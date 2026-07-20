@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartFlow — GUI Mockup v1</title>
+<style>
+/* ============ Design Tokens ============ */
+:root{
+  /* Dark (shop floor) */
+  --d-bg:#0f141a; --d-panel:#171e26; --d-panel2:#1d2630; --d-border:#26303b;
+  --d-text:#e8eef4; --d-muted:#8fa0b0; --d-faint:#5c6b7a;
+  /* Light (management) */
+  --l-bg:#f2f4f8; --l-panel:#ffffff; --l-border:#dde3ea;
+  --l-text:#1c2733; --l-muted:#5f7183;
+  /* Status */
+  --ok:#2fca7c; --warn:#f5b83d; --err:#ff5d5d; --info:#3da5ff;
+  /* Area colors */
+  --a-material:#8b93a8; --a-cut:#f5b83d; --a-lathe:#3da5ff; --a-mill:#9b6ef3;
+  --a-deburr:#2fbf9b; --a-external:#ff8a4c; --a-stockroom:#2fca7c; --a-manual:#e06fae;
+  --radius:10px;
+  --font:system-ui,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --mono:'Consolas','SF Mono',Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--d-bg);color:var(--d-text);font-size:16px}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select{font-family:inherit}
+.mono{font-family:var(--mono)}
+
+/* ============ App Chrome (mockup navigation) ============ */
+#appnav{display:flex;align-items:center;gap:6px;background:#0a0e13;border-bottom:1px solid var(--d-border);padding:8px 14px;position:sticky;top:0;z-index:100}
+#appnav .logo{font-weight:800;font-size:18px;letter-spacing:.5px;margin-right:14px}
+#appnav .logo span{color:var(--info)}
+#appnav button.navbtn{padding:8px 16px;border-radius:8px;color:var(--d-muted);font-size:14px;font-weight:600}
+#appnav button.navbtn:hover{background:var(--d-panel2);color:var(--d-text)}
+#appnav button.navbtn.active{background:var(--info);color:#04121f}
+#appnav .spacer{flex:1}
+#appnav .mock-tag{font-size:11px;color:var(--d-faint);border:1px solid var(--d-border);border-radius:6px;padding:3px 8px}
+.view{display:none;min-height:calc(100vh - 49px)}
+.view.active{display:block}
+
+/* ============ Shared bits ============ */
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:.3px}
+.badge.hi{background:rgba(255,93,93,.16);color:var(--err)}
+.badge.md{background:rgba(245,184,61,.16);color:var(--warn)}
+.badge.lo{background:rgba(143,160,176,.16);color:var(--d-muted)}
+.areachip{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+.areachip .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.qty{font-family:var(--mono);font-weight:700}
+
+/* ============ SCAN STATION ============ */
+#view-scan{background:var(--d-bg);display:none;flex-direction:column}
+#view-scan.active{display:flex}
+.ss-head{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--d-panel);border-bottom:1px solid var(--d-border)}
+.ss-head .loc .dept{font-size:12px;color:var(--d-muted);text-transform:uppercase;letter-spacing:1px}
+.ss-head .loc .area{font-size:26px;font-weight:800;display:flex;align-items:center;gap:10px}
+.ss-head .loc .area .dot{width:16px;height:16px;border-radius:4px;background:var(--a-lathe)}
+.ss-head .loc .op{font-size:13px;color:var(--d-muted)}
+.ss-head .spacer{flex:1}
+.ss-pill{display:flex;flex-direction:column;align-items:flex-start;gap:2px;background:var(--d-panel2);border:1px solid var(--d-border);border-radius:var(--radius);padding:8px 14px;min-width:130px}
+.ss-pill .lbl{font-size:11px;color:var(--d-muted);text-transform:uppercase;letter-spacing:.8px}
+.ss-pill .val{font-size:16px;font-weight:700}
+.ss-pill .val.none{color:var(--d-faint);font-weight:400}
+#conn{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:var(--radius);border:1px solid var(--d-border);background:var(--d-panel2)}
+#conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+#conn.off .cdot{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+#conn .ctxt{font-size:13px;font-weight:700}
+#offbanner{display:none;background:rgba(245,184,61,.14);border-bottom:1px solid rgba(245,184,61,.4);color:var(--warn);padding:8px 20px;font-size:14px;font-weight:600}
+#offbanner.show{display:block}
+
+.ss-body{flex:1;display:grid;grid-template-columns:1fr 380px;gap:14px;padding:14px 20px}
+.ss-main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.panel{background:var(--d-panel);border:1px solid var(--d-border);border-radius:var(--radius)}
+.panel .ph{display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid var(--d-border);font-size:12px;font-weight:700;color:var(--d-muted);text-transform:uppercase;letter-spacing:1px}
+.panel .ph .spacer{flex:1}
+
+/* machine status strip (read-only — machine is selected by SCAN only) */
+#machines{display:flex;gap:10px;padding:12px 16px;flex-wrap:wrap}
+.mtile{min-height:56px;min-width:110px;border-radius:var(--radius);border:2px solid var(--d-border);background:var(--d-panel2);font-size:17px;font-weight:700;color:var(--d-muted);padding:8px 18px;cursor:default;text-align:center}
+.mtile.armed{border-color:var(--info);background:rgba(61,165,255,.12);color:var(--info)}
+.mtile .sub{display:block;font-size:11px;font-weight:600;color:var(--d-faint);margin-top:2px}
+#needmachine{display:none;margin:0 16px 14px;padding:12px 16px;border-radius:var(--radius);border:1px solid rgba(245,184,61,.5);background:rgba(245,184,61,.10);color:var(--warn);font-size:16px;font-weight:800}
+#needmachine.show{display:flex;align-items:center;gap:10px}
+#needmachine .pulse{width:12px;height:12px;border-radius:50%;background:var(--warn);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* scan input */
+#scanwrap{padding:18px 16px}
+#scanrow{display:flex;gap:12px}
+#scaninput{flex:1;background:var(--d-bg);border:2px solid var(--d-border);border-radius:var(--radius);color:var(--d-text);font-size:26px;font-family:var(--mono);padding:16px 18px;outline:none;transition:border-color .15s, box-shadow .15s}
+#scaninput:focus{border-color:var(--info);box-shadow:0 0 0 3px rgba(61,165,255,.18)}
+#scaninput::placeholder{color:var(--d-faint);font-family:var(--font);font-size:20px}
+#scanbtn{min-width:110px;border-radius:var(--radius);background:var(--info);color:#04121f;font-size:18px;font-weight:800}
+#scanhint{margin-top:10px;font-size:13px;color:var(--d-faint)}
+#scanhint b{color:var(--d-muted);font-family:var(--mono);font-weight:600}
+
+/* feedback */
+#feedback{min-height:86px;border-radius:var(--radius);border:1px dashed var(--d-border);display:flex;align-items:center;gap:16px;padding:14px 18px;margin:0 16px 16px}
+#feedback .fic{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;flex:none}
+#feedback.idle{color:var(--d-faint)}
+#feedback.ok{border:1px solid rgba(47,202,124,.5);background:rgba(47,202,124,.10)}
+#feedback.ok .fic{background:var(--ok);color:#04160c}
+#feedback.warn{border:1px solid rgba(245,184,61,.5);background:rgba(245,184,61,.10)}
+#feedback.warn .fic{background:var(--warn);color:#1d1503}
+#feedback.err{border:1px solid rgba(255,93,93,.5);background:rgba(255,93,93,.10)}
+#feedback.err .fic{background:var(--err);color:#210606}
+#feedback .ft .t1{font-size:19px;font-weight:800}
+#feedback .ft .t2{font-size:14px;color:var(--d-muted);margin-top:2px}
+
+/* qty + ambiguity overlays */
+.overlay{display:none;position:fixed;inset:0;background:rgba(5,8,12,.72);z-index:200;align-items:center;justify-content:center}
+.overlay.show{display:flex}
+.dlg{background:var(--d-panel);border:1px solid var(--d-border);border-radius:14px;width:min(560px,94vw);padding:22px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+.dlg h3{font-size:14px;color:var(--d-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.dlg .big{font-size:24px;font-weight:800;margin-bottom:4px}
+.dlg .sub{font-size:14px;color:var(--d-muted);margin-bottom:16px}
+#qtydisplay{font-family:var(--mono);font-size:44px;font-weight:800;text-align:right;background:var(--d-bg);border:2px solid var(--d-border);border-radius:var(--radius);padding:10px 18px;margin-bottom:14px;min-height:72px}
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.keypad button{height:62px;border-radius:var(--radius);background:var(--d-panel2);border:1px solid var(--d-border);font-size:24px;font-weight:700}
+.keypad button:hover{background:#243040}
+.keypad button.act{background:rgba(61,165,255,.15);color:var(--info);font-size:16px;font-weight:800}
+.dlg .row{display:flex;gap:10px;margin-top:16px}
+.bigbtn{flex:1;height:58px;border-radius:var(--radius);font-size:18px;font-weight:800}
+.bigbtn.primary{background:var(--ok);color:#04160c}
+.bigbtn.ghost{background:var(--d-panel2);border:1px solid var(--d-border);color:var(--d-muted)}
+.choice{display:flex;align-items:center;gap:14px;width:100%;text-align:left;border:2px solid var(--d-border);background:var(--d-panel2);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px;min-height:64px}
+.choice:hover{border-color:var(--info)}
+.choice .cic{width:40px;height:40px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;flex:none}
+.choice .cic.run{background:rgba(47,202,124,.16);color:var(--ok)}
+.choice .cic.que{background:rgba(245,184,61,.16);color:var(--warn)}
+.choice .cic.new{background:rgba(61,165,255,.16);color:var(--info)}
+.choice .cic.rwk{background:rgba(255,138,76,.16);color:var(--a-external)}
+.choice .ct1{font-size:17px;font-weight:700}
+.choice .ct2{font-size:13px;color:var(--d-muted);margin-top:2px}
+
+/* right column */
+.ss-side{display:flex;flex-direction:column;gap:14px;min-width:0}
+#undo{width:100%;min-height:54px;border-radius:var(--radius);border:1px solid rgba(255,93,93,.45);background:rgba(255,93,93,.08);color:var(--err);font-size:16px;font-weight:800}
+#undo:disabled{opacity:.35;cursor:not-allowed}
+.scanlist{list-style:none;max-height:300px;overflow:auto}
+.scanlist li{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--d-border);font-size:14px}
+.scanlist li:last-child{border-bottom:none}
+.scanlist .sic{width:8px;height:8px;border-radius:50%;flex:none}
+.scanlist .sic.ok{background:var(--ok)}
+.scanlist .sic.undo{background:var(--err)}
+.scanlist .sic.pend{background:var(--warn)}
+.scanlist .what{flex:1;min-width:0}
+.scanlist .what .p{font-weight:700;font-family:var(--mono);font-size:14px}
+.scanlist .what .d{color:var(--d-muted);font-size:12px;margin-top:1px}
+.scanlist .when{color:var(--d-faint);font-size:12px;flex:none}
+.invlist{list-style:none}
+.invlist li{display:flex;align-items:center;padding:11px 16px;border-bottom:1px solid var(--d-border)}
+.invlist li:last-child{border-bottom:none}
+.invlist .p{font-family:var(--mono);font-weight:700;font-size:15px;flex:1}
+.invlist .m{color:var(--d-muted);font-size:13px;margin-right:14px}
+.invlist .q{font-family:var(--mono);font-size:18px;font-weight:800;color:var(--info)}
+
+/* ============ PRODUCTION BOARD ============ */
+#view-board{background:#0a0e13;padding:0}
+.pb-head{display:flex;align-items:baseline;gap:18px;padding:18px 28px 8px}
+.pb-head h1{font-size:30px;font-weight:800;letter-spacing:.5px}
+.pb-head .sub{color:var(--d-muted);font-size:15px}
+.pb-head .spacer{flex:1}
+.pb-head .clock{font-family:var(--mono);font-size:26px;font-weight:700;color:var(--d-muted)}
+.pb-table{width:100%;border-collapse:collapse}
+.pb-table th{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--d-faint);text-align:left;padding:12px 16px;border-bottom:2px solid var(--d-border);position:sticky;top:49px;background:#0a0e13}
+.pb-table td{padding:16px;border-bottom:1px solid #1a222c;vertical-align:top}
+.pb-table .part{font-family:var(--mono);font-size:22px;font-weight:800}
+.pb-table .pname{font-size:13px;color:var(--d-muted);margin-top:3px;font-family:var(--font);font-weight:400}
+.pb-table .loc{display:flex;flex-direction:column;gap:6px}
+.pb-table .locrow{display:flex;align-items:center;gap:8px;font-size:16px}
+.pb-table .locrow .dot{width:11px;height:11px;border-radius:3px;flex:none}
+.pb-table .locrow .q{font-family:var(--mono);font-weight:800;margin-left:2px}
+.pb-table .totq{font-family:var(--mono);font-size:26px;font-weight:800;color:var(--info)}
+.pb-table .requests .r{font-family:var(--mono);font-size:15px;font-weight:600}
+.pb-table .requests .r .rq{color:var(--d-muted);font-weight:400}
+.pb-table .due .d1{font-size:17px;font-weight:700}
+.pb-table .due .d2{font-size:13px;margin-top:2px}
+.pb-table .due .d2.ok{color:var(--d-muted)}
+.pb-table .due .d2.soon{color:var(--warn);font-weight:700}
+.pb-table .due .d2.late{color:var(--err);font-weight:800}
+.pb-table .tia{display:flex;flex-direction:column;gap:6px}
+.pb-table .tiarow{font-family:var(--mono);font-size:15px;color:var(--d-muted)}
+.pb-table .tiarow.long{color:var(--warn);font-weight:700}
+/* Priority: order number across Parts (1 = hottest). Priority rows sort first, tinted hotter = redder. */
+.pb-table tr.prio1 td{background:rgba(255,70,70,.10)}
+.pb-table tr.prio1 td:first-child{border-left:5px solid var(--err)}
+.pb-table tr.prio2 td{background:rgba(255,138,76,.07)}
+.pb-table tr.prio2 td:first-child{border-left:5px solid var(--a-external)}
+.pchip{display:inline-block;font-size:13px;font-weight:800;border-radius:7px;padding:2px 8px;margin-left:10px;vertical-align:4px}
+.pchip.p1{background:rgba(255,70,70,.2);color:var(--err)}
+.pchip.p2{background:rgba(255,138,76,.2);color:var(--a-external)}
+/* Parts close to due date: Part Number text blinks */
+@keyframes blinkdue{0%,58%{opacity:1}59%,100%{opacity:.2}}
+.pb-table .part.blink{animation:blinkdue 1.1s step-end infinite}
+.pb-foot{display:flex;align-items:center;gap:10px;padding:14px 28px;color:var(--d-faint);font-size:14px}
+.pb-foot .pgdot{width:9px;height:9px;border-radius:50%;background:var(--d-border)}
+.pb-foot .pgdot.on{background:var(--info)}
+
+/* ============ AREA BOARD ============ */
+#view-area{background:var(--d-bg);padding:18px 24px}
+.ab-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.ab-tab{display:flex;align-items:center;gap:8px;padding:10px 18px;border-radius:var(--radius);border:1px solid var(--d-border);background:var(--d-panel);font-size:15px;font-weight:700;color:var(--d-muted)}
+.ab-tab .dot{width:10px;height:10px;border-radius:3px}
+.ab-tab .cnt{font-family:var(--mono);font-size:12px;background:var(--d-panel2);border-radius:12px;padding:1px 8px}
+.ab-tab.active{border-color:var(--a-lathe);color:var(--d-text);background:rgba(61,165,255,.10)}
+.ab-tools{display:flex;gap:10px;margin-bottom:16px}
+.ab-tools input{flex:1;max-width:360px;background:var(--d-panel);border:1px solid var(--d-border);border-radius:var(--radius);color:var(--d-text);font-size:15px;padding:10px 14px;outline:none}
+.ab-tools select{background:var(--d-panel);border:1px solid var(--d-border);border-radius:var(--radius);color:var(--d-muted);font-size:14px;padding:10px 12px}
+.ab-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.ab-card{background:var(--d-panel);border:1px solid var(--d-border);border-radius:var(--radius);padding:16px}
+.ab-card .top{display:flex;align-items:flex-start;gap:10px}
+.ab-card .part{font-family:var(--mono);font-size:19px;font-weight:800;flex:1}
+.ab-card .qtyblk{text-align:right;flex:none;border-left:1px solid var(--d-border);padding-left:14px;min-width:86px}
+.ab-card .qtyblk .qlbl{font-size:10px;font-weight:700;color:var(--d-faint);text-transform:uppercase;letter-spacing:1px}
+.ab-card .qty-big{font-family:var(--mono);font-size:30px;font-weight:800;color:var(--info);line-height:1.1}
+.ab-card .qunit{font-size:11px;color:var(--d-muted)}
+.ab-card .po{font-family:var(--mono);font-size:13px;color:var(--d-muted);margin-top:2px}
+.ab-card .ext{font-family:var(--mono);font-size:12px;color:var(--d-faint);margin-top:2px}
+.ab-card .machines{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.ab-card .mrow{font-size:13px;background:var(--d-panel2);border:1px solid var(--d-border);border-radius:7px;padding:4px 10px;color:var(--d-muted)}
+.ab-card .mrow b{color:var(--d-text);font-family:var(--mono)}
+.ab-card .foot{display:flex;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--d-border)}
+.ab-card .duetxt{font-size:13px;flex:1}
+.ab-card .duetxt.ok{color:var(--d-muted)}
+.ab-card .duetxt.soon{color:var(--warn);font-weight:700}
+.ab-card .duetxt.late{color:var(--err);font-weight:800}
+
+/* ============ TRACKING (light) ============ */
+#view-track{background:var(--l-bg);color:var(--l-text)}
+.tk-wrap{display:grid;grid-template-columns:1fr 480px;gap:0;min-height:calc(100vh - 49px)}
+.tk-left{padding:20px 22px;min-width:0}
+.tk-filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.tk-filters input,.tk-filters select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:8px;font-size:14px;padding:9px 12px;color:var(--l-text);outline:none}
+.tk-filters input{min-width:230px}
+.tk-filters input:focus{border-color:var(--info)}
+.tk-table{width:100%;border-collapse:collapse;background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);overflow:hidden}
+.tk-table th{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--l-muted);text-align:left;padding:10px 14px;border-bottom:1px solid var(--l-border);background:#f8fafc}
+.tk-table td{padding:12px 14px;border-bottom:1px solid #edf1f5;font-size:14px;vertical-align:top}
+.tk-table tr.sel td{background:rgba(61,165,255,.07)}
+.tk-table tr:hover td{background:rgba(61,165,255,.04);cursor:pointer}
+.tk-table .part{font-family:var(--mono);font-weight:700}
+.tk-table .status{font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;display:inline-block}
+.tk-table .status.running{background:rgba(47,202,124,.14);color:#1a9e5c}
+.tk-table .status.queued{background:rgba(245,184,61,.16);color:#b07f14}
+.tk-table .status.completed{background:#eceff3;color:var(--l-muted)}
+.tk-right{background:var(--l-panel);border-left:1px solid var(--l-border);padding:20px;overflow:auto}
+.tk-right h2{font-family:var(--mono);font-size:22px}
+.tk-right .jsub{color:var(--l-muted);font-size:13px;margin:4px 0 16px}
+.tk-sec{margin-bottom:20px}
+.tk-sec h4{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--l-muted);margin-bottom:8px;border-bottom:1px solid var(--l-border);padding-bottom:6px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:14px}
+.kv .k{color:var(--l-muted)}
+.kv .v{font-weight:600}
+.dist{display:flex;flex-direction:column;gap:6px}
+.dist .drow{display:flex;align-items:center;gap:8px;font-size:14px}
+.dist .drow .dot{width:10px;height:10px;border-radius:3px}
+.dist .drow .nm{width:130px}
+.dist .drow .bar{flex:1;height:16px;background:#eef1f5;border-radius:5px;overflow:hidden}
+.dist .drow .bar i{display:block;height:100%;border-radius:5px}
+.dist .drow .q{font-family:var(--mono);font-weight:700;width:26px;text-align:right}
+.route{display:flex;align-items:center;flex-wrap:wrap;gap:4px;font-size:13px}
+.rstep{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;border:1px solid var(--l-border);background:#f8fafc;font-weight:600}
+.rstep.done{background:rgba(47,202,124,.12);border-color:rgba(47,202,124,.4);color:#177a48}
+.rstep.cur{background:rgba(61,165,255,.12);border-color:var(--info);color:#0f6ab5}
+.rstep.dev{background:rgba(255,138,76,.13);border-color:rgba(255,138,76,.5);color:#c05a1e}
+.rarrow{color:#b6c1cc}
+.mv{list-style:none;font-size:13px}
+.mv li{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed #e6ebf0}
+.mv .t{font-family:var(--mono);color:var(--l-muted);flex:none;width:118px}
+.mv .mtype{font-weight:700;width:78px;flex:none}
+.mv .mtype.rec{color:#1a9e5c}.mv .mtype.tra{color:#0f6ab5}.mv .mtype.com{color:#7141d8}.mv .mtype.und{color:#c0392b}
+.mv .desc{flex:1;color:var(--l-text)}
+.tk-actions{display:flex;gap:8px;flex-wrap:wrap}
+.tk-actions button{border:1px solid var(--l-border);border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;color:var(--l-text);background:#f8fafc}
+.tk-actions button:hover{border-color:var(--info);color:#0f6ab5}
+.prog{height:10px;background:#eef1f5;border-radius:6px;overflow:hidden;margin-top:6px}
+.prog i{display:block;height:100%;background:var(--ok);border-radius:6px}
+
+/* ============ ADMIN (light) ============ */
+#view-admin{background:var(--l-bg);color:var(--l-text)}
+.ad-wrap{display:grid;grid-template-columns:230px 1fr;min-height:calc(100vh - 49px)}
+.ad-nav{background:var(--l-panel);border-right:1px solid var(--l-border);padding:14px 10px}
+.ad-nav .grp{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--l-muted);padding:12px 12px 6px}
+.ad-nav button{display:block;width:100%;text-align:left;padding:9px 12px;border-radius:8px;font-size:14px;font-weight:600;color:var(--l-text)}
+.ad-nav button:hover{background:#f0f4f8}
+.ad-nav button.active{background:rgba(61,165,255,.12);color:#0f6ab5}
+.ad-main{padding:22px 26px;min-width:0}
+.ad-main h1{font-size:22px;margin-bottom:4px}
+.ad-main .sub{color:var(--l-muted);font-size:14px;margin-bottom:18px}
+.ad-table{width:100%;border-collapse:collapse;background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);overflow:hidden}
+.ad-table th{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--l-muted);text-align:left;padding:10px 14px;background:#f8fafc;border-bottom:1px solid var(--l-border)}
+.ad-table td{padding:11px 14px;border-bottom:1px solid #edf1f5;font-size:14px}
+.ad-table .colordot{width:14px;height:14px;border-radius:4px;display:inline-block;vertical-align:-2px;margin-right:8px}
+.pillnav{display:inline-block;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px}
+.pillnav.on{background:rgba(47,202,124,.14);color:#1a9e5c}
+.pillnav.off{background:#eceff3;color:var(--l-muted)}
+.ad-top{display:flex;align-items:center;margin-bottom:14px}
+.ad-top .spacer{flex:1}
+.btn-primary{background:var(--info);color:#fff;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:700}
+.notice{background:rgba(61,165,255,.08);border:1px solid rgba(61,165,255,.3);border-radius:var(--radius);padding:12px 16px;font-size:13px;color:#0f6ab5;margin-top:16px}
+</style>
+</head>
+<body>
+
+<nav id="appnav">
+  <div class="logo">Part<span>Flow</span></div>
+  <button class="navbtn active" data-v="scan" onclick="showView('scan')">Scan Station</button>
+  <button class="navbtn" data-v="board" onclick="showView('board')">Production Board</button>
+  <button class="navbtn" data-v="area" onclick="showView('area')">Area Board</button>
+  <button class="navbtn" data-v="track" onclick="showView('track')">Tracking</button>
+  <button class="navbtn" data-v="admin" onclick="showView('admin')">Administration</button>
+  <div class="spacer"></div>
+  <div class="mock-tag">GUI MOCKUP v1 — sample data</div>
+</nav>
+
+<!-- ==================== SCAN STATION ==================== -->
+<section id="view-scan" class="view active">
+  <div class="ss-head">
+    <div class="loc">
+      <div class="dept">Machine Shop</div>
+      <div class="area"><span class="dot"></span>Lathe</div>
+      <div class="op">Operation: Turning &nbsp;·&nbsp; Station LATHE-ST-01</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="ss-pill">
+      <span class="lbl">Machine (scan per Part)</span>
+      <span class="val none" id="pill-machine">— scan required</span>
+    </div>
+    <div class="ss-pill">
+      <span class="lbl">Worker</span>
+      <span class="val" id="pill-worker">H. Nguyen</span>
+    </div>
+    <button id="conn" onclick="toggleOffline()" title="Click to simulate offline">
+      <span class="cdot"></span><span class="ctxt" id="conntxt">ONLINE</span>
+    </button>
+  </div>
+  <div id="offbanner">⚠ Offline — scans are queued locally and will sync automatically. Queued events: <b id="qcount">0</b></div>
+
+  <div class="ss-body">
+    <div class="ss-main">
+      <div class="panel">
+        <div class="ph">Machine status <div class="spacer"></div><span style="text-transform:none;font-weight:400">selection by Machine barcode scan only — one scan per Part</span></div>
+        <div id="machines">
+          <div class="mtile" data-m="Lathe 1">Lathe 1<span class="sub">idle</span></div>
+          <div class="mtile" data-m="Lathe 2">Lathe 2<span class="sub">running</span></div>
+          <div class="mtile" data-m="Lathe 3">Lathe 3<span class="sub">running</span></div>
+          <div class="mtile" data-m="Lathe 4">Lathe 4<span class="sub">maintenance</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph">Scan barcode</div>
+        <div id="scanwrap">
+          <div id="scanrow">
+            <input id="scaninput" autocomplete="off" placeholder="Scan Part / Machine / Worker barcode…" onkeydown="if(event.key==='Enter')doScan()">
+            <button id="scanbtn" onclick="doScan()">ENTER</button>
+          </div>
+          <div id="scanhint">Demo — try: <b>PF-SHAFT-014</b> (1 context) · <b>PF-BRACKET-001</b> (multiple contexts) · <b>PF-XXX-999</b> (unknown) · <b>LATHE-3</b> (machine) · <b>W-TRAN</b> (worker). Order is flexible: Part → Machine or Machine → Part.</div>
+        </div>
+        <div id="needmachine"><span class="pulse"></span><span id="needmachinetxt"></span></div>
+        <div id="feedback" class="idle">
+          <div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Ready to scan…</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ss-side">
+      <button id="undo" onclick="undoLast()">⟲ UNDO LAST SCAN</button>
+      <div class="panel">
+        <div class="ph">Recent scans <div class="spacer"></div><span id="scancount" style="text-transform:none">0 today</span></div>
+        <ul class="scanlist" id="scanlist"></ul>
+      </div>
+      <div class="panel">
+        <div class="ph">In this Area now</div>
+        <ul class="invlist" id="invlist"></ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- quantity dialog -->
+<div class="overlay" id="qtyovl">
+  <div class="dlg">
+    <h3>Enter quantity</h3>
+    <div class="big mono" id="qtypart">PF-SHAFT-014</div>
+    <div class="sub" id="qtysub">Receive into Lathe · Machine Lathe 2 · available upstream: 8</div>
+    <div id="qtydisplay">&nbsp;</div>
+    <div class="keypad">
+      <button onclick="kp('7')">7</button><button onclick="kp('8')">8</button><button onclick="kp('9')">9</button>
+      <button onclick="kp('4')">4</button><button onclick="kp('5')">5</button><button onclick="kp('6')">6</button>
+      <button onclick="kp('1')">1</button><button onclick="kp('2')">2</button><button onclick="kp('3')">3</button>
+      <button class="act" onclick="kp('C')">CLEAR</button><button onclick="kp('0')">0</button><button class="act" onclick="kp('B')">⌫</button>
+    </div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeQty()">Cancel</button>
+      <button class="bigbtn primary" onclick="confirmQty()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ambiguity dialog -->
+<div class="overlay" id="ambovl">
+  <div class="dlg">
+    <h3>Multiple production contexts — confirm intent</h3>
+    <div class="big mono">PF-BRACKET-001</div>
+    <div class="sub">This Part has more than one valid context. Choose how to continue:</div>
+    <button class="choice" onclick="ambPick('PO-1001')">
+      <span class="cic run">RUN</span>
+      <span><span class="ct1">Continue PO-1001 — Running</span><br><span class="ct2">Qty in production: 10 · due Jul 24 · Production</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('PO-1008')">
+      <span class="cic que">QUE</span>
+      <span><span class="ct1">Release PO-1008 — Queued</span><br><span class="ct2">Requested: 5 · due Aug 02 · Production</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('REWORK')">
+      <span class="cic rwk">RWK</span>
+      <span><span class="ct1">Continue Rework Request RW-0031 — Queued</span><br><span class="ct2">Qty: 2 · requested by QC · scratched face</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('NEW')">
+      <span class="cic new">NEW</span>
+      <span><span class="ct1">Create a new internal Production Request…</span><br><span class="ct2">Production / Rework / Modification</span></span>
+    </button>
+    <div class="row"><button class="bigbtn ghost" onclick="closeAmb()">Cancel (Esc)</button></div>
+  </div>
+</div>
+<!-- ==================== PRODUCTION BOARD ==================== -->
+<section id="view-board" class="view">
+  <div class="pb-head">
+    <h1>Machine Shop — Production</h1>
+    <div class="sub">Live · updates automatically</div>
+    <div class="spacer"></div>
+    <div class="clock">14:32</div>
+  </div>
+  <table class="pb-table">
+    <thead><tr>
+      <th style="width:25%">Part</th><th style="width:20%">Current location</th><th style="width:7%">Qty</th>
+      <th style="width:21%">Requests / PO · Ext. Job No.</th><th style="width:13%">Due</th><th style="width:14%">Time in area</th>
+    </tr></thead>
+    <tbody>
+      <!-- Priority Parts first, sorted by priority (1 = hottest = reddest) -->
+      <tr class="prio1">
+        <td><div class="part">🔥 PF-BRACKET-001<span class="pchip p1">P1</span></div><div class="pname">Mounting bracket, alum 6061</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="q">4</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 1 <span class="q">2</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 3 <span class="q">4</span></div>
+        </div></td>
+        <td><div class="totq">10</div></td>
+        <td class="requests">
+          <div class="r">PO-1001 <span class="rq">· ERP-88112 · 10 pcs</span></div>
+          <div class="r">PO-1008 <span class="rq">· ERP-88240 · queued 5</span></div>
+        </td>
+        <td class="due"><div class="d1">Jul 24</div><div class="d2 soon">10 days left</div></td>
+        <td><div class="tia">
+          <div class="tiarow">Cut · 3h 40m</div>
+          <div class="tiarow">Lathe 1 · 2h 05m</div>
+          <div class="tiarow">Lathe 3 · 1h 25m</div>
+        </div></td>
+      </tr>
+      <tr class="prio2">
+        <td><div class="part blink">🔥 PF-PLATE-007<span class="pchip p2">P2</span></div><div class="pname">Base plate 200×140</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span></div>
+        </div></td>
+        <td><div class="totq">20</div></td>
+        <td class="requests"><div class="r">PO-1005 <span class="rq">· ERP-88031 · 20 pcs</span></div></td>
+        <td class="due"><div class="d1">Jul 16</div><div class="d2 late">2 days left</div></td>
+        <td><div class="tia"><div class="tiarow long">External · 4d 02h</div></div></td>
+      </tr>
+      <!-- Non-priority Parts, sorted by due date -->
+      <tr>
+        <td><div class="part">PF-SHAFT-014</div><div class="pname">Drive shaft Ø25, 4140</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-material)"></span>Material <span class="q">8</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span></div>
+        </div></td>
+        <td><div class="totq">12</div></td>
+        <td class="requests"><div class="r">PO-1003 <span class="rq">· ERP-88190 · 12 pcs</span></div></td>
+        <td class="due"><div class="d1">Jul 31</div><div class="d2 ok">17 days left</div></td>
+        <td><div class="tia">
+          <div class="tiarow">Material · 2d 01h</div>
+          <div class="tiarow">Lathe 2 · 1h 05m</div>
+        </div></td>
+      </tr>
+      <tr>
+        <td><div class="part">PF-HOUSING-021</div><div class="pname">Gearbox housing</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-mill)"></span>Mill 1 <span class="q">3</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="q">3</span></div>
+        </div></td>
+        <td><div class="totq">6</div></td>
+        <td class="requests">
+          <div class="r">PO-1002 <span class="rq">· ERP-88102 · 6 pcs</span></div>
+          <div class="r">RW-0028 <span class="rq">· internal · rework 1</span></div>
+        </td>
+        <td class="due"><div class="d1">Aug 07</div><div class="d2 ok">24 days left</div></td>
+        <td><div class="tia">
+          <div class="tiarow">Mill 1 · 0h 45m</div>
+          <div class="tiarow">Deburr · 0h 30m</div>
+        </div></td>
+      </tr>
+      <tr>
+        <td><div class="part">PF-PIN-102</div><div class="pname">Locating pin Ø8</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span></div>
+        </div></td>
+        <td><div class="totq">50</div></td>
+        <td class="requests"><div class="r">PO-0996 <span class="rq">· ERP-87740 · completed</span></div></td>
+        <td class="due"><div class="d1">Jul 10</div><div class="d2 ok">received</div></td>
+        <td><div class="tia"><div class="tiarow">—</div></div></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="pb-foot">
+    <span>Page 1 / 3 · rotates every 12s</span>
+    <span class="pgdot on"></span><span class="pgdot"></span><span class="pgdot"></span>
+    <div class="spacer" style="flex:1"></div>
+    <span>🔥 P# = priority order (P1 first) · blinking Part = due soon · 5 active Parts · 48 pcs in production</span>
+  </div>
+</section>
+
+<!-- ==================== AREA BOARD ==================== -->
+<section id="view-area" class="view">
+  <div class="ab-tabs">
+    <button class="ab-tab"><span class="dot" style="background:var(--a-material)"></span>Material <span class="cnt">2</span></button>
+    <button class="ab-tab"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="cnt">1</span></button>
+    <button class="ab-tab active"><span class="dot" style="background:var(--a-lathe)"></span>Lathe <span class="cnt">3</span></button>
+    <button class="ab-tab"><span class="dot" style="background:var(--a-mill)"></span>Mill <span class="cnt">1</span></button>
+    <button class="ab-tab"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="cnt">1</span></button>
+    <button class="ab-tab"><span class="dot" style="background:var(--a-external)"></span>External <span class="cnt">1</span></button>
+    <button class="ab-tab"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="cnt">1</span></button>
+  </div>
+  <div class="ab-tools">
+    <input placeholder="Search Part Number, PO, Request Number…">
+    <select><option>Sort: Due date</option><option>Sort: Priority</option><option>Sort: Time in area</option><option>Sort: Quantity</option></select>
+  </div>
+  <div class="ab-grid">
+    <div class="ab-card">
+      <div class="top">
+        <div><div class="part">🔥 PF-BRACKET-001 <span class="pchip p1" style="vertical-align:2px">P1</span></div>
+          <div class="po">PO-1001 · Turning</div>
+          <div class="ext">Ext. Job: ERP-88112</div></div>
+        <div class="qtyblk"><div class="qlbl">In this area</div><div class="qty-big">6</div><div class="qunit">pcs</div></div>
+      </div>
+      <div class="machines"><span class="mrow">Lathe 1 · <b>2</b></span><span class="mrow">Lathe 3 · <b>4</b></span></div>
+      <div class="foot"><span class="duetxt soon">10 days remaining</span></div>
+    </div>
+    <div class="ab-card">
+      <div class="top">
+        <div><div class="part">PF-SHAFT-014</div>
+          <div class="po">PO-1003 · Turning</div>
+          <div class="ext">Ext. Job: ERP-88190</div></div>
+        <div class="qtyblk"><div class="qlbl">In this area</div><div class="qty-big">4</div><div class="qunit">pcs</div></div>
+      </div>
+      <div class="machines"><span class="mrow">Lathe 2 · <b>4</b></span></div>
+      <div class="foot"><span class="duetxt ok">17 days remaining</span></div>
+    </div>
+    <div class="ab-card">
+      <div class="top">
+        <div><div class="part">PF-VALVE-033</div>
+          <div class="po">RW-0031 · Turning · Rework</div>
+          <div class="ext">Ext. Job: — (internal)</div></div>
+        <div class="qtyblk"><div class="qlbl">In this area</div><div class="qty-big">2</div><div class="qunit">pcs</div></div>
+      </div>
+      <div class="machines"><span class="mrow">unassigned</span></div>
+      <div class="foot"><span class="duetxt late">overdue 1 day</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== TRACKING ==================== -->
+<section id="view-track" class="view">
+  <div class="tk-wrap">
+    <div class="tk-left">
+      <div class="tk-filters">
+        <input placeholder="Search: Part Number, PO, Request Number, external Job Number…">
+        <select><option>Area: All</option><option>Material</option><option>Cut</option><option>Lathe</option><option>Mill</option><option>Deburr</option><option>External</option><option>Stockroom</option></select>
+        <select><option>Request Type: All</option><option>Production</option><option>Rework</option><option>Modification</option></select>
+        <select><option>Status: Active</option><option>Queued</option><option>Running</option><option>Completed</option><option>All</option></select>
+        <select><option>Due: Any</option><option>Overdue</option><option>This week</option><option>This month</option></select>
+      </div>
+      <table class="tk-table">
+        <thead><tr><th>Request</th><th>Ext. Job No.</th><th>Part</th><th>Type</th><th>Qty</th><th>Completed</th><th>Due</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr class="sel"><td class="mono">PO-1001</td><td class="mono">ERP-88112</td><td class="part">PF-BRACKET-001</td><td>Production</td><td class="mono">10</td><td class="mono">0 / 10</td><td>Jul 24</td><td><span class="status running">Running</span></td></tr>
+          <tr><td class="mono">PO-1008</td><td class="mono">ERP-88240</td><td class="part">PF-BRACKET-001</td><td>Production</td><td class="mono">5</td><td class="mono">0 / 5</td><td>Aug 02</td><td><span class="status queued">Queued</span></td></tr>
+          <tr><td class="mono">RW-0031</td><td class="mono">—</td><td class="part">PF-VALVE-033</td><td>Rework</td><td class="mono">2</td><td class="mono">0 / 2</td><td>Jul 13</td><td><span class="status running">Running</span></td></tr>
+          <tr><td class="mono">PO-1003</td><td class="mono">ERP-88190</td><td class="part">PF-SHAFT-014</td><td>Production</td><td class="mono">12</td><td class="mono">0 / 12</td><td>Jul 31</td><td><span class="status running">Running</span></td></tr>
+          <tr><td class="mono">PO-1005</td><td class="mono">ERP-88031</td><td class="part">PF-PLATE-007</td><td>Production</td><td class="mono">20</td><td class="mono">0 / 20</td><td>Jul 16</td><td><span class="status running">Running</span></td></tr>
+          <tr><td class="mono">PO-0996</td><td class="mono">ERP-87740</td><td class="part">PF-PIN-102</td><td>Production</td><td class="mono">50</td><td class="mono">50 / 50</td><td>Jul 10</td><td><span class="status completed">Completed</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tk-right">
+      <h2>PO-1001</h2>
+      <div class="jsub">ERP Purchase Order · created Jul 02 by import · Part <b class="mono">PF-BRACKET-001</b></div>
+
+      <div class="tk-sec">
+        <h4>Production Request information</h4>
+        <div class="kv">
+          <span class="k">Request Type</span><span class="v">Production</span>
+          <span class="k">Requested qty</span><span class="v mono">10</span>
+          <span class="k">Due date</span><span class="v">Jul 24, 2026</span>
+          <span class="k">Priority</span><span class="v">🔥 P1 — first in queue</span>
+          <span class="k">External Job No.</span><span class="v mono">ERP-88112</span>
+          <span class="k">Requester</span><span class="v">Purchasing / ERP</span>
+        </div>
+        <div class="prog"><i style="width:0%"></i></div>
+        <div style="font-size:12px;color:var(--l-muted);margin-top:4px">Completed 0 / 10 — nothing received into Stockroom yet</div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Quantity distribution (live)</h4>
+        <div class="dist">
+          <div class="drow"><span class="dot" style="background:var(--a-cut)"></span><span class="nm">Cut</span><span class="bar"><i style="width:40%;background:var(--a-cut)"></i></span><span class="q">4</span></div>
+          <div class="drow"><span class="dot" style="background:var(--a-lathe)"></span><span class="nm">Lathe 1</span><span class="bar"><i style="width:20%;background:var(--a-lathe)"></i></span><span class="q">2</span></div>
+          <div class="drow"><span class="dot" style="background:var(--a-lathe)"></span><span class="nm">Lathe 3</span><span class="bar"><i style="width:40%;background:var(--a-lathe)"></i></span><span class="q">4</span></div>
+        </div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Assigned route</h4>
+        <div class="route">
+          <span class="rstep done">Material</span><span class="rarrow">→</span>
+          <span class="rstep done">Cut</span><span class="rarrow">→</span>
+          <span class="rstep cur">Lathe</span><span class="rarrow">→</span>
+          <span class="rstep">Deburr</span><span class="rarrow">→</span>
+          <span class="rstep dev" title="Route deviation — added Jul 12 by T.Le: extra plating required">External ⚠</span><span class="rarrow">→</span>
+          <span class="rstep">Stockroom</span>
+        </div>
+        <div style="font-size:12px;color:#c05a1e;margin-top:6px">⚠ Deviation: “External” inserted Jul 12 by T. Le — reason: plating added per customer. Original route preserved in audit.</div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Movement history (immutable)</h4>
+        <ul class="mv">
+          <li><span class="t">Jul 14 13:05</span><span class="mtype tra">Transfer</span><span class="desc">Cut → Lathe 3 · qty 4 · Saw 1 → Lathe 3 · W: H. Nguyen · ST: LATHE-ST-01</span></li>
+          <li><span class="t">Jul 14 09:41</span><span class="mtype und">Undo</span><span class="desc">Compensates 09:38 Transfer · qty 2 · reason: wrong machine scanned</span></li>
+          <li><span class="t">Jul 14 09:38</span><span class="mtype tra">Transfer</span><span class="desc">Cut → Lathe 1 · qty 2 · W: H. Nguyen</span></li>
+          <li><span class="t">Jul 13 15:22</span><span class="mtype tra">Transfer</span><span class="desc">Material → Cut · qty 10 · W: V. Tran · ST: CUT-ST-01</span></li>
+          <li><span class="t">Jul 12 08:02</span><span class="mtype rec">Receive</span><span class="desc">Received into Material · qty 10 · from PO-1001 release</span></li>
+        </ul>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Corrections (authorized users)</h4>
+        <div class="tk-actions">
+          <button>Quantity adjustment…</button>
+          <button>Edit assigned route…</button>
+          <button>Reallocate completion…</button>
+          <button>Change priority…</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== ADMINISTRATION ==================== -->
+<section id="view-admin" class="view">
+  <div class="ad-wrap">
+    <nav class="ad-nav">
+      <div class="grp">Organization</div>
+      <button>Departments</button>
+      <button class="active">Areas</button>
+      <button>Machines</button>
+      <button>Workers</button>
+      <div class="grp">Production setup</div>
+      <button>Route Templates</button>
+      <button>Barcode configuration</button>
+      <button>Allocation policy</button>
+      <div class="grp">Access</div>
+      <button>Users</button>
+      <button>Roles &amp; permissions</button>
+      <div class="grp">System</div>
+      <button>Worker policies</button>
+      <button>Offline behavior</button>
+      <button>Settings</button>
+    </nav>
+    <div class="ad-main">
+      <div class="ad-top">
+        <div><h1>Areas</h1><div class="sub">Physical production locations — Machine Shop</div></div>
+        <div class="spacer"></div>
+        <button class="btn-primary">+ New Area</button>
+      </div>
+      <table class="ad-table">
+        <thead><tr><th>Area</th><th>Operation</th><th>Machine tracking</th><th>Machines</th><th>Worker ID mode</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><span class="colordot" style="background:var(--a-material)"></span><b>Material</b></td><td>Receiving</td><td><span class="pillnav off">Off</span></td><td>—</td><td>Disabled</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-cut)"></span><b>Cut</b></td><td>Cutting</td><td><span class="pillnav on">On</span></td><td>Saw 1</td><td>Default worker</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-lathe)"></span><b>Lathe</b></td><td>Turning</td><td><span class="pillnav on">On</span></td><td>Lathe 1–4</td><td>Scan required</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-mill)"></span><b>Mill</b></td><td>Milling</td><td><span class="pillnav on">On</span></td><td>Mill 1–2</td><td>Scan required</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-deburr)"></span><b>Deburr</b></td><td>Deburring</td><td><span class="pillnav off">Off</span></td><td>—</td><td>Default worker</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-external)"></span><b>External</b></td><td>Plating</td><td><span class="pillnav off">Off</span></td><td>—</td><td>Disabled</td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-stockroom)"></span><b>Stockroom</b></td><td>Receiving</td><td><span class="pillnav off">Off</span></td><td>—</td><td>Scan required</td><td><span class="pillnav on">Active</span></td></tr>
+        </tbody>
+      </table>
+      <div class="notice">Area identity is stable — display name, color, description and icon may change without affecting production history. Operation is a property of the Area (configured in the Area editor), not a separately managed object.</div>
+    </div>
+  </div>
+</section>
+
+<script>
+/* ================= Mock state ================= */
+/* Machine model: selected ONLY by scanning a Machine barcode, and consumed per Part.
+   - armedMachine: machine scanned in advance, used by the NEXT Part scan, then cleared.
+   - awaiting: a Part (+qty) recorded pending its Machine scan. Scanning another Part now = error. */
+let state = {
+  armedMachine:null, awaiting:null,
+  worker:'H. Nguyen', offline:false, queued:0,
+  pendingPart:null, scans:[], scanSeq:0,
+  inv:[
+    {part:'PF-BRACKET-001', m:'Lathe 1', q:2},
+    {part:'PF-BRACKET-001', m:'Lathe 3', q:4},
+    {part:'PF-SHAFT-014',  m:'Lathe 2', q:4},
+    {part:'PF-VALVE-033',  m:'—',       q:2},
+  ]
+};
+
+function showView(v){
+  document.querySelectorAll('.view').forEach(el=>el.classList.remove('active'));
+  document.getElementById('view-'+v).classList.add('active');
+  document.querySelectorAll('#appnav .navbtn').forEach(b=>b.classList.toggle('active',b.dataset.v===v));
+  if(v==='scan') focusScan();
+}
+function focusScan(){ const i=document.getElementById('scaninput'); if(i){ i.value=''; setTimeout(()=>i.focus(),50);} }
+
+function renderMachine(){
+  const pill=document.getElementById('pill-machine');
+  document.querySelectorAll('.mtile').forEach(t=>t.classList.toggle('armed',t.dataset.m===state.armedMachine));
+  const banner=document.getElementById('needmachine');
+  if(state.awaiting){
+    pill.textContent='REQUIRED'; pill.classList.remove('none');
+    document.getElementById('needmachinetxt').textContent=
+      'Scan Machine barcode to record '+state.awaiting.part+' × '+state.awaiting.q;
+    banner.classList.add('show');
+  } else {
+    banner.classList.remove('show');
+    if(state.armedMachine){ pill.textContent=state.armedMachine+' (next Part)'; pill.classList.remove('none'); }
+    else { pill.textContent='— scan required'; pill.classList.add('none'); }
+  }
+}
+function machineScanned(m){
+  if(state.awaiting){
+    const a=state.awaiting; state.awaiting=null;
+    recordMovement(a.part,a.q,m,a.desc+' ('+m+')');
+  } else {
+    state.armedMachine=m;
+    feedback('ok','Machine ready: '+m,'The next Part scan will be recorded on '+m+'. One Machine scan is required per Part.');
+  }
+  renderMachine(); focusScan();
+}
+function toggleOffline(){
+  state.offline=!state.offline;
+  document.getElementById('conn').classList.toggle('off',state.offline);
+  document.getElementById('conntxt').textContent=state.offline?'OFFLINE':'ONLINE';
+  document.getElementById('offbanner').classList.toggle('show',state.offline);
+  if(!state.offline && state.queued>0){
+    feedback('ok','Back online — sync complete','Uploaded '+state.queued+' queued event(s), duplicates rejected by Event ID.');
+    state.queued=0; renderQueue();
+    state.scans.forEach(s=>s.pend=false); renderScans();
+  }
+  focusScan();
+}
+function renderQueue(){ document.getElementById('qcount').textContent=state.queued; }
+
+function feedback(kind,t1,t2){
+  const f=document.getElementById('feedback');
+  f.className=kind;
+  const ic = kind==='ok'?'✓':kind==='warn'?'!':'✕';
+  f.innerHTML='<div class="fic">'+ic+'</div><div class="ft"><div class="t1">'+t1+'</div><div class="t2">'+(t2||'')+'</div></div>';
+}
+
+/* ================= Scan resolution ================= */
+function doScan(){
+  const raw=document.getElementById('scaninput').value.trim().toUpperCase();
+  if(!raw) return;
+  document.getElementById('scaninput').value='';
+
+  if(raw.startsWith('LATHE-') && raw.length===7){            // machine barcode (type auto-detected)
+    machineScanned('Lathe '+raw.slice(6)); return;
+  }
+  if(raw.startsWith('W-')){                                   // worker barcode
+    const name = raw==='W-TRAN' ? 'V. Tran' : raw.slice(2,3)+'. '+raw.slice(2).charAt(0)+raw.slice(3).toLowerCase();
+    state.worker = raw==='W-TRAN' ? 'V. Tran' : name;
+    document.getElementById('pill-worker').textContent=state.worker;
+    feedback('ok','Worker signed in: '+state.worker,'Worker Session active for this station.');
+    focusScan(); return;
+  }
+  if(raw.startsWith('PF-') && state.awaiting){                // previous Part still waiting for its Machine
+    feedback('err','Machine barcode required',
+      state.awaiting.part+' × '+state.awaiting.q+' is not recorded yet. Scan the Machine barcode first, then scan the next Part.');
+    renderMachine(); focusScan(); return;
+  }
+  if(raw==='PF-BRACKET-001'){                                 // ambiguous part
+    document.getElementById('ambovl').classList.add('show'); return;
+  }
+  if(raw==='PF-SHAFT-014'){                                   // single context part
+    openQty(raw,'Receive into Lathe · available upstream: 8'); return;
+  }
+  if(raw.startsWith('PF-')){                                  // unknown part
+    feedback('err','Unknown Part: '+raw,'No Part master record found. Check the folder barcode or create the Part in Administration.');
+    focusScan(); return;
+  }
+  feedback('err','Unrecognized barcode','Format not recognized as Part, Machine, Worker or Request Type.');
+  focusScan();
+}
+
+/* quantity dialog */
+let qtyVal='';
+function openQty(part,sub){
+  state.pendingPart=part; qtyVal='';
+  document.getElementById('qtypart').textContent=part;
+  document.getElementById('qtysub').textContent=sub;
+  document.getElementById('qtydisplay').innerHTML='&nbsp;';
+  document.getElementById('qtyovl').classList.add('show');
+}
+function kp(k){
+  if(k==='C') qtyVal='';
+  else if(k==='B') qtyVal=qtyVal.slice(0,-1);
+  else if(qtyVal.length<4) qtyVal+=k;
+  document.getElementById('qtydisplay').innerHTML=qtyVal||'&nbsp;';
+}
+function closeQty(){ document.getElementById('qtyovl').classList.remove('show'); state.pendingPart=null; focusScan(); }
+function confirmQty(){
+  const q=parseInt(qtyVal||'0',10);
+  const part=state.pendingPart;
+  if(!q){ document.getElementById('qtydisplay').innerHTML='<span style="color:var(--err)">0 ?</span>'; return; }
+  if(q>8){  // integrity guard demo
+    document.getElementById('qtyovl').classList.remove('show');
+    feedback('err','Quantity exceeds available','Only 8 available upstream for '+part+'. Movement rejected — quantity integrity.');
+    focusScan(); return;
+  }
+  document.getElementById('qtyovl').classList.remove('show');
+  const desc='Receive · Material → Lathe';
+  if(state.armedMachine){
+    const m=state.armedMachine; state.armedMachine=null;      // consumed — one Machine scan per Part
+    recordMovement(part,q,m,desc+' ('+m+')');
+  } else {
+    state.awaiting={part,q,desc};                             // hold until Machine barcode is scanned
+    feedback('warn','Scan Machine barcode · '+part+' × '+q,'The Movement will be recorded as soon as the Machine barcode is scanned.');
+  }
+  renderMachine(); focusScan();
+}
+
+/* ambiguity dialog */
+function closeAmb(){ document.getElementById('ambovl').classList.remove('show'); focusScan(); }
+function ambPick(ctx){
+  document.getElementById('ambovl').classList.remove('show');
+  if(ctx==='NEW'){
+    feedback('warn','Create internal Production Request','Next: scan a Request Type barcode (Production / Rework / Modification) or pick on screen, then enter Quantity, Requester, Reason.');
+    focusScan(); return;
+  }
+  openQty('PF-BRACKET-001','Context: '+ctx+' · Receive into Lathe');
+}
+
+/* movements */
+function recordMovement(part,q,machine,desc){
+  state.scanSeq++;
+  const now=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  state.scans.unshift({id:state.scanSeq,part,q,m:machine,desc,when:now,undone:false,pend:state.offline});
+  if(state.offline){ state.queued++; renderQueue();
+    feedback('warn','Queued offline · '+part+' × '+q, desc+' — will sync when connection returns.');
+  } else {
+    feedback('ok','Recorded · '+part+' × '+q, desc+' · Worker '+state.worker);
+  }
+  const row=state.inv.find(r=>r.part===part && r.m===machine);
+  if(row) row.q+=q; else state.inv.push({part,m:machine,q});
+  renderScans(); renderInv();
+}
+function undoLast(){
+  const last=state.scans.find(s=>!s.undone && !s.isUndo);
+  if(!last){ feedback('warn','Nothing to undo','No recent scan available for this Area.'); return; }
+  last.undone=true; state.scanSeq++;
+  const now=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  state.scans.unshift({id:state.scanSeq,part:last.part,q:last.q,m:last.m,desc:'Undo — compensates scan #'+last.id+' (original kept in history)',when:now,isUndo:true});
+  const row=state.inv.find(r=>r.part===last.part && r.m===last.m);
+  if(row) row.q=Math.max(0,row.q-last.q);
+  feedback('ok','Undo recorded · '+last.part+' × '+last.q,'A compensating Movement was created. History is never deleted.');
+  renderScans(); renderInv(); focusScan();
+}
+function renderScans(){
+  const ul=document.getElementById('scanlist');
+  const seed=[
+    {cls:'ok', p:'PF-SHAFT-014 × 4', d:'Receive · Lathe 2 · V. Tran', w:'13:58'},
+    {cls:'ok', p:'PF-BRACKET-001 × 4', d:'Transfer Cut → Lathe 3', w:'13:05'},
+    {cls:'undo',p:'PF-BRACKET-001 × 2', d:'Undo — wrong machine', w:'09:41'},
+  ];
+  let html='';
+  state.scans.forEach(s=>{
+    const cls=s.isUndo?'undo':(s.pend?'pend':'ok');
+    html+='<li><span class="sic '+cls+'"></span><span class="what"><span class="p">'+s.part+' × '+s.q+'</span><br><span class="d">'+s.desc+'</span></span><span class="when">'+s.when+'</span></li>';
+  });
+  seed.forEach(s=>{ html+='<li><span class="sic '+s.cls+'"></span><span class="what"><span class="p">'+s.p+'</span><br><span class="d">'+s.d+'</span></span><span class="when">'+s.w+'</span></li>'; });
+  ul.innerHTML=html;
+  document.getElementById('scancount').textContent=(state.scans.length+3)+' today';
+}
+function renderInv(){
+  const ul=document.getElementById('invlist');
+  ul.innerHTML=state.inv.filter(r=>r.q>0).map(r=>
+    '<li><span class="p">'+r.part+'</span><span class="m">'+r.m+'</span><span class="q">'+r.q+'</span></li>').join('');
+}
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeAmb(); closeQty(); } });
+renderScans(); renderInv(); renderMachine(); focusScan();
+</script>
+</body>
+</html>

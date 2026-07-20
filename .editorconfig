@@ -1,0 +1,14 @@
+# This is the root configuration file for the project
+root = true
+
+# Default setting: Apply LF line endings to all files unless specified below
+[*]
+charset = utf-8
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+insert_final_newline = true
+end_of_line = lf
+
+[*.{bat,cmd,ps1,txt}]
+end_of_line = crlf
