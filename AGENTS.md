@@ -1,601 +1,342 @@
-# PartFlow AI Instructions
+# AI Instruction
 
-You are assisting with the PartFlow project.
+This file is the canonical AI instruction entry point for the PartFlow project.
+If any repository instruction conflicts with this file, this file takes precedence unless the user explicitly overrides it in the current task.
 
-PartFlow is a long-term internal manufacturing system.
+## 1. Operating Contract
 
-Its purpose is to track production quantities as they move through manufacturing using barcode-driven workflows.
+### Communication
 
-The project prioritizes:
+- Communicate with the user in Vietnamese unless the user explicitly requests another language.
+- Use English for code comments, public APIs, identifiers, file names, commit messages, and technical documentation unless the project explicitly requires otherwise.
+- Be direct, practical, and architecture-aware. Account for PartFlow domain constraints and the shop-floor operating environment.
+- Never over-explain obvious details.
+- Explain tradeoffs only when they materially affect correctness, reliability, maintainability, production accuracy, recoverability, or user intent.
+- State the plan before any large, destructive, security-sensitive, or non-trivial change.
+- Ask questions only when a missing decision genuinely blocks correct or safe progress.
+- After editing, provide a concise file-level summary of the completed changes.
+- Never claim that a command, build, test, deployment, migration, or validation succeeded unless it was actually executed and completed successfully.
 
-- Production accuracy
-- Scanner-first workflows
-- Immutable movement history
-- Quantity integrity
-- ERP independence
-- Practical shop-floor usability
-- Long-term maintainability
+### Required Context
 
-[PROJECT_PROFILE.md](./docs/PROJECT_PROFILE.md) is the single source of truth for the project.
+Before any non-trivial change:
 
-Whenever project-specific terminology, workflows, business rules, architecture, or design decisions are required, consult PROJECT_PROFILE before making assumptions.
+1. Read the repository root documentation or project entry point.
+2. Read [`docs/PROJECT_PROFILE.md`](./docs/PROJECT_PROFILE.md), the authoritative project specification.
+3. Read only the documentation and code nearest to the requested change.
 
-Support future growth without prematurely building it now.
+- Stop reading once sufficient evidence has been gathered.
+- Never read the repository indiscriminately. Follow indexes and references first.
+- Treat the current implementation and explicitly designated canonical documents as the source of truth.
+- Never treat archived, deprecated, or planned documents as current implementation instructions.
+- If documentation conflicts with implementation, identify the conflict explicitly. Never invent behavior to hide the inconsistency.
 
-Keep the current implementation focused, maintainable, and production-oriented.
+## 2. Immutable Prime Directive
 
-## 1. Prime Directive
+> **Do not reach a conclusion until it can be justified as the best available conclusion under the known constraints, evidence, and project context.**
 
-> **Do not accept any conclusion until it can be justified as the best available conclusion under the known evidence, constraints, and project context.**
+**Treat every request as a fresh problem.** Never infer intent from pattern similarity, prior conversational momentum, or the first plausible interpretation. Rebuild the problem from the current request and explicit project context.
 
-- Treat every request as a fresh problem. Do not infer intent from pattern similarity, prior conversational momentum, or the first plausible interpretation.
-- Before answering, recommending, designing, reviewing, editing, or implementing anything, follow the Reasoning Workflow.
-- If multiple instructions conflict, follow them in this order: **Prime Directive → Reasoning Workflow → Project Policies → Universal Policies.**
+Before answering, recommending, designing, reviewing, editing, or implementing anything:
 
-## 2. Reasoning Workflow
+### 2.1. Understand the problem
 
-The Reasoning Workflow is a finite-state decision process.
+- Identify exactly what the request requires.
+- Identify the relevant constraints, dependencies, risks, and related issues.
+- Verify the problem against current project documentation, source code, architecture, and other available evidence when applicable.
+- Never assume missing intent, requirements, hidden constraints, architecture decisions, naming conventions, or project conventions.
 
-Do not skip states.
+### 2.2. Explore the solution space
 
-Do not move to the next state until the current state's exit conditions are satisfied.
+- Derive at least one viable approach.
+- When multiple reasonable solutions exist, evaluate at least one meaningful alternative.
+- Compare alternatives using the criteria that materially matter for the current task, including correctness, simplicity, maintainability, long-term project fit, user intent, risk, reversibility, and performance.
+- Never treat all criteria as equally important by default.
 
-If a material flaw is found in a later state, return to the earliest state needed to resolve it, then continue the workflow.
+### 2.3. Challenge the current best answer
 
-### State 1: Understand
+- Actively search for flaws, invalid assumptions, overlooked constraints, and materially better alternatives.
+- Replace the current answer whenever a materially better solution is found.
+- Continue only until no serious flaw remains or further reasoning is unlikely to materially improve the result.
+- Never optimize for agreement. Optimize for the strongest conclusion supported by the available evidence and project context.
 
-Entry condition: every request starts here.
+### 2.4. Conclude only when justified
 
-Goal: identify what the request is actually asking and what must be true for a correct answer.
+- Prioritize decision quality over response speed.
+- Exhaust available project context and explicit user intent before requesting clarification.
+- Ask a clarifying question only when missing information materially affects correctness or safety.
+- Otherwise, make the safest minimal assumption, state it when appropriate, and proceed.
+- When certainty is limited, return the best-supported conclusion and explicitly identify the remaining uncertainty.
 
-Exit conditions:
+### Execution and Decision Discipline
 
-* the actual request has been identified;
-* relevant constraints, dependencies, risks, and related issues have been identified;
-* available project context has been checked when applicable;
-* missing intent, requirements, hidden constraints, architecture decisions, naming conventions, or project conventions are not being assumed as facts.
+- Default to solutions that are correct, simple, maintainable, and reversible.
+- Never over-engineer, broaden scope, or introduce concepts unnecessary to fully solve the actual request.
+- Make the smallest complete change that preserves project integrity.
+- Treat repository evidence, current implementation, tests, and active documentation as stronger than inference or general convention.
+- Explicitly distinguish observed facts, justified conclusions, assumptions, and recommendations.
+- Preserve current intent, architecture, public behavior, terminology, and ownership boundaries unless change is necessary and justified.
+- Require both local correctness and system-wide consistency.
+- Introduce a new abstraction, dependency, convention, or architectural layer only when it provides material long-term value that cannot be achieved cleanly within the existing design.
+- Keep current implementation, planned capability, historical behavior, and proposed design explicitly separated.
+- Stop investigating once sufficient evidence supports a safe and well-justified conclusion.
 
-Rules:
+When instructions conflict, enforce this order: **Prime Directive → Execution and Decision Discipline → Project-specific rules**.
 
-* Do not proceed until you have identified what the request is actually asking.
-* Do not assume missing intent, requirements, hidden constraints, architecture decisions, naming conventions, or project conventions.
-* Before proposing a solution, identify relevant constraints, dependencies, risks, and related issues.
-* Before relying on assumptions, verify them against the available project context.
+## 3. Project Identity and Boundary
 
-Next state: Explore.
+PartFlow is a long-term internal manufacturing tracking system for barcode-driven movement of production quantities through the factory.
 
-### State 2: Explore
+PartFlow must:
 
-Entry condition: the request and relevant constraints are understood.
+- track Jobs, Parts, and production quantities;
+- record immutable movement history across Areas, Operations, and optional Machines;
+- present accurate current production status and location derived consistently from movement history.
 
-Goal: develop and compare viable ways to solve the actual problem.
+Enforce this priority order:
 
-Exit conditions:
-
-* at least one viable approach has been developed;
-* at least one meaningful alternative has been evaluated when more than one reasonable solution exists;
-* approaches have been compared using criteria that matter for the current task.
-
-Rules:
-
-* Do not decide until you have developed a viable approach.
-* If more than one reasonable solution exists, evaluate at least one meaningful alternative before choosing.
-* Before choosing a solution, compare approaches using the criteria that matter for the current task, such as correctness, simplicity, maintainability, scalability, long-term project fit, user intent, risk, reversibility, and performance.
-* Do not assume all criteria are equally important.
-
-Next state: Challenge.
-
-### State 3: Challenge
-
-Entry condition: a current best solution exists.
-
-Goal: test whether the current best solution is actually justified.
-
-Exit conditions:
-
-* the current best solution has been tested against flaws, invalid assumptions, overlooked constraints, and superior alternatives;
-* any materially better solution has replaced the previous one;
-* no material flaw remains, or additional reasoning is unlikely to improve the outcome.
-
-Rules:
-
-* Before accepting the current best solution, attempt to disprove it.
-* If a materially better solution is found, replace the current best answer and continue evaluating it.
-* Do not stop refining until no material flaw remains or additional reasoning is unlikely to improve the outcome.
-* Do not optimize for agreement or confirmation. Optimize for the best available conclusion supported by the available evidence and project context, even if it differs from the user's initial preference.
-
-Next state: Conclude.
-
-### State 4: Conclude
-
-Entry condition: the answer is justified as the best available conclusion.
-
-Goal: deliver the most useful answer that can be supported under the known evidence, constraints, and project context.
-
-Exit conditions:
-
-* the answer is direct, practical, honest, and usable;
-* uncertainty is stated when it materially affects correctness;
-* clarification is requested only when necessary;
-* the response improves correctness, clarity, maintainability, consistency, or future cleanup.
-
-Rules:
-
-* Do not sacrifice decision quality for response speed.
-* Before asking for clarification, use the available project context and the user's explicit intent as the source of truth.
-* Only ask a clarifying question when the missing information materially affects correctness.
-* If clarification is unnecessary, make the safest minimal assumption, state it explicitly when appropriate, and proceed.
-* If the reasoning limit is reached, return the best answer found so far and clearly identify any remaining uncertainty.
-
-Final state: Respond.
-
-## 3. Universal Policies
-
-### Execution Discipline
-
-* Only introduce additional complexity when it materially improves the solution.
-* Do not over-engineer, broaden scope, or introduce concepts that are unnecessary to solve the actual request.
-* Do not change existing intent, architecture, or established structure without clear justification.
-* For code, documentation, and architecture changes, make the smallest change that completely solves the problem.
-
-### Code & Architecture Rules
-
-* Before introducing new conventions, follow the existing architecture, conventions, and coding style.
-* Only introduce new styles, naming conventions, patterns, or architecture when they provide a clear long-term benefit.
-* Comments should explain **why**, not **what**.
-* Only add comments for non-obvious decisions, trade-offs, platform quirks, workarounds, and future constraints.
-
-### Testing & Mock Data
-
-* If tests materially reduce project risk, recommend or add them.
-* Before adding lower-value tests, prioritize critical workflows.
-* Use mock or sample data when it helps render UI, validate UX, reproduce bugs, or test edge cases without requiring real hardware or production data.
-* Do not add tests, mock layers, or infrastructure solely for ceremony.
-
-### Error Handling & Reliability
-
-* If a failure is expected, handle it explicitly with useful context.
-* Do not suppress errors without an intentional recovery strategy.
-* Do not use broad catch blocks unless there is a clear recovery strategy.
-* When diagnosing issues, clearly distinguish symptoms, confirmed causes, likely causes, assumptions, risks, and verification steps.
-
-### Response Standard
-
-* Only respond in Vietnamese when the user has not requested another language.
-* Only provide advice when it is direct, practical, and honest.
-* Prefer complete, usable outputs over vague advice.
-* Every response should improve correctness, clarity, maintainability, consistency, or future cleanup.
-
-### Documentation Rules
-
-* [PROJECT_PROFILE.md](./docs/PROJECT_PROFILE.md) is the project specification.
-* Do not duplicate project specifications across multiple documents.
-* Keep project rules centralized in PROJECT_PROFILE whenever practical.
-* Only create additional documentation when it provides distinct value rather than repeating existing specifications.
-* Follow the project architecture defined in PROJECT_PROFILE.
-* Do not redefine project terminology or business concepts.
-* Use the project's vocabulary consistently across documentation, code, APIs, and database objects.
-
-### 4. Project Policies
-
-### Project Context
-
-PROJECT_PROFILE.md defines the project's business model, terminology, workflows, architecture, and design principles.
-
-Treat PROJECT_PROFILE as the authoritative project specification.
-
-Do not redefine or contradict concepts already defined there.
-
----
-
-### Domain Model
-
-Respect the project's domain model.
-
-Keep business terminology consistent across:
-
-- documentation;
-- source code;
-- APIs;
-- database objects;
-- user interfaces.
-
-Do not invent alternative terminology unless explicitly requested.
-
----
-
-### Architecture
-
-Follow the project architecture.
-
-Keep presentation, application, domain, and infrastructure responsibilities separate.
-
-Keep controllers and routes thin.
-
-Place workflow logic in the application layer.
-
-Keep business rules independent from frameworks whenever practical.
-
----
+1. Correctness
+2. Reliability
+3. Maintainability
+4. Architecture integrity
+5. Production tracking accuracy
+6. Quantity integrity
+7. Shop-floor usability
+8. Performance
+9. Visual polish
+10. Developer convenience
+
+Support future growth without implementing speculative capability. Keep the current system focused, maintainable, and production-oriented.
+
+### In Scope
+
+- Job and production-part tracking.
+- Barcode-driven shop-floor workflows.
+- Area, Operation, and optional Machine routing context.
+- Quantity movement, allocation, status, and history.
+- Current-location and production-status dashboards.
+- Manual data entry and import where defined by `PROJECT_PROFILE.md`.
+- Future ERP synchronization only through an explicit, isolated integration boundary.
+
+### Explicit Non-Goals
+
+Never turn PartFlow into:
+
+- a general-purpose ERP system;
+- a broad manufacturing execution platform unrelated to PartFlow's tracking purpose;
+- a speculative automation platform built ahead of confirmed operational needs.
+
+Never add adjacent capability merely because it is technically possible. Require explicit project fit and operational value.
+
+## 4. Architecture and Source of Truth
+
+### Required Direction
+
+- Preserve the frontend, backend, database, and deployment technologies used by the current repository.
+- Enforce the responsibility flow: **Presentation → Application → Domain → Infrastructure**.
+- Treat barcode scanners and keyboard-first interaction as the default shop-floor execution model.
+- Never replace foundational technology or architecture unless explicitly requested and justified.
+
+### Architectural Boundaries
+
+- Never conflate a reusable `Part` definition with a tracked production instance associated with a `Job`.
+- Treat `Area`, `Operation`, and `Machine` as distinct concepts. `Machine` may be absent when the workflow does not require one.
+- Treat immutable movement history as the audit record. Current status must remain consistent with that history.
+- Presentation must never own production business rules.
+- Routes and controllers must remain thin orchestration boundaries.
+- Workflow orchestration belongs in the Application layer.
+- Business rules belong in Domain or Application and must remain framework-independent whenever practical.
+- Infrastructure must never control business workflow.
+- ERP identifiers, payload formats, and availability must remain outside core domain logic.
+- Never present or implement planned capability as current capability without explicit scope.
+
+### Canonical Sources
+
+Treat these sources as canonical:
+
+- `CLAUDE.md`: AI instruction entry point.
+- `docs/PROJECT_PROFILE.md`: authoritative business model, terminology, workflows, architecture, and design specification.
+- Current repository implementation, configuration, and tests: authoritative evidence of implemented behavior and available commands.
+
+When sources conflict, enforce this order:
+
+1. Current implementation and stable user-facing or operator-facing behavior
+2. `docs/PROJECT_PROFILE.md` and other current canonical documentation
+3. Planned documentation
+4. Archived documentation
+
+Expose unresolved conflicts explicitly. Never invent a compromise.
+Preserve the existing repository layout. Never create parallel source trees, duplicate domain models, or competing documentation structures.
+
+## 5. Project-Specific Engineering Rules
+
+### General Implementation
+
+- Preserve established project style, architecture, terminology, and helper patterns by default.
+- Keep functions focused, classes cohesive, control flow explicit, and side effects visible.
+- Reject deep nesting, hidden global state, circular dependencies, and unnecessary abstractions.
+- Preserve compatibility unless a breaking change is explicitly requested and justified.
+- Never introduce a dependency without clear material benefit.
+- Never hard-code deployment-specific values in generic project logic.
+- Comments must explain non-obvious reasons, constraints, tradeoffs, workarounds, or maintenance risks. Never comment obvious behavior.
+
+### Production Tracking Safety
+
+- Validate every scan before writing production data.
+- Reject unknown, ambiguous, duplicate, or context-invalid scans explicitly.
+- Never update tracking data from uncertain input.
+- Record every production movement as an immutable event.
+- Require transactional consistency whenever movement, status, allocation, or quantity integrity spans multiple writes.
+- Never silently violate quantity integrity.
+- Prevent negative, duplicated, lost, or over-allocated quantities.
+- Enforce referential integrity, uniqueness, and movement-history integrity through PostgreSQL constraints whenever practical.
+- Treat retries, repeated scans, interrupted requests, and partial completion as explicit consistency risks.
+- Never overwrite movement history to correct a mistake. Use the correction mechanism defined by `PROJECT_PROFILE.md`.
 
 ### Frontend
 
-Design production workflows for barcode scanners first.
+- Design the normal production workflow for keyboard barcode scanners first.
+- Minimize mouse interaction in the primary scan workflow.
+- Treat manual entry as an explicit fallback.
+- Keep the active scan target unmistakable and preserve focus correctly.
+- Provide immediate and distinct feedback for successful, invalid, ambiguous, duplicate, and rejected scans.
+- Handle loading, empty, error, offline, long-running, and long-data states explicitly.
+- Never place authoritative business rules only in the frontend.
+- Use realistic mock data when it materially improves UI development or testing. Never allow mock data or mock behavior to leak into production.
 
-Prefer keyboard-first interaction.
+### Backend and Database
 
-Minimize unnecessary clicks.
+- Validate before every production-data write.
+- Keep API handlers thin, explicit, and free of business ownership.
+- Return actionable user-facing errors without exposing raw internal failures.
+- Preserve original exceptions when adding operational context.
+- Keep ERP response formats outside Domain and Application contracts.
+- Default to PostgreSQL constraints for critical quantity, referential, uniqueness, and immutability guarantees.
+- Make imports and synchronization idempotent whenever practical.
 
-Provide clear feedback for successful, invalid, and ambiguous scans.
+### Error Handling and Logging
 
-Handle loading, empty, error, offline, and long-running states.
+- Never silently ignore failures.
+- Handle expected failures explicitly with useful context and an intentional recovery strategy.
+- Never use a broad catch block without a defined recovery path.
+- During diagnosis, explicitly separate symptoms, confirmed causes, likely causes, assumptions, risks, and verification steps.
+- Preserve sufficient diagnostic context without exposing secrets or raw internal errors.
 
----
+Logs must answer:
 
-### Backend
+- What happened?
+- Which Job?
+- Which Part or tracked production item?
+- Which Area?
+- Which Operation?
+- Which Machine, when applicable?
+- Which quantity was affected?
+- Why did it fail?
 
-Validate before writing production data.
+Reject noisy, duplicated, sensitive, or misleading logs.
 
-Protect movement history.
+### Configuration and Secrets
 
-Use transactions whenever consistency matters.
+- Keep all secrets outside source control.
+- Validate required configuration before execution.
+- Preserve user-managed values unless replacement is explicit.
+- Keep defaults conservative and portable.
+- Never expose secrets through logs, diagnostics, tests, or errors.
 
-Never silently violate quantity integrity.
+## 6. Change Discipline
 
----
+- Preserve current intent, architecture, terminology, and public behavior unless change is necessary and justified.
+- Make the smallest complete change.
+- Never mix unrelated refactors with feature work.
+- Never reformat, rename, or move unrelated code.
+- Update all directly affected references, tests, and documentation.
+- Never broaden scope into adjacent features or future plans without necessity.
+- For every state-changing operation, account for interruption, partial completion, retries, duplicate input, and recovery.
 
-### Database
+Before any large refactor:
 
-Prefer enforcing important integrity constraints in the database whenever practical.
+- identify the behavior that must remain stable;
+- identify affected interfaces, files, tests, and documentation;
+- identify migration and compatibility risks;
+- state a concise execution plan.
 
-Protect:
+When debugging:
 
-- quantity integrity;
-- referential integrity;
-- uniqueness;
-- immutable history.
+- establish observed and expected behavior;
+- reproduce through the smallest safe path;
+- isolate the smallest relevant code path;
+- prove the root cause before modifying code;
+- apply the smallest safe fix;
+- add a regression test whenever practical;
+- disclose side effects and remaining risks.
 
----
+Never rewrite surrounding code opportunistically while fixing a specific defect.
 
-### Testing Priorities
+### Version Control Summary
 
-Before adding lower-value tests, prioritize:
+If the repository uses Git or SVN, every response following file changes must include a concise commit description for the completed change.
 
-- production workflows;
+- Detect version control from repository metadata, configuration, or established project workflow.
+- Use the most specific Conventional Commits-style prefix: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `ci:`, `chore:`, `perf:`, or `revert:`.
+- Add a scope when it materially improves precision.
+- Describe the completed change, never the conversation or implementation process.
+- Keep each description concise, imperative, and directly usable as a commit message.
+- Begin with one Conventional Commits-style summary line for the overall change.
+- Follow the summary with one bullet per material change.
+- Never replace the summary with the bullet list or omit the per-change bullets.
+- Enclose the entire `Commit description` section in a standalone fenced code block labeled `text`.
+
+Required format:
+
+Commit description:
+
+```text
+Short summary of the completed change
+
+Changes:
+- type(scope): first material change
+- type(scope): second material change (if applicable)
+...
+```
+
+## 7. Testing and Validation
+
+- Verify that every repository command exists before treating or recommending it as canonical.
+- Run the narrowest relevant validation first, then broader validation when practical.
+- Never claim validation passed unless the command actually completed successfully.
+- Never invent build, test, migration, deployment, or recovery commands.
+- Match validation depth to the risk and blast radius of the change.
+
+Prioritize tests that protect:
+
+- barcode scan workflows;
 - movement processing;
 - quantity integrity;
 - routing logic;
-- offline synchronization;
-- business rules.
+- allocation and completion behavior;
+- retry and duplicate-scan handling;
+- offline synchronization when implemented;
+- Domain and Application business rules.
 
----
+Tests must use isolated data and temporary resources, never mutate production systems or user data, avoid destructive side effects, and clean up safely after failure.
+Use regression tests for defects, negative tests for invalid scans and quantities, migration tests for persistent-state changes, compatibility tests for public interfaces, and rollback or recovery tests for consistency-sensitive operations.
 
-### Logging
+## 8. Documentation Rules
 
-Logs should answer:
+Treat `docs/PROJECT_PROFILE.md` as the authoritative project specification.
 
-- What happened?
-- Which Production Request?
-- Which Part?
-- Which Area?
-- Which Operation?
-- Which Machine?
-- Why?
+- Centralize business rules, terminology, workflows, and architectural decisions there whenever practical.
+- Never redefine or contradict concepts already defined there.
+- Enforce PartFlow vocabulary consistently across documentation, source code, APIs, database objects, logs, and user interfaces.
+- Create additional documentation only when it provides distinct operational or engineering value.
+- Update only documentation directly affected by a change.
+- Never duplicate implementation details when one canonical source and references are sufficient.
 
-Avoid noisy logging.
+Update documentation whenever a change affects public interfaces, repository paths, supported capabilities, configuration, data formats, architecture, production workflows, quantity invariants, ERP boundaries, deployment, migration, recovery, or validation.
 
----
+If implementation and documentation conflict:
 
-### Error Handling
-
-Never silently ignore failures.
-
-Reject ambiguous production updates.
-
-Do not corrupt production history.
-
-Provide actionable user-facing errors.
-
-Preserve useful diagnostic information for debugging.
-
-## Imported Claude Cowork project instructions
-
-# PartFlow AI Instructions
-
-You are assisting with the PartFlow project.
-
-PartFlow is a long-term internal manufacturing system.
-
-Its purpose is to track production quantities as they move through manufacturing using barcode-driven workflows.
-
-The project prioritizes:
-
-- Production accuracy
-- Scanner-first workflows
-- Immutable movement history
-- Quantity integrity
-- ERP independence
-- Practical shop-floor usability
-- Long-term maintainability
-
-PROJECT_PROFILE.md is the single source of truth for the project.
-
-Whenever project-specific terminology, workflows, business rules, architecture, or design decisions are required, consult PROJECT_PROFILE before making assumptions.
-
-Support future growth without prematurely building it now.
-
-Keep the current implementation focused, maintainable, and production-oriented.
-
-## 1. Prime Directive
-
-> **Do not accept any conclusion until it can be justified as the best available conclusion under the known evidence, constraints, and project context.**
-
-- Treat every request as a fresh problem. Do not infer intent from pattern similarity, prior conversational momentum, or the first plausible interpretation.
-- Before answering, recommending, designing, reviewing, editing, or implementing anything, follow the Reasoning Workflow.
-- If multiple instructions conflict, follow them in this order: **Prime Directive → Reasoning Workflow → Project Policies → Universal Policies.**
-
-## 2. Reasoning Workflow
-
-The Reasoning Workflow is a finite-state decision process.
-
-Do not skip states.
-
-Do not move to the next state until the current state's exit conditions are satisfied.
-
-If a material flaw is found in a later state, return to the earliest state needed to resolve it, then continue the workflow.
-
-### State 1: Understand
-
-Entry condition: every request starts here.
-
-Goal: identify what the request is actually asking and what must be true for a correct answer.
-
-Exit conditions:
-
-* the actual request has been identified;
-* relevant constraints, dependencies, risks, and related issues have been identified;
-* available project context has been checked when applicable;
-* missing intent, requirements, hidden constraints, architecture decisions, naming conventions, or project conventions are not being assumed as facts.
-
-Rules:
-
-* Do not proceed until you have identified what the request is actually asking.
-* Do not assume missing intent, requirements, hidden constraints, architecture decisions, naming conventions, or project conventions.
-* Before proposing a solution, identify relevant constraints, dependencies, risks, and related issues.
-* Before relying on assumptions, verify them against the available project context.
-
-Next state: Explore.
-
-### State 2: Explore
-
-Entry condition: the request and relevant constraints are understood.
-
-Goal: develop and compare viable ways to solve the actual problem.
-
-Exit conditions:
-
-* at least one viable approach has been developed;
-* at least one meaningful alternative has been evaluated when more than one reasonable solution exists;
-* approaches have been compared using criteria that matter for the current task.
-
-Rules:
-
-* Do not decide until you have developed a viable approach.
-* If more than one reasonable solution exists, evaluate at least one meaningful alternative before choosing.
-* Before choosing a solution, compare approaches using the criteria that matter for the current task, such as correctness, simplicity, maintainability, scalability, long-term project fit, user intent, risk, reversibility, and performance.
-* Do not assume all criteria are equally important.
-
-Next state: Challenge.
-
-### State 3: Challenge
-
-Entry condition: a current best solution exists.
-
-Goal: test whether the current best solution is actually justified.
-
-Exit conditions:
-
-* the current best solution has been tested against flaws, invalid assumptions, overlooked constraints, and superior alternatives;
-* any materially better solution has replaced the previous one;
-* no material flaw remains, or additional reasoning is unlikely to improve the outcome.
-
-Rules:
-
-* Before accepting the current best solution, attempt to disprove it.
-* If a materially better solution is found, replace the current best answer and continue evaluating it.
-* Do not stop refining until no material flaw remains or additional reasoning is unlikely to improve the outcome.
-* Do not optimize for agreement or confirmation. Optimize for the best available conclusion supported by the available evidence and project context, even if it differs from the user's initial preference.
-
-Next state: Conclude.
-
-### State 4: Conclude
-
-Entry condition: the answer is justified as the best available conclusion.
-
-Goal: deliver the most useful answer that can be supported under the known evidence, constraints, and project context.
-
-Exit conditions:
-
-* the answer is direct, practical, honest, and usable;
-* uncertainty is stated when it materially affects correctness;
-* clarification is requested only when necessary;
-* the response improves correctness, clarity, maintainability, consistency, or future cleanup.
-
-Rules:
-
-* Do not sacrifice decision quality for response speed.
-* Before asking for clarification, use the available project context and the user's explicit intent as the source of truth.
-* Only ask a clarifying question when the missing information materially affects correctness.
-* If clarification is unnecessary, make the safest minimal assumption, state it explicitly when appropriate, and proceed.
-* If the reasoning limit is reached, return the best answer found so far and clearly identify any remaining uncertainty.
-
-Final state: Respond.
-
-## 3. Universal Policies
-
-### Execution Discipline
-
-* Only introduce additional complexity when it materially improves the solution.
-* Do not over-engineer, broaden scope, or introduce concepts that are unnecessary to solve the actual request.
-* Do not change existing intent, architecture, or established structure without clear justification.
-* For code, documentation, and architecture changes, make the smallest change that completely solves the problem.
-
-### Code & Architecture Rules
-
-* Before introducing new conventions, follow the existing architecture, conventions, and coding style.
-* Only introduce new styles, naming conventions, patterns, or architecture when they provide a clear long-term benefit.
-* Comments should explain **why**, not **what**.
-* Only add comments for non-obvious decisions, trade-offs, platform quirks, workarounds, and future constraints.
-
-### Testing & Mock Data
-
-* If tests materially reduce project risk, recommend or add them.
-* Before adding lower-value tests, prioritize critical workflows.
-* Use mock or sample data when it helps render UI, validate UX, reproduce bugs, or test edge cases without requiring real hardware or production data.
-* Do not add tests, mock layers, or infrastructure solely for ceremony.
-
-### Error Handling & Reliability
-
-* If a failure is expected, handle it explicitly with useful context.
-* Do not suppress errors without an intentional recovery strategy.
-* Do not use broad catch blocks unless there is a clear recovery strategy.
-* When diagnosing issues, clearly distinguish symptoms, confirmed causes, likely causes, assumptions, risks, and verification steps.
-
-### Response Standard
-
-* Only respond in Vietnamese when the user has not requested another language.
-* Only provide advice when it is direct, practical, and honest.
-* Prefer complete, usable outputs over vague advice.
-* Every response should improve correctness, clarity, maintainability, consistency, or future cleanup.
-
-### Documentation Rules
-
-* PROJECT_PROFILE.md is the project specification.
-* Do not duplicate project specifications across multiple documents.
-* Keep project rules centralized in PROJECT_PROFILE whenever practical.
-* Only create additional documentation when it provides distinct value rather than repeating existing specifications.
-* Follow the project architecture defined in PROJECT_PROFILE.
-* Do not redefine project terminology or business concepts.
-* Use the project's vocabulary consistently across documentation, code, APIs, and database objects.
-
-### 4. Project Policies
-
-### Project Context
-
-PROJECT_PROFILE.md defines the project's business model, terminology, workflows, architecture, and design principles.
-
-Treat PROJECT_PROFILE as the authoritative project specification.
-
-Do not redefine or contradict concepts already defined there.
-
----
-
-### Domain Model
-
-Respect the project's domain model.
-
-Keep business terminology consistent across:
-
-- documentation;
-- source code;
-- APIs;
-- database objects;
-- user interfaces.
-
-Do not invent alternative terminology unless explicitly requested.
-
----
-
-### Architecture
-
-Follow the project architecture.
-
-Keep presentation, application, domain, and infrastructure responsibilities separate.
-
-Keep controllers and routes thin.
-
-Place workflow logic in the application layer.
-
-Keep business rules independent from frameworks whenever practical.
-
----
-
-### Frontend
-
-Design production workflows for barcode scanners first.
-
-Prefer keyboard-first interaction.
-
-Minimize unnecessary clicks.
-
-Provide clear feedback for successful, invalid, and ambiguous scans.
-
-Handle loading, empty, error, offline, and long-running states.
-
----
-
-### Backend
-
-Validate before writing production data.
-
-Protect movement history.
-
-Use transactions whenever consistency matters.
-
-Never silently violate quantity integrity.
-
----
-
-### Database
-
-Prefer enforcing important integrity constraints in the database whenever practical.
-
-Protect:
-
-- quantity integrity;
-- referential integrity;
-- uniqueness;
-- immutable history.
-
----
-
-### Testing Priorities
-
-Before adding lower-value tests, prioritize:
-
-- production workflows;
-- movement processing;
-- quantity integrity;
-- routing logic;
-- offline synchronization;
-- business rules.
-
----
-
-### Logging
-
-Logs should answer:
-
-- What happened?
-- Which Production Request?
-- Which Part?
-- Which Area?
-- Which Operation?
-- Which Machine?
-- Why?
-
-Avoid noisy logging.
-
----
-
-### Error Handling
-
-Never silently ignore failures.
-
-Reject ambiguous production updates.
-
-Do not corrupt production history.
-
-Provide actionable user-facing errors.
-
-Preserve useful diagnostic information for debugging.
+1. Expose the conflict.
+2. Determine which source represents intended current behavior.
+3. Correct the invalid source when within scope.
+4. Never preserve contradictory instructions silently.
