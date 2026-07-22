@@ -26,7 +26,10 @@ Before any non-trivial change:
 3. When planning or implementing a feature, read
       [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)
       to determine the current phase, approved scope, dependencies, and deferred work.
-4. Read only the documentation and code nearest to the requested change.
+4. When working on user interface behavior, read
+      [`docs/GUI_DESIGN.md`](./docs/GUI_DESIGN.md),
+      the authoritative specification of the currently approved target UI.
+5. Read only the documentation and code nearest to the requested change.
 
 - Stop reading once sufficient evidence has been gathered.
 - Never read the repository indiscriminately. Follow indexes and references first.
@@ -92,9 +95,11 @@ PartFlow is a long-term internal manufacturing tracking system for barcode-drive
 
 PartFlow must:
 
-- track Jobs, Parts, and production quantities;
-- record immutable movement history across Areas, Operations, and optional Machines;
+- track PartNumbers (PNs) as the primary tracked identity, PurchaseOrders and PoDemand as business demand, and QuantityFlows as traceable physical production quantities;
+- record immutable PartMovement history across Areas, Operations, and optional Machines;
 - present accurate current production status and location derived consistently from movement history.
+
+External Job Numbers are metadata on PoDemand. They are valid search, display, sorting, and reporting values, but they are not a `Job` aggregate and PartFlow has no `Job` domain entity.
 
 Enforce this priority order:
 
@@ -113,10 +118,10 @@ Support future growth without implementing speculative capability. Keep the curr
 
 ### In Scope
 
-- Job and production-part tracking.
+- PN-centric production tracking: PurchaseOrder and PoDemand as business demand, QuantityFlow as physical quantity.
 - Barcode-driven shop-floor workflows.
 - Area, Operation, and optional Machine routing context.
-- Quantity movement, allocation, status, and history.
+- Quantity movement (PartMovement), allocation (PoAllocation), status, and history.
 - Current-location and production-status dashboards.
 - Manual data entry and import where defined by `PROJECT_PROFILE.md`.
 - Future ERP synchronization only through an explicit, isolated integration boundary.
@@ -142,7 +147,8 @@ Never add adjacent capability merely because it is technically possible. Require
 
 ### Architectural Boundaries
 
-- Never conflate a reusable `Part` definition with a tracked production instance associated with a `Job`.
+- Never conflate the reusable `PartNumber` definition with tracked physical quantity. `QuantityFlow` is the traceable production portion of PN quantity; `PoDemand` is business demand; `PoAllocation` connects stocked quantity to PoDemand only after completion.
+- Never treat external Job Numbers as a domain aggregate. They are PoDemand metadata used for search, display, sorting, and reporting.
 - Treat `Area`, `Operation`, and `Machine` as distinct concepts. `Machine` may be absent when the workflow does not require one.
 - Treat immutable movement history as the audit record. Current status must remain consistent with that history.
 - Presentation must never own production business rules.
@@ -155,19 +161,31 @@ Never add adjacent capability merely because it is technically possible. Require
 
 ### Canonical Sources
 
-Treat these sources as canonical:
+Each canonical source owns a distinct responsibility:
 
-- `CLAUDE.md`: AI instruction entry point.
-- `docs/PROJECT_PROFILE.md`: authoritative business model, terminology, workflows, architecture, and design specification.
-- `docs/IMPLEMENTATION_ROADMAP.md`: authoritative implementation order, current phase, approved delivery scope, and explicitly deferred work.
-- Current repository implementation, configuration, and tests: authoritative evidence of implemented behavior and available commands.
+- `CLAUDE.md`: controls AI operating behavior.
+- `docs/PROJECT_PROFILE.md`: authoritative for PartFlow domain terminology, business behavior, invariants, workflows, and product scope.
+- `docs/GUI_DESIGN.md`: authoritative for the currently approved target UI.
+- `docs/IMPLEMENTATION_ROADMAP.md`: authoritative for implementation order, phase boundaries, dependencies, and temporary limitations.
+- Slice design documents (for example `docs/SLICE1_DATA_MODEL.md`): subordinate to all of the above; rewrite them when they conflict with canonical sources.
+- Current repository implementation, configuration, and tests: evidence of what is implemented and which commands exist. They must never silently override canonical business rules.
 
-When sources conflict, enforce this order:
+When sources conflict on domain terminology, business behavior, invariants, workflows, or product scope, enforce this order:
 
-1. Current implementation and stable user-facing or operator-facing behavior
-2. `docs/PROJECT_PROFILE.md` and other current canonical documentation
-3. Planned documentation
-4. Archived documentation
+1. `docs/PROJECT_PROFILE.md`
+2. `docs/GUI_DESIGN.md` (target UI) and `docs/IMPLEMENTATION_ROADMAP.md` (implementation order and temporary limitations), each within its own responsibility
+3. Slice design documents
+4. Planned documentation
+5. Archived documentation
+
+When implementation and `PROJECT_PROFILE.md` conflict:
+
+1. Expose the conflict.
+2. Identify the intended canonical behavior.
+3. Correct the invalid source when within scope.
+4. Never preserve the conflict merely because code already exists.
+
+Do not treat current implementation as higher authority than `PROJECT_PROFILE.md` for domain or product behavior. Implementation remains the authority only for *what is currently implemented*, never for *what is correct*.
 
 Expose unresolved conflicts explicitly. Never invent a compromise.
 Preserve the existing repository layout. Never create parallel source trees, duplicate domain models, or competing documentation structures.
@@ -187,8 +205,14 @@ Preserve the existing repository layout. Never create parallel source trees, dup
 ### Production Tracking Safety
 
 - Validate every scan before writing production data.
-- Reject unknown, ambiguous, duplicate, or context-invalid scans explicitly.
-- Never update tracking data from uncertain input.
+- Apply these scan outcomes consistently:
+  - Unknown barcode: reject; no write.
+  - Inactive entity: reject; no write.
+  - Invalid Area, Machine, Operation, Route, or quantity: reject; no write.
+  - Duplicate transport retry with the same event id: return the original idempotent result; do not create another Movement.
+  - Multiple valid contexts: present the relevant choices and require explicit confirmation; no write until one choice is confirmed.
+  - Cancel: abandon the pending intent; no write.
+- Never update tracking data from uncertain input. Unresolved ambiguity blocks the write; it is not a silent rejection of valid production reality.
 - Record every production movement as an immutable event.
 - Require transactional consistency whenever movement, status, allocation, or quantity integrity spans multiple writes.
 - Never silently violate quantity integrity.
@@ -204,9 +228,11 @@ Preserve the existing repository layout. Never create parallel source trees, dup
 - Treat manual entry as an explicit fallback.
 - Keep the active scan target unmistakable and preserve focus correctly.
 - Provide immediate and distinct feedback for successful, invalid, ambiguous, duplicate, and rejected scans.
-- Handle loading, empty, error, offline, long-running, and long-data states explicitly.
+- Handle loading, empty, error, connectivity-loss, long-running, and long-data states explicitly.
+- Treat connectivity loss as an explicit write-blocked state: block production write submission while disconnected, show a persistent disconnected indicator, preserve already loaded read-only information where practical, and restore input readiness and focus on reconnection.
+- Never queue production writes locally. Offline scan synchronization is deferred and unapproved; production writes must remain blocked while disconnected unless offline synchronization is explicitly approved and implemented.
 - Never place authoritative business rules only in the frontend.
-- Use realistic mock data when it materially improves UI development or testing. Never allow mock data or mock behavior to leak into production.
+- Use realistic mock data when it materially improves UI development or testing. Never allow mock data, mock behavior, or mock offline behavior to leak into production.
 
 ### Backend and Database
 
@@ -226,16 +252,19 @@ Preserve the existing repository layout. Never create parallel source trees, dup
 - During diagnosis, explicitly separate symptoms, confirmed causes, likely causes, assumptions, risks, and verification steps.
 - Preserve sufficient diagnostic context without exposing secrets or raw internal errors.
 
-Logs must answer:
+Logs must answer, where relevant:
 
 - What happened?
-- Which Job?
-- Which Part or tracked production item?
+- Which PN?
+- Which QuantityFlow and quantity?
+- Which PO Demand was relevant, if any?
 - Which Area?
 - Which Operation?
-- Which Machine, when applicable?
-- Which quantity was affected?
-- Why did it fail?
+- Which Machine?
+- Which Worker?
+- Which Scan Station?
+- Why did the action fail?
+- Was it reversed or corrected?
 
 Reject noisy, duplicated, sensitive, or misleading logs.
 

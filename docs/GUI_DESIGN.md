@@ -3,21 +3,22 @@
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v5).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
 > An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v2.html`.
-> Supersedes GUI Design v1 (`archive/partflow-gui-mockup.html`); the differences are listed in §12.
+> Supersedes GUI Design v1 (`archive/partflow-gui-mockup.html`); the differences are listed in §13.
 
 ---
 
 # 1. Scope
 
-Covers the seven application views from PROJECT_PROFILE §20:
+Covers the eight application views from PROJECT_PROFILE §20:
 
 1. Scan Station (production)
 2. Production Board (monitoring, large display)
 3. Area Board (monitoring, per-Area)
 4. Manager Summary (management overview, grouped by Area)
 5. Tracking (management, PN-centric)
-6. Priority Management (Hot PO Demand ranking)
-7. Administration (configuration)
+6. PO Intake (management, manual PO entry and production release)
+7. Priority Management (Hot PO Demand ranking)
+8. Administration (configuration)
 
 ---
 
@@ -28,7 +29,7 @@ Covers the seven application views from PROJECT_PROFILE §20:
 | Context    | Views                                                       | Theme | Rationale                                                                           |
 |------------|-------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
 | Shop floor | Scan Station, Production Board, Area Board, Manager Summary | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
-| Management | Tracking, Priority Management, Administration               | Light | Dense data work at a desk, matches office tooling expectations                      |
+| Management | Tracking, PO Intake, Priority Management, Administration    | Light | Dense data work at a desk, matches office tooling expectations                      |
 
 Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system.
 
@@ -37,7 +38,7 @@ Both contexts share the same color tokens, spacing scale, and typography so the 
 Status colors (semantic, never decorative):
 
 - **Success** `#31d287` — recorded Movement, confirmed action
-- **Warning** `#ffb224` — needs attention, pending context, offline queue, route deviation, due soon
+- **Warning** `#ffb224` — needs attention, pending context, route deviation, due soon
 - **Error** `#ff6166` — rejected scan, integrity violation, overdue
 - **Info / accent** `#4f8cff` — selection, focus, primary action
 
@@ -66,10 +67,10 @@ These apply to every view; they implement the profile's core principles in UI te
 
 1. **Focus discipline.** On the Scan Station, the barcode input regains focus automatically after every completed operation, dialog close, session change, and view activation. Nothing may steal focus permanently.
 2. **Ambiguity requires confirmation.** Whenever a scan resolves to more than one valid production context, the UI presents an explicit choice list (§4.6). The UI never guesses and never defaults silently; nothing is recorded until the choice is made (PROJECT_PROFILE §9 Barcode Resolution).
-3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded/queued but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each.
+3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each.
 4. **Quantity integrity is visible.** Quantity entry displays the available source quantity. Attempts to move more than available are rejected with an explicit error — the UI explains the limit rather than clamping silently (PROJECT_PROFILE §10).
 5. **History is append-only in the UI too.** Undo appears as a new `REVERSED` entry in the scan list; the original entry stays visible. Tracking's Movement history has no edit/delete affordances (PROJECT_PROFILE §15).
-6. **Offline is a first-class state.** Going offline shows a persistent banner with the queued-event count; queued scans render with an amber "pending" dot and flip to green after sync. The workflow itself does not change.
+6. **Connectivity loss is an explicit write-blocked state.** Losing the connection shows a persistent OFFLINE / DISCONNECTED banner with an actionable message; production write submission is disabled while disconnected. Already loaded read-only information stays visible where practical. No production write is queued locally, no pending Movement indicator is shown, and the UI never claims that scans will synchronize later. On reconnection, input readiness and focus are restored. (Offline scan synchronization remains deferred and unapproved — PROJECT_PROFILE §29, §31.5.)
 7. **PartFlow vocabulary everywhere.** UI labels use the canonical names: PN, PO, PO Demand, Request Type (`NEW` / `REWORK` / `MODIFY`), Quantity Flow, Route, Movement types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`, `SPLIT`, `MERGED`, `STOCKED`, `REVERSED`, …), PO Allocation, Hot (PROJECT_PROFILE §7).
 
 ---
@@ -83,7 +84,7 @@ Fixed to one Area per station. Single screen, no navigation during normal produc
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ Dept / AREA (color) / Operations · Station  [Machine session][Worker][●Online]│
-│ (offline banner when disconnected)                                            │
+│ (disconnected banner when connectivity is lost — writes blocked)              │
 ├──────────────────────────────────────┬────────────────────────────────────────┤
 │ Machine status strip (scan to select)│  UNDO LAST SCAN                        │
 │ Scan input (large, focused)          │  Recent scans (today)                  │
@@ -124,7 +125,7 @@ One input accepts every barcode type; the system classifies the scan determinist
 | Unknown PN / unrecognized value        | Error feedback, nothing recorded; raw ERP text is never auto-accepted           |
 | Inactive entity                        | Error feedback, nothing recorded                                                |
 
-Manual PN entry remains available as an explicit fallback link under the scan input.
+Manual PN entry remains available as an explicit fallback link under the scan input. It opens a **separate manual-entry flow** that accepts the exact PartNumber text and resolves it through the same server-side validation as a scan. It never pre-fills or reuses the barcode input, and raw PN text is never silently interpreted as a barcode (PROJECT_PROFILE §9).
 
 ## 4.5 Pending scan context and last scanned PN
 
@@ -135,7 +136,7 @@ Two persistent context surfaces required by §20:
 
 ## 4.6 Ambiguity dialog
 
-Full-screen modal listing every valid context as a large tappable row, filtered to the current station where possible. Typical contexts: assign queued quantity to a Machine, receive additional quantity from an upstream Area, create `REWORK` demand, create `MODIFY` demand. Each row shows the relevant quantities, POs and due dates; REWORK/MODIFY rows explain the temporary-PO fallback (`TMP-YYYYMMDD-HHMM-REWORK`) used when no active PO applies (PROJECT_PROFILE §13). Esc / Cancel abandons with nothing recorded.
+Full-screen modal listing every valid context as a large tappable row, filtered to the current station where possible. Typical contexts: assign queued quantity to a Machine, receive additional quantity from an upstream Area, create `REWORK` demand, create `MODIFY` demand. Each row shows the relevant quantities, POs and due dates; REWORK/MODIFY rows explain the temporary-PO fallback (`TMP-YYYYMMDD-HHMM-REWORK`) used when no active PO applies (PROJECT_PROFILE §13). Choosing REWORK or MODIFY does **not** record anything immediately — it opens a prefilled intake/confirmation flow (Request Type, quantity, link to an applicable PO or temporary internal PO, Route and starting Area); `RECEIVED` is appended only after that confirmation. Esc / Cancel abandons with nothing recorded.
 
 ## 4.7 Quantity entry
 
@@ -144,7 +145,7 @@ Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard di
 ## 4.8 Right column
 
 - **Undo Last Scan** — one prominent button; only undoes recent eligible scans made at this Area. Creates a `REVERSED` compensating Movement referencing the original (PROJECT_PROFILE §15); disabled when nothing is undoable.
-- **Recent scans** — today's scans, newest first: PN, Movement type and description, time, status dot (green recorded / amber queued offline / red reversed).
+- **Recent scans** — today's scans, newest first: PN, Movement type and description, time, status dot (green recorded / red reversed).
 - **In this Area now** — live Area inventory split into two labeled groups per §20: quantity **assigned to Machines** (with Machine name) and quantity in the **Area queue** awaiting Machine assignment, with the Area total beneath.
 
 ## 4.9 States
@@ -153,8 +154,8 @@ Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard di
 |-----------------|---------------------------------------------------------------------|
 | Loading         | Skeleton panels; scan input disabled with "Connecting…" placeholder |
 | Empty inventory | "No production in this Area" placeholder row                        |
-| Offline         | Amber banner + queued count; scans continue, marked pending         |
-| Sync return     | Success feedback with uploaded count; pending dots flip to green    |
+| Disconnected    | Persistent OFFLINE banner with actionable message; production write submission disabled; loaded read-only data stays visible |
+| Reconnected     | Banner clears; scan input re-enabled and refocused, ready for the next scan |
 | Error           | Red feedback zone; input cleared and refocused, ready for next scan |
 
 ---
@@ -233,7 +234,7 @@ Manages the Department's Hot PO Demand list (PROJECT_PROFILE §20 Priority Manag
 
 - The list shows each Hot entry with rank badge, PN, PO + Job Number, Request Type chip, demand figures (requested / allocated / shortage), current distribution, and color-ramped due date.
 - **Add:** the "+ Add to Hot list" button opens a dialog with a single search field that accepts free text (PN / PO / Job Number) *and* PN barcode scans — scanning with the dialog open adds the matching PO Demand directly. If a PN has multiple active PO Demand records, each is listed and added separately. New entries always join at the **bottom** of the list.
-- **Remove:** each entry has a remove (✕) affordance; remaining ranks close the gap.
+- **Remove:** each entry has a remove (✕) affordance. Clicking it opens a **confirmation dialog identifying the PN and PO Demand**; Cancel changes nothing. On Confirm the entry is removed, remaining ranks close the gap, the change applies immediately and is audited, and Undo can restore it. Confirmation guards the removal; it does not reintroduce a separate save-or-cancel workflow.
 - **Reorder:** drag-and-drop with a visible grip; rank badges renumber live.
 - **Undo / Redo instead of save-or-cancel:** every change (reorder, add, remove) applies immediately, is audited, and can be stepped back and forward with Undo/Redo buttons. The buttons disable when the corresponding history is empty.
 - A footer note restates the rules: Hot is a label on top of `priority_rank`, and ordering criteria are ① Hot rank ② earliest due date ③ largest remaining shortage (deterministic tie-breaker last, PROJECT_PROFILE §17).
@@ -263,7 +264,33 @@ The Stockroom station reuses the Scan Station shell with one additional step: af
 
 ---
 
-# 12. Changes from GUI Design v1
+# 12. PO Intake
+
+Management view (light theme) implementing manual PO entry and explicit production release (PROJECT_PROFILE §12, §20 PO Intake). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+
+## 12.1 Layout and PO handling
+
+- **PO search / create:** one search field over PO Number; an exact miss offers "Create PO". Creating captures PO Number and received date. Attempting to create a PO Number that already exists surfaces the existing PO instead of duplicating it (duplicate PO handling).
+- **PO header:** PO Number, received date, status, and demand-line count.
+- **PoDemand rows:** an editable table, one row per PN demand: PN (lookup or create), Request Type (`NEW` default / `REWORK` / `MODIFY`), requested quantity, due date, priority when applicable, external Job Numbers, requester / reason / notes. Long PO line lists scroll with a sticky header and a line count.
+- **PN lookup / create:** the PN field searches existing PartNumbers; a new PN can be created inline, which shows a **barcode preview** (`PF:PN:…`) and creates the unique PN barcode with the PN master. An **inactive PN** is flagged and cannot be released without reactivation.
+- **Validation states:** per-field errors (missing PN, quantity ≤ 0, missing due date where required); a row with errors cannot be saved. **Unsaved changes** are visibly marked and guarded against navigation loss.
+
+## 12.2 Demand save vs. production release
+
+- **Save demand** persists the PurchaseOrder and PoDemand rows only. Saving never creates production quantity — the UI states this explicitly ("business demand — separate from production").
+- Each saved demand row carries an explicit **Release to production…** action. Releasing opens a confirmation flow that:
+  1. confirms the release quantity;
+  2. confirms or assigns the Route (snapshot noted);
+  3. confirms the configured starting Area and Operation;
+  4. **warns when the PN already has active quantity**, showing the existing distribution and requiring explicit confirmation of intent — never auto-creating or auto-merging quantity;
+  5. shows a **release summary before commit** (PN, quantity, Route, starting Area/Operation, PO Demand);
+  6. on Confirm, reports the result: created Quantity Flow id, assigned Route, starting Area, quantity, and the appended `RECEIVED` Movement.
+- Saving demand never triggers a release automatically; release is always a separate explicit action.
+
+---
+
+# 13. Changes from GUI Design v1
 
 Decisions in v1 that are superseded by this version, all aligned to PROJECT_PROFILE v5:
 
@@ -277,13 +304,13 @@ Decisions in v1 that are superseded by this version, all aligned to PROJECT_PROF
 
 ---
 
-# 13. Out of Scope for v2 UI
+# 14. Out of Scope for v2 UI
 
 Deferred intentionally: dark/light user toggle (theme is fixed per view class), localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
 ---
 
-# 14. Open Questions
+# 15. Open Questions
 
 1. Undo/Redo depth and retention for Priority Management (per session? until sign-out?).
 2. Hot-add barcode behavior when the scanned PN has multiple active PO Demand records — auto-open the filtered list, or require explicit selection?

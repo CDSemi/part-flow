@@ -1,6 +1,6 @@
-# PartFlow Project Profile v5
+# PartFlow Project Profile v6
 
-> **Status:** Living Document
+> **Status:** Living Document  
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
 
 ---
@@ -224,7 +224,7 @@ A PN:
 - has one reusable drawing folder,
 - has one unique PartFlow barcode,
 - may be requested by multiple active POs,
-- may have multiple external Job Numbers,
+- may reference external Job Numbers for display and reporting,
 - may have quantities in multiple Areas simultaneously,
 - may have quantities assigned to multiple Machines simultaneously,
 - may have different quantity flows following different Routes,
@@ -256,7 +256,7 @@ The following rules are mandatory:
 5. A PN may simultaneously have quantity assigned to multiple Machines.
 6. Quantity must never be accidentally created, destroyed, duplicated, lost, or made negative.
 7. No Movement may consume more quantity than is available in its source position.
-8. Unknown or invalid scans are rejected; ambiguous scans must never update production data until the ambiguity is explicitly confirmed.
+8. Unknown or ambiguous scans must never update production data.
 9. PO Demand and shop-floor Movement are separate concepts.
 10. PO Allocation and shop-floor Movement are separate concepts.
 11. PO Allocation may change without rewriting Movement history.
@@ -315,7 +315,7 @@ PO Demand contains the business context needed to answer:
 - due date,
 - priority,
 - request type,
-- external Job Numbers.
+- external Job Numbers used only for display, searching, sorting, and reporting.
 
 PO Demand does not define the current production location.
 
@@ -414,13 +414,13 @@ A Machine:
 
 ---
 
-## Quantity Flow
+## Quantity Flow (Internal Tracking Concept)
 
-A traceable production portion of a PN quantity as it moves, splits, merges, queues, and becomes assigned to Areas or Machines.
+An internal tracking concept representing a traceable portion of PN quantity when quantity-level identity is required.
 
 Quantity Flow does not represent individually labeled pieces.
 
-It is the logical identity needed to preserve:
+It exists only to preserve:
 
 - current quantity distribution,
 - route assignment,
@@ -499,7 +499,7 @@ Production correctness must not depend on Worker identity.
 
 Represents the reusable PN master record.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number`
@@ -528,7 +528,7 @@ Rules:
 
 Represents a PO received by the business.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `po_number`
@@ -551,7 +551,7 @@ Rules:
 
 Represents how many physical pieces of a PN are requested by one PO.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `purchase_order_id`
@@ -584,7 +584,7 @@ Rules:
 
 Represents a physical shop-floor location.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `department_id`
@@ -615,7 +615,7 @@ Rules:
 
 Represents a type of work supported by an Area.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `area_id`
@@ -637,7 +637,7 @@ Rules:
 
 Represents a physical Machine or processing station.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `area_id`
@@ -658,9 +658,9 @@ Rules:
 
 ## 8.7 QuantityFlow
 
-Represents a traceable portion of active PN quantity.
+Represents an internal tracking concept for active PN quantity.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -686,7 +686,7 @@ Rules:
 
 Represents a reusable production route definition.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `name`
@@ -706,7 +706,7 @@ Changing a Route Template must never retroactively alter active assigned Routes.
 
 Represents one expected step in a Route.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `route_template_id`
@@ -752,7 +752,7 @@ Rules:
 
 Represents an immutable quantity event.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -803,7 +803,7 @@ Rules:
 
 Represents the assignment of stocked PN quantity to PO Demand.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -830,7 +830,7 @@ Rules:
 
 Represents an operator.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `employee_number`
@@ -850,27 +850,28 @@ Worker identity must not control production business rules.
 
 ---
 
-## 8.14 ScanSession
+# 9. Application Concepts
 
-Represents temporary scan context at a Scan Station.
+## ScanSession
 
-Suggested context:
+ScanSession is temporary Application-layer state used to coordinate barcode scanning.
 
-- Area
+It may retain temporary context such as:
+
+- active Area
 - active Worker
 - active Machine
 - pending PN
 - pending Operation
 - pending quantity
-- expiration time
 
-ScanSession exists to reduce repetitive scanning.
+ScanSession improves scanning efficiency.
 
-It must never become the source of truth for production state.
+It is never part of the production truth.
 
 ---
 
-# 9. Barcode Model
+# 10. Barcode Model
 
 Barcode scanning is the primary interaction method.
 
@@ -1104,25 +1105,14 @@ For a newly received PO:
 3. Locate the reusable PN folder.
 4. Create the PN master and barcode if the PN is new.
 5. Add PO Demand without creating a separate tracked PN.
-6. Save the business demand. Saving PO Demand never automatically creates production quantity.
-
-Production release is a separate, explicit action. On production release:
-
-1. Confirm the release quantity.
-2. Confirm or assign the Route.
-3. Confirm the configured starting Area and Operation.
-4. Create the Quantity Flow.
-5. Snapshot the Assigned Route.
-6. Append an immutable `RECEIVED` Part Movement.
-7. Derive or update the current-position projection atomically with the Movement.
+6. Confirm or assign the initial Route when production is released.
+7. Introduce the required quantity into the configured first Area.
 
 New ERP production normally uses Request Type `NEW`.
 
-The starting Area may be Material or another configured starting Area.
+The initial Area may be Material or another configured starting Area.
 
-If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new PO requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
-
-Purchase Order and PO Demand represent business demand; creating or editing PO Demand does not define current production position. Production release explicitly introduces physical quantity. Part Movement remains PN + Quantity Flow + quantity activity: PO Demand does not own shop-floor Movement, and PO Allocation remains separate from both.
+A new PO requesting an already active PN does not automatically create additional physical quantity or merge production state.
 
 ---
 
@@ -1183,27 +1173,16 @@ For multi-machine Areas:
 3. Scan order may be reversed.
 4. Once both valid inputs are available, assign the selected quantity.
 
-The system must clearly reject, with no write:
+The system must clearly reject:
 
 - unknown barcodes,
 - inactive entities,
 - invalid Area/Machine combinations,
 - impossible quantities,
 - quantity exceeding available source quantity,
+- ambiguous PN context,
 - unauthorized corrections,
 - route deviations without required confirmation.
-
-An ambiguous PN context is not simply rejected. When multiple valid contexts exist, the system must present the relevant choices and require explicit confirmation; unresolved ambiguity blocks the write, and nothing is recorded until one choice is confirmed. Cancelling abandons the pending intent with no write.
-
-A duplicate transport retry carrying the same event id must return the original idempotent result and must not create another Movement.
-
----
-
-## Scan Station Persistence
-
-A Scan Station's identity and its binding to one Area are stable application and infrastructure configuration. A database table such as `scan_stations` is permitted; Scan Station configuration is not required to be a core domain aggregate.
-
-ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
 
 ---
 
@@ -1336,11 +1315,10 @@ The system must suggest allocation using this exact priority:
 
 1. Highest manager-defined PO Demand priority.
 2. Earliest due date.
-3. Largest remaining shortage.
 
-If all three criteria are equal, implementation must use a stable deterministic tie-breaker such as PO Demand creation order or internal ID.
+If both criteria are equal, implementation may use any stable deterministic tie-breaker such as PO Demand creation order or internal ID.
 
-This final technical tie-breaker must not change the business ordering above.
+The tie-breaker is an implementation detail, not a business rule.
 
 ---
 
@@ -1363,7 +1341,7 @@ The suggestion must show:
 
 Routine receiving should not require Manager approval.
 
-Operator allocation changes are permitted only when explicitly granted by role configuration.
+Operators may review and adjust the suggested PO Allocation before confirmation.
 
 Admin and Manager may adjust PO Allocation at any time.
 
@@ -1469,7 +1447,7 @@ Operator capabilities may include:
 - confirm quantity,
 - complete production into Stockroom,
 - confirm suggested allocation,
-- modify completion allocation when explicitly permitted,
+- review and adjust suggested completion allocation,
 - undo recent eligible scans.
 
 Operators must never directly rewrite historical data.
@@ -1517,24 +1495,18 @@ Requirements:
 - due-date sorting,
 - overdue highlighting,
 - Area color display,
-- distributed PN quantity display,
-- time in current Area or Machine shown per distributed quantity,
-- Part Number rendered on a single line.
+- distributed PN quantity display.
 
 Suggested columns:
 
-| No. | Part Number | Areas and Quantities · Time | Job Numbers | Due Date | Total Days |
-|---|---|---|---|---|---|
+| No. | Part Number | Areas and Quantities | Job Numbers | Due Date | Days Left | Total Days |
+|---|---|---|---|---|---|---|
 
-Days Left is displayed inside the Due Date column as a highlighted secondary line rather than as a separate column.
-
-Example distribution with time in location:
+Example distribution:
 
 ```text
-Cut (3 · 3h 40m), Lathe 1 (4 · 2h 05m), Lathe 2 (2 · 1h 10m), Mill (6 · 45m)
+Cut (3), Lathe 1 (4), Lathe 2 (2), Mill (6)
 ```
-
-Time in location may be highlighted when it exceeds the expected duration of the active Route Step.
 
 ---
 
@@ -1626,43 +1598,18 @@ It must not imply that the entire PN is at one Route Step.
 
 ---
 
-## PO Intake
-
-PO Intake is the management view for manual Purchase Order entry (§12). It is a light-theme management view.
-
-The view must support the minimum confirmed workflow:
-
-1. Create or locate a Purchase Order.
-2. Add or update one or more PO Demand records.
-3. Locate or create the PartNumber.
-4. Create the PN barcode when the PN is new.
-5. Enter: PO Number, received date, PN, Request Type (default `NEW`), requested quantity, due date, priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
-6. Save business demand without automatically creating production quantity.
-7. Provide a separate explicit `Release to production` action following the release steps in §12.
-
-On production release the view must confirm release quantity, Route, and the configured starting Area and Operation, and show the resulting Quantity Flow, Route, Area, quantity, and `RECEIVED` Movement.
-
-If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
-
-PO Intake must not grow into ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
-
----
-
 ## Priority Management
 
 Priority belongs to PO Demand.
 
-The Hot list is managed within the Department:
+When a Manager marks PO Demand as Hot:
 
-1. Show Hot PO Demand sorted by explicit priority rank.
-2. Add PO Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
-3. If a PN has multiple active PO Demand records, each PO Demand is selected and ranked separately.
-4. Add new Hot entries at the bottom by default.
-5. Allow drag-and-drop reordering.
-6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and PO Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
-7. Apply Hot list changes immediately and record every change in the audit trail.
-8. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step.
-9. Use the stored rank as the highest work and allocation priority.
+1. Show Hot PO Demand within the Department.
+2. Sort by explicit priority rank.
+3. Add new Hot entries at the bottom by default.
+4. Allow drag-and-drop reordering.
+5. Save or cancel changes.
+6. Use the stored rank as the highest work and allocation priority.
 
 Multiple POs requesting the same PN may have different priorities.
 
@@ -1883,7 +1830,7 @@ Database constraints should enforce, whenever practical:
 - non-negative quantities,
 - valid Area/Machine relationships,
 - allocation not exceeding available stock,
-- idempotent scan-submission event identifiers (`device_event_id`).
+- idempotent event identifiers if offline support is added.
 
 ---
 
@@ -1911,7 +1858,6 @@ The initial release should support:
 - manual Allocation adjustment by Admin and Manager,
 - optional Worker identification,
 - Scan Station,
-- PO Intake,
 - Production Board,
 - Area Board,
 - Manager Summary,
@@ -1967,8 +1913,7 @@ Do not introduce these responsibilities without an explicit project decision.
 
 Only the following unresolved decisions remain:
 
-1. Whether Operator may modify the suggested Stockroom Allocation or only confirm it.
-2. Whether stocked quantity may be returned to active production through a controlled reversal.
+1. Whether stocked quantity may be returned to active production through a controlled reversal.
 3. Whether scrap and rejected quantity are first-class Movement types in the initial release.
 4. The exact expiration rules for Worker and Machine sessions.
 5. Whether offline scan synchronization will be included in a later release.

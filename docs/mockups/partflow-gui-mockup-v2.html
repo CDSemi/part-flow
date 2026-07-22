@@ -100,11 +100,13 @@ input,select{font-family:inherit}
 .ss-pill .sub{font-size:10.5px;color:var(--d-faint)}
 #conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--d-border);background:var(--d-panel2)}
 #conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
-#conn.off .cdot{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+#conn.off .cdot{background:var(--err);box-shadow:0 0 10px var(--err)}
 #conn .ctxt{font-size:13px;font-weight:800;letter-spacing:.5px}
-#offbanner{display:none;background:rgba(255,178,36,.13);border-bottom:1px solid rgba(255,178,36,.4);color:var(--warn);
+#offbanner{display:none;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err);
   padding:9px 22px;font-size:14px;font-weight:650}
 #offbanner.show{display:block}
+#scaninput:disabled{opacity:.45;cursor:not-allowed}
+#scanbtn:disabled{opacity:.45;cursor:not-allowed}
 
 .ss-body{flex:1;display:grid;grid-template-columns:1fr 400px;gap:16px;padding:16px 22px}
 .ss-main{display:flex;flex-direction:column;gap:16px;min-width:0}
@@ -222,7 +224,6 @@ input,select{font-family:inherit}
 .scanlist .sic{width:8px;height:8px;border-radius:50%;flex:none}
 .scanlist .sic.ok{background:var(--ok)}
 .scanlist .sic.undo{background:var(--err)}
-.scanlist .sic.pend{background:var(--warn)}
 .scanlist .what{flex:1;min-width:0}
 .scanlist .what .p{font-weight:750;font-family:var(--mono);font-size:13.5px}
 .scanlist .what .d{color:var(--d-muted);font-size:12px;margin-top:1px}
@@ -474,6 +475,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .dlg.light{background:var(--l-panel);border-color:var(--l-border);color:var(--l-text);box-shadow:0 18px 60px rgba(20,30,43,.28)}
 .dlg.light h3{color:var(--l-muted)}
 .dlg.light .sub{color:var(--l-muted)}
+.dlg.light .sub b,.dlg.light .big{color:var(--l-text)}
 .dlg.light .bigbtn.ghost{background:var(--l-panel2);border:1px solid var(--l-border);color:var(--l-muted)}
 #hotsearch{width:100%;border:1.5px solid var(--l-border);border-radius:11px;padding:13px 15px;font-size:16px;outline:none;color:var(--l-text);background:var(--l-panel)}
 #hotsearch:focus{border-color:var(--info);box-shadow:0 0 0 3px rgba(79,140,255,.14)}
@@ -526,6 +528,63 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .btn-primary:hover{background:var(--info-d)}
 .notice{background:rgba(79,140,255,.07);border:1px solid rgba(79,140,255,.25);border-radius:12px;padding:12px 16px;
   font-size:12.5px;color:var(--info-d);margin-top:16px;line-height:1.6}
+
+/* ============ PO INTAKE (light) ============ */
+#view-pointake{background:var(--l-bg);color:var(--l-text);padding:24px 28px}
+.po-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.po-head h1{font-size:22px}
+.po-head .spacer{flex:1}
+.po-sub{color:var(--l-muted);font-size:13.5px;margin-bottom:16px;line-height:1.6;max-width:860px}
+.po-tools{display:flex;gap:10px;margin-bottom:16px;align-items:center}
+.po-tools input{flex:1;max-width:420px;background:var(--l-panel);border:1px solid var(--l-border);border-radius:10px;
+  font-size:14px;padding:11px 14px;color:var(--l-text);outline:none}
+.po-tools input:focus{border-color:var(--info)}
+.po-card{background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);box-shadow:var(--lshadow);margin-bottom:16px;overflow:hidden}
+.po-card .pc-head{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--l-border);background:var(--l-panel2)}
+.po-card .pc-head .po{font-family:var(--mono);font-size:19px;font-weight:800}
+.po-card .pc-head .meta{font-size:12.5px;color:var(--l-muted)}
+.po-card .pc-head .spacer{flex:1}
+.unsaved{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;background:rgba(255,178,36,.16);color:var(--warn-d)}
+.po-lines{max-height:420px;overflow:auto}   /* long PO line lists scroll; header stays visible */
+.po-table{width:100%;border-collapse:separate;border-spacing:0}
+.po-table th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--l-muted);text-align:left;
+  padding:10px 12px;background:var(--l-panel);border-bottom:1px solid var(--l-border);position:sticky;top:0}
+.po-table td{padding:11px 12px;border-bottom:1px solid #eef2f7;font-size:13.5px;vertical-align:top}
+.po-table tr:last-child td{border-bottom:none}
+.po-table .pn{font-family:var(--mono);font-weight:750}
+.po-table .bc{font-family:var(--mono);font-size:11.5px;color:var(--l-faint);margin-top:2px}
+.po-table .bc.newpn{color:var(--info-d)}
+.po-table input,.po-table select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:8px;
+  font-size:13px;padding:6px 9px;color:var(--l-text);outline:none;max-width:120px}
+.po-table input:focus,.po-table select:focus{border-color:var(--info)}
+.po-table .err-cell input{border-color:var(--err);background:rgba(255,97,102,.05)}
+.rowerr{font-size:11.5px;color:var(--err-d);font-weight:700;margin-top:4px}
+.rel-btn{border:1px solid var(--info);border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:750;color:var(--info-d);background:rgba(79,140,255,.06)}
+.rel-btn:hover{background:rgba(79,140,255,.14)}
+.rel-btn:disabled{opacity:.4;cursor:not-allowed}
+.linestat{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;display:inline-block}
+.linestat.saved{background:#edf0f4;color:var(--l-muted)}
+.linestat.released{background:rgba(49,210,135,.13);color:var(--ok-d)}
+.linestat.invalid{background:rgba(255,97,102,.12);color:var(--err-d)}
+.po-actions{display:flex;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--l-border)}
+.po-actions .hint{font-size:12px;color:var(--l-faint)}
+.relwarn{background:rgba(255,178,36,.10);border:1px solid rgba(255,178,36,.5);border-radius:12px;padding:12px 14px;
+  font-size:13px;color:var(--warn-d);margin-bottom:14px;line-height:1.55}
+.relgrid{display:grid;grid-template-columns:170px 1fr;gap:10px 12px;align-items:center;font-size:13.5px;margin-bottom:14px}
+.relgrid label{color:var(--l-muted);font-weight:650}
+.relgrid input,.relgrid select{background:var(--l-panel);border:1.5px solid var(--l-border);border-radius:9px;
+  font-size:14px;padding:9px 12px;color:var(--l-text);outline:none}
+.relgrid input:focus,.relgrid select:focus{border-color:var(--info)}
+.relsum{background:rgba(79,140,255,.07);border:1px solid rgba(79,140,255,.25);border-radius:12px;padding:12px 14px;
+  font-size:12.5px;color:var(--info-d);line-height:1.6}
+.relsum b{font-family:var(--mono)}
+/* dark-dialog form fields (manual entry / intake confirmation) */
+.dlg .field{width:100%;background:var(--d-bg2);border:2px solid var(--d-border2);border-radius:10px;color:var(--d-text);
+  font-size:17px;padding:11px 14px;outline:none;margin-bottom:10px}
+.dlg .field:focus{border-color:var(--info)}
+.dlg .fgrid{display:grid;grid-template-columns:150px 1fr;gap:9px 12px;align-items:center;font-size:13.5px;margin-bottom:6px}
+.dlg .fgrid label{color:var(--d-muted);font-weight:650}
+.dlg .fgrid .field{margin-bottom:0}
 </style>
 </head>
 <body>
@@ -538,6 +597,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   <span class="navgrp">Management</span>
   <button class="navbtn" data-v="summary" onclick="showView('summary')">Manager Summary</button>
   <button class="navbtn" data-v="track" onclick="showView('track')">Tracking</button>
+  <button class="navbtn" data-v="pointake" onclick="showView('pointake')">PO Intake</button>
   <button class="navbtn" data-v="priority" onclick="showView('priority')">Priority</button>
   <button class="navbtn" data-v="admin" onclick="showView('admin')">Administration</button>
   <div class="spacer"></div>
@@ -567,7 +627,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
       <span class="cdot"></span><span class="ctxt" id="conntxt">ONLINE</span>
     </button>
   </div>
-  <div id="offbanner">⚠ Offline — scans are queued locally and sync automatically. Queued events: <b id="qcount">0</b></div>
+  <div id="offbanner">⚠ DISCONNECTED — production scans are blocked; nothing is recorded or queued while offline. Already loaded information stays visible. Check the network connection — scanning resumes automatically after reconnecting.</div>
 
   <div class="ss-body">
     <div class="ss-main">
@@ -598,7 +658,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
             <b onclick="fill(this)">PF:PN:9999</b> unknown ·
             <b onclick="fill(this)">STOCK-DEMO</b> Stockroom allocation
           </div>
-          <div id="manualentry">Scanner unavailable? <a onclick="manualEntry()">Manual PN entry…</a></div>
+          <div id="manualentry">Scanner unavailable? <a onclick="manualEntry()">Manual PN entry…</a> — a separate explicit fallback; raw PN text is never treated as a barcode (§9)</div>
         </div>
         <div id="pending"><span class="pulse"></span><span id="pendingtxt"></span></div>
         <div id="lastpn">
@@ -674,14 +734,61 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
     <button class="choice" onclick="ambPick('rework')">
       <span class="cic rwk">RWK</span>
       <span><span class="ct1">Create REWORK demand</span><br>
-        <span class="ct2">New Quantity Flow · temporary PO <span class="mono">TMP-20260722-####-REWORK</span> unless linked to an active PO</span></span>
+        <span class="ct2">Opens intake confirmation — quantity, PO link (or temporary PO <span class="mono">TMP-20260722-####-REWORK</span>), Route, starting Area. Nothing recorded yet.</span></span>
     </button>
     <button class="choice" onclick="ambPick('modify')">
       <span class="cic mod">MOD</span>
       <span><span class="ct1">Create MODIFY demand</span><br>
-        <span class="ct2">New Quantity Flow with its own Route</span></span>
+        <span class="ct2">Opens intake confirmation — new Quantity Flow with its own Route. Nothing recorded yet.</span></span>
     </button>
     <div class="row"><button class="bigbtn ghost" onclick="closeAmb()">Cancel (Esc) — nothing recorded</button></div>
+  </div>
+</div>
+
+<!-- manual PN entry — explicit fallback, separate from barcode scanning (§9) -->
+<div class="overlay" id="manovl">
+  <div class="dlg">
+    <h3>Manual PN entry — explicit fallback</h3>
+    <div class="sub">Type the <b>exact PartNumber</b> (not a barcode). It is validated exactly like a scan — raw PN text is never interpreted as a barcode (§9). Nothing is recorded by this step.</div>
+    <input id="mpninput" class="field mono" autocomplete="off" placeholder="Exact PartNumber, e.g. PF-SHAFT-014"
+           onkeydown="if(event.key==='Enter')confirmManual()">
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeManual()">Cancel (Esc)</button>
+      <button class="bigbtn primary" onclick="confirmManual()">Look up PN</button>
+    </div>
+  </div>
+</div>
+
+<!-- REWORK / MODIFY intake confirmation — §13: nothing recorded until confirmed -->
+<div class="overlay" id="intakeovl">
+  <div class="dlg">
+    <h3><span id="itype">REWORK</span> intake — confirm before anything is recorded</h3>
+    <div class="big mono">PF-BRACKET-001</div>
+    <div class="sub">Request Type <b id="itype2">REWORK</b>. Confirm quantity, PO link, Route and starting Area — <b>RECEIVED is appended only after confirmation</b>.</div>
+    <div class="fgrid">
+      <label>Quantity</label>
+      <input id="iqty" class="field mono" inputmode="numeric" placeholder="pcs" onkeydown="if(event.key==='Enter')confirmIntake()">
+      <label>Purchase Order</label>
+      <select id="ipo" class="field">
+        <option value="TMP">Temporary internal PO — TMP-20260722-####-…</option>
+        <option value="PO-1001">Link to active PO-1001</option>
+        <option value="PO-1008">Link to active PO-1008</option>
+      </select>
+      <label>Route</label>
+      <select id="iroute" class="field">
+        <option>Bracket rework v1</option>
+        <option>Bracket std v3</option>
+      </select>
+      <label>Starting Area</label>
+      <select id="iarea" class="field">
+        <option>Lathe (this Area)</option>
+        <option>Material</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeIntake()">Cancel — nothing recorded</button>
+      <button class="bigbtn primary" onclick="confirmIntake()">Confirm — append RECEIVED</button>
+    </div>
   </div>
 </div>
 
@@ -1143,6 +1250,96 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </section>
 
+<!-- ==================== PO INTAKE (light, §20 / GUI §12) ==================== -->
+<section id="view-pointake" class="view">
+  <div class="po-head">
+    <h1>PO Intake</h1>
+    <div class="spacer"></div>
+    <button class="btn primary" onclick="toast('＋','New PO — enter PO Number and received date. An existing PO Number opens the existing PO instead of duplicating it.')">＋ New PO</button>
+  </div>
+  <div class="po-sub">Manual Purchase Order entry (§12). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>.</div>
+  <div class="po-tools">
+    <input placeholder="Search PO Number… (exact match on an existing PO opens it — duplicates are never created)">
+  </div>
+
+  <div class="po-card">
+    <div class="pc-head">
+      <span class="po">PO-1010</span>
+      <span class="meta">received <b>Jul 22, 2026</b> · status Open · 3 demand lines</span>
+      <div class="spacer"></div>
+      <span class="unsaved" id="po-unsaved">● Unsaved changes</span>
+    </div>
+    <div class="po-lines">
+    <table class="po-table">
+      <thead><tr><th>PN</th><th>Request Type</th><th>Qty</th><th>Due date</th><th>Priority</th><th>Job Numbers</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td><div class="pn">PF-SHAFT-014</div><div class="bc">existing PN · barcode PF:PN:1014</div></td>
+          <td><span class="typechip new">NEW</span></td>
+          <td><input class="mono" value="12" size="4"></td>
+          <td><input value="Aug 12" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="ERP-88411" size="10"></td>
+          <td><input value="" placeholder="notes…" size="10"></td>
+          <td><span class="linestat saved" id="line1-stat">Saved</span></td>
+          <td><button class="rel-btn" onclick="openRelease('PF-SHAFT-014')">Release to production…</button></td>
+        </tr>
+        <tr>
+          <td><div class="pn">PF-GEAR-201</div><div class="bc newpn">new PN — barcode created with PN master: PF:PN:1201</div></td>
+          <td><span class="typechip new">NEW</span></td>
+          <td><input class="mono" value="8" size="4"></td>
+          <td><input value="Aug 20" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="ERP-88420" size="10"></td>
+          <td><input value="hardened" size="10"></td>
+          <td><span class="linestat saved" id="line2-stat">Saved</span></td>
+          <td><button class="rel-btn" id="line2-rel" onclick="openRelease('PF-GEAR-201')">Release to production…</button></td>
+        </tr>
+        <tr>
+          <td class="err-cell"><div class="pn" style="color:var(--l-faint)">—</div><div class="bc">PN lookup or inline create required</div></td>
+          <td><span class="typechip rework">REWORK</span></td>
+          <td class="err-cell"><input class="mono" value="0" size="4"><div class="rowerr">quantity must be &gt; 0</div></td>
+          <td><input value="" placeholder="due…" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="" size="10"></td>
+          <td><input value="" size="10"></td>
+          <td><span class="linestat invalid">Row invalid</span></td>
+          <td><button class="rel-btn" disabled>Release to production…</button></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="po-actions">
+      <button class="btn primary" onclick="saveDemand()">Save demand</button>
+      <span class="hint">Saving stores <b>business demand only</b> — no Quantity Flow, no Movement, no release. Invalid rows cannot be saved.</span>
+    </div>
+  </div>
+  <div class="pr-note">An <b>inactive PN</b> is flagged in lookup and cannot be added or released without reactivation. Long PO line lists scroll with a sticky header. Leaving the view with unsaved changes prompts an explicit warning. PO Intake handles business demand only — it is not customer, pricing, invoicing, shipping, purchasing, or accounting functionality.</div>
+</section>
+
+<!-- release confirmation — explicit production release (§12) -->
+<div class="overlay" id="relovl">
+  <div class="dlg light" style="width:min(660px,94vw)">
+    <h3>Release to production — explicit action</h3>
+    <div class="big mono" id="rel-pn">PF-GEAR-201</div>
+    <div class="sub" id="rel-sub">PO-1010 demand · requested <b>8</b> · nothing is created until you confirm.</div>
+    <div class="relwarn" id="rel-warn" style="display:none">⚠ <b>This PN already has active quantity:</b> <span id="rel-dist" class="mono"></span>. Confirm intent explicitly — release always creates a <b>separate</b> Quantity Flow; it never automatically adds to or merges existing flows.</div>
+    <div class="relgrid">
+      <label>Release quantity</label>
+      <input id="rel-qty" class="mono" inputmode="numeric" oninput="relSummary()">
+      <label>Route</label>
+      <select id="rel-route" onchange="relSummary()"><option>—</option></select>
+      <label>Starting Area · Operation</label>
+      <select id="rel-area" onchange="relSummary()"><option>Material — Receiving (configured start)</option></select>
+    </div>
+    <div class="relsum" id="rel-sum">—</div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeRelease()">Cancel — nothing created</button>
+      <button class="bigbtn primary" onclick="confirmRelease()">Confirm release</button>
+    </div>
+  </div>
+</div>
+
 <!-- ==================== PRIORITY MANAGEMENT ==================== -->
 <section id="view-priority" class="view">
   <div class="pr-head">
@@ -1169,6 +1366,19 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
     <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (PF-SHAFT-014) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
     <div id="hotaddlist"></div>
     <div class="row"><button class="bigbtn ghost" onclick="closeHotAdd()">Cancel (Esc)</button></div>
+  </div>
+</div>
+
+<!-- remove-from-hot confirmation — §20 Priority: confirm before removal -->
+<div class="overlay" id="hotremovl">
+  <div class="dlg light">
+    <h3>Remove from Hot list?</h3>
+    <div class="big mono" id="hrm-pn">—</div>
+    <div class="sub">PO Demand <b class="mono" id="hrm-po">—</b> will be removed from the Hot ranking. Remaining ranks close the gap. The change applies <b>immediately</b>, is audited, and can be restored with Undo.</div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeHotRemove()">Cancel — nothing changes</button>
+      <button class="bigbtn primary" style="background:var(--err);color:#fff" onclick="confirmHotRemove()">Remove entry</button>
+    </div>
   </div>
 </div>
 
@@ -1239,14 +1449,29 @@ function toast(ic,msg){
 /* ================= Scan Station ================= */
 let machineSession=null;      // sticky session (§18) — held until changed/cleared/expired
 let pendingPN=null;           // PN waiting for qty or Machine
-let offline=false, queued=0, scans=0;
+let offline=false, scans=0;   // no local write queue exists — writes are blocked while disconnected
 const undoStack=[];
 
 const input=document.getElementById('scaninput');
 function focusScan(){ setTimeout(()=>input.focus(),50); }  // §3: input regains focus after every operation
 focusScan();
 function fill(el){ input.value=el.textContent.trim(); focusScan(); }
-function manualEntry(){ input.value='PF:PN:'; focusScan(); toast('⌨','Manual entry — type the PN and press Enter'); }
+
+/* manual PN entry — separate explicit fallback flow (§9); never pre-fills the barcode input */
+function manualEntry(){
+  document.getElementById('mpninput').value='';
+  document.getElementById('manovl').classList.add('show');
+  setTimeout(()=>document.getElementById('mpninput').focus(),60);
+}
+function closeManual(){ document.getElementById('manovl').classList.remove('show'); focusScan(); }
+function confirmManual(){
+  const pn=document.getElementById('mpninput').value.trim().toUpperCase();
+  document.getElementById('manovl').classList.remove('show');
+  if(!pn){ focusScan(); return; }
+  if(pn==='PF-SHAFT-014'){ setLastPN('PF-SHAFT-014','manual entry · single valid context'); openQty('PF-SHAFT-014',8); }
+  else if(pn==='PF-BRACKET-001'){ setLastPN('PF-BRACKET-001','manual entry · multiple valid contexts'); document.getElementById('ambovl').classList.add('show'); }
+  else { feedback('err','Unknown PartNumber','“'+pn+'” matches no PN — nothing recorded. Manual entry is validated exactly like a scan.','✕'); focusScan(); }
+}
 
 function now(){ const d=new Date(); return d.toTimeString().slice(0,5); }
 function feedback(kind,t1,t2,icon){
@@ -1270,7 +1495,7 @@ function addScan(pn,desc,cls){
   li.innerHTML='<span class="sic '+cls+'"></span><div class="what"><div class="p">'+pn+'</div><div class="d">'+desc+'</div></div><span class="when">'+now()+'</span>';
   const list=document.getElementById('scanlist');
   list.insertBefore(li,list.firstChild);
-  if(cls==='ok'||cls==='pend'){ undoStack.push({pn,desc}); document.getElementById('undo').disabled=false; }
+  if(cls==='ok'){ undoStack.push({pn,desc}); document.getElementById('undo').disabled=false; }
 }
 function setMachineSession(m){
   machineSession=m;
@@ -1281,6 +1506,7 @@ function setMachineSession(m){
 }
 
 function doScan(){
+  if(offline){ blockedFeedback(); return; }   // write-blocked while disconnected — nothing recorded, nothing queued
   const raw=input.value.trim(); input.value=''; focusScan();
   if(!raw) return;
   const v=raw.toUpperCase();
@@ -1329,9 +1555,13 @@ function doScan(){
   feedback('err','Unrecognized barcode','Not a PartFlow barcode. Raw ERP text is not auto-accepted — use manual entry if needed (§9).','✕');
 }
 
+function blockedFeedback(){
+  feedback('err','Disconnected — production writes are blocked','No scan is recorded or queued while offline (§3.6). Restore the connection to resume scanning.','✕');
+}
 function recordMovement(pn,type,desc){
-  if(offline){ queued++; document.getElementById('qcount').textContent=queued; addScan(pn,type+' · '+desc+' · queued offline',''+'pend'); }
-  else addScan(pn,type+' · '+desc,'ok');
+  if(offline){ blockedFeedback(); return false; }   // no local queue — a write either commits online or does not happen
+  addScan(pn,type+' · '+desc,'ok');
+  return true;
 }
 
 /* ----- quantity dialog ----- */
@@ -1361,13 +1591,15 @@ function confirmQty(){
   }
   document.getElementById('qtyovl').classList.remove('show');
   if(machineSession){
-    recordMovement(c.pn,'TRANSFERRED + ASSIGNED','Material → Lathe · '+machineSession+' · qty '+q);
-    feedback(offline?'warn':'ok', c.pn+' × '+q+' → '+machineSession, (offline?'Queued offline — will sync automatically. ':'Movement recorded. ')+'Machine session retained.', offline?'!':'✓');
+    // one atomic transaction, two canonical Movements — never an invented combined type
+    if(!recordMovement(c.pn,'TRANSFERRED','Material → Lathe · qty '+q)){ focusScan(); return; }
+    recordMovement(c.pn,'ASSIGNED_TO_MACHINE','Lathe queue → '+machineSession+' · qty '+q);
+    feedback('ok', c.pn+' × '+q+' → '+machineSession, 'Recorded atomically as two Movements: TRANSFERRED, then ASSIGNED_TO_MACHINE. Machine session retained.', '✓');
   } else {
+    if(!recordMovement(c.pn,'TRANSFERRED','Material → Lathe queue · qty '+q)){ focusScan(); return; }
     pendingPN={pn:c.pn,qty:q};
-    recordMovement(c.pn,'TRANSFERRED','Material → Lathe queue · qty '+q);
     setPending('Pending context: '+c.pn+' × '+q+' received into Lathe queue — scan a Machine barcode to assign, or continue scanning.');
-    feedback(offline?'warn':'ok', c.pn+' × '+q+' → Lathe queue', 'Received into Area queue. Scan a Machine to assign — either order works (§11).', offline?'!':'✓');
+    feedback('ok', c.pn+' × '+q+' → Lathe queue', 'Received into Area queue. Scan a Machine to assign — either order works (§11).', '✓');
   }
   focusScan();
 }
@@ -1382,13 +1614,39 @@ function ambPick(k){
     setPending('Pending context: PF-BRACKET-001 × 2 (Lathe queue) — scan a Machine barcode to assign.');
     feedback('warn','Scan Machine barcode to assign','PF-BRACKET-001 × 2 selected from Lathe queue — nothing recorded until the Machine scan.','!');
   } else if(k==='transfer'){ openQty('PF-BRACKET-001',4); }
-  else if(k==='rework'){
-    recordMovement('PF-BRACKET-001','RECEIVED','REWORK · TMP-20260722-1432-REWORK · qty 1 · into Lathe');
-    feedback('ok','REWORK demand created','TMP-20260722-1432-REWORK · new Quantity Flow QF-0158 · Route “Bracket rework v1” assigned.','✓');
-  } else {
-    recordMovement('PF-BRACKET-001','RECEIVED','MODIFY · TMP-20260722-1432-MODIFY · qty 1 · into Lathe');
-    feedback('ok','MODIFY demand created','TMP-20260722-1432-MODIFY · new Quantity Flow with its own Route.','✓');
-  }
+  else if(k==='rework'){ openIntake('REWORK'); return; }
+  else { openIntake('MODIFY'); return; }
+  focusScan();
+}
+
+/* ----- REWORK / MODIFY intake confirmation (§13) — nothing recorded until confirmed ----- */
+let intakeType=null;
+function openIntake(t){
+  intakeType=t;
+  document.getElementById('itype').textContent=t;
+  document.getElementById('itype2').textContent=t;
+  document.getElementById('iqty').value='';
+  document.getElementById('ipo').selectedIndex=0;
+  document.getElementById('intakeovl').classList.add('show');
+  setTimeout(()=>document.getElementById('iqty').focus(),60);
+}
+function closeIntake(){
+  document.getElementById('intakeovl').classList.remove('show'); intakeType=null;
+  document.getElementById('feedback').className='idle';
+  document.getElementById('feedback').innerHTML='<div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Cancelled — nothing recorded.</div></div>';
+  focusScan();
+}
+function confirmIntake(){
+  const q=parseInt(document.getElementById('iqty').value||'0',10);
+  if(!q){ document.getElementById('iqty').focus(); return; }   // quantity is confirmed, never assumed
+  const posel=document.getElementById('ipo').value;
+  const po= posel==='TMP' ? 'TMP-20260722-1432-'+intakeType : posel;
+  const route=document.getElementById('iroute').value;
+  const area=document.getElementById('iarea').value.replace(' (this Area)','');
+  const t=intakeType; intakeType=null;
+  document.getElementById('intakeovl').classList.remove('show');
+  if(recordMovement('PF-BRACKET-001','RECEIVED',t+' · '+po+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
+    feedback('ok',t+' demand released into '+area, po+' · new Quantity Flow QF-0158 × '+q+' · Route “'+route+'” snapshot assigned · RECEIVED appended after confirmation.','✓');
   focusScan();
 }
 
@@ -1403,23 +1661,29 @@ function undoLast(){
   focusScan();
 }
 
-/* ----- offline simulation ----- */
+/* ----- connectivity-loss simulation — explicit write-blocked state (GUI §3.6) ----- */
 function toggleOffline(){
   offline=!offline;
   document.getElementById('conn').classList.toggle('off',offline);
   document.getElementById('conntxt').textContent=offline?'OFFLINE':'ONLINE';
   document.getElementById('offbanner').classList.toggle('show',offline);
-  if(!offline&&queued){
-    document.querySelectorAll('.scanlist .sic.pend').forEach(s=>s.className='sic ok');
-    feedback('ok','Back online — '+queued+' queued event'+(queued>1?'s':'')+' synced','All pending Movements uploaded in order.','✓');
-    queued=0; document.getElementById('qcount').textContent=0;
+  input.disabled=offline;
+  document.getElementById('scanbtn').disabled=offline;
+  if(offline){
+    input.placeholder='Disconnected — scanning blocked';
+    blockedFeedback();          // loaded read-only panels (inventory, recent scans) stay visible
+  } else {
+    input.placeholder='Scan PN / Machine / Worker / Action barcode…';
+    feedback('ok','Reconnected — scanning restored','Input re-enabled and refocused. Nothing was recorded or queued while disconnected.','✓');
+    focusScan();
   }
-  focusScan();
 }
 
 /* ----- Stockroom allocation demo (§17) ----- */
 const allocReq=[12,8]; let alloc=[12,8];
 function openAlloc(){
+  // the STOCKED PartMovement is recorded first; the allocation dialog follows (GUI §11)
+  if(!recordMovement('PF-PIN-102','STOCKED','20 pcs into Stockroom · manufacturing-complete')) return;
   alloc=[...allocReq]; refreshAlloc();
   setLastPN('PF-PIN-102','STOCKED × 20 — allocation suggestion open');
   document.getElementById('allocovl').classList.add('show');
@@ -1438,15 +1702,16 @@ function refreshAlloc(){
 function closeAlloc(confirmed){
   document.getElementById('allocovl').classList.remove('show');
   if(confirmed){
-    recordMovement('PF-PIN-102','STOCKED + ALLOCATED','PO-1006 × '+alloc[0]+' · PO-1009 × '+alloc[1]);
-    feedback('ok','Stocked & allocated','PF-PIN-102 × 20 → PO-1006 ('+alloc[0]+') · PO-1009 ('+alloc[1]+'). Allocation is auditable and adjustable by Manager/Admin.','✓');
+    // PO Allocation is recorded separately from the STOCKED Movement and is never itself a Movement
+    feedback('ok','Stocked & allocated','STOCKED Movement already recorded. PO Allocation (separate from Movement): PO-1006 × '+alloc[0]+' · PO-1009 × '+alloc[1]+' — auditable, adjustable by Manager/Admin.','✓');
   } else {
     feedback('warn','Stocked — allocation deferred','STOCKED Movement stands; quantity remains unallocated until confirmed.','!');
   }
   focusScan();
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){ ['qtyovl','ambovl','allocovl','hotaddovl'].forEach(id=>document.getElementById(id).classList.remove('show'));
+  if(e.key==='Escape'){ ['qtyovl','ambovl','allocovl','hotaddovl','manovl','intakeovl','hotremovl','relovl'].forEach(id=>document.getElementById(id).classList.remove('show'));
+    intakeType=null; hotRemoveIdx=null;
     if(document.getElementById('view-scan').classList.contains('active')) focusScan(); }
 });
 
@@ -1555,10 +1820,22 @@ function prRedo(){
   hotList=JSON.parse(redoHist.pop()); renderHot();
   toast('⟳','Redo — change re-applied (audited)');
 }
+/* removal requires explicit confirmation identifying PN and PO Demand (§20 Priority) */
+let hotRemoveIdx=null;
 function removeHot(i){
+  hotRemoveIdx=i;
+  const h=hotList[i];
+  document.getElementById('hrm-pn').textContent=h.pn;
+  document.getElementById('hrm-po').textContent=h.po;
+  document.getElementById('hotremovl').classList.add('show');
+}
+function closeHotRemove(){ document.getElementById('hotremovl').classList.remove('show'); hotRemoveIdx=null; }
+function confirmHotRemove(){
+  if(hotRemoveIdx===null) return;
   prSnapshot();
-  const r=hotList.splice(i,1)[0]; renderHot();
-  toast('✕',r.pn+' · '+r.po.split(' ·')[0]+' removed from Hot list — remaining ranks shift up');
+  const r=hotList.splice(hotRemoveIdx,1)[0];
+  closeHotRemove(); renderHot();
+  toast('✕',r.pn+' · '+r.po.split(' ·')[0]+' removed from Hot list (audited) — remaining ranks close the gap · Undo can restore it');
 }
 
 /* drag & drop reorder */
@@ -1621,6 +1898,53 @@ function addHot(pn){
   toast('🔥',c.pn+' · '+c.po.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
 }
 renderHot();
+
+/* ================= PO Intake (§12) — demand save vs explicit release ================= */
+const REL_DATA={
+  'PF-SHAFT-014':{req:12,route:['Shaft std v2','Shaft short v1'],active:'Material 8 · Lathe 2 × 4',line:'line1',qf:'QF-0161'},
+  'PF-GEAR-201' :{req:8, route:['Gear std v1'],                  active:null,                      line:'line2',qf:'QF-0162'}
+};
+let relPN=null;
+function saveDemand(){
+  document.getElementById('po-unsaved').style.display='none';
+  toast('💾','Demand saved — business demand only. No Quantity Flow, no Movement, no release.');
+}
+function openRelease(pn){
+  relPN=pn;
+  const d=REL_DATA[pn];
+  document.getElementById('rel-pn').textContent=pn;
+  document.getElementById('rel-sub').innerHTML='PO-1010 demand · requested <b>'+d.req+'</b> · nothing is created until you confirm.';
+  document.getElementById('rel-qty').value=d.req;
+  document.getElementById('rel-route').innerHTML=d.route.map(r=>'<option>'+r+'</option>').join('');
+  const w=document.getElementById('rel-warn');
+  if(d.active){ document.getElementById('rel-dist').textContent=d.active; w.style.display='block'; }
+  else w.style.display='none';
+  relSummary();
+  document.getElementById('relovl').classList.add('show');
+}
+function relSummary(){
+  if(!relPN) return;
+  const q=document.getElementById('rel-qty').value||'0';
+  const r=document.getElementById('rel-route').value;
+  document.getElementById('rel-sum').innerHTML='Release summary — will create: Quantity Flow <b>× '+q+
+    '</b> · independent Route snapshot <b>“'+r+'”</b> · <b>RECEIVED</b> into <b>Material</b> (Operation <b>Receiving</b>) · current position derived atomically. Existing flows are never merged.';
+}
+function closeRelease(){
+  document.getElementById('relovl').classList.remove('show'); relPN=null;
+  toast('✕','Release cancelled — nothing was created.');
+}
+function confirmRelease(){
+  if(!relPN) return;
+  const d=REL_DATA[relPN];
+  const q=parseInt(document.getElementById('rel-qty').value||'0',10);
+  if(!q||q<1){ document.getElementById('rel-qty').focus(); return; }
+  const r=document.getElementById('rel-route').value;
+  document.getElementById('relovl').classList.remove('show');
+  const st=document.getElementById(d.line+'-stat');
+  st.className='linestat released'; st.textContent='Released · '+d.qf;
+  toast('✓',relPN+' released — '+d.qf+' × '+q+' · Route “'+r+'” snapshot · RECEIVED into Material (Receiving) · position derived');
+  relPN=null;
+}
 
 /* ================= Production Board clock ================= */
 setInterval(()=>{ const d=new Date();

@@ -1,115 +1,227 @@
 # PartFlow Implementation Roadmap
 
+> **Authority:** Canonical for implementation order, phase boundaries, dependencies, and temporary limitations.
+> Domain behavior and product scope are defined by [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md); the approved target UI by [`GUI_DESIGN.md`](./GUI_DESIGN.md).
+
 ## Current State
 
-- Canonical project specification completed.
-- UI mockup v2 completed.
+- Canonical project specification completed (`PROJECT_PROFILE.md` v5).
+- UI mockup v2 completed, including the PO Intake view.
 - No production source code exists yet.
 
 ## Implementation Principles
 
-- Build in vertical slices.
-- Complete one workflow end to end before expanding.
+- Build in vertical slices; complete one workflow end to end before expanding.
+- Never transfer quantity before the system has a real quantity-introduction workflow: PO Intake and production release precede all real transfer workflows.
 - Preserve Presentation → Application → Domain → Infrastructure.
-- Use mock data only until the relevant backend slice exists.
-- Do not implement ERP integration or offline synchronization during MVP.
+- Use mock data only until the relevant backend slice exists; mock behavior never leaks into production.
+- Ambiguity always requires explicit confirmation before any write; unknown or invalid input is rejected with no write.
+- Production writes are blocked while disconnected; offline scan synchronization is deferred and unapproved.
+- Do not implement ERP integration during MVP.
 
 ## Phase 1 — Repository Foundation
 
-Goal:
-Create the executable project foundation.
-
 Scope:
+
 - React + TypeScript frontend
 - FastAPI backend
 - PostgreSQL
-- Docker Compose
 - Alembic
-- Health endpoint
-- Frontend/backend/database connectivity
+- Docker Compose
+- health endpoint
+- frontend/backend/database connectivity
+- formatter, linter, type checks, and test foundations
 
 Completion criteria:
+
 - Development environment starts from documented commands.
-- Frontend can call the backend health endpoint.
-- Backend can connect to PostgreSQL.
-- Formatting, linting, and initial tests run successfully.
+- Frontend calls the backend health endpoint; backend connects to PostgreSQL.
+- Formatting, linting, type checks, and initial tests run successfully.
 
-## Phase 2 — Frontend Shell
-
-Goal:
-Convert the approved mockup into maintainable React screens.
+## Phase 2 — Frontend Design System and Application Shell
 
 Scope:
-- Application layout
-- Navigation
-- Scan Station screen
-- Realistic mock data
-- Loading, empty, and error states
+
+- shared tokens
+- dark and light contexts
+- application routing/navigation
+- approved mock views, including PO Intake in the application shell
+- development-only mock data
+- loading, empty, error, connectivity-loss, and long-data states
 
 Non-goals:
-- Production business logic
-- Database writes
+
+- production business rules in mock components
+- database writes
 - ERP integration
 
-## Phase 3 — Domain Foundation
+## Phase 3 — Minimum Canonical Domain and Data Foundation
 
-Goal:
-Implement the minimum domain required by the first workflow.
+Only the foundation required by manual PO Intake and production release:
 
-Scope:
-- Job
-- Part
-- Production quantity tracking
+- Department
 - Area
 - Operation
-- Machine
+- PartNumber
+- PurchaseOrder
+- PoDemand
+- RouteTemplate
+- RouteStep
+- AssignedRoute
+- QuantityFlow
 - PartMovement
-- Current derived state
+- derived current-position projection
 
-Completion criteria:
-- Domain invariants are covered by tests.
-- Movement history is immutable.
-- Quantity integrity is enforced.
+Rules:
 
-## Phase 4 — First End-to-End Slice
+- Preserve canonical PartMovement field names when those fields are introduced: `station_id`, `occurred_at`, `server_received_at`, `device_event_id`.
+- Do not introduce competing names such as `client_event_id`.
+- Movement history is immutable; quantity integrity is enforced; domain invariants are covered by tests.
 
-Goal:
-Transfer a production quantity into an Area queue.
+## Phase 4 — Manual PO Intake and Production Release
 
-Workflow:
-1. Resolve the scan station context.
-2. Scan a part or production quantity.
-3. Validate the scan.
-4. Record an immutable movement.
-5. Derive the current state.
-6. Refresh the Scan Station UI.
+The first business vertical slice. It must:
 
-Completion criteria:
-- Valid scans complete successfully.
-- Unknown and ambiguous scans are rejected.
-- Duplicate requests are handled safely.
-- Writes are transactional.
-- Relevant tests pass.
+- create/find PurchaseOrder,
+- create/find PartNumber,
+- create/update PoDemand,
+- save demand separately from production quantity,
+- explicitly release production,
+- create QuantityFlow,
+- assign an independent Route snapshot,
+- append `RECEIVED`,
+- establish current position,
+- remain transactional and idempotent,
+- not automatically merge with existing active quantity.
 
-## Later Slices
+Manual entry comes before file import. Development seed data may support UI development and tests, but seeded `RECEIVED` fixtures are not the product intake workflow.
 
-1. Machine assignment
-2. Machine sessions
-3. Completion allocation
-4. Undo/correction workflow
-5. Area boards
-6. Production tracking
-7. Purchase Order intake
-8. Stockroom
-9. Priority management
-10. Administration
-11. Authentication and authorization
-12. Deployment
+## Phase 5 — Scan Station Transfer to an Area Queue
+
+Pilot example: `Material -> Lathe queue`, where Lathe is configured as `Queue -> select Machine by scan`.
+
+The slice must include:
+
+- stable Scan Station configuration bound to Lathe,
+- PN barcode resolution,
+- source QuantityFlow resolution,
+- Operation resolution,
+- route validation,
+- quantity validation,
+- explicit ambiguity confirmation,
+- immutable `TRANSFERRED` Movement,
+- transactional current-position projection update,
+- idempotent retry handling,
+- keyboard focus restoration,
+- recent scans and Area inventory refresh.
+
+Candidate resolution must respect current position, route, Operation, station context, and valid deviations — never "every active flow outside the target Area".
+
+Temporary limitation: full-QuantityFlow movement only. Partial movement must not be claimed as supported before SPLIT (Phase 8); partial input is refused clearly with no write. The target GUI requirement for partial quantity (GUI_DESIGN §4.7) remains.
+
+## Phase 6 — Machine Assignment and Machine Sessions
+
+- Machine barcode resolution
+- Machine/Area validation
+- PN -> Machine and Machine -> PN scan order
+- `ASSIGNED_TO_MACHINE`
+- `RELEASED_FROM_MACHINE`
+- sticky Machine session
+- inactive Machine rejection
+- direct single-Machine mode later in this phase or a clearly named sub-phase
+
+## Phase 7 — Additional Area Ownership Modes
+
+- Area without Machines takes direct processing ownership
+- Operation recorded and Machine null
+- direct single-Machine auto-assignment
+- multiple-Operation confirmation
+- behavior driven by Area configuration, never Machine count alone
+
+## Phase 8 — Quantity SPLIT and MERGED Workflows
+
+- partial movement
+- preserved lineage
+- quantity conservation
+- `SPLIT` and `MERGED` Movement history
+- quantity keypad supports valid partial amounts
+
+## Phase 9 — Undo and Corrections
+
+- `REVERSED` Movement
+- original Movement preserved
+- authorization
+- reason when configured
+- projection restoration
+- audit visibility
+
+## Phase 10 — Stockroom and PoAllocation
+
+- `STOCKED` Movement
+- available stocked quantity
+- suggested allocation order:
+  1. priority
+  2. earliest due date
+  3. largest shortage
+  4. deterministic tie-breaker
+- PoAllocation recorded separately from PartMovement
+- authorization for allocation adjustment
+
+## Phase 11 — Read Models and Monitoring Views
+
+- Production Board
+- Area Board
+- Manager Summary
+- Tracking
+- movement-derived projections
+- stale-feed and long-data states
+
+## Phase 12 — Priority Management
+
+- Hot PoDemand ranking
+- add/search/scan
+- reorder
+- confirmation before removal
+- immediate audited application
+- Undo/Redo
+
+## Phase 13 — Administration
+
+- Departments
+- Areas
+- Operations
+- Machines
+- Workers
+- Route Templates
+- barcode configuration
+- session policies
+- correction permissions
+
+## Phase 14 — Authentication and Role Enforcement
+
+Role-based authorization per PROJECT_PROFILE §19.
+
+## Phase 15 — File-Based PO Import
+
+- idempotent import
+- row validation
+- clear partial-failure reporting
+- no ERP dependency
+
+## Phase 16 — Deployment and Production Hardening
+
+- backups
+- migrations
+- HTTPS/internal access
+- observability
+- rollback
+- reconciliation checks
+- pilot deployment
 
 ## Deferred
 
 - ERP synchronization
-- Offline synchronization
-- Advanced analytics
-- Broad reporting
-- Speculative automation
+- offline scan synchronization (not part of MVP; production writes stay blocked while disconnected)
+- advanced analytics
+- speculative automation
+- broad ERP/MES features
