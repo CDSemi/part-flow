@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PartFlow — GUI Mockup v2 · PROJECT_PROFILE v5</title>
+<!-- Mockup file: selectors are toggled dynamically from JS and font tokens carry
+     their generic fallbacks inside var() definitions — suppress false positives. -->
+<!--suppress CssUnusedSymbol, CssNoGenericFontName -->
 <style>
 /* ================================================================
    PartFlow GUI Mockup v2 — aligned to PROJECT_PROFILE v5
@@ -248,23 +251,24 @@ input,select{font-family:inherit}
   padding:12px 18px;border-bottom:2px solid var(--d-border);position:sticky;top:53px;background:var(--d-bg2);z-index:5}
 .pb-table td{padding:17px 18px;border-bottom:1px solid #16202e;vertical-align:top}
 .pb-table .no{font-family:var(--mono);font-size:17px;color:var(--d-faint);font-weight:650}
-.pb-table .part{font-family:var(--mono);font-size:22px;font-weight:800}
+.pb-table .part{font-family:var(--mono);font-size:22px;font-weight:800;white-space:nowrap}
 .pb-table .pname{font-size:13px;color:var(--d-muted);margin-top:3px;font-family:var(--font);font-weight:400}
 .pb-table .loc{display:flex;flex-direction:column;gap:6px}
 .pb-table .locrow{display:flex;align-items:center;gap:8px;font-size:16.5px}
 .pb-table .locrow .dot{width:11px;height:11px;border-radius:3.5px;flex:none}
 .pb-table .locrow .q{font-family:var(--mono);font-weight:800;margin-left:2px}
 .pb-table .locrow .qtag{font-size:11px;color:var(--d-faint);font-weight:650}
+.pb-table .locrow .ltime{margin-left:auto;font-family:var(--mono);font-size:13px;color:var(--d-faint);font-weight:600;padding-left:12px}
+.pb-table .locrow .ltime.long{color:var(--warn);font-weight:750}
 .pb-table .totline{margin-top:4px;padding-top:6px;border-top:1px dashed var(--d-border);font-family:var(--mono);font-size:14px;color:var(--d-muted)}
 .pb-table .totline b{font-size:18px;color:var(--info)}
 .pb-table .jobs .j{font-family:var(--mono);font-size:15px;font-weight:650}
 .pb-table .jobs .j .jm{color:var(--d-muted);font-weight:400;font-size:13px}
 .pb-table .due .d1{font-size:18px;font-weight:750}
-.pb-table .dleft{font-family:var(--mono);font-size:19px;font-weight:800}
-.pb-table .dleft.ok{color:var(--d-muted)}
-.pb-table .dleft.soon{color:var(--warn)}
-.pb-table .dleft.late{color:var(--err)}
-.pb-table .dleft .u{font-size:12px;font-weight:600;font-family:var(--font)}
+.pb-table .due .d2{font-size:13.5px;margin-top:3px;font-weight:750}
+.pb-table .due .d2.ok{color:var(--d-muted);font-weight:450}
+.pb-table .due .d2.soon{color:var(--warn)}
+.pb-table .due .d2.late{color:var(--err)}
 .pb-table .dtotal{font-family:var(--mono);font-size:17px;color:var(--d-muted);font-weight:650}
 tr.hotrow1 td{background:rgba(255,70,70,.09)}
 tr.hotrow1 td:first-child{border-left:5px solid var(--err)}
@@ -461,6 +465,29 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .pr-item .due .d2{font-size:12px;margin-top:2px}
 .pr-item .due .d2.late{color:var(--err-d);font-weight:750}
 .pr-item .due .d2.soon{color:var(--warn-d);font-weight:750}
+.pr-item .due .d2.ok{color:var(--l-muted)}
+.pr-x{flex:none;width:36px;height:36px;border-radius:9px;font-size:15px;font-weight:800;color:var(--l-faint);margin-left:4px}
+.pr-x:hover{background:rgba(255,97,102,.10);color:var(--err-d)}
+.pr-empty{background:var(--l-panel);border:1px dashed var(--l-border);border-radius:12px;padding:26px;text-align:center;color:var(--l-faint);font-size:14px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+/* Hot-add dialog (light theme) */
+.dlg.light{background:var(--l-panel);border-color:var(--l-border);color:var(--l-text);box-shadow:0 18px 60px rgba(20,30,43,.28)}
+.dlg.light h3{color:var(--l-muted)}
+.dlg.light .sub{color:var(--l-muted)}
+.dlg.light .bigbtn.ghost{background:var(--l-panel2);border:1px solid var(--l-border);color:var(--l-muted)}
+#hotsearch{width:100%;border:1.5px solid var(--l-border);border-radius:11px;padding:13px 15px;font-size:16px;outline:none;color:var(--l-text);background:var(--l-panel)}
+#hotsearch:focus{border-color:var(--info);box-shadow:0 0 0 3px rgba(79,140,255,.14)}
+.hotadd-hint{font-size:12px;color:var(--l-faint);margin:8px 2px 14px;line-height:1.6}
+.hotadd-hint b{font-family:var(--mono);background:#eef2f7;border-radius:5px;padding:1px 6px;color:var(--l-muted)}
+#hotaddlist{max-height:300px;overflow:auto}
+.hotadd-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1.5px solid var(--l-border);
+  background:var(--l-panel2);border-radius:11px;padding:13px 15px;margin-bottom:8px;transition:border-color .12s}
+.hotadd-item:hover{border-color:var(--info)}
+.hotadd-item .hpn{font-family:var(--mono);font-weight:800;font-size:15px}
+.hotadd-item .hpo{font-family:var(--mono);font-size:12.5px;color:var(--l-muted);flex:1}
+.hotadd-item .hdue{font-size:12.5px;color:var(--l-muted);flex:none}
+.hotadd-item .hdue.late{color:var(--err-d);font-weight:750}
+.hotadd-empty{color:var(--l-faint);font-size:13.5px;padding:18px;text-align:center}
 .pr-bar{display:flex;gap:10px;max-width:860px}
 .btn{border-radius:10px;padding:10px 18px;font-size:14px;font-weight:750}
 .btn.primary{background:var(--info);color:#fff}
@@ -697,12 +724,11 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   <table class="pb-table">
     <thead><tr>
       <th style="width:4%">No.</th>
-      <th style="width:23%">Part Number</th>
-      <th style="width:24%">Areas &amp; Quantities</th>
-      <th style="width:18%">Job Numbers</th>
-      <th style="width:11%">Due Date</th>
-      <th style="width:9%">Days Left</th>
-      <th style="width:9%">Total Days</th>
+      <th style="width:25%">Part Number</th>
+      <th style="width:29%">Areas &amp; Quantities · Time</th>
+      <th style="width:19%">Job Numbers</th>
+      <th style="width:13%">Due Date</th>
+      <th style="width:10%">Total Days</th>
     </tr></thead>
     <tbody>
       <!-- Hot PO Demand first, by priority rank; then by due date -->
@@ -711,17 +737,16 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
         <td><div class="part blink">🔥 PF-BRACKET-001<span class="hot h1" style="margin-left:9px">#1</span></div>
             <div class="pname">Mounting bracket, alum 6061 · rev C</div></td>
         <td><div class="loc">
-          <div class="locrow"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="q">4</span></div>
-          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 3 <span class="q">4</span> <span class="qtag">machine</span></div>
-          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe <span class="q">2</span> <span class="qtag">queue</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="q">4</span><span class="ltime">3h 40m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 3 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">2h 05m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe <span class="q">2</span> <span class="qtag">queue</span><span class="ltime">1h 10m</span></div>
           <div class="totline">total <b>10</b> pcs</div>
         </div></td>
         <td class="jobs">
           <div class="j">ERP-88112 <span class="jm">· PO-1001 · 10 pcs</span></div>
           <div class="j">ERP-88240 <span class="jm">· PO-1008 · 5 pcs queued</span></div>
         </td>
-        <td class="due"><div class="d1">Jul 24</div></td>
-        <td><div class="dleft soon">2 <span class="u">days</span></div></td>
+        <td class="due"><div class="d1">Jul 24</div><div class="d2 soon">2 days left</div></td>
         <td><div class="dtotal">10 d</div></td>
       </tr>
       <tr class="hotrow2">
@@ -729,53 +754,49 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
         <td><div class="part blink">🔥 PF-PLATE-007<span class="hot h2" style="margin-left:9px">#2</span></div>
             <div class="pname">Base plate 200×140</div></td>
         <td><div class="loc">
-          <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span><span class="ltime long">4d 02h</span></div>
           <div class="totline">total <b>20</b> pcs</div>
         </div></td>
         <td class="jobs"><div class="j">ERP-88031 <span class="jm">· PO-1005 · 20 pcs</span></div></td>
-        <td class="due"><div class="d1">Jul 16</div></td>
-        <td><div class="dleft late">−6 <span class="u">overdue</span></div></td>
+        <td class="due"><div class="d1">Jul 16</div><div class="d2 late">overdue 6 days</div></td>
         <td><div class="dtotal">18 d</div></td>
       </tr>
       <tr>
         <td><div class="no">3</div></td>
         <td><div class="part">PF-SHAFT-014</div><div class="pname">Drive shaft Ø25, 4140</div></td>
         <td><div class="loc">
-          <div class="locrow"><span class="dot" style="background:var(--a-material)"></span>Material <span class="q">8</span></div>
-          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span> <span class="qtag">machine</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-material)"></span>Material <span class="q">8</span><span class="ltime">2d 01h</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">1h 05m</span></div>
           <div class="totline">total <b>12</b> pcs</div>
         </div></td>
         <td class="jobs"><div class="j">ERP-88190 <span class="jm">· PO-1003 · 12 pcs</span></div></td>
-        <td class="due"><div class="d1">Jul 31</div></td>
-        <td><div class="dleft ok">9 <span class="u">days</span></div></td>
+        <td class="due"><div class="d1">Jul 31</div><div class="d2 ok">9 days left</div></td>
         <td><div class="dtotal">6 d</div></td>
       </tr>
       <tr>
         <td><div class="no">4</div></td>
         <td><div class="part">PF-HOUSING-021</div><div class="pname">Gearbox housing</div></td>
         <td><div class="loc">
-          <div class="locrow"><span class="dot" style="background:var(--a-mill)"></span>Mill 1 <span class="q">3</span> <span class="qtag">machine</span></div>
-          <div class="locrow"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="q">3</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-mill)"></span>Mill 1 <span class="q">3</span> <span class="qtag">machine</span><span class="ltime">45m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="q">3</span><span class="ltime">30m</span></div>
           <div class="totline">total <b>6</b> pcs</div>
         </div></td>
         <td class="jobs">
           <div class="j">ERP-88102 <span class="jm">· PO-1002 · 6 pcs</span></div>
           <div class="j">— <span class="jm">· TMP-20260718-0910-REWORK · 1 pc</span></div>
         </td>
-        <td class="due"><div class="d1">Aug 07</div></td>
-        <td><div class="dleft ok">16 <span class="u">days</span></div></td>
+        <td class="due"><div class="d1">Aug 07</div><div class="d2 ok">16 days left</div></td>
         <td><div class="dtotal">4 d</div></td>
       </tr>
       <tr>
         <td><div class="no">5</div></td>
         <td><div class="part">PF-PIN-102</div><div class="pname">Locating pin Ø8</div></td>
         <td><div class="loc">
-          <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span><span class="ltime">—</span></div>
           <div class="totline">total <b>50</b> pcs stocked</div>
         </div></td>
         <td class="jobs"><div class="j">ERP-87740 <span class="jm">· PO-0996 · allocated 50/50</span></div></td>
-        <td class="due"><div class="d1">Jul 10</div></td>
-        <td><div class="dleft ok">✓ <span class="u">stocked</span></div></td>
+        <td class="due"><div class="d1">Jul 10</div><div class="d2 ok">✓ stocked</div></td>
         <td><div class="dtotal">12 d</div></td>
       </tr>
     </tbody>
@@ -1127,41 +1148,29 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   <div class="pr-head">
     <h1>Priority Management — Hot PO Demand</h1>
     <div class="spacer"></div>
-    <button class="btn ghost" onclick="toast('🔥','Demo: mark a PO Demand as Hot from Tracking — it is added at the bottom of this list')">+ Mark PO Demand as Hot</button>
+    <button class="btn primary" onclick="openHotAdd()">+ Add to Hot list</button>
   </div>
-  <div class="pr-sub">Priority belongs to <b>PO Demand</b>, ranked per Department. Drag to reorder — the stored rank is the highest work-ordering and allocation criterion. New Hot entries are added at the bottom. Multiple POs for the same PN may hold different priorities.</div>
-  <div class="pr-list" id="prlist">
-    <div class="pr-item" draggable="true">
-      <span class="grip">⠿</span><span class="rank">1</span>
-      <div class="body">
-        <div class="l1"><span class="pn">PF-BRACKET-001</span><span class="po">PO-1001 · ERP-88112</span><span class="typechip new">NEW</span></div>
-        <div class="l2"><span>requested <b>10</b></span><span>allocated <b>0</b></span><span>shortage <b>10</b></span><span>at Cut 4 · Lathe 6</span></div>
-      </div>
-      <div class="due"><div>Jul 24</div><div class="d2 soon">2 days left</div></div>
-    </div>
-    <div class="pr-item" draggable="true">
-      <span class="grip">⠿</span><span class="rank">2</span>
-      <div class="body">
-        <div class="l1"><span class="pn">PF-PLATE-007</span><span class="po">PO-1005 · ERP-88031</span><span class="typechip new">NEW</span></div>
-        <div class="l2"><span>requested <b>20</b></span><span>allocated <b>0</b></span><span>shortage <b>20</b></span><span>at External 20</span></div>
-      </div>
-      <div class="due"><div>Jul 16</div><div class="d2 late">overdue 6 days</div></div>
-    </div>
-    <div class="pr-item" draggable="true">
-      <span class="grip">⠿</span><span class="rank">3</span>
-      <div class="body">
-        <div class="l1"><span class="pn">PF-PIN-102</span><span class="po">PO-1006 · ERP-88355</span><span class="typechip rework">REWORK</span></div>
-        <div class="l2"><span>requested <b>12</b></span><span>allocated <b>0</b></span><span>shortage <b>12</b></span><span>not yet released</span></div>
-      </div>
-      <div class="due"><div>Jul 25</div><div class="d2 soon">3 days left</div></div>
-    </div>
-  </div>
+  <div class="pr-sub">Priority belongs to <b>PO Demand</b>, ranked per Department. Drag to reorder, ✕ to remove — changes apply immediately and are audited. New Hot entries are added at the bottom. Multiple POs for the same PN may hold different priorities.</div>
+  <div class="pr-list" id="prlist"></div>
   <div class="pr-bar">
-    <button class="btn primary" onclick="toast('✓','Hot ranking saved — priority_rank updated on PO Demand (audited)')">Save order</button>
-    <button class="btn ghost" onclick="toast('↩','Changes discarded — stored ranking unchanged')">Cancel</button>
+    <button class="btn ghost" id="prundo" onclick="prUndo()" disabled>⟲ Undo</button>
+    <button class="btn ghost" id="prredo" onclick="prRedo()" disabled>⟳ Redo</button>
   </div>
   <div class="pr-note"><b>Hot Part</b> is a label on top of <span class="mono">priority_rank</span> — it never replaces it. Allocation &amp; work ordering: ① Hot rank ② earliest due date ③ largest remaining shortage (deterministic tie-breaker last, §17).</div>
 </section>
+
+<!-- add-to-hot dialog: search & select, or scan PN barcode -->
+<div class="overlay" id="hotaddovl">
+  <div class="dlg light">
+    <h3>Add PO Demand to Hot list</h3>
+    <div class="sub">Search by PN, PO or Job Number and select — or <b>scan the PN barcode</b> with this dialog open.</div>
+    <input id="hotsearch" placeholder="Search PN, PO, Job Number… or scan PN barcode" autocomplete="off"
+           oninput="renderHotAdd()" onkeydown="hotSearchKey(event)">
+    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (PF-SHAFT-014) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
+    <div id="hotaddlist"></div>
+    <div class="row"><button class="bigbtn ghost" onclick="closeHotAdd()">Cancel (Esc)</button></div>
+  </div>
+</div>
 
 <!-- ==================== ADMINISTRATION ==================== -->
 <section id="view-admin" class="view">
@@ -1437,7 +1446,8 @@ function closeAlloc(confirmed){
   focusScan();
 }
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'){ ['qtyovl','ambovl','allocovl'].forEach(id=>document.getElementById(id).classList.remove('show')); focusScan(); }
+  if(e.key==='Escape'){ ['qtyovl','ambovl','allocovl','hotaddovl'].forEach(id=>document.getElementById(id).classList.remove('show'));
+    if(document.getElementById('view-scan').classList.contains('active')) focusScan(); }
 });
 
 /* ================= Area Board (data-driven tabs) ================= */
@@ -1498,22 +1508,119 @@ function selectPN(row,pn){
   if(pn!=='PF-BRACKET-001') toast('ℹ','Mockup shows the full detail panel for PF-BRACKET-001 only');
 }
 
-/* ================= Priority Management (drag & drop) ================= */
+/* ================= Priority Management =================
+   Hot list edits (reorder / add / remove) apply immediately and are audited.
+   Undo/Redo replace Save/Cancel per current UI decision — supersedes §20 step 5. */
+let hotList=[
+  {pn:'PF-BRACKET-001',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
+  {pn:'PF-PLATE-007',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
+  {pn:'PF-PIN-102',po:'PO-1006 · ERP-88355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
+];
+const HOT_CANDIDATES=[
+  {pn:'PF-SHAFT-014',po:'PO-1003 · ERP-88190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
+  {pn:'PF-HOUSING-021',po:'PO-1002 · ERP-88102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
+  {pn:'PF-VALVE-033',po:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
+];
+let undoHist=[], redoHist=[];
 const prlist=document.getElementById('prlist');
-let dragEl=null;
-prlist.addEventListener('dragstart',e=>{ dragEl=e.target.closest('.pr-item'); dragEl.classList.add('dragging'); });
-prlist.addEventListener('dragend',()=>{ if(dragEl){dragEl.classList.remove('dragging');dragEl=null;renumber();} });
+const hotKey=h=>h.pn+'|'+h.po;
+
+function renderHot(){
+  prlist.innerHTML = hotList.length ? hotList.map((h,i)=>
+    '<div class="pr-item" draggable="true" data-k="'+hotKey(h)+'">'+
+      '<span class="grip">⠿</span><span class="rank">'+(i+1)+'</span>'+
+      '<div class="body"><div class="l1"><span class="pn">'+h.pn+'</span><span class="po">'+h.po+'</span>'+
+        '<span class="typechip '+h.type+'">'+h.type.toUpperCase()+'</span></div>'+
+        '<div class="l2">'+h.meta.split('|').map(s=>'<span>'+s+'</span>').join('')+'</div></div>'+
+      '<div class="due"><div>'+h.due+'</div><div class="d2 '+h.d2c+'">'+h.d2+'</div></div>'+
+      '<button class="pr-x" title="Remove from Hot list" onclick="removeHot('+i+')">✕</button>'+
+    '</div>').join('')
+    : '<div class="pr-empty">No Hot PO Demand — add one with “+ Add to Hot list”, or scan a PN barcode in the add dialog.</div>';
+  updatePrButtons();
+}
+function updatePrButtons(){
+  document.getElementById('prundo').disabled=!undoHist.length;
+  document.getElementById('prredo').disabled=!redoHist.length;
+}
+function prSnapshot(){ undoHist.push(JSON.stringify(hotList)); redoHist=[]; }
+function prUndo(){
+  if(!undoHist.length) return;
+  redoHist.push(JSON.stringify(hotList));
+  hotList=JSON.parse(undoHist.pop()); renderHot();
+  toast('⟲','Undo — previous Hot ranking restored (audited)');
+}
+function prRedo(){
+  if(!redoHist.length) return;
+  undoHist.push(JSON.stringify(hotList));
+  hotList=JSON.parse(redoHist.pop()); renderHot();
+  toast('⟳','Redo — change re-applied (audited)');
+}
+function removeHot(i){
+  prSnapshot();
+  const r=hotList.splice(i,1)[0]; renderHot();
+  toast('✕',r.pn+' · '+r.po.split(' ·')[0]+' removed from Hot list — remaining ranks shift up');
+}
+
+/* drag & drop reorder */
+let dragEl=null, dragPrev=null;
+prlist.addEventListener('dragstart',e=>{
+  dragEl=e.target.closest('.pr-item'); if(!dragEl) return;
+  dragPrev=JSON.stringify(hotList); dragEl.classList.add('dragging');
+});
 prlist.addEventListener('dragover',e=>{
-  e.preventDefault();
+  e.preventDefault(); if(!dragEl) return;
   const after=[...prlist.querySelectorAll('.pr-item:not(.dragging)')].find(el=>{
     const r=el.getBoundingClientRect(); return e.clientY < r.top + r.height/2;
   });
-  if(!dragEl) return;
   if(after) prlist.insertBefore(dragEl,after); else prlist.appendChild(dragEl);
 });
-function renumber(){
-  [...prlist.querySelectorAll('.pr-item .rank')].forEach((r,i)=>r.textContent=i+1);
+prlist.addEventListener('dragend',()=>{
+  if(!dragEl) return;
+  dragEl.classList.remove('dragging'); dragEl=null;
+  const order=[...prlist.querySelectorAll('.pr-item')].map(el=>el.dataset.k);
+  const newList=order.map(k=>hotList.find(h=>hotKey(h)===k)).filter(Boolean);
+  if(JSON.stringify(newList)!==dragPrev){
+    undoHist.push(dragPrev); redoHist=[]; hotList=newList;
+    toast('🔥','Hot ranking updated — priority_rank saved (audited)');
+  }
+  renderHot();
+});
+
+/* add-to-hot dialog */
+function hotCandidates(){ return HOT_CANDIDATES.filter(c=>!hotList.some(h=>hotKey(h)===hotKey(c))); }
+function openHotAdd(){
+  document.getElementById('hotsearch').value=''; renderHotAdd();
+  document.getElementById('hotaddovl').classList.add('show');
+  setTimeout(()=>document.getElementById('hotsearch').focus(),60);
 }
+function closeHotAdd(){ document.getElementById('hotaddovl').classList.remove('show'); }
+function renderHotAdd(){
+  const q=document.getElementById('hotsearch').value.trim().toLowerCase();
+  const list=hotCandidates().filter(c=>!q||(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(q));
+  document.getElementById('hotaddlist').innerHTML = list.length ? list.map(c=>
+    '<button class="hotadd-item" onclick="addHot(\''+c.pn+'\')">'+
+      '<span class="hpn">'+c.pn+'</span><span class="hpo">'+c.po+'</span>'+
+      '<span class="typechip '+c.type+'">'+c.type.toUpperCase()+'</span>'+
+      '<span class="hdue '+(c.d2c==='late'?'late':'')+'">'+c.due+' · '+c.d2+'</span>'+
+    '</button>').join('')
+    : '<div class="hotadd-empty">No matching active PO Demand'+(q?' for “'+q+'”':' — everything is already Hot')+'</div>';
+}
+function hotSearchKey(e){
+  if(e.key!=='Enter') return;
+  const v=e.target.value.trim().toUpperCase();
+  const byCode=hotCandidates().find(c=>c.code===v);
+  if(byCode){ addHot(byCode.pn); return; }
+  const list=hotCandidates().filter(c=>(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(v.toLowerCase()));
+  if(list.length===1) addHot(list[0].pn);
+}
+function addHot(pn){
+  const c=hotCandidates().find(x=>x.pn===pn); if(!c) return;
+  prSnapshot();
+  const {code,...item}=c; hotList.push(item);   // new Hot entries join at the bottom (§20)
+  renderHot(); closeHotAdd();
+  toast('🔥',c.pn+' · '+c.po.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
+}
+renderHot();
 
 /* ================= Production Board clock ================= */
 setInterval(()=>{ const d=new Date();

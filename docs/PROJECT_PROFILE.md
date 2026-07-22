@@ -1495,18 +1495,24 @@ Requirements:
 - due-date sorting,
 - overdue highlighting,
 - Area color display,
-- distributed PN quantity display.
+- distributed PN quantity display,
+- time in current Area or Machine shown per distributed quantity,
+- Part Number rendered on a single line.
 
 Suggested columns:
 
-| No. | Part Number | Areas and Quantities | Job Numbers | Due Date | Days Left | Total Days |
-|---|---|---|---|---|---|---|
+| No. | Part Number | Areas and Quantities · Time | Job Numbers | Due Date | Total Days |
+|---|---|---|---|---|---|
 
-Example distribution:
+Days Left is displayed inside the Due Date column as a highlighted secondary line rather than as a separate column.
+
+Example distribution with time in location:
 
 ```text
-Cut (3), Lathe 1 (4), Lathe 2 (2), Mill (6)
+Cut (3 · 3h 40m), Lathe 1 (4 · 2h 05m), Lathe 2 (2 · 1h 10m), Mill (6 · 45m)
 ```
+
+Time in location may be highlighted when it exceeds the expected duration of the active Route Step.
 
 ---
 
@@ -1602,14 +1608,17 @@ It must not imply that the entire PN is at one Route Step.
 
 Priority belongs to PO Demand.
 
-When a Manager marks PO Demand as Hot:
+The Hot list is managed within the Department:
 
-1. Show Hot PO Demand within the Department.
-2. Sort by explicit priority rank.
-3. Add new Hot entries at the bottom by default.
-4. Allow drag-and-drop reordering.
-5. Save or cancel changes.
-6. Use the stored rank as the highest work and allocation priority.
+1. Show Hot PO Demand sorted by explicit priority rank.
+2. Add PO Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
+3. If a PN has multiple active PO Demand records, each PO Demand is selected and ranked separately.
+4. Add new Hot entries at the bottom by default.
+5. Allow drag-and-drop reordering.
+6. Allow removing an entry from the Hot list (Should confirm before delete); remaining ranks close the gap.
+7. Apply Hot list changes immediately and record every change in the audit trail.
+8. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step.
+9. Use the stored rank as the highest work and allocation priority.
 
 Multiple POs requesting the same PN may have different priorities.
 

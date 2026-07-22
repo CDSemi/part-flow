@@ -1,20 +1,23 @@
-# PartFlow GUI Design v1
+# PartFlow GUI Design v2
 
-> **Status:** Draft for review — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md).
+> **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v5).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup.html`.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v2.html`.
+> Supersedes GUI Design v1 (`mockups/partflow-gui-mockup.html`); the differences are listed in §12.
 
 ---
 
 # 1. Scope
 
-Covers the five application views from PROJECT_PROFILE §16:
+Covers the seven application views from PROJECT_PROFILE §20:
 
 1. Scan Station (production)
 2. Production Board (monitoring, large display)
 3. Area Board (monitoring, per-Area)
-4. Tracking (management)
-5. Administration (configuration)
+4. Manager Summary (management overview, grouped by Area)
+5. Tracking (management, PN-centric)
+6. Priority Management (Hot PO Demand ranking)
+7. Administration (configuration)
 
 ---
 
@@ -22,10 +25,10 @@ Covers the five application views from PROJECT_PROFILE §16:
 
 ## 2.1 Two visual contexts, one token set
 
-| Context    | Views                                      | Theme | Rationale                                                                           |
-|------------|--------------------------------------------|-------|-------------------------------------------------------------------------------------|
-| Shop floor | Scan Station, Production Board, Area Board | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
-| Management | Tracking, Administration                   | Light | Dense data work at a desk, matches office tooling expectations                      |
+| Context    | Views                                                       | Theme | Rationale                                                                           |
+|------------|-------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
+| Shop floor | Scan Station, Production Board, Area Board, Manager Summary | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
+| Management | Tracking, Priority Management, Administration               | Light | Dense data work at a desk, matches office tooling expectations                      |
 
 Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system.
 
@@ -33,26 +36,27 @@ Both contexts share the same color tokens, spacing scale, and typography so the 
 
 Status colors (semantic, never decorative):
 
-- **Success** `#2fca7c` — recorded Movement, confirmed action
-- **Warning** `#f5b83d` — needs attention, offline queue, route deviation, due soon
-- **Error** `#ff5d5d` — rejected scan, integrity violation, overdue
-- **Info / accent** `#3da5ff` — selection, focus, primary action
+- **Success** `#31d287` — recorded Movement, confirmed action
+- **Warning** `#ffb224` — needs attention, pending context, offline queue, route deviation, due soon
+- **Error** `#ff6166` — rejected scan, integrity violation, overdue
+- **Info / accent** `#4f8cff` — selection, focus, primary action
 
-Area colors: every Area has a stable identity color used consistently in **all** views (chips, dots, distribution bars). Colors are Area display properties and editable in Administration without affecting history (PROJECT_PROFILE §5 Area).
+Area colors: every Area has a stable identity color used consistently in **all** views (chips, dots, distribution bars, column headers). Colors are Area display properties and editable in Administration without affecting history (PROJECT_PROFILE §7 Area).
 
-Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6ef3`, Deburr `#2fbf9b`, External `#ff8a4c`, Stockroom `#2fca7c`, Manual `#e06fae`.
+Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6ef3`, Manual `#e06fae`, Deburr `#2fbf9b`, External `#ff8a4c`, Stockroom `#2fca7c`.
 
 ## 2.3 Typography
 
 - UI text: system font stack (`system-ui, Segoe UI, Roboto…`) — no webfont dependency, works offline.
-- Identifiers (Part Number, PO, Request Number, external Job Number, quantities, timestamps): monospace. Identifiers must be visually distinct from prose because operators read them against paper travelers and folder labels.
-- Shop-floor minimum sizes: body 16 px, Part Numbers ≥ 19 px, quantities ≥ 18 px bold. Production Board is sized for reading at 3–5 m (Part 22 px+, totals 26 px+).
+- Identifiers (PN, PO, temporary PO, external Job Number, Quantity Flow id, barcode values, quantities, timestamps): monospace. Identifiers must be visually distinct from prose because operators read them against paper travelers and folder labels.
+- Shop-floor minimum sizes: body 16 px, PN ≥ 19 px, quantities ≥ 18 px bold. Production Board is sized for reading at 3–5 m (PN 22 px+, key figures 18 px+).
+- The PN is always rendered on a single line; columns and cards size themselves to fit it rather than wrapping the identifier.
 
 ## 2.4 Touch and scanner ergonomics
 
 - Minimum touch target 48×48 px; primary Scan Station actions ≥ 56 px tall.
 - All production actions reachable by scan or single tap. Mouse never required on shop-floor views.
-- Keyboard wedge support: the scan input is a plain text input terminated by Enter — no custom driver, no scan-mode selection (PROJECT_PROFILE §7).
+- Keyboard wedge support: the scan input is a plain text input terminated by Enter — no custom driver, no scan-mode selection (PROJECT_PROFILE §9).
 
 ---
 
@@ -60,12 +64,13 @@ Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6e
 
 These apply to every view; they implement the profile's core principles in UI terms.
 
-1. **Focus discipline.** On the Scan Station, the barcode input regains focus automatically after every completed operation, dialog close, machine/worker change, and view activation. Nothing may steal focus permanently.
-2. **Ambiguity requires confirmation.** Whenever a scan resolves to more than one valid production context, the UI presents an explicit choice list (see §4.5). The UI never guesses and never defaults silently.
-3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber, action recorded or queued but needs awareness), Error (red, nothing recorded). Feedback shows *what happened* and *why* in one line each.
-4. **Quantity integrity is visible.** Quantity entry displays the available upstream quantity. Attempts to move more than available are rejected with an explicit error — the UI explains the limit rather than clamping silently.
-5. **History is append-only in the UI too.** Undo appears as a new compensating entry in the scan list; the original entry stays visible (struck context, never removed). Tracking's Movement history has no edit/delete affordances.
-6. **Offline is a first-class state.** Going offline shows a persistent banner with the queued-event count; queued scans render with an amber "pending" dot and flip to green after sync. The workflow itself does not change (PROJECT_PROFILE §14).
+1. **Focus discipline.** On the Scan Station, the barcode input regains focus automatically after every completed operation, dialog close, session change, and view activation. Nothing may steal focus permanently.
+2. **Ambiguity requires confirmation.** Whenever a scan resolves to more than one valid production context, the UI presents an explicit choice list (§4.6). The UI never guesses and never defaults silently; nothing is recorded until the choice is made (PROJECT_PROFILE §9 Barcode Resolution).
+3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded/queued but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each.
+4. **Quantity integrity is visible.** Quantity entry displays the available source quantity. Attempts to move more than available are rejected with an explicit error — the UI explains the limit rather than clamping silently (PROJECT_PROFILE §10).
+5. **History is append-only in the UI too.** Undo appears as a new `REVERSED` entry in the scan list; the original entry stays visible. Tracking's Movement history has no edit/delete affordances (PROJECT_PROFILE §15).
+6. **Offline is a first-class state.** Going offline shows a persistent banner with the queued-event count; queued scans render with an amber "pending" dot and flip to green after sync. The workflow itself does not change.
+7. **PartFlow vocabulary everywhere.** UI labels use the canonical names: PN, PO, PO Demand, Request Type (`NEW` / `REWORK` / `MODIFY`), Quantity Flow, Route, Movement types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`, `SPLIT`, `MERGED`, `STOCKED`, `REVERSED`, …), PO Allocation, Hot (PROJECT_PROFILE §7).
 
 ---
 
@@ -76,64 +81,73 @@ Fixed to one Area per station. Single screen, no navigation during normal produc
 ## 4.1 Layout
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│ Dept / AREA (color) / Operation · Station   [Machine][Worker][●Online] │
-│ (offline banner when disconnected)                                     │
-├────────────────────────────────┬───────────────────────────────────────┤
-│ Machine strip (scan to select) │  UNDO LAST SCAN                       │
-│ Scan input (large, focused)    │  Recent scans (today)                 │
-│ Feedback zone                  │  In this Area now (inventory)         │
-└────────────────────────────────┴───────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Dept / AREA (color) / Operations · Station  [Machine session][Worker][●Online]│
+│ (offline banner when disconnected)                                            │
+├──────────────────────────────────────┬────────────────────────────────────────┤
+│ Machine status strip (scan to select)│  UNDO LAST SCAN                        │
+│ Scan input (large, focused)          │  Recent scans (today)                  │
+│ Pending scan context banner          │  In this Area now:                     │
+│ Last scanned PN                      │    – assigned to Machines              │
+│ Feedback zone                        │    – Area queue (awaiting Machine)     │
+└──────────────────────────────────────┴────────────────────────────────────────┘
 ```
 
 ## 4.2 Header
 
-Department, Area name with Area color, Operation, Station ID. Pills for active Machine and active Worker (both show `—` when not applicable per Area configuration). Connectivity indicator with explicit ONLINE/OFFLINE text — color alone is not sufficient.
+Department, Area name with Area color, supported Operations, Station ID. Session pills for the active **Machine session** and **Worker session** (both show `—` when not applicable per Area configuration), each with a caption describing its lifetime. Connectivity indicator with explicit ONLINE/OFFLINE text — color alone is not sufficient.
 
-## 4.3 Machine selection — scan-only, one scan per Part
+## 4.3 Machine sessions — scan-only, sticky per §18
 
-Applies only when the Area has Machine tracking enabled.
+Applies only when the Area requires Machine selection (`machine_assignment_mode`).
 
-- Machine selection happens **exclusively by scanning a Machine barcode**. There is no tap/click selection; the on-screen machine strip is a read-only status display (idle / running / maintenance) that also highlights the currently armed Machine.
-- A Machine scan is **not** required before a Part scan — the application classifies every barcode automatically, so either order works:
-  - **Part → Machine:** after quantity entry the Movement is held in an *awaiting-Machine* state, shown as a prominent pulsing banner ("Scan Machine barcode to record {Part} × {qty}") and a `REQUIRED` Machine pill. Scanning the Machine records the Movement.
-  - **Machine → Part:** the scanned Machine is *armed* for the next Part only (pill shows "{Machine} (next Part)"). The following Part scan records immediately and consumes the armed Machine.
-- **Every Part scan requires its own Machine scan.** The Machine is never sticky across Parts — after each recorded Movement the selection resets to "— scan required".
-- Scanning another Part while a previous Part is still awaiting its Machine is **rejected with an error** ("Machine barcode required — scan the Machine first, then the next Part"). Nothing is recorded.
-
-> ⚠ **PROJECT_PROFILE impact:** this supersedes §5 Machine / §13 Machine Selection ("the selected Machine remains active across subsequent scans until changed or cleared"). PROJECT_PROFILE should be updated to the per-Part machine-scan model.
+- Machine selection happens **exclusively by scanning a Machine barcode**. The on-screen machine strip is a read-only status display (idle / running / maintenance) that highlights the Machine of the active session.
+- The selected Machine becomes a **session**: it remains active for subsequent PN scans until it is changed, cleared, or expires (PROJECT_PROFILE §18). The active Machine is always visible in the header pill.
+- Scan order is flexible (PROJECT_PROFILE §11, §14):
+  - **PN → Machine:** the received quantity enters the Area queue and the UI shows a pending-context banner ("scan a Machine barcode to assign"); scanning the Machine records `ASSIGNED_TO_MACHINE`.
+  - **Machine → PN:** with an active Machine session, a PN scan assigns directly to that Machine.
+- Areas configured for direct single-Machine assignment auto-select the Machine; Areas without Machines skip Machine handling entirely. Behavior comes from Area configuration, never from machine count (PROJECT_PROFILE §11).
+- Inactive Machines (e.g. maintenance) are rejected with an error and never accept production updates.
 
 ## 4.4 Scan input and resolution
 
-One input accepts every barcode type; the system classifies the scan (Part / Machine / Worker / Request Type / Area). Resolution outcomes:
+One input accepts every barcode type; the system classifies the scan deterministically from the `PF:` prefix (PROJECT_PROFILE §9). Resolution outcomes:
 
-| Scan resolves to                     | UI behavior                                                                         |
-|--------------------------------------|-------------------------------------------------------------------------------------|
-| Machine, Part awaiting               | Record the held Movement on this Machine, success feedback                          |
-| Machine, nothing awaiting            | Arm the Machine for the next Part (one-shot)                                        |
-| Worker                               | Start Worker Session, update Worker pill                                            |
-| Part, previous Part awaiting Machine | Error — Machine barcode required first; nothing recorded                            |
-| Part, single context                 | Quantity entry (if required) → record (armed Machine) or hold awaiting Machine      |
-| Part, multiple contexts              | Ambiguity dialog (§4.5)                                                             |
-| Part, no active context              | Offer to create an internal Production Request (Production / Rework / Modification) |
-| Unknown Part / unrecognized          | Error feedback, nothing recorded                                                    |
-| Request Type                         | Combine with pending/next Part scan; order-independent (Part→Rework ≡ Rework→Part)  |
+| Scan resolves to                       | UI behavior                                                                     |
+|----------------------------------------|---------------------------------------------------------------------------------|
+| Machine, pending PN context            | Record `ASSIGNED_TO_MACHINE` for the pending quantity, success feedback         |
+| Machine, no pending context            | Start/replace the Machine session                                               |
+| Worker                                 | Start Worker Session, update Worker pill; previous Worker signs out             |
+| PN, single context                     | Quantity entry (only if required) → record; assign if a Machine session is active, otherwise receive into Area queue |
+| PN, multiple contexts                  | Ambiguity dialog (§4.6)                                                          |
+| Action barcode (`PF:ACTION:REWORK/MODIFY`) | Armed for the next PN scan; order-independent (PN → Action ≡ Action → PN)    |
+| Unknown PN / unrecognized value        | Error feedback, nothing recorded; raw ERP text is never auto-accepted           |
+| Inactive entity                        | Error feedback, nothing recorded                                                |
 
-## 4.5 Ambiguity dialog
+Manual PN entry remains available as an explicit fallback link under the scan input.
 
-Full-screen modal listing every valid context as a large tappable row: continue running Production Request(s), release queued Production Request(s), continue queued Rework/Modification Requests, create a new internal Production Request. Each row shows Request Number, status, quantity, due date, and Request Type. Esc / Cancel abandons with nothing recorded. Choices are filtered by current production context where possible (PROJECT_PROFILE §7 Barcode Resolution).
+## 4.5 Pending scan context and last scanned PN
 
-## 4.6 Quantity entry
+Two persistent context surfaces required by §20:
 
-Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard digits also accepted. Shows Part, target Area/Machine, and available upstream quantity. Confirm is blocked for 0; quantities above available are rejected with an integrity error after confirm (server-validated in the real app).
+- **Pending scan context** — an amber pulsing banner whenever the station holds an incomplete intent (e.g. quantity received into the queue awaiting its Machine scan, or an armed Request Type). It names the PN, quantity and the scan that completes the action.
+- **Last scanned PN** — a fixed strip showing the most recent PN with a one-line description of what happened.
 
-## 4.7 Right column
+## 4.6 Ambiguity dialog
 
-- **Undo Last Scan** — one prominent button; only undoes scans made at this Area (PROJECT_PROFILE §10 Undo). Creates a compensating entry; disabled state when nothing is undoable.
-- **Recent scans** — today's scans, newest first: Part × qty, movement description, time, status dot (green recorded / amber queued offline / red undo).
-- **In this Area now** — live Area inventory: Part, Machine, quantity.
+Full-screen modal listing every valid context as a large tappable row, filtered to the current station where possible. Typical contexts: assign queued quantity to a Machine, receive additional quantity from an upstream Area, create `REWORK` demand, create `MODIFY` demand. Each row shows the relevant quantities, POs and due dates; REWORK/MODIFY rows explain the temporary-PO fallback (`TMP-YYYYMMDD-HHMM-REWORK`) used when no active PO applies (PROJECT_PROFILE §13). Esc / Cancel abandons with nothing recorded.
 
-## 4.8 States
+## 4.7 Quantity entry
+
+Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard digits also accepted. Shows PN, source → target context, and available source quantity. Confirm is blocked for 0; quantities above the available source are rejected with an integrity error (server-validated in the real application).
+
+## 4.8 Right column
+
+- **Undo Last Scan** — one prominent button; only undoes recent eligible scans made at this Area. Creates a `REVERSED` compensating Movement referencing the original (PROJECT_PROFILE §15); disabled when nothing is undoable.
+- **Recent scans** — today's scans, newest first: PN, Movement type and description, time, status dot (green recorded / amber queued offline / red reversed).
+- **In this Area now** — live Area inventory split into two labeled groups per §20: quantity **assigned to Machines** (with Machine name) and quantity in the **Area queue** awaiting Machine assignment, with the Area total beneath.
+
+## 4.9 States
 
 | State           | Behavior                                                            |
 |-----------------|---------------------------------------------------------------------|
@@ -149,14 +163,13 @@ Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard di
 
 Read-only, full-screen, for large shared displays. No interactive elements except an (optional, admin-gated) settings gesture.
 
-- Columns: Part (+ name), Current location (per-Area/Machine distribution with color dots and quantities), total Qty, Requests/PO **with external Job Numbers**, Due (date + days remaining), Time in area (per-location).
-- **Priority model:** priority is an **order number across Parts** (P1, P2, … — not HIGH/MED/LOW), so there is no Priority column. Instead:
-  - Priority Parts always sort **first**, in priority order (P1 at top).
-  - Non-priority Parts follow, sorted by due date (most urgent first).
-  - Priority Parts are marked with 🔥 + a `P#` chip and a row tint that gets **redder the hotter the priority** (P1 strongest).
-- **Due-soon blink:** when a Part approaches its due date (threshold configurable), its Part Number text blinks. Blink is reserved for due-date urgency only — nothing else on the board may blink.
-- **Time in area is per-location:** when a Part's quantity is distributed across multiple Areas/Machines, the Time-in-area column shows one sub-line per location, aligned with the Current-location rows (e.g. `Cut · 3h 40m / Lathe 1 · 2h 05m / Lathe 3 · 1h 25m`). A line turns amber past the Route Step's expected duration.
-- Long lists rotate pages automatically (page indicator + interval in footer). Footer carries the legend (🔥 P# = priority order, blinking = due soon) and aggregate stats.
+- Columns (PROJECT_PROFILE §20): **No. · Part Number · Areas & Quantities · Time · Job Numbers · Due Date · Total Days**.
+- **Part Number** renders on a single line — the column is sized so the PN, Hot flame and rank chip never wrap. Name and revision appear as a secondary line.
+- **Areas & Quantities · Time:** one row per location showing Area color dot, Area/Machine name, quantity, a `machine` / `queue` tag where relevant, and the **time in that location** right-aligned in monospace. A time turns amber when it exceeds the expected duration of the active Route Step. A dashed separator shows the PN total underneath.
+- **Due Date** carries a highlighted secondary line with days left (amber = due soon, red = overdue, neutral = comfortable / stocked). There is no separate Days Left column.
+- **Priority model:** Hot PO Demand rank (🔥 + `#n` chip) from Priority Management. Hot rows sort first in rank order with a row tint that gets redder the hotter the rank; non-Hot rows follow sorted by due date.
+- **Due-soon blink:** a PN approaching or past its due date blinks (threshold configurable). Blink is reserved for due-date urgency only — nothing else on the board may blink.
+- Long lists rotate pages automatically (page indicator + interval in footer). Footer carries the legend and aggregate stats (active PNs, pcs in production, pcs stocked).
 - Auto-refresh; a "Live" indicator plus last-updated time when the feed is stale.
 
 ---
@@ -166,82 +179,114 @@ Read-only, full-screen, for large shared displays. No interactive elements excep
 Focused per-Area view, interactive (wall tablet or desktop).
 
 - Area tab strip with color dots and item counts; one active Area at a time.
-- Toolbar: text search (Part / PO / Request Number / external Job Number) and sort selector (Due date, Priority, Time in area, Quantity).
-- Card grid, one card per Part-in-Area:
-  - Part Number (🔥 + `P#` chip for priority Parts), PO/Request + Operation (+ Request Type when not Production), and **external Job Number** (`Ext. Job: ERP-88112`, or `— (internal)` for internal Production Requests).
-  - Quantity presented as a **right-aligned block** with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number can't be misread as anything else.
-  - Per-Machine chips, due text with the same color ramp as the Production Board.
+- Toolbar: text search (PN / PO / Job Number) and sort selector (Due date, Priority, Time in Area, Quantity); a summary of PN count and total pieces for the Area.
+- Card grid, one card per PN-in-Area:
+  - PN (🔥 + `#n` chip for Hot demand), PO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal POs).
+  - Quantity presented as a **right-aligned block** with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
+  - Per-Machine chips (dashed style for queued quantity), due text with the same color ramp as the Production Board, and time in Area.
 - Empty state: "No production in {Area}".
 
 ---
 
-# 7. Tracking
+# 7. Manager Summary
 
-Primary management interface. Master–detail layout: filterable Production Request list (left) + Production Request detail panel (right).
+Operational overview grouped by Area (PROJECT_PROFILE §20). One column per Area; the layout scrolls horizontally when all Areas do not fit.
 
-## 7.1 Filters and list
+Each Area column shows:
 
-Search across Part Number, PO, Request Number, external Job Number, and requester; selects for Area, Request Type, Status, Due window (PROJECT_PROFILE §16 Tracking). List columns: Request, **Ext. Job No.** (— for internal Production Requests), Part, Type, Requested qty, Completed x/y, Due, Status pill (Running / Queued / Completed).
+- header with Area color, name, description and supported Operation chips;
+- a three-value stat row: **total pcs · queued · on machines**;
+- the PN list for the Area: PN (🔥 + rank when Hot), quantity, PO + Job Number, due date (color-ramped), Machine distribution or time in Area;
+- an explicit empty state for Areas without production.
 
-## 7.2 Detail panel sections
-
-1. **Production Request information** — type, requested qty, due, priority (order number, e.g. "🔥 P1 — first in queue", blank for non-priority), external Job No.(s), requester, completion progress bar.
-2. **Quantity distribution (live)** — horizontal bars per Area/Machine in Area colors; quantities always sum to active total.
-3. **Assigned route** — step chips: done (green) → current (blue) → future (neutral); deviations marked (orange, ⚠) with who/when/reason caption. Original route retained in audit view.
-4. **Movement history (immutable)** — reverse-chronological: timestamp, type (Receive/Transfer/Complete/Undo/Adjustment color-coded), full description (areas, qty, machines, worker, station). Read-only; no edit affordances exist.
-5. **Corrections** — authorized-only actions as explicit buttons: Quantity adjustment, Edit assigned route, Reallocate completion, Change priority. Every correction flow requires a reason and produces new history.
-
-## 7.3 States
-
-Loading skeletons per section; empty filter result ("No Production Requests match — clear filters"); permission-restricted users see the Corrections section hidden entirely rather than disabled.
+A toolbar provides search (PN / PO / Job Number) and PN sorting (priority, due date, quantity).
 
 ---
 
-# 8. Administration
+# 8. Tracking
+
+Primary management interface, **PN-centric** per PROJECT_PROFILE §20. Master–detail layout: filterable PN list (left) + PN detail panel (right).
+
+## 8.1 Filters and list
+
+Search across PN, PO and Job Number; selects for Area, Operation, Machine, Request Type, priority (Hot only), status, and due window. List columns: PN (+ name, Hot chip), active PO Demand (PO · qty · Request Type chip), current distribution (Area color dots), active quantity, stocked quantity, next due date, status pill (Active / Stocked / Completed).
+
+## 8.2 Detail panel sections
+
+1. **PN master** — image placeholder, PN, name, current revision (informational), barcode value (`PF:PN:…`), ERP id.
+2. **Active PO Demand** — table of PO · Request Type · requested · allocated · remaining shortage · due · priority, with an allocation progress bar. Labeled "business demand — separate from Movement".
+3. **Current quantity by Area** — horizontal bars per Area/Machine in Area colors, queue rows visually distinct; labeled "derived from Movement history".
+4. **Quantity Flows & assigned Routes** — one block per Quantity Flow: flow id, quantity, current position, split/merge lineage, and its own route chips: done (green) → current (blue) → queued (amber) → future (neutral); deviations marked (orange, ⚠) with who/when/reason caption and a note that the previous route is preserved in audit. The section explicitly avoids implying the whole PN is at one Route Step.
+5. **Movement history (immutable)** — reverse-chronological: timestamp, Movement type (color-coded, canonical names), full description (areas, quantity, Quantity Flow, machines, worker, station). Read-only; no edit affordances exist.
+6. **Stocked & Allocation history** — stocked quantity and PO Allocation entries with the §17 ordering note; empty state when nothing is stocked.
+7. **Corrections** — authorized-only actions as explicit buttons: Quantity adjustment, Edit assigned Route, Adjust PO Allocation, Change priority, View audit trail. Every correction flow requires a reason and produces new history.
+
+## 8.3 States
+
+Loading skeletons per section; empty filter result ("No PNs match — clear filters"); permission-restricted users see the Corrections section hidden entirely rather than disabled.
+
+---
+
+# 9. Priority Management
+
+Manages the Department's Hot PO Demand list (PROJECT_PROFILE §20 Priority Management). Priority belongs to PO Demand; multiple POs for the same PN may hold different ranks.
+
+- The list shows each Hot entry with rank badge, PN, PO + Job Number, Request Type chip, demand figures (requested / allocated / shortage), current distribution, and color-ramped due date.
+- **Add:** the "+ Add to Hot list" button opens a dialog with a single search field that accepts free text (PN / PO / Job Number) *and* PN barcode scans — scanning with the dialog open adds the matching PO Demand directly. If a PN has multiple active PO Demand records, each is listed and added separately. New entries always join at the **bottom** of the list.
+- **Remove:** each entry has a remove (✕) affordance; remaining ranks close the gap.
+- **Reorder:** drag-and-drop with a visible grip; rank badges renumber live.
+- **Undo / Redo instead of save-or-cancel:** every change (reorder, add, remove) applies immediately, is audited, and can be stepped back and forward with Undo/Redo buttons. The buttons disable when the corresponding history is empty.
+- A footer note restates the rules: Hot is a label on top of `priority_rank`, and ordering criteria are ① Hot rank ② earliest due date ③ largest remaining shortage (deterministic tie-breaker last, PROJECT_PROFILE §17).
+
+---
+
+# 10. Administration
 
 Isolated from production. Sidebar navigation grouped as:
 
-- **Organization:** Departments, Areas, Machines, Workers
-- **Production setup:** Route Templates, Barcode configuration, Allocation policy
+- **Organization:** Departments, Areas, Operations, Machines, Workers
+- **Production setup:** Route Templates, Barcode configuration, Scan behavior
 - **Access:** Users, Roles & permissions
-- **System:** Worker policies, Offline behavior, Settings
+- **Policies:** Worker sessions, Machine assignment, Correction permissions, Settings
 
-**Operation is a property of the Area**, configured inside the Area editor — Operations are not managed as separate objects and have no dedicated administration page.
+Operations are managed per PROJECT_PROFILE §8.5 — each Operation belongs to an Area, and the Areas table lists the Operations an Area supports.
 
-> ⚠ **PROJECT_PROFILE impact:** §15 Administrator and §16 Administration list "Operations" as a separately configured item; PROJECT_PROFILE should be updated to reflect Operation as an Area attribute.
+Each section is a standard table + editor pattern. The Areas table is the reference example: Area (color + name), Operations, Machine assignment mode (None / Auto-assign single Machine / Queue → select by scan), Machines, Worker ID mode (Disabled / Fixed Worker / Scanned session), Terminal flag, Active status.
 
-Each section is a standard table + editor pattern. The Areas table is the reference example: Area (color + name), Operation, Machine tracking on/off, Machines, Worker ID mode (Disabled / Default worker / Scan required), Active status.
-
-Editing an Area's display properties shows an inline note that identity is stable and history is unaffected. Destructive operations (deactivating an Area with active quantities) are blocked with an explanation, not confirmed through.
+Editing an Area's display properties shows an inline note that identity and barcode are stable and history is unaffected. Destructive operations (deactivating an Area with active quantities) are blocked with an explanation, not confirmed through.
 
 ---
 
-# 9. Completion / Receiving UI (Stockroom Scan Station)
+# 11. Completion / Receiving UI (Stockroom Scan Station)
 
-The Stockroom station reuses the Scan Station shell with one additional step: after quantity entry, an **allocation dialog** shows the suggested split across outstanding Production Requests (per configured policy — Earliest Due Date / Priority / FIFO / Manual). The operator can adjust each Request amount with +/− steppers or keypad; Confirm is enabled only when allocated total equals completed quantity. No Manager involvement in the normal path (PROJECT_PROFILE §9).
+The Stockroom station reuses the Scan Station shell with one additional step: after the `STOCKED` Movement, an **allocation dialog** shows the suggested split across outstanding PO Demand in the exact §17 order — ① highest Hot rank ② earliest due date ③ largest remaining shortage. Each row shows the PO, requested quantity, previously allocated quantity, remaining shortage and the proposed quantity, adjustable with +/− steppers (only when the role permits). Confirm is enabled only when the allocated total equals the stocked quantity. Routine receiving requires no Manager involvement; Admin and Manager may adjust the allocation later, with every change audited.
 
 ---
 
-# 10. Out of Scope for v1 UI
+# 12. Changes from GUI Design v1
+
+Decisions in v1 that are superseded by this version, all aligned to PROJECT_PROFILE v5:
+
+1. **Machine selection:** v1 proposed a per-Part Machine scan with no persistent selection. v2 follows §18 — the scanned Machine starts a **session** that persists until changed, cleared, or expired. Scan order remains flexible.
+2. **Terminology:** "Production Request" and "Request Number" are replaced by the canonical PO Demand / Request Type / Quantity Flow / temporary PO vocabulary.
+3. **Priority model:** v1 used per-Part `P#` ordering. v2 ranks **Hot PO Demand** per Department; the same PN may appear with different ranks through different POs.
+4. **Priority workflow:** save-or-cancel is replaced by immediate, audited application with Undo/Redo; the Hot list gains add-by-search/scan and per-entry removal.
+5. **Production Board columns:** now No. · PN · Areas & Quantities · Time · Job Numbers · Due Date (with embedded Days Left) · Total Days; per-location time replaces the separate "Time in area" column, and PN never wraps.
+6. **Operations administration:** v1 folded Operations into the Area editor with no admin page. v2 restores Operations as configurable objects under Organization, per §8.5 and §20.
+7. **New views:** Manager Summary and Priority Management are specified; Tracking becomes PN-centric with Quantity Flow / per-flow route visualization.
+
+---
+
+# 13. Out of Scope for v2 UI
 
 Deferred intentionally: dark/light user toggle (theme is fixed per view class), localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
 ---
 
-# 11. Open Questions
+# 14. Open Questions
 
-1. Should the Production Board offer a per-Area filtered mode, or is that fully covered by Area Board?
-2. Worker Session expiry duration and its visual countdown — policy value lives in Administration; default TBD.
-3. Whether Undo requires Worker identity when Worker scanning is enabled for the Area.
-4. Awaiting-Machine timeout: how long may a Part+quantity wait for its Machine scan before auto-cancelling (nothing recorded)?
-5. Non-priority sort: confirmed as most-urgent due date first — confirm the tie-breaker (time in area vs. Part Number).
-
----
-
-# 12. Pending PROJECT_PROFILE Updates
-
-Decisions made during GUI design that supersede the current profile text; PROJECT_PROFILE should be amended:
-
-1. **Machine selection (§5 Machine, §13 Machine Selection):** Machine is selected only by scanning the Machine barcode, one scan required per Part; the selection never persists across Parts. Order Part→Machine or Machine→Part is both valid; a second Part scan while one is awaiting its Machine is rejected.
-2. **Operations administration (§15, §16):** Operation is an attribute of an Area configured in the Area editor, not a separately managed object.
-3. **Priority (§5 Production Request, §16 Production Board):** priority is an ordering number across Parts (P1, P2, …), not a level (High/Med/Low). Priority Parts sort first; non-priority Parts sort by due date.
+1. Undo/Redo depth and retention for Priority Management (per session? until sign-out?).
+2. Hot-add barcode behavior when the scanned PN has multiple active PO Demand records — auto-open the filtered list, or require explicit selection?
+3. Worker and Machine session expiration values and their visual countdown — policy values live in Administration; defaults TBD (PROJECT_PROFILE §31.4).
+4. Should the Production Board offer a per-Area filtered mode, or is that fully covered by Area Board / Manager Summary?
+5. Whether Undo on the Scan Station requires Worker identity when Worker scanning is enabled for the Area.
