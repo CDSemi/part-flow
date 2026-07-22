@@ -274,29 +274,32 @@ Never rewrite surrounding code opportunistically while fixing a specific defect.
 
 ### Version Control Summary
 
-If the repository uses Git or SVN, every response following file changes must include a concise commit description for the completed change.
+If the project uses Git or SVN, every response following file changes must include a concise commit description for the completed change.
 
 - Detect version control from repository metadata, configuration, or established project workflow.
-- Use the most specific Conventional Commits-style prefix: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `ci:`, `chore:`, `perf:`, or `revert:`.
-- Add a scope when it materially improves precision.
-- Describe the completed change, never the conversation or implementation process.
-- Keep each description concise, imperative, and directly usable as a commit message.
-- Begin with one Conventional Commits-style summary line for the overall change.
-- Follow the summary with one bullet per material change.
-- Never replace the summary with the bullet list or omit the per-change bullets.
-- Enclose the entire `Commit description` section in a standalone fenced code block labeled `text`.
+- Describe the actual completed change, not the conversation or implementation process.
+- Keep every line concise, imperative, and suitable for direct use in a commit message.
+- Begin with exactly one plain-language summary line describing the overall completed change.
+- The summary line must start directly with the change description.
+- Never prefix the summary line with a Conventional Commits type or scope.
+- Do not use `type:`, `type(scope):`, or any equivalent prefix on the summary line.
+- Follow the summary with bullet entries for each material logical change.
+- Every bullet must use a Conventional Commits-style prefix such as `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `ci:`, `chore:`, `perf:`, or `revert:`.
+- Use the most specific applicable type and an optional scope for each bullet.
+- Use one bullet when the work contains only one material change.
+- Do not replace the summary with the bullet list.
+- Do not omit the per-change bullets.
+- Enclose the entire `Commit description` content in a standalone fenced code block labeled `text`.
 
 Required format:
 
 Commit description:
 
 ```text
-Short summary of the completed change
+Describe the overall completed change directly without a type or scope prefix.
 
-Changes:
-- type(scope): first material change
-- type(scope): second material change (if applicable)
-...
+- type(scope): Describe the first logical change.
+- type(scope): Describe each additional logical change when applicable.
 ```
 
 ## 7. Testing and Validation

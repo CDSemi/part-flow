@@ -1,6 +1,6 @@
 # PartFlow Project Profile v5
 
-> **Status:** Living Document
+> **Status:** Living Document  
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
 
 ---
