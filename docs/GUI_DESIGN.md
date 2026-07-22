@@ -3,7 +3,7 @@
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v5).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
 > An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v2.html`.
-> Supersedes GUI Design v1 (`mockups/partflow-gui-mockup.html`); the differences are listed in §12.
+> Supersedes GUI Design v1 (`archive/partflow-gui-mockup.html`); the differences are listed in §12.
 
 ---
 

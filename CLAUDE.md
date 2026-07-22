@@ -23,7 +23,10 @@ Before any non-trivial change:
 
 1. Read the repository root documentation or project entry point.
 2. Read [`docs/PROJECT_PROFILE.md`](./docs/PROJECT_PROFILE.md), the authoritative project specification.
-3. Read only the documentation and code nearest to the requested change.
+3. When planning or implementing a feature, read
+      [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)
+      to determine the current phase, approved scope, dependencies, and deferred work.
+4. Read only the documentation and code nearest to the requested change.
 
 - Stop reading once sufficient evidence has been gathered.
 - Never read the repository indiscriminately. Follow indexes and references first.
@@ -156,6 +159,7 @@ Treat these sources as canonical:
 
 - `CLAUDE.md`: AI instruction entry point.
 - `docs/PROJECT_PROFILE.md`: authoritative business model, terminology, workflows, architecture, and design specification.
+- `docs/IMPLEMENTATION_ROADMAP.md`: authoritative implementation order, current phase, approved delivery scope, and explicitly deferred work.
 - Current repository implementation, configuration, and tests: authoritative evidence of implemented behavior and available commands.
 
 When sources conflict, enforce this order:
