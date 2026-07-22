@@ -1,4 +1,4 @@
-# PartFlow Project Profile v5
+# PartFlow Project Profile v6
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -224,7 +224,7 @@ A PN:
 - has one reusable drawing folder,
 - has one unique PartFlow barcode,
 - may be requested by multiple active POs,
-- may have multiple external Job Numbers,
+- may have multiple external Job Numbers (used only for display, searching, sorting, and reporting),
 - may have quantities in multiple Areas simultaneously,
 - may have quantities assigned to multiple Machines simultaneously,
 - may have different quantity flows following different Routes,
@@ -315,7 +315,7 @@ PO Demand contains the business context needed to answer:
 - due date,
 - priority,
 - request type,
-- external Job Numbers.
+- external Job Numbers (used only for display, searching, sorting, and reporting).
 
 PO Demand does not define the current production location.
 
@@ -414,7 +414,7 @@ A Machine:
 
 ---
 
-## Quantity Flow
+## Quantity Flow (Internal Tracking Concept)
 
 A traceable production portion of a PN quantity as it moves, splits, merges, queues, and becomes assigned to Areas or Machines.
 
@@ -499,7 +499,7 @@ Production correctness must not depend on Worker identity.
 
 Represents the reusable PN master record.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number`
@@ -528,7 +528,7 @@ Rules:
 
 Represents a PO received by the business.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `po_number`
@@ -551,7 +551,7 @@ Rules:
 
 Represents how many physical pieces of a PN are requested by one PO.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `purchase_order_id`
@@ -584,7 +584,7 @@ Rules:
 
 Represents a physical shop-floor location.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `department_id`
@@ -615,7 +615,7 @@ Rules:
 
 Represents a type of work supported by an Area.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `area_id`
@@ -637,7 +637,7 @@ Rules:
 
 Represents a physical Machine or processing station.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `area_id`
@@ -658,9 +658,9 @@ Rules:
 
 ## 8.7 QuantityFlow
 
-Represents a traceable portion of active PN quantity.
+Represents an internal tracking concept for active PN quantity.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -686,7 +686,7 @@ Rules:
 
 Represents a reusable production route definition.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `name`
@@ -706,7 +706,7 @@ Changing a Route Template must never retroactively alter active assigned Routes.
 
 Represents one expected step in a Route.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `route_template_id`
@@ -752,7 +752,7 @@ Rules:
 
 Represents an immutable quantity event.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -803,7 +803,7 @@ Rules:
 
 Represents the assignment of stocked PN quantity to PO Demand.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
@@ -830,7 +830,7 @@ Rules:
 
 Represents an operator.
 
-Suggested attributes:
+Typical attributes (illustrative only):
 
 - `id`
 - `employee_number`
@@ -850,11 +850,13 @@ Worker identity must not control production business rules.
 
 ---
 
-## 8.14 ScanSession
+# 9. Application Concepts
 
-Represents temporary scan context at a Scan Station.
+## ScanSession
 
-Suggested context:
+ScanSession is temporary Application-layer state used to coordinate barcode scanning.
+
+It may retain temporary context such as:
 
 - Area
 - active Worker
@@ -864,13 +866,13 @@ Suggested context:
 - pending quantity
 - expiration time
 
-ScanSession exists to reduce repetitive scanning.
+ScanSession exists to reduce repetitive scanning and improves scanning efficiency.
 
 It must never become the source of truth for production state.
 
 ---
 
-# 9. Barcode Model
+# 10. Barcode Model
 
 Barcode scanning is the primary interaction method.
 
@@ -1105,6 +1107,7 @@ For a newly received PO:
 4. Create the PN master and barcode if the PN is new.
 5. Add PO Demand without creating a separate tracked PN.
 6. Save the business demand. Saving PO Demand never automatically creates production quantity.
+7. Confirm or assign the initial Route when production is released.
 
 Production release is a separate, explicit action. On production release:
 
@@ -1336,11 +1339,10 @@ The system must suggest allocation using this exact priority:
 
 1. Highest manager-defined PO Demand priority.
 2. Earliest due date.
-3. Largest remaining shortage.
 
-If all three criteria are equal, implementation must use a stable deterministic tie-breaker such as PO Demand creation order or internal ID.
+If both criteria are equal, implementation may use any stable deterministic tie-breaker such as PO Demand creation order or internal ID.
 
-This final technical tie-breaker must not change the business ordering above.
+The tie-breaker is an implementation detail, not a business rule.
 
 ---
 
@@ -1363,7 +1365,7 @@ The suggestion must show:
 
 Routine receiving should not require Manager approval.
 
-Operator allocation changes are permitted only when explicitly granted by role configuration.
+Operators may review and adjust the suggested PO Allocation before confirmation.
 
 Admin and Manager may adjust PO Allocation at any time.
 
@@ -1469,7 +1471,7 @@ Operator capabilities may include:
 - confirm quantity,
 - complete production into Stockroom,
 - confirm suggested allocation,
-- modify completion allocation when explicitly permitted,
+- review and adjust suggested completion allocation,
 - undo recent eligible scans.
 
 Operators must never directly rewrite historical data.
@@ -1967,11 +1969,10 @@ Do not introduce these responsibilities without an explicit project decision.
 
 Only the following unresolved decisions remain:
 
-1. Whether Operator may modify the suggested Stockroom Allocation or only confirm it.
-2. Whether stocked quantity may be returned to active production through a controlled reversal.
-3. Whether scrap and rejected quantity are first-class Movement types in the initial release.
-4. The exact expiration rules for Worker and Machine sessions.
-5. Whether offline scan synchronization will be included in a later release.
+1. Whether stocked quantity may be returned to active production through a controlled reversal.
+2. Whether scrap and rejected quantity are first-class Movement types in the initial release.
+3. The exact expiration rules for Worker and Machine sessions.
+4. Whether offline scan synchronization will be included in a later release.
 
 Implementations must avoid assumptions that make these decisions difficult to change.
 
