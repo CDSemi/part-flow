@@ -1,37 +1,38 @@
-# PartFlow GUI Design v3
+# PartFlow GUI Design v4
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v6).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v3.html`.
-> Supersedes GUI Design v2 (mockup: `archive/partflow-gui-mockup-v2.html`); the differences are listed in §13.1. Differences from v1 remain listed in §13.2.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v4.html`.
+> Supersedes GUI Design v3 (mockup: `archive/partflow-gui-mockup-v3.html`); the differences are listed in §12.1. Differences from v2 and v1 remain listed in §12.2 and §12.3.
 
 ---
 
 # 1. Scope
 
-Covers the eight application views from PROJECT_PROFILE §21:
+Covers the application-view content of PROJECT_PROFILE §21 in **seven GUI views**:
 
 1. Scan Station (production)
 2. Production Board (monitoring, large display)
-3. Area Board (monitoring, per-Area)
-4. Manager Summary (management overview, grouped by Area)
-5. Tracking (management, PN-centric)
-6. PO Intake (management, manual PO entry and production release)
-7. Priority Management (Hot PO Demand ranking)
-8. Administration (configuration)
+3. Area Board (monitoring — **All Areas** overview + per-Area detail; the overview carries the §21 *Manager Summary* content)
+4. Tracking (management, PN-centric)
+5. Purchase Orders (management, manual PO entry and production release — §21 *PO Intake*)
+6. Priority Management (Hot PO Demand ranking)
+7. Administration (configuration)
+
+> **Pending PROJECT_PROFILE alignment (v4).** PROJECT_PROFILE v6 still (a) lists Area Board and Manager Summary as separate views in §21, (b) names the PO view "PO Intake", and (c) has no `due_date` on PurchaseOrder in §8.2. GUI v4 merges Manager Summary into Area Board as its All Areas overview (no content dropped), renames PO Intake to **Purchase Orders**, and introduces a PO-level due date used as the entry default for demand-line due dates. PROJECT_PROFILE §21 and §8.2 need a matching update; until then this document notes each deviation where it occurs.
 
 ## 1.1 Navigation structure
 
 Top-level navigation exposes four entries; the management views are grouped as **sub views of one Management view**:
 
-| Top level        | Contains                                                          |
-|------------------|-------------------------------------------------------------------|
-| Scan Station     | — (single view)                                                   |
-| Production Board | — (single view)                                                   |
-| Management       | Area Board · Manager Summary · Tracking · PO Intake · Priority    |
-| Administration   | — (single view, own sidebar navigation per §10)                   |
+| Top level        | Contains                                                |
+|------------------|----------------------------------------------------------|
+| Scan Station     | — (single view)                                         |
+| Production Board | — (single view)                                         |
+| Management       | Area Board · Tracking · Purchase Orders · Priority      |
+| Administration   | — (single view, own sidebar navigation per §9)          |
 
-Selecting Management opens its **last-used sub view** (Area Board on first open) and reveals a secondary sub-view bar beneath the top navigation. The grouping is navigation only — each sub view keeps its own specification (§6–§9, §12). The eight views of PROJECT_PROFILE §21 are unchanged.
+Selecting Management opens its **last-used sub view** (Area Board on first open, which itself opens on its All Areas overview) and reveals a secondary sub-view bar beneath the top navigation. The sub-view bar follows the active sub view's theme (dark over Area Board, light elsewhere — §2.1). The grouping is navigation only — each sub view keeps its own specification (§6–§8, §11).
 
 ---
 
@@ -39,12 +40,12 @@ Selecting Management opens its **last-used sub view** (Area Board on first open)
 
 ## 2.1 Two visual contexts, one token set
 
-| Context    | Views                                                                                             | Theme | Rationale                                                                           |
-|------------|---------------------------------------------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
-| Shop floor | Scan Station, Production Board                                                                    | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
-| Management | Management sub views (Area Board, Manager Summary, Tracking, PO Intake, Priority), Administration | Light | Dense data work at a desk, matches office tooling expectations; one consistent theme across the whole Management view |
+| Context                 | Views                                                        | Theme | Rationale                                                                           |
+|-------------------------|--------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
+| Shop floor & monitoring | Scan Station, Production Board, Area Board (incl. its All Areas overview) | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays. Area Board is a monitoring surface used near the floor and on tablets — the light v3 variant proved hard to read, so v4 returns it to the v2 dark theme |
+| Management desk work    | Tracking, Purchase Orders, Priority, Administration          | Light | Dense data work at a desk, matches office tooling expectations                      |
 
-Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system.
+Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system. The Management sub-view bar adopts the dark palette while Area Board is active so the chrome never clashes with the view below it.
 
 ## 2.2 Color tokens
 
@@ -190,42 +191,44 @@ Read-only, full-screen, for large shared displays. No interactive elements excep
 
 # 6. Area Board
 
-Focused per-Area view, interactive. Management sub view (light theme, §1.1); typically used at a desk or on a tablet.
+Monitoring sub view of Management (dark theme, §1.1 / §2.1). One view, two modes behind a single tab strip: the **All Areas overview** (the §21 *Manager Summary* content) and the **per-Area detail** (the §21 *Area Board* content). The "Manager Summary" name is retired.
 
-- Area tab strip with color dots and item counts; one active Area at a time.
-- Toolbar: text search (PN / PO / Job Number) and sort selector (Due date, Priority, Time in Area, Quantity); a summary of PN count and total pieces for the Area.
-- Card grid, one card per PN-in-Area:
-  - PN (🔥 + `#n` chip for Hot demand), PO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal POs).
-  - Quantity presented as a **right-aligned block** with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
-  - Per-Machine chips (dashed style for queued quantity), due text with the same color ramp as the Production Board, and time in Area.
+## 6.1 Tab strip and toolbar
+
+- The tab strip starts with **All Areas** — the default on first open — followed by one tab per Area with its color dot and item count. Exactly one tab is active.
+- Shared toolbar for both modes: text search (PN / PO / Job Number), sort selector (Due date, Priority, Time in Area, Quantity), and a scope summary (PN count and total pieces for the active Area, or across all Areas in the overview).
+
+## 6.2 All Areas overview
+
+One column per Area; the layout scrolls horizontally when all Areas do not fit. Each Area column shows:
+
+- a **clickable header** (Area color, name, description, supported Operation chips) with a "detail ›" affordance — clicking it opens that Area's detail mode, equivalent to selecting its tab;
+- a three-value stat row: **total pcs · queued · on machines** (the terminal Stockroom column shows **stocked pcs** instead);
+- the PN list for the Area: PN (🔥 + rank when Hot), quantity, PO + Job Number, due date (color-ramped), Machine distribution or time in Area;
+- an explicit empty state for Areas without production.
+
+Search filters the PN lists; the sort selector orders PNs within each column.
+
+## 6.3 Per-Area detail
+
+Card grid, one card per PN-in-Area:
+
+- PN (🔥 + `#n` chip for Hot demand), PO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal POs).
+- Quantity presented as a **right-aligned block** with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
+- Per-Machine chips (dashed style for queued quantity), due text with the same color ramp as the Production Board, and time in Area.
 - Empty state: "No production in {Area}".
 
 ---
 
-# 7. Manager Summary
-
-Operational overview grouped by Area (PROJECT_PROFILE §21). Management sub view (light theme, §1.1). One column per Area; the layout scrolls horizontally when all Areas do not fit.
-
-Each Area column shows:
-
-- header with Area color, name, description and supported Operation chips;
-- a three-value stat row: **total pcs · queued · on machines**;
-- the PN list for the Area: PN (🔥 + rank when Hot), quantity, PO + Job Number, due date (color-ramped), Machine distribution or time in Area;
-- an explicit empty state for Areas without production.
-
-A toolbar provides search (PN / PO / Job Number) and PN sorting (priority, due date, quantity).
-
----
-
-# 8. Tracking
+# 7. Tracking
 
 Primary management interface, **PN-centric** per PROJECT_PROFILE §21. Master–detail layout: filterable PN list (left) + PN detail panel (right).
 
-## 8.1 Filters and list
+## 7.1 Filters and list
 
 Search across PN, PO and Job Number; selects for Area, Operation, Machine, Request Type, priority (Hot only), status, and due window. List columns: PN (+ name, Hot chip), active PO Demand (PO · qty · Request Type chip), current distribution (Area color dots), active quantity, stocked quantity, next due date, status pill (Active / Stocked / Completed).
 
-## 8.2 Detail panel sections
+## 7.2 Detail panel sections
 
 1. **PN master** — image placeholder, PN, name, current revision (informational), barcode value (`PF:PN:…`), ERP id.
 2. **Active PO Demand** — table of PO · Request Type · requested · allocated · remaining shortage · due · priority, with an allocation progress bar. Labeled "business demand — separate from Movement".
@@ -235,13 +238,13 @@ Search across PN, PO and Job Number; selects for Area, Operation, Machine, Reque
 6. **Stocked & Allocation history** — stocked quantity and PO Allocation entries with the §18 ordering note; empty state when nothing is stocked.
 7. **Corrections** — authorized-only actions as explicit buttons: Quantity adjustment, Edit assigned Route, Adjust PO Allocation, Change priority, View audit trail. Every correction flow requires a reason and produces new history.
 
-## 8.3 States
+## 7.3 States
 
 Loading skeletons per section; empty filter result ("No PNs match — clear filters"); permission-restricted users see the Corrections section hidden entirely rather than disabled.
 
 ---
 
-# 9. Priority Management
+# 8. Priority Management
 
 Manages the Department's Hot PO Demand list (PROJECT_PROFILE §21 Priority Management). Priority belongs to PO Demand; multiple POs for the same PN may hold different ranks.
 
@@ -254,7 +257,7 @@ Manages the Department's Hot PO Demand list (PROJECT_PROFILE §21 Priority Manag
 
 ---
 
-# 10. Administration
+# 9. Administration
 
 Isolated from production. Sidebar navigation grouped as:
 
@@ -271,25 +274,46 @@ Editing an Area's display properties shows an inline note that identity and barc
 
 ---
 
-# 11. Completion / Receiving UI (Stockroom Scan Station)
+# 10. Completion / Receiving UI (Stockroom Scan Station)
 
 The Stockroom station reuses the Scan Station shell with one additional step: after the `STOCKED` Movement, an **allocation dialog** shows the suggested split across outstanding PO Demand in the exact §18 order — ① highest Hot rank ② earliest due date. Each row shows the PO, requested quantity, previously allocated quantity, remaining shortage and the proposed quantity, adjustable with +/− steppers — Operators may review and adjust the suggestion before confirmation (PROJECT_PROFILE §18). Confirm is enabled only when the allocated total equals the stocked quantity. Routine receiving requires no Manager involvement; Admin and Manager may adjust the allocation later, with every change audited.
 
 ---
 
-# 12. PO Intake
+# 11. Purchase Orders
 
-Management view (light theme) implementing manual PO entry and explicit production release (PROJECT_PROFILE §13, §21 PO Intake). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (light theme) implementing manual PO entry and explicit production release (PROJECT_PROFILE §13; §21 *PO Intake*, renamed **Purchase Orders** in v4 — see §1). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
-## 12.1 Layout and PO handling
+The view has three panels: **PO list** (master, the entry screen), **PO detail** (demand lines of one selected PO), and **New PO** (scanner-first entry).
 
-- **PO search / create:** one search field over PO Number; an exact miss offers "Create PO". Creating captures PO Number and received date. Attempting to create a PO Number that already exists surfaces the existing PO instead of duplicating it (duplicate PO handling).
-- **PO header:** PO Number, received date, status, and demand-line count.
+## 11.1 PO list
+
+- One row per PO: PO Number, received date, **PO due date** (color-ramped like all due dates), demand-line count with a PN preview, and status (**Open** / **Released** / **Complete**).
+- Search over PO Number. An existing PO Number is always opened, never duplicated; a miss offers "＋ New PO".
+- Temporary internal POs (`TMP-…-REWORK/MODIFY`) appear like any other PO, labeled "temporary internal PO".
+- Completed POs (every PO Demand fully allocated) move out of the active list but remain permanently available in history (PROJECT_PROFILE §8.2).
+- **Demand lines are shown only after a PO is selected** — selecting a row opens the PO detail panel.
+
+## 11.2 PO detail — demand lines
+
+- Header: "‹ All POs" back action, PO Number, received date, PO due date, line count, status.
 - **PoDemand rows:** an editable table, one row per PN demand: PN (lookup or create), Request Type (`NEW` default / `REWORK` / `MODIFY`), requested quantity, due date, priority when applicable, external Job Numbers, requester / reason / notes. Long PO line lists scroll with a sticky header and a line count.
+- **Due-date default:** each line's due date defaults to the **PO due date** and may be edited per line.
 - **PN lookup / create:** the PN field searches existing PartNumbers; a new PN can be created inline, which shows a **barcode preview** (`PF:PN:…`) and creates the unique PN barcode with the PN master. An **inactive PN** is flagged and cannot be released without reactivation.
 - **Validation states:** per-field errors (missing PN, quantity ≤ 0, missing due date where required); a row with errors cannot be saved. **Unsaved changes** are visibly marked and guarded against navigation loss.
 
-## 12.2 Demand save vs. production release
+## 11.3 New PO — scanner-first entry
+
+- **Header form:** PO Number, received date (defaults to today), and **PO due date** — the default due date for every demand line. Entering a PO Number that already exists opens the existing PO instead of duplicating it (duplicate PO handling).
+- **Scan loop:** a dedicated, visually prominent scan input accepts PN barcodes (`PF:PN:…`). Each scan appends one demand line — Request Type `NEW`, due date prefilled from the PO due date — and moves focus to that line's quantity field; Enter on the quantity returns focus to the scan input, ready for the next part. An entire PO can be entered scan → qty → scan → qty without touching the mouse.
+- Scanning a PN that is already on the PO focuses the existing line (edit its quantity) instead of adding a duplicate. Unknown or non-PN barcodes are rejected with an error — nothing is added.
+- **Manual lines** remain available ("＋ Add line manually") for PNs that do not exist yet, using the same PN lookup / inline-create as §11.2.
+- Changing the PO due date updates lines still holding the default; lines whose due date was edited keep their value. Request Type and due date stay editable per line before saving.
+- **Save demand** validates all rows, persists the PurchaseOrder and PoDemand rows only, and returns to the PO list with the new PO shown as **Open**.
+
+> **Data-model note (pending PROJECT_PROFILE update):** the PO due date requires a `due_date` attribute on PurchaseOrder (§8.2). It is an entry default only — PoDemand keeps its own `due_date` as the operative business value.
+
+## 11.4 Demand save vs. production release
 
 - **Save demand** persists the PurchaseOrder and PoDemand rows only. Saving never creates production quantity — the UI states this explicitly ("business demand — separate from production").
 - Each saved demand row carries an explicit **Release to production…** action. Releasing opens a confirmation flow that:
@@ -303,16 +327,24 @@ Management view (light theme) implementing manual PO entry and explicit producti
 
 ---
 
-# 13. Changes from previous versions
+# 12. Changes from previous versions
 
-## 13.1 Changes from GUI Design v2
+## 12.1 Changes from GUI Design v3
+
+1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
+2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
+3. **PO Intake renamed Purchase Orders** and restructured as PO list → PO detail → New PO (§11): the view opens with the list of POs, demand lines appear only after selecting a PO, and a dedicated **scanner-first New PO** flow adds one demand line per PN barcode scan (Request Type defaults to `NEW`, quantity typed immediately after each scan).
+4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
+5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
+
+## 12.2 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 13.2 Changes from GUI Design v1
+## 12.3 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
@@ -326,16 +358,16 @@ Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 ---
 
-# 14. Out of Scope for v3 UI
+# 13. Out of Scope for v4 UI
 
 Deferred intentionally: dark/light user toggle (theme is fixed per view class), localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
 ---
 
-# 15. Open Questions
+# 14. Open Questions
 
 1. Undo/Redo depth and retention for Priority Management (per session? until sign-out?).
 2. Hot-add barcode behavior when the scanned PN has multiple active PO Demand records — auto-open the filtered list, or require explicit selection?
 3. Worker and Machine session expiration values and their visual countdown — policy values live in Administration; defaults TBD (PROJECT_PROFILE §32.3).
-4. Should the Production Board offer a per-Area filtered mode, or is that fully covered by Area Board / Manager Summary?
+4. Should the Production Board offer a per-Area filtered mode, or is that fully covered by the Area Board (All Areas overview / per-Area detail)?
 5. Whether Undo on the Scan Station requires Worker identity when Worker scanning is enabled for the Area.
