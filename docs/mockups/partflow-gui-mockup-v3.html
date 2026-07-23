@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PartFlow — GUI Mockup v3 · PROJECT_PROFILE v5</title>
+<title>PartFlow — GUI Mockup v3 · PROJECT_PROFILE v6</title>
 <!-- Mockup file: selectors are toggled dynamically from JS and font tokens carry
      their generic fallbacks inside var() definitions — suppress false positives. -->
 <!--suppress CssUnusedSymbol, CssNoGenericFontName -->
 <style>
 /* ================================================================
-   PartFlow GUI Mockup v3 — aligned to PROJECT_PROFILE v5
+   PartFlow GUI Mockup v3 — aligned to PROJECT_PROFILE v6
    Two visual contexts, one token set:
    dark = shop floor (Scan Station, Production Board)
    light = management (Management view with sub views: Area Board,
@@ -124,7 +124,7 @@ input,select{font-family:inherit}
 .panel .ph .spacer{flex:1}
 .panel .ph .note{text-transform:none;letter-spacing:0;font-weight:450;font-size:12px;color:var(--d-faint)}
 
-/* Machine session strip — sticky session per PROJECT_PROFILE §18 */
+/* Machine session strip — sticky session per PROJECT_PROFILE §19 */
 #machines{display:flex;gap:10px;padding:14px 18px;flex-wrap:wrap}
 .mtile{min-height:60px;min-width:118px;border-radius:12px;border:2px solid var(--d-border);background:var(--d-panel2);
   font-size:17px;font-weight:750;color:var(--d-muted);padding:9px 18px;text-align:center;cursor:default;transition:border-color .15s}
@@ -133,7 +133,7 @@ input,select{font-family:inherit}
 .mtile.session .sub{color:var(--info)}
 .mtile.maint{opacity:.45}
 
-/* Pending scan context — §20 "visible pending scan context" */
+/* Pending scan context — §21 "visible pending scan context" */
 #pending{display:none;margin:0 18px 14px;padding:13px 16px;border-radius:12px;border:1px solid rgba(255,178,36,.5);
   background:rgba(255,178,36,.09);color:var(--warn);font-size:15.5px;font-weight:750}
 #pending.show{display:flex;align-items:center;gap:12px}
@@ -155,7 +155,7 @@ input,select{font-family:inherit}
 #manualentry{margin-top:8px;font-size:12.5px;color:var(--d-faint)}
 #manualentry a{color:var(--info);text-decoration:none;font-weight:650;cursor:pointer}
 
-/* Last scanned PN — §20 "visible last scanned PN" */
+/* Last scanned PN — §21 "visible last scanned PN" */
 #lastpn{display:flex;align-items:center;gap:14px;margin:0 18px 16px;padding:10px 16px;border-radius:12px;background:var(--d-panel2);border:1px solid var(--d-border)}
 #lastpn .l{font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--d-faint);flex:none}
 #lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800}
@@ -236,7 +236,7 @@ input,select{font-family:inherit}
 .scanlist .what .p{font-weight:750;font-family:var(--mono);font-size:13.5px}
 .scanlist .what .d{color:var(--d-muted);font-size:12px;margin-top:1px}
 .scanlist .when{color:var(--d-faint);font-size:12px;flex:none}
-/* In this Area now — queued vs assigned separated (§20) */
+/* In this Area now — queued vs assigned separated (§21) */
 .invgrp{padding:9px 18px 4px;font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--d-faint)}
 .invlist{list-style:none}
 .invlist li{display:flex;align-items:center;padding:10px 18px;border-bottom:1px solid var(--d-border)}
@@ -605,7 +605,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   <button class="navbtn" data-v="mgmt" onclick="showView('mgmt')">Management</button>
   <button class="navbtn" data-v="admin" onclick="showView('admin')">Administration</button>
   <div class="spacer"></div>
-  <div class="mock-tag">GUI MOCKUP <b>v3</b> · PROJECT_PROFILE v5 · sample data</div>
+  <div class="mock-tag">GUI MOCKUP <b>v3</b> · PROJECT_PROFILE v6 · sample data</div>
 </nav>
 
 <!-- Management sub-view navigation — visible only while a Management sub view is active -->
@@ -647,7 +647,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
     <div class="ss-main">
       <div class="panel">
         <div class="ph">Machine status<div class="spacer"></div>
-          <span class="note">select by scanning a Machine barcode — session persists until changed, cleared or expired (§18)</span></div>
+          <span class="note">select by scanning a Machine barcode — session persists until changed, cleared or expired (§19)</span></div>
         <div id="machines">
           <div class="mtile" data-m="Lathe 1">Lathe 1<span class="sub">idle</span></div>
           <div class="mtile" data-m="Lathe 2">Lathe 2<span class="sub">running · SHAFT-014 × 4</span></div>
@@ -672,7 +672,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
             <b onclick="fill(this)">PF:PN:9999</b> unknown ·
             <b onclick="fill(this)">STOCK-DEMO</b> Stockroom allocation
           </div>
-          <div id="manualentry">Scanner unavailable? <a onclick="manualEntry()">Manual PN entry…</a> — a separate explicit fallback; raw PN text is never treated as a barcode (§9)</div>
+          <div id="manualentry">Scanner unavailable? <a onclick="manualEntry()">Manual PN entry…</a> — a separate explicit fallback; raw PN text is never treated as a barcode (§10)</div>
         </div>
         <div id="pending"><span class="pulse"></span><span id="pendingtxt"></span></div>
         <div id="lastpn">
@@ -729,7 +729,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </div>
 
-<!-- ambiguity dialog — §9 Barcode Resolution: never guess between valid contexts -->
+<!-- ambiguity dialog — §10 Barcode Model: never guess between valid contexts -->
 <div class="overlay" id="ambovl">
   <div class="dlg">
     <h3>Multiple valid contexts — confirm intent</h3>
@@ -759,11 +759,11 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </div>
 
-<!-- manual PN entry — explicit fallback, separate from barcode scanning (§9) -->
+<!-- manual PN entry — explicit fallback, separate from barcode scanning (§10) -->
 <div class="overlay" id="manovl">
   <div class="dlg">
     <h3>Manual PN entry — explicit fallback</h3>
-    <div class="sub">Type the <b>exact PartNumber</b> (not a barcode). It is validated exactly like a scan — raw PN text is never interpreted as a barcode (§9). Nothing is recorded by this step.</div>
+    <div class="sub">Type the <b>exact PartNumber</b> (not a barcode). It is validated exactly like a scan — raw PN text is never interpreted as a barcode (§10). Nothing is recorded by this step.</div>
     <input id="mpninput" class="field mono" autocomplete="off" placeholder="Exact PartNumber, e.g. PF-SHAFT-014"
            onkeydown="if(event.key==='Enter')confirmManual()">
     <div class="row">
@@ -773,7 +773,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </div>
 
-<!-- REWORK / MODIFY intake confirmation — §13: nothing recorded until confirmed -->
+<!-- REWORK / MODIFY intake confirmation — §14: nothing recorded until confirmed -->
 <div class="overlay" id="intakeovl">
   <div class="dlg">
     <h3><span id="itype">REWORK</span> intake — confirm before anything is recorded</h3>
@@ -806,12 +806,12 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </div>
 
-<!-- Stockroom allocation dialog — §17: priority → due date → largest shortage -->
+<!-- Stockroom allocation dialog — §18: priority → earliest due date -->
 <div class="overlay" id="allocovl">
   <div class="dlg" style="width:min(640px,94vw)">
     <h3>Stocked — suggested PO Allocation</h3>
     <div class="big mono">PF-PIN-102 <span style="font-size:16px;color:var(--d-muted);font-weight:600">× 20 stocked</span></div>
-    <div class="sub">Movement <b>STOCKED</b> recorded. Suggested allocation order: <b>priority → earliest due → largest shortage</b>. Adjust only if authorized.</div>
+    <div class="sub">Movement <b>STOCKED</b> recorded. Suggested allocation order: <b>priority → earliest due date</b>. Operators may review and adjust before confirmation.</div>
     <div class="alloc-row">
       <div>
         <div class="po">PO-1006 <span class="hot h1" style="vertical-align:2px">🔥 HOT #1</span></div>
@@ -841,7 +841,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
     <div class="spacer"></div>
     <div class="clock" id="pbclock">14:32</div>
   </div>
-  <!-- Columns per PROJECT_PROFILE v5 §20 Production Board -->
+  <!-- Columns per PROJECT_PROFILE v6 §21 Production Board -->
   <table class="pb-table">
     <thead><tr>
       <th style="width:4%">No.</th>
@@ -1110,7 +1110,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 
   </div>
 </section>
-<!-- ==================== TRACKING (PN-centric, §20) ==================== -->
+<!-- ==================== TRACKING (PN-centric, §21) ==================== -->
 <section id="view-track" class="view">
   <div class="tk-wrap">
     <div class="tk-left">
@@ -1247,7 +1247,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 
       <div class="tk-sec">
         <h4>Stocked &amp; Allocation history <span class="tag">PO Allocation — separate from Movement</span></h4>
-        <div class="prognote" style="margin-top:0">No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due → largest shortage (§17).</div>
+        <div class="prognote" style="margin-top:0">No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due date (§18).</div>
       </div>
 
       <div class="tk-sec">
@@ -1264,14 +1264,14 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </section>
 
-<!-- ==================== PO INTAKE (light, §20 / GUI §12) ==================== -->
+<!-- ==================== PO INTAKE (light, §21 / GUI §12) ==================== -->
 <section id="view-pointake" class="view">
   <div class="po-head">
     <h1>PO Intake</h1>
     <div class="spacer"></div>
     <button class="btn primary" onclick="toast('＋','New PO — enter PO Number and received date. An existing PO Number opens the existing PO instead of duplicating it.')">＋ New PO</button>
   </div>
-  <div class="po-sub">Manual Purchase Order entry (§12). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>.</div>
+  <div class="po-sub">Manual Purchase Order entry (§13). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>.</div>
   <div class="po-tools">
     <input placeholder="Search PO Number… (exact match on an existing PO opens it — duplicates are never created)">
   </div>
@@ -1331,7 +1331,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   <div class="pr-note">An <b>inactive PN</b> is flagged in lookup and cannot be added or released without reactivation. Long PO line lists scroll with a sticky header. Leaving the view with unsaved changes prompts an explicit warning. PO Intake handles business demand only — it is not customer, pricing, invoicing, shipping, purchasing, or accounting functionality.</div>
 </section>
 
-<!-- release confirmation — explicit production release (§12) -->
+<!-- release confirmation — explicit production release (§13) -->
 <div class="overlay" id="relovl">
   <div class="dlg light" style="width:min(660px,94vw)">
     <h3>Release to production — explicit action</h3>
@@ -1367,7 +1367,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
     <button class="btn ghost" id="prundo" onclick="prUndo()" disabled>⟲ Undo</button>
     <button class="btn ghost" id="prredo" onclick="prRedo()" disabled>⟳ Redo</button>
   </div>
-  <div class="pr-note"><b>Hot Part</b> is a label on top of <span class="mono">priority_rank</span> — it never replaces it. Allocation &amp; work ordering: ① Hot rank ② earliest due date ③ largest remaining shortage (deterministic tie-breaker last, §17).</div>
+  <div class="pr-note"><b>Hot Part</b> is a label on top of <span class="mono">priority_rank</span> — it never replaces it. Allocation &amp; work ordering: ① Hot rank ② earliest due date — a stable deterministic tie-breaker is an implementation detail, not a business rule (§18).</div>
 </section>
 
 <!-- add-to-hot dialog: search & select, or scan PN barcode -->
@@ -1383,7 +1383,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   </div>
 </div>
 
-<!-- remove-from-hot confirmation — §20 Priority: confirm before removal -->
+<!-- remove-from-hot confirmation — §21 Priority: confirm before removal -->
 <div class="overlay" id="hotremovl">
   <div class="dlg light">
     <h3>Remove from Hot list?</h3>
@@ -1472,7 +1472,7 @@ function toast(ic,msg){
 }
 
 /* ================= Scan Station ================= */
-let machineSession=null;      // sticky session (§18) — held until changed/cleared/expired
+let machineSession=null;      // sticky session (§19) — held until changed/cleared/expired
 let pendingPN=null;           // PN waiting for qty or Machine
 let offline=false, scans=0;   // no local write queue exists — writes are blocked while disconnected
 const undoStack=[];
@@ -1482,7 +1482,7 @@ function focusScan(){ setTimeout(()=>input.focus(),50); }  // §3: input regains
 focusScan();
 function fill(el){ input.value=el.textContent.trim(); focusScan(); }
 
-/* manual PN entry — separate explicit fallback flow (§9); never pre-fills the barcode input */
+/* manual PN entry — separate explicit fallback flow (§10); never pre-fills the barcode input */
 function manualEntry(){
   document.getElementById('mpninput').value='';
   document.getElementById('manovl').classList.add('show');
@@ -1542,9 +1542,9 @@ function doScan(){
   if(v.startsWith('PF:MACHINE:')){
     const m = v.endsWith('L1')?'Lathe 1':v.endsWith('L2')?'Lathe 2':v.endsWith('L3')?'Lathe 3':v.endsWith('L4')?'Lathe 4':null;
     if(!m){ feedback('err','Unknown Machine barcode','Rejected — no production data was updated.','✕'); return; }
-    if(m==='Lathe 4'){ feedback('err','Lathe 4 is inactive (maintenance)','Inactive entities must not accept production updates (§9).','✕'); return; }
+    if(m==='Lathe 4'){ feedback('err','Lathe 4 is inactive (maintenance)','Inactive entities must not accept production updates (§10).','✕'); return; }
     setMachineSession(m);
-    if(pendingPN){                            // order-free: PN then Machine (§11/§14)
+    if(pendingPN){                            // order-free: PN then Machine (§12/§15)
       const p=pendingPN; pendingPN=null; setPending(null);
       recordMovement(p.pn,'ASSIGNED_TO_MACHINE','Lathe queue → '+m+' · qty '+p.qty);
       feedback('ok','Assigned to '+m,p.pn+' × '+p.qty+' — ASSIGNED_TO_MACHINE recorded. Machine session active.','✓');
@@ -1568,16 +1568,16 @@ function doScan(){
     openQty('PF-SHAFT-014',8);
     return;
   }
-  if(v==='PF:PN:1001'){                       // multiple contexts → never guess (§9)
+  if(v==='PF:PN:1001'){                       // multiple contexts → never guess (§10)
     setLastPN('PF-BRACKET-001','Mounting bracket · multiple valid contexts');
     document.getElementById('ambovl').classList.add('show');
     return;
   }
   if(v.startsWith('PF:PN:')){
-    feedback('err','Unknown PN barcode','Rejected — unknown or ambiguous input never updates tracking data (§6.8).','✕');
+    feedback('err','Unknown PN barcode','Rejected — unknown or invalid scans never update tracking data (§6.8).','✕');
     return;
   }
-  feedback('err','Unrecognized barcode','Not a PartFlow barcode. Raw ERP text is not auto-accepted — use manual entry if needed (§9).','✕');
+  feedback('err','Unrecognized barcode','Not a PartFlow barcode. Raw ERP text is not auto-accepted — use manual entry if needed (§10).','✕');
 }
 
 function blockedFeedback(){
@@ -1611,7 +1611,7 @@ function confirmQty(){
   if(!q){ return; }
   if(q>c.avail){
     document.getElementById('qtyovl').classList.remove('show');
-    feedback('err','Quantity exceeds available source quantity','Requested '+q+' > available '+c.avail+' at Material. Movement rejected (§10 Quantity Integrity).','✕');
+    feedback('err','Quantity exceeds available source quantity','Requested '+q+' > available '+c.avail+' at Material. Movement rejected (§11 Quantity Integrity).','✕');
     focusScan(); return;
   }
   document.getElementById('qtyovl').classList.remove('show');
@@ -1624,7 +1624,7 @@ function confirmQty(){
     if(!recordMovement(c.pn,'TRANSFERRED','Material → Lathe queue · qty '+q)){ focusScan(); return; }
     pendingPN={pn:c.pn,qty:q};
     setPending('Pending context: '+c.pn+' × '+q+' received into Lathe queue — scan a Machine barcode to assign, or continue scanning.');
-    feedback('ok', c.pn+' × '+q+' → Lathe queue', 'Received into Area queue. Scan a Machine to assign — either order works (§11).', '✓');
+    feedback('ok', c.pn+' × '+q+' → Lathe queue', 'Received into Area queue. Scan a Machine to assign — either order works (§12).', '✓');
   }
   focusScan();
 }
@@ -1644,7 +1644,7 @@ function ambPick(k){
   focusScan();
 }
 
-/* ----- REWORK / MODIFY intake confirmation (§13) — nothing recorded until confirmed ----- */
+/* ----- REWORK / MODIFY intake confirmation (§14) — nothing recorded until confirmed ----- */
 let intakeType=null;
 function openIntake(t){
   intakeType=t;
@@ -1675,7 +1675,7 @@ function confirmIntake(){
   focusScan();
 }
 
-/* ----- undo (§15): compensating REVERSED movement, original preserved ----- */
+/* ----- undo (§16): compensating REVERSED movement, original preserved ----- */
 function undoLast(){
   if(!undoStack.length) return;
   const last=undoStack.pop();
@@ -1704,7 +1704,7 @@ function toggleOffline(){
   }
 }
 
-/* ----- Stockroom allocation demo (§17) ----- */
+/* ----- Stockroom allocation demo (§18) ----- */
 const allocReq=[12,8]; let alloc=[12,8];
 function openAlloc(){
   // the STOCKED PartMovement is recorded first; the allocation dialog follows (GUI §11)
@@ -1800,7 +1800,7 @@ function selectPN(row,pn){
 
 /* ================= Priority Management =================
    Hot list edits (reorder / add / remove) apply immediately and are audited.
-   Undo/Redo replace Save/Cancel per current UI decision — supersedes §20 step 5. */
+   Undo/Redo replace Save/Cancel per current UI decision — supersedes §21 step 5. */
 let hotList=[
   {pn:'PF-BRACKET-001',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
   {pn:'PF-PLATE-007',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
@@ -1845,7 +1845,7 @@ function prRedo(){
   hotList=JSON.parse(redoHist.pop()); renderHot();
   toast('⟳','Redo — change re-applied (audited)');
 }
-/* removal requires explicit confirmation identifying PN and PO Demand (§20 Priority) */
+/* removal requires explicit confirmation identifying PN and PO Demand (§21 Priority) */
 let hotRemoveIdx=null;
 function removeHot(i){
   hotRemoveIdx=i;
@@ -1918,13 +1918,13 @@ function hotSearchKey(e){
 function addHot(pn){
   const c=hotCandidates().find(x=>x.pn===pn); if(!c) return;
   prSnapshot();
-  const {code,...item}=c; hotList.push(item);   // new Hot entries join at the bottom (§20)
+  const {code,...item}=c; hotList.push(item);   // new Hot entries join at the bottom (§21)
   renderHot(); closeHotAdd();
   toast('🔥',c.pn+' · '+c.po.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
 }
 renderHot();
 
-/* ================= PO Intake (§12) — demand save vs explicit release ================= */
+/* ================= PO Intake (§13) — demand save vs explicit release ================= */
 const REL_DATA={
   'PF-SHAFT-014':{req:12,route:['Shaft std v2','Shaft short v1'],active:'Material 8 · Lathe 2 × 4',line:'line1',qf:'QF-0161'},
   'PF-GEAR-201' :{req:8, route:['Gear std v1'],                  active:null,                      line:'line2',qf:'QF-0162'}

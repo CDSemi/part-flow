@@ -939,7 +939,7 @@ No production write may occur until ambiguity is resolved.
 
 ---
 
-# 10. Quantity Model
+# 11. Quantity Model
 
 Quantity always represents physical parts.
 
@@ -1032,7 +1032,7 @@ History must never be silently rewritten.
 
 ---
 
-# 11. Processing Ownership Rules
+# 12. Processing Ownership Rules
 
 ## Area Without Machines
 
@@ -1091,7 +1091,7 @@ The Machine remains the current executor until the quantity is:
 
 ---
 
-# 12. Purchase Order Intake
+# 13. Purchase Order Intake
 
 POs may enter PartFlow through:
 
@@ -1129,7 +1129,7 @@ Purchase Order and PO Demand represent business demand; creating or editing PO D
 
 ---
 
-# 13. Rework and Modify Intake
+# 14. Rework and Modify Intake
 
 Rework and Modify represent why additional production work exists.
 
@@ -1163,7 +1163,7 @@ The system must never infer this from PN identity alone.
 
 ---
 
-# 14. Core Scan Workflow
+# 15. Core Scan Workflow
 
 The normal workflow is keyboard- and scanner-first.
 
@@ -1210,7 +1210,7 @@ ScanSession remains temporary context. Neither Scan Station configuration nor Sc
 
 ---
 
-# 15. Undo and Correction
+# 16. Undo and Correction
 
 Undo exists to correct recent scanning mistakes.
 
@@ -1232,7 +1232,7 @@ All corrections must remain auditable.
 
 ---
 
-# 16. Production Routing
+# 17. Production Routing
 
 A Route describes the expected manufacturing path of a Quantity Flow.
 
@@ -1319,7 +1319,7 @@ Expected duration is advisory and must never block production.
 
 ---
 
-# 17. Stockroom and Completion Allocation
+# 18. Stockroom and Completion Allocation
 
 Stockroom is the normal terminal Area.
 
@@ -1388,7 +1388,7 @@ When complete:
 
 ---
 
-# 18. Worker and Machine Sessions
+# 19. Worker and Machine Sessions
 
 Worker identification is configurable per Area.
 
@@ -1416,7 +1416,7 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 ---
 
-# 19. Roles and Permissions
+# 20. Roles and Permissions
 
 PartFlow uses role-based authorization.
 
@@ -1478,7 +1478,7 @@ Operators must never directly rewrite historical data.
 
 ---
 
-# 20. Application Views
+# 21. Application Views
 
 ## Scan Station
 
@@ -1693,7 +1693,7 @@ Administrative workflows must remain separate from normal production scanning.
 
 ---
 
-# 21. Department Scope
+# 22. Department Scope
 
 The initial deployment targets Machine Shop.
 
@@ -1723,7 +1723,7 @@ Department configuration may define:
 
 ---
 
-# 22. ERP Boundary
+# 23. ERP Boundary
 
 ERP owns business planning and source master data.
 
@@ -1742,7 +1742,7 @@ Rules:
 
 ---
 
-# 23. Application Architecture
+# 24. Application Architecture
 
 Preferred stack:
 
@@ -1777,7 +1777,7 @@ Rules:
 
 ---
 
-# 24. Transaction Requirements
+# 25. Transaction Requirements
 
 Every production write must be atomic.
 
@@ -1801,7 +1801,7 @@ The system must never partially record a production Movement.
 
 ---
 
-# 25. Logging
+# 26. Logging
 
 Logs must answer:
 
@@ -1823,7 +1823,7 @@ Do not expose raw internal exceptions to operators.
 
 ---
 
-# 26. Reporting
+# 27. Reporting
 
 The system should support:
 
@@ -1854,7 +1854,7 @@ Reports must distinguish:
 
 ---
 
-# 27. Audit and Data Integrity
+# 28. Audit and Data Integrity
 
 The system must preserve a complete audit trail for:
 
@@ -1889,7 +1889,7 @@ Database constraints should enforce, whenever practical:
 
 ---
 
-# 28. Initial Scope
+# 29. Initial Scope
 
 The initial release should support:
 
@@ -1926,7 +1926,7 @@ ERP synchronization may be added later without replacing the core model.
 
 ---
 
-# 29. Future Scope
+# 30. Future Scope
 
 The following are outside the confirmed initial scope unless separately approved:
 
@@ -1948,7 +1948,7 @@ Future features must extend the existing PN, quantity, Movement, Route, and Allo
 
 ---
 
-# 30. Explicit Non-Goals
+# 31. Explicit Non-Goals
 
 PartFlow must not become:
 
@@ -1965,7 +1965,7 @@ Do not introduce these responsibilities without an explicit project decision.
 
 ---
 
-# 31. Remaining Open Decisions
+# 32. Remaining Open Decisions
 
 Only the following unresolved decisions remain:
 
@@ -1978,7 +1978,7 @@ Implementations must avoid assumptions that make these decisions difficult to ch
 
 ---
 
-# 32. Guiding Principles
+# 33. Guiding Principles
 
 Every future feature must reinforce these principles:
 
