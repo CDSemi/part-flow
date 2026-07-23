@@ -1,0 +1,1981 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PartFlow — GUI Mockup v3 · PROJECT_PROFILE v5</title>
+<!-- Mockup file: selectors are toggled dynamically from JS and font tokens carry
+     their generic fallbacks inside var() definitions — suppress false positives. -->
+<!--suppress CssUnusedSymbol, CssNoGenericFontName -->
+<style>
+/* ================================================================
+   PartFlow GUI Mockup v3 — aligned to PROJECT_PROFILE v5
+   Two visual contexts, one token set:
+   dark = shop floor (Scan Station, Production Board)
+   light = management (Management view with sub views: Area Board,
+   Manager Summary, Tracking, PO Intake, Priority — and Administration)
+   ================================================================ */
+:root{
+  /* Dark (shop floor) */
+  --d-bg:#0a0e14; --d-bg2:#070a0f; --d-panel:#121926; --d-panel2:#1a2434;
+  --d-border:#243247; --d-border2:#2e405c;
+  --d-text:#eaf1fa; --d-muted:#93a5bc; --d-faint:#5a6b82;
+  /* Light (management) */
+  --l-bg:#f3f5fa; --l-panel:#ffffff; --l-panel2:#f7f9fc; --l-border:#e2e8f2;
+  --l-text:#141e2b; --l-muted:#5f7188; --l-faint:#94a3b8;
+  /* Status — semantic only, never decorative */
+  --ok:#31d287; --warn:#ffb224; --err:#ff6166; --info:#4f8cff;
+  --ok-d:#158f56; --warn-d:#a8721a; --err-d:#c43a41; --info-d:#2563eb;
+  /* Area identity colors — stable across ALL views */
+  --a-material:#8b93a8; --a-cut:#f5b83d; --a-lathe:#3da5ff; --a-mill:#9b6ef3;
+  --a-manual:#e06fae; --a-deburr:#2fbf9b; --a-external:#ff8a4c; --a-stockroom:#2fca7c;
+  --radius:14px; --radius-sm:9px;
+  --font:system-ui,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --mono:'Cascadia Code','Consolas','SF Mono',Menlo,monospace;
+  --shadow:0 8px 28px rgba(3,8,18,.42);
+  --lshadow:0 1px 2px rgba(20,30,43,.05),0 6px 22px rgba(20,30,43,.06);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--d-bg);color:var(--d-text);font-size:16px;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select{font-family:inherit}
+.mono{font-family:var(--mono)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#2c3a50;border-radius:8px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ============ App chrome (mockup navigation) ============ */
+#appnav{display:flex;align-items:center;gap:4px;background:rgba(7,10,15,.92);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--d-border);padding:10px 16px;position:sticky;top:0;z-index:100}
+#appnav .logo{font-weight:800;font-size:19px;letter-spacing:.4px;margin-right:10px;display:flex;align-items:center;gap:8px}
+#appnav .logo .mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--info),#7c5cff);
+  display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;color:#fff}
+#appnav .logo span.pf{color:var(--info)}
+#appnav button.navbtn{padding:8px 14px;border-radius:10px;color:var(--d-muted);font-size:13.5px;font-weight:650}
+#appnav button.navbtn:hover{background:var(--d-panel2);color:var(--d-text)}
+#appnav button.navbtn.active{background:var(--info);color:#04121f;font-weight:800}
+#appnav .spacer{flex:1}
+#appnav .mock-tag{font-size:11px;color:var(--d-faint);border:1px solid var(--d-border);border-radius:8px;padding:4px 10px}
+#appnav .mock-tag b{color:var(--d-muted)}
+.view{display:none;min-height:calc(100vh - 53px)}
+.view.active{display:block}
+
+/* ============ Management sub-view navigation (light) ============ */
+#mgmtnav{display:none;align-items:center;gap:4px;background:var(--l-panel);border-bottom:1px solid var(--l-border);
+  padding:8px 16px;position:sticky;top:53px;z-index:99;box-shadow:0 1px 2px rgba(20,30,43,.04)}
+#mgmtnav.show{display:flex}
+#mgmtnav .subgrp{font-size:9.5px;font-weight:800;letter-spacing:1.6px;color:var(--l-faint);text-transform:uppercase;
+  margin-right:10px;padding-right:14px;border-right:1px solid var(--l-border)}
+#mgmtnav button.subbtn{padding:7px 13px;border-radius:9px;color:var(--l-muted);font-size:13px;font-weight:650}
+#mgmtnav button.subbtn:hover{background:var(--l-panel2);color:var(--l-text)}
+#mgmtnav button.subbtn.active{background:rgba(79,140,255,.12);color:var(--info-d);font-weight:800}
+
+/* ============ Shared ============ */
+.areachip{display:inline-flex;align-items:center;gap:6px;font-weight:650}
+.areachip .dot{width:10px;height:10px;border-radius:3.5px;flex:none}
+.qty{font-family:var(--mono);font-weight:700}
+.hot{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:800;border-radius:7px;padding:2px 8px;vertical-align:2px}
+.hot.h1{background:rgba(255,97,102,.18);color:var(--err)}
+.hot.h2{background:rgba(255,138,76,.18);color:var(--a-external)}
+.hot.h3{background:rgba(255,178,36,.16);color:var(--warn)}
+.typechip{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.5px;border-radius:6px;padding:2px 7px}
+.typechip.new{background:rgba(79,140,255,.15);color:var(--info)}
+.typechip.rework{background:rgba(255,138,76,.16);color:var(--a-external)}
+.typechip.modify{background:rgba(155,110,243,.16);color:var(--a-mill)}
+#toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(80px);background:#101825;color:var(--d-text);
+  border:1px solid var(--d-border2);border-radius:12px;padding:12px 20px;font-size:14px;font-weight:650;z-index:400;
+  box-shadow:var(--shadow);transition:transform .25s;pointer-events:none;max-width:90vw}
+#toast.show{transform:translateX(-50%) translateY(0)}
+#toast .tic{margin-right:8px}
+
+/* ============ SCAN STATION ============ */
+#view-scan{background:radial-gradient(1200px 500px at 60% -10%,#101a2c 0%,var(--d-bg) 55%);display:none;flex-direction:column}
+#view-scan.active{display:flex}
+.ss-head{display:flex;align-items:center;gap:14px;padding:14px 22px;background:rgba(18,25,38,.75);border-bottom:1px solid var(--d-border)}
+.ss-head .loc .dept{font-size:11px;color:var(--d-muted);text-transform:uppercase;letter-spacing:1.6px;font-weight:700}
+.ss-head .loc .area{font-size:28px;font-weight:800;display:flex;align-items:center;gap:10px;line-height:1.15}
+.ss-head .loc .area .dot{width:16px;height:16px;border-radius:5px;background:var(--a-lathe);box-shadow:0 0 14px rgba(61,165,255,.55)}
+.ss-head .loc .op{font-size:13px;color:var(--d-muted);margin-top:2px}
+.ss-head .loc .op b{color:var(--d-text);font-weight:650}
+.ss-head .spacer{flex:1}
+.ss-pill{display:flex;flex-direction:column;gap:3px;background:var(--d-panel2);border:1px solid var(--d-border);
+  border-radius:12px;padding:9px 14px;min-width:150px}
+.ss-pill .lbl{font-size:10px;color:var(--d-muted);text-transform:uppercase;letter-spacing:1px;font-weight:750}
+.ss-pill .val{font-size:16px;font-weight:750;display:flex;align-items:center;gap:7px}
+.ss-pill .val .sdot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.ss-pill .val.none{color:var(--d-faint);font-weight:450}
+.ss-pill .sub{font-size:10.5px;color:var(--d-faint)}
+#conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--d-border);background:var(--d-panel2)}
+#conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
+#conn.off .cdot{background:var(--err);box-shadow:0 0 10px var(--err)}
+#conn .ctxt{font-size:13px;font-weight:800;letter-spacing:.5px}
+#offbanner{display:none;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err);
+  padding:9px 22px;font-size:14px;font-weight:650}
+#offbanner.show{display:block}
+#scaninput:disabled{opacity:.45;cursor:not-allowed}
+#scanbtn:disabled{opacity:.45;cursor:not-allowed}
+
+.ss-body{flex:1;display:grid;grid-template-columns:1fr 400px;gap:16px;padding:16px 22px}
+.ss-main{display:flex;flex-direction:column;gap:16px;min-width:0}
+.panel{background:var(--d-panel);border:1px solid var(--d-border);border-radius:var(--radius);box-shadow:0 1px 0 rgba(255,255,255,.03) inset}
+.panel .ph{display:flex;align-items:center;gap:8px;padding:11px 18px;border-bottom:1px solid var(--d-border);
+  font-size:11px;font-weight:800;color:var(--d-muted);text-transform:uppercase;letter-spacing:1.4px}
+.panel .ph .spacer{flex:1}
+.panel .ph .note{text-transform:none;letter-spacing:0;font-weight:450;font-size:12px;color:var(--d-faint)}
+
+/* Machine session strip — sticky session per PROJECT_PROFILE §18 */
+#machines{display:flex;gap:10px;padding:14px 18px;flex-wrap:wrap}
+.mtile{min-height:60px;min-width:118px;border-radius:12px;border:2px solid var(--d-border);background:var(--d-panel2);
+  font-size:17px;font-weight:750;color:var(--d-muted);padding:9px 18px;text-align:center;cursor:default;transition:border-color .15s}
+.mtile.session{border-color:var(--info);background:rgba(79,140,255,.13);color:var(--info);box-shadow:0 0 0 3px rgba(79,140,255,.12)}
+.mtile .sub{display:block;font-size:11px;font-weight:600;color:var(--d-faint);margin-top:2px}
+.mtile.session .sub{color:var(--info)}
+.mtile.maint{opacity:.45}
+
+/* Pending scan context — §20 "visible pending scan context" */
+#pending{display:none;margin:0 18px 14px;padding:13px 16px;border-radius:12px;border:1px solid rgba(255,178,36,.5);
+  background:rgba(255,178,36,.09);color:var(--warn);font-size:15.5px;font-weight:750}
+#pending.show{display:flex;align-items:center;gap:12px}
+#pending .pulse{width:12px;height:12px;border-radius:50%;background:var(--warn);animation:pulse 1s infinite;flex:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* Scan input */
+#scanwrap{padding:20px 18px 14px}
+#scanrow{display:flex;gap:12px}
+#scaninput{flex:1;background:var(--d-bg2);border:2px solid var(--d-border2);border-radius:12px;color:var(--d-text);
+  font-size:27px;font-family:var(--mono);padding:17px 20px;outline:none;transition:border-color .15s, box-shadow .15s}
+#scaninput:focus{border-color:var(--info);box-shadow:0 0 0 4px rgba(79,140,255,.16)}
+#scaninput::placeholder{color:var(--d-faint);font-family:var(--font);font-size:20px}
+#scanbtn{min-width:112px;border-radius:12px;background:var(--info);color:#04121f;font-size:18px;font-weight:800}
+#scanbtn:hover{filter:brightness(1.08)}
+#scanhint{margin-top:11px;font-size:12.5px;color:var(--d-faint);line-height:1.7}
+#scanhint b{color:var(--d-muted);font-family:var(--mono);font-weight:600;background:var(--d-panel2);border-radius:5px;padding:1px 6px;cursor:pointer}
+#scanhint b:hover{color:var(--info)}
+#manualentry{margin-top:8px;font-size:12.5px;color:var(--d-faint)}
+#manualentry a{color:var(--info);text-decoration:none;font-weight:650;cursor:pointer}
+
+/* Last scanned PN — §20 "visible last scanned PN" */
+#lastpn{display:flex;align-items:center;gap:14px;margin:0 18px 16px;padding:10px 16px;border-radius:12px;background:var(--d-panel2);border:1px solid var(--d-border)}
+#lastpn .l{font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--d-faint);flex:none}
+#lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800}
+#lastpn .d{font-size:12.5px;color:var(--d-muted)}
+
+/* Feedback — tri-state */
+#feedback{min-height:92px;border-radius:12px;border:1px dashed var(--d-border2);display:flex;align-items:center;gap:16px;padding:15px 18px;margin:0 18px 18px}
+#feedback .fic{width:48px;height:48px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;flex:none}
+#feedback.idle{color:var(--d-faint)}
+#feedback.ok{border:1px solid rgba(49,210,135,.5);background:rgba(49,210,135,.09)}
+#feedback.ok .fic{background:var(--ok);color:#04160c}
+#feedback.warn{border:1px solid rgba(255,178,36,.5);background:rgba(255,178,36,.09)}
+#feedback.warn .fic{background:var(--warn);color:#1d1503}
+#feedback.err{border:1px solid rgba(255,97,102,.55);background:rgba(255,97,102,.09)}
+#feedback.err .fic{background:var(--err);color:#210606}
+#feedback .ft .t1{font-size:19px;font-weight:800}
+#feedback .ft .t2{font-size:13.5px;color:var(--d-muted);margin-top:3px}
+
+/* Overlays */
+.overlay{display:none;position:fixed;inset:0;background:rgba(4,7,12,.78);z-index:200;align-items:center;justify-content:center}
+.overlay.show{display:flex}
+.dlg{background:var(--d-panel);border:1px solid var(--d-border2);border-radius:18px;width:min(580px,94vw);padding:24px;box-shadow:var(--shadow)}
+.dlg h3{font-size:12px;color:var(--d-muted);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:8px;font-weight:800}
+.dlg .big{font-size:25px;font-weight:800;margin-bottom:4px}
+.dlg .sub{font-size:14px;color:var(--d-muted);margin-bottom:16px;line-height:1.5}
+.dlg .sub b{color:var(--d-text)}
+#qtydisplay{font-family:var(--mono);font-size:46px;font-weight:800;text-align:right;background:var(--d-bg2);
+  border:2px solid var(--d-border2);border-radius:12px;padding:10px 18px;margin-bottom:14px;min-height:76px}
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.keypad button{height:62px;border-radius:12px;background:var(--d-panel2);border:1px solid var(--d-border);font-size:24px;font-weight:700}
+.keypad button:hover{background:#26344b}
+.keypad button.act{background:rgba(79,140,255,.14);color:var(--info);font-size:15px;font-weight:800}
+.dlg .row{display:flex;gap:10px;margin-top:18px}
+.bigbtn{flex:1;height:58px;border-radius:12px;font-size:18px;font-weight:800}
+.bigbtn.primary{background:var(--ok);color:#04160c}
+.bigbtn.primary:disabled{opacity:.35;cursor:not-allowed}
+.bigbtn.ghost{background:var(--d-panel2);border:1px solid var(--d-border);color:var(--d-muted)}
+.choice{display:flex;align-items:center;gap:14px;width:100%;text-align:left;border:2px solid var(--d-border);
+  background:var(--d-panel2);border-radius:12px;padding:14px 16px;margin-bottom:10px;min-height:66px;transition:border-color .12s}
+.choice:hover{border-color:var(--info)}
+.choice .cic{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex:none}
+.choice .cic.run{background:rgba(49,210,135,.15);color:var(--ok)}
+.choice .cic.que{background:rgba(255,178,36,.15);color:var(--warn)}
+.choice .cic.new{background:rgba(79,140,255,.15);color:var(--info)}
+.choice .cic.rwk{background:rgba(255,138,76,.15);color:var(--a-external)}
+.choice .cic.mod{background:rgba(155,110,243,.15);color:var(--a-mill)}
+.choice .ct1{font-size:16.5px;font-weight:750}
+.choice .ct2{font-size:13px;color:var(--d-muted);margin-top:3px}
+
+/* Allocation dialog (Stockroom) */
+.alloc-row{display:grid;grid-template-columns:1fr auto auto;gap:8px 14px;align-items:center;border:1px solid var(--d-border);
+  background:var(--d-panel2);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.alloc-row .po{font-family:var(--mono);font-size:16px;font-weight:800}
+.alloc-row .meta{font-size:12px;color:var(--d-muted);margin-top:3px;line-height:1.55}
+.alloc-row .meta b{color:var(--d-text);font-family:var(--mono)}
+.stepper{display:flex;align-items:center;gap:0;border:1px solid var(--d-border2);border-radius:10px;overflow:hidden}
+.stepper button{width:42px;height:44px;font-size:20px;font-weight:800;background:var(--d-panel);color:var(--d-muted)}
+.stepper button:hover{color:var(--info)}
+.stepper .sv{width:52px;text-align:center;font-family:var(--mono);font-size:19px;font-weight:800}
+#alloc-sum{display:flex;justify-content:space-between;font-size:14px;color:var(--d-muted);padding:10px 4px 0;font-weight:650}
+#alloc-sum b{font-family:var(--mono);font-size:16px}
+#alloc-sum b.bad{color:var(--err)}
+#alloc-sum b.good{color:var(--ok)}
+
+/* Right column */
+.ss-side{display:flex;flex-direction:column;gap:16px;min-width:0}
+#undo{width:100%;min-height:56px;border-radius:12px;border:1px solid rgba(255,97,102,.45);background:rgba(255,97,102,.07);
+  color:var(--err);font-size:16px;font-weight:800;letter-spacing:.3px}
+#undo:hover{background:rgba(255,97,102,.13)}
+#undo:disabled{opacity:.3;cursor:not-allowed}
+.scanlist{list-style:none;max-height:280px;overflow:auto}
+.scanlist li{display:flex;align-items:center;gap:10px;padding:10px 18px;border-bottom:1px solid var(--d-border);font-size:14px}
+.scanlist li:last-child{border-bottom:none}
+.scanlist .sic{width:8px;height:8px;border-radius:50%;flex:none}
+.scanlist .sic.ok{background:var(--ok)}
+.scanlist .sic.undo{background:var(--err)}
+.scanlist .what{flex:1;min-width:0}
+.scanlist .what .p{font-weight:750;font-family:var(--mono);font-size:13.5px}
+.scanlist .what .d{color:var(--d-muted);font-size:12px;margin-top:1px}
+.scanlist .when{color:var(--d-faint);font-size:12px;flex:none}
+/* In this Area now — queued vs assigned separated (§20) */
+.invgrp{padding:9px 18px 4px;font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--d-faint)}
+.invlist{list-style:none}
+.invlist li{display:flex;align-items:center;padding:10px 18px;border-bottom:1px solid var(--d-border)}
+.invlist li:last-child{border-bottom:none}
+.invlist .p{font-family:var(--mono);font-weight:750;font-size:14.5px;flex:1}
+.invlist .m{color:var(--d-muted);font-size:12.5px;margin-right:14px}
+.invlist .q{font-family:var(--mono);font-size:18px;font-weight:800;color:var(--info)}
+.invtotal{display:flex;align-items:center;padding:11px 18px;background:var(--d-panel2);border-top:1px solid var(--d-border);
+  border-radius:0 0 var(--radius) var(--radius);font-size:12px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--d-muted)}
+.invtotal .q{margin-left:auto;font-family:var(--mono);font-size:19px;color:var(--d-text)}
+/* ============ PRODUCTION BOARD ============ */
+#view-board{background:var(--d-bg2);padding:0}
+.pb-head{display:flex;align-items:baseline;gap:18px;padding:20px 30px 10px}
+.pb-head h1{font-size:30px;font-weight:800;letter-spacing:.4px}
+.pb-head .live{display:inline-flex;align-items:center;gap:7px;color:var(--d-muted);font-size:14px;font-weight:650}
+.pb-head .live .ld{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+.pb-head .spacer{flex:1}
+.pb-head .clock{font-family:var(--mono);font-size:27px;font-weight:750;color:var(--d-muted)}
+.pb-table{width:100%;border-collapse:collapse}
+.pb-table th{font-size:12.5px;text-transform:uppercase;letter-spacing:1.3px;color:var(--d-faint);text-align:left;
+  padding:12px 18px;border-bottom:2px solid var(--d-border);position:sticky;top:53px;background:var(--d-bg2);z-index:5}
+.pb-table td{padding:17px 18px;border-bottom:1px solid #16202e;vertical-align:top}
+.pb-table .no{font-family:var(--mono);font-size:17px;color:var(--d-faint);font-weight:650}
+.pb-table .part{font-family:var(--mono);font-size:22px;font-weight:800;white-space:nowrap}
+.pb-table .pname{font-size:13px;color:var(--d-muted);margin-top:3px;font-family:var(--font);font-weight:400}
+.pb-table .loc{display:flex;flex-direction:column;gap:6px}
+.pb-table .locrow{display:flex;align-items:center;gap:8px;font-size:16.5px}
+.pb-table .locrow .dot{width:11px;height:11px;border-radius:3.5px;flex:none}
+.pb-table .locrow .q{font-family:var(--mono);font-weight:800;margin-left:2px}
+.pb-table .locrow .qtag{font-size:11px;color:var(--d-faint);font-weight:650}
+.pb-table .locrow .ltime{margin-left:auto;font-family:var(--mono);font-size:13px;color:var(--d-faint);font-weight:600;padding-left:12px}
+.pb-table .locrow .ltime.long{color:var(--warn);font-weight:750}
+.pb-table .totline{margin-top:4px;padding-top:6px;border-top:1px dashed var(--d-border);font-family:var(--mono);font-size:14px;color:var(--d-muted)}
+.pb-table .totline b{font-size:18px;color:var(--info)}
+.pb-table .jobs .j{font-family:var(--mono);font-size:15px;font-weight:650}
+.pb-table .jobs .j .jm{color:var(--d-muted);font-weight:400;font-size:13px}
+.pb-table .due .d1{font-size:18px;font-weight:750}
+.pb-table .due .d2{font-size:13.5px;margin-top:3px;font-weight:750}
+.pb-table .due .d2.ok{color:var(--d-muted);font-weight:450}
+.pb-table .due .d2.soon{color:var(--warn)}
+.pb-table .due .d2.late{color:var(--err)}
+.pb-table .dtotal{font-family:var(--mono);font-size:17px;color:var(--d-muted);font-weight:650}
+tr.hotrow1 td{background:rgba(255,70,70,.09)}
+tr.hotrow1 td:first-child{border-left:5px solid var(--err)}
+tr.hotrow2 td{background:rgba(255,138,76,.06)}
+tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
+@keyframes blinkdue{0%,58%{opacity:1}59%,100%{opacity:.18}}
+.pb-table .part.blink{animation:blinkdue 1.1s step-end infinite}
+.pb-foot{display:flex;align-items:center;gap:12px;padding:15px 30px;color:var(--d-faint);font-size:13.5px}
+.pb-foot .pgdot{width:9px;height:9px;border-radius:50%;background:var(--d-border)}
+.pb-foot .pgdot.on{background:var(--info)}
+.pb-foot .spacer{flex:1}
+
+/* ============ AREA BOARD (light — Management sub view) ============ */
+#view-area{background:var(--l-bg);color:var(--l-text);padding:20px 26px}
+.ab-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.ab-tab{display:flex;align-items:center;gap:8px;padding:10px 17px;border-radius:11px;border:1px solid var(--l-border);
+  background:var(--l-panel);font-size:15px;font-weight:700;color:var(--l-muted)}
+.ab-tab .dot{width:10px;height:10px;border-radius:3.5px}
+.ab-tab .cnt{font-family:var(--mono);font-size:12px;background:var(--l-panel2);border:1px solid var(--l-border);border-radius:12px;padding:1px 8px}
+.ab-tab.active{color:var(--info-d);background:rgba(79,140,255,.10);border-color:var(--info)}
+.ab-tools{display:flex;gap:10px;margin-bottom:16px;align-items:center}
+.ab-tools input{flex:1;max-width:380px;background:var(--l-panel);border:1px solid var(--l-border);border-radius:11px;
+  color:var(--l-text);font-size:15px;padding:11px 15px;outline:none}
+.ab-tools input:focus{border-color:var(--info)}
+.ab-tools select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:11px;color:var(--l-muted);font-size:14px;padding:11px 12px}
+.ab-meta{margin-left:auto;font-size:13px;color:var(--l-faint)}
+.ab-meta b{color:var(--l-muted)}
+.ab-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:15px}
+.ab-card{background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);padding:17px;
+  box-shadow:var(--lshadow);transition:border-color .12s}
+.ab-card:hover{border-color:#c9d4e4}
+.ab-card .top{display:flex;align-items:flex-start;gap:10px}
+.ab-card .part{font-family:var(--mono);font-size:19px;font-weight:800;flex:1;line-height:1.3}
+.ab-card .qtyblk{text-align:right;flex:none;border-left:1px solid var(--l-border);padding-left:15px;min-width:92px}
+.ab-card .qlbl{font-size:9.5px;font-weight:800;color:var(--l-faint);text-transform:uppercase;letter-spacing:1.1px}
+.ab-card .qty-big{font-family:var(--mono);font-size:32px;font-weight:800;color:var(--info-d);line-height:1.1}
+.ab-card .qunit{font-size:11px;color:var(--l-muted)}
+.ab-card .po{font-family:var(--mono);font-size:13px;color:var(--l-muted);margin-top:3px}
+.ab-card .ext{font-family:var(--mono);font-size:12px;color:var(--l-faint);margin-top:2px}
+.ab-card .machines{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.ab-card .mrow{font-size:13px;background:var(--l-panel2);border:1px solid var(--l-border);border-radius:8px;padding:4px 10px;color:var(--l-muted)}
+.ab-card .mrow b{color:var(--l-text);font-family:var(--mono)}
+.ab-card .mrow.queue{border-style:dashed;color:var(--warn-d)}
+.ab-card .foot{display:flex;align-items:center;gap:10px;margin-top:13px;padding-top:12px;border-top:1px solid var(--l-border);font-size:13px}
+.ab-card .duetxt.ok{color:var(--l-muted)}
+.ab-card .duetxt.soon{color:var(--warn-d);font-weight:750}
+.ab-card .duetxt.late{color:var(--err-d);font-weight:800}
+.ab-card .tia{margin-left:auto;color:var(--l-faint);font-family:var(--mono);font-size:12.5px}
+
+/* ============ MANAGER SUMMARY (light — Management sub view) ============ */
+#view-summary{background:var(--l-bg);color:var(--l-text);padding:20px 26px}
+.ms-head{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+.ms-head h1{font-size:23px;font-weight:800}
+.ms-head .sub{color:var(--l-muted);font-size:14px}
+.ms-head .spacer{flex:1}
+.ms-head input{background:var(--l-panel);border:1px solid var(--l-border);border-radius:11px;color:var(--l-text);
+  font-size:14px;padding:10px 14px;outline:none;width:280px}
+.ms-head input:focus{border-color:var(--info)}
+.ms-head select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:11px;color:var(--l-muted);font-size:14px;padding:10px 12px}
+.ms-scroll{display:flex;gap:15px;overflow-x:auto;padding-bottom:14px;align-items:flex-start}
+.ms-col{flex:0 0 330px;background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--lshadow)}
+.ms-col .mc-head{padding:14px 16px;border-bottom:1px solid var(--l-border);border-top:4px solid var(--acol,#888)}
+.ms-col .mc-title{display:flex;align-items:center;gap:9px;font-size:18px;font-weight:800}
+.ms-col .mc-title .dot{width:12px;height:12px;border-radius:4px;background:var(--acol)}
+.ms-col .mc-desc{font-size:12px;color:var(--l-faint);margin-top:3px}
+.ms-col .mc-ops{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+.ms-col .opchip{font-size:11px;font-weight:700;color:var(--l-muted);background:var(--l-panel2);border:1px solid var(--l-border);border-radius:6px;padding:2px 8px}
+.ms-col .mc-stats{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid var(--l-border)}
+.ms-col .stat{padding:10px 8px;text-align:center;border-right:1px solid var(--l-border)}
+.ms-col .stat:last-child{border-right:none}
+.ms-col .stat .n{font-family:var(--mono);font-size:21px;font-weight:800}
+.ms-col .stat .n.q{color:var(--warn-d)}
+.ms-col .stat .n.m{color:var(--info-d)}
+.ms-col .stat .l{font-size:9.5px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--l-faint);margin-top:2px}
+.ms-col .mc-list{list-style:none}
+.ms-col .mc-list li{padding:11px 16px;border-bottom:1px solid #eef2f7}
+.ms-col .mc-list li:last-child{border-bottom:none}
+.ms-col .mc-list .r1{display:flex;align-items:center;gap:8px}
+.ms-col .mc-list .p{font-family:var(--mono);font-size:14.5px;font-weight:750;flex:1}
+.ms-col .mc-list .q{font-family:var(--mono);font-size:16px;font-weight:800;color:var(--info-d)}
+.ms-col .mc-list .r2{display:flex;gap:10px;font-size:12px;color:var(--l-muted);margin-top:3px;flex-wrap:wrap}
+.ms-col .mc-list .r2 .late{color:var(--err-d);font-weight:700}
+.ms-col .mc-list .r2 .soon{color:var(--warn-d);font-weight:700}
+.ms-col .mc-list .r2 .mono{font-size:11.5px}
+.ms-col .empty{padding:22px 16px;color:var(--l-faint);font-size:13px;text-align:center}
+
+/* ============ TRACKING (light) ============ */
+#view-track{background:var(--l-bg);color:var(--l-text)}
+.tk-wrap{display:grid;grid-template-columns:minmax(0,1fr) 520px;min-height:calc(100vh - 53px)}
+.tk-left{padding:22px 24px;min-width:0}
+.tk-left h1{font-size:21px;margin-bottom:14px}
+.tk-filters{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}
+.tk-filters input,.tk-filters select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:9px;
+  font-size:13.5px;padding:9px 12px;color:var(--l-text);outline:none}
+.tk-filters input{min-width:300px}
+.tk-filters input:focus,.tk-filters select:focus{border-color:var(--info)}
+.tk-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--l-panel);border:1px solid var(--l-border);
+  border-radius:var(--radius);overflow:hidden;box-shadow:var(--lshadow)}
+.tk-table th{font-size:11.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--l-muted);text-align:left;
+  padding:11px 14px;border-bottom:1px solid var(--l-border);background:var(--l-panel2)}
+.tk-table td{padding:12px 14px;border-bottom:1px solid #eef2f7;font-size:14px;vertical-align:top}
+.tk-table tr:last-child td{border-bottom:none}
+.tk-table tr.sel td{background:rgba(79,140,255,.07)}
+.tk-table tr:hover td{background:rgba(79,140,255,.04);cursor:pointer}
+.tk-table .part{font-family:var(--mono);font-weight:750}
+.tk-table .sub{font-size:12px;color:var(--l-muted);margin-top:2px}
+.tk-table .distmini{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.tk-table .distmini span{display:inline-flex;align-items:center;gap:6px}
+.tk-table .distmini .dot{width:8px;height:8px;border-radius:2.5px}
+.tk-table .distmini b{font-family:var(--mono)}
+.status{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;display:inline-block}
+.status.active{background:rgba(49,210,135,.13);color:var(--ok-d)}
+.status.queued{background:rgba(255,178,36,.15);color:var(--warn-d)}
+.status.stocked{background:rgba(79,140,255,.12);color:var(--info-d)}
+.status.done{background:#edf0f4;color:var(--l-muted)}
+.tk-right{background:var(--l-panel);border-left:1px solid var(--l-border);padding:22px;overflow:auto}
+.tk-pnrow{display:flex;gap:14px;align-items:flex-start}
+.tk-img{width:64px;height:64px;border-radius:12px;background:linear-gradient(135deg,#e8edf4,#d7dfeb);border:1px solid var(--l-border);
+  display:flex;align-items:center;justify-content:center;font-size:24px;flex:none}
+.tk-right h2{font-family:var(--mono);font-size:23px}
+.tk-right .jsub{color:var(--l-muted);font-size:13px;margin:3px 0 0;line-height:1.6}
+.tk-right .jsub b{font-family:var(--mono);color:var(--l-text);font-weight:650}
+.tk-sec{margin:20px 0}
+.tk-sec h4{font-size:11.5px;text-transform:uppercase;letter-spacing:1.1px;color:var(--l-muted);margin-bottom:9px;
+  border-bottom:1px solid var(--l-border);padding-bottom:6px;font-weight:800;display:flex;align-items:center;gap:8px}
+.tk-sec h4 .tag{font-size:10px;letter-spacing:.4px;text-transform:none;background:#eef2f7;border-radius:5px;padding:1px 7px;color:var(--l-faint);font-weight:700}
+.kv{display:grid;grid-template-columns:140px 1fr;gap:5px 10px;font-size:13.5px}
+.kv .k{color:var(--l-muted)}
+.kv .v{font-weight:650}
+.demand{width:100%;border-collapse:collapse;font-size:13px}
+.demand th{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--l-faint);text-align:left;padding:5px 8px;border-bottom:1px solid var(--l-border)}
+.demand td{padding:7px 8px;border-bottom:1px solid #f0f3f8}
+.demand .mono{font-weight:650}
+.demand .short{color:var(--err-d);font-weight:750}
+.demand .zero{color:var(--l-faint)}
+.dist{display:flex;flex-direction:column;gap:7px}
+.dist .drow{display:flex;align-items:center;gap:9px;font-size:13.5px}
+.dist .drow .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.dist .drow .nm{width:120px}
+.dist .drow .nm .sub{font-size:11px;color:var(--l-faint)}
+.dist .drow .bar{flex:1;height:16px;background:#eef1f6;border-radius:6px;overflow:hidden}
+.dist .drow .bar i{display:block;height:100%;border-radius:6px}
+.dist .drow .q{font-family:var(--mono);font-weight:750;width:28px;text-align:right}
+.qflow{border:1px solid var(--l-border);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:var(--l-panel2)}
+.qflow .qf-head{display:flex;align-items:center;gap:10px;font-size:13px;margin-bottom:9px}
+.qflow .qf-id{font-family:var(--mono);font-weight:800;font-size:13.5px}
+.qflow .qf-q{font-family:var(--mono);font-weight:750;color:var(--info-d)}
+.qflow .qf-pos{color:var(--l-muted);font-size:12.5px}
+.route{display:flex;align-items:center;flex-wrap:wrap;gap:4px;font-size:12.5px}
+.rstep{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;border:1px solid var(--l-border);background:#fff;font-weight:650;color:var(--l-muted)}
+.rstep.done{background:rgba(49,210,135,.11);border-color:rgba(49,210,135,.4);color:var(--ok-d)}
+.rstep.cur{background:rgba(79,140,255,.12);border-color:var(--info);color:var(--info-d);box-shadow:0 0 0 2px rgba(79,140,255,.12)}
+.rstep.queuedstep{background:rgba(255,178,36,.11);border-color:rgba(255,178,36,.45);color:var(--warn-d)}
+.rstep.dev{background:rgba(255,138,76,.12);border-color:rgba(255,138,76,.5);color:#c05a1e}
+.rarrow{color:#b8c2cf}
+.devnote{font-size:12px;color:#c05a1e;margin-top:7px;line-height:1.5}
+.mv{list-style:none;font-size:12.5px}
+.mv li{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed #e8edf3}
+.mv li:last-child{border-bottom:none}
+.mv .t{font-family:var(--mono);color:var(--l-muted);flex:none;width:112px}
+.mv .mtype{font-weight:800;width:118px;flex:none;font-size:10.5px;letter-spacing:.2px;padding-top:2px;overflow-wrap:anywhere;line-height:1.35}
+.mv .mtype.rec{color:var(--ok-d)}.mv .mtype.tra{color:var(--info-d)}.mv .mtype.asg{color:#7141d8}
+.mv .mtype.spl{color:#a8721a}.mv .mtype.stk{color:#157a63}.mv .mtype.rev{color:var(--err-d)}
+.mv .desc{flex:1;color:var(--l-text);line-height:1.5}
+.mv .desc .mono{font-size:12px}
+.tk-actions{display:flex;gap:8px;flex-wrap:wrap}
+.tk-actions button{border:1px solid var(--l-border);border-radius:9px;padding:8px 14px;font-size:13px;font-weight:700;color:var(--l-text);background:var(--l-panel2)}
+.tk-actions button:hover{border-color:var(--info);color:var(--info-d)}
+.prog{height:10px;background:#eef1f6;border-radius:6px;overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;background:var(--ok);border-radius:6px}
+.prognote{font-size:12px;color:var(--l-muted);margin-top:5px}
+
+/* ============ PRIORITY MANAGEMENT (light) ============ */
+#view-priority{background:var(--l-bg);color:var(--l-text);padding:24px 28px}
+.pr-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.pr-head h1{font-size:22px}
+.pr-head .spacer{flex:1}
+.pr-sub{color:var(--l-muted);font-size:13.5px;margin-bottom:18px;line-height:1.6;max-width:760px}
+.pr-list{max-width:860px;display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
+.pr-item{display:flex;align-items:center;gap:14px;background:var(--l-panel);border:1px solid var(--l-border);
+  border-radius:12px;padding:13px 16px;box-shadow:var(--lshadow);cursor:grab}
+.pr-item.dragging{opacity:.45;border-style:dashed}
+.pr-item .grip{color:var(--l-faint);font-size:17px;letter-spacing:-2px;cursor:grab}
+.pr-item .rank{width:44px;height:44px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-weight:900;font-size:17px;flex:none;background:#f0f3f8;color:var(--l-muted)}
+.pr-item:nth-child(1) .rank{background:rgba(255,97,102,.14);color:var(--err-d)}
+.pr-item:nth-child(2) .rank{background:rgba(255,138,76,.15);color:#c05a1e}
+.pr-item:nth-child(3) .rank{background:rgba(255,178,36,.16);color:var(--warn-d)}
+.pr-item .body{flex:1;min-width:0}
+.pr-item .l1{display:flex;align-items:center;gap:9px;font-size:15.5px}
+.pr-item .l1 .pn{font-family:var(--mono);font-weight:800}
+.pr-item .l1 .po{font-family:var(--mono);color:var(--l-muted);font-size:13px}
+.pr-item .l2{font-size:12.5px;color:var(--l-muted);margin-top:3px;display:flex;gap:12px;flex-wrap:wrap}
+.pr-item .l2 b{font-family:var(--mono);font-weight:650;color:var(--l-text)}
+.pr-item .due{flex:none;text-align:right;font-size:13px}
+.pr-item .due .d2{font-size:12px;margin-top:2px}
+.pr-item .due .d2.late{color:var(--err-d);font-weight:750}
+.pr-item .due .d2.soon{color:var(--warn-d);font-weight:750}
+.pr-item .due .d2.ok{color:var(--l-muted)}
+.pr-x{flex:none;width:36px;height:36px;border-radius:9px;font-size:15px;font-weight:800;color:var(--l-faint);margin-left:4px}
+.pr-x:hover{background:rgba(255,97,102,.10);color:var(--err-d)}
+.pr-empty{background:var(--l-panel);border:1px dashed var(--l-border);border-radius:12px;padding:26px;text-align:center;color:var(--l-faint);font-size:14px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+/* Hot-add dialog (light theme) */
+.dlg.light{background:var(--l-panel);border-color:var(--l-border);color:var(--l-text);box-shadow:0 18px 60px rgba(20,30,43,.28)}
+.dlg.light h3{color:var(--l-muted)}
+.dlg.light .sub{color:var(--l-muted)}
+.dlg.light .sub b,.dlg.light .big{color:var(--l-text)}
+.dlg.light .bigbtn.ghost{background:var(--l-panel2);border:1px solid var(--l-border);color:var(--l-muted)}
+#hotsearch{width:100%;border:1.5px solid var(--l-border);border-radius:11px;padding:13px 15px;font-size:16px;outline:none;color:var(--l-text);background:var(--l-panel)}
+#hotsearch:focus{border-color:var(--info);box-shadow:0 0 0 3px rgba(79,140,255,.14)}
+.hotadd-hint{font-size:12px;color:var(--l-faint);margin:8px 2px 14px;line-height:1.6}
+.hotadd-hint b{font-family:var(--mono);background:#eef2f7;border-radius:5px;padding:1px 6px;color:var(--l-muted)}
+#hotaddlist{max-height:300px;overflow:auto}
+.hotadd-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1.5px solid var(--l-border);
+  background:var(--l-panel2);border-radius:11px;padding:13px 15px;margin-bottom:8px;transition:border-color .12s}
+.hotadd-item:hover{border-color:var(--info)}
+.hotadd-item .hpn{font-family:var(--mono);font-weight:800;font-size:15px}
+.hotadd-item .hpo{font-family:var(--mono);font-size:12.5px;color:var(--l-muted);flex:1}
+.hotadd-item .hdue{font-size:12.5px;color:var(--l-muted);flex:none}
+.hotadd-item .hdue.late{color:var(--err-d);font-weight:750}
+.hotadd-empty{color:var(--l-faint);font-size:13.5px;padding:18px;text-align:center}
+.pr-bar{display:flex;gap:10px;max-width:860px}
+.btn{border-radius:10px;padding:10px 18px;font-size:14px;font-weight:750}
+.btn.primary{background:var(--info);color:#fff}
+.btn.primary:hover{background:var(--info-d)}
+.btn.ghost{border:1px solid var(--l-border);background:var(--l-panel);color:var(--l-muted)}
+.btn.ghost:hover{color:var(--l-text)}
+.pr-note{max-width:860px;background:rgba(79,140,255,.07);border:1px solid rgba(79,140,255,.25);border-radius:12px;
+  padding:12px 16px;font-size:12.5px;color:var(--info-d);margin-top:16px;line-height:1.6}
+
+/* ============ ADMINISTRATION (light) ============ */
+#view-admin{background:var(--l-bg);color:var(--l-text)}
+.ad-wrap{display:grid;grid-template-columns:242px 1fr;min-height:calc(100vh - 53px)}
+.ad-nav{background:var(--l-panel);border-right:1px solid var(--l-border);padding:16px 10px}
+.ad-nav .grp{font-size:10.5px;text-transform:uppercase;letter-spacing:1.1px;color:var(--l-faint);padding:14px 12px 6px;font-weight:800}
+.ad-nav button{display:block;width:100%;text-align:left;padding:9px 12px;border-radius:9px;font-size:14px;font-weight:600;color:var(--l-text)}
+.ad-nav button:hover{background:#f0f4f9}
+.ad-nav button.active{background:rgba(79,140,255,.11);color:var(--info-d);font-weight:750}
+.ad-main{padding:24px 28px;min-width:0}
+.ad-main h1{font-size:22px;margin-bottom:4px}
+.ad-main .sub{color:var(--l-muted);font-size:14px;margin-bottom:18px}
+.ad-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--l-panel);border:1px solid var(--l-border);
+  border-radius:var(--radius);overflow:hidden;box-shadow:var(--lshadow)}
+.ad-table th{font-size:11.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--l-muted);text-align:left;
+  padding:11px 14px;background:var(--l-panel2);border-bottom:1px solid var(--l-border)}
+.ad-table td{padding:12px 14px;border-bottom:1px solid #eef2f7;font-size:14px}
+.ad-table tr:last-child td{border-bottom:none}
+.ad-table .colordot{width:14px;height:14px;border-radius:4.5px;display:inline-block;vertical-align:-2px;margin-right:9px}
+.ad-table .modecell{font-size:12.5px;color:var(--l-muted)}
+.pillnav{display:inline-block;font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px}
+.pillnav.on{background:rgba(49,210,135,.13);color:var(--ok-d)}
+.pillnav.off{background:#edf0f4;color:var(--l-muted)}
+.pillnav.term{background:rgba(79,140,255,.12);color:var(--info-d)}
+.ad-top{display:flex;align-items:center;margin-bottom:14px}
+.ad-top .spacer{flex:1}
+.btn-primary{background:var(--info);color:#fff;border-radius:9px;padding:10px 16px;font-size:14px;font-weight:750}
+.btn-primary:hover{background:var(--info-d)}
+.notice{background:rgba(79,140,255,.07);border:1px solid rgba(79,140,255,.25);border-radius:12px;padding:12px 16px;
+  font-size:12.5px;color:var(--info-d);margin-top:16px;line-height:1.6}
+
+/* ============ PO INTAKE (light) ============ */
+#view-pointake{background:var(--l-bg);color:var(--l-text);padding:24px 28px}
+.po-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.po-head h1{font-size:22px}
+.po-head .spacer{flex:1}
+.po-sub{color:var(--l-muted);font-size:13.5px;margin-bottom:16px;line-height:1.6;max-width:860px}
+.po-tools{display:flex;gap:10px;margin-bottom:16px;align-items:center}
+.po-tools input{flex:1;max-width:420px;background:var(--l-panel);border:1px solid var(--l-border);border-radius:10px;
+  font-size:14px;padding:11px 14px;color:var(--l-text);outline:none}
+.po-tools input:focus{border-color:var(--info)}
+.po-card{background:var(--l-panel);border:1px solid var(--l-border);border-radius:var(--radius);box-shadow:var(--lshadow);margin-bottom:16px;overflow:hidden}
+.po-card .pc-head{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--l-border);background:var(--l-panel2)}
+.po-card .pc-head .po{font-family:var(--mono);font-size:19px;font-weight:800}
+.po-card .pc-head .meta{font-size:12.5px;color:var(--l-muted)}
+.po-card .pc-head .spacer{flex:1}
+.unsaved{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;background:rgba(255,178,36,.16);color:var(--warn-d)}
+.po-lines{max-height:420px;overflow:auto}   /* long PO line lists scroll; header stays visible */
+.po-table{width:100%;border-collapse:separate;border-spacing:0}
+.po-table th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--l-muted);text-align:left;
+  padding:10px 12px;background:var(--l-panel);border-bottom:1px solid var(--l-border);position:sticky;top:0}
+.po-table td{padding:11px 12px;border-bottom:1px solid #eef2f7;font-size:13.5px;vertical-align:top}
+.po-table tr:last-child td{border-bottom:none}
+.po-table .pn{font-family:var(--mono);font-weight:750}
+.po-table .bc{font-family:var(--mono);font-size:11.5px;color:var(--l-faint);margin-top:2px}
+.po-table .bc.newpn{color:var(--info-d)}
+.po-table input,.po-table select{background:var(--l-panel);border:1px solid var(--l-border);border-radius:8px;
+  font-size:13px;padding:6px 9px;color:var(--l-text);outline:none;max-width:120px}
+.po-table input:focus,.po-table select:focus{border-color:var(--info)}
+.po-table .err-cell input{border-color:var(--err);background:rgba(255,97,102,.05)}
+.rowerr{font-size:11.5px;color:var(--err-d);font-weight:700;margin-top:4px}
+.rel-btn{border:1px solid var(--info);border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:750;color:var(--info-d);background:rgba(79,140,255,.06)}
+.rel-btn:hover{background:rgba(79,140,255,.14)}
+.rel-btn:disabled{opacity:.4;cursor:not-allowed}
+.linestat{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;display:inline-block}
+.linestat.saved{background:#edf0f4;color:var(--l-muted)}
+.linestat.released{background:rgba(49,210,135,.13);color:var(--ok-d)}
+.linestat.invalid{background:rgba(255,97,102,.12);color:var(--err-d)}
+.po-actions{display:flex;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--l-border)}
+.po-actions .hint{font-size:12px;color:var(--l-faint)}
+.relwarn{background:rgba(255,178,36,.10);border:1px solid rgba(255,178,36,.5);border-radius:12px;padding:12px 14px;
+  font-size:13px;color:var(--warn-d);margin-bottom:14px;line-height:1.55}
+.relgrid{display:grid;grid-template-columns:170px 1fr;gap:10px 12px;align-items:center;font-size:13.5px;margin-bottom:14px}
+.relgrid label{color:var(--l-muted);font-weight:650}
+.relgrid input,.relgrid select{background:var(--l-panel);border:1.5px solid var(--l-border);border-radius:9px;
+  font-size:14px;padding:9px 12px;color:var(--l-text);outline:none}
+.relgrid input:focus,.relgrid select:focus{border-color:var(--info)}
+.relsum{background:rgba(79,140,255,.07);border:1px solid rgba(79,140,255,.25);border-radius:12px;padding:12px 14px;
+  font-size:12.5px;color:var(--info-d);line-height:1.6}
+.relsum b{font-family:var(--mono)}
+/* dark-dialog form fields (manual entry / intake confirmation) */
+.dlg .field{width:100%;background:var(--d-bg2);border:2px solid var(--d-border2);border-radius:10px;color:var(--d-text);
+  font-size:17px;padding:11px 14px;outline:none;margin-bottom:10px}
+.dlg .field:focus{border-color:var(--info)}
+.dlg .fgrid{display:grid;grid-template-columns:150px 1fr;gap:9px 12px;align-items:center;font-size:13.5px;margin-bottom:6px}
+.dlg .fgrid label{color:var(--d-muted);font-weight:650}
+.dlg .fgrid .field{margin-bottom:0}
+</style>
+</head>
+<body>
+<nav id="appnav">
+  <div class="logo"><span class="mark">⇄</span>Part<span class="pf">Flow</span></div>
+  <button class="navbtn active" data-v="scan" onclick="showView('scan')">Scan Station</button>
+  <button class="navbtn" data-v="board" onclick="showView('board')">Production Board</button>
+  <button class="navbtn" data-v="mgmt" onclick="showView('mgmt')">Management</button>
+  <button class="navbtn" data-v="admin" onclick="showView('admin')">Administration</button>
+  <div class="spacer"></div>
+  <div class="mock-tag">GUI MOCKUP <b>v3</b> · PROJECT_PROFILE v5 · sample data</div>
+</nav>
+
+<!-- Management sub-view navigation — visible only while a Management sub view is active -->
+<nav id="mgmtnav">
+  <span class="subgrp">Management</span>
+  <button class="subbtn" data-v="area" onclick="showView('area')">Area Board</button>
+  <button class="subbtn" data-v="summary" onclick="showView('summary')">Manager Summary</button>
+  <button class="subbtn" data-v="track" onclick="showView('track')">Tracking</button>
+  <button class="subbtn" data-v="pointake" onclick="showView('pointake')">PO Intake</button>
+  <button class="subbtn" data-v="priority" onclick="showView('priority')">Priority</button>
+</nav>
+
+<!-- ==================== SCAN STATION ==================== -->
+<section id="view-scan" class="view active">
+  <div class="ss-head">
+    <div class="loc">
+      <div class="dept">Machine Shop</div>
+      <div class="area"><span class="dot"></span>Lathe</div>
+      <div class="op">Operations: <b>Turning</b> · Station <b class="mono">LATHE-ST-01</b></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="ss-pill">
+      <span class="lbl">Machine session</span>
+      <span class="val none" id="pill-machine">— none</span>
+      <span class="sub">held until changed · cleared · expired</span>
+    </div>
+    <div class="ss-pill">
+      <span class="lbl">Worker session</span>
+      <span class="val" id="pill-worker"><span class="sdot"></span>H. Nguyen</span>
+      <span class="sub">expires 18:00 · scan badge to switch</span>
+    </div>
+    <button id="conn" onclick="toggleOffline()" title="Click to simulate offline">
+      <span class="cdot"></span><span class="ctxt" id="conntxt">ONLINE</span>
+    </button>
+  </div>
+  <div id="offbanner">⚠ DISCONNECTED — production scans are blocked; nothing is recorded or queued while offline. Already loaded information stays visible. Check the network connection — scanning resumes automatically after reconnecting.</div>
+
+  <div class="ss-body">
+    <div class="ss-main">
+      <div class="panel">
+        <div class="ph">Machine status<div class="spacer"></div>
+          <span class="note">select by scanning a Machine barcode — session persists until changed, cleared or expired (§18)</span></div>
+        <div id="machines">
+          <div class="mtile" data-m="Lathe 1">Lathe 1<span class="sub">idle</span></div>
+          <div class="mtile" data-m="Lathe 2">Lathe 2<span class="sub">running · SHAFT-014 × 4</span></div>
+          <div class="mtile" data-m="Lathe 3">Lathe 3<span class="sub">running · BRACKET-001 × 4</span></div>
+          <div class="mtile maint" data-m="Lathe 4">Lathe 4<span class="sub">maintenance</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph">Scan barcode<div class="spacer"></div><span class="note">one input for every barcode type — the system classifies the scan</span></div>
+        <div id="scanwrap">
+          <div id="scanrow">
+            <input id="scaninput" autocomplete="off" placeholder="Scan PN / Machine / Worker / Action barcode…" onkeydown="if(event.key==='Enter')doScan()">
+            <button id="scanbtn" onclick="doScan()">ENTER</button>
+          </div>
+          <div id="scanhint">Demo barcodes —
+            <b onclick="fill(this)">PF:PN:1014</b> single context ·
+            <b onclick="fill(this)">PF:PN:1001</b> multiple contexts ·
+            <b onclick="fill(this)">PF:MACHINE:L1</b> machine session ·
+            <b onclick="fill(this)">PF:WORKER:88</b> worker ·
+            <b onclick="fill(this)">PF:ACTION:REWORK</b> request type ·
+            <b onclick="fill(this)">PF:PN:9999</b> unknown ·
+            <b onclick="fill(this)">STOCK-DEMO</b> Stockroom allocation
+          </div>
+          <div id="manualentry">Scanner unavailable? <a onclick="manualEntry()">Manual PN entry…</a> — a separate explicit fallback; raw PN text is never treated as a barcode (§9)</div>
+        </div>
+        <div id="pending"><span class="pulse"></span><span id="pendingtxt"></span></div>
+        <div id="lastpn">
+          <span class="l">Last scanned PN</span>
+          <span class="p mono" id="lastpn-p">—</span>
+          <span class="d" id="lastpn-d">no scans yet</span>
+        </div>
+        <div id="feedback" class="idle">
+          <div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Ready to scan…</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ss-side">
+      <button id="undo" onclick="undoLast()" disabled>⟲ UNDO LAST SCAN</button>
+      <div class="panel">
+        <div class="ph">Recent scans<div class="spacer"></div><span class="note" id="scancount">0 today</span></div>
+        <ul class="scanlist" id="scanlist"></ul>
+      </div>
+      <div class="panel">
+        <div class="ph">In this Area now</div>
+        <div class="invgrp">Assigned to Machines</div>
+        <ul class="invlist" id="inv-assigned">
+          <li><span class="p">PF-BRACKET-001</span><span class="m">Lathe 3</span><span class="q">4</span></li>
+          <li><span class="p">PF-SHAFT-014</span><span class="m">Lathe 2</span><span class="q">4</span></li>
+        </ul>
+        <div class="invgrp">Area queue — awaiting Machine</div>
+        <ul class="invlist" id="inv-queued">
+          <li><span class="p">PF-BRACKET-001</span><span class="m">queued</span><span class="q">2</span></li>
+        </ul>
+        <div class="invtotal">Total in Lathe<span class="q" id="invtotal">10</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- quantity dialog -->
+<div class="overlay" id="qtyovl">
+  <div class="dlg">
+    <h3>Enter quantity</h3>
+    <div class="big mono" id="qtypart">PF-SHAFT-014</div>
+    <div class="sub" id="qtysub">Transfer Material → Lathe · available at source: <b>8</b></div>
+    <div id="qtydisplay">&nbsp;</div>
+    <div class="keypad">
+      <button onclick="kp('7')">7</button><button onclick="kp('8')">8</button><button onclick="kp('9')">9</button>
+      <button onclick="kp('4')">4</button><button onclick="kp('5')">5</button><button onclick="kp('6')">6</button>
+      <button onclick="kp('1')">1</button><button onclick="kp('2')">2</button><button onclick="kp('3')">3</button>
+      <button class="act" onclick="kp('C')">CLEAR</button><button onclick="kp('0')">0</button><button class="act" onclick="kp('B')">⌫</button>
+    </div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeQty()">Cancel</button>
+      <button class="bigbtn primary" onclick="confirmQty()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ambiguity dialog — §9 Barcode Resolution: never guess between valid contexts -->
+<div class="overlay" id="ambovl">
+  <div class="dlg">
+    <h3>Multiple valid contexts — confirm intent</h3>
+    <div class="big mono">PF-BRACKET-001</div>
+    <div class="sub">This PN has more than one valid context at this station. Nothing is recorded until you choose:</div>
+    <button class="choice" onclick="ambPick('assign')">
+      <span class="cic que">QUE</span>
+      <span><span class="ct1">Assign queued quantity to a Machine</span><br>
+        <span class="ct2">2 pcs waiting in Lathe queue · scan Machine barcode next</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('transfer')">
+      <span class="cic run">MOVE</span>
+      <span><span class="ct1">Receive more quantity from Cut</span><br>
+        <span class="ct2">4 pcs available at Cut · quantity entry follows</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('rework')">
+      <span class="cic rwk">RWK</span>
+      <span><span class="ct1">Create REWORK demand</span><br>
+        <span class="ct2">Opens intake confirmation — quantity, PO link (or temporary PO <span class="mono">TMP-20260722-####-REWORK</span>), Route, starting Area. Nothing recorded yet.</span></span>
+    </button>
+    <button class="choice" onclick="ambPick('modify')">
+      <span class="cic mod">MOD</span>
+      <span><span class="ct1">Create MODIFY demand</span><br>
+        <span class="ct2">Opens intake confirmation — new Quantity Flow with its own Route. Nothing recorded yet.</span></span>
+    </button>
+    <div class="row"><button class="bigbtn ghost" onclick="closeAmb()">Cancel (Esc) — nothing recorded</button></div>
+  </div>
+</div>
+
+<!-- manual PN entry — explicit fallback, separate from barcode scanning (§9) -->
+<div class="overlay" id="manovl">
+  <div class="dlg">
+    <h3>Manual PN entry — explicit fallback</h3>
+    <div class="sub">Type the <b>exact PartNumber</b> (not a barcode). It is validated exactly like a scan — raw PN text is never interpreted as a barcode (§9). Nothing is recorded by this step.</div>
+    <input id="mpninput" class="field mono" autocomplete="off" placeholder="Exact PartNumber, e.g. PF-SHAFT-014"
+           onkeydown="if(event.key==='Enter')confirmManual()">
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeManual()">Cancel (Esc)</button>
+      <button class="bigbtn primary" onclick="confirmManual()">Look up PN</button>
+    </div>
+  </div>
+</div>
+
+<!-- REWORK / MODIFY intake confirmation — §13: nothing recorded until confirmed -->
+<div class="overlay" id="intakeovl">
+  <div class="dlg">
+    <h3><span id="itype">REWORK</span> intake — confirm before anything is recorded</h3>
+    <div class="big mono">PF-BRACKET-001</div>
+    <div class="sub">Request Type <b id="itype2">REWORK</b>. Confirm quantity, PO link, Route and starting Area — <b>RECEIVED is appended only after confirmation</b>.</div>
+    <div class="fgrid">
+      <label>Quantity</label>
+      <input id="iqty" class="field mono" inputmode="numeric" placeholder="pcs" onkeydown="if(event.key==='Enter')confirmIntake()">
+      <label>Purchase Order</label>
+      <select id="ipo" class="field">
+        <option value="TMP">Temporary internal PO — TMP-20260722-####-…</option>
+        <option value="PO-1001">Link to active PO-1001</option>
+        <option value="PO-1008">Link to active PO-1008</option>
+      </select>
+      <label>Route</label>
+      <select id="iroute" class="field">
+        <option>Bracket rework v1</option>
+        <option>Bracket std v3</option>
+      </select>
+      <label>Starting Area</label>
+      <select id="iarea" class="field">
+        <option>Lathe (this Area)</option>
+        <option>Material</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeIntake()">Cancel — nothing recorded</button>
+      <button class="bigbtn primary" onclick="confirmIntake()">Confirm — append RECEIVED</button>
+    </div>
+  </div>
+</div>
+
+<!-- Stockroom allocation dialog — §17: priority → due date → largest shortage -->
+<div class="overlay" id="allocovl">
+  <div class="dlg" style="width:min(640px,94vw)">
+    <h3>Stocked — suggested PO Allocation</h3>
+    <div class="big mono">PF-PIN-102 <span style="font-size:16px;color:var(--d-muted);font-weight:600">× 20 stocked</span></div>
+    <div class="sub">Movement <b>STOCKED</b> recorded. Suggested allocation order: <b>priority → earliest due → largest shortage</b>. Adjust only if authorized.</div>
+    <div class="alloc-row">
+      <div>
+        <div class="po">PO-1006 <span class="hot h1" style="vertical-align:2px">🔥 HOT #1</span></div>
+        <div class="meta">requested <b>12</b> · allocated <b>0</b> · shortage <b>12</b> · due <b>Jul 25</b></div>
+      </div>
+      <div class="stepper"><button onclick="stepAlloc(0,-1)">−</button><span class="sv" id="al0">12</span><button onclick="stepAlloc(0,1)">+</button></div>
+    </div>
+    <div class="alloc-row">
+      <div>
+        <div class="po">PO-1009</div>
+        <div class="meta">requested <b>10</b> · allocated <b>2</b> · shortage <b>8</b> · due <b>Aug 04</b></div>
+      </div>
+      <div class="stepper"><button onclick="stepAlloc(1,-1)">−</button><span class="sv" id="al1">8</span><button onclick="stepAlloc(1,1)">+</button></div>
+    </div>
+    <div id="alloc-sum"><span>Allocated <b id="alloc-tot" class="good">20</b> / stocked <b>20</b></span><span style="margin-left:auto" id="alloc-warn"></span></div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeAlloc(false)">Cancel</button>
+      <button class="bigbtn primary" id="allocbtn" onclick="closeAlloc(true)">Confirm allocation</button>
+    </div>
+  </div>
+</div>
+<!-- ==================== PRODUCTION BOARD ==================== -->
+<section id="view-board" class="view">
+  <div class="pb-head">
+    <h1>Machine Shop — Production</h1>
+    <span class="live"><span class="ld"></span>Live · updated 14:32:08</span>
+    <div class="spacer"></div>
+    <div class="clock" id="pbclock">14:32</div>
+  </div>
+  <!-- Columns per PROJECT_PROFILE v5 §20 Production Board -->
+  <table class="pb-table">
+    <thead><tr>
+      <th style="width:4%">No.</th>
+      <th style="width:25%">Part Number</th>
+      <th style="width:29%">Areas &amp; Quantities · Time</th>
+      <th style="width:19%">Job Numbers</th>
+      <th style="width:13%">Due Date</th>
+      <th style="width:10%">Total Days</th>
+    </tr></thead>
+    <tbody>
+      <!-- Hot PO Demand first, by priority rank; then by due date -->
+      <tr class="hotrow1">
+        <td><div class="no">1</div></td>
+        <td><div class="part blink">🔥 PF-BRACKET-001<span class="hot h1" style="margin-left:9px">#1</span></div>
+            <div class="pname">Mounting bracket, alum 6061 · rev C</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="q">4</span><span class="ltime">3h 40m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 3 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">2h 05m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe <span class="q">2</span> <span class="qtag">queue</span><span class="ltime">1h 10m</span></div>
+          <div class="totline">total <b>10</b> pcs</div>
+        </div></td>
+        <td class="jobs">
+          <div class="j">ERP-88112 <span class="jm">· PO-1001 · 10 pcs</span></div>
+          <div class="j">ERP-88240 <span class="jm">· PO-1008 · 5 pcs queued</span></div>
+        </td>
+        <td class="due"><div class="d1">Jul 24</div><div class="d2 soon">2 days left</div></td>
+        <td><div class="dtotal">10 d</div></td>
+      </tr>
+      <tr class="hotrow2">
+        <td><div class="no">2</div></td>
+        <td><div class="part blink">🔥 PF-PLATE-007<span class="hot h2" style="margin-left:9px">#2</span></div>
+            <div class="pname">Base plate 200×140</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span><span class="ltime long">4d 02h</span></div>
+          <div class="totline">total <b>20</b> pcs</div>
+        </div></td>
+        <td class="jobs"><div class="j">ERP-88031 <span class="jm">· PO-1005 · 20 pcs</span></div></td>
+        <td class="due"><div class="d1">Jul 16</div><div class="d2 late">overdue 6 days</div></td>
+        <td><div class="dtotal">18 d</div></td>
+      </tr>
+      <tr>
+        <td><div class="no">3</div></td>
+        <td><div class="part">PF-SHAFT-014</div><div class="pname">Drive shaft Ø25, 4140</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-material)"></span>Material <span class="q">8</span><span class="ltime">2d 01h</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">1h 05m</span></div>
+          <div class="totline">total <b>12</b> pcs</div>
+        </div></td>
+        <td class="jobs"><div class="j">ERP-88190 <span class="jm">· PO-1003 · 12 pcs</span></div></td>
+        <td class="due"><div class="d1">Jul 31</div><div class="d2 ok">9 days left</div></td>
+        <td><div class="dtotal">6 d</div></td>
+      </tr>
+      <tr>
+        <td><div class="no">4</div></td>
+        <td><div class="part">PF-HOUSING-021</div><div class="pname">Gearbox housing</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-mill)"></span>Mill 1 <span class="q">3</span> <span class="qtag">machine</span><span class="ltime">45m</span></div>
+          <div class="locrow"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="q">3</span><span class="ltime">30m</span></div>
+          <div class="totline">total <b>6</b> pcs</div>
+        </div></td>
+        <td class="jobs">
+          <div class="j">ERP-88102 <span class="jm">· PO-1002 · 6 pcs</span></div>
+          <div class="j">— <span class="jm">· TMP-20260718-0910-REWORK · 1 pc</span></div>
+        </td>
+        <td class="due"><div class="d1">Aug 07</div><div class="d2 ok">16 days left</div></td>
+        <td><div class="dtotal">4 d</div></td>
+      </tr>
+      <tr>
+        <td><div class="no">5</div></td>
+        <td><div class="part">PF-PIN-102</div><div class="pname">Locating pin Ø8</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span><span class="ltime">—</span></div>
+          <div class="totline">total <b>50</b> pcs stocked</div>
+        </div></td>
+        <td class="jobs"><div class="j">ERP-87740 <span class="jm">· PO-0996 · allocated 50/50</span></div></td>
+        <td class="due"><div class="d1">Jul 10</div><div class="d2 ok">✓ stocked</div></td>
+        <td><div class="dtotal">12 d</div></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="pb-foot">
+    <span>Page 1 / 3 · rotates every 12 s</span>
+    <span class="pgdot on"></span><span class="pgdot"></span><span class="pgdot"></span>
+    <div class="spacer"></div>
+    <span>🔥 #n = Hot priority rank · blinking PN = due soon / overdue · 5 active PNs · 48 pcs in production · 50 pcs stocked</span>
+  </div>
+</section>
+
+<!-- ==================== AREA BOARD ==================== -->
+<section id="view-area" class="view">
+  <div class="ab-tabs" id="abtabs"></div>
+  <div class="ab-tools">
+    <input id="absearch" placeholder="Search PN, PO, Job Number…" oninput="renderArea()">
+    <select id="absort" onchange="renderArea()">
+      <option value="due">Sort: Due date</option>
+      <option value="prio">Sort: Priority</option>
+      <option value="tia">Sort: Time in Area</option>
+      <option value="qty">Sort: Quantity</option>
+    </select>
+    <div class="ab-meta" id="abmeta"></div>
+  </div>
+  <div class="ab-grid" id="abgrid"></div>
+</section>
+
+<!-- ==================== MANAGER SUMMARY ==================== -->
+<section id="view-summary" class="view">
+  <div class="ms-head">
+    <h1>Manager Summary</h1>
+    <span class="sub">Machine Shop · grouped by Area · scrolls horizontally</span>
+    <div class="spacer"></div>
+    <input placeholder="Search PN, PO, Job Number…">
+    <select><option>Sort PNs: Priority</option><option>Sort PNs: Due date</option><option>Sort PNs: Quantity</option></select>
+  </div>
+  <div class="ms-scroll">
+
+    <div class="ms-col" style="--acol:var(--a-material)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Material</div>
+        <div class="mc-desc">Incoming raw material staging</div>
+        <div class="mc-ops"><span class="opchip">Receiving</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">8</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">8</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">—</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="p">PF-SHAFT-014</span><span class="q">8</span></div>
+          <div class="r2"><span class="mono">PO-1003 · ERP-88190</span><span>due Jul 31</span><span>2d 01h in Area</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-cut)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Cut</div>
+        <div class="mc-desc">Saw cutting to length</div>
+        <div class="mc-ops"><span class="opchip">Cutting</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">4</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">0</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">4</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="hot h1">🔥 #1</span><span class="p">PF-BRACKET-001</span><span class="q">4</span></div>
+          <div class="r2"><span class="mono">PO-1001 · ERP-88112</span><span class="soon">due Jul 24</span><span>Saw 1 · 3h 40m</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-lathe)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Lathe</div>
+        <div class="mc-desc">Turning cell · Lathe 1–4</div>
+        <div class="mc-ops"><span class="opchip">Turning</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">10</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">2</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">8</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="hot h1">🔥 #1</span><span class="p">PF-BRACKET-001</span><span class="q">6</span></div>
+          <div class="r2"><span class="mono">PO-1001 · ERP-88112</span><span class="soon">due Jul 24</span><span>Lathe 3 × 4 · queue × 2</span></div>
+        </li>
+        <li>
+          <div class="r1"><span class="p">PF-SHAFT-014</span><span class="q">4</span></div>
+          <div class="r2"><span class="mono">PO-1003 · ERP-88190</span><span>due Jul 31</span><span>Lathe 2 × 4</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-mill)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Mill</div>
+        <div class="mc-desc">Milling cell · Mill 1–2</div>
+        <div class="mc-ops"><span class="opchip">Milling</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">3</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">0</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">3</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="p">PF-HOUSING-021</span><span class="q">3</span></div>
+          <div class="r2"><span class="mono">PO-1002 · ERP-88102</span><span>due Aug 07</span><span>Mill 1 × 3 · 45m</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-deburr)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Deburr</div>
+        <div class="mc-desc">Hand finishing bench</div>
+        <div class="mc-ops"><span class="opchip">Deburring</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">3</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">3</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">—</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="p">PF-HOUSING-021</span><span class="q">3</span></div>
+          <div class="r2"><span class="mono">PO-1002 · ERP-88102</span><span>due Aug 07</span><span>30m in Area</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-external)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>External</div>
+        <div class="mc-desc">Outside processing vendors</div>
+        <div class="mc-ops"><span class="opchip">Plating</span><span class="opchip">Painting</span><span class="opchip">Testing</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">20</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">20</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">—</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="hot h2">🔥 #2</span><span class="p">PF-PLATE-007</span><span class="q">20</span></div>
+          <div class="r2"><span class="mono">PO-1005 · ERP-88031</span><span class="late">overdue 6 d</span><span>Plating · 4d 02h</span></div>
+        </li>
+      </ul>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-manual)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Manual</div>
+        <div class="mc-desc">Manual machining bench</div>
+        <div class="mc-ops"><span class="opchip">Manual work</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">0</div><div class="l">Total pcs</div></div>
+        <div class="stat"><div class="n q">0</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">—</div><div class="l">On machines</div></div>
+      </div>
+      <div class="empty">No production in Manual</div>
+    </div>
+
+    <div class="ms-col" style="--acol:var(--a-stockroom)">
+      <div class="mc-head">
+        <div class="mc-title"><span class="dot"></span>Stockroom</div>
+        <div class="mc-desc">Terminal Area — completed parts</div>
+        <div class="mc-ops"><span class="opchip">Receiving</span></div>
+      </div>
+      <div class="mc-stats">
+        <div class="stat"><div class="n">50</div><div class="l">Stocked pcs</div></div>
+        <div class="stat"><div class="n q">—</div><div class="l">Queued</div></div>
+        <div class="stat"><div class="n m">—</div><div class="l">On machines</div></div>
+      </div>
+      <ul class="mc-list">
+        <li>
+          <div class="r1"><span class="p">PF-PIN-102</span><span class="q">50</span></div>
+          <div class="r2"><span class="mono">PO-0996 · ERP-87740</span><span>allocated 50/50</span></div>
+        </li>
+      </ul>
+    </div>
+
+  </div>
+</section>
+<!-- ==================== TRACKING (PN-centric, §20) ==================== -->
+<section id="view-track" class="view">
+  <div class="tk-wrap">
+    <div class="tk-left">
+      <h1>Tracking</h1>
+      <div class="tk-filters">
+        <input placeholder="Search: PN, PO, Job Number…">
+        <select><option>Area: All</option><option>Material</option><option>Cut</option><option>Lathe</option><option>Mill</option><option>Manual</option><option>Deburr</option><option>External</option><option>Stockroom</option></select>
+        <select><option>Operation: All</option><option>Cutting</option><option>Turning</option><option>Milling</option><option>Deburring</option><option>Plating</option></select>
+        <select><option>Machine: All</option><option>Saw 1</option><option>Lathe 1–4</option><option>Mill 1–2</option></select>
+        <select><option>Request Type: All</option><option>NEW</option><option>REWORK</option><option>MODIFY</option></select>
+        <select><option>Priority: All</option><option>Hot only</option></select>
+        <select><option>Status: Active</option><option>Stocked</option><option>Completed</option><option>All</option></select>
+        <select><option>Due: Any</option><option>Overdue</option><option>This week</option><option>This month</option></select>
+      </div>
+      <table class="tk-table">
+        <thead><tr><th>Part Number</th><th>Active PO Demand</th><th>Current distribution</th><th>Active qty</th><th>Stocked</th><th>Due (next)</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr class="sel" onclick="selectPN(this,'PF-BRACKET-001')">
+            <td><span class="part">🔥 PF-BRACKET-001</span><span class="hot h1" style="margin-left:8px">#1</span><div class="sub">Mounting bracket, alum 6061</div></td>
+            <td><div class="mono" style="font-size:13px">PO-1001 · 10 <span class="typechip new">NEW</span></div>
+                <div class="mono" style="font-size:13px;margin-top:3px">PO-1008 · 5 <span class="typechip new">NEW</span></div></td>
+            <td><div class="distmini">
+              <span><span class="dot" style="background:var(--a-cut)"></span>Cut <b>4</b></span>
+              <span><span class="dot" style="background:var(--a-lathe)"></span>Lathe <b>6</b></span></div></td>
+            <td class="mono">10</td><td class="mono">0</td><td>Jul 24</td>
+            <td><span class="status active">Active</span></td>
+          </tr>
+          <tr onclick="selectPN(this,'PF-PLATE-007')">
+            <td><span class="part">🔥 PF-PLATE-007</span><span class="hot h2" style="margin-left:8px">#2</span><div class="sub">Base plate 200×140</div></td>
+            <td><div class="mono" style="font-size:13px">PO-1005 · 20 <span class="typechip new">NEW</span></div></td>
+            <td><div class="distmini"><span><span class="dot" style="background:var(--a-external)"></span>External <b>20</b></span></div></td>
+            <td class="mono">20</td><td class="mono">0</td><td>Jul 16</td>
+            <td><span class="status active">Active</span></td>
+          </tr>
+          <tr onclick="selectPN(this,'PF-SHAFT-014')">
+            <td><span class="part">PF-SHAFT-014</span><div class="sub">Drive shaft Ø25, 4140</div></td>
+            <td><div class="mono" style="font-size:13px">PO-1003 · 12 <span class="typechip new">NEW</span></div></td>
+            <td><div class="distmini">
+              <span><span class="dot" style="background:var(--a-material)"></span>Material <b>8</b></span>
+              <span><span class="dot" style="background:var(--a-lathe)"></span>Lathe <b>4</b></span></div></td>
+            <td class="mono">12</td><td class="mono">0</td><td>Jul 31</td>
+            <td><span class="status active">Active</span></td>
+          </tr>
+          <tr onclick="selectPN(this,'PF-HOUSING-021')">
+            <td><span class="part">PF-HOUSING-021</span><div class="sub">Gearbox housing</div></td>
+            <td><div class="mono" style="font-size:13px">PO-1002 · 6 <span class="typechip new">NEW</span></div>
+                <div class="mono" style="font-size:13px;margin-top:3px">TMP-…-0910 · 1 <span class="typechip rework">REWORK</span></div></td>
+            <td><div class="distmini">
+              <span><span class="dot" style="background:var(--a-mill)"></span>Mill <b>3</b></span>
+              <span><span class="dot" style="background:var(--a-deburr)"></span>Deburr <b>3</b></span></div></td>
+            <td class="mono">6</td><td class="mono">0</td><td>Aug 07</td>
+            <td><span class="status active">Active</span></td>
+          </tr>
+          <tr onclick="selectPN(this,'PF-PIN-102')">
+            <td><span class="part">PF-PIN-102</span><div class="sub">Locating pin Ø8</div></td>
+            <td><div class="mono" style="font-size:13px">PO-0996 · 50 <span class="typechip new">NEW</span></div></td>
+            <td><div class="distmini"><span><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <b>50</b></span></div></td>
+            <td class="mono">0</td><td class="mono">50</td><td>—</td>
+            <td><span class="status done">Completed</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tk-right">
+      <div class="tk-pnrow">
+        <div class="tk-img">🔩</div>
+        <div>
+          <h2>PF-BRACKET-001</h2>
+          <div class="jsub">Mounting bracket, alum 6061 · revision <b>C</b> (informational) · barcode <b>PF:PN:1001</b> · ERP id <b>ERP-PN-40412</b></div>
+        </div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Active PO Demand <span class="tag">business demand — separate from Movement</span></h4>
+        <table class="demand">
+          <thead><tr><th>PO</th><th>Type</th><th>Req.</th><th>Alloc.</th><th>Shortage</th><th>Due</th><th>Priority</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">PO-1001</td><td><span class="typechip new">NEW</span></td><td class="mono">10</td><td class="mono zero">0</td><td class="mono short">10</td><td>Jul 24</td><td>🔥 Hot #1</td></tr>
+            <tr><td class="mono">PO-1008</td><td><span class="typechip new">NEW</span></td><td class="mono">5</td><td class="mono zero">0</td><td class="mono short">5</td><td>Aug 02</td><td>—</td></tr>
+          </tbody>
+        </table>
+        <div class="prog"><i style="width:0%"></i></div>
+        <div class="prognote">Allocated 0 / 15 requested — nothing stocked yet</div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Current quantity by Area <span class="tag">derived from Movement history</span></h4>
+        <div class="dist">
+          <div class="drow"><span class="dot" style="background:var(--a-cut)"></span><span class="nm">Cut <div class="sub">Saw 1</div></span><span class="bar"><i style="width:40%;background:var(--a-cut)"></i></span><span class="q">4</span></div>
+          <div class="drow"><span class="dot" style="background:var(--a-lathe)"></span><span class="nm">Lathe 3 <div class="sub">machine</div></span><span class="bar"><i style="width:40%;background:var(--a-lathe)"></i></span><span class="q">4</span></div>
+          <div class="drow"><span class="dot" style="background:var(--a-lathe)"></span><span class="nm">Lathe <div class="sub">queue</div></span><span class="bar"><i style="width:20%;background:var(--a-lathe);opacity:.55"></i></span><span class="q">2</span></div>
+        </div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Quantity Flows &amp; assigned Routes <span class="tag">flows may follow different Routes — the PN is not at one step</span></h4>
+        <div class="qflow">
+          <div class="qf-head"><span class="qf-id">QF-0140</span><span class="qf-q">6 pcs</span><span class="qf-pos">Lathe (4 on Lathe 3 · 2 queued) · 2h 05m in Area</span></div>
+          <div class="route">
+            <span class="rstep done">Material</span><span class="rarrow">→</span>
+            <span class="rstep done">Cut</span><span class="rarrow">→</span>
+            <span class="rstep cur">Lathe</span><span class="rarrow">→</span>
+            <span class="rstep">Deburr</span><span class="rarrow">→</span>
+            <span class="rstep">Stockroom</span>
+          </div>
+        </div>
+        <div class="qflow">
+          <div class="qf-head"><span class="qf-id">QF-0141</span><span class="qf-q">4 pcs</span><span class="qf-pos">Cut · Saw 1 · 3h 40m in Area · SPLIT from QF-0140</span></div>
+          <div class="route">
+            <span class="rstep done">Material</span><span class="rarrow">→</span>
+            <span class="rstep cur">Cut</span><span class="rarrow">→</span>
+            <span class="rstep">Lathe</span><span class="rarrow">→</span>
+            <span class="rstep dev" title="Deviation — External inserted Jul 20 by T. Le">External ⚠</span><span class="rarrow">→</span>
+            <span class="rstep">Deburr</span><span class="rarrow">→</span>
+            <span class="rstep">Stockroom</span>
+          </div>
+          <div class="devnote">⚠ ROUTE_ADJUSTED — “External · Plating” inserted Jul 20 by T. Le (Manager). Reason: plating added per customer. Previous route preserved in audit.</div>
+        </div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Movement history <span class="tag">immutable — corrections append, never edit</span></h4>
+        <ul class="mv">
+          <li><span class="t">Jul 22 13:05</span><span class="mtype asg">ASSIGNED_TO_MACHINE</span><span class="desc">Lathe queue → <span class="mono">Lathe 3</span> · qty 4 · QF-0140 · W: H. Nguyen · <span class="mono">LATHE-ST-01</span></span></li>
+          <li><span class="t">Jul 22 11:20</span><span class="mtype tra">TRANSFERRED</span><span class="desc">Cut → Lathe (queue) · qty 6 · QF-0140 · W: H. Nguyen</span></li>
+          <li><span class="t">Jul 21 09:41</span><span class="mtype rev">REVERSED</span><span class="desc">Compensates 09:38 ASSIGNED_TO_MACHINE · qty 2 · reason: wrong Machine scanned · W: H. Nguyen</span></li>
+          <li><span class="t">Jul 21 09:38</span><span class="mtype asg">ASSIGNED_TO_MACHINE</span><span class="desc">Lathe queue → <span class="mono">Lathe 1</span> · qty 2 · QF-0140 · W: H. Nguyen</span></li>
+          <li><span class="t">Jul 20 15:22</span><span class="mtype spl">SPLIT</span><span class="desc">QF-0140 (10) → QF-0140 (6) + QF-0141 (4) · at Cut · W: V. Tran</span></li>
+          <li><span class="t">Jul 20 08:12</span><span class="mtype tra">TRANSFERRED</span><span class="desc">Material → Cut · qty 10 · QF-0140 · W: V. Tran · <span class="mono">CUT-ST-01</span></span></li>
+          <li><span class="t">Jul 12 08:02</span><span class="mtype rec">RECEIVED</span><span class="desc">Received into Material · qty 10 · QF-0140 · PO-1001 release · Route “Bracket std v3” assigned</span></li>
+        </ul>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Stocked &amp; Allocation history <span class="tag">PO Allocation — separate from Movement</span></h4>
+        <div class="prognote" style="margin-top:0">No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due → largest shortage (§17).</div>
+      </div>
+
+      <div class="tk-sec">
+        <h4>Corrections <span class="tag">authorized roles · every change is audited</span></h4>
+        <div class="tk-actions">
+          <button>Quantity adjustment…</button>
+          <button>Edit assigned Route…</button>
+          <button>Adjust PO Allocation…</button>
+          <button>Change priority…</button>
+          <button>View audit trail…</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== PO INTAKE (light, §20 / GUI §12) ==================== -->
+<section id="view-pointake" class="view">
+  <div class="po-head">
+    <h1>PO Intake</h1>
+    <div class="spacer"></div>
+    <button class="btn primary" onclick="toast('＋','New PO — enter PO Number and received date. An existing PO Number opens the existing PO instead of duplicating it.')">＋ New PO</button>
+  </div>
+  <div class="po-sub">Manual Purchase Order entry (§12). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>.</div>
+  <div class="po-tools">
+    <input placeholder="Search PO Number… (exact match on an existing PO opens it — duplicates are never created)">
+  </div>
+
+  <div class="po-card">
+    <div class="pc-head">
+      <span class="po">PO-1010</span>
+      <span class="meta">received <b>Jul 22, 2026</b> · status Open · 3 demand lines</span>
+      <div class="spacer"></div>
+      <span class="unsaved" id="po-unsaved">● Unsaved changes</span>
+    </div>
+    <div class="po-lines">
+    <table class="po-table">
+      <thead><tr><th>PN</th><th>Request Type</th><th>Qty</th><th>Due date</th><th>Priority</th><th>Job Numbers</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td><div class="pn">PF-SHAFT-014</div><div class="bc">existing PN · barcode PF:PN:1014</div></td>
+          <td><span class="typechip new">NEW</span></td>
+          <td><input class="mono" value="12" size="4"></td>
+          <td><input value="Aug 12" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="ERP-88411" size="10"></td>
+          <td><input value="" placeholder="notes…" size="10"></td>
+          <td><span class="linestat saved" id="line1-stat">Saved</span></td>
+          <td><button class="rel-btn" onclick="openRelease('PF-SHAFT-014')">Release to production…</button></td>
+        </tr>
+        <tr>
+          <td><div class="pn">PF-GEAR-201</div><div class="bc newpn">new PN — barcode created with PN master: PF:PN:1201</div></td>
+          <td><span class="typechip new">NEW</span></td>
+          <td><input class="mono" value="8" size="4"></td>
+          <td><input value="Aug 20" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="ERP-88420" size="10"></td>
+          <td><input value="hardened" size="10"></td>
+          <td><span class="linestat saved" id="line2-stat">Saved</span></td>
+          <td><button class="rel-btn" id="line2-rel" onclick="openRelease('PF-GEAR-201')">Release to production…</button></td>
+        </tr>
+        <tr>
+          <td class="err-cell"><div class="pn" style="color:var(--l-faint)">—</div><div class="bc">PN lookup or inline create required</div></td>
+          <td><span class="typechip rework">REWORK</span></td>
+          <td class="err-cell"><input class="mono" value="0" size="4"><div class="rowerr">quantity must be &gt; 0</div></td>
+          <td><input value="" placeholder="due…" size="7"></td>
+          <td>—</td>
+          <td><input class="mono" value="" size="10"></td>
+          <td><input value="" size="10"></td>
+          <td><span class="linestat invalid">Row invalid</span></td>
+          <td><button class="rel-btn" disabled>Release to production…</button></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="po-actions">
+      <button class="btn primary" onclick="saveDemand()">Save demand</button>
+      <span class="hint">Saving stores <b>business demand only</b> — no Quantity Flow, no Movement, no release. Invalid rows cannot be saved.</span>
+    </div>
+  </div>
+  <div class="pr-note">An <b>inactive PN</b> is flagged in lookup and cannot be added or released without reactivation. Long PO line lists scroll with a sticky header. Leaving the view with unsaved changes prompts an explicit warning. PO Intake handles business demand only — it is not customer, pricing, invoicing, shipping, purchasing, or accounting functionality.</div>
+</section>
+
+<!-- release confirmation — explicit production release (§12) -->
+<div class="overlay" id="relovl">
+  <div class="dlg light" style="width:min(660px,94vw)">
+    <h3>Release to production — explicit action</h3>
+    <div class="big mono" id="rel-pn">PF-GEAR-201</div>
+    <div class="sub" id="rel-sub">PO-1010 demand · requested <b>8</b> · nothing is created until you confirm.</div>
+    <div class="relwarn" id="rel-warn" style="display:none">⚠ <b>This PN already has active quantity:</b> <span id="rel-dist" class="mono"></span>. Confirm intent explicitly — release always creates a <b>separate</b> Quantity Flow; it never automatically adds to or merges existing flows.</div>
+    <div class="relgrid">
+      <label>Release quantity</label>
+      <input id="rel-qty" class="mono" inputmode="numeric" oninput="relSummary()">
+      <label>Route</label>
+      <select id="rel-route" onchange="relSummary()"><option>—</option></select>
+      <label>Starting Area · Operation</label>
+      <select id="rel-area" onchange="relSummary()"><option>Material — Receiving (configured start)</option></select>
+    </div>
+    <div class="relsum" id="rel-sum">—</div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeRelease()">Cancel — nothing created</button>
+      <button class="bigbtn primary" onclick="confirmRelease()">Confirm release</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PRIORITY MANAGEMENT ==================== -->
+<section id="view-priority" class="view">
+  <div class="pr-head">
+    <h1>Priority Management — Hot PO Demand</h1>
+    <div class="spacer"></div>
+    <button class="btn primary" onclick="openHotAdd()">+ Add to Hot list</button>
+  </div>
+  <div class="pr-sub">Priority belongs to <b>PO Demand</b>, ranked per Department. Drag to reorder, ✕ to remove — changes apply immediately and are audited. New Hot entries are added at the bottom. Multiple POs for the same PN may hold different priorities.</div>
+  <div class="pr-list" id="prlist"></div>
+  <div class="pr-bar">
+    <button class="btn ghost" id="prundo" onclick="prUndo()" disabled>⟲ Undo</button>
+    <button class="btn ghost" id="prredo" onclick="prRedo()" disabled>⟳ Redo</button>
+  </div>
+  <div class="pr-note"><b>Hot Part</b> is a label on top of <span class="mono">priority_rank</span> — it never replaces it. Allocation &amp; work ordering: ① Hot rank ② earliest due date ③ largest remaining shortage (deterministic tie-breaker last, §17).</div>
+</section>
+
+<!-- add-to-hot dialog: search & select, or scan PN barcode -->
+<div class="overlay" id="hotaddovl">
+  <div class="dlg light">
+    <h3>Add PO Demand to Hot list</h3>
+    <div class="sub">Search by PN, PO or Job Number and select — or <b>scan the PN barcode</b> with this dialog open.</div>
+    <input id="hotsearch" placeholder="Search PN, PO, Job Number… or scan PN barcode" autocomplete="off"
+           oninput="renderHotAdd()" onkeydown="hotSearchKey(event)">
+    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (PF-SHAFT-014) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
+    <div id="hotaddlist"></div>
+    <div class="row"><button class="bigbtn ghost" onclick="closeHotAdd()">Cancel (Esc)</button></div>
+  </div>
+</div>
+
+<!-- remove-from-hot confirmation — §20 Priority: confirm before removal -->
+<div class="overlay" id="hotremovl">
+  <div class="dlg light">
+    <h3>Remove from Hot list?</h3>
+    <div class="big mono" id="hrm-pn">—</div>
+    <div class="sub">PO Demand <b class="mono" id="hrm-po">—</b> will be removed from the Hot ranking. Remaining ranks close the gap. The change applies <b>immediately</b>, is audited, and can be restored with Undo.</div>
+    <div class="row">
+      <button class="bigbtn ghost" onclick="closeHotRemove()">Cancel — nothing changes</button>
+      <button class="bigbtn primary" style="background:var(--err);color:#fff" onclick="confirmHotRemove()">Remove entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== ADMINISTRATION ==================== -->
+<section id="view-admin" class="view">
+  <div class="ad-wrap">
+    <nav class="ad-nav">
+      <div class="grp">Organization</div>
+      <button>Departments</button>
+      <button class="active">Areas</button>
+      <button>Operations</button>
+      <button>Machines</button>
+      <button>Workers</button>
+      <div class="grp">Production setup</div>
+      <button>Route Templates</button>
+      <button>Barcode configuration</button>
+      <button>Scan behavior</button>
+      <div class="grp">Access</div>
+      <button>Users</button>
+      <button>Roles &amp; permissions</button>
+      <div class="grp">Policies</div>
+      <button>Worker sessions</button>
+      <button>Machine assignment</button>
+      <button>Correction permissions</button>
+      <button>Settings</button>
+    </nav>
+    <div class="ad-main">
+      <div class="ad-top">
+        <div><h1>Areas</h1><div class="sub">Physical production locations — Machine Shop</div></div>
+        <div class="spacer"></div>
+        <button class="btn-primary">+ New Area</button>
+      </div>
+      <table class="ad-table">
+        <thead><tr><th>Area</th><th>Operations</th><th>Machine assignment</th><th>Machines</th><th>Worker ID mode</th><th>Terminal</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><span class="colordot" style="background:var(--a-material)"></span><b>Material</b></td><td>Receiving</td><td class="modecell">None (no Machines)</td><td>—</td><td class="modecell">Disabled</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-cut)"></span><b>Cut</b></td><td>Cutting</td><td class="modecell">Auto-assign single Machine</td><td class="mono">Saw 1</td><td class="modecell">Fixed Worker</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-lathe)"></span><b>Lathe</b></td><td>Turning</td><td class="modecell">Queue → select by scan</td><td class="mono">Lathe 1–4</td><td class="modecell">Scanned session</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-mill)"></span><b>Mill</b></td><td>Milling</td><td class="modecell">Queue → select by scan</td><td class="mono">Mill 1–2</td><td class="modecell">Scanned session</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-manual)"></span><b>Manual</b></td><td>Manual work</td><td class="modecell">None (no Machines)</td><td>—</td><td class="modecell">Fixed Worker</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-deburr)"></span><b>Deburr</b></td><td>Deburring</td><td class="modecell">None (no Machines)</td><td>—</td><td class="modecell">Fixed Worker</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-external)"></span><b>External</b></td><td>Plating · Painting · Testing</td><td class="modecell">None (no Machines)</td><td>—</td><td class="modecell">Disabled</td><td></td><td><span class="pillnav on">Active</span></td></tr>
+          <tr><td><span class="colordot" style="background:var(--a-stockroom)"></span><b>Stockroom</b></td><td>Receiving</td><td class="modecell">None (no Machines)</td><td>—</td><td class="modecell">Scanned session</td><td><span class="pillnav term">Terminal</span></td><td><span class="pillnav on">Active</span></td></tr>
+        </tbody>
+      </table>
+      <div class="notice">Area <b>identity and barcode are stable</b> — display name, description, color and icon may change without affecting historical Movements. An Area supporting multiple Operations (e.g. External) requires Operation resolution or confirmation at scan time. Deactivating an Area that still holds quantity is blocked with an explanation.</div>
+    </div>
+  </div>
+</section>
+
+<div id="toast"><span class="tic" id="toastic">✓</span><span id="toasttxt"></span></div>
+<script>
+/* ================= Mockup navigation =================
+   Top level: Scan Station · Production Board · Management · Administration.
+   'mgmt' is a container view — it opens its last-used sub view and shows
+   the Management sub-nav (Area Board, Manager Summary, Tracking, PO Intake, Priority). */
+const MGMT_SUBS=['area','summary','track','pointake','priority'];
+let mgmtLast='area';                       // last-used Management sub view (session only)
+function showView(v){
+  if(v==='mgmt') v=mgmtLast;               // Management opens its last-used sub view
+  const isMgmt=MGMT_SUBS.includes(v);
+  if(isMgmt) mgmtLast=v;
+  document.querySelectorAll('.view').forEach(s=>s.classList.remove('active'));
+  document.getElementById('view-'+v).classList.add('active');
+  document.querySelectorAll('#appnav .navbtn').forEach(b=>
+    b.classList.toggle('active', b.dataset.v===v || (b.dataset.v==='mgmt'&&isMgmt)));
+  document.getElementById('mgmtnav').classList.toggle('show',isMgmt);
+  document.querySelectorAll('#mgmtnav .subbtn').forEach(b=>b.classList.toggle('active',b.dataset.v===v));
+  if(v==='scan') focusScan();
+  if(v==='area') renderArea();
+}
+function toast(ic,msg){
+  document.getElementById('toastic').textContent=ic;
+  document.getElementById('toasttxt').textContent=msg;
+  const t=document.getElementById('toast'); t.classList.add('show');
+  clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),3200);
+}
+
+/* ================= Scan Station ================= */
+let machineSession=null;      // sticky session (§18) — held until changed/cleared/expired
+let pendingPN=null;           // PN waiting for qty or Machine
+let offline=false, scans=0;   // no local write queue exists — writes are blocked while disconnected
+const undoStack=[];
+
+const input=document.getElementById('scaninput');
+function focusScan(){ setTimeout(()=>input.focus(),50); }  // §3: input regains focus after every operation
+focusScan();
+function fill(el){ input.value=el.textContent.trim(); focusScan(); }
+
+/* manual PN entry — separate explicit fallback flow (§9); never pre-fills the barcode input */
+function manualEntry(){
+  document.getElementById('mpninput').value='';
+  document.getElementById('manovl').classList.add('show');
+  setTimeout(()=>document.getElementById('mpninput').focus(),60);
+}
+function closeManual(){ document.getElementById('manovl').classList.remove('show'); focusScan(); }
+function confirmManual(){
+  const pn=document.getElementById('mpninput').value.trim().toUpperCase();
+  document.getElementById('manovl').classList.remove('show');
+  if(!pn){ focusScan(); return; }
+  if(pn==='PF-SHAFT-014'){ setLastPN('PF-SHAFT-014','manual entry · single valid context'); openQty('PF-SHAFT-014',8); }
+  else if(pn==='PF-BRACKET-001'){ setLastPN('PF-BRACKET-001','manual entry · multiple valid contexts'); document.getElementById('ambovl').classList.add('show'); }
+  else { feedback('err','Unknown PartNumber','“'+pn+'” matches no PN — nothing recorded. Manual entry is validated exactly like a scan.','✕'); focusScan(); }
+}
+
+function now(){ const d=new Date(); return d.toTimeString().slice(0,5); }
+function feedback(kind,t1,t2,icon){
+  const f=document.getElementById('feedback');
+  f.className=kind;
+  f.innerHTML='<div class="fic">'+icon+'</div><div class="ft"><div class="t1">'+t1+'</div><div class="t2">'+t2+'</div></div>';
+}
+function setLastPN(pn,desc){
+  document.getElementById('lastpn-p').textContent=pn;
+  document.getElementById('lastpn-d').textContent=desc;
+}
+function setPending(txt){
+  const p=document.getElementById('pending');
+  if(txt){ document.getElementById('pendingtxt').textContent=txt; p.classList.add('show'); }
+  else p.classList.remove('show');
+}
+function addScan(pn,desc,cls){
+  scans++;
+  document.getElementById('scancount').textContent=scans+' today';
+  const li=document.createElement('li');
+  li.innerHTML='<span class="sic '+cls+'"></span><div class="what"><div class="p">'+pn+'</div><div class="d">'+desc+'</div></div><span class="when">'+now()+'</span>';
+  const list=document.getElementById('scanlist');
+  list.insertBefore(li,list.firstChild);
+  if(cls==='ok'){ undoStack.push({pn,desc}); document.getElementById('undo').disabled=false; }
+}
+function setMachineSession(m){
+  machineSession=m;
+  const pill=document.getElementById('pill-machine');
+  if(m){ pill.className='val'; pill.innerHTML='<span class="sdot"></span>'+m; }
+  else { pill.className='val none'; pill.textContent='— none'; }
+  document.querySelectorAll('.mtile').forEach(t=>t.classList.toggle('session',t.dataset.m===m));
+}
+
+function doScan(){
+  if(offline){ blockedFeedback(); return; }   // write-blocked while disconnected — nothing recorded, nothing queued
+  const raw=input.value.trim(); input.value=''; focusScan();
+  if(!raw) return;
+  const v=raw.toUpperCase();
+
+  if(v==='STOCK-DEMO'){                       // Stockroom completion demo
+    openAlloc(); return;
+  }
+  if(v.startsWith('PF:MACHINE:')){
+    const m = v.endsWith('L1')?'Lathe 1':v.endsWith('L2')?'Lathe 2':v.endsWith('L3')?'Lathe 3':v.endsWith('L4')?'Lathe 4':null;
+    if(!m){ feedback('err','Unknown Machine barcode','Rejected — no production data was updated.','✕'); return; }
+    if(m==='Lathe 4'){ feedback('err','Lathe 4 is inactive (maintenance)','Inactive entities must not accept production updates (§9).','✕'); return; }
+    setMachineSession(m);
+    if(pendingPN){                            // order-free: PN then Machine (§11/§14)
+      const p=pendingPN; pendingPN=null; setPending(null);
+      recordMovement(p.pn,'ASSIGNED_TO_MACHINE','Lathe queue → '+m+' · qty '+p.qty);
+      feedback('ok','Assigned to '+m,p.pn+' × '+p.qty+' — ASSIGNED_TO_MACHINE recorded. Machine session active.','✓');
+    } else {
+      feedback('ok','Machine session: '+m,'Session persists until changed, cleared or expired — next PN scans assign here.','✓');
+    }
+    return;
+  }
+  if(v.startsWith('PF:WORKER:')){
+    document.getElementById('pill-worker').innerHTML='<span class="sdot"></span>V. Tran';
+    feedback('ok','Worker session: V. Tran','Previous Worker signed out. Subsequent scans record this Worker.','✓');
+    return;
+  }
+  if(v==='PF:ACTION:REWORK'||v==='PF:ACTION:MODIFY'){
+    const t=v.split(':')[2];
+    feedback('warn',t+' armed for next PN scan','Scan a PN barcode next — order is flexible (PN → Action ≡ Action → PN). Confirmation follows.','!');
+    return;
+  }
+  if(v==='PF:PN:1014'){                       // single context
+    setLastPN('PF-SHAFT-014','Drive shaft Ø25 · single valid context');
+    openQty('PF-SHAFT-014',8);
+    return;
+  }
+  if(v==='PF:PN:1001'){                       // multiple contexts → never guess (§9)
+    setLastPN('PF-BRACKET-001','Mounting bracket · multiple valid contexts');
+    document.getElementById('ambovl').classList.add('show');
+    return;
+  }
+  if(v.startsWith('PF:PN:')){
+    feedback('err','Unknown PN barcode','Rejected — unknown or ambiguous input never updates tracking data (§6.8).','✕');
+    return;
+  }
+  feedback('err','Unrecognized barcode','Not a PartFlow barcode. Raw ERP text is not auto-accepted — use manual entry if needed (§9).','✕');
+}
+
+function blockedFeedback(){
+  feedback('err','Disconnected — production writes are blocked','No scan is recorded or queued while offline (§3.6). Restore the connection to resume scanning.','✕');
+}
+function recordMovement(pn,type,desc){
+  if(offline){ blockedFeedback(); return false; }   // no local queue — a write either commits online or does not happen
+  addScan(pn,type+' · '+desc,'ok');
+  return true;
+}
+
+/* ----- quantity dialog ----- */
+let qtyval='', qtyctx=null;
+function openQty(pn,avail){
+  qtyctx={pn,avail}; qtyval='';
+  document.getElementById('qtypart').textContent=pn;
+  document.getElementById('qtysub').innerHTML='Transfer Material → Lathe · available at source: <b>'+avail+'</b>';
+  document.getElementById('qtydisplay').innerHTML='&nbsp;';
+  document.getElementById('qtyovl').classList.add('show');
+}
+function kp(k){
+  if(k==='C') qtyval='';
+  else if(k==='B') qtyval=qtyval.slice(0,-1);
+  else if(qtyval.length<4) qtyval+=k;
+  document.getElementById('qtydisplay').textContent=qtyval||' ';
+}
+function closeQty(){ document.getElementById('qtyovl').classList.remove('show'); qtyctx=null; feedback('idle','','','');
+  document.getElementById('feedback').innerHTML='<div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Cancelled — nothing recorded.</div></div>'; focusScan(); }
+function confirmQty(){
+  const q=parseInt(qtyval||'0',10), c=qtyctx;
+  if(!q){ return; }
+  if(q>c.avail){
+    document.getElementById('qtyovl').classList.remove('show');
+    feedback('err','Quantity exceeds available source quantity','Requested '+q+' > available '+c.avail+' at Material. Movement rejected (§10 Quantity Integrity).','✕');
+    focusScan(); return;
+  }
+  document.getElementById('qtyovl').classList.remove('show');
+  if(machineSession){
+    // one atomic transaction, two canonical Movements — never an invented combined type
+    if(!recordMovement(c.pn,'TRANSFERRED','Material → Lathe · qty '+q)){ focusScan(); return; }
+    recordMovement(c.pn,'ASSIGNED_TO_MACHINE','Lathe queue → '+machineSession+' · qty '+q);
+    feedback('ok', c.pn+' × '+q+' → '+machineSession, 'Recorded atomically as two Movements: TRANSFERRED, then ASSIGNED_TO_MACHINE. Machine session retained.', '✓');
+  } else {
+    if(!recordMovement(c.pn,'TRANSFERRED','Material → Lathe queue · qty '+q)){ focusScan(); return; }
+    pendingPN={pn:c.pn,qty:q};
+    setPending('Pending context: '+c.pn+' × '+q+' received into Lathe queue — scan a Machine barcode to assign, or continue scanning.');
+    feedback('ok', c.pn+' × '+q+' → Lathe queue', 'Received into Area queue. Scan a Machine to assign — either order works (§11).', '✓');
+  }
+  focusScan();
+}
+
+/* ----- ambiguity dialog ----- */
+function closeAmb(){ document.getElementById('ambovl').classList.remove('show');
+  feedback('idle','','',''); document.getElementById('feedback').innerHTML='<div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Cancelled — nothing recorded.</div></div>'; focusScan(); }
+function ambPick(k){
+  document.getElementById('ambovl').classList.remove('show');
+  if(k==='assign'){
+    pendingPN={pn:'PF-BRACKET-001',qty:2};
+    setPending('Pending context: PF-BRACKET-001 × 2 (Lathe queue) — scan a Machine barcode to assign.');
+    feedback('warn','Scan Machine barcode to assign','PF-BRACKET-001 × 2 selected from Lathe queue — nothing recorded until the Machine scan.','!');
+  } else if(k==='transfer'){ openQty('PF-BRACKET-001',4); }
+  else if(k==='rework'){ openIntake('REWORK'); return; }
+  else { openIntake('MODIFY'); return; }
+  focusScan();
+}
+
+/* ----- REWORK / MODIFY intake confirmation (§13) — nothing recorded until confirmed ----- */
+let intakeType=null;
+function openIntake(t){
+  intakeType=t;
+  document.getElementById('itype').textContent=t;
+  document.getElementById('itype2').textContent=t;
+  document.getElementById('iqty').value='';
+  document.getElementById('ipo').selectedIndex=0;
+  document.getElementById('intakeovl').classList.add('show');
+  setTimeout(()=>document.getElementById('iqty').focus(),60);
+}
+function closeIntake(){
+  document.getElementById('intakeovl').classList.remove('show'); intakeType=null;
+  document.getElementById('feedback').className='idle';
+  document.getElementById('feedback').innerHTML='<div class="ft"><div class="t1" style="color:var(--d-faint);font-weight:400">Cancelled — nothing recorded.</div></div>';
+  focusScan();
+}
+function confirmIntake(){
+  const q=parseInt(document.getElementById('iqty').value||'0',10);
+  if(!q){ document.getElementById('iqty').focus(); return; }   // quantity is confirmed, never assumed
+  const posel=document.getElementById('ipo').value;
+  const po= posel==='TMP' ? 'TMP-20260722-1432-'+intakeType : posel;
+  const route=document.getElementById('iroute').value;
+  const area=document.getElementById('iarea').value.replace(' (this Area)','');
+  const t=intakeType; intakeType=null;
+  document.getElementById('intakeovl').classList.remove('show');
+  if(recordMovement('PF-BRACKET-001','RECEIVED',t+' · '+po+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
+    feedback('ok',t+' demand released into '+area, po+' · new Quantity Flow QF-0158 × '+q+' · Route “'+route+'” snapshot assigned · RECEIVED appended after confirmation.','✓');
+  focusScan();
+}
+
+/* ----- undo (§15): compensating REVERSED movement, original preserved ----- */
+function undoLast(){
+  if(!undoStack.length) return;
+  const last=undoStack.pop();
+  addScan(last.pn,'REVERSED · compensates '+now()+' · reason: operator undo','undo');
+  undoStack.pop && undoStack.length===0 && (document.getElementById('undo').disabled=true);
+  if(!undoStack.length) document.getElementById('undo').disabled=true;
+  feedback('warn','Undo recorded as REVERSED','Original Movement is preserved — a compensating event restored the derived quantities.','⟲');
+  focusScan();
+}
+
+/* ----- connectivity-loss simulation — explicit write-blocked state (GUI §3.6) ----- */
+function toggleOffline(){
+  offline=!offline;
+  document.getElementById('conn').classList.toggle('off',offline);
+  document.getElementById('conntxt').textContent=offline?'OFFLINE':'ONLINE';
+  document.getElementById('offbanner').classList.toggle('show',offline);
+  input.disabled=offline;
+  document.getElementById('scanbtn').disabled=offline;
+  if(offline){
+    input.placeholder='Disconnected — scanning blocked';
+    blockedFeedback();          // loaded read-only panels (inventory, recent scans) stay visible
+  } else {
+    input.placeholder='Scan PN / Machine / Worker / Action barcode…';
+    feedback('ok','Reconnected — scanning restored','Input re-enabled and refocused. Nothing was recorded or queued while disconnected.','✓');
+    focusScan();
+  }
+}
+
+/* ----- Stockroom allocation demo (§17) ----- */
+const allocReq=[12,8]; let alloc=[12,8];
+function openAlloc(){
+  // the STOCKED PartMovement is recorded first; the allocation dialog follows (GUI §11)
+  if(!recordMovement('PF-PIN-102','STOCKED','20 pcs into Stockroom · manufacturing-complete')) return;
+  alloc=[...allocReq]; refreshAlloc();
+  setLastPN('PF-PIN-102','STOCKED × 20 — allocation suggestion open');
+  document.getElementById('allocovl').classList.add('show');
+}
+function stepAlloc(i,d){
+  alloc[i]=Math.max(0,Math.min(allocReq[i],alloc[i]+d)); refreshAlloc();
+}
+function refreshAlloc(){
+  document.getElementById('al0').textContent=alloc[0];
+  document.getElementById('al1').textContent=alloc[1];
+  const tot=alloc[0]+alloc[1], el=document.getElementById('alloc-tot');
+  el.textContent=tot; el.className=tot===20?'good':'bad';
+  document.getElementById('alloc-warn').textContent=tot===20?'':'must equal stocked quantity';
+  document.getElementById('allocbtn').disabled=tot!==20;
+}
+function closeAlloc(confirmed){
+  document.getElementById('allocovl').classList.remove('show');
+  if(confirmed){
+    // PO Allocation is recorded separately from the STOCKED Movement and is never itself a Movement
+    feedback('ok','Stocked & allocated','STOCKED Movement already recorded. PO Allocation (separate from Movement): PO-1006 × '+alloc[0]+' · PO-1009 × '+alloc[1]+' — auditable, adjustable by Manager/Admin.','✓');
+  } else {
+    feedback('warn','Stocked — allocation deferred','STOCKED Movement stands; quantity remains unallocated until confirmed.','!');
+  }
+  focusScan();
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){ ['qtyovl','ambovl','allocovl','hotaddovl','manovl','intakeovl','hotremovl','relovl'].forEach(id=>document.getElementById(id).classList.remove('show'));
+    intakeType=null; hotRemoveIdx=null;
+    if(document.getElementById('view-scan').classList.contains('active')) focusScan(); }
+});
+
+/* ================= Area Board (data-driven tabs) ================= */
+const AREAS=[
+  {key:'material',name:'Material',color:'var(--a-material)'},
+  {key:'cut',name:'Cut',color:'var(--a-cut)'},
+  {key:'lathe',name:'Lathe',color:'var(--a-lathe)'},
+  {key:'mill',name:'Mill',color:'var(--a-mill)'},
+  {key:'manual',name:'Manual',color:'var(--a-manual)'},
+  {key:'deburr',name:'Deburr',color:'var(--a-deburr)'},
+  {key:'external',name:'External',color:'var(--a-external)'},
+  {key:'stockroom',name:'Stockroom',color:'var(--a-stockroom)'}
+];
+const AB_CARDS=[
+  {area:'material',pn:'PF-SHAFT-014',po:'PO-1003 · Receiving',job:'ERP-88190',qty:8,mach:[['queue',8]],due:'9 days remaining',dcls:'ok',tia:'2d 01h',prio:0,d:9},
+  {area:'cut',pn:'PF-BRACKET-001',po:'PO-1001 · Cutting',job:'ERP-88112',qty:4,mach:[['Saw 1',4]],due:'2 days remaining',dcls:'soon',tia:'3h 40m',prio:1,d:2},
+  {area:'lathe',pn:'PF-BRACKET-001',po:'PO-1001 · Turning',job:'ERP-88112',qty:6,mach:[['Lathe 3',4],['queue',2]],due:'2 days remaining',dcls:'soon',tia:'2h 05m',prio:1,d:2},
+  {area:'lathe',pn:'PF-SHAFT-014',po:'PO-1003 · Turning',job:'ERP-88190',qty:4,mach:[['Lathe 2',4]],due:'9 days remaining',dcls:'ok',tia:'1h 05m',prio:0,d:9},
+  {area:'lathe',pn:'PF-VALVE-033',po:'TMP-…-REWORK · Turning · REWORK',job:'— (internal)',qty:2,mach:[['queue',2]],due:'overdue 1 day',dcls:'late',tia:'6h 12m',prio:0,d:-1},
+  {area:'mill',pn:'PF-HOUSING-021',po:'PO-1002 · Milling',job:'ERP-88102',qty:3,mach:[['Mill 1',3]],due:'16 days remaining',dcls:'ok',tia:'45m',prio:0,d:16},
+  {area:'deburr',pn:'PF-HOUSING-021',po:'PO-1002 · Deburring',job:'ERP-88102',qty:3,mach:[['queue',3]],due:'16 days remaining',dcls:'ok',tia:'30m',prio:0,d:16},
+  {area:'external',pn:'PF-PLATE-007',po:'PO-1005 · Plating',job:'ERP-88031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6},
+  {area:'stockroom',pn:'PF-PIN-102',po:'PO-0996 · stocked',job:'ERP-87740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:99}
+];
+let abActive='lathe';
+function renderAreaTabs(){
+  document.getElementById('abtabs').innerHTML=AREAS.map(a=>{
+    const n=AB_CARDS.filter(c=>c.area===a.key).length;
+    return '<button class="ab-tab'+(a.key===abActive?' active':'')+'" onclick="abActive=\''+a.key+'\';renderArea()">'+
+      '<span class="dot" style="background:'+a.color+'"></span>'+a.name+' <span class="cnt">'+n+'</span></button>';
+  }).join('');
+}
+function renderArea(){
+  renderAreaTabs();
+  const q=(document.getElementById('absearch').value||'').toLowerCase();
+  const sort=document.getElementById('absort').value;
+  let cards=AB_CARDS.filter(c=>c.area===abActive)
+    .filter(c=>!q||(c.pn+c.po+c.job).toLowerCase().includes(q));
+  cards.sort((a,b)=> sort==='qty'? b.qty-a.qty : sort==='prio'? ((a.prio||9)-(b.prio||9)) : sort==='tia'? 0 : a.d-b.d);
+  const area=AREAS.find(a=>a.key===abActive);
+  const tot=cards.reduce((s,c)=>s+c.qty,0);
+  document.getElementById('abmeta').innerHTML='<b>'+cards.length+'</b> PN · <b>'+tot+'</b> pcs in '+area.name;
+  document.getElementById('abgrid').innerHTML=cards.length? cards.map(c=>{
+    const hot=c.prio? '<span class="hot h'+c.prio+'">🔥 #'+c.prio+'</span> ':'';
+    const mach=c.mach.map(m=>'<span class="mrow'+(m[0]==='queue'?' queue':'')+'">'+(m[0]==='queue'?'queue':m[0])+' · <b>'+m[1]+'</b></span>').join('');
+    return '<div class="ab-card"><div class="top"><div>'+
+      '<div class="part">'+hot+c.pn+'</div><div class="po">'+c.po+'</div><div class="ext">Job: '+c.job+'</div></div>'+
+      '<div class="qtyblk"><div class="qlbl">In this Area</div><div class="qty-big">'+c.qty+'</div><div class="qunit">pcs</div></div></div>'+
+      (mach?'<div class="machines">'+mach+'</div>':'')+
+      '<div class="foot"><span class="duetxt '+c.dcls+'">'+c.due+'</span><span class="tia">'+(c.tia==='—'?'':c.tia+' in Area')+'</span></div></div>';
+  }).join('') : '<div style="grid-column:1/-1;color:var(--l-faint);padding:40px;text-align:center">No production in '+area.name+'</div>';
+}
+
+/* ================= Tracking (demo selection) ================= */
+function selectPN(row,pn){
+  document.querySelectorAll('.tk-table tr').forEach(r=>r.classList.remove('sel'));
+  row.classList.add('sel');
+  if(pn!=='PF-BRACKET-001') toast('ℹ','Mockup shows the full detail panel for PF-BRACKET-001 only');
+}
+
+/* ================= Priority Management =================
+   Hot list edits (reorder / add / remove) apply immediately and are audited.
+   Undo/Redo replace Save/Cancel per current UI decision — supersedes §20 step 5. */
+let hotList=[
+  {pn:'PF-BRACKET-001',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
+  {pn:'PF-PLATE-007',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
+  {pn:'PF-PIN-102',po:'PO-1006 · ERP-88355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
+];
+const HOT_CANDIDATES=[
+  {pn:'PF-SHAFT-014',po:'PO-1003 · ERP-88190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
+  {pn:'PF-HOUSING-021',po:'PO-1002 · ERP-88102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
+  {pn:'PF-VALVE-033',po:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
+];
+let undoHist=[], redoHist=[];
+const prlist=document.getElementById('prlist');
+const hotKey=h=>h.pn+'|'+h.po;
+
+function renderHot(){
+  prlist.innerHTML = hotList.length ? hotList.map((h,i)=>
+    '<div class="pr-item" draggable="true" data-k="'+hotKey(h)+'">'+
+      '<span class="grip">⠿</span><span class="rank">'+(i+1)+'</span>'+
+      '<div class="body"><div class="l1"><span class="pn">'+h.pn+'</span><span class="po">'+h.po+'</span>'+
+        '<span class="typechip '+h.type+'">'+h.type.toUpperCase()+'</span></div>'+
+        '<div class="l2">'+h.meta.split('|').map(s=>'<span>'+s+'</span>').join('')+'</div></div>'+
+      '<div class="due"><div>'+h.due+'</div><div class="d2 '+h.d2c+'">'+h.d2+'</div></div>'+
+      '<button class="pr-x" title="Remove from Hot list" onclick="removeHot('+i+')">✕</button>'+
+    '</div>').join('')
+    : '<div class="pr-empty">No Hot PO Demand — add one with “+ Add to Hot list”, or scan a PN barcode in the add dialog.</div>';
+  updatePrButtons();
+}
+function updatePrButtons(){
+  document.getElementById('prundo').disabled=!undoHist.length;
+  document.getElementById('prredo').disabled=!redoHist.length;
+}
+function prSnapshot(){ undoHist.push(JSON.stringify(hotList)); redoHist=[]; }
+function prUndo(){
+  if(!undoHist.length) return;
+  redoHist.push(JSON.stringify(hotList));
+  hotList=JSON.parse(undoHist.pop()); renderHot();
+  toast('⟲','Undo — previous Hot ranking restored (audited)');
+}
+function prRedo(){
+  if(!redoHist.length) return;
+  undoHist.push(JSON.stringify(hotList));
+  hotList=JSON.parse(redoHist.pop()); renderHot();
+  toast('⟳','Redo — change re-applied (audited)');
+}
+/* removal requires explicit confirmation identifying PN and PO Demand (§20 Priority) */
+let hotRemoveIdx=null;
+function removeHot(i){
+  hotRemoveIdx=i;
+  const h=hotList[i];
+  document.getElementById('hrm-pn').textContent=h.pn;
+  document.getElementById('hrm-po').textContent=h.po;
+  document.getElementById('hotremovl').classList.add('show');
+}
+function closeHotRemove(){ document.getElementById('hotremovl').classList.remove('show'); hotRemoveIdx=null; }
+function confirmHotRemove(){
+  if(hotRemoveIdx===null) return;
+  prSnapshot();
+  const r=hotList.splice(hotRemoveIdx,1)[0];
+  closeHotRemove(); renderHot();
+  toast('✕',r.pn+' · '+r.po.split(' ·')[0]+' removed from Hot list (audited) — remaining ranks close the gap · Undo can restore it');
+}
+
+/* drag & drop reorder */
+let dragEl=null, dragPrev=null;
+prlist.addEventListener('dragstart',e=>{
+  dragEl=e.target.closest('.pr-item'); if(!dragEl) return;
+  dragPrev=JSON.stringify(hotList); dragEl.classList.add('dragging');
+});
+prlist.addEventListener('dragover',e=>{
+  e.preventDefault(); if(!dragEl) return;
+  const after=[...prlist.querySelectorAll('.pr-item:not(.dragging)')].find(el=>{
+    const r=el.getBoundingClientRect(); return e.clientY < r.top + r.height/2;
+  });
+  if(after) prlist.insertBefore(dragEl,after); else prlist.appendChild(dragEl);
+});
+prlist.addEventListener('dragend',()=>{
+  if(!dragEl) return;
+  dragEl.classList.remove('dragging'); dragEl=null;
+  const order=[...prlist.querySelectorAll('.pr-item')].map(el=>el.dataset.k);
+  const newList=order.map(k=>hotList.find(h=>hotKey(h)===k)).filter(Boolean);
+  if(JSON.stringify(newList)!==dragPrev){
+    undoHist.push(dragPrev); redoHist=[]; hotList=newList;
+    toast('🔥','Hot ranking updated — priority_rank saved (audited)');
+  }
+  renderHot();
+});
+
+/* add-to-hot dialog */
+function hotCandidates(){ return HOT_CANDIDATES.filter(c=>!hotList.some(h=>hotKey(h)===hotKey(c))); }
+function openHotAdd(){
+  document.getElementById('hotsearch').value=''; renderHotAdd();
+  document.getElementById('hotaddovl').classList.add('show');
+  setTimeout(()=>document.getElementById('hotsearch').focus(),60);
+}
+function closeHotAdd(){ document.getElementById('hotaddovl').classList.remove('show'); }
+function renderHotAdd(){
+  const q=document.getElementById('hotsearch').value.trim().toLowerCase();
+  const list=hotCandidates().filter(c=>!q||(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(q));
+  document.getElementById('hotaddlist').innerHTML = list.length ? list.map(c=>
+    '<button class="hotadd-item" onclick="addHot(\''+c.pn+'\')">'+
+      '<span class="hpn">'+c.pn+'</span><span class="hpo">'+c.po+'</span>'+
+      '<span class="typechip '+c.type+'">'+c.type.toUpperCase()+'</span>'+
+      '<span class="hdue '+(c.d2c==='late'?'late':'')+'">'+c.due+' · '+c.d2+'</span>'+
+    '</button>').join('')
+    : '<div class="hotadd-empty">No matching active PO Demand'+(q?' for “'+q+'”':' — everything is already Hot')+'</div>';
+}
+function hotSearchKey(e){
+  if(e.key!=='Enter') return;
+  const v=e.target.value.trim().toUpperCase();
+  const byCode=hotCandidates().find(c=>c.code===v);
+  if(byCode){ addHot(byCode.pn); return; }
+  const list=hotCandidates().filter(c=>(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(v.toLowerCase()));
+  if(list.length===1) addHot(list[0].pn);
+}
+function addHot(pn){
+  const c=hotCandidates().find(x=>x.pn===pn); if(!c) return;
+  prSnapshot();
+  const {code,...item}=c; hotList.push(item);   // new Hot entries join at the bottom (§20)
+  renderHot(); closeHotAdd();
+  toast('🔥',c.pn+' · '+c.po.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
+}
+renderHot();
+
+/* ================= PO Intake (§12) — demand save vs explicit release ================= */
+const REL_DATA={
+  'PF-SHAFT-014':{req:12,route:['Shaft std v2','Shaft short v1'],active:'Material 8 · Lathe 2 × 4',line:'line1',qf:'QF-0161'},
+  'PF-GEAR-201' :{req:8, route:['Gear std v1'],                  active:null,                      line:'line2',qf:'QF-0162'}
+};
+let relPN=null;
+function saveDemand(){
+  document.getElementById('po-unsaved').style.display='none';
+  toast('💾','Demand saved — business demand only. No Quantity Flow, no Movement, no release.');
+}
+function openRelease(pn){
+  relPN=pn;
+  const d=REL_DATA[pn];
+  document.getElementById('rel-pn').textContent=pn;
+  document.getElementById('rel-sub').innerHTML='PO-1010 demand · requested <b>'+d.req+'</b> · nothing is created until you confirm.';
+  document.getElementById('rel-qty').value=d.req;
+  document.getElementById('rel-route').innerHTML=d.route.map(r=>'<option>'+r+'</option>').join('');
+  const w=document.getElementById('rel-warn');
+  if(d.active){ document.getElementById('rel-dist').textContent=d.active; w.style.display='block'; }
+  else w.style.display='none';
+  relSummary();
+  document.getElementById('relovl').classList.add('show');
+}
+function relSummary(){
+  if(!relPN) return;
+  const q=document.getElementById('rel-qty').value||'0';
+  const r=document.getElementById('rel-route').value;
+  document.getElementById('rel-sum').innerHTML='Release summary — will create: Quantity Flow <b>× '+q+
+    '</b> · independent Route snapshot <b>“'+r+'”</b> · <b>RECEIVED</b> into <b>Material</b> (Operation <b>Receiving</b>) · current position derived atomically. Existing flows are never merged.';
+}
+function closeRelease(){
+  document.getElementById('relovl').classList.remove('show'); relPN=null;
+  toast('✕','Release cancelled — nothing was created.');
+}
+function confirmRelease(){
+  if(!relPN) return;
+  const d=REL_DATA[relPN];
+  const q=parseInt(document.getElementById('rel-qty').value||'0',10);
+  if(!q||q<1){ document.getElementById('rel-qty').focus(); return; }
+  const r=document.getElementById('rel-route').value;
+  document.getElementById('relovl').classList.remove('show');
+  const st=document.getElementById(d.line+'-stat');
+  st.className='linestat released'; st.textContent='Released · '+d.qf;
+  toast('✓',relPN+' released — '+d.qf+' × '+q+' · Route “'+r+'” snapshot · RECEIVED into Material (Receiving) · position derived');
+  relPN=null;
+}
+
+/* ================= Production Board clock ================= */
+setInterval(()=>{ const d=new Date();
+  document.getElementById('pbclock').textContent=d.toTimeString().slice(0,5); },1000);
+
+renderArea();
+</script>
+</body>
+</html>

@@ -1,9 +1,9 @@
-# PartFlow GUI Design v2
+# PartFlow GUI Design v3
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v5).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v2.html`.
-> Supersedes GUI Design v1 (`archive/partflow-gui-mockup.html`); the differences are listed in §13.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v3.html`.
+> Supersedes GUI Design v2 (mockup: `archive/partflow-gui-mockup-v2.html`); the differences are listed in §13.1. Differences from v1 remain listed in §13.2.
 
 ---
 
@@ -20,16 +20,29 @@ Covers the eight application views from PROJECT_PROFILE §20:
 7. Priority Management (Hot PO Demand ranking)
 8. Administration (configuration)
 
+## 1.1 Navigation structure
+
+Top-level navigation exposes four entries; the management views are grouped as **sub views of one Management view**:
+
+| Top level        | Contains                                                          |
+|------------------|-------------------------------------------------------------------|
+| Scan Station     | — (single view)                                                   |
+| Production Board | — (single view)                                                   |
+| Management       | Area Board · Manager Summary · Tracking · PO Intake · Priority    |
+| Administration   | — (single view, own sidebar navigation per §10)                   |
+
+Selecting Management opens its **last-used sub view** (Area Board on first open) and reveals a secondary sub-view bar beneath the top navigation. The grouping is navigation only — each sub view keeps its own specification (§6–§9, §12). The eight views of PROJECT_PROFILE §20 are unchanged.
+
 ---
 
 # 2. Design System
 
 ## 2.1 Two visual contexts, one token set
 
-| Context    | Views                                                       | Theme | Rationale                                                                           |
-|------------|-------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
-| Shop floor | Scan Station, Production Board, Area Board, Manager Summary | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
-| Management | Tracking, PO Intake, Priority Management, Administration    | Light | Dense data work at a desk, matches office tooling expectations                      |
+| Context    | Views                                                                                             | Theme | Rationale                                                                           |
+|------------|---------------------------------------------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
+| Shop floor | Scan Station, Production Board                                                                    | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays |
+| Management | Management sub views (Area Board, Manager Summary, Tracking, PO Intake, Priority), Administration | Light | Dense data work at a desk, matches office tooling expectations; one consistent theme across the whole Management view |
 
 Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system.
 
@@ -177,7 +190,7 @@ Read-only, full-screen, for large shared displays. No interactive elements excep
 
 # 6. Area Board
 
-Focused per-Area view, interactive (wall tablet or desktop).
+Focused per-Area view, interactive. Management sub view (light theme, §1.1); typically used at a desk or on a tablet.
 
 - Area tab strip with color dots and item counts; one active Area at a time.
 - Toolbar: text search (PN / PO / Job Number) and sort selector (Due date, Priority, Time in Area, Quantity); a summary of PN count and total pieces for the Area.
@@ -191,7 +204,7 @@ Focused per-Area view, interactive (wall tablet or desktop).
 
 # 7. Manager Summary
 
-Operational overview grouped by Area (PROJECT_PROFILE §20). One column per Area; the layout scrolls horizontally when all Areas do not fit.
+Operational overview grouped by Area (PROJECT_PROFILE §20). Management sub view (light theme, §1.1). One column per Area; the layout scrolls horizontally when all Areas do not fit.
 
 Each Area column shows:
 
@@ -290,9 +303,17 @@ Management view (light theme) implementing manual PO entry and explicit producti
 
 ---
 
-# 13. Changes from GUI Design v1
+# 13. Changes from previous versions
 
-Decisions in v1 that are superseded by this version, all aligned to PROJECT_PROFILE v5:
+## 13.1 Changes from GUI Design v2
+
+1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
+2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
+3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
+
+## 13.2 Changes from GUI Design v1
+
+Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 1. **Machine selection:** v1 proposed a per-Part Machine scan with no persistent selection. v2 follows §18 — the scanned Machine starts a **session** that persists until changed, cleared, or expired. Scan order remains flexible.
 2. **Terminology:** "Production Request" and "Request Number" are replaced by the canonical PO Demand / Request Type / Quantity Flow / temporary PO vocabulary.
@@ -304,7 +325,7 @@ Decisions in v1 that are superseded by this version, all aligned to PROJECT_PROF
 
 ---
 
-# 14. Out of Scope for v2 UI
+# 14. Out of Scope for v3 UI
 
 Deferred intentionally: dark/light user toggle (theme is fixed per view class), localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
