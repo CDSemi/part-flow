@@ -20,8 +20,8 @@
   --d-bg:#0a0e14; --d-bg2:#070a0f; --d-panel:#121926; --d-panel2:#1a2434;
   --d-border:#243247; --d-border2:#2e405c;
   --d-text:#eaf1fa; --d-muted:#93a5bc; --d-faint:#5a6b82;
-  --l-bg:#f3f5fa; --l-panel:#ffffff; --l-panel2:#f7f9fc; --l-border:#e2e8f2;
-  --l-text:#141e2b; --l-muted:#5f7188; --l-faint:#94a3b8;
+  --l-bg:#e9edf5; --l-panel:#ffffff; --l-panel2:#f2f5fa; --l-border:#c7d2e2;
+  --l-text:#0f1826; --l-muted:#49596f; --l-faint:#77869b;
   /* Status — semantic only, never decorative */
   --ok:#31d287; --warn:#ffb224; --err:#ff6166; --info:#4f8cff;
   --ok-d:#158f56; --warn-d:#a8721a; --err-d:#c43a41; --info-d:#2563eb;
@@ -46,15 +46,17 @@ body.dark{
   --shadow:0 8px 28px rgba(3,8,18,.42);
 }
 body.light{
-  --bg:var(--l-bg); --bg2:#e9edf5; --panel:var(--l-panel); --panel2:var(--l-panel2);
-  --border:var(--l-border); --border2:#c9d4e4;
+  --bg:var(--l-bg); --bg2:#dbe1ec; --panel:var(--l-panel); --panel2:var(--l-panel2);
+  --border:var(--l-border); --border2:#a7b7cc;
   --text:var(--l-text); --muted:var(--l-muted); --faint:var(--l-faint);
-  --hair:#eef2f7; --chip:#edf0f4; --thumb:#c3cddc; --track-bar:#eef1f6;
+  --hair:#dfe5ef; --chip:#e2e8f1; --thumb:#a7b6ca; --track-bar:#dbe2ed;
   --ok-t:var(--ok-d); --warn-t:var(--warn-d); --err-t:var(--err-d); --info-t:var(--info-d);
   --asg-t:#7141d8; --spl-t:#a8721a; --stk-t:#157a63; --dev-t:#c05a1e;
-  --navglass:rgba(255,255,255,.92);
-  --shadow:0 1px 2px rgba(20,30,43,.05),0 6px 22px rgba(20,30,43,.06);
+  --navglass:rgba(255,255,255,.95);
+  --shadow:0 1px 2px rgba(20,30,43,.10),0 6px 22px rgba(20,30,43,.12);
 }
+/* text-entry surfaces stay white in light mode (a tinted fill reads as disabled) */
+body.light #scaninput,body.light #qtydisplay,body.light .dlg .field{background:var(--panel)}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:16px;-webkit-font-smoothing:antialiased;
@@ -331,7 +333,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .ab-meta{margin-left:auto;font-size:13px;color:var(--faint)}
 .ab-meta b{color:var(--muted)}
 .ab-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:15px}
-.ab-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:17px;transition:border-color .12s}
+.ab-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:17px;box-shadow:var(--shadow);transition:border-color .12s}
 .ab-card:hover{border-color:var(--border2)}
 .ab-card .top{display:flex;align-items:flex-start;gap:10px}
 /* qty block anchors to the card's right edge regardless of PN length:
@@ -357,7 +359,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 
 /* All Areas overview — former Manager Summary layout, dark, rendered inside Area Board */
 .ms-scroll{display:flex;gap:15px;overflow-x:auto;padding-bottom:14px;align-items:flex-start}
-.ms-col{flex:0 0 330px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.ms-col{flex:0 0 330px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow)}
 .ms-col .mc-head{padding:14px 16px;border-bottom:1px solid var(--border);border-top:4px solid var(--acol,#888);
   cursor:pointer;transition:background .12s}
 .ms-col .mc-head:hover{background:var(--panel2)}
