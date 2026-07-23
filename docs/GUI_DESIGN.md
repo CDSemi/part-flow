@@ -1,9 +1,9 @@
-# PartFlow GUI Design v4
+# PartFlow GUI Design v5
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v6).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v4.html`.
-> Supersedes GUI Design v3 (mockup: `archive/partflow-gui-mockup-v3.html`); the differences are listed in §12.1. Differences from v2 and v1 remain listed in §12.2 and §12.3.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v5.html`.
+> Supersedes GUI Design v4 (mockup: `archive/partflow-gui-mockup-v4.html`); the differences are listed in §12.1. Differences from v3, v2 and v1 remain listed in §12.2–§12.4.
 
 ---
 
@@ -32,20 +32,23 @@ Top-level navigation exposes four entries; the management views are grouped as *
 | Management       | Area Board · Tracking · Purchase Orders · Priority      |
 | Administration   | — (single view, own sidebar navigation per §9)          |
 
-Selecting Management opens its **last-used sub view** (Area Board on first open, which itself opens on its All Areas overview) and reveals a secondary sub-view bar beneath the top navigation. The sub-view bar follows the active sub view's theme (dark over Area Board, light elsewhere — §2.1). The grouping is navigation only — each sub view keeps its own specification (§6–§8, §11).
+Selecting Management opens its **last-used sub view** (Area Board on first open, which itself opens on its All Areas overview) and reveals a secondary sub-view bar beneath the top navigation. All navigation chrome follows the global theme mode (§2.1). The grouping is navigation only — each sub view keeps its own specification (§6–§8, §11).
 
 ---
 
 # 2. Design System
 
-## 2.1 Two visual contexts, one token set
+## 2.1 One token set, two switchable themes
 
-| Context                 | Views                                                        | Theme | Rationale                                                                           |
-|-------------------------|--------------------------------------------------------------|-------|-------------------------------------------------------------------------------------|
-| Shop floor & monitoring | Scan Station, Production Board, Area Board (incl. its All Areas overview) | Dark  | Reduces glare in the shop, readable from distance, tolerant of low-quality displays. Area Board is a monitoring surface used near the floor and on tablets — the light v3 variant proved hard to read, so v4 returns it to the v2 dark theme |
-| Management desk work    | Tracking, Purchase Orders, Priority, Administration          | Light | Dense data work at a desk, matches office tooling expectations                      |
+The application has a single global **theme mode — Dark or Light — switchable by the user**; **every view follows the selected mode** (v5; supersedes the fixed per-view themes of v2–v4).
 
-Both contexts share the same color tokens, spacing scale, and typography so the product feels like one system. The Management sub-view bar adopts the dark palette while Area Board is active so the chrome never clashes with the view below it.
+- The toggle lives in the top navigation bar and applies to the whole application instantly, including navigation chrome, dialogs and toasts. No view has a fixed theme anymore.
+- **Dark is the default**: PartFlow is shop-floor first — dark reduces glare in the shop, is readable from distance, and is tolerant of low-quality displays. Desk users who prefer light for dense data work switch once.
+- All component styling uses **semantic tokens only** (background, panel, border, text, muted, status-text, …); the two theme definitions supply the values. Adding or restyling a component never hard-codes a theme-specific color.
+- Status colors (§2.2) keep per-theme *text* variants so contrast holds in both modes (e.g. success text is bright on dark, deepened on light); status backgrounds/tints are shared. Area identity colors are identical in both themes.
+- In the mockup the choice is session-only; how the real application persists it (per user, per station, or both) is an open decision (§14).
+
+Both themes share the same color tokens, spacing scale, and typography so the product feels like one system in either mode.
 
 ## 2.2 Color tokens
 
@@ -65,7 +68,7 @@ Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6e
 - UI text: system font stack (`system-ui, Segoe UI, Roboto…`) — no webfont dependency, works offline.
 - Identifiers (PN, PO, temporary PO, external Job Number, Quantity Flow id, barcode values, quantities, timestamps): monospace. Identifiers must be visually distinct from prose because operators read them against paper travelers and folder labels.
 - Shop-floor minimum sizes: body 16 px, PN ≥ 19 px, quantities ≥ 18 px bold. Production Board is sized for reading at 3–5 m (PN 22 px+, key figures 18 px+).
-- The PN is always rendered on a single line; columns and cards size themselves to fit it rather than wrapping the identifier.
+- The PN is always rendered on a single line and never wraps. Where the container cannot grow with the identifier (Area Board cards and overview lists), an over-long PN is **truncated with an ellipsis** and the full PN is shown in a tooltip on hover; layout-critical figures (quantities) must never move because of PN length. Views sized around the PN (Production Board, Tracking) keep sizing the column to fit it.
 
 ## 2.4 Touch and scanner ergonomics
 
@@ -191,7 +194,7 @@ Read-only, full-screen, for large shared displays. No interactive elements excep
 
 # 6. Area Board
 
-Monitoring sub view of Management (dark theme, §1.1 / §2.1). One view, two modes behind a single tab strip: the **All Areas overview** (the §21 *Manager Summary* content) and the **per-Area detail** (the §21 *Area Board* content). The "Manager Summary" name is retired.
+Monitoring sub view of Management (follows the global theme mode, §2.1). One view, two modes behind a single tab strip: the **All Areas overview** (the §21 *Manager Summary* content) and the **per-Area detail** (the §21 *Area Board* content). The "Manager Summary" name is retired.
 
 ## 6.1 Tab strip and toolbar
 
@@ -213,8 +216,8 @@ Search filters the PN lists; the sort selector orders PNs within each column.
 
 Card grid, one card per PN-in-Area:
 
-- PN (🔥 + `#n` chip for Hot demand), PO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal POs).
-- Quantity presented as a **right-aligned block** with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
+- PN (🔥 + `#n` chip for Hot demand), PO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal POs). An over-long PN is truncated with an ellipsis; hovering shows the full PN as a tooltip (§2.3).
+- Quantity presented as a **right-aligned block anchored to the card's right edge** — its position is independent of PN length — with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
 - Per-Machine chips (dashed style for queued quantity), due text with the same color ramp as the Production Board, and time in Area.
 - Empty state: "No production in {Area}".
 
@@ -329,7 +332,12 @@ The view has three panels: **PO list** (master, the entry screen), **PO detail**
 
 # 12. Changes from previous versions
 
-## 12.1 Changes from GUI Design v3
+## 12.1 Changes from GUI Design v4
+
+1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§14). This removes "dark/light user toggle" from the deferred list (§13).
+2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
+
+## 12.2 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -337,14 +345,14 @@ The view has three panels: **PO list** (master, the entry screen), **PO detail**
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 12.2 Changes from GUI Design v2
+## 12.3 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 12.3 Changes from GUI Design v1
+## 12.4 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
@@ -358,16 +366,17 @@ Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 ---
 
-# 13. Out of Scope for v4 UI
+# 13. Out of Scope for v5 UI
 
-Deferred intentionally: dark/light user toggle (theme is fixed per view class), localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
+Deferred intentionally: localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
 ---
 
 # 14. Open Questions
 
 1. Undo/Redo depth and retention for Priority Management (per session? until sign-out?).
-2. Hot-add barcode behavior when the scanned PN has multiple active PO Demand records — auto-open the filtered list, or require explicit selection?
-3. Worker and Machine session expiration values and their visual countdown — policy values live in Administration; defaults TBD (PROJECT_PROFILE §32.3).
-4. Should the Production Board offer a per-Area filtered mode, or is that fully covered by the Area Board (All Areas overview / per-Area detail)?
-5. Whether Undo on the Scan Station requires Worker identity when Worker scanning is enabled for the Area.
+2. Theme-mode persistence: is the Dark/Light choice stored per user, per station, or both — and which wins on a shared terminal? (§2.1; the mockup keeps it session-only.)
+3. Hot-add barcode behavior when the scanned PN has multiple active PO Demand records — auto-open the filtered list, or require explicit selection?
+4. Worker and Machine session expiration values and their visual countdown — policy values live in Administration; defaults TBD (PROJECT_PROFILE §32.3).
+5. Should the Production Board offer a per-Area filtered mode, or is that fully covered by the Area Board (All Areas overview / per-Area detail)?
+6. Whether Undo on the Scan Station requires Worker identity when Worker scanning is enabled for the Area.
