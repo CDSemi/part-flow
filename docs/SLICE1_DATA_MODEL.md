@@ -75,8 +75,8 @@ PartMovement carries **no** `po_demand_id`. A release may be initiated from a Po
 6. A flow occupies exactly one current Area; multi-Area distribution of a PN is represented by multiple flows.
 7. Release never merges with existing active quantity and never creates additional quantity implicitly; releasing a PN with active quantity requires explicit UI confirmation of intent (§8).
 8. Movement history is immutable and append-only; current state must be reconstructable from it (§15).
-9. The QuantityFlow creation (carrying its initial `current_area_id` projection), AssignedRoute snapshot, Movement insert, and release audit event commit atomically or not at all (§13).
-10. A duplicate release submission with the same `device_event_id` returns the original result and creates nothing (§14).
+9. The QuantityFlow creation (carrying its initial `current_area_id` projection), AssignedRoute snapshot, and Movement insert commit atomically or not at all (§13).
+10. A duplicate release submission with the same `device_event_id` and the same normalized request returns the original result and creates nothing; the same `device_event_id` with a different normalized request is an idempotency conflict and creates nothing (§14).
 11. Inactive entities (PN, Area, Operation, RouteTemplate) never accept a release.
 
 ---
@@ -122,15 +122,16 @@ Steps (one transaction, §13):
 2. If the PN has active flows, require the request to carry the explicit confirmation flag set by the UI after showing the existing distribution; otherwise reject. Never auto-create or auto-merge.
 3. Create the QuantityFlow with its initial projection: `current_area_id` = the confirmed starting Area (§9, §15).
 4. Snapshot the AssignedRoute (§10).
-5. Append the `RECEIVED` PartMovement referencing the snapshot's first step (§11).
-6. Append the release audit event (§16).
-7. Commit and return: flow id, route snapshot id, starting Area, Operation, quantity, Movement id.
+5. Append the `RECEIVED` PartMovement referencing the snapshot's first step and recording the resolved Operation; its `metadata` carries the request fingerprint (§14) plus, informationally, the initiating actor and optional PoDemand context (§11).
+6. Commit and return: flow id, route snapshot id, starting Area, Operation, quantity, Movement id.
+
+The release transaction appends **no** generic `audit_events` row: the `RECEIVED` Movement is itself the immutable production audit record (§16).
 
 ---
 
 ## 9. QuantityFlow Creation
 
-- Columns per PROJECT_PROFILE §8.7: `id`, `part_number_id`, `quantity`, `status` (`ACTIVE` on creation), `parent_flow_id` (NULL in this slice; reserved for SPLIT), `created_at`, `closed_at` (NULL).
+- Columns per PROJECT_PROFILE §8.7, restricted to those this slice uses: `id`, `part_number_id`, `quantity`, `status` (`ACTIVE` on creation), `created_at`, `closed_at` (NULL). `parent_flow_id` is the canonical name of the SPLIT lineage column; it is **not** created in this slice and arrives with the Phase 8 migration (§18).
 - Plus maintained projection columns: `current_area_id` (NOT NULL; set by the INSERT itself to the confirmed starting Area — a QuantityFlow row never exists without a valid current Area) and `updated_at`. `current_machine_id` is the canonical name of the Machine projection column; it is **not** created in this slice and arrives with the Phase 6 migration (§18).
 - Flow quantity is immutable within this slice (no SPLIT/MERGED/QUANTITY_ADJUSTED yet), so conservation is verifiable as Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
 
@@ -150,13 +151,13 @@ Steps (one transaction, §13):
 Columns per PROJECT_PROFILE §8.11, with slice-relevant shape:
 
 - `movement_type = 'RECEIVED'` (the only type this slice produces; the enum widens additively later).
-- `from_area_id` NULL; `to_area_id` = starting Area; `operation_id` = resolved starting Operation.
+- `from_area_id` NULL; `to_area_id` = starting Area (NOT NULL); `operation_id` = resolved starting Operation (NOT NULL — a valid release always resolves or explicitly confirms one, §12).
 - `quantity` = flow quantity; composite FK guarantees PN agreement.
-- `assigned_route_step_id` → `assigned_route_steps.id`, the **immutable snapshot** step — never the mutable `route_steps` template row, so template edits can never alter the route context recorded by an existing Movement. Nullable in general (future movement types may lack route context), but release sets it to the snapshot's first step, which §10 requires to match the confirmed starting Area. The name is deliberately not a generic `route_step_id`, which would be ambiguous between `route_steps` and `assigned_route_steps`; it refines the illustrative `route_step_id` attribute of PROJECT_PROFILE §8.11.
+- `assigned_route_step_id` → `assigned_route_steps.id`, the **immutable snapshot** step — never the mutable `route_steps` template row, so template edits can never alter the route context recorded by an existing Movement. NOT NULL in this slice: every `RECEIVED` Movement records its snapshot's first step, which §10 requires to match the confirmed starting Area. A future movement type without route context arrives via an additive migration that relaxes this (e.g. widening to a per-type CHECK). The name is deliberately not a generic `route_step_id`, which would be ambiguous between `route_steps` and `assigned_route_steps`; it refines the illustrative `route_step_id` attribute of PROJECT_PROFILE §8.11.
 - `station_id`, `worker_id`, `scan_session_id` are canonical column names for later phases (§18); they are **not** created in this slice because their owning tables do not exist yet. Management-initiated release requires none of them.
 - `occurred_at`, `server_received_at` — see §14.
 - `device_event_id` NOT NULL UNIQUE — idempotency key (§14).
-- `metadata` may capture the initiating PoDemand context for audit display; it creates no ownership (§3).
+- `metadata` carries the deterministic request fingerprint (§14) and may informationally capture the initiating actor (until authentication exists, Phase 14) and the initiating PoDemand context for audit display; none of this creates ownership — PoDemand never owns Movement (§3).
 - Immutable: insert-only; UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, per the PostgreSQL-constraints-first rule.
 
 ---
@@ -175,23 +176,26 @@ One release submission = one database transaction:
 
 ```
 BEGIN
-  idempotency check on device_event_id (§14)
+  idempotency check on device_event_id + request fingerprint (§14)
   validate PN / Area / Operation / RouteTemplate / quantity
   active-quantity confirmation check
   INSERT quantity_flows            (current_area_id = confirmed starting Area)
   INSERT assigned_routes + assigned_route_steps
   INSERT part_movements (RECEIVED, assigned_route_step_id = snapshot first step)
-  INSERT audit_events (release event, §16)
 COMMIT
 ```
 
-The QuantityFlow is inserted complete, with its initial `current_area_id` projection already set — no intermediate invalid or projection-less row ever exists (`current_area_id` is NOT NULL). Any failure rolls back everything: a Movement is never recorded without its flow, snapshot, and audit event, and vice versa. PartMovement remains the source of truth and the projection remains rebuildable from it (§15). Demand save is a separate, earlier transaction (§7). No external side effects live inside the transaction.
+The QuantityFlow is inserted complete, with its initial `current_area_id` projection already set — no intermediate invalid or projection-less row ever exists (`current_area_id` is NOT NULL). Any failure rolls back everything: a Movement is never recorded without its flow and snapshot, and vice versa — no partial release state can commit. No generic `audit_events` row is written here: the `RECEIVED` Movement is the production audit record (§16). PartMovement remains the source of truth and the projection remains rebuildable from it (§15). Demand save is a separate, earlier transaction (§7). No external side effects live inside the transaction.
 
 ---
 
 ## 14. Idempotency and Retry Behavior
 
-- The client generates one `device_event_id` (UUID) per release submission and reuses it on every transport retry (timeout, connection reset, unknown outcome). `UNIQUE (device_event_id)` guarantees at-most-once recording; a replayed submission returns the original outcome unchanged.
+- The client generates one `device_event_id` (UUID) per release submission and reuses it on every transport retry (timeout, connection reset, unknown outcome). `UNIQUE (device_event_id)` guarantees at-most-once recording.
+- A duplicate `device_event_id` is safe only when it carries the **same normalized request**. On submission the server computes a deterministic **request fingerprint** — a canonical hash over at least: PartNumber, release quantity, RouteTemplate, starting Area, Operation, and the initiating PoDemand context when supplied — and stores it in the `RECEIVED` Movement's `metadata` (§11). No separate idempotency table exists: the Movement row, found via `UNIQUE (device_event_id)`, is the idempotency record.
+- Replay outcomes:
+  - same `device_event_id` + same fingerprint → return the original committed result unchanged; create nothing;
+  - same `device_event_id` + different fingerprint → return an explicit idempotency-conflict error; create nothing. A mismatch signals a client defect (an id wrongly reused for a new intent) and is never silently honored.
 - A **new** release intent gets a new `device_event_id`; it is then caught by the active-quantity confirmation rule (§8.2), so accidental double release still requires explicit human confirmation.
 - Synchronous online semantics: `occurred_at` and `server_received_at` may both be server-assigned and equal. There is **no local offline event queue**; a submission that cannot reach the server fails visibly and is blocked while disconnected (GUI_DESIGN §3.6). `device_event_id` serves request idempotency today and remains compatible with any future, separately approved offline design.
 
@@ -211,28 +215,27 @@ Auditable in this slice (PROJECT_PROFILE §28):
 
 - PO creation and edits; PoDemand creation and edits (who, when, what changed).
 - PN creation, including barcode issuance.
-- Production release: the full result (flow, snapshot, `RECEIVED` Movement) plus the initiating actor and PoDemand context.
-- The `RECEIVED` Movement itself is the immutable production record.
+- Production release — audited by the `RECEIVED` PartMovement itself, the immutable production record; the initiating actor and PoDemand context live informationally in its `metadata` (§11).
 
 Historical records never disappear; demand edit history must not rewrite prior values silently.
 
 **Persistence.** Two complementary mechanisms, with distinct responsibilities:
 
-1. **PartMovement remains the production audit record** — the sole source of truth for production state, replayable into projections (§15). Nothing here changes that.
-2. **One generic append-only table, `audit_events`, records master-data and business-demand changes.** Its rows are descriptive history for display and accountability; they are **never** replayed to build state. This is deliberately not an event-sourcing framework.
+1. **PartMovement is the production audit record** — the sole source of truth for production state, replayable into projections (§15), and the sole audit record for production release and all production activity. One production action, one audit record: the release transaction writes **no** duplicate generic audit row (§13).
+2. **One generic append-only table, `audit_events`, records master-data and business-demand changes only** — PurchaseOrder, PoDemand, and PartNumber. Its rows are descriptive history for display and accountability; they are **never** replayed to build state, and never describe production actions. This is deliberately not an event-sourcing framework.
 
 `audit_events` shape (constraints in §17):
 
 - `id` — BIGSERIAL PK (write order).
-- `event_type` — `'CREATED'`, `'UPDATED'`, or `'RELEASED'` in this slice; widens additively later.
-- `entity_type` — `'PurchaseOrder'`, `'PoDemand'`, `'PartNumber'`, or `'QuantityFlow'` in this slice.
+- `event_type` — `'CREATED'` or `'UPDATED'` in this slice; widens additively later.
+- `entity_type` — `'PurchaseOrder'`, `'PoDemand'`, or `'PartNumber'` in this slice.
 - `entity_id` — the audited row's PK. Polymorphic by design, so no FK; integrity is guaranteed by writing the audit row in the same transaction as the audited change.
 - `actor_reference` — nullable text. Authentication and role enforcement remain deferred (Phase 14); until authenticated users exist, this is NULL or an explicitly configured development/system actor identifier. No user table is invented in this slice; Phase 14 may migrate this to a real user reference.
 - `occurred_at` — timestamptz.
 - `before_data` / `after_data` — jsonb snapshots of the audited fields (`before_data` NULL for creation events).
-- `metadata` — jsonb for contextual detail (e.g. the release event records flow id, snapshot id, Movement id, and initiating PoDemand context).
+- `metadata` — jsonb for contextual detail.
 
-Event mapping in this slice: PO create/edit → `CREATED`/`UPDATED` on `PurchaseOrder`; PoDemand create/edit → `CREATED`/`UPDATED` on `PoDemand`; PN creation (including barcode issuance, captured in `after_data`) → `CREATED` on `PartNumber`; production release → `RELEASED` on `QuantityFlow`, inside the release transaction (§13).
+Event mapping in this slice: PO create/edit → `CREATED`/`UPDATED` on `PurchaseOrder`; PoDemand create/edit → `CREATED`/`UPDATED` on `PoDemand`; PN creation (including barcode issuance, captured in `after_data`) → `CREATED` on `PartNumber`. Production release maps to **no** `audit_events` row — its audit record is the `RECEIVED` Movement (§13).
 
 Rules:
 
@@ -246,7 +249,7 @@ Rules:
 
 **`departments`** — PK `id`; `UNIQUE (name)`; `is_active`; `created_at`, `updated_at`.
 
-**`areas`** — PK `id`; `department_id NOT NULL` FK; `name NOT NULL`; `UNIQUE (barcode_value)` where assigned; `is_terminal`, `is_active`, `machine_assignment_mode`, `worker_identification_mode` (plain configuration columns — no FK; only starting-Area use is exercised here); `created_at`, `updated_at`.
+**`areas`** — PK `id`; `department_id NOT NULL` FK; `name NOT NULL`; `UNIQUE (barcode_value)` where assigned; `is_active`; `created_at`, `updated_at`. `is_terminal`, `machine_assignment_mode`, and `worker_identification_mode` are canonical names only — not created in this slice, added by the migrations of the phases that first use them (§18).
 
 **`operations`** — PK `id`; `area_id NOT NULL` FK; `code NOT NULL`, `UNIQUE (area_id, code)`; `name`; `is_active`; `created_at`, `updated_at`.
 
@@ -254,9 +257,9 @@ Rules:
 
 **`purchase_orders`** — PK `id`; `po_number NOT NULL UNIQUE`; `received_date NOT NULL`; `status`; `created_at`, `updated_at`.
 
-**`po_demands`** — PK `id`; FKs `purchase_order_id`, `part_number_id` NOT NULL; `request_type NOT NULL CHECK (request_type IN ('NEW','REWORK','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (required by validation rule per §5, not by constraint per §20); `priority_rank` nullable; `job_numbers`; `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(purchase_order_id)`, index `(part_number_id)`.
+**`po_demands`** — PK `id`; FKs `purchase_order_id`, `part_number_id` NOT NULL; `request_type NOT NULL CHECK (request_type IN ('NEW','REWORK','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (required by validation rule per §5, not by constraint per §20); `priority_rank` nullable; `job_numbers text[] NOT NULL DEFAULT '{}'` (arbitrary external strings preserved verbatim; empty list valid; metadata only — no `Job` aggregate, no FK, and no GIN index in this slice because Slice 1 includes no Job Number search); `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(purchase_order_id)`, index `(part_number_id)`.
 
-**`route_templates`** — PK `id`; `name NOT NULL`, `UNIQUE (name, version)`; `is_active`; `created_at`, `updated_at`.
+**`route_templates`** — PK `id`; `name NOT NULL`; `version int NOT NULL CHECK (version > 0)` (simple positive integer — no semantic-version parsing, no route-version framework); `UNIQUE (name, version)`; `is_active`; `created_at`, `updated_at`.
 
 **`route_steps`** — PK `id`; `route_template_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (route_template_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable.
 
@@ -264,11 +267,11 @@ Rules:
 
 **`assigned_route_steps`** — PK `id`; `assigned_route_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (assigned_route_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable (snapshot copies of the template step fields, §10).
 
-**`quantity_flows`** — PK `id`; `part_number_id NOT NULL` FK; `quantity int NOT NULL CHECK (quantity > 0)`; `status NOT NULL DEFAULT 'ACTIVE'`; `parent_flow_id` FK nullable (self-reference; reserved for SPLIT, always NULL here); `current_area_id NOT NULL` FK (set at INSERT, §13); `UNIQUE (id, part_number_id)` (composite-FK target); `created_at`, `updated_at`, `closed_at` nullable; index `(part_number_id) WHERE status = 'ACTIVE'`; index `(current_area_id)`.
+**`quantity_flows`** — PK `id`; `part_number_id NOT NULL` FK; `quantity int NOT NULL CHECK (quantity > 0)`; `status NOT NULL DEFAULT 'ACTIVE'`; `current_area_id NOT NULL` FK (set at INSERT, §13); `UNIQUE (id, part_number_id)` (composite-FK target); `created_at`, `updated_at`, `closed_at` nullable; index `(part_number_id) WHERE status = 'ACTIVE'`; index `(current_area_id)`. `parent_flow_id` is not created in this slice (§9, §18).
 
-**`part_movements`** — PK `id BIGSERIAL` (event order); `quantity_flow_id`, `part_number_id` NOT NULL with composite FK `(quantity_flow_id, part_number_id)` → `quantity_flows (id, part_number_id)`; `movement_type NOT NULL CHECK (movement_type IN ('RECEIVED'))` (widens additively); `quantity int NOT NULL CHECK (quantity > 0)`; `from_area_id` FK nullable, `to_area_id NOT NULL` FK; shape check `(movement_type = 'RECEIVED' AND from_area_id IS NULL)`; `operation_id` FK nullable; `assigned_route_step_id` FK nullable → `assigned_route_steps (id)` (§11); `occurred_at timestamptz NOT NULL`; `server_received_at timestamptz NOT NULL`; `device_event_id NOT NULL`, `UNIQUE (device_event_id)`; `metadata jsonb`; index `(quantity_flow_id, id)`; immutability guard (revoke UPDATE/DELETE + raise trigger).
+**`part_movements`** — PK `id BIGSERIAL` (event order); `quantity_flow_id`, `part_number_id` NOT NULL with composite FK `(quantity_flow_id, part_number_id)` → `quantity_flows (id, part_number_id)`; `movement_type NOT NULL CHECK (movement_type IN ('RECEIVED'))` (widens additively); `quantity int NOT NULL CHECK (quantity > 0)`; `from_area_id` FK nullable, `to_area_id NOT NULL` FK; shape check `(movement_type = 'RECEIVED' AND from_area_id IS NULL)`; `operation_id NOT NULL` FK; `assigned_route_step_id NOT NULL` FK → `assigned_route_steps (id)` (both NOT NULL directly while `RECEIVED` is the only movement type — the simplest Slice 1 schema; a later movement type that lacks either relaxes the constraint additively, §11); `occurred_at timestamptz NOT NULL`; `server_received_at timestamptz NOT NULL`; `device_event_id NOT NULL`, `UNIQUE (device_event_id)`; `metadata jsonb`; index `(quantity_flow_id, id)`; immutability guard (revoke UPDATE/DELETE + raise trigger).
 
-**`audit_events`** — PK `id BIGSERIAL`; `event_type NOT NULL CHECK (event_type IN ('CREATED','UPDATED','RELEASED'))` (widens additively); `entity_type NOT NULL CHECK (entity_type IN ('PurchaseOrder','PoDemand','PartNumber','QuantityFlow'))` (widens additively); `entity_id NOT NULL` (no FK — polymorphic, §16); `actor_reference` nullable; `occurred_at timestamptz NOT NULL`; `before_data jsonb` nullable; `after_data jsonb` nullable; `metadata jsonb`; index `(entity_type, entity_id, id)`; append-only guard (revoke UPDATE/DELETE + raise trigger), per §16.
+**`audit_events`** — PK `id BIGSERIAL`; `event_type NOT NULL CHECK (event_type IN ('CREATED','UPDATED'))` (widens additively); `entity_type NOT NULL CHECK (entity_type IN ('PurchaseOrder','PoDemand','PartNumber'))` (widens additively); `entity_id NOT NULL` (no FK — polymorphic, §16); `actor_reference` nullable; `occurred_at timestamptz NOT NULL`; `before_data jsonb` nullable; `after_data jsonb` nullable; `metadata jsonb`; index `(entity_type, entity_id, id)`; append-only guard (revoke UPDATE/DELETE + raise trigger), per §16.
 
 Every table above exists in and is used by this slice; the Slice 1 migration contains **no** foreign keys to tables it does not create. `scan_stations` remains documented Phase 5 configuration (§2) and is created by the Phase 5 migration together with `part_movements.station_id`.
 
@@ -282,10 +285,10 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 |---|---|---|
 | Scan Station transfer, `TRANSFERRED` | Phase 5 | widen movement-type check; migration adds `scan_stations` + `part_movements.station_id` (canonical name documented, §2) |
 | Machine assignment, sessions, `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` | Phase 6 | migration adds `machines` table plus `quantity_flows.current_machine_id` and Movement machine columns (canonical names documented, §9) |
-| Area ownership modes beyond queue | Phase 7 | Area configuration columns already present (plain values, no FK) |
-| SPLIT / MERGED, partial movement | Phase 8 | `parent_flow_id` (self-reference) already present; widen type check |
-| Undo / corrections, `REVERSED`, `reverses_movement_id` | Phase 9 | append-only model already assumes it |
-| Stockroom, `STOCKED`, PoAllocation | Phase 10 | new tables; Allocation already separate from Movement by design |
+| Area ownership modes beyond queue | Phase 7 | migration adds `areas.machine_assignment_mode`, `areas.worker_identification_mode` (canonical names documented, §17) |
+| SPLIT / MERGED, partial movement | Phase 8 | migration adds `quantity_flows.parent_flow_id` (self-reference; canonical name documented, §9); widen type check |
+| Undo / corrections, `REVERSED`, `reverses_movement_id` | Phase 9 | append-only model already assumes it; migration adds `reverses_movement_id` |
+| Stockroom, `STOCKED`, PoAllocation | Phase 10 | new tables; migration adds `areas.is_terminal` (canonical name documented, §17); Allocation already separate from Movement by design |
 | Monitoring read models | Phase 11 | movement-derived queries |
 | Priority / Hot management UI | Phase 12 | `priority_rank` column already present |
 | Administration UI | Phase 13 | master-data tables already present |
@@ -300,18 +303,20 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 
 1. Saving a PO with PoDemand creates no QuantityFlow, no PartMovement, and no projection change.
 2. Creating a new PN issues a unique barcode; duplicate PN or barcode values are impossible (constraint-verified). The creation appends a `CREATED` audit event recording the issued barcode.
-3. A release creates exactly one QuantityFlow, one AssignedRoute snapshot, one `RECEIVED` Movement, and one `RELEASED` audit event — atomically. If any part fails, nothing commits: no committed state can contain a QuantityFlow without its `RECEIVED` Movement or without its AssignedRoute snapshot.
+3. A release creates exactly one QuantityFlow, one AssignedRoute snapshot, and one `RECEIVED` Movement — atomically, with no generic audit event. If any part fails, nothing commits: no committed state can contain a QuantityFlow without its `RECEIVED` Movement or without its AssignedRoute snapshot, and no partial release state is ever observable.
 4. `current_area_id` is set to the confirmed starting Area by the QuantityFlow INSERT itself; the column is NOT NULL and no post-insert projection update is required for release.
-5. The `RECEIVED` Movement's `assigned_route_step_id` references the AssignedRoute snapshot's first step (an `assigned_route_steps` row, never a `route_steps` row).
+5. Every `RECEIVED` Movement records a resolved Operation and references the AssignedRoute snapshot's first step: `operation_id` and `assigned_route_step_id` are NOT NULL (constraint-verified), and the referenced step is an `assigned_route_steps` row, never a `route_steps` row.
 6. Releasing with an invalid or inactive PN, Area, Operation, RouteTemplate, or quantity ≤ 0 is rejected with no write.
 7. Releasing a PN that already has active quantity without the explicit confirmation flag is rejected with no write; with confirmation it creates a separate flow and never merges.
-8. Retrying a release with the same `device_event_id` returns the original result and creates nothing.
-9. Editing a RouteTemplate after release does not change any AssignedRoute snapshot, and template edits never alter the route context recorded by any existing Movement.
-10. The projection rebuild procedure reproduces `current_area_id` for every flow from Movement history alone.
-11. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role (trigger/permission verified by test).
-12. Every PurchaseOrder and PoDemand creation or edit appends an `audit_events` row (`CREATED`/`UPDATED` with `before_data`/`after_data`) in the same transaction as the change; edits preserve all prior audit rows unchanged (append-only history, verified by test).
-13. Conservation holds: Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
-14. No Slice 1 migration contains a foreign key to any table it does not create (no references to `machines`, `workers`, `scan_sessions`, `scan_stations`, or user tables).
+8. Retrying a release with the same `device_event_id` and the same normalized request (matching fingerprint) returns the original result and creates nothing.
+9. Reusing a `device_event_id` with a different normalized request (mismatched fingerprint) returns an explicit idempotency-conflict error and creates nothing.
+10. Editing a RouteTemplate after release does not change any AssignedRoute snapshot, and template edits never alter the route context recorded by any existing Movement.
+11. The projection rebuild procedure reproduces `current_area_id` for every flow from Movement history alone.
+12. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role (trigger/permission verified by test).
+13. Every PurchaseOrder and PoDemand creation or edit appends an `audit_events` row (`CREATED`/`UPDATED` with `before_data`/`after_data`) in the same transaction as the change; edits preserve all prior audit rows unchanged (append-only history, verified by test).
+14. `audit_events` contains rows only for `PurchaseOrder`, `PoDemand`, and `PartNumber` — never for production release or any other production activity (constraint- and test-verified).
+15. Conservation holds: Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
+16. No Slice 1 migration contains a foreign key to any table it does not create, nor any unused deferred column: no `machines`, `workers`, `scan_sessions`, `scan_stations`, or user-table references, and no `current_machine_id`, `parent_flow_id`, `station_id`, `worker_id`, `scan_session_id`, `reverses_movement_id`, `is_terminal`, `machine_assignment_mode`, or `worker_identification_mode`.
 
 ---
 
