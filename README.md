@@ -74,30 +74,50 @@ Apply migrations (currently a no-op repository-foundation baseline):
 docker compose exec backend uv run alembic upgrade head
 ```
 
-Outside Docker (from `backend/`, with `DATABASE_URL` set): `uv run alembic upgrade head`.
-
 ## Quality commands
 
-### Backend (run from `backend/`, or via `docker compose exec backend …`)
+The Linux containers are the canonical environment for all quality
+gates. Run these with the Compose stack up (`docker compose up -d`).
+
+### Backend
 
 ```bash
-uv run ruff format --check .   # formatting check (ruff format . to fix)
-uv run ruff check .            # lint
-uv run mypy app tests          # type check (strict)
-uv run pytest                  # tests (connectivity test needs PostgreSQL running)
-uv run alembic upgrade head    # migrations
+docker compose exec backend uv run ruff format --check .   # formatting check (ruff format . to fix)
+docker compose exec backend uv run ruff check .            # lint
+docker compose exec backend uv run mypy app tests          # type check (strict)
+docker compose exec backend uv run pytest                  # tests (includes a real PostgreSQL connectivity test)
+docker compose exec backend uv run alembic upgrade head    # migrations
 ```
 
-### Frontend (run from `frontend/`, or via `docker compose exec frontend …`)
+### Frontend
 
 ```bash
-npm run format        # format with Prettier
-npm run format:check  # formatting check
-npm run lint          # ESLint
-npm run typecheck     # TypeScript (strict, no emit)
-npm run test          # Vitest + React Testing Library
-npm run build         # type check + production build
+docker compose exec frontend npm run format        # format with Prettier
+docker compose exec frontend npm run format:check  # formatting check
+docker compose exec frontend npm run lint          # ESLint
+docker compose exec frontend npm run typecheck     # TypeScript (strict, no emit)
+docker compose exec frontend npm run test          # Vitest + React Testing Library
+docker compose exec frontend npm run build         # type check + production build
 ```
+
+### Running directly on the host (optional, best effort)
+
+The same commands can be run without the `docker compose exec …` prefix
+from `backend/` (with uv) or `frontend/` (with Node 22), but the host is
+not the canonical environment: toolchain versions and OS behavior may
+differ from the Linux containers used by Docker and CI. Backend notes
+for host runs:
+
+- `DATABASE_URL` must be resolvable. `backend/tests/conftest.py`
+  defaults it to the development database from `.env.example`; anything
+  outside pytest (e.g. `uv run alembic upgrade head`) needs the variable
+  set explicitly or a `backend/.env` file.
+- The pytest connectivity test performs a real `SELECT 1`, so the
+  Compose `db` service must be running (its port 5432 is published to
+  the host).
+
+When host results disagree with container results, the container
+results win.
 
 ## Docker development notes
 
