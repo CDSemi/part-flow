@@ -12,3 +12,9 @@ end_of_line = lf
 
 [*.{bat,cmd,ps1,txt}]
 end_of_line = crlf
+
+[*.{tsx,ts,js,json,html}]
+indent_size = 2
+
+[package-lock.json]
+indent_size = 4

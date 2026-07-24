@@ -5,9 +5,9 @@
 
 ## Current State
 
-- Canonical project specification completed (`PROJECT_PROFILE.md` v5).
-- UI mockup v2 completed, including the PO Intake view.
-- No production source code exists yet.
+- Canonical project specification: `PROJECT_PROFILE.md` v6.
+- Approved target UI: `GUI_DESIGN.md` v5, with mockup v5 (`docs/mockups/partflow-gui-mockup-v5.html`) as its visual reference.
+- Phase 1 — Repository Foundation source code exists: React + TypeScript frontend, FastAPI backend, PostgreSQL, Alembic (no-op baseline), Docker Compose, the `/api/health` endpoint, formatter/linter/type-check/test tooling, and CI.
 
 ## Implementation Principles
 
@@ -45,7 +45,7 @@ Scope:
 - shared tokens
 - dark and light contexts
 - application routing/navigation
-- approved mock views, including PO Intake in the application shell
+- approved mock views, including the Purchase Orders view in the application shell
 - development-only mock data
 - loading, empty, error, connectivity-loss, and long-data states
 
@@ -80,7 +80,7 @@ Rules:
 
 ## Phase 4 — Manual PO Intake and Production Release
 
-The first business vertical slice. It must:
+The first business vertical slice, presented in the UI as the Purchase Orders view (GUI_DESIGN §11). It must:
 
 - create/find PurchaseOrder,
 - create/find PartNumber,
@@ -160,18 +160,16 @@ Temporary limitation: full-QuantityFlow movement only. Partial movement must not
 - `STOCKED` Movement
 - available stocked quantity
 - suggested allocation order:
-  1. priority
+  1. highest manager-defined PO Demand priority
   2. earliest due date
-  3. largest shortage
-  4. deterministic tie-breaker
+- equal criteria resolved by a stable deterministic tie-breaker (implementation detail, not a business rule)
 - PoAllocation recorded separately from PartMovement
 - authorization for allocation adjustment
 
 ## Phase 11 — Read Models and Monitoring Views
 
 - Production Board
-- Area Board
-- Manager Summary
+- Area Board, including the Manager Summary content in its All Areas overview (no separate Manager Summary view)
 - Tracking
 - movement-derived projections
 - stale-feed and long-data states

@@ -28,10 +28,13 @@ services:
         ports:
             - "8000:8000"
         volumes:
-            # Bind mount for development reload; the named volume keeps the
-            # container's virtual environment out of the host checkout.
+            # Bind mount for development reload; the anonymous volume keeps
+            # the container's virtual environment out of the host checkout.
+            # After dependency changes, run `docker compose up --build -V`
+            # to renew it (otherwise the stale volume shadows the rebuilt
+            # image's /app/.venv).
             - ./backend:/app
-            - backend_venv:/app/.venv
+            - /app/.venv
         depends_on:
             db:
                 condition: service_healthy
@@ -55,10 +58,13 @@ services:
         ports:
             - "5173:5173"
         volumes:
-            # Bind mount for development reload; the named volume keeps the
-            # container's node_modules out of the host checkout.
+            # Bind mount for development reload; the anonymous volume keeps
+            # the container's node_modules out of the host checkout.
+            # After dependency changes, run `docker compose up --build -V`
+            # to renew it (otherwise the stale volume shadows the rebuilt
+            # image's /app/node_modules).
             - ./frontend:/app
-            - frontend_node_modules:/app/node_modules
+            - /app/node_modules
         depends_on:
             backend:
                 condition: service_healthy
@@ -81,5 +87,3 @@ services:
 
 volumes:
     postgres_data:
-    backend_venv:
-    frontend_node_modules:

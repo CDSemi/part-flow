@@ -26,14 +26,7 @@ This repository currently contains the **Phase 1 Repository Foundation** only:
 
 2. Adjust values in `.env` if needed. These are development-only credentials; the real `.env` is git-ignored and must never contain shared or production secrets.
 
-3. First-time dependency lock (only if the lockfiles are not yet present in the repository):
-
-   ```bash
-   cd backend && uv lock && cd ..
-   cd frontend && npm install && cd ..
-   ```
-
-   `backend/uv.lock` and `frontend/package-lock.json` must be committed; the Docker builds install strictly from them (`uv sync --frozen`, `npm ci`).
+Dependency lockfiles (`backend/uv.lock`, `frontend/package-lock.json`) are committed; the Docker builds install strictly from them (`uv sync --frozen`, `npm ci`). No extra bootstrap step is required on a clean checkout.
 
 ## Start the complete stack
 
@@ -54,6 +47,12 @@ docker compose down
 ```
 
 (`docker compose down -v` additionally deletes the PostgreSQL data volume — normally not needed.)
+
+After changing backend or frontend dependencies (`pyproject.toml`/`uv.lock`, `package.json`/`package-lock.json`), rebuild and renew the anonymous dependency volumes so stale `.venv`/`node_modules` contents do not shadow the rebuilt images:
+
+```bash
+docker compose up --build -V
+```
 
 ## Database migrations (Alembic)
 
@@ -87,6 +86,10 @@ npm run typecheck     # TypeScript (strict, no emit)
 npm run test          # Vitest + React Testing Library
 npm run build         # type check + production build
 ```
+
+## Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the same quality gates on every push to `main` and every pull request: backend format check, lint, mypy, Alembic migration, and pytest against PostgreSQL 16; frontend format check, lint, typecheck, tests, and production build.
 
 ## Repository layout
 
