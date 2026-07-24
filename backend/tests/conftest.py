@@ -12,5 +12,5 @@ import os
 # Must run before any test module imports app.core.config.
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+psycopg://partflow:partflow_dev_password@localhost:5432/partflow",
+    "postgresql+psycopg://partflow_user:partflow_dev_password@localhost:5432/partflow",
 )

@@ -49,6 +49,16 @@ jobs:
             - name: Tests
               run: uv run pytest
 
+    # Verifies that the development images assemble from the committed
+    # lockfiles. The backend/frontend jobs already run the quality gates,
+    # so this job only builds; it does not start the stack.
+    docker:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Build images
+              run: docker compose build
+
     frontend:
         runs-on: ubuntu-latest
         defaults:

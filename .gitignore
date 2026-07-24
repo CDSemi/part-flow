@@ -1,4 +1,5 @@
 XOA/
+_to_delete/
 
 # Environment variables and secrets
 .env

@@ -4,7 +4,7 @@ services:
     db:
         image: postgres:16
         environment:
-            POSTGRES_USER: ${POSTGRES_USER:-partflow}
+            POSTGRES_USER: ${POSTGRES_USER:-partflow_user}
             POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-partflow_dev_password}
             POSTGRES_DB: ${POSTGRES_DB:-partflow}
         ports:
@@ -15,7 +15,7 @@ services:
             test:
                 [
                     "CMD-SHELL",
-                    "pg_isready -U ${POSTGRES_USER:-partflow} -d ${POSTGRES_DB:-partflow}",
+                    "pg_isready -U ${POSTGRES_USER:-partflow_user} -d ${POSTGRES_DB:-partflow}",
                 ]
             interval: 5s
             timeout: 5s
@@ -24,7 +24,7 @@ services:
     backend:
         build: ./backend
         environment:
-            DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-partflow}:${POSTGRES_PASSWORD:-partflow_dev_password}@db:5432/${POSTGRES_DB:-partflow}
+            DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-partflow_user}:${POSTGRES_PASSWORD:-partflow_dev_password}@db:5432/${POSTGRES_DB:-partflow}
         ports:
             - "8000:8000"
         volumes:

@@ -85,9 +85,18 @@ gates. Run these with the Compose stack up (`docker compose up -d`).
 docker compose exec backend uv run ruff format --check .   # formatting check (ruff format . to fix)
 docker compose exec backend uv run ruff check .            # lint
 docker compose exec backend uv run mypy app tests          # type check (strict)
-docker compose exec backend uv run pytest                  # tests (includes a real PostgreSQL connectivity test)
+docker compose exec backend uv run pytest                  # tests (see below)
 docker compose exec backend uv run alembic upgrade head    # migrations
 ```
+
+The pytest suite contains two kinds of tests:
+
+- `tests/test_health.py` — health-endpoint **behavior** tests that mock
+  `ping_database` (success and safe 503 responses; no database needed).
+- `tests/test_database_connectivity.py` — one **integration** test that
+  calls `GET /api/health` through the real application wiring with no
+  mocking, so it requires the PostgreSQL service to be reachable via
+  `DATABASE_URL`.
 
 ### Frontend
 
@@ -112,9 +121,11 @@ for host runs:
   defaults it to the development database from `.env.example`; anything
   outside pytest (e.g. `uv run alembic upgrade head`) needs the variable
   set explicitly or a `backend/.env` file.
-- The pytest connectivity test performs a real `SELECT 1`, so the
-  Compose `db` service must be running (its port 5432 is published to
-  the host).
+- The pytest integration test performs a real database check through
+  `GET /api/health`, so the Compose `db` service must be running (its
+  port 5432 is published to the host). If your `.env` uses custom
+  credentials, set `DATABASE_URL` to match before running pytest on the
+  host.
 
 When host results disagree with container results, the container
 results win.
@@ -158,8 +169,11 @@ docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff 
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same quality gates
 on every push to `main` and every pull request: backend format check,
-lint, mypy, Alembic migration, and pytest against PostgreSQL 16;
-frontend format check, lint, typecheck, tests, and production build.
+lint, mypy, Alembic migration, and pytest (mocked behavior tests plus
+the real PostgreSQL integration test) against PostgreSQL 16; frontend
+format check, lint, typecheck, tests, and production build. A separate
+`docker` job verifies that the Docker Compose development images build
+(`docker compose build`).
 
 ## Repository layout
 
