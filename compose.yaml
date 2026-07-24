@@ -1,0 +1,85 @@
+name: partflow
+
+services:
+    db:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: ${POSTGRES_USER:-partflow}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-partflow_dev_password}
+            POSTGRES_DB: ${POSTGRES_DB:-partflow}
+        ports:
+            - "5432:5432"
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -U ${POSTGRES_USER:-partflow} -d ${POSTGRES_DB:-partflow}",
+                ]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+    backend:
+        build: ./backend
+        environment:
+            DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-partflow}:${POSTGRES_PASSWORD:-partflow_dev_password}@db:5432/${POSTGRES_DB:-partflow}
+        ports:
+            - "8000:8000"
+        volumes:
+            # Bind mount for development reload; the named volume keeps the
+            # container's virtual environment out of the host checkout.
+            - ./backend:/app
+            - backend_venv:/app/.venv
+        depends_on:
+            db:
+                condition: service_healthy
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "python",
+                    "-c",
+                    "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+
+    frontend:
+        build: ./frontend
+        environment:
+            BACKEND_PROXY_TARGET: http://backend:8000
+        ports:
+            - "5173:5173"
+        volumes:
+            # Bind mount for development reload; the named volume keeps the
+            # container's node_modules out of the host checkout.
+            - ./frontend:/app
+            - frontend_node_modules:/app/node_modules
+        depends_on:
+            backend:
+                condition: service_healthy
+        healthcheck:
+            # Confirms both the Vite dev server and the proxied backend
+            # health route are reachable from inside the container.
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "-O",
+                    "/dev/null",
+                    "http://localhost:5173/api/health",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 30s
+
+volumes:
+    postgres_data:
+    backend_venv:
+    frontend_node_modules:

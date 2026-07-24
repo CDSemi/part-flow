@@ -24,11 +24,11 @@ Before any non-trivial change:
 1. Read the repository root documentation or project entry point.
 2. Read [`docs/PROJECT_PROFILE.md`](./docs/PROJECT_PROFILE.md), the authoritative project specification.
 3. When planning or implementing a feature, read
-      [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)
-      to determine the current phase, approved scope, dependencies, and deferred work.
+   [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md)
+   to determine the current phase, approved scope, dependencies, and deferred work.
 4. When working on user interface behavior, read
-      [`docs/GUI_DESIGN.md`](./docs/GUI_DESIGN.md),
-      the authoritative specification of the currently approved target UI.
+   [`docs/GUI_DESIGN.md`](./docs/GUI_DESIGN.md),
+   the authoritative specification of the currently approved target UI.
 5. Read only the documentation and code nearest to the requested change.
 
 - Stop reading once sufficient evidence has been gathered.
@@ -206,12 +206,12 @@ Preserve the existing repository layout. Never create parallel source trees, dup
 
 - Validate every scan before writing production data.
 - Apply these scan outcomes consistently:
-  - Unknown barcode: reject; no write.
-  - Inactive entity: reject; no write.
-  - Invalid Area, Machine, Operation, Route, or quantity: reject; no write.
-  - Duplicate transport retry with the same event id: return the original idempotent result; do not create another Movement.
-  - Multiple valid contexts: present the relevant choices and require explicit confirmation; no write until one choice is confirmed.
-  - Cancel: abandon the pending intent; no write.
+    - Unknown barcode: reject; no write.
+    - Inactive entity: reject; no write.
+    - Invalid Area, Machine, Operation, Route, or quantity: reject; no write.
+    - Duplicate transport retry with the same event id: return the original idempotent result; do not create another Movement.
+    - Multiple valid contexts: present the relevant choices and require explicit confirmation; no write until one choice is confirmed.
+    - Cancel: abandon the pending intent; no write.
 - Never update tracking data from uncertain input. Unresolved ambiguity blocks the write; it is not a silent rejection of valid production reality.
 - Record every production movement as an immutable event.
 - Require transactional consistency whenever movement, status, allocation, or quantity integrity spans multiple writes.
