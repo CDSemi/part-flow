@@ -1,15 +1,21 @@
 # PartFlow
 
-Internal manufacturing tracking system for barcode-driven movement of production quantities through the factory.
+Internal manufacturing tracking system for barcode-driven movement of
+production quantities through the factory.
 
-This repository currently contains the **Phase 1 Repository Foundation** only:
+This repository currently contains the **Phase 1 Repository Foundation**
+only:
 
 - `frontend/` — React + TypeScript (Vite) with a single backend-connectivity screen
 - `backend/` — FastAPI with one operational health endpoint (`GET /api/health`)
 - PostgreSQL 16 with Alembic migration wiring (no-op baseline revision)
 - Docker Compose development stack with health checks
 
-**Phase 1 contains no production domain schema and no business workflows.** Domain entities, barcode scanning, PO intake, and all tracking behavior arrive in later phases. See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries and `docs/PROJECT_PROFILE.md` for the authoritative project specification.
+**Phase 1 contains no production domain schema and no business
+workflows.** Domain entities, barcode scanning, PO intake, and all
+tracking behavior arrive in later phases. See
+`docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries and
+`docs/PROJECT_PROFILE.md` for the authoritative project specification.
 
 ## Prerequisites
 
@@ -26,7 +32,10 @@ This repository currently contains the **Phase 1 Repository Foundation** only:
 
 2. Adjust values in `.env` if needed. These are development-only credentials; the real `.env` is git-ignored and must never contain shared or production secrets.
 
-Dependency lockfiles (`backend/uv.lock`, `frontend/package-lock.json`) are committed; the Docker builds install strictly from them (`uv sync --frozen`, `npm ci`). No extra bootstrap step is required on a clean checkout.
+Dependency lockfiles (`backend/uv.lock`, `frontend/package-lock.json`)
+are committed; the Docker builds install strictly from them
+(`uv sync --frozen`, `npm ci`). No extra bootstrap step is required on a
+clean checkout.
 
 ## Start the complete stack
 
@@ -48,7 +57,10 @@ docker compose down
 
 (`docker compose down -v` additionally deletes the PostgreSQL data volume — normally not needed.)
 
-After changing backend or frontend dependencies (`pyproject.toml`/`uv.lock`, `package.json`/`package-lock.json`), rebuild and renew the anonymous dependency volumes so stale `.venv`/`node_modules` contents do not shadow the rebuilt images:
+After changing backend or frontend dependencies
+(`pyproject.toml`/`uv.lock`, `package.json`/`package-lock.json`),
+rebuild and renew the anonymous dependency volumes so stale
+`.venv`/`node_modules` contents do not shadow the rebuilt images:
 
 ```bash
 docker compose up --build -V
@@ -87,13 +99,51 @@ npm run test          # Vitest + React Testing Library
 npm run build         # type check + production build
 ```
 
+## Docker development notes
+
+When using the Docker development environment, treat the Linux
+containers as the canonical development environment.
+
+### Frontend formatting
+
+Run Prettier **inside the frontend container** before checking
+formatting:
+
+```bash
+docker compose exec frontend npm run format
+```
+
+Then verify:
+
+```bash
+docker compose exec frontend npm run format:check
+```
+
+Running Prettier directly on the host machine may produce different
+results from the Linux container used by Docker and GitHub Actions.
+
+### Complete frontend quality gate
+
+```bash
+docker compose exec frontend sh -lc "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
+```
+
+### Complete backend quality gate
+
+```bash
+docker compose exec backend sh -lc "uv run ruff format --check . && uv run ruff check . && uv run mypy app tests && uv run pytest"
+```
+
 ## Continuous integration
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the same quality gates on every push to `main` and every pull request: backend format check, lint, mypy, Alembic migration, and pytest against PostgreSQL 16; frontend format check, lint, typecheck, tests, and production build.
+GitHub Actions (`.github/workflows/ci.yml`) runs the same quality gates
+on every push to `main` and every pull request: backend format check,
+lint, mypy, Alembic migration, and pytest against PostgreSQL 16;
+frontend format check, lint, typecheck, tests, and production build.
 
 ## Repository layout
 
-```
+```text
 frontend/          Vite + React + TypeScript app (connectivity screen only)
 backend/
   app/api/         HTTP routes (health endpoint)
