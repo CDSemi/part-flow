@@ -1,7 +1,11 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, expect, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from './App';
+
+beforeEach(() => {
+  window.history.replaceState({}, '', '/scan-station');
+});
 
 afterEach(() => {
   cleanup();
@@ -10,87 +14,123 @@ afterEach(() => {
 });
 
 function stubFetch(implementation: () => Promise<Response>) {
-  vi.stubGlobal('fetch', vi.fn(implementation));
+  const fetchMock = vi.fn(implementation);
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
 }
 
-test('shows the loading state while the health request is pending', () => {
-  // A fetch that never settles keeps the component in its initial state.
+function healthOk() {
+  return Promise.resolve(
+    new Response(
+      JSON.stringify({
+        status: 'ok',
+        service: 'partflow-api',
+        database: 'connected',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+  );
+}
+
+test('shows the connecting state while the health request is pending', () => {
+  // A fetch that never settles keeps the shell in its connecting state.
   stubFetch(() => new Promise<Response>(() => {}));
 
   render(<App />);
 
-  expect(screen.getByRole('heading', { name: 'PartFlow' })).toBeInTheDocument();
-  expect(screen.getByRole('status')).toHaveTextContent(
-    'Checking backend connection…',
-  );
+  expect(screen.getByText('CONNECTING…')).toBeInTheDocument();
+  // Production-write controls are not enabled before the backend confirms.
+  expect(screen.getByLabelText('Scan barcode')).toBeDisabled();
 });
 
-test('shows the connected state when the health endpoint succeeds', async () => {
-  stubFetch(() =>
-    Promise.resolve(
-      new Response(
-        JSON.stringify({
-          status: 'ok',
-          service: 'partflow-api',
-          database: 'connected',
-        }),
-        {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        },
-      ),
-    ),
+test('shows ONLINE when the health endpoint succeeds', async () => {
+  stubFetch(healthOk);
+
+  render(<App />);
+
+  expect(await screen.findByText('ONLINE')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Scan barcode')).toBeEnabled();
+});
+
+test('shows OFFLINE with the persistent banner when the health request fails', async () => {
+  const fetchMock = stubFetch(() =>
+    Promise.reject(new TypeError('Failed to fetch')),
   );
 
   render(<App />);
 
-  expect(await screen.findByText('Backend connected.')).toBeInTheDocument();
-});
-
-test('shows the unavailable state when the health request fails', async () => {
-  stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
-
-  render(<App />);
-
-  expect(await screen.findByRole('alert')).toHaveTextContent(
-    'Backend unavailable.',
-  );
-});
-
-test('shows the unavailable state when the health request times out', async () => {
-  // Regression: the health request is bounded by AbortSignal.timeout,
-  // which rejects fetch with a TimeoutError DOMException. The screen
-  // must fall back to unavailable instead of loading forever.
-  const fetchMock = vi.fn(() =>
-    Promise.reject(
-      new DOMException('The operation timed out.', 'TimeoutError'),
-    ),
-  );
-  vi.stubGlobal('fetch', fetchMock);
-
-  render(<App />);
-
-  expect(await screen.findByRole('alert')).toHaveTextContent(
-    'Backend unavailable.',
-  );
+  expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
+  const banner = screen.getByRole('alert');
+  expect(banner).toHaveTextContent('OFFLINE — the backend is unavailable');
+  expect(banner).toHaveTextContent('nothing is recorded or queued');
+  expect(
+    screen.getByRole('button', { name: 'Retry connection' }),
+  ).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith(
     '/api/health',
     expect.objectContaining({ signal: expect.any(AbortSignal) }),
   );
 });
 
-test('shows the unavailable state when the backend returns a non-success response', async () => {
+test('shows OFFLINE when the health request times out', async () => {
+  // Regression: the health request is bounded by AbortSignal.timeout,
+  // which rejects fetch with a TimeoutError DOMException. The shell must
+  // fall back to unavailable instead of loading forever.
   stubFetch(() =>
-    Promise.resolve(
-      new Response(JSON.stringify({ status: 'unavailable' }), {
-        status: 503,
-      }),
+    Promise.reject(
+      new DOMException('The operation timed out.', 'TimeoutError'),
     ),
   );
 
   render(<App />);
 
-  expect(await screen.findByRole('alert')).toHaveTextContent(
-    'Backend unavailable.',
+  expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
+});
+
+test('shows OFFLINE when the backend returns a non-success response', async () => {
+  stubFetch(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ status: 'unavailable' }), { status: 503 }),
+    ),
   );
+
+  render(<App />);
+
+  expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
+});
+
+test('disables production-write controls while disconnected but keeps read-only mock data visible', async () => {
+  stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
+
+  render(<App />);
+  await screen.findByText('OFFLINE');
+
+  // Write-oriented controls are disabled.
+  expect(screen.getByLabelText('Scan barcode')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'ENTER' })).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '⟲ UNDO LAST SCAN' }),
+  ).toBeDisabled();
+
+  // Already displayed read-only mock information stays visible.
+  expect(screen.getByText('Recent scans')).toBeInTheDocument();
+  expect(screen.getByText('In this Area now')).toBeInTheDocument();
+});
+
+test('retry re-runs the health check and recovers to ONLINE', async () => {
+  let failing = true;
+  stubFetch(() =>
+    failing ? Promise.reject(new TypeError('Failed to fetch')) : healthOk(),
+  );
+
+  render(<App />);
+  await screen.findByText('OFFLINE');
+
+  failing = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry connection' }));
+
+  expect(await screen.findByText('ONLINE')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Scan barcode')).toBeEnabled();
 });

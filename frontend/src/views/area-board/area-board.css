@@ -1,0 +1,421 @@
+/* Area Board — All Areas overview + per-Area detail (GUI_DESIGN §6). */
+.ab {
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px 26px;
+    min-height: calc(100vh - 105px);
+}
+
+.ab-tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.ab-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 17px;
+    min-height: var(--touch-min);
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--muted);
+}
+
+.ab-tab .cnt {
+    font-family: var(--mono), monospace;
+    font-size: 12px;
+    background: var(--panel2);
+    border-radius: 12px;
+    padding: 1px 8px;
+}
+
+.ab-tab.active {
+    color: var(--text);
+    background: rgba(79, 140, 255, 0.1);
+    border-color: var(--info-t);
+}
+
+.ab-tab.all {
+    font-weight: 800;
+}
+
+.ab-tab.all::before {
+    content: '⊞';
+    font-size: 14px;
+    color: var(--info-t);
+}
+
+.ab-tools {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.ab-tools input {
+    flex: 1;
+    max-width: 380px;
+    min-width: 220px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    color: var(--text);
+    font-size: 15px;
+    padding: 11px 15px;
+    outline: none;
+    min-height: var(--touch-min);
+}
+
+.ab-tools input:focus {
+    border-color: var(--info-t);
+}
+
+.ab-tools select {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    color: var(--muted);
+    font-size: 14px;
+    padding: 11px 12px;
+    min-height: var(--touch-min);
+}
+
+.ab-meta {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--faint);
+}
+
+.ab-meta b {
+    color: var(--muted);
+}
+
+/* Per-Area detail — card grid */
+.ab-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 15px;
+}
+
+.ab-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 17px;
+    box-shadow: var(--shadow);
+    transition: border-color 0.12s;
+}
+
+.ab-card:hover {
+    border-color: var(--border2);
+}
+
+.ab-card .top {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+/* qty block anchors to the card's right edge regardless of PN length:
+   the id column flexes and truncates, the qty block never moves (§6.3) */
+.ab-card .id {
+    flex: 1;
+    min-width: 0;
+}
+
+.ab-card .part {
+    font-family: var(--mono), monospace;
+    font-size: var(--fs-pn);
+    font-weight: 800;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ab-card .qtyblk {
+    text-align: right;
+    flex: none;
+    border-left: 1px solid var(--border);
+    padding-left: 15px;
+    min-width: 92px;
+}
+
+.ab-card .qlbl {
+    font-size: 9.5px;
+    font-weight: 800;
+    color: var(--faint);
+    text-transform: uppercase;
+    letter-spacing: 1.1px;
+}
+
+.ab-card .qty-big {
+    font-family: var(--mono), monospace;
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--info-t);
+    line-height: 1.1;
+}
+
+.ab-card .qunit {
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.ab-card .po {
+    font-family: var(--mono), monospace;
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 3px;
+}
+
+.ab-card .ext {
+    font-family: var(--mono), monospace;
+    font-size: 12px;
+    color: var(--faint);
+    margin-top: 2px;
+}
+
+.ab-card .machines {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.ab-card .mrow {
+    font-size: 13px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 10px;
+    color: var(--muted);
+}
+
+.ab-card .mrow b {
+    color: var(--text);
+    font-family: var(--mono), monospace;
+}
+
+.ab-card .mrow.queue {
+    border-style: dashed;
+    color: var(--warn-t);
+}
+
+.ab-card .foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 13px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.ab-card .tia {
+    margin-left: auto;
+    color: var(--faint);
+    font-family: var(--mono), monospace;
+    font-size: 12.5px;
+}
+
+.ab-cardempty {
+    grid-column: 1 / -1;
+    color: var(--faint);
+    padding: 40px;
+    text-align: center;
+}
+
+/* All Areas overview — one column per Area, horizontal scroll (§6.2) */
+.ms-scroll {
+    display: flex;
+    gap: 15px;
+    overflow-x: auto;
+    padding-bottom: 14px;
+    align-items: flex-start;
+}
+
+.ms-col {
+    flex: 0 0 330px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+}
+
+.ms-col .mc-head {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    border-top: 4px solid var(--acol, #888);
+    transition: background 0.12s;
+}
+
+.ms-col .mc-head:hover {
+    background: var(--panel2);
+}
+
+.ms-col .mc-title {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 18px;
+    font-weight: 800;
+}
+
+.ms-col .mc-title .areadot {
+    width: 12px;
+    height: 12px;
+    border-radius: 4px;
+}
+
+.ms-col .mc-title .go {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--faint);
+    font-weight: 650;
+}
+
+.ms-col .mc-head:hover .go {
+    color: var(--info-t);
+}
+
+.ms-col .mc-desc {
+    font-size: 12px;
+    color: var(--faint);
+    margin-top: 3px;
+}
+
+.ms-col .mc-ops {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 9px;
+}
+
+.ms-col .opchip {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+}
+
+.ms-col .mc-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    border-bottom: 1px solid var(--border);
+}
+
+.ms-col .stat {
+    padding: 10px 8px;
+    text-align: center;
+    border-right: 1px solid var(--border);
+}
+
+.ms-col .stat:last-child {
+    border-right: none;
+}
+
+.ms-col .stat .n {
+    font-family: var(--mono), monospace;
+    font-size: 21px;
+    font-weight: 800;
+}
+
+.ms-col .stat .n.q {
+    color: var(--warn-t);
+}
+
+.ms-col .stat .n.m {
+    color: var(--info-t);
+}
+
+.ms-col .stat .l {
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-top: 2px;
+}
+
+.ms-col .mc-list {
+    list-style: none;
+}
+
+.ms-col .mc-list li {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--panel2);
+}
+
+.ms-col .mc-list li:last-child {
+    border-bottom: none;
+}
+
+.ms-col .mc-list .r1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* PN truncates; qty stays put (§6.2 + §2.3 amendment) */
+.ms-col .mc-list .p {
+    font-family: var(--mono), monospace;
+    font-size: 14.5px;
+    font-weight: 750;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ms-col .mc-list .q {
+    font-family: var(--mono), monospace;
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--info-t);
+}
+
+.ms-col .mc-list .r2 {
+    display: flex;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 3px;
+    flex-wrap: wrap;
+}
+
+.ms-col .mc-list .r2 .late {
+    color: var(--err-t);
+    font-weight: 700;
+}
+
+.ms-col .mc-list .r2 .soon {
+    color: var(--warn-t);
+    font-weight: 700;
+}
+
+.ms-col .mc-list .r2 .mono {
+    font-size: 11.5px;
+}
+
+.ms-col .empty {
+    padding: 22px 16px;
+    color: var(--faint);
+    font-size: 13px;
+    text-align: center;
+}

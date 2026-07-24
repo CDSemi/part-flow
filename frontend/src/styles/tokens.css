@@ -1,0 +1,123 @@
+/* ================================================================
+   PartFlow design tokens — GUI_DESIGN v5 §2.
+   One token set, two switchable themes. Components consume ONLY the
+   semantic tokens (--bg, --panel, --text, --ok-t, …); body.dark /
+   body.light supply the values. Never reference a --d-* / --l-* raw
+   value from component CSS.
+   ================================================================ */
+:root {
+    /* Raw palettes (referenced only by the theme blocks below) */
+    --d-bg: #0a0e14;
+    --d-bg2: #070a0f;
+    --d-panel: #121926;
+    --d-panel2: #1a2434;
+    --d-border: #243247;
+    --d-border2: #2e405c;
+    --d-text: #eaf1fa;
+    --d-muted: #93a5bc;
+    --d-faint: #5a6b82;
+    --l-bg: #e9edf5;
+    --l-panel: #ffffff;
+    --l-panel2: #f2f5fa;
+    --l-border: #c7d2e2;
+    --l-text: #0f1826;
+    --l-muted: #49596f;
+    --l-faint: #77869b;
+
+    /* Status — semantic only, never decorative (GUI_DESIGN §2.2) */
+    --ok: #31d287;
+    --warn: #ffb224;
+    --err: #ff6166;
+    --info: #4f8cff;
+    --ok-d: #158f56;
+    --warn-d: #a8721a;
+    --err-d: #c43a41;
+    --info-d: #2563eb;
+
+    /* Area identity colors — stable across ALL views and BOTH themes */
+    --a-material: #8b93a8;
+    --a-cut: #f5b83d;
+    --a-lathe: #3da5ff;
+    --a-mill: #9b6ef3;
+    --a-manual: #e06fae;
+    --a-deburr: #2fbf9b;
+    --a-external: #ff8a4c;
+    --a-stockroom: #2fca7c;
+
+    /* Radius */
+    --radius: 14px;
+    --radius-sm: 9px;
+
+    /* Typography — system stack, no webfont (GUI_DESIGN §2.3) */
+    --font: system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --mono: 'Cascadia Code', 'Consolas', 'SF Mono', Menlo, monospace;
+    --fs-body: 16px;
+    --fs-pn: 19px;
+    --fs-qty: 18px;
+
+    /* Spacing scale */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 22px;
+    --sp-6: 30px;
+
+    /* Touch and scanner ergonomics (GUI_DESIGN §2.4) */
+    --touch-min: 48px;
+    --touch-primary: 56px;
+}
+
+/* ============ Theme modes — user-switchable, every view follows ============ */
+body.dark {
+    --bg: var(--d-bg);
+    --bg2: var(--d-bg2);
+    --panel: var(--d-panel);
+    --panel2: var(--d-panel2);
+    --border: var(--d-border);
+    --border2: var(--d-border2);
+    --text: var(--d-text);
+    --muted: var(--d-muted);
+    --faint: var(--d-faint);
+    --hair: #1a2434;
+    --chip: #1e2a3d;
+    --thumb: #2c3a50;
+    --track-bar: #22304a;
+    --ok-t: var(--ok);
+    --warn-t: var(--warn);
+    --err-t: var(--err);
+    --info-t: #79a8ff;
+    --asg-t: #a789f0;
+    --spl-t: #d9a23f;
+    --stk-t: #35c9a5;
+    --dev-t: #ff9a5c;
+    --navglass: rgba(7, 10, 15, 0.92);
+    --shadow: 0 8px 28px rgba(3, 8, 18, 0.42);
+}
+
+body.light {
+    --bg: var(--l-bg);
+    --bg2: #dbe1ec;
+    --panel: var(--l-panel);
+    --panel2: var(--l-panel2);
+    --border: var(--l-border);
+    --border2: #a7b7cc;
+    --text: var(--l-text);
+    --muted: var(--l-muted);
+    --faint: var(--l-faint);
+    --hair: #dfe5ef;
+    --chip: #e2e8f1;
+    --thumb: #a7b6ca;
+    --track-bar: #dbe2ed;
+    --ok-t: var(--ok-d);
+    --warn-t: var(--warn-d);
+    --err-t: var(--err-d);
+    --info-t: var(--info-d);
+    --asg-t: #7141d8;
+    --spl-t: #a8721a;
+    --stk-t: #157a63;
+    --dev-t: #c05a1e;
+    --navglass: rgba(255, 255, 255, 0.95);
+    --shadow:
+        0 1px 2px rgba(20, 30, 43, 0.1), 0 6px 22px rgba(20, 30, 43, 0.12);
+}

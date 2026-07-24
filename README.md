@@ -4,18 +4,73 @@ Internal manufacturing tracking system for barcode-driven movement of
 production quantities through the factory.
 
 This repository currently contains the **Phase 1 Repository Foundation**
-only:
+and the **Phase 2 Frontend Design System and Application Shell**:
 
-- `frontend/` — React + TypeScript (Vite) with a single backend-connectivity screen
+- `frontend/` — React + TypeScript (Vite): design tokens with switchable
+  Dark/Light themes (Dark default), application shell with routing, the
+  seven approved GUI views with development-only mock data, and the real
+  `/api/health` connectivity integration
 - `backend/` — FastAPI with one operational health endpoint (`GET /api/health`)
 - PostgreSQL 16 with Alembic migration wiring (no-op baseline revision)
 - Docker Compose development stack with health checks
 
-**Phase 1 contains no production domain schema and no business
-workflows.** Domain entities, barcode scanning, PO intake, and all
-tracking behavior arrive in later phases. See
-`docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries and
-`docs/PROJECT_PROFILE.md` for the authoritative project specification.
+**Phases 1–2 contain no production domain schema and no business
+workflows.** All view content is development-only mock data; barcode
+resolution, PO intake, and all tracking behavior arrive in later phases.
+See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
+`docs/PROJECT_PROFILE.md` for the authoritative project specification,
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v5.html`)
+for the approved target UI.
+
+## Phase 2 frontend
+
+Routes (meaningful URLs; browser back/forward works; unknown routes show
+an application-level not-found state):
+
+| URL | View |
+|---|---|
+| `/scan-station` | Scan Station (root `/` redirects here) |
+| `/production-board` | Production Board (large display, read-only) |
+| `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
+| `/management/tracking` | Management → Tracking (PN-centric) |
+| `/management/purchase-orders` | Management → Purchase Orders |
+| `/management/priority` | Management → Priority (Hot PO Demand ranking) |
+| `/administration` | Administration |
+
+`/management` opens the last-used sub view of the current session
+(Area Board on first open). Routing is a small history-based router in
+`src/app/router.tsx` — no routing dependency was added.
+
+Frontend structure:
+
+- `src/styles/` — semantic design tokens (`tokens.css`; `body.dark` /
+  `body.light` supply the values) and shared primitives (`global.css`).
+  Component CSS consumes semantic tokens only.
+- `src/app/` — shell infrastructure: router, theme provider (Dark
+  default, session-only), connectivity provider (health check with
+  bounded timeout, periodic re-check, explicit Retry), dev state preview.
+- `src/mocks/` — the development-only mock-data boundary. Views read
+  from here and pass data to components via props; nothing in `src/mocks`
+  encodes production business rules or is written to the backend.
+- `src/views/<view>/` — one folder per GUI view.
+- `src/components/` — genuinely shared pieces (Area dot, Hot/Type chips,
+  view-state blocks, accessible mock dialog).
+
+### Previewing UI states (development only)
+
+Append `?state=…` to any view URL in a development build to force that
+view's deterministic state:
+
+- `?state=loading` — skeleton loading state
+- `?state=empty` — empty state
+- `?state=error` — error state
+- `?state=long` — long-data set (over-long PNs, many rows)
+
+Example: `http://localhost:5173/management/tracking?state=long`. The
+override is gated by `import.meta.env.DEV` and does not exist in a
+production build. The disconnected state is real: stop the backend (or
+let the health check fail) and the shell shows the persistent OFFLINE
+banner with a Retry action while production-write mock controls disable.
 
 ## Prerequisites
 
@@ -47,7 +102,10 @@ docker compose up --build
 - Backend API: <http://localhost:8000>
 - Health endpoint: <http://localhost:8000/api/health> (also proxied at <http://localhost:5173/api/health>)
 
-The frontend shows a single connectivity screen: loading, connected, or backend-unavailable.
+The frontend serves the Phase 2 application shell (see “Phase 2
+frontend” above). The top-navigation chip shows the real backend
+connectivity state: CONNECTING…, ONLINE, or OFFLINE with a persistent
+banner and Retry action.
 
 Stop the stack with `Ctrl+C`, then:
 
@@ -178,7 +236,12 @@ format check, lint, typecheck, tests, and production build. A separate
 ## Repository layout
 
 ```text
-frontend/          Vite + React + TypeScript app (connectivity screen only)
+frontend/          Vite + React + TypeScript app (Phase 2 shell + mock views)
+  src/styles/      semantic design tokens and shared primitives
+  src/app/         router, theme, connectivity, dev state preview
+  src/mocks/       development-only mock data boundary
+  src/views/       one folder per approved GUI view
+  src/components/  shared presentation components
 backend/
   app/api/         HTTP routes (health endpoint)
   app/core/        configuration (pydantic-settings)

@@ -1,0 +1,420 @@
+/* Global base styles and shared primitives. Everything consumes the
+   semantic tokens from tokens.css — no theme-specific colors here. */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body,
+#root {
+    height: 100%;
+}
+
+body {
+    font-family: var(--font), sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: var(--fs-body);
+    -webkit-font-smoothing: antialiased;
+    transition:
+        background 0.15s,
+        color 0.15s;
+}
+
+button {
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: inherit;
+}
+
+button:disabled {
+    cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+    font-family: inherit;
+}
+
+/* Visible keyboard focus everywhere */
+:focus-visible {
+    outline: 2px solid var(--info-t);
+    outline-offset: 2px;
+}
+
+.mono {
+    font-family: var(--mono), monospace;
+}
+
+.qty {
+    font-family: var(--mono), monospace;
+    font-weight: 700;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--thumb);
+    border-radius: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* ============ Shared chips and pills ============ */
+.areachip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 650;
+}
+
+.areadot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3.5px;
+    flex: none;
+    display: inline-block;
+}
+
+.hot {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 800;
+    border-radius: 7px;
+    padding: 2px 8px;
+    vertical-align: 2px;
+}
+
+.hot.h1 {
+    background: rgba(255, 97, 102, 0.18);
+    color: var(--err-t);
+}
+
+.hot.h2 {
+    background: rgba(255, 138, 76, 0.18);
+    color: var(--a-external);
+}
+
+.hot.h3 {
+    background: rgba(255, 178, 36, 0.16);
+    color: var(--warn-t);
+}
+
+.typechip {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    border-radius: 6px;
+    padding: 2px 7px;
+}
+
+.typechip.new {
+    background: rgba(79, 140, 255, 0.15);
+    color: var(--info-t);
+}
+
+.typechip.rework {
+    background: rgba(255, 138, 76, 0.16);
+    color: var(--a-external);
+}
+
+.typechip.modify {
+    background: rgba(155, 110, 243, 0.16);
+    color: var(--a-mill);
+}
+
+.status {
+    font-size: 11.5px;
+    font-weight: 750;
+    padding: 3px 10px;
+    border-radius: 20px;
+    display: inline-block;
+}
+
+.status.active {
+    background: rgba(49, 210, 135, 0.13);
+    color: var(--ok-t);
+}
+
+.status.queued {
+    background: rgba(255, 178, 36, 0.15);
+    color: var(--warn-t);
+}
+
+.status.stocked {
+    background: rgba(79, 140, 255, 0.12);
+    color: var(--info-t);
+}
+
+.status.done {
+    background: var(--chip);
+    color: var(--muted);
+}
+
+/* ============ Shared panel ============ */
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+}
+
+.panel .ph {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 18px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+}
+
+.panel .ph .spacer {
+    flex: 1;
+}
+
+.panel .ph .note {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 450;
+    font-size: 12px;
+    color: var(--faint);
+}
+
+/* ============ Shared buttons ============ */
+.btn {
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 750;
+    min-height: var(--touch-min);
+}
+
+.btn.primary {
+    background: var(--info);
+    color: #fff;
+}
+
+.btn.primary:hover {
+    background: var(--info-d);
+    color: #fff;
+}
+
+.btn.ghost {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--muted);
+}
+
+.btn.ghost:hover {
+    color: var(--text);
+}
+
+.btn:disabled {
+    opacity: 0.4;
+}
+
+/* ============ View state primitives (loading / empty / error) ============ */
+.state-loading {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 24px;
+}
+
+.skeleton {
+    border-radius: var(--radius-sm);
+    background: var(--panel2);
+    border: 1px solid var(--hair);
+    min-height: 20px;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.45;
+    }
+}
+
+.state-empty,
+.state-error {
+    margin: 24px;
+    border-radius: var(--radius);
+    padding: 34px 24px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.state-empty {
+    border: 1px dashed var(--border);
+    color: var(--faint);
+    background: var(--panel);
+}
+
+.state-error {
+    border: 1px solid rgba(255, 97, 102, 0.55);
+    background: rgba(255, 97, 102, 0.09);
+    color: var(--err-t);
+    font-weight: 650;
+}
+
+.state-error .detail {
+    font-weight: 450;
+    color: var(--muted);
+    margin-top: 6px;
+}
+
+/* ============ Mock-action toast ============ */
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    transform: translateX(-50%);
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border2);
+    border-radius: 12px;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 650;
+    z-index: 400;
+    box-shadow: var(--shadow);
+    pointer-events: none;
+    max-width: 90vw;
+}
+
+/* ============ Dialog overlay (accessible mock dialogs) ============ */
+.overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 7, 12, 0.78);
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.dlg {
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 18px;
+    width: min(580px, 94vw);
+    max-height: 92vh;
+    overflow: auto;
+    padding: 24px;
+    box-shadow: var(--shadow);
+}
+
+.dlg h3 {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    margin-bottom: 8px;
+    font-weight: 800;
+}
+
+.dlg .big {
+    font-size: 25px;
+    font-weight: 800;
+    margin-bottom: 4px;
+}
+
+.dlg .sub {
+    font-size: 14px;
+    color: var(--muted);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.dlg .sub b {
+    color: var(--text);
+}
+
+.dlg .row {
+    display: flex;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.bigbtn {
+    flex: 1;
+    min-height: 58px;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: 800;
+}
+
+.bigbtn.primary {
+    background: var(--ok);
+    color: #04160c;
+}
+
+.bigbtn.primary:disabled {
+    opacity: 0.35;
+}
+
+.bigbtn.ghost {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+}
+
+.dlg .field {
+    width: 100%;
+    background: var(--bg2);
+    border: 2px solid var(--border2);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 17px;
+    padding: 11px 14px;
+    outline: none;
+    margin-bottom: 10px;
+}
+
+.dlg .field:focus {
+    border-color: var(--info-t);
+}
+
+/* text-entry surfaces stay white in light mode (a tinted fill reads
+   as disabled — see GUI_DESIGN v5 / light-theme contrast decisions) */
+body.light .dlg .field,
+body.light .ss-scaninput,
+body.light .qtydisplay {
+    background: var(--panel);
+}
+
+/* ============ Due-date color ramp ============ */
+.duetxt.ok {
+    color: var(--muted);
+}
+
+.duetxt.soon {
+    color: var(--warn-t);
+    font-weight: 750;
+}
+
+.duetxt.late {
+    color: var(--err-t);
+    font-weight: 800;
+}

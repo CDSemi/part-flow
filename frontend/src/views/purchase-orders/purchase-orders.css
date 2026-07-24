@@ -1,0 +1,511 @@
+/* Purchase Orders — PO list · PO detail · scanner-first New PO (GUI §11). */
+.po-view {
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 28px;
+    min-height: calc(100vh - 105px);
+}
+
+.po-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.po-head h1 {
+    font-size: 22px;
+}
+
+.po-head .spacer {
+    flex: 1;
+}
+
+.po-sub {
+    color: var(--muted);
+    font-size: 13.5px;
+    margin-bottom: 16px;
+    line-height: 1.6;
+    max-width: 860px;
+}
+
+.po-sub b {
+    color: var(--text);
+}
+
+.po-tools {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    align-items: center;
+}
+
+.po-tools input {
+    flex: 1;
+    max-width: 420px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 14px;
+    padding: 11px 14px;
+    min-height: var(--touch-min);
+    color: var(--text);
+    outline: none;
+}
+
+.po-tools input:focus {
+    border-color: var(--info-t);
+}
+
+.polist {
+    width: 100%;
+    max-width: 1060px;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+}
+
+.polist th {
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--muted);
+    text-align: left;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel2);
+}
+
+.polist td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--hair);
+    font-size: 14px;
+    vertical-align: top;
+}
+
+.polist tr:last-child td {
+    border-bottom: none;
+}
+
+.polist tbody tr:hover td {
+    background: rgba(79, 140, 255, 0.04);
+}
+
+.polist .po {
+    font-family: var(--mono), monospace;
+    font-weight: 800;
+    font-size: 15px;
+    white-space: nowrap;
+}
+
+.polist .rowbtn {
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    padding: 0;
+    display: block;
+    width: 100%;
+}
+
+.polist .sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+    font-weight: 400;
+}
+
+.polist .mono-sm {
+    font-family: var(--mono), monospace;
+    font-size: 13px;
+}
+
+.polist .empty {
+    text-align: center;
+    color: var(--faint);
+    padding: 28px;
+}
+
+.postat {
+    font-size: 11.5px;
+    font-weight: 750;
+    padding: 3px 10px;
+    border-radius: 20px;
+    display: inline-block;
+}
+
+.postat.open {
+    background: rgba(79, 140, 255, 0.12);
+    color: var(--info-t);
+}
+
+.postat.released {
+    background: rgba(49, 210, 135, 0.13);
+    color: var(--ok-t);
+}
+
+.postat.complete {
+    background: var(--chip);
+    color: var(--muted);
+}
+
+.po-back {
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px 14px;
+    min-height: var(--touch-min);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--panel);
+}
+
+.po-back:hover {
+    color: var(--info-t);
+    border-color: var(--info-t);
+}
+
+.po-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    margin-bottom: 16px;
+    overflow: hidden;
+    max-width: 1060px;
+}
+
+.po-card .pc-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel2);
+}
+
+.po-card .pc-head .meta {
+    font-size: 12.5px;
+    color: var(--muted);
+}
+
+.po-card .pc-head .spacer {
+    flex: 1;
+}
+
+.unsaved {
+    font-size: 11.5px;
+    font-weight: 750;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: rgba(255, 178, 36, 0.16);
+    color: var(--warn-t);
+}
+
+/* long PO line lists scroll; the header stays visible */
+.po-lines {
+    max-height: 420px;
+    overflow: auto;
+}
+
+.po-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.po-table th {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--muted);
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+
+.po-table td {
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--hair);
+    font-size: 13.5px;
+    vertical-align: top;
+}
+
+.po-table tr:last-child td {
+    border-bottom: none;
+}
+
+.po-table .pn {
+    font-family: var(--mono), monospace;
+    font-weight: 750;
+    white-space: nowrap;
+}
+
+.po-table .bc {
+    font-family: var(--mono), monospace;
+    font-size: 11.5px;
+    color: var(--faint);
+    margin-top: 2px;
+}
+
+.po-table .bc.newpn {
+    color: var(--info-t);
+}
+
+.po-table input,
+.po-table select {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 6px 9px;
+    color: var(--text);
+    outline: none;
+    max-width: 120px;
+}
+
+.po-table input:focus,
+.po-table select:focus {
+    border-color: var(--info-t);
+}
+
+.po-table .err-cell input {
+    border-color: var(--err-t);
+    background: rgba(255, 97, 102, 0.05);
+}
+
+.rowerr {
+    font-size: 11.5px;
+    color: var(--err-t);
+    font-weight: 700;
+    margin-top: 4px;
+}
+
+.rel-btn {
+    border: 1px solid var(--info);
+    border-radius: 9px;
+    padding: 7px 12px;
+    min-height: 40px;
+    font-size: 12.5px;
+    font-weight: 750;
+    color: var(--info-t);
+    background: rgba(79, 140, 255, 0.06);
+}
+
+.rel-btn:hover:not(:disabled) {
+    background: rgba(79, 140, 255, 0.14);
+}
+
+.rel-btn:disabled {
+    opacity: 0.4;
+}
+
+.linestat {
+    font-size: 11.5px;
+    font-weight: 750;
+    padding: 3px 10px;
+    border-radius: 20px;
+    display: inline-block;
+}
+
+.linestat.saved {
+    background: var(--chip);
+    color: var(--muted);
+}
+
+.linestat.released {
+    background: rgba(49, 210, 135, 0.13);
+    color: var(--ok-t);
+}
+
+.linestat.invalid {
+    background: rgba(255, 97, 102, 0.12);
+    color: var(--err-t);
+}
+
+.po-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 14px 18px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+
+.po-actions .hint {
+    font-size: 12px;
+    color: var(--faint);
+}
+
+.po-note {
+    max-width: 1060px;
+    background: rgba(79, 140, 255, 0.07);
+    border: 1px solid rgba(79, 140, 255, 0.25);
+    border-radius: 12px;
+    padding: 12px 16px;
+    font-size: 12.5px;
+    color: var(--info-t);
+    margin-top: 16px;
+    line-height: 1.6;
+}
+
+/* New PO header form */
+.np-form {
+    display: grid;
+    grid-template-columns: 130px 230px 130px 230px;
+    gap: 12px 14px;
+    align-items: center;
+    padding: 16px 18px;
+    font-size: 13.5px;
+}
+
+@media (max-width: 900px) {
+    .np-form {
+        grid-template-columns: 130px 1fr;
+    }
+}
+
+.np-form label {
+    color: var(--muted);
+    font-weight: 650;
+}
+
+.np-form input {
+    background: var(--panel);
+    border: 1.5px solid var(--border);
+    border-radius: 9px;
+    font-size: 14px;
+    padding: 9px 12px;
+    min-height: 42px;
+    color: var(--text);
+    outline: none;
+}
+
+.np-form input:focus {
+    border-color: var(--info-t);
+}
+
+.np-scanrow {
+    display: flex;
+    gap: 10px;
+    margin: 0 0 4px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.np-scan {
+    flex: 1;
+    max-width: 540px;
+    min-width: 260px;
+    background: var(--panel);
+    border: 2px solid var(--info);
+    border-radius: 11px;
+    font-size: 16px;
+    font-family: var(--mono), monospace;
+    padding: 12px 15px;
+    min-height: var(--touch-min);
+    color: var(--text);
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.1);
+}
+
+.np-hint {
+    font-size: 12px;
+    color: var(--faint);
+    margin: 6px 2px 14px;
+    line-height: 1.6;
+}
+
+.np-hint code {
+    font-family: var(--mono), monospace;
+    background: var(--chip);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: var(--muted);
+}
+
+.np-empty {
+    text-align: center;
+    color: var(--faint);
+    padding: 24px;
+}
+
+.pr-x {
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--faint);
+}
+
+.pr-x:hover {
+    background: rgba(255, 97, 102, 0.1);
+    color: var(--err-t);
+}
+
+/* Release confirmation dialog */
+.relwarn {
+    background: rgba(255, 178, 36, 0.1);
+    border: 1px solid rgba(255, 178, 36, 0.5);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 13px;
+    color: var(--warn-t);
+    margin-bottom: 14px;
+    line-height: 1.55;
+}
+
+.relgrid {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    gap: 10px 12px;
+    align-items: center;
+    font-size: 13.5px;
+    margin-bottom: 14px;
+}
+
+.relgrid label {
+    color: var(--muted);
+    font-weight: 650;
+}
+
+.relgrid input,
+.relgrid select {
+    background: var(--panel);
+    border: 1.5px solid var(--border);
+    border-radius: 9px;
+    font-size: 14px;
+    padding: 9px 12px;
+    min-height: 42px;
+    color: var(--text);
+    outline: none;
+}
+
+.relgrid input:focus,
+.relgrid select:focus {
+    border-color: var(--info-t);
+}
+
+.relsum {
+    background: rgba(79, 140, 255, 0.07);
+    border: 1px solid rgba(79, 140, 255, 0.25);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 12.5px;
+    color: var(--info-t);
+    line-height: 1.6;
+}
+
+.relsum b {
+    font-family: var(--mono), monospace;
+}
