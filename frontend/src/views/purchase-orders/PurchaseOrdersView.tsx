@@ -2,7 +2,7 @@ import './purchase-orders.css';
 
 import { useEffect, useRef, useState } from 'react';
 
-import { useConnectivity } from '../../app/connectivity';
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { TypeChip } from '../../components/indicators';
 import { useMockNotice } from '../../components/mock-notice';

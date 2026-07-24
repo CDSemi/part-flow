@@ -1,4 +1,4 @@
-import { Link } from './router';
+import { Link } from './link';
 
 export function NotFoundView({ path }: { path: string }) {
   return (

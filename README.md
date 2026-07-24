@@ -38,8 +38,11 @@ an application-level not-found state):
 | `/administration` | Administration |
 
 `/management` opens the last-used sub view of the current session
-(Area Board on first open). Routing is a small history-based router in
-`src/app/router.tsx` — no routing dependency was added.
+(Area Board on first open). Routing is a small history-based router
+(`src/app/router-core.ts` route table and resolution,
+`src/app/router-context.ts` Context and `useRouter`,
+`src/app/router-provider.tsx` history state and redirects,
+`src/app/link.tsx` client-side `Link`) — no routing dependency was added.
 
 Frontend structure:
 

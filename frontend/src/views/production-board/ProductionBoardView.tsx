@@ -1,6 +1,6 @@
 import './production-board.css';
 
-import { useConnectivity } from '../../app/connectivity';
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot, HotChip } from '../../components/indicators';
 import {

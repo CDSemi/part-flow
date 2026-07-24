@@ -1,25 +1,13 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-export type Theme = 'dark' | 'light';
+import { ThemeContext } from './theme-context';
+import type { Theme } from './theme-context';
 
 // Dark is the default: PartFlow is shop-floor first (GUI_DESIGN §2.1).
 // The choice is session-only — persistence (per user / per station) is an
 // open decision (GUI_DESIGN §14) and is intentionally not invented here.
 const DEFAULT_THEME: Theme = 'dark';
-
-interface ThemeValue {
-  theme: Theme;
-  toggleTheme: () => void;
-}
-
-const ThemeContext = createContext<ThemeValue | null>(null);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(DEFAULT_THEME);
@@ -40,10 +28,4 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       {children}
     </ThemeContext.Provider>
   );
-}
-
-export function useTheme(): ThemeValue {
-  const value = useContext(ThemeContext);
-  if (!value) throw new Error('useTheme must be used within ThemeProvider');
-  return value;
 }

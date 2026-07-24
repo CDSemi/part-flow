@@ -2,7 +2,7 @@ import './scan-station.css';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { useConnectivity } from '../../app/connectivity';
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';

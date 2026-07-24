@@ -1,14 +1,8 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-export type ConnectivityStatus = 'connecting' | 'connected' | 'unavailable';
+import { ConnectivityContext } from './connectivity-context';
+import type { ConnectivityStatus } from './connectivity-context';
 
 // Bounded timeout so the screen cannot stay in the loading state forever
 // when the request hangs (accepted connection that never responds).
@@ -18,14 +12,6 @@ const HEALTH_REQUEST_TIMEOUT_MS = 5000;
 // Passive re-check so a lost backend eventually surfaces as OFFLINE even
 // without a user action; the Retry control remains the explicit path.
 const RECHECK_INTERVAL_MS = 30000;
-
-interface ConnectivityValue {
-  status: ConnectivityStatus;
-  /** Explicit user-facing retry: re-runs the health check immediately. */
-  retry: () => void;
-}
-
-const ConnectivityContext = createContext<ConnectivityValue | null>(null);
 
 export function ConnectivityProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnectivityStatus>('connecting');
@@ -69,12 +55,4 @@ export function ConnectivityProvider({ children }: { children: ReactNode }) {
       {children}
     </ConnectivityContext.Provider>
   );
-}
-
-export function useConnectivity(): ConnectivityValue {
-  const value = useContext(ConnectivityContext);
-  if (!value) {
-    throw new Error('useConnectivity must be used within ConnectivityProvider');
-  }
-  return value;
 }

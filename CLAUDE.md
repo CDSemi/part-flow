@@ -234,6 +234,44 @@ Preserve the existing repository layout. Never create parallel source trees, dup
 - Never place authoritative business rules only in the frontend.
 - Use realistic mock data when it materially improves UI development or testing. Never allow mock data, mock behavior, or mock offline behavior to leak into production.
 
+#### React Module Organization
+
+- Preserve compatibility with React Fast Refresh and the enabled
+  `react-refresh/only-export-components` ESLint rule. A `.tsx` module that
+  exports React components must export only React components whenever practical.
+- Separate responsibilities by cohesive module:
+  - Context objects, context value types, and consumer hooks belong in
+    `*-context.ts`.
+  - Provider components that own state, effects, lifecycle, and render
+    `<Context.Provider>` belong in `*-provider.tsx`.
+  - Pure constants, route definitions, parsing, resolution, types, and
+    framework-independent logic belong in focused `.ts` modules.
+  - Standalone React components belong in their own `.tsx` modules when
+    combining them would create mixed component and non-component exports.
+- Use the concepts accurately: a Context is the typed channel used to share a
+  value through a React subtree; a Provider is the React component that owns or
+  assembles the shared value and supplies it through the Context; a consumer
+  hook reads the Context and fails with a clear error when used outside the
+  required Provider.
+- Keep local state local. Use Context only when state or services are genuinely
+  shared across a meaningful subtree. Never use Context merely to avoid passing
+  props through a small, direct component path.
+- Split by cohesive responsibility, not mechanically by symbol: never create one
+  file per constant or type without a meaningful boundary, never over-fragment
+  small modules, and keep closely related non-component definitions together
+  when Fast Refresh remains satisfied.
+- A small `.ts` barrel may re-export a stable public surface only when it
+  contains no state, effects, JSX, or business logic, introduces no circular
+  dependencies, and passes the existing ESLint rule without suppression. If a
+  barrel causes lint warnings, update imports directly instead.
+- Never suppress, disable, or downgrade `react-refresh/only-export-components`
+  merely to avoid organizing modules correctly. Correct the module boundary
+  first.
+- During structural refactoring, preserve behavior and update all affected
+  imports, tests, and directly affected documentation.
+- Validate affected frontend work with existing repository commands. Never claim
+  validation passed unless it actually completed successfully.
+
 ### Backend and Database
 
 - Validate before every production-data write.
@@ -323,6 +361,7 @@ If the project uses Git or SVN, every response following file changes must inclu
 - Do not replace the summary with the bullet list.
 - Do not omit the per-change bullets.
 - Enclose the entire `Commit description` content in a standalone fenced code block labeled `text`.
+- Leave all changes uncommitted by default; Do not run any command that creates or modifies a commit unless the user explicitly requests it.
 
 Required format:
 
