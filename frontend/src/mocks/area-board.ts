@@ -1,4 +1,4 @@
-import type { MockAreaCard } from './types';
+import type { MockAreaCard } from '../views/view-models';
 
 export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {

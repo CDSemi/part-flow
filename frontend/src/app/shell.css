@@ -27,13 +27,13 @@
     width: 26px;
     height: 26px;
     border-radius: 8px;
-    background: linear-gradient(135deg, var(--info), #7c5cff);
+    background: linear-gradient(135deg, var(--info), var(--brand-secondary));
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 13px;
     font-weight: 900;
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .appnav .logo .pf {
@@ -59,12 +59,8 @@
 
 .navbtn.active {
     background: var(--info);
-    color: #fff;
+    color: var(--active-nav-text);
     font-weight: 800;
-}
-
-body.dark .navbtn.active {
-    color: #04121f;
 }
 
 .appnav .spacer {
@@ -131,7 +127,7 @@ body.dark .navbtn.active {
     position: sticky;
     top: 53px;
     z-index: 99;
-    box-shadow: 0 1px 2px rgba(20, 30, 43, 0.04);
+    box-shadow: var(--subnav-shadow);
 }
 
 .mgmtnav .subgrp {
@@ -163,7 +159,7 @@ body.dark .navbtn.active {
 }
 
 .subbtn.active {
-    background: rgba(79, 140, 255, 0.12);
+    background: var(--info-surface);
     color: var(--info-t);
     font-weight: 800;
 }
@@ -173,8 +169,8 @@ body.dark .navbtn.active {
     display: flex;
     align-items: center;
     gap: 14px;
-    background: rgba(255, 97, 102, 0.12);
-    border-bottom: 1px solid rgba(255, 97, 102, 0.4);
+    background: var(--error-surface);
+    border-bottom: 1px solid var(--error-border);
     color: var(--err-t);
     padding: 9px 22px;
     font-size: 14px;
@@ -194,7 +190,30 @@ body.dark .navbtn.active {
 }
 
 .offbanner .retry:hover {
-    background: rgba(255, 97, 102, 0.12);
+    background: var(--error-surface);
+}
+
+/* ============ Production not-connected state ============ */
+.unconnected {
+    max-width: 640px;
+    margin: 80px auto;
+    padding: 34px;
+    text-align: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.unconnected h1 {
+    font-size: 22px;
+    margin-bottom: 8px;
+}
+
+.unconnected p {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 /* ============ Not-found state ============ */

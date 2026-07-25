@@ -1,4 +1,4 @@
-import type { MockArea } from './types';
+import type { MockArea } from '../views/view-models';
 
 // Area identity colors are display properties defined in Administration;
 // the palette below mirrors GUI_DESIGN §2.2 and is stable in both themes.

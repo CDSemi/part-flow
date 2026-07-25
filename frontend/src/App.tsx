@@ -2,8 +2,12 @@ import './styles/tokens.css';
 import './styles/global.css';
 import './app/shell.css';
 
+import { Suspense } from 'react';
+
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
+import { DEV_MOCK_VIEWS } from './app/dev-views';
+import type { AppViewKey } from './app/dev-views';
 import { Link } from './app/link';
 import { NotFoundView } from './app/NotFoundView';
 import { useRouter } from './app/router-context';
@@ -11,13 +15,8 @@ import type { ManagementSubview, Route } from './app/router-core';
 import { RouterProvider } from './app/router-provider';
 import { useTheme } from './app/theme-context';
 import { ThemeProvider } from './app/theme-provider';
-import { AdministrationView } from './views/administration/AdministrationView';
-import { AreaBoardView } from './views/area-board/AreaBoardView';
-import { PriorityView } from './views/priority/PriorityView';
-import { ProductionBoardView } from './views/production-board/ProductionBoardView';
-import { PurchaseOrdersView } from './views/purchase-orders/PurchaseOrdersView';
-import { ScanStationView } from './views/scan-station/ScanStationView';
-import { TrackingView } from './views/tracking/TrackingView';
+import { UnconnectedView } from './app/UnconnectedView';
+import { LoadingState } from './components/view-states';
 
 const TOP_NAV: {
   to: string;
@@ -104,30 +103,29 @@ function ThemeToggle() {
   );
 }
 
+const VIEW_TITLES: Record<AppViewKey, string> = {
+  'scan-station': 'Scan Station',
+  'production-board': 'Production Board',
+  'area-board': 'Area Board',
+  tracking: 'Tracking',
+  'purchase-orders': 'Purchase Orders',
+  priority: 'Priority Management',
+  administration: 'Administration',
+};
+
 function ViewForRoute({ route }: { route: Route }) {
-  switch (route.view) {
-    case 'scan-station':
-      return <ScanStationView />;
-    case 'production-board':
-      return <ProductionBoardView />;
-    case 'administration':
-      return <AdministrationView />;
-    case 'management':
-      switch (route.subview) {
-        case 'area-board':
-          return <AreaBoardView />;
-        case 'tracking':
-          return <TrackingView />;
-        case 'purchase-orders':
-          return <PurchaseOrdersView />;
-        case 'priority':
-          return <PriorityView />;
-      }
-      break;
-    case 'not-found':
-      return <NotFoundView path={route.path} />;
+  if (route.view === 'not-found') {
+    return <NotFoundView path={route.path} />;
   }
-  return null;
+  const key: AppViewKey =
+    route.view === 'management' ? route.subview : route.view;
+  // Mock views exist only in development builds (see dev-views.ts). A
+  // production build renders the explicit not-connected state instead.
+  const DevView = DEV_MOCK_VIEWS?.[key];
+  if (!DevView) {
+    return <UnconnectedView title={VIEW_TITLES[key]} />;
+  }
+  return <DevView />;
 }
 
 function AppShell() {
@@ -154,9 +152,11 @@ function AppShell() {
         <span className="spacer" />
         <ConnectivityChip />
         <ThemeToggle />
-        <span className="mock-tag">
-          Phase 2 · <b>mock data</b>
-        </span>
+        {import.meta.env.DEV ? (
+          <span className="mock-tag">
+            Phase 2 · <b>mock data</b>
+          </span>
+        ) : null}
       </nav>
       {route.view === 'management' && (
         <nav className="mgmtnav" aria-label="Management sub views">
@@ -175,7 +175,9 @@ function AppShell() {
       )}
       <OfflineBanner />
       <main>
-        <ViewForRoute route={route} />
+        <Suspense fallback={<LoadingState label="Loading view" />}>
+          <ViewForRoute route={route} />
+        </Suspense>
       </main>
     </>
   );

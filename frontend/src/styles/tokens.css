@@ -34,6 +34,49 @@
     --err-d: #c43a41;
     --info-d: #2563eb;
 
+    /* Text on solid accent / status fills (shared by both themes) */
+    --on-accent: #ffffff;
+    --on-ok: #04160c;
+    --on-warn: #1d1503;
+    --on-err: #210606;
+    --on-info: #04121f;
+
+    /* Brand */
+    --brand-secondary: #7c5cff;
+
+    /* Status surfaces — shared tints and borders (GUI_DESIGN §2.1:
+       status backgrounds/tints are identical in both themes) */
+    --success-surface: rgba(49, 210, 135, 0.13);
+    --success-surface-weak: rgba(49, 210, 135, 0.09);
+    --success-border: rgba(49, 210, 135, 0.5);
+    --warning-surface: rgba(255, 178, 36, 0.15);
+    --warning-surface-weak: rgba(255, 178, 36, 0.09);
+    --warning-border: rgba(255, 178, 36, 0.5);
+    --error-surface: rgba(255, 97, 102, 0.13);
+    --error-surface-weak: rgba(255, 97, 102, 0.08);
+    --error-border: rgba(255, 97, 102, 0.5);
+    --info-surface: rgba(79, 140, 255, 0.12);
+    --info-surface-weak: rgba(79, 140, 255, 0.07);
+    --info-border: rgba(79, 140, 255, 0.25);
+    --info-ring: rgba(79, 140, 255, 0.14);
+    --row-hover: rgba(79, 140, 255, 0.04);
+    --hot1-row-surface: rgba(255, 70, 70, 0.09);
+    --hot2-row-surface: rgba(255, 138, 76, 0.06);
+    --hot1-chip-surface: rgba(255, 97, 102, 0.18);
+    --hot2-chip-surface: rgba(255, 138, 76, 0.18);
+    --hot3-chip-surface: rgba(255, 178, 36, 0.16);
+
+    /* Request-type chip tints — derived from stable identity colors,
+       shared by both themes like the Area colors themselves */
+    --rework-surface: rgba(255, 138, 76, 0.15);
+    --rework-border: rgba(255, 138, 76, 0.5);
+    --modify-surface: rgba(155, 110, 243, 0.15);
+
+    /* Overlay behind modal dialogs and panel inset highlight */
+    --overlay: rgba(4, 7, 12, 0.78);
+    --panel-inset-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+    --subnav-shadow: 0 1px 2px rgba(20, 30, 43, 0.04);
+
     /* Area identity colors — stable across ALL views and BOTH themes */
     --a-material: #8b93a8;
     --a-cut: #f5b83d;
@@ -93,6 +136,13 @@ body.dark {
     --dev-t: #ff9a5c;
     --navglass: rgba(7, 10, 15, 0.92);
     --shadow: 0 8px 28px rgba(3, 8, 18, 0.42);
+    --active-nav-text: var(--on-info);
+    --field-bg: var(--d-bg2);
+    --scan-backdrop: radial-gradient(
+        1200px 500px at 60% -10%,
+        #101a2c 0%,
+        var(--d-bg) 55%
+    );
 }
 
 body.light {
@@ -120,4 +170,9 @@ body.light {
     --navglass: rgba(255, 255, 255, 0.95);
     --shadow:
         0 1px 2px rgba(20, 30, 43, 0.1), 0 6px 22px rgba(20, 30, 43, 0.12);
+    --active-nav-text: var(--on-accent);
+    /* text-entry surfaces stay white in light mode (a tinted fill reads
+       as disabled — see GUI_DESIGN light-theme contrast decisions) */
+    --field-bg: var(--l-panel);
+    --scan-backdrop: var(--l-bg);
 }

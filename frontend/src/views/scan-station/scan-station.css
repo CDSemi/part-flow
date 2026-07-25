@@ -6,12 +6,10 @@
     background: var(--bg);
 }
 
-body.dark .ss {
-    background: radial-gradient(
-        1200px 500px at 60% -10%,
-        #101a2c 0%,
-        var(--bg) 55%
-    );
+/* Dark mode adds a subtle radial glow; light mode is a flat surface
+   (the theme supplies the value — GUI_DESIGN §2.1). */
+.ss {
+    background: var(--scan-backdrop);
 }
 
 .ss-head {
@@ -151,9 +149,9 @@ body.dark .ss {
 
 .mtile.session {
     border-color: var(--info-t);
-    background: rgba(79, 140, 255, 0.13);
+    background: var(--info-surface);
     color: var(--info-t);
-    box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.12);
+    box-shadow: 0 0 0 3px var(--info-ring);
 }
 
 .mtile .sub {
@@ -180,8 +178,8 @@ body.dark .ss {
     margin: 0 18px 14px;
     padding: 13px 16px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 178, 36, 0.5);
-    background: rgba(255, 178, 36, 0.09);
+    border: 1px solid var(--warning-border);
+    background: var(--warning-surface-weak);
     color: var(--warn-t);
     font-size: 15.5px;
     font-weight: 750;
@@ -219,7 +217,7 @@ body.dark .ss {
 .ss-scaninput {
     flex: 1;
     min-width: 0;
-    background: var(--bg2);
+    background: var(--field-bg);
     border: 2px solid var(--border2);
     border-radius: 12px;
     color: var(--text);
@@ -234,7 +232,7 @@ body.dark .ss {
 
 .ss-scaninput:focus {
     border-color: var(--info-t);
-    box-shadow: 0 0 0 4px rgba(79, 140, 255, 0.16);
+    box-shadow: 0 0 0 4px var(--info-ring);
 }
 
 .ss-scaninput::placeholder {
@@ -253,7 +251,7 @@ body.dark .ss {
     min-height: var(--touch-primary);
     border-radius: 12px;
     background: var(--info);
-    color: #04121f;
+    color: var(--on-info);
     font-size: 18px;
     font-weight: 800;
 }
@@ -354,33 +352,33 @@ body.dark .ss {
 }
 
 .ss-feedback.ok {
-    border: 1px solid rgba(49, 210, 135, 0.5);
-    background: rgba(49, 210, 135, 0.09);
+    border: 1px solid var(--success-border);
+    background: var(--success-surface-weak);
 }
 
 .ss-feedback.ok .fic {
     background: var(--ok);
-    color: #04160c;
+    color: var(--on-ok);
 }
 
 .ss-feedback.warn {
-    border: 1px solid rgba(255, 178, 36, 0.5);
-    background: rgba(255, 178, 36, 0.09);
+    border: 1px solid var(--warning-border);
+    background: var(--warning-surface-weak);
 }
 
 .ss-feedback.warn .fic {
     background: var(--warn);
-    color: #1d1503;
+    color: var(--on-warn);
 }
 
 .ss-feedback.err {
-    border: 1px solid rgba(255, 97, 102, 0.55);
-    background: rgba(255, 97, 102, 0.09);
+    border: 1px solid var(--error-border);
+    background: var(--error-surface-weak);
 }
 
 .ss-feedback.err .fic {
     background: var(--err);
-    color: #210606;
+    color: var(--on-err);
 }
 
 .ss-feedback .t1 {
@@ -399,8 +397,8 @@ body.dark .ss {
     width: 100%;
     min-height: var(--touch-primary);
     border-radius: 12px;
-    border: 1px solid rgba(255, 97, 102, 0.45);
-    background: rgba(255, 97, 102, 0.07);
+    border: 1px solid var(--error-border);
+    background: var(--error-surface-weak);
     color: var(--err-t);
     font-size: 16px;
     font-weight: 800;
@@ -408,7 +406,7 @@ body.dark .ss {
 }
 
 .ss-undo:hover:not(:disabled) {
-    background: rgba(255, 97, 102, 0.13);
+    background: var(--error-surface);
 }
 
 .ss-undo:disabled {
@@ -559,7 +557,7 @@ body.dark .ss {
     font-size: 46px;
     font-weight: 800;
     text-align: right;
-    background: var(--bg2);
+    background: var(--field-bg);
     border: 2px solid var(--border2);
     border-radius: 12px;
     padding: 10px 18px;
@@ -587,7 +585,7 @@ body.dark .ss {
 }
 
 .keypad button.act {
-    background: rgba(79, 140, 255, 0.14);
+    background: var(--info-surface);
     color: var(--info-t);
     font-size: 15px;
     font-weight: 800;
@@ -626,22 +624,22 @@ body.dark .ss {
 }
 
 .choice .cic.run {
-    background: rgba(49, 210, 135, 0.15);
+    background: var(--success-surface);
     color: var(--ok-t);
 }
 
 .choice .cic.que {
-    background: rgba(255, 178, 36, 0.15);
+    background: var(--warning-surface);
     color: var(--warn-t);
 }
 
 .choice .cic.rwk {
-    background: rgba(255, 138, 76, 0.15);
+    background: var(--rework-surface);
     color: var(--a-external);
 }
 
 .choice .cic.mod {
-    background: rgba(155, 110, 243, 0.15);
+    background: var(--modify-surface);
     color: var(--a-mill);
 }
 

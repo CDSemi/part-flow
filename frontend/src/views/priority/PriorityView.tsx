@@ -10,7 +10,7 @@ import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
-import type { MockHotEntry } from '../../mocks/types';
+import type { MockHotEntry } from '../view-models';
 
 const hotKey = (h: MockHotEntry) => `${h.pn}|${h.po}`;
 
@@ -261,8 +261,7 @@ export function PriorityView() {
               Cancel — nothing changes
             </button>
             <button
-              className="bigbtn primary"
-              style={{ background: 'var(--err)', color: '#fff' }}
+              className="bigbtn danger"
               onClick={() => {
                 const removed = hotList[removeIndex];
                 setRemoveIndex(null);

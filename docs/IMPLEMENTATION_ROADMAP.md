@@ -6,9 +6,9 @@
 ## Current State
 
 - Canonical project specification: `PROJECT_PROFILE.md` v6.
-- Approved target UI: `GUI_DESIGN.md` v5, with mockup v5 (`docs/mockups/partflow-gui-mockup-v5.html`) as its visual reference.
+- Approved target UI: `GUI_DESIGN.md` v6, with mockup v6 (`docs/mockups/partflow-gui-mockup-v6.html`) as its visual reference.
 - Phase 1 — Repository Foundation source code exists: React + TypeScript frontend, FastAPI backend, PostgreSQL, Alembic (no-op baseline), Docker Compose, the `/api/health` endpoint, formatter/linter/type-check/test tooling, and CI.
-- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a development-only mock-data boundary (`frontend/src/mocks/`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration (persistent OFFLINE banner, Retry, write controls disabled while disconnected). No domain behavior, backend business APIs, or database writes exist yet.
+- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a real development-only build boundary (mock views and datasets are loaded only when `import.meta.env.DEV` is true; production builds render an explicit not-connected state per route, verified by a mock-sentinel check in `npm run build`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration (persistent OFFLINE banner, Retry, write controls disabled while disconnected). The Purchase Orders view implements the approved GUI v6 interaction model against local mock state: New PO as a modal dialog over the PO list, OPEN PO demand-line adding/removal per the PO Demand removal rule (PROJECT_PROFILE §13), native calendar date inputs, mock validation, and unsaved-change protection. No domain behavior, backend business APIs, or database writes exist yet.
 
 ## Implementation Principles
 
@@ -46,8 +46,8 @@ Scope:
 - shared tokens
 - dark and light contexts
 - application routing/navigation
-- approved mock views, including the Purchase Orders view in the application shell
-- development-only mock data
+- approved mock views, including the Purchase Orders view in the application shell (New PO modal, OPEN PO line editing, calendar date inputs, mock validation, unsaved-change protection)
+- development-only mock data behind a real production build boundary (mock-sentinel verification in the build)
 - loading, empty, error, connectivity-loss, and long-data states
 
 Non-goals:
@@ -93,7 +93,8 @@ The first business vertical slice, presented in the UI as the Purchase Orders vi
 - append `RECEIVED`,
 - establish current position,
 - remain transactional and idempotent,
-- not automatically merge with existing active quantity.
+- not automatically merge with existing active quantity,
+- enforce the PO Demand removal rule (PROJECT_PROFILE §13) transactionally in the Application/Domain layer: a PoDemand line may be deleted only while no production quantity has been released for it; once released, deletion must be refused, and removal must never cascade to the PartNumber master, QuantityFlows, PartMovements, release history, or other PoDemand records for the same PN.
 
 Manual entry comes before file import. Development seed data may support UI development and tests, but seeded `RECEIVED` fixtures are not the product intake workflow.
 

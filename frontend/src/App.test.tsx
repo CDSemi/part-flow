@@ -32,7 +32,7 @@ function healthOk() {
   );
 }
 
-test('shows the connecting state while the health request is pending', () => {
+test('shows the connecting state while the health request is pending', async () => {
   // A fetch that never settles keeps the shell in its connecting state.
   stubFetch(() => new Promise<Response>(() => {}));
 
@@ -40,7 +40,8 @@ test('shows the connecting state while the health request is pending', () => {
 
   expect(screen.getByText('CONNECTING…')).toBeInTheDocument();
   // Production-write controls are not enabled before the backend confirms.
-  expect(screen.getByLabelText('Scan barcode')).toBeDisabled();
+  // (Views load lazily through the development-only mock boundary.)
+  expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
 });
 
 test('shows ONLINE when the health endpoint succeeds', async () => {
@@ -50,7 +51,7 @@ test('shows ONLINE when the health endpoint succeeds', async () => {
 
   expect(await screen.findByText('ONLINE')).toBeInTheDocument();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.getByLabelText('Scan barcode')).toBeEnabled();
+  expect(await screen.findByLabelText('Scan barcode')).toBeEnabled();
 });
 
 test('shows OFFLINE with the persistent banner when the health request fails', async () => {
@@ -107,7 +108,7 @@ test('disables production-write controls while disconnected but keeps read-only 
   await screen.findByText('OFFLINE');
 
   // Write-oriented controls are disabled.
-  expect(screen.getByLabelText('Scan barcode')).toBeDisabled();
+  expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
   expect(screen.getByRole('button', { name: 'ENTER' })).toBeDisabled();
   expect(
     screen.getByRole('button', { name: '⟲ UNDO LAST SCAN' }),
@@ -132,5 +133,5 @@ test('retry re-runs the health check and recovers to ONLINE', async () => {
 
   expect(await screen.findByText('ONLINE')).toBeInTheDocument();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.getByLabelText('Scan barcode')).toBeEnabled();
+  expect(await screen.findByLabelText('Scan barcode')).toBeEnabled();
 });

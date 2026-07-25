@@ -1,4 +1,4 @@
-import type { MockHotEntry } from './types';
+import type { MockHotEntry } from '../views/view-models';
 
 export const MOCK_HOT_LIST: MockHotEntry[] = [
   {

@@ -80,17 +80,17 @@
 }
 
 .pr-item .rank.r1 {
-    background: rgba(255, 97, 102, 0.14);
+    background: var(--hot1-chip-surface);
     color: var(--err-t);
 }
 
 .pr-item .rank.r2 {
-    background: rgba(255, 138, 76, 0.15);
+    background: var(--hot2-chip-surface);
     color: var(--dev-t);
 }
 
 .pr-item .rank.r3 {
-    background: rgba(255, 178, 36, 0.16);
+    background: var(--hot3-chip-surface);
     color: var(--warn-t);
 }
 
@@ -199,8 +199,8 @@
 
 .pr-note {
     max-width: 860px;
-    background: rgba(79, 140, 255, 0.07);
-    border: 1px solid rgba(79, 140, 255, 0.25);
+    background: var(--info-surface-weak);
+    border: 1px solid var(--info-border);
     border-radius: 12px;
     padding: 12px 16px;
     font-size: 12.5px;
@@ -224,7 +224,7 @@
 
 .hotsearch:focus {
     border-color: var(--info-t);
-    box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.14);
+    box-shadow: 0 0 0 3px var(--info-ring);
 }
 
 .hotadd-hint {

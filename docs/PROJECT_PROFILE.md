@@ -1127,6 +1127,16 @@ If the PN already has active quantity, the system must show the existing distrib
 
 Purchase Order and PO Demand represent business demand; creating or editing PO Demand does not define current production position. Production release explicitly introduces physical quantity. Part Movement remains PN + Quantity Flow + quantity activity: PO Demand does not own shop-floor Movement, and PO Allocation remains separate from both.
 
+## PO Demand Removal
+
+A PO Demand line may be removed from its Purchase Order only while no production quantity has been released for it:
+
+- An unsaved draft line may be removed immediately.
+- A saved PO Demand with no released production quantity may be removed only after explicit confirmation.
+- Once any quantity for a PO Demand has been released to production, that PO Demand must not be deleted from Purchase Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
+
+Removing a PO Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other PO Demand records for the same PN.
+
 ---
 
 # 14. Rework and Modify Intake

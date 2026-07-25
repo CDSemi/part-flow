@@ -45,7 +45,7 @@
 }
 
 .ad-nav button.active {
-    background: rgba(79, 140, 255, 0.11);
+    background: var(--info-surface);
     color: var(--info-t);
     font-weight: 750;
 }
@@ -122,7 +122,7 @@
 }
 
 .pillnav.on {
-    background: rgba(49, 210, 135, 0.13);
+    background: var(--success-surface);
     color: var(--ok-t);
 }
 
@@ -132,13 +132,13 @@
 }
 
 .pillnav.term {
-    background: rgba(79, 140, 255, 0.12);
+    background: var(--info-surface);
     color: var(--info-t);
 }
 
 .ad-notice {
-    background: rgba(79, 140, 255, 0.07);
-    border: 1px solid rgba(79, 140, 255, 0.25);
+    background: var(--info-surface-weak);
+    border: 1px solid var(--info-border);
     border-radius: 12px;
     padding: 12px 16px;
     font-size: 12.5px;

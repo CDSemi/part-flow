@@ -7,7 +7,7 @@ import { AreaDot, HotChip } from '../../components/indicators';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_AREA_CARDS, MOCK_AREA_CARDS_LONG } from '../../mocks/area-board';
 import { MOCK_AREAS } from '../../mocks/areas';
-import type { MockArea, MockAreaCard } from '../../mocks/types';
+import type { MockArea, MockAreaCard } from '../view-models';
 
 type SortKey = 'due' | 'prio' | 'tia' | 'qty';
 

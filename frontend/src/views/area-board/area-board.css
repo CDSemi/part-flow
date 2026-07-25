@@ -37,7 +37,7 @@
 
 .ab-tab.active {
     color: var(--text);
-    background: rgba(79, 140, 255, 0.1);
+    background: var(--info-surface);
     border-color: var(--info-t);
 }
 
@@ -257,7 +257,7 @@
     text-align: left;
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);
-    border-top: 4px solid var(--acol, #888);
+    border-top: 4px solid var(--acol, var(--faint));
     transition: background 0.12s;
 }
 

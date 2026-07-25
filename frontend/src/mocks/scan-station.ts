@@ -2,7 +2,7 @@ import type {
   MockInventoryRow,
   MockMachineTile,
   MockScanRecord,
-} from './types';
+} from '../views/view-models';
 
 // Scan Station mock configuration: one station fixed to the Lathe Area.
 export const MOCK_STATION = {

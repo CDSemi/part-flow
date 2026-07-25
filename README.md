@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, PO intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v5.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v6.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -52,9 +52,17 @@ Frontend structure:
 - `src/app/` — shell infrastructure: router, theme provider (Dark
   default, session-only), connectivity provider (health check with
   bounded timeout, periodic re-check, explicit Retry), dev state preview.
-- `src/mocks/` — the development-only mock-data boundary. Views read
-  from here and pass data to components via props; nothing in `src/mocks`
+- `src/mocks/` — the development-only mock datasets. Views read from
+  here and pass data to components via props; nothing in `src/mocks`
   encodes production business rules or is written to the backend.
+  Mock views and datasets are reachable only through the dev-only
+  registry `src/app/dev-views.ts` (`import.meta.env.DEV`), so a
+  production build excludes them entirely and every route renders an
+  explicit "not connected to a production data source yet" state.
+  `npm run build` verifies this by scanning the generated assets for
+  known mock sentinel values (`scripts/check-production-boundary.mjs`).
+  Shared view-model types live in `src/views/view-models.ts` (types
+  only — production-safe).
 - `src/views/<view>/` — one folder per GUI view.
 - `src/components/` — genuinely shared pieces (Area dot, Hot/Type chips,
   view-state blocks, accessible mock dialog).
@@ -167,7 +175,7 @@ docker compose exec frontend npm run format:check  # formatting check
 docker compose exec frontend npm run lint          # ESLint
 docker compose exec frontend npm run typecheck     # TypeScript (strict, no emit)
 docker compose exec frontend npm run test          # Vitest + React Testing Library
-docker compose exec frontend npm run build         # type check + production build
+docker compose exec frontend npm run build         # type check + production build + mock-boundary check
 ```
 
 ### Running directly on the host (optional, best effort)
@@ -242,7 +250,7 @@ format check, lint, typecheck, tests, and production build. A separate
 frontend/          Vite + React + TypeScript app (Phase 2 shell + mock views)
   src/styles/      semantic design tokens and shared primitives
   src/app/         router, theme, connectivity, dev state preview
-  src/mocks/       development-only mock data boundary
+  src/mocks/       development-only mock datasets (excluded from production builds)
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components
 backend/

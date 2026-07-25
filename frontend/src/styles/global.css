@@ -23,6 +23,16 @@ body {
         color 0.15s;
 }
 
+/* Native form controls (calendar date pickers, scrollbars) follow the
+   active theme mode. */
+body.dark {
+    color-scheme: dark;
+}
+
+body.light {
+    color-scheme: light;
+}
+
 button {
     font-family: inherit;
     cursor: pointer;
@@ -98,17 +108,17 @@ textarea {
 }
 
 .hot.h1 {
-    background: rgba(255, 97, 102, 0.18);
+    background: var(--hot1-chip-surface);
     color: var(--err-t);
 }
 
 .hot.h2 {
-    background: rgba(255, 138, 76, 0.18);
+    background: var(--hot2-chip-surface);
     color: var(--a-external);
 }
 
 .hot.h3 {
-    background: rgba(255, 178, 36, 0.16);
+    background: var(--hot3-chip-surface);
     color: var(--warn-t);
 }
 
@@ -122,17 +132,17 @@ textarea {
 }
 
 .typechip.new {
-    background: rgba(79, 140, 255, 0.15);
+    background: var(--info-surface);
     color: var(--info-t);
 }
 
 .typechip.rework {
-    background: rgba(255, 138, 76, 0.16);
+    background: var(--rework-surface);
     color: var(--a-external);
 }
 
 .typechip.modify {
-    background: rgba(155, 110, 243, 0.16);
+    background: var(--modify-surface);
     color: var(--a-mill);
 }
 
@@ -145,17 +155,17 @@ textarea {
 }
 
 .status.active {
-    background: rgba(49, 210, 135, 0.13);
+    background: var(--success-surface);
     color: var(--ok-t);
 }
 
 .status.queued {
-    background: rgba(255, 178, 36, 0.15);
+    background: var(--warning-surface);
     color: var(--warn-t);
 }
 
 .status.stocked {
-    background: rgba(79, 140, 255, 0.12);
+    background: var(--info-surface);
     color: var(--info-t);
 }
 
@@ -169,7 +179,7 @@ textarea {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+    box-shadow: var(--panel-inset-shadow);
 }
 
 .panel .ph {
@@ -208,12 +218,12 @@ textarea {
 
 .btn.primary {
     background: var(--info);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .btn.primary:hover {
     background: var(--info-d);
-    color: #fff;
+    color: var(--on-accent);
 }
 
 .btn.ghost {
@@ -272,8 +282,8 @@ textarea {
 }
 
 .state-error {
-    border: 1px solid rgba(255, 97, 102, 0.55);
-    background: rgba(255, 97, 102, 0.09);
+    border: 1px solid var(--error-border);
+    background: var(--error-surface-weak);
     color: var(--err-t);
     font-weight: 650;
 }
@@ -307,7 +317,7 @@ textarea {
 .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(4, 7, 12, 0.78);
+    background: var(--overlay);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -323,6 +333,14 @@ textarea {
     overflow: auto;
     padding: 24px;
     box-shadow: var(--shadow);
+}
+
+.dlg.wide {
+    width: min(660px, 94vw);
+}
+
+.dlg.xwide {
+    width: min(980px, 96vw);
 }
 
 .dlg h3 {
@@ -367,11 +385,16 @@ textarea {
 
 .bigbtn.primary {
     background: var(--ok);
-    color: #04160c;
+    color: var(--on-ok);
 }
 
 .bigbtn.primary:disabled {
     opacity: 0.35;
+}
+
+.bigbtn.danger {
+    background: var(--err);
+    color: var(--on-accent);
 }
 
 .bigbtn.ghost {
@@ -382,7 +405,7 @@ textarea {
 
 .dlg .field {
     width: 100%;
-    background: var(--bg2);
+    background: var(--field-bg);
     border: 2px solid var(--border2);
     border-radius: 10px;
     color: var(--text);
@@ -394,14 +417,6 @@ textarea {
 
 .dlg .field:focus {
     border-color: var(--info-t);
-}
-
-/* text-entry surfaces stay white in light mode (a tinted fill reads
-   as disabled — see GUI_DESIGN v5 / light-theme contrast decisions) */
-body.light .dlg .field,
-body.light .ss-scaninput,
-body.light .qtydisplay {
-    background: var(--panel);
 }
 
 /* ============ Due-date color ramp ============ */

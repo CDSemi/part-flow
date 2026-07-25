@@ -93,7 +93,7 @@
 }
 
 .polist tbody tr:hover td {
-    background: rgba(79, 140, 255, 0.04);
+    background: var(--row-hover);
 }
 
 .polist .po {
@@ -139,12 +139,12 @@
 }
 
 .postat.open {
-    background: rgba(79, 140, 255, 0.12);
+    background: var(--info-surface);
     color: var(--info-t);
 }
 
 .postat.released {
-    background: rgba(49, 210, 135, 0.13);
+    background: var(--success-surface);
     color: var(--ok-t);
 }
 
@@ -202,7 +202,7 @@
     font-weight: 750;
     padding: 3px 10px;
     border-radius: 20px;
-    background: rgba(255, 178, 36, 0.16);
+    background: var(--warning-surface);
     color: var(--warn-t);
 }
 
@@ -279,7 +279,7 @@
 
 .po-table .err-cell input {
     border-color: var(--err-t);
-    background: rgba(255, 97, 102, 0.05);
+    background: var(--error-surface-weak);
 }
 
 .rowerr {
@@ -297,11 +297,11 @@
     font-size: 12.5px;
     font-weight: 750;
     color: var(--info-t);
-    background: rgba(79, 140, 255, 0.06);
+    background: var(--info-surface-weak);
 }
 
 .rel-btn:hover:not(:disabled) {
-    background: rgba(79, 140, 255, 0.14);
+    background: var(--info-surface);
 }
 
 .rel-btn:disabled {
@@ -322,12 +322,12 @@
 }
 
 .linestat.released {
-    background: rgba(49, 210, 135, 0.13);
+    background: var(--success-surface);
     color: var(--ok-t);
 }
 
 .linestat.invalid {
-    background: rgba(255, 97, 102, 0.12);
+    background: var(--error-surface);
     color: var(--err-t);
 }
 
@@ -347,8 +347,8 @@
 
 .po-note {
     max-width: 1060px;
-    background: rgba(79, 140, 255, 0.07);
-    border: 1px solid rgba(79, 140, 255, 0.25);
+    background: var(--info-surface-weak);
+    border: 1px solid var(--info-border);
     border-radius: 12px;
     padding: 12px 16px;
     font-size: 12.5px;
@@ -414,7 +414,7 @@
     min-height: var(--touch-min);
     color: var(--text);
     outline: none;
-    box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.1);
+    box-shadow: 0 0 0 3px var(--info-ring);
 }
 
 .np-hint {
@@ -449,14 +449,94 @@
 }
 
 .pr-x:hover {
-    background: rgba(255, 97, 102, 0.1);
+    background: var(--error-surface-weak);
     color: var(--err-t);
+}
+
+/* New PO modal dialog (over the PO list — GUI §11.3) */
+.npd-title {
+    font-size: 20px;
+    margin-bottom: 4px;
+}
+
+.npd .np-form {
+    padding: 12px 0;
+    align-items: start;
+}
+
+.npd .np-form label {
+    padding-top: 10px;
+}
+
+.npd .np-form > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.np-fieldhint {
+    font-size: 12px;
+    color: var(--faint);
+}
+
+/* long line lists scroll inside the dialog; the dialog itself stays
+   within the viewport (internal scrolling) */
+.npd-lines {
+    max-height: min(44vh, 420px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.npd-actions {
+    border-top: none;
+    padding: 14px 0 0;
+}
+
+/* ＋ Add Part entry on an OPEN PO detail */
+.po-addpart {
+    padding: 12px 18px;
+    border-top: 1px solid var(--hair);
+}
+
+.po-addpart .np-hint {
+    margin: 8px 2px 2px;
+}
+
+.linestat.draft {
+    background: var(--warning-surface);
+    color: var(--warn-t);
+}
+
+.po-rowactions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.pr-x:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* Inline PO due date editor in the detail header line */
+.po-due-input {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 8px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+}
+
+.po-due-input:focus {
+    border-color: var(--info-t);
 }
 
 /* Release confirmation dialog */
 .relwarn {
-    background: rgba(255, 178, 36, 0.1);
-    border: 1px solid rgba(255, 178, 36, 0.5);
+    background: var(--warning-surface-weak);
+    border: 1px solid var(--warning-border);
     border-radius: 12px;
     padding: 12px 14px;
     font-size: 13px;
@@ -497,8 +577,8 @@
 }
 
 .relsum {
-    background: rgba(79, 140, 255, 0.07);
-    border: 1px solid rgba(79, 140, 255, 0.25);
+    background: var(--info-surface-weak);
+    border: 1px solid var(--info-border);
     border-radius: 12px;
     padding: 12px 14px;
     font-size: 12.5px;

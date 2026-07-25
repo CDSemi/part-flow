@@ -46,32 +46,34 @@ test('the application shell renders with the four top-level entries', async () =
   expect(await screen.findByText('ONLINE')).toBeInTheDocument();
 });
 
-test('the root URL redirects to the Scan Station', () => {
+test('the root URL redirects to the Scan Station', async () => {
   renderAt('/');
 
   expect(window.location.pathname).toBe('/scan-station');
   expect(
-    screen.getByRole('region', { name: 'Scan Station' }),
+    await screen.findByRole('region', { name: 'Scan Station' }),
   ).toBeInTheDocument();
 });
 
-test('top-level navigation switches views and updates the URL', () => {
+test('top-level navigation switches views and updates the URL', async () => {
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Production Board' }));
 
   expect(window.location.pathname).toBe('/production-board');
   expect(
-    screen.getByRole('heading', { name: 'Machine Shop — Production' }),
+    await screen.findByRole('heading', { name: 'Machine Shop — Production' }),
   ).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('link', { name: 'Administration' }));
 
   expect(window.location.pathname).toBe('/administration');
-  expect(screen.getByRole('heading', { name: 'Areas' })).toBeInTheDocument();
+  expect(
+    await screen.findByRole('heading', { name: 'Areas' }),
+  ).toBeInTheDocument();
 });
 
-test('Management opens Area Board first and exposes the sub navigation', () => {
+test('Management opens Area Board first and exposes the sub navigation', async () => {
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
@@ -81,18 +83,19 @@ test('Management opens Area Board first and exposes the sub navigation', () => {
     screen.getByRole('navigation', { name: 'Management sub views' }),
   ).toBeInTheDocument();
   // Area Board initially opens its All Areas overview.
-  expect(screen.getByRole('button', { name: /All Areas/ })).toHaveAttribute(
-    'aria-pressed',
-    'true',
-  );
+  expect(
+    await screen.findByRole('button', { name: /All Areas/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
 
   fireEvent.click(screen.getByRole('link', { name: 'Tracking' }));
 
   expect(window.location.pathname).toBe('/management/tracking');
-  expect(screen.getByRole('heading', { name: 'Tracking' })).toBeInTheDocument();
+  expect(
+    await screen.findByRole('heading', { name: 'Tracking' }),
+  ).toBeInTheDocument();
 });
 
-test('returning to Management restores the last-used sub view during the session', () => {
+test('returning to Management restores the last-used sub view during the session', async () => {
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
@@ -105,15 +108,15 @@ test('returning to Management restores the last-used sub view during the session
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
   expect(window.location.pathname).toBe('/management/purchase-orders');
   expect(
-    screen.getByRole('heading', { name: 'Purchase Orders' }),
+    await screen.findByRole('heading', { name: 'Purchase Orders' }),
   ).toBeInTheDocument();
 });
 
-test('a Management sub view renders directly from its URL', () => {
+test('a Management sub view renders directly from its URL', async () => {
   renderAt('/management/priority');
 
   expect(
-    screen.getByRole('heading', {
+    await screen.findByRole('heading', {
       name: 'Priority Management — Hot PO Demand',
     }),
   ).toBeInTheDocument();
@@ -124,6 +127,7 @@ test('browser back and forward navigation works', async () => {
 
   fireEvent.click(screen.getByRole('link', { name: 'Production Board' }));
   expect(window.location.pathname).toBe('/production-board');
+  await screen.findByRole('heading', { name: 'Machine Shop — Production' });
 
   window.history.back();
   await waitFor(() =>

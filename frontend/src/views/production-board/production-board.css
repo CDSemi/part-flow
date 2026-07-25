@@ -199,7 +199,7 @@
 }
 
 tr.hotrow1 td {
-    background: rgba(255, 70, 70, 0.09);
+    background: var(--hot1-row-surface);
 }
 
 tr.hotrow1 td:first-child {
@@ -207,7 +207,7 @@ tr.hotrow1 td:first-child {
 }
 
 tr.hotrow2 td {
-    background: rgba(255, 138, 76, 0.06);
+    background: var(--hot2-row-surface);
 }
 
 tr.hotrow2 td:first-child {

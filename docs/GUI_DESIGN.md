@@ -1,9 +1,9 @@
-# PartFlow GUI Design v5
+# PartFlow GUI Design v6
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v6).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v5.html`.
-> Supersedes GUI Design v4 (mockup: `archive/partflow-gui-mockup-v4.html`); the differences are listed in §12.1. Differences from v3, v2 and v1 remain listed in §12.2–§12.4.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v6.html`.
+> Supersedes GUI Design v5 (mockup: `archive/partflow-gui-mockup-v5.html`); the differences are listed in §12.1. Differences from v4, v3, v2 and v1 remain listed in §12.2–§12.5.
 
 ---
 
@@ -285,34 +285,48 @@ The Stockroom station reuses the Scan Station shell with one additional step: af
 
 # 11. Purchase Orders
 
-Management sub view (light theme) implementing manual PO entry and explicit production release (PROJECT_PROFILE §13; §21 *PO Intake*, renamed **Purchase Orders** in v4 — see §1). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (follows the global theme mode, §2.1) implementing manual PO entry and explicit production release (PROJECT_PROFILE §13; §21 *PO Intake*, renamed **Purchase Orders** in v4 — see §1). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
-The view has three panels: **PO list** (master, the entry screen), **PO detail** (demand lines of one selected PO), and **New PO** (scanner-first entry).
+The view has two panels on one route (`/management/purchase-orders`): the **PO list** (master, the entry screen) and the **PO detail** (demand lines of one selected PO). **New PO** is a **modal dialog over the PO list** (v6) — it never replaces the list and never changes the URL.
+
+**Editable dates use native calendar controls** (`<input type="date">`) in every Purchase Orders form: New PO received date and PO due date, the OPEN PO due date, and every demand-line due date. Editable values are ISO `YYYY-MM-DD` internally; read-only presentation formats them as `Jul 24, 2026`. No date-picker dependency is added — the native accessible control works in both theme modes (`color-scheme` follows the theme) and stays keyboard-accessible.
+
+In Phase 2 every Purchase Orders interaction changes **development-only local mock state** and says so explicitly; nothing is persisted to the backend.
 
 ## 11.1 PO list
 
 - One row per PO: PO Number, received date, **PO due date** (color-ramped like all due dates), demand-line count with a PN preview, and status (**Open** / **Released** / **Complete**).
 - Search over PO Number. An existing PO Number is always opened, never duplicated; a miss offers "＋ New PO".
+- **＋ New PO opens the modal dialog of §11.3 over the list.** The list stays mounted and visible behind the overlay, and the URL remains `/management/purchase-orders`.
 - Temporary internal POs (`TMP-…-REWORK/MODIFY`) appear like any other PO, labeled "temporary internal PO".
 - Completed POs (every PO Demand fully allocated) move out of the active list but remain permanently available in history (PROJECT_PROFILE §8.2).
 - **Demand lines are shown only after a PO is selected** — selecting a row opens the PO detail panel.
 
 ## 11.2 PO detail — demand lines
 
-- Header: "‹ All POs" back action, PO Number, received date, PO due date, line count, status.
-- **PoDemand rows:** an editable table, one row per PN demand: PN (lookup or create), Request Type (`NEW` default / `REWORK` / `MODIFY`), requested quantity, due date, priority when applicable, external Job Numbers, requester / reason / notes. Long PO line lists scroll with a sticky header and a line count.
-- **Due-date default:** each line's due date defaults to the **PO due date** and may be edited per line.
+- Header: "‹ All POs" back action, PO Number, received date, PO due date (**editable with a calendar control while the PO is Open**), line count, status.
+- **PoDemand rows:** an editable table, one row per PN demand: PN (lookup or create), Request Type (`NEW` default / `REWORK` / `MODIFY`), requested quantity, due date (calendar control), priority when applicable, external Job Numbers, requester / reason / notes. Long PO line lists scroll with a sticky header and a line count.
+- **Adding demand lines (v6):** an **OPEN** PO shows a clear **＋ Add Part** action; CLOSED/completed POs remain read-only. Add Part reuses the scanner-first entry of §11.3: scan an existing PN barcode, or add a line manually with PN lookup / inline create. A new line joins the PO as a visibly marked **unsaved draft** — Request Type defaults to `NEW`, the due date defaults to the PO due date. Scanning or entering a PN already on the PO focuses the existing line instead of adding a duplicate; a released line is announced as read-only instead.
+- **Removing demand lines (v6)** follows the canonical PO Demand removal rule (PROJECT_PROFILE §13):
+  - an unsaved draft line is removed immediately;
+  - a saved line with no released production quantity is removed only after an explicit confirmation dialog;
+  - once any quantity has been released to production, the line's remove action is disabled with the explanation "Cannot remove: production quantity has already been released." — later adjustments go through correction/production workflows, never deletion;
+  - removal never deletes the PartNumber master, Quantity Flows, Movements, release history, or other PO Demand for the same PN.
+- **Due-date default:** each line's due date defaults to the **PO due date** and may be edited per line. Changing the PO due date updates only lines still holding the inherited default; a line whose due date was manually changed keeps its value.
 - **PN lookup / create:** the PN field searches existing PartNumbers; a new PN can be created inline, which shows a **barcode preview** (`PF:PN:…`) and creates the unique PN barcode with the PN master. An **inactive PN** is flagged and cannot be released without reactivation.
-- **Validation states:** per-field errors (missing PN, quantity ≤ 0, missing due date where required); a row with errors cannot be saved. **Unsaved changes** are visibly marked and guarded against navigation loss.
+- **Validation states:** per-field errors (missing PN, quantity not a positive integer, missing due date, duplicate PN); a row with errors cannot be saved and is **never silently filtered out**. After a failed save the first invalid control receives focus and all entered values are preserved.
+- **Unsaved changes** are visibly marked ("● Unsaved changes") and guarded: leaving the PO — via the back action, top-level navigation, Management sub-navigation, browser back/forward, or reload/tab close (`beforeunload`) — requires explicit confirmation before the draft is discarded.
 
-## 11.3 New PO — scanner-first entry
+## 11.3 New PO — scanner-first modal dialog
 
-- **Header form:** PO Number, received date (defaults to today), and **PO due date** — the default due date for every demand line. Entering a PO Number that already exists opens the existing PO instead of duplicating it (duplicate PO handling).
+- **Presentation (v6):** New PO opens as a **modal dialog over the PO list**. The dialog has `role="dialog"`, `aria-modal="true"`, an accessible name from its visible heading, initial focus inside the dialog, keyboard focus trapping, Escape and backdrop-click close requests, focus restoration to the **＋ New PO** button on close, responsive sizing with internal scrolling for long line lists, and follows both theme modes. The URL never changes.
+- **Nothing is silently discarded:** Escape, backdrop click, Cancel, or any other close request on a dialog with entered data first asks for explicit confirmation ("Discard this New PO?").
+- **Header form:** PO Number, received date (calendar control, defaults to today), and **PO due date** (calendar control) — the default due date for every demand line. Entering a PO Number that already exists opens the existing PO instead of duplicating it (duplicate PO handling); if lines were already entered, opening the existing PO is confirmed explicitly first.
 - **Scan loop:** a dedicated, visually prominent scan input accepts PN barcodes (`PF:PN:…`). Each scan appends one demand line — Request Type `NEW`, due date prefilled from the PO due date — and moves focus to that line's quantity field; Enter on the quantity returns focus to the scan input, ready for the next part. An entire PO can be entered scan → qty → scan → qty without touching the mouse.
 - Scanning a PN that is already on the PO focuses the existing line (edit its quantity) instead of adding a duplicate. Unknown or non-PN barcodes are rejected with an error — nothing is added.
 - **Manual lines** remain available ("＋ Add line manually") for PNs that do not exist yet, using the same PN lookup / inline-create as §11.2.
 - Changing the PO due date updates lines still holding the default; lines whose due date was edited keep their value. Request Type and due date stay editable per line before saving.
-- **Save demand** validates all rows, persists the PurchaseOrder and PoDemand rows only, and returns to the PO list with the new PO shown as **Open**.
+- **Save demand** validates the header and all rows (§11.2 validation states — field-level errors, first invalid control focused, values preserved, incomplete rows never dropped), persists the PurchaseOrder and PoDemand rows only, closes the dialog, and shows the new PO in the list as **Open**. In Phase 2 the save changes local mock state only and reports that nothing was persisted to the backend.
 
 > **Data-model note (pending PROJECT_PROFILE update):** the PO due date requires a `due_date` attribute on PurchaseOrder (§8.2). It is an entry default only — PoDemand keeps its own `due_date` as the operative business value.
 
@@ -332,12 +346,24 @@ The view has three panels: **PO list** (master, the entry screen), **PO detail**
 
 # 12. Changes from previous versions
 
-## 12.1 Changes from GUI Design v4
+## 12.1 Changes from GUI Design v5
+
+All v5→v6 changes concern the Purchase Orders view (§11); Phase 2 implements them against development-only local mock state.
+
+1. **New PO becomes a modal dialog over the PO list** (§11.3): ＋ New PO no longer replaces the Purchase Orders content with a full-page panel. The list stays mounted behind the overlay and the URL remains `/management/purchase-orders`. The dialog specifies full accessibility behavior (accessible name from its visible heading, `aria-modal`, focus trap, initial focus, Escape/backdrop close requests, focus restoration to ＋ New PO, responsive sizing with internal scrolling) and never silently discards entered data — a dirty dialog asks "Discard this New PO?" before closing.
+2. **OPEN PO detail supports adding demand lines** (§11.2): a clear ＋ Add Part action (OPEN POs only) reuses the scanner-first entry — scan an existing PN barcode, search or manually enter a PN, or create a PN inline. New lines are visibly marked unsaved drafts; duplicate PNs focus the existing line instead of duplicating it.
+3. **Demand-line removal follows the canonical PO Demand removal rule** (§11.2; PROJECT_PROFILE §13): unsaved drafts remove immediately, saved unreleased lines require explicit confirmation, and released lines cannot be removed — the action is disabled with the explanation "Cannot remove: production quantity has already been released."
+4. **Editable dates use native calendar controls** (§11 intro): `<input type="date">` for the New PO received/due dates, the OPEN PO due date, and every demand-line due date. ISO `YYYY-MM-DD` internally, formatted display read-only, both themes via `color-scheme`, no date-picker dependency. The inherited-default rule is unchanged: only lines still holding the PO due date follow later changes.
+5. **Validation is corrected** (§11.2/§11.3): a manual row without a PN makes the form invalid instead of being silently filtered out at save; field-level errors cover missing PN, non-positive quantity, missing due date, and duplicate PNs; after a failed save the first invalid control receives focus and entered values are preserved.
+6. **Unsaved changes are guarded everywhere** (§11.2): the OPEN PO detail visibly tracks its dirty state, and navigation away — back action, top-level navigation, Management sub-navigation, browser back/forward, reload/tab close — requires explicit confirmation.
+7. **Production mock boundary made real** (implementation alignment): mock views and datasets load only in development builds; production builds show an explicit "not connected to a production data source yet" state per route, verified by a mock-sentinel check in the build.
+
+## 12.2 Changes from GUI Design v4
 
 1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§14). This removes "dark/light user toggle" from the deferred list (§13).
 2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
 
-## 12.2 Changes from GUI Design v3
+## 12.3 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -345,14 +371,14 @@ The view has three panels: **PO list** (master, the entry screen), **PO detail**
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 12.3 Changes from GUI Design v2
+## 12.4 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 12.4 Changes from GUI Design v1
+## 12.5 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 

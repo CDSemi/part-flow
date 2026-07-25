@@ -13,7 +13,7 @@ import {
   MOCK_BOARD_ROWS,
   MOCK_BOARD_ROWS_LONG,
 } from '../../mocks/production-board';
-import type { MockBoardRow } from '../../mocks/types';
+import type { MockBoardRow } from '../view-models';
 
 // Read-only large-display view: mock rows, no interactive elements.
 export function ProductionBoardView() {

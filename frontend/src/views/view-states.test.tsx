@@ -28,35 +28,35 @@ function renderAt(path: string) {
   return render(<App />);
 }
 
-test('a view renders its loading state', () => {
+test('a view renders its loading state', async () => {
   renderAt('/management/tracking?state=loading');
 
   expect(
-    screen.getByRole('status', { name: 'Loading Tracking' }),
+    await screen.findByRole('status', { name: 'Loading Tracking' }),
   ).toBeInTheDocument();
 });
 
-test('a view renders its empty state', () => {
+test('a view renders its empty state', async () => {
   renderAt('/management/tracking?state=empty');
 
   expect(
-    screen.getByText(/No PNs match the current filters/),
+    await screen.findByText(/No PNs match the current filters/),
   ).toBeInTheDocument();
 });
 
-test('a view renders its error state', () => {
+test('a view renders its error state', async () => {
   renderAt('/management/area-board?state=error');
 
-  expect(screen.getByRole('alert')).toHaveTextContent(
+  expect(await screen.findByRole('alert')).toHaveTextContent(
     'Area Board data could not be loaded.',
   );
 });
 
-test('the Production Board renders long data without wrapping the PN', () => {
+test('the Production Board renders long data without wrapping the PN', async () => {
   renderAt('/production-board?state=long');
 
   // Over-long identifier from the long-data mock set.
-  const longPn = screen.getByText(
+  const longPn = await screen.findByText(
     /PF-MANIFOLD-ASSY-00847-REV-C-EXTENDED-VALIDATION/,
   );
   expect(longPn).toBeInTheDocument();

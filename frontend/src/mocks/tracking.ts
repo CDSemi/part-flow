@@ -1,4 +1,4 @@
-import type { MockTrackingRow } from './types';
+import type { MockTrackingRow } from '../views/view-models';
 
 export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {

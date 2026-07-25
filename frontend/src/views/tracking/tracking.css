@@ -84,11 +84,11 @@
 }
 
 .tk-table tr.sel td {
-    background: rgba(79, 140, 255, 0.07);
+    background: var(--info-surface-weak);
 }
 
 .tk-table tbody tr:hover td {
-    background: rgba(79, 140, 255, 0.04);
+    background: var(--row-hover);
 }
 
 /* PN never wraps; the column sizes to fit it (§2.3) */
@@ -351,27 +351,27 @@
 }
 
 .rstep.done {
-    background: rgba(49, 210, 135, 0.11);
-    border-color: rgba(49, 210, 135, 0.4);
+    background: var(--success-surface);
+    border-color: var(--success-border);
     color: var(--ok-t);
 }
 
 .rstep.cur {
-    background: rgba(79, 140, 255, 0.12);
+    background: var(--info-surface);
     border-color: var(--info-t);
     color: var(--info-t);
-    box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.12);
+    box-shadow: 0 0 0 2px var(--info-ring);
 }
 
 .rstep.queuedstep {
-    background: rgba(255, 178, 36, 0.11);
-    border-color: rgba(255, 178, 36, 0.45);
+    background: var(--warning-surface);
+    border-color: var(--warning-border);
     color: var(--warn-t);
 }
 
 .rstep.dev {
-    background: rgba(255, 138, 76, 0.12);
-    border-color: rgba(255, 138, 76, 0.5);
+    background: var(--rework-surface);
+    border-color: var(--rework-border);
     color: var(--dev-t);
 }
 

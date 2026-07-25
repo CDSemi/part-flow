@@ -16,7 +16,7 @@ import {
   MOCK_SCAN_OUTCOMES,
   MOCK_STATION,
 } from '../../mocks/scan-station';
-import type { MockScanRecord } from '../../mocks/types';
+import type { MockScanRecord } from '../view-models';
 
 type Feedback = {
   kind: 'idle' | 'ok' | 'warn' | 'err';

@@ -1,4 +1,4 @@
-import type { RequestType } from '../mocks/types';
+import type { RequestType } from '../views/view-models';
 
 /** Stable Area identity color dot (same color in both themes). */
 export function AreaDot({
