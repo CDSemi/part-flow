@@ -1,4 +1,4 @@
-/* Priority Management — Hot PO Demand ranking (GUI_DESIGN §8). */
+/* Priority Management — Hot WO Demand ranking (GUI_DESIGN §8). */
 .pr-view {
     background: var(--bg);
     color: var(--text);
@@ -113,7 +113,7 @@
     white-space: nowrap;
 }
 
-.pr-item .l1 .po {
+.pr-item .l1 .wo {
     font-family: var(--mono), monospace;
     color: var(--muted);
     font-size: 13px;
@@ -273,7 +273,7 @@
     white-space: nowrap;
 }
 
-.hotadd-item .hpo {
+.hotadd-item .hwo {
     font-family: var(--mono), monospace;
     font-size: 12.5px;
     color: var(--muted);

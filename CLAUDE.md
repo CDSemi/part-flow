@@ -95,11 +95,11 @@ PartFlow is a long-term internal manufacturing tracking system for barcode-drive
 
 PartFlow must:
 
-- track PartNumbers (PNs) as the primary tracked identity, PurchaseOrders and PoDemand as business demand, and QuantityFlows as traceable physical production quantities;
+- track PartNumbers (PNs) as the primary tracked identity, WorkOrders and WorkOrderDemand as business demand, and QuantityFlows as traceable physical production quantities;
 - record immutable PartMovement history across Areas, Operations, and optional Machines;
 - present accurate current production status and location derived consistently from movement history.
 
-External Job Numbers are metadata on PoDemand. They are valid search, display, sorting, and reporting values, but they are not a `Job` aggregate and PartFlow has no `Job` domain entity.
+External Job Numbers are metadata on WorkOrderDemand. They are valid search, display, sorting, and reporting values, but they are not a `Job` aggregate and PartFlow has no `Job` domain entity.
 
 Enforce this priority order:
 
@@ -118,10 +118,10 @@ Support future growth without implementing speculative capability. Keep the curr
 
 ### In Scope
 
-- PN-centric production tracking: PurchaseOrder and PoDemand as business demand, QuantityFlow as physical quantity.
+- PN-centric production tracking: WorkOrder and WorkOrderDemand as business demand, QuantityFlow as physical quantity.
 - Barcode-driven shop-floor workflows.
 - Area, Operation, and optional Machine routing context.
-- Quantity movement (PartMovement), allocation (PoAllocation), status, and history.
+- Quantity movement (PartMovement), allocation (WorkOrderAllocation), status, and history.
 - Current-location and production-status dashboards.
 - Manual data entry and import where defined by `PROJECT_PROFILE.md`.
 - Future ERP synchronization only through an explicit, isolated integration boundary.
@@ -147,8 +147,8 @@ Never add adjacent capability merely because it is technically possible. Require
 
 ### Architectural Boundaries
 
-- Never conflate the reusable `PartNumber` definition with tracked physical quantity. `QuantityFlow` is the traceable production portion of PN quantity; `PoDemand` is business demand; `PoAllocation` connects stocked quantity to PoDemand only after completion.
-- Never treat external Job Numbers as a domain aggregate. They are PoDemand metadata used for search, display, sorting, and reporting.
+- Never conflate the reusable `PartNumber` definition with tracked physical quantity. `QuantityFlow` is the traceable production portion of PN quantity; `WorkOrderDemand` is business demand; `WorkOrderAllocation` connects stocked quantity to WorkOrderDemand only after completion.
+- Never treat external Job Numbers as a domain aggregate. They are WorkOrderDemand metadata used for search, display, sorting, and reporting.
 - Treat `Area`, `Operation`, and `Machine` as distinct concepts. `Machine` may be absent when the workflow does not require one.
 - Treat immutable movement history as the audit record. Current status must remain consistent with that history.
 - Presentation must never own production business rules.
@@ -295,7 +295,7 @@ Logs must answer, where relevant:
 - What happened?
 - Which PN?
 - Which QuantityFlow and quantity?
-- Which PO Demand was relevant, if any?
+- Which Work Order Demand was relevant, if any?
 - Which Area?
 - Which Operation?
 - Which Machine?

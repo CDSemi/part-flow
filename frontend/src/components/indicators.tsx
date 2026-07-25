@@ -17,7 +17,7 @@ export function AreaDot({
   );
 }
 
-/** Hot PO Demand rank chip (🔥 #n). */
+/** Hot WO Demand rank chip (🔥 #n). */
 export function HotChip({
   rank,
   showFlame = true,

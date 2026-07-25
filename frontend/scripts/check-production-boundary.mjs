@@ -15,13 +15,13 @@ import { dirname, join, relative } from 'node:path';
 // Each value must keep existing in the mock sources (verified by
 // src/production-boundary.test.ts) so this check cannot rot.
 export const MOCK_SENTINELS = [
-    '0455-20-0118-03', // mocks/purchase-orders.ts (and others)
+    '0455-20-0118-03', // mocks/work-orders.ts (and others)
     '2027-60-8114-00', // mocks/scan-station.ts, tracking, …
     '0118-40-0022-07', // long-data sets
-    'PO-1010', // mocks/purchase-orders.ts
-    'TMP-20260721-0940-REWORK', // mocks/purchase-orders.ts
+    '007010', // mocks/work-orders.ts (mock Work Order Number)
+    'TMP-20260721-0940-REWORK', // mocks/work-orders.ts
     'LATHE-ST-01', // mocks/scan-station.ts
-    'ERP-88411', // mocks/purchase-orders.ts
+    'QF-0161', // mocks/work-orders.ts (released-line status)
     'PF:PN:1014', // mock PN barcode catalog
 ];
 

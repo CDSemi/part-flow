@@ -3,10 +3,10 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
 
-// Purchase Orders regression tests: New PO modal workflow, OPEN PO
-// editing (add / remove demand lines), calendar date behavior, mock
-// validation, and unsaved-change protection. Everything here exercises
-// Phase 2 development mock state only.
+// Work Orders regression tests: New Work Order modal workflow, OPEN
+// Work Order editing (add / remove demand lines), calendar date
+// behavior, mock validation, and unsaved-change protection. Everything
+// here exercises Phase 2 development mock state only.
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -25,19 +25,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function renderPurchaseOrders() {
-  window.history.replaceState({}, '', '/management/purchase-orders');
+async function renderWorkOrders() {
+  window.history.replaceState({}, '', '/management/work-orders');
   render(<App />);
-  await screen.findByRole('heading', { name: 'Purchase Orders' });
+  await screen.findByRole('heading', { name: 'Work Orders' });
 }
 
-function openNewPoDialog() {
-  const button = screen.getByRole('button', { name: '＋ New PO' });
+function openNewWorkOrderDialog() {
+  const button = screen.getByRole('button', { name: '＋ New Work Order' });
   // A real click focuses the button first; jsdom needs this explicitly
   // so focus restoration on close can be asserted.
   button.focus();
   fireEvent.click(button);
-  return screen.getByRole('dialog', { name: 'New PO' });
+  return screen.getByRole('dialog', { name: 'New Work Order' });
 }
 
 function scanBarcode(barcode: string) {
@@ -47,83 +47,89 @@ function scanBarcode(barcode: string) {
   return scan;
 }
 
-async function openPoDetail(po: string) {
-  fireEvent.click(screen.getByRole('button', { name: new RegExp(po) }));
-  await screen.findByRole('heading', { name: po });
+async function openWorkOrderDetail(workOrderNumber: string) {
+  fireEvent.click(
+    screen.getByRole('button', { name: new RegExp(workOrderNumber) }),
+  );
+  await screen.findByRole('heading', { name: workOrderNumber });
 }
 
-/* ============ New PO modal ============ */
+/* ============ New Work Order modal ============ */
 
-test('＋ New PO opens a dialog over the PO list without changing the URL', async () => {
-  await renderPurchaseOrders();
+test('＋ New Work Order opens a dialog over the Work Order list without changing the URL', async () => {
+  await renderWorkOrders();
 
-  const dialog = openNewPoDialog();
+  const dialog = openNewWorkOrderDialog();
 
   expect(dialog).toHaveAttribute('aria-modal', 'true');
-  expect(window.location.pathname).toBe('/management/purchase-orders');
-  // The PO list stays mounted behind the overlay.
+  expect(window.location.pathname).toBe('/management/work-orders');
+  // The Work Order list stays mounted behind the overlay.
   expect(
-    screen.getByRole('heading', { name: 'Purchase Orders' }),
+    screen.getByRole('heading', { name: 'Work Orders' }),
   ).toBeInTheDocument();
-  expect(screen.getByText('PO-1010')).toBeInTheDocument();
+  expect(screen.getByText('007010')).toBeInTheDocument();
 });
 
-test('Cancel closes a clean dialog and focus returns to ＋ New PO', async () => {
-  await renderPurchaseOrders();
-  const newPoButton = screen.getByRole('button', { name: '＋ New PO' });
-  openNewPoDialog();
+test('Cancel closes a clean dialog and focus returns to ＋ New Work Order', async () => {
+  await renderWorkOrders();
+  const newWorkOrderButton = screen.getByRole('button', {
+    name: '＋ New Work Order',
+  });
+  openNewWorkOrderDialog();
 
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(document.activeElement).toBe(newPoButton);
+  expect(document.activeElement).toBe(newWorkOrderButton);
 });
 
 test('Escape and backdrop close a clean dialog', async () => {
-  await renderPurchaseOrders();
-  const dialog = openNewPoDialog();
+  await renderWorkOrders();
+  const dialog = openNewWorkOrderDialog();
 
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-  const dialog2 = openNewPoDialog();
+  const dialog2 = openNewWorkOrderDialog();
   fireEvent.mouseDown(dialog2.parentElement!);
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-test('closing a dirty New PO form requires confirmation and preserves entries', async () => {
-  await renderPurchaseOrders();
-  const dialog = openNewPoDialog();
+test('closing a dirty New Work Order form requires confirmation and preserves entries', async () => {
+  await renderWorkOrders();
+  const dialog = openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-2001' },
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007482' },
   });
   fireEvent.keyDown(dialog, { key: 'Escape' });
 
   // Nothing is silently discarded: an explicit confirmation appears.
   expect(
-    screen.getByRole('dialog', { name: 'Discard this New PO?' }),
+    screen.getByRole('dialog', { name: 'Discard this New Work Order?' }),
   ).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
-  expect(screen.getByRole('dialog', { name: 'New PO' })).toBeInTheDocument();
-  expect(screen.getByLabelText('PO Number')).toHaveValue('PO-2001');
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText('WO Number')).toHaveValue('007482');
 
-  fireEvent.keyDown(screen.getByRole('dialog', { name: 'New PO' }), {
+  fireEvent.keyDown(screen.getByRole('dialog', { name: 'New Work Order' }), {
     key: 'Escape',
   });
   fireEvent.click(screen.getByRole('button', { name: 'Discard entries' }));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-test('the scanner-first save flow adds the PO to the list and reports mock-only', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+test('the scanner-first save flow adds the Work Order to the list and reports mock-only', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-2001' },
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007482' },
   });
-  fireEvent.change(screen.getByLabelText('PO due date'), {
+  fireEvent.change(screen.getByLabelText('WO due date'), {
     target: { value: '2026-09-01' },
   });
 
@@ -139,17 +145,17 @@ test('the scanner-first save flow adds the PO to the list and reports mock-only'
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('PO-2001')).toBeInTheDocument();
-  expect(window.location.pathname).toBe('/management/purchase-orders');
-  expect(screen.getByText(/PO-2001 saved \(mock\)/)).toBeInTheDocument();
+  expect(screen.getByText('007482')).toBeInTheDocument();
+  expect(window.location.pathname).toBe('/management/work-orders');
+  expect(screen.getByText(/007482 saved \(mock\)/)).toBeInTheDocument();
   expect(
     screen.getByText(/Nothing was persisted to the backend/),
   ).toBeInTheDocument();
 });
 
 test('an unknown barcode is rejected and adds nothing', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
   scanBarcode('PF:PN:9999');
 
@@ -162,8 +168,8 @@ test('an unknown barcode is rejected and adds nothing', async () => {
 });
 
 test('scanning a duplicate PN focuses the existing line instead of adding one', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
   scanBarcode('PF:PN:1021');
   scanBarcode('PF:PN:1021');
@@ -173,34 +179,34 @@ test('scanning a duplicate PN focuses the existing line instead of adding one', 
   expect(document.activeElement).toBe(qtyFields[0]);
 });
 
-test('search matches hyphenated PNs and PO numbers with punctuation', async () => {
-  await renderPurchaseOrders();
+test('search matches hyphenated PNs and WO numbers with punctuation', async () => {
+  await renderWorkOrders();
 
   // Realistic PNs are multi-segment hyphenated strings; search must match
-  // them literally (PO Number and PN preview).
-  fireEvent.change(screen.getByLabelText('Search PO Number'), {
+  // them literally (WO Number and PN preview).
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
     target: { value: '52-09-0114' },
   });
-  expect(screen.getByText('PO-1010')).toBeInTheDocument();
-  expect(screen.queryByText('PO-1005')).not.toBeInTheDocument();
+  expect(screen.getByText('007010')).toBeInTheDocument();
+  expect(screen.queryByText('007005')).not.toBeInTheDocument();
 
-  fireEvent.change(screen.getByLabelText('Search PO Number'), {
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
     target: { value: 'TMP-20260721' },
   });
   expect(screen.getByText('TMP-20260721-0940-REWORK')).toBeInTheDocument();
-  expect(screen.queryByText('PO-1010')).not.toBeInTheDocument();
+  expect(screen.queryByText('007010')).not.toBeInTheDocument();
 });
 
 /* ============ Validation ============ */
 
 test('a manual row with a blank PN blocks save and is not silently dropped', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-2002' },
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007483' },
   });
-  fireEvent.change(screen.getByLabelText('PO due date'), {
+  fireEvent.change(screen.getByLabelText('WO due date'), {
     target: { value: '2026-09-01' },
   });
   fireEvent.click(screen.getByRole('button', { name: '＋ Add line manually' }));
@@ -208,7 +214,9 @@ test('a manual row with a blank PN blocks save and is not silently dropped', asy
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
   // The dialog stays open, the row stays, and the PN error is shown.
-  expect(screen.getByRole('dialog', { name: 'New PO' })).toBeInTheDocument();
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
   expect(
     screen.getByText('PN is required — look up or create the PartNumber'),
   ).toBeInTheDocument();
@@ -217,13 +225,13 @@ test('a manual row with a blank PN blocks save and is not silently dropped', asy
 });
 
 test('an invalid quantity blocks save and keeps entered values', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-2003' },
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007484' },
   });
-  fireEvent.change(screen.getByLabelText('PO due date'), {
+  fireEvent.change(screen.getByLabelText('WO due date'), {
     target: { value: '2026-09-01' },
   });
   scanBarcode('PF:PN:1021');
@@ -232,7 +240,9 @@ test('an invalid quantity blocks save and keeps entered values', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  expect(screen.getByRole('dialog', { name: 'New PO' })).toBeInTheDocument();
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
   expect(
     screen.getByText('quantity must be a positive whole number'),
   ).toBeInTheDocument();
@@ -240,41 +250,41 @@ test('an invalid quantity blocks save and keeps entered values', async () => {
   expect(document.activeElement).toBe(qty);
 });
 
-test('a missing PO Number blocks save and focuses the field', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+test('a missing WO Number blocks save and focuses the field', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  expect(screen.getByText('PO Number is required')).toBeInTheDocument();
-  expect(document.activeElement).toBe(screen.getByLabelText('PO Number'));
+  expect(screen.getByText('WO Number is required')).toBeInTheDocument();
+  expect(document.activeElement).toBe(screen.getByLabelText('WO Number'));
 });
 
-test('an existing PO Number is opened instead of duplicated', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+test('an existing WO Number is opened instead of duplicated', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-1010' },
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007010' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(await screen.findByRole('heading', { name: 'PO-1010' }));
+  expect(await screen.findByRole('heading', { name: '007010' }));
   expect(screen.getByText(/already exists/)).toBeInTheDocument();
 });
 
 /* ============ Dates ============ */
 
 test('editable date fields are calendar inputs (type="date")', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
   expect(screen.getByLabelText('Received date')).toHaveAttribute(
     'type',
     'date',
   );
-  expect(screen.getByLabelText('PO due date')).toHaveAttribute('type', 'date');
+  expect(screen.getByLabelText('WO due date')).toHaveAttribute('type', 'date');
 
   scanBarcode('PF:PN:1021');
   expect(screen.getByLabelText('Due date for 78-04-0031')).toHaveAttribute(
@@ -283,11 +293,11 @@ test('editable date fields are calendar inputs (type="date")', async () => {
   );
 });
 
-test('new lines inherit the PO due date; edited lines keep their own date', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
+test('new lines inherit the WO due date; edited lines keep their own date', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
 
-  fireEvent.change(screen.getByLabelText('PO due date'), {
+  fireEvent.change(screen.getByLabelText('WO due date'), {
     target: { value: '2026-09-01' },
   });
   scanBarcode('PF:PN:1021');
@@ -298,9 +308,9 @@ test('new lines inherit the PO due date; edited lines keep their own date', asyn
   expect(due1).toHaveValue('2026-09-01');
   expect(due2).toHaveValue('2026-09-01');
 
-  // Manually edit one line, then change the PO due date.
+  // Manually edit one line, then change the WO due date.
   fireEvent.change(due1, { target: { value: '2026-09-10' } });
-  fireEvent.change(screen.getByLabelText('PO due date'), {
+  fireEvent.change(screen.getByLabelText('WO due date'), {
     target: { value: '2026-09-15' },
   });
 
@@ -308,15 +318,15 @@ test('new lines inherit the PO due date; edited lines keep their own date', asyn
   expect(due2).toHaveValue('2026-09-15'); // still inherited — follows
 });
 
-/* ============ OPEN PO editing ============ */
+/* ============ OPEN Work Order editing ============ */
 
-test('an OPEN PO offers ＋ Add Part; a non-OPEN PO stays read-only', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+test('an OPEN Work Order offers ＋ Add Part; a non-OPEN Work Order stays read-only', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
   expect(screen.getByRole('button', { name: '＋ Add Part' })).toBeEnabled();
 
-  fireEvent.click(screen.getByRole('button', { name: '‹ All POs' }));
-  await openPoDetail('PO-1003');
+  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
+  await openWorkOrderDetail('007003');
   expect(
     screen.queryByRole('button', { name: '＋ Add Part' }),
   ).not.toBeInTheDocument();
@@ -325,9 +335,9 @@ test('an OPEN PO offers ＋ Add Part; a non-OPEN PO stays read-only', async () =
   ).not.toBeInTheDocument();
 });
 
-test('scanning a new PN on an OPEN PO adds a draft line and marks unsaved', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+test('scanning a new PN on an OPEN Work Order adds a draft line and marks unsaved', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
   scanBarcode('PF:PN:1021');
@@ -340,12 +350,12 @@ test('scanning a new PN on an OPEN PO adds a draft line and marks unsaved', asyn
   expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);
 });
 
-test('a duplicate PN on an OPEN PO focuses the existing line', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+test('a duplicate PN on an OPEN Work Order focuses the existing line', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
-  scanBarcode('PF:PN:1014'); // 0455-20-0118-03 is already on PO-1010
+  scanBarcode('PF:PN:1014'); // 0455-20-0118-03 is already on WO 007010
 
   const qtyFields = screen.getAllByLabelText('Quantity for 0455-20-0118-03');
   expect(qtyFields).toHaveLength(1);
@@ -353,8 +363,8 @@ test('a duplicate PN on an OPEN PO focuses the existing line', async () => {
 });
 
 test('an unsaved draft line is removed immediately without a dialog', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
   scanBarcode('PF:PN:1021');
@@ -367,14 +377,14 @@ test('an unsaved draft line is removed immediately without a dialog', async () =
 });
 
 test('removing a saved unreleased line requires confirmation', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   fireEvent.click(
     screen.getByRole('button', { name: 'Remove line 52-09-0114' }),
   );
   const confirm = screen.getByRole('dialog', {
-    name: 'Remove 52-09-0114 from PO-1010?',
+    name: 'Remove 52-09-0114 from 007010?',
   });
   expect(confirm).toBeInTheDocument();
 
@@ -394,8 +404,8 @@ test('removing a saved unreleased line requires confirmation', async () => {
 });
 
 test('a released line cannot be removed and explains why', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   const removeButton = screen.getByRole('button', {
     name: 'Remove line 2027-60-8114-00',
@@ -412,9 +422,9 @@ test('a released line cannot be removed and explains why', async () => {
   ).toBeGreaterThan(0);
 });
 
-test('saving an edited OPEN PO updates local mock state and reports mock-only', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+test('saving an edited OPEN Work Order updates local mock state and reports mock-only', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
   // The mock data ships one invalid draft row — remove it first (drafts
   // are removed immediately), then save a real edit.
@@ -432,11 +442,11 @@ test('saving an edited OPEN PO updates local mock state and reports mock-only', 
   expect(screen.queryByText('● Unsaved changes')).not.toBeInTheDocument();
 });
 
-test('saving an OPEN PO with an incomplete row is blocked, not filtered', async () => {
-  await renderPurchaseOrders();
-  await openPoDetail('PO-1010');
+test('saving an OPEN Work Order with an incomplete row is blocked, not filtered', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007010');
 
-  // PO-1010 ships with an invalid row (no PN, qty 0, no due date).
+  // WO 007010 ships with an invalid row (no PN, qty 0, no due date).
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
   expect(
@@ -448,27 +458,27 @@ test('saving an OPEN PO with an incomplete row is blocked, not filtered', async 
 /* ============ Unsaved changes and navigation protection ============ */
 
 async function makeDetailDirty() {
-  await openPoDetail('PO-1010');
+  await openWorkOrderDetail('007010');
   fireEvent.change(screen.getByLabelText('Quantity for 0455-20-0118-03'), {
     target: { value: '99' },
   });
   expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);
 }
 
-test('cancelling the discard confirmation keeps the user on the dirty PO', async () => {
-  await renderPurchaseOrders();
+test('cancelling the discard confirmation keeps the user on the dirty Work Order', async () => {
+  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
   fireEvent.click(screen.getByRole('link', { name: 'Scan Station' }));
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(window.location.pathname).toBe('/management/purchase-orders');
-  expect(screen.getByRole('heading', { name: 'PO-1010' })).toBeInTheDocument();
+  expect(window.location.pathname).toBe('/management/work-orders');
+  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
 });
 
 test('confirming the discard allows top-level navigation away', async () => {
-  await renderPurchaseOrders();
+  await renderWorkOrders();
   await makeDetailDirty();
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 
@@ -478,34 +488,34 @@ test('confirming the discard allows top-level navigation away', async () => {
 });
 
 test('Management sub-navigation is guarded too', async () => {
-  await renderPurchaseOrders();
+  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
   fireEvent.click(screen.getByRole('link', { name: 'Tracking' }));
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(window.location.pathname).toBe('/management/purchase-orders');
+  expect(window.location.pathname).toBe('/management/work-orders');
 });
 
-test('returning to the PO list from a dirty detail asks for confirmation', async () => {
-  await renderPurchaseOrders();
+test('returning to the Work Order list from a dirty detail asks for confirmation', async () => {
+  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
-  fireEvent.click(screen.getByRole('button', { name: '‹ All POs' }));
+  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
   expect(confirmSpy).toHaveBeenCalled();
-  expect(screen.getByRole('heading', { name: 'PO-1010' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
 
   confirmSpy.mockReturnValue(true);
-  fireEvent.click(screen.getByRole('button', { name: '‹ All POs' }));
+  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
   expect(
-    screen.getByRole('heading', { name: 'Purchase Orders' }),
+    screen.getByRole('heading', { name: 'Work Orders' }),
   ).toBeInTheDocument();
 });
 
-test('browser back is guarded while the PO detail is dirty', async () => {
-  await renderPurchaseOrders();
+test('browser back is guarded while the Work Order detail is dirty', async () => {
+  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
@@ -513,11 +523,11 @@ test('browser back is guarded while the PO detail is dirty', async () => {
   fireEvent.popState(window);
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(screen.getByRole('heading', { name: 'PO-1010' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
 });
 
 test('reload and tab close are guarded through beforeunload while dirty', async () => {
-  await renderPurchaseOrders();
+  await renderWorkOrders();
   await makeDetailDirty();
 
   const event = new Event('beforeunload', { cancelable: true });
@@ -533,17 +543,19 @@ test('reload and tab close are guarded through beforeunload while dirty', async 
   expect(after.defaultPrevented).toBe(false);
 });
 
-test('a dirty New PO dialog also guards top-level navigation', async () => {
-  await renderPurchaseOrders();
-  openNewPoDialog();
-  fireEvent.change(screen.getByLabelText('PO Number'), {
-    target: { value: 'PO-2010' },
+test('a dirty New Work Order dialog also guards top-level navigation', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.change(screen.getByLabelText('WO Number'), {
+    target: { value: '007490' },
   });
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
   fireEvent.click(screen.getByRole('link', { name: 'Scan Station' }));
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(window.location.pathname).toBe('/management/purchase-orders');
-  expect(screen.getByRole('dialog', { name: 'New PO' })).toBeInTheDocument();
+  expect(window.location.pathname).toBe('/management/work-orders');
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
 });

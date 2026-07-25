@@ -12,9 +12,9 @@ import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
 import type { MockHotEntry } from '../view-models';
 
-const hotKey = (h: MockHotEntry) => `${h.pn}|${h.po}`;
+const hotKey = (h: MockHotEntry) => `${h.pn}|${h.workOrder}`;
 
-// Hot PO Demand ranking. All interactions are local presentation state:
+// Hot WO Demand ranking. All interactions are local presentation state:
 // reorder / add / remove change the mock list only and are labeled as
 // development mocks — real prioritization persistence is a later phase.
 export function PriorityView() {
@@ -104,7 +104,7 @@ export function PriorityView() {
   return (
     <section className="pr-view" aria-label="Priority Management">
       <div className="pr-head">
-        <h1>Priority Management — Hot PO Demand</h1>
+        <h1>Priority Management — Hot WO Demand</h1>
         <span className="spacer" />
         <button
           className="btn primary"
@@ -115,16 +115,16 @@ export function PriorityView() {
         </button>
       </div>
       <p className="pr-sub">
-        Priority belongs to <b>PO Demand</b>, ranked per Department. Drag (or
-        use the arrow buttons) to reorder, ✕ to remove — in the real application
-        changes apply immediately and are audited; in Phase 2 they change local
-        mock state only. New Hot entries are added at the bottom. Multiple POs
-        for the same PN may hold different priorities.
+        Priority belongs to <b>Work Order Demand</b>, ranked per Department.
+        Drag (or use the arrow buttons) to reorder, ✕ to remove — in the real
+        application changes apply immediately and are audited; in Phase 2 they
+        change local mock state only. New Hot entries are added at the bottom.
+        Multiple Work Orders for the same PN may hold different priorities.
       </p>
 
       {shownList.length === 0 ? (
         <div className="pr-empty">
-          No Hot PO Demand — add one with “+ Add to Hot list”, or scan a PN
+          No Hot WO Demand — add one with “+ Add to Hot list”, or scan a PN
           barcode in the add dialog.
         </div>
       ) : (
@@ -153,7 +153,7 @@ export function PriorityView() {
                   <span className="pn" title={entry.pn}>
                     {entry.pn}
                   </span>
-                  <span className="po">{entry.po}</span>
+                  <span className="wo">{entry.workOrder}</span>
                   <TypeChip type={entry.type} />
                 </span>
                 <span className="l2">
@@ -234,7 +234,7 @@ export function PriorityView() {
             setAddOpen(false);
             applyChange(
               [...hotList, candidate],
-              `🔥 ${candidate.pn} · ${candidate.po.split(' ·')[0]} added at the bottom (mock) — rank #${hotList.length + 1}`,
+              `🔥 ${candidate.pn} · ${candidate.workOrder.split(' ·')[0]} added at the bottom (mock) — rank #${hotList.length + 1}`,
             );
           }}
         />
@@ -248,7 +248,8 @@ export function PriorityView() {
           <h3>Remove from Hot list?</h3>
           <div className="big mono">{hotList[removeIndex].pn}</div>
           <div className="sub">
-            PO Demand <b className="mono">{hotList[removeIndex].po}</b> will be
+            Work Order Demand{' '}
+            <b className="mono">{hotList[removeIndex].workOrder}</b> will be
             removed from the Hot ranking. Remaining ranks close the gap. In the
             real application the change applies <b>immediately</b>, is audited,
             and can be restored with Undo — here it changes mock state only.
@@ -267,7 +268,7 @@ export function PriorityView() {
                 setRemoveIndex(null);
                 applyChange(
                   hotList.filter((_, i) => i !== removeIndex),
-                  `✕ ${removed.pn} · ${removed.po.split(' ·')[0]} removed from Hot list (mock) — remaining ranks close the gap · Undo can restore it`,
+                  `✕ ${removed.pn} · ${removed.workOrder.split(' ·')[0]} removed from Hot list (mock) — remaining ranks close the gap · Undo can restore it`,
                 );
               }}
             >
@@ -293,19 +294,21 @@ function HotAddDialog({
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
   const list = candidates.filter(
-    (c) => !q || `${c.pn} ${c.po} ${c.barcode ?? ''}`.toLowerCase().includes(q),
+    (c) =>
+      !q ||
+      `${c.pn} ${c.workOrder} ${c.barcode ?? ''}`.toLowerCase().includes(q),
   );
   return (
-    <ModalDialog label="Add PO Demand to Hot list" onClose={onCancel}>
-      <h3>Add PO Demand to Hot list</h3>
+    <ModalDialog label="Add WO Demand to Hot list" onClose={onCancel}>
+      <h3>Add WO Demand to Hot list</h3>
       <div className="sub">
-        Search by PN, PO or Job Number and select — or{' '}
+        Search by PN, WO or Job Number and select — or{' '}
         <b>scan the PN barcode</b> with this dialog open.
       </div>
       <input
         className="hotsearch"
-        placeholder="Search PN, PO, Job Number… or scan PN barcode"
-        aria-label="Search PN, PO, Job Number or scan PN barcode"
+        placeholder="Search PN, WO, Job Number… or scan PN barcode"
+        aria-label="Search PN, WO, Job Number or scan PN barcode"
         autoComplete="off"
         autoFocus
         value={query}
@@ -323,7 +326,7 @@ function HotAddDialog({
       />
       <div className="hotadd-hint">
         Demo barcode: <code>PF:PN:1014</code> (0455-20-0118-03) — Enter adds it
-        directly. If a PN has multiple active PO Demands, each is listed
+        directly. If a PN has multiple active WO Demands, each is listed
         separately.
       </div>
       <div className="hotaddlist">
@@ -335,7 +338,7 @@ function HotAddDialog({
               onClick={() => onAdd(c)}
             >
               <span className="hpn">{c.pn}</span>
-              <span className="hpo">{c.po}</span>
+              <span className="hwo">{c.workOrder}</span>
               <TypeChip type={c.type} />
               <span className={`hdue ${c.dueClass === 'late' ? 'late' : ''}`}>
                 {c.due} · {c.dueNote}
@@ -344,7 +347,7 @@ function HotAddDialog({
           ))
         ) : (
           <div className="hotadd-empty">
-            No matching active PO Demand
+            No matching active WO Demand
             {q ? ` for “${query.trim()}”` : ' — everything is already Hot'}
           </div>
         )}

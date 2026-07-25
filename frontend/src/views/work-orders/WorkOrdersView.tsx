@@ -1,4 +1,4 @@
-import './purchase-orders.css';
+import './work-orders.css';
 
 import { useCallback, useEffect, useState } from 'react';
 
@@ -12,21 +12,24 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { MOCK_PO_LIST, MOCK_RELEASE_DATA } from '../../mocks/purchase-orders';
-import type { MockPo } from '../view-models';
+import {
+  MOCK_RELEASE_DATA,
+  MOCK_WORK_ORDER_LIST,
+} from '../../mocks/work-orders';
+import type { MockWorkOrder } from '../view-models';
 import { formatIsoDate } from './dates';
-import { NewPoDialog } from './NewPoDialog';
-import { PoDetailPanel } from './PoDetailPanel';
+import { NewWorkOrderDialog } from './NewWorkOrderDialog';
+import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
-type Panel = { kind: 'list' } | { kind: 'detail'; po: string };
+type Panel = { kind: 'list' } | { kind: 'detail'; workOrderNumber: string };
 
-// Long-data preview rows (?state=long): many POs plus over-long PO and
-// PN identifiers to exercise dense-table and truncation behavior.
-const LONG_PREVIEW_POS: MockPo[] = [
-  ...Array.from({ length: 20 }, (_, i): MockPo => {
+// Long-data preview rows (?state=long): many Work Orders plus over-long
+// WO and PN identifiers to exercise dense-table and truncation behavior.
+const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
+  ...Array.from({ length: 20 }, (_, i): MockWorkOrder => {
     const n = i + 1;
     return {
-      po: `PO-3${String(100 + n)}`,
+      workOrderNumber: String(7300 + n).padStart(6, '0'),
       received: '2026-07-01',
       due: '2026-09-30',
       dueClass: '',
@@ -36,7 +39,7 @@ const LONG_PREVIEW_POS: MockPo[] = [
     };
   }),
   {
-    po: 'PO-1099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
+    workOrderNumber: '007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
     received: '2026-07-20',
     due: '2026-10-15',
     dueClass: '',
@@ -46,10 +49,11 @@ const LONG_PREVIEW_POS: MockPo[] = [
   },
 ];
 
-// Management sub view for manual PO entry and explicit production release.
-// Phase 2: layout and local interactions only — saving and releasing are
-// development mocks that change presentation state and never persist.
-export function PurchaseOrdersView() {
+// Management sub view for manual Work Order entry and explicit production
+// release. Phase 2: layout and local interactions only — saving and
+// releasing are development mocks that change presentation state and
+// never persist.
+export function WorkOrdersView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const { setNavigationGuard } = useRouter();
@@ -57,19 +61,21 @@ export function PurchaseOrdersView() {
   const { showNotice, noticeElement } = useMockNotice();
 
   const [panel, setPanel] = useState<Panel>({ kind: 'list' });
-  const [poList, setPoList] = useState<MockPo[]>(MOCK_PO_LIST);
+  const [workOrderList, setWorkOrderList] =
+    useState<MockWorkOrder[]>(MOCK_WORK_ORDER_LIST);
   const [search, setSearch] = useState('');
-  const [newPoOpen, setNewPoOpen] = useState(false);
-  const [newPoDirty, setNewPoDirty] = useState(false);
+  const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
+  const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
   const [releasedLines, setReleasedLines] = useState<Set<string>>(new Set());
   const [releaseDialog, setReleaseDialog] = useState<{
-    po: string;
+    workOrderNumber: string;
     pn: string;
   } | null>(null);
 
   const dirty =
-    (newPoOpen && newPoDirty) || (panel.kind === 'detail' && detailDirty);
+    (newWorkOrderOpen && newWorkOrderDirty) ||
+    (panel.kind === 'detail' && detailDirty);
 
   // Unsaved-change protection for top-level navigation, Management
   // sub-navigation and browser back/forward (the router consults the
@@ -81,7 +87,7 @@ export function PurchaseOrdersView() {
     }
     setNavigationGuard(() =>
       window.confirm(
-        'Purchase Orders has unsaved changes. Discard them and leave this view?',
+        'Work Orders has unsaved changes. Discard them and leave this view?',
       ),
     );
     return () => setNavigationGuard(null);
@@ -104,67 +110,73 @@ export function PurchaseOrdersView() {
 
   if (preview === 'loading') {
     return (
-      <section className="po-view" aria-label="Purchase Orders">
-        <LoadingState label="Loading Purchase Orders" />
+      <section className="wo-view" aria-label="Work Orders">
+        <LoadingState label="Loading Work Orders" />
       </section>
     );
   }
   if (preview === 'error') {
     return (
-      <section className="po-view" aria-label="Purchase Orders">
+      <section className="wo-view" aria-label="Work Orders">
         <ErrorState
-          message="Purchase Orders could not be loaded."
+          message="Work Orders could not be loaded."
           detail="Check the backend connection, then retry from the offline banner."
         />
       </section>
     );
   }
 
-  const listData: MockPo[] =
+  const listData: MockWorkOrder[] =
     preview === 'empty'
       ? []
       : preview === 'long'
-        ? [...poList, ...LONG_PREVIEW_POS]
-        : poList;
+        ? [...workOrderList, ...LONG_PREVIEW_WORK_ORDERS]
+        : workOrderList;
 
-  const openPo = (po: string) => {
+  const openWorkOrder = (workOrderNumber: string) => {
     setDetailDirty(false);
-    setPanel({ kind: 'detail', po });
+    setPanel({ kind: 'detail', workOrderNumber });
   };
 
-  const closeNewPo = () => {
-    setNewPoOpen(false);
-    setNewPoDirty(false);
+  const closeNewWorkOrder = () => {
+    setNewWorkOrderOpen(false);
+    setNewWorkOrderDirty(false);
   };
 
   return (
-    <section className="po-view" aria-label="Purchase Orders">
+    <section className="wo-view" aria-label="Work Orders">
       {panel.kind === 'list' && (
-        <PoListPanel
+        <WorkOrderListPanel
           list={listData}
           search={search}
           onSearch={setSearch}
-          onOpen={openPo}
-          onNew={() => setNewPoOpen(true)}
+          onOpen={openWorkOrder}
+          onNew={() => setNewWorkOrderOpen(true)}
         />
       )}
       {panel.kind === 'detail' && (
-        <PoDetailPanel
-          key={panel.po}
-          po={listData.find((p) => p.po === panel.po)}
+        <WorkOrderDetailPanel
+          key={panel.workOrderNumber}
+          workOrder={listData.find(
+            (w) => w.workOrderNumber === panel.workOrderNumber,
+          )}
           releasedLines={releasedLines}
           writeBlocked={writeBlocked}
           onBack={() => {
             setDetailDirty(false);
             setPanel({ kind: 'list' });
           }}
-          onRelease={(pn) => setReleaseDialog({ po: panel.po, pn })}
+          onRelease={(pn) =>
+            setReleaseDialog({ workOrderNumber: panel.workOrderNumber, pn })
+          }
           onSaveDetail={(updated) => {
-            setPoList((current) =>
-              current.map((p) => (p.po === updated.po ? updated : p)),
+            setWorkOrderList((current) =>
+              current.map((w) =>
+                w.workOrderNumber === updated.workOrderNumber ? updated : w,
+              ),
             );
             showNotice(
-              `💾 ${updated.po} demand updated (mock) — business demand only, local state only. No Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
+              `💾 WO ${updated.workOrderNumber} demand updated (mock) — business demand only, local state only. No Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
             );
           }}
           onDirtyChange={handleDetailDirtyChange}
@@ -172,26 +184,26 @@ export function PurchaseOrdersView() {
         />
       )}
 
-      {newPoOpen && (
-        <NewPoDialog
-          existing={poList.map((p) => p.po)}
+      {newWorkOrderOpen && (
+        <NewWorkOrderDialog
+          existing={workOrderList.map((w) => w.workOrderNumber)}
           writeBlocked={writeBlocked}
-          onClose={closeNewPo}
-          onOpenExisting={(po) => {
-            closeNewPo();
+          onClose={closeNewWorkOrder}
+          onOpenExisting={(workOrderNumber) => {
+            closeNewWorkOrder();
             showNotice(
-              `⚠ PO Number ${po} already exists — opening the existing PO instead of duplicating it.`,
+              `⚠ WO Number ${workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
             );
-            openPo(po);
+            openWorkOrder(workOrderNumber);
           }}
-          onSave={(po) => {
-            setPoList((current) => [po, ...current]);
-            closeNewPo();
+          onSave={(workOrder) => {
+            setWorkOrderList((current) => [workOrder, ...current]);
+            closeNewWorkOrder();
             showNotice(
-              `💾 ${po.po} saved (mock) — business demand only (${po.lines.length} line${po.lines.length > 1 ? 's' : ''}), local state only. Nothing was persisted to the backend. No release.`,
+              `💾 WO ${workOrder.workOrderNumber} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), local state only. Nothing was persisted to the backend. No release.`,
             );
           }}
-          onDirtyChange={setNewPoDirty}
+          onDirtyChange={setNewWorkOrderDirty}
           showNotice={showNotice}
         />
       )}
@@ -205,7 +217,9 @@ export function PurchaseOrdersView() {
           }}
           onConfirm={(qty, route) => {
             setReleasedLines((current) =>
-              new Set(current).add(`${releaseDialog.po}:${releaseDialog.pn}`),
+              new Set(current).add(
+                `${releaseDialog.workOrderNumber}:${releaseDialog.pn}`,
+              ),
             );
             setReleaseDialog(null);
             showNotice(
@@ -219,55 +233,57 @@ export function PurchaseOrdersView() {
   );
 }
 
-function PoListPanel({
+function WorkOrderListPanel({
   list,
   search,
   onSearch,
   onOpen,
   onNew,
 }: {
-  list: MockPo[];
+  list: MockWorkOrder[];
   search: string;
   onSearch: (v: string) => void;
-  onOpen: (po: string) => void;
+  onOpen: (workOrderNumber: string) => void;
   onNew: () => void;
 }) {
   const query = search.trim().toLowerCase();
   const rows = list.filter(
-    (p) => !query || (p.po + ' ' + p.preview).toLowerCase().includes(query),
+    (w) =>
+      !query ||
+      (w.workOrderNumber + ' ' + w.preview).toLowerCase().includes(query),
   );
   return (
     <div>
-      <div className="po-head">
-        <h1>Purchase Orders</h1>
+      <div className="wo-head">
+        <h1>Work Orders</h1>
         <span className="spacer" />
         <button className="btn primary" onClick={onNew}>
-          ＋ New PO
+          ＋ New Work Order
         </button>
       </div>
-      <p className="po-sub">
-        Manual Purchase Order entry and explicit production release.{' '}
+      <p className="wo-sub">
+        Manual Work Order entry and explicit production release.{' '}
         <b>Saving demand never creates production quantity</b> — physical
         quantity enters production only through the explicit{' '}
-        <b>Release to production</b> action on a demand line. Select a PO to see
-        its demand lines. <b>＋ New PO</b> opens a dialog over this list — the
-        URL does not change.
+        <b>Release to production</b> action on a demand line. Select a Work
+        Order to see its demand lines. <b>＋ New Work Order</b> opens a dialog
+        over this list — the URL does not change.
       </p>
-      <div className="po-tools">
+      <div className="wo-tools">
         <input
           value={search}
           onChange={(e) => onSearch(e.target.value)}
-          placeholder="Search PO Number… (an existing PO Number is opened — duplicates are never created)"
-          aria-label="Search PO Number"
+          placeholder="Search WO Number… (an existing WO Number is opened — duplicates are never created)"
+          aria-label="Search WO Number"
         />
       </div>
       {list.length === 0 ? (
-        <EmptyState message="No Purchase Orders yet — create the first one with ＋ New PO." />
+        <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
       ) : (
-        <table className="polist">
+        <table className="wolist">
           <thead>
             <tr>
-              <th>PO Number</th>
+              <th>WO Number</th>
               <th>Received</th>
               <th>Due date</th>
               <th>Demand lines</th>
@@ -278,38 +294,41 @@ function PoListPanel({
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={5} className="empty">
-                  No PO matches “{search.trim()}” — check the number, or create
-                  it with ＋ New PO
+                  No Work Order matches “{search.trim()}” — check the number, or
+                  create it with ＋ New Work Order
                 </td>
               </tr>
             ) : (
-              rows.map((p) => (
-                <tr key={p.po}>
+              rows.map((w) => (
+                <tr key={w.workOrderNumber}>
                   <td>
-                    <button className="rowbtn" onClick={() => onOpen(p.po)}>
-                      <span className="po" title={p.po}>
-                        {p.po}
+                    <button
+                      className="rowbtn"
+                      onClick={() => onOpen(w.workOrderNumber)}
+                    >
+                      <span className="wo" title={w.workOrderNumber}>
+                        {w.workOrderNumber}
                       </span>
-                      {p.internal ? (
+                      {w.internal ? (
                         <span className="sub" style={{ display: 'block' }}>
-                          temporary internal PO
+                          temporary internal Work Order
                         </span>
                       ) : null}
                     </button>
                   </td>
-                  <td className="mono-sm">{formatIsoDate(p.received)}</td>
+                  <td className="mono-sm">{formatIsoDate(w.received)}</td>
                   <td className="mono-sm">
-                    <span className={`duetxt ${p.dueClass}`}>
-                      {formatIsoDate(p.due)}
+                    <span className={`duetxt ${w.dueClass}`}>
+                      {formatIsoDate(w.due)}
                     </span>
                   </td>
                   <td>
-                    {p.lines.length}
-                    <div className="sub mono-sm">{p.preview}</div>
+                    {w.lines.length}
+                    <div className="sub mono-sm">{w.preview}</div>
                   </td>
                   <td>
-                    <span className={`postat ${p.status.toLowerCase()}`}>
-                      {p.status}
+                    <span className={`wostat ${w.status.toLowerCase()}`}>
+                      {w.status}
                     </span>
                   </td>
                 </tr>
@@ -318,11 +337,12 @@ function PoListPanel({
           </tbody>
         </table>
       )}
-      <div className="po-note">
-        Completed POs (every PO Demand fully allocated) move out of the active
-        list but remain permanently available in history. Temporary internal POs
-        (<span className="mono">TMP-…-REWORK/MODIFY</span>) appear here like any
-        other PO. Purchase Orders handles business demand only — it is not
+      <div className="wo-note">
+        Completed Work Orders (every Work Order Demand fully allocated) move out
+        of the active list but remain permanently available in history.
+        Temporary internal Work Orders (
+        <span className="mono">TMP-…-REWORK/MODIFY</span>) appear here like any
+        other Work Order. Work Orders handles business demand only — it is not
         customer, pricing, invoicing, shipping, purchasing, or accounting
         functionality.
       </div>
@@ -352,8 +372,8 @@ function ReleaseDialog({
       <h3>Release to production — explicit action (development mock)</h3>
       <div className="big mono">{pn}</div>
       <div className="sub">
-        PO-1010 demand · requested <b>{data?.requested ?? '—'}</b> · nothing is
-        created until you confirm — and in Phase 2 confirming changes{' '}
+        WO 007010 demand · requested <b>{data?.requested ?? '—'}</b> · nothing
+        is created until you confirm — and in Phase 2 confirming changes{' '}
         <b>local presentation state only</b>.
       </div>
       {data?.activeDistribution ? (

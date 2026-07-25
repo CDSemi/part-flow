@@ -49,9 +49,9 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
           default: m.TrackingView,
         })),
       ),
-      'purchase-orders': lazy(() =>
-        import('../views/purchase-orders/PurchaseOrdersView').then((m) => ({
-          default: m.PurchaseOrdersView,
+      'work-orders': lazy(() =>
+        import('../views/work-orders/WorkOrdersView').then((m) => ({
+          default: m.WorkOrdersView,
         })),
       ),
       priority: lazy(() =>

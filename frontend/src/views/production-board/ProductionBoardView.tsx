@@ -1,5 +1,7 @@
 import './production-board.css';
 
+import { useEffect, useState } from 'react';
+
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot, HotChip } from '../../components/indicators';
@@ -15,10 +17,35 @@ import {
 } from '../../mocks/production-board';
 import type { MockBoardRow } from '../view-models';
 
+// Rows per rotated page on the large display (GUI_DESIGN §5).
+const PAGE_SIZE = 10;
+const ROTATE_MS = 12_000;
+
 // Read-only large-display view: mock rows, no interactive elements.
 export function ProductionBoardView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
+
+  const allRows: MockBoardRow[] =
+    preview === 'empty' || preview === 'loading' || preview === 'error'
+      ? []
+      : preview === 'long'
+        ? MOCK_BOARD_ROWS_LONG
+        : MOCK_BOARD_ROWS;
+  const pageCount = Math.max(1, Math.ceil(allRows.length / PAGE_SIZE));
+
+  // Long lists rotate pages automatically; the footer claim is honest
+  // because this interval actually advances the page (mock rotation).
+  const [page, setPage] = useState(0);
+  useEffect(() => {
+    if (pageCount <= 1) return;
+    const timer = window.setInterval(
+      () => setPage((current) => (current + 1) % pageCount),
+      ROTATE_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [pageCount]);
+  const safePage = Math.min(page, pageCount - 1);
 
   if (preview === 'loading') {
     return (
@@ -38,17 +65,15 @@ export function ProductionBoardView() {
     );
   }
 
-  const rows: MockBoardRow[] =
-    preview === 'empty'
-      ? []
-      : preview === 'long'
-        ? MOCK_BOARD_ROWS_LONG
-        : MOCK_BOARD_ROWS;
-  const activePns = rows.filter((r) => !r.totalStocked).length;
-  const inProduction = rows
+  const rows = allRows.slice(
+    safePage * PAGE_SIZE,
+    safePage * PAGE_SIZE + PAGE_SIZE,
+  );
+  const activePns = allRows.filter((r) => !r.totalStocked).length;
+  const inProduction = allRows
     .filter((r) => !r.totalStocked)
     .reduce((s, r) => s + r.total, 0);
-  const stocked = rows
+  const stocked = allRows
     .filter((r) => r.totalStocked)
     .reduce((s, r) => s + r.total, 0);
 
@@ -92,7 +117,7 @@ export function ProductionBoardView() {
                 }
               >
                 <td>
-                  <div className="no">{index + 1}</div>
+                  <div className="no">{safePage * PAGE_SIZE + index + 1}</div>
                 </td>
                 <td>
                   <div className={`part ${row.blink ? 'blink' : ''}`}>
@@ -154,10 +179,18 @@ export function ProductionBoardView() {
         </table>
       )}
       <div className="pb-foot">
-        <span>Page 1 / 3 · rotates every 12 s</span>
-        <span className="pgdot on" aria-hidden="true" />
-        <span className="pgdot" aria-hidden="true" />
-        <span className="pgdot" aria-hidden="true" />
+        <span>
+          {pageCount > 1
+            ? `Page ${safePage + 1} / ${pageCount} · rotates every 12 s`
+            : 'Page 1 / 1'}
+        </span>
+        {Array.from({ length: pageCount }, (_, i) => (
+          <span
+            key={i}
+            className={`pgdot ${i === safePage ? 'on' : ''}`}
+            aria-hidden="true"
+          />
+        ))}
         <span className="spacer" />
         <span>
           🔥 #n = Hot priority rank · blinking PN = due soon / overdue ·{' '}

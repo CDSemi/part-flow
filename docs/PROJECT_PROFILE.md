@@ -1,4 +1,4 @@
-# PartFlow Project Profile v6
+# PartFlow Project Profile v7
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -18,13 +18,13 @@ The system must always be able to answer:
 - How many physical parts are currently in each Area.
 - Which Operation is being performed.
 - Which Machine is currently processing a quantity, when applicable.
-- Which Purchase Orders request that Part Number.
-- How many pieces each Purchase Order requires.
+- Which Work Orders request that Part Number.
+- How many pieces each Work Order requires.
 - What production work remains.
 - Which route each active quantity is expected to follow.
 - Which Areas and Machines each quantity has passed through.
 - Whether requested quantities have been completed and stocked.
-- How completed quantities are allocated to Purchase Orders.
+- How completed quantities are allocated to Work Orders.
 
 PartFlow is intentionally focused on lightweight production tracking.
 
@@ -75,15 +75,15 @@ Barcode scanning is the primary production interaction.
 
 The Part Number, abbreviated as PN, is the primary tracked identity.
 
-The system does not use `PO + PN`, a physical batch, or an individual piece as the primary tracked object.
+The system does not use `Work Order + PN`, a physical batch, or an individual piece as the primary tracked object.
 
 Instead:
 
 - PN identifies the reusable part definition.
 - Physical quantity represents production state.
-- PO Demand represents business demand.
+- Work Order Demand represents business demand.
 - Part Movement represents production activity.
-- PO Allocation connects stocked quantity to individual PO Demand only after completion.
+- Work Order Allocation connects stocked quantity to individual Work Order Demand only after completion.
 
 ---
 
@@ -173,8 +173,8 @@ A reusable physical folder containing drawings is maintained for every PN.
 
 The folder:
 
-- belongs to the PN, not to a specific PO,
-- is reused across all POs requesting that PN,
+- belongs to the PN, not to a specific Work Order,
+- is reused across all Work Orders requesting that PN,
 - may be reused across production runs,
 - carries one unique PN barcode,
 - may contain drawings for the current revision.
@@ -223,7 +223,7 @@ A PN:
 - must be treated as an arbitrary string,
 - has one reusable drawing folder,
 - has one unique PartFlow barcode,
-- may be requested by multiple active POs,
+- may be requested by multiple active Work Orders,
 - may have multiple external Job Numbers (used only for display, searching, sorting, and reporting),
 - may have quantities in multiple Areas simultaneously,
 - may have quantities assigned to multiple Machines simultaneously,
@@ -234,13 +234,13 @@ The system does not track:
 
 - individual serial pieces,
 - a physical batch as a first-class identity,
-- `PO + PN` as the movement identity.
+- `Work Order + PN` as the movement identity.
 
 Instead:
 
 - Movement is recorded at PN + quantity level.
-- PO Demand is maintained separately.
-- Stocked quantity is allocated to PO Demand after completion.
+- Work Order Demand is maintained separately.
+- Stocked quantity is allocated to Work Order Demand after completion.
 - Allocation changes must not rewrite shop-floor Movement history.
 
 ---
@@ -257,9 +257,9 @@ The following rules are mandatory:
 6. Quantity must never be accidentally created, destroyed, duplicated, lost, or made negative.
 7. No Movement may consume more quantity than is available in its source position.
 8. Unknown or invalid scans are rejected; ambiguous scans must never update production data until the ambiguity is explicitly confirmed.
-9. PO Demand and shop-floor Movement are separate concepts.
-10. PO Allocation and shop-floor Movement are separate concepts.
-11. PO Allocation may change without rewriting Movement history.
+9. Work Order Demand and shop-floor Movement are separate concepts.
+10. Work Order Allocation and shop-floor Movement are separate concepts.
+11. Work Order Allocation may change without rewriting Movement history.
 12. Routes guide production but do not replace actual Movement history.
 13. Corrections must preserve the original event.
 14. Scan updates must be atomic.
@@ -283,32 +283,35 @@ A PN:
 
 - is unique,
 - has no fixed format,
-- remains the same across multiple POs,
+- remains the same across multiple Work Orders,
 - is represented by the reusable folder barcode.
 
 ---
 
-## Purchase Order
+## Work Order
 
-A business order containing one or more requested PNs and quantities.
+An externally originated manufacturing work container containing one or more requested Part Numbers and physical quantities that PartFlow is responsible for tracking.
 
-Abbreviation: `PO`.
+Abbreviation: `WO`. The abbreviation is appropriate only in compact user-facing labels, table headings, and prose where Work Order has already been established; code names remain the full `WorkOrder`, `WorkOrderDemand`, and `WorkOrderAllocation`.
 
-A PO Number:
+A Work Order Number:
 
-- originates externally,
+- originates externally or is manually entered,
 - has no fixed format,
-- must be treated as an arbitrary string.
+- must be treated as an opaque, arbitrary string,
+- is the canonical business container identifier used by PartFlow.
+
+Work Order Number and external Job Number are separate identifiers (for example Work Order Number `007125` versus external Job Number `17555`). Job Numbers remain informational metadata on Work Order Demand: usable for display, search, sorting, and reporting, but never an internal identity, a movement identity, or a workflow key.
 
 ---
 
-## PO Demand
+## Work Order Demand
 
-The requested physical quantity of one PN for one PO.
+The requested physical quantity of one PN for one Work Order.
 
-PO Demand contains the business context needed to answer:
+Work Order Demand contains the business context needed to answer:
 
-- which PO requests the PN,
+- which Work Order requests the PN,
 - requested quantity,
 - allocated quantity,
 - remaining shortage,
@@ -317,13 +320,13 @@ PO Demand contains the business context needed to answer:
 - request type,
 - external Job Numbers (used only for display, searching, sorting, and reporting).
 
-PO Demand does not define the current production location.
+Work Order Demand does not define the current production location.
 
 ---
 
 ## Request Type
 
-Describes why a PO Demand or internal demand exists.
+Describes why a Work Order Demand or internal demand exists.
 
 Initial values:
 
@@ -459,17 +462,17 @@ The derived current Area and optional Machine holding a Quantity Flow.
 
 ---
 
-## PO Allocation
+## Work Order Allocation
 
-The assignment of stocked PN quantity to specific PO Demand records.
+The assignment of stocked PN quantity to specific Work Order Demand records.
 
-PO Allocation is independent from Part Movement.
+Work Order Allocation is independent from Part Movement.
 
 ---
 
 ## Priority
 
-A manager-defined rank stored on PO Demand.
+A manager-defined rank stored on Work Order Demand.
 
 Priority is the highest allocation and work-ordering criterion.
 
@@ -477,7 +480,7 @@ Priority is the highest allocation and work-ordering criterion.
 
 ## Hot Part
 
-A UI and business label indicating expedited PO Demand.
+A UI and business label indicating expedited Work Order Demand.
 
 `Hot Part` must not replace the underlying `priority_rank`.
 
@@ -522,18 +525,18 @@ Rules:
 - The folder barcode identifies only the PN.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.
-- The PN barcode is reused across all POs requesting the PN.
+- The PN barcode is reused across all Work Orders requesting the PN.
 
 ---
 
-## 8.2 PurchaseOrder
+## 8.2 WorkOrder
 
-Represents a PO received by the business.
+Represents a Work Order received by the business.
 
 Typical attributes (illustrative only):
 
 - `id`
-- `po_number`
+- `work_order_number`
 - `received_date`
 - `status`
 - `erp_id`
@@ -542,21 +545,21 @@ Typical attributes (illustrative only):
 
 Rules:
 
-- `po_number` must be treated as an arbitrary string.
-- A PO contains one or more PO Demand records.
-- A PO is complete when every PO Demand has been fully allocated.
-- Completed POs move out of active views but remain permanently available in history.
+- `work_order_number` must be treated as an arbitrary string.
+- A Work Order contains one or more Work Order Demand records.
+- A Work Order is complete when every Work Order Demand has been fully allocated.
+- Completed Work Orders move out of active views but remain permanently available in history.
 
 ---
 
-## 8.3 PoDemand
+## 8.3 WorkOrderDemand
 
-Represents how many physical pieces of a PN are requested by one PO.
+Represents how many physical pieces of a PN are requested by one Work Order.
 
 Typical attributes (illustrative only):
 
 - `id`
-- `purchase_order_id`
+- `work_order_id`
 - `part_number_id`
 - `request_type`
 - `requested_quantity`
@@ -572,12 +575,12 @@ Typical attributes (illustrative only):
 
 Rules:
 
-- A PN may have multiple active PO Demand records.
+- A PN may have multiple active Work Order Demand records.
 - Requested quantity represents physical pieces.
-- PO Demand may be edited by Admin or Manager.
-- Priority belongs to PO Demand.
-- PO Demand does not own shop-floor Movement.
-- PO Demand does not determine current PN location.
+- Work Order Demand may be edited by Admin or Manager.
+- Priority belongs to Work Order Demand.
+- Work Order Demand does not own shop-floor Movement.
+- Work Order Demand does not determine current PN location.
 - Allocation may be adjusted at any time by Admin or Manager.
 
 ---
@@ -794,22 +797,22 @@ Initial Movement types may include:
 Rules:
 
 - Movement records PN quantity.
-- Movement is not tied to a specific PO Allocation.
+- Movement is not tied to a specific Work Order Allocation.
 - Movement must never be silently overwritten.
 - Corrections preserve the original event.
 - Current state must be reconstructable from Movement history.
 
 ---
 
-## 8.12 PoAllocation
+## 8.12 WorkOrderAllocation
 
-Represents the assignment of stocked PN quantity to PO Demand.
+Represents the assignment of stocked PN quantity to Work Order Demand.
 
 Typical attributes (illustrative only):
 
 - `id`
 - `part_number_id`
-- `po_demand_id`
+- `work_order_demand_id`
 - `quantity`
 - `allocated_at`
 - `allocated_by_worker_id`
@@ -824,7 +827,7 @@ Rules:
 - Admin or Manager may adjust allocation at any time.
 - Every adjustment must be auditable.
 - Total active allocation must never exceed available stocked quantity.
-- Allocation must never exceed remaining PO Demand unless explicitly authorized as a correction.
+- Allocation must never exceed remaining Work Order Demand unless explicitly authorized as a correction.
 
 ---
 
@@ -905,8 +908,8 @@ The PN barcode identifies only the PN.
 
 It does not encode:
 
-- PO,
-- PO Demand,
+- Work Order,
+- Work Order Demand,
 - quantity,
 - Job Number,
 - Route,
@@ -990,7 +993,7 @@ Splitting:
 - creates separate Quantity Flows,
 - preserves the original PN,
 - preserves quantity conservation,
-- does not modify PO Demand.
+- does not modify Work Order Demand.
 
 ---
 
@@ -1093,22 +1096,22 @@ The Machine remains the current executor until the quantity is:
 
 ---
 
-# 13. Purchase Order Intake
+# 13. Work Order Intake
 
-POs may enter PartFlow through:
+Work Orders may enter PartFlow through:
 
 - manual entry,
 - file import,
 - future ERP synchronization.
 
-For a newly received PO:
+For a newly received Work Order:
 
-1. Create or locate the Purchase Order.
-2. Create or update PO Demand for each PN.
+1. Create or locate the Work Order.
+2. Create or update Work Order Demand for each PN.
 3. Locate the reusable PN folder.
 4. Create the PN master and barcode if the PN is new.
-5. Add PO Demand without creating a separate tracked PN.
-6. Save the business demand. Saving PO Demand never automatically creates production quantity.
+5. Add Work Order Demand without creating a separate tracked PN.
+6. Save the business demand. Saving Work Order Demand never automatically creates production quantity.
 7. Confirm or assign the initial Route when production is released.
 
 Production release is a separate, explicit action. On production release:
@@ -1125,19 +1128,34 @@ New ERP production normally uses Request Type `NEW`.
 
 The starting Area may be Material or another configured starting Area.
 
-If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new PO requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
+If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new Work Order requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
 
-Purchase Order and PO Demand represent business demand; creating or editing PO Demand does not define current production position. Production release explicitly introduces physical quantity. Part Movement remains PN + Quantity Flow + quantity activity: PO Demand does not own shop-floor Movement, and PO Allocation remains separate from both.
+Work Order and Work Order Demand represent business demand; creating or editing Work Order Demand does not define current production position. Production release explicitly introduces physical quantity. Part Movement remains PN + Quantity Flow + quantity activity: Work Order Demand does not own shop-floor Movement, and Work Order Allocation remains separate from both.
 
-## PO Demand Removal
+## Source-System Mapping
 
-A PO Demand line may be removed from its Purchase Order only while no production quantity has been released for it:
+When Work Order data originates from the external source system (manual entry from its records, file import, or future ERP synchronization), use this canonical mapping:
+
+- Source Work Order Number → `WorkOrder.work_order_number`.
+- Source Job Number → informational external Job Number associated with the relevant `WorkOrderDemand`.
+- Source component Part Number → `PartNumber`.
+- Source component row → candidate `WorkOrderDemand`.
+- Source component Quantity → candidate `WorkOrderDemand.requested_quantity`, but only when the row represents production demand PartFlow is intended to track.
+- Source Revision → the PartNumber's separate informational Revision field.
+
+A source Work Order may also identify a parent or build-for assembly with its own Part Number, Description, and Revision. Treat that information as Work Order header context unless an approved workflow explicitly requires the parent assembly to become its own tracked WorkOrderDemand or QuantityFlow.
+
+Never import every BOM component automatically as a tracked WorkOrderDemand: only rows representing production demand managed by PartFlow enter the tracking workflow. Source fields such as Type (`Fabricate`, `F`, `P`, `SM`, `Commercial`), Ref Designator, Attribute, Issued, Shelf, Cost, and Open/Closed carry no PartFlow business meaning: source Type values are not PartFlow Request Types, source BOM Quantity is not automatically requested quantity, Issued is not a Part Movement, Shelf is not an Area or current position, source Open/Closed is not a PartFlow status, and Cost is out of scope. There is exactly one Work Order concept — no second Work-Order-like aggregate may be introduced for source data.
+
+## Work Order Demand Removal
+
+A Work Order Demand line may be removed from its Work Order only while no production quantity has been released for it:
 
 - An unsaved draft line may be removed immediately.
-- A saved PO Demand with no released production quantity may be removed only after explicit confirmation.
-- Once any quantity for a PO Demand has been released to production, that PO Demand must not be deleted from Purchase Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
+- A saved Work Order Demand with no released production quantity may be removed only after explicit confirmation.
+- Once any quantity for a Work Order Demand has been released to production, that Work Order Demand must not be deleted from Work Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
 
-Removing a PO Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other PO Demand records for the same PN.
+Removing a Work Order Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other Work Order Demand records for the same PN.
 
 ---
 
@@ -1150,12 +1168,12 @@ When Rework or Modify is introduced:
 1. Scan or enter the PN.
 2. Scan or select Request Type.
 3. Confirm quantity.
-4. Associate it with an applicable active PO when appropriate.
-5. Otherwise create or select a temporary internal PO.
+4. Associate it with an applicable active Work Order when appropriate.
+5. Otherwise create or select a temporary internal Work Order.
 6. Assign a Route to the new Quantity Flow.
 7. Receive the quantity directly into the required starting Area.
 
-Suggested temporary PO format:
+Suggested temporary Work Order format:
 
 ```text
 TMP-20260721-1523-REWORK
@@ -1339,9 +1357,9 @@ When quantity is scanned into Stockroom:
 
 - a `STOCKED` Movement is recorded,
 - the quantity is considered manufacturing-complete,
-- the quantity becomes available for PO Allocation.
+- the quantity becomes available for Work Order Allocation.
 
-Production Movement and PO Allocation remain separate.
+Production Movement and Work Order Allocation remain separate.
 
 ---
 
@@ -1349,10 +1367,10 @@ Production Movement and PO Allocation remain separate.
 
 The system must suggest allocation using this exact priority:
 
-1. Highest manager-defined PO Demand priority.
+1. Highest manager-defined Work Order Demand priority.
 2. Earliest due date.
 
-If both criteria are equal, implementation may use any stable deterministic tie-breaker such as PO Demand creation order or internal ID.
+If both criteria are equal, implementation may use any stable deterministic tie-breaker such as Work Order Demand creation order or internal ID.
 
 The tie-breaker is an implementation detail, not a business rule.
 
@@ -1364,12 +1382,12 @@ The normal Stockroom workflow should be:
 
 1. Scan PN.
 2. Enter or confirm completed quantity.
-3. Review suggested PO Allocation.
+3. Review suggested Work Order Allocation.
 4. Confirm the allocation.
 
 The suggestion must show:
 
-- affected PO,
+- affected Work Order,
 - requested quantity,
 - previously allocated quantity,
 - remaining shortage,
@@ -1377,9 +1395,9 @@ The suggestion must show:
 
 Routine receiving should not require Manager approval.
 
-Operators may review and adjust the suggested PO Allocation before confirmation.
+Operators may review and adjust the suggested Work Order Allocation before confirmation.
 
-Admin and Manager may adjust PO Allocation at any time.
+Admin and Manager may adjust Work Order Allocation at any time.
 
 Every change must remain auditable.
 
@@ -1387,16 +1405,16 @@ The total active allocation must equal the portion of stocked quantity being all
 
 ---
 
-## PO Completion
+## Work Order Completion
 
-A PO is complete when all of its PO Demand records are fully allocated.
+A Work Order is complete when all of its Work Order Demand records are fully allocated.
 
 When complete:
 
-- the PO leaves active production views,
-- the PO remains available in History,
+- the Work Order leaves active production views,
+- the Work Order remains available in History,
 - Movement history remains unchanged,
-- later work must be represented by new PO Demand or new internal demand rather than reopening historical Movement.
+- later work must be represented by new Work Order Demand or new internal demand rather than reopening historical Movement.
 
 ---
 
@@ -1447,8 +1465,8 @@ Administrator capabilities include:
 - manage scan behavior,
 - manage Worker and Machine session policies,
 - manage correction permissions,
-- edit PO Demand,
-- edit PO Allocation,
+- edit Work Order Demand,
+- edit Work Order Allocation,
 - perform authorized historical corrections,
 - configure system settings.
 
@@ -1459,13 +1477,13 @@ Administrator capabilities include:
 Manager capabilities include:
 
 - view all current and historical production data,
-- create and edit POs,
-- edit PO Demand,
-- set PO Demand priority,
+- create and edit Work Orders,
+- edit Work Order Demand,
+- set Work Order Demand priority,
 - reorder Hot items,
 - assign and edit Routes,
 - perform quantity corrections,
-- edit PO Allocation,
+- edit Work Order Allocation,
 - resolve exceptional production situations,
 - export and print reports.
 
@@ -1563,7 +1581,7 @@ It should show:
 - Area queue,
 - Operation,
 - Machine distribution,
-- associated active POs,
+- associated active Work Orders,
 - Job Numbers,
 - due dates,
 - priority,
@@ -1599,7 +1617,7 @@ Tracking is the primary management interface.
 Managers must be able to search and filter by:
 
 - PN,
-- PO,
+- Work Order,
 - Job Number,
 - Area,
 - Operation,
@@ -1614,10 +1632,10 @@ The selected PN view must show:
 - PN master data,
 - barcode,
 - image and revision,
-- active PO Demand,
-- requested quantity by PO,
-- allocated quantity by PO,
-- remaining shortage by PO,
+- active Work Order Demand,
+- requested quantity by Work Order,
+- allocated quantity by Work Order,
+- remaining shortage by Work Order,
 - current quantity by Area,
 - current Machine assignments,
 - Quantity Flows,
@@ -1640,17 +1658,17 @@ It must not imply that the entire PN is at one Route Step.
 
 ---
 
-## PO Intake
+## Work Orders
 
-PO Intake is the management view for manual Purchase Order entry (§12). It is a light-theme management view.
+Work Orders is the management view for manual Work Order entry (the Work Order Intake workflow, §12). It is a light-theme management view.
 
 The view must support the minimum confirmed workflow:
 
-1. Create or locate a Purchase Order.
-2. Add or update one or more PO Demand records.
+1. Create or locate a Work Order.
+2. Add or update one or more Work Order Demand records.
 3. Locate or create the PartNumber.
 4. Create the PN barcode when the PN is new.
-5. Enter: PO Number, received date, PN, Request Type (default `NEW`), requested quantity, due date, priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
+5. Enter: Work Order Number, received date, PN, Request Type (default `NEW`), requested quantity, due date, priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
 6. Save business demand without automatically creating production quantity.
 7. Provide a separate explicit `Release to production` action following the release steps in §12.
 
@@ -1658,27 +1676,27 @@ On production release the view must confirm release quantity, Route, and the con
 
 If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
 
-PO Intake must not grow into ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Work Order Intake must not grow into ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 ---
 
 ## Priority Management
 
-Priority belongs to PO Demand.
+Priority belongs to Work Order Demand.
 
 The Hot list is managed within the Department:
 
-1. Show Hot PO Demand sorted by explicit priority rank.
-2. Add PO Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
-3. If a PN has multiple active PO Demand records, each PO Demand is selected and ranked separately.
+1. Show Hot Work Order Demand sorted by explicit priority rank.
+2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
+3. If a PN has multiple active Work Order Demand records, each Work Order Demand is selected and ranked separately.
 4. Add new Hot entries at the bottom by default.
 5. Allow drag-and-drop reordering.
-6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and PO Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
+6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and Work Order Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
 7. Apply Hot list changes immediately and record every change in the audit trail.
 8. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step.
 9. Use the stored rank as the highest work and allocation priority.
 
-Multiple POs requesting the same PN may have different priorities.
+Multiple Work Orders requesting the same PN may have different priorities.
 
 ---
 
@@ -1747,7 +1765,7 @@ Rules:
 - ERP IDs must remain separate from internal IDs.
 - ERP imports should be idempotent.
 - ERP response models must not leak into domain logic.
-- PN and PO formats must never be assumed.
+- PN and Work Order Number formats must never be assumed.
 - Production history is owned by PartFlow.
 - ERP changes must not erase local Movement history.
 - Rework and Modify remain valid PartFlow concepts even when ERP does not model them.
@@ -1820,7 +1838,7 @@ Logs must answer:
 - What happened?
 - Which PN?
 - Which quantity and Quantity Flow?
-- Which PO Demand was relevant, if any?
+- Which Work Order Demand was relevant, if any?
 - Which Area?
 - Which Operation?
 - Which Machine?
@@ -1839,8 +1857,8 @@ Do not expose raw internal exceptions to operators.
 
 The system should support:
 
-- active PO status,
-- active PO Demand,
+- active Work Order status,
+- active Work Order Demand,
 - active PN status,
 - quantity by Area,
 - quantity by Machine,
@@ -1852,8 +1870,8 @@ The system should support:
 - time in Area,
 - time at Machine,
 - stocked quantity,
-- PO Allocation,
-- completed PO history,
+- Work Order Allocation,
+- completed Work Order history,
 - route deviation history,
 - correction history.
 
@@ -1870,8 +1888,8 @@ Reports must distinguish:
 
 The system must preserve a complete audit trail for:
 
-- PO creation and edits,
-- PO Demand creation and edits,
+- Work Order creation and edits,
+- Work Order Demand creation and edits,
 - priority changes,
 - Route assignment,
 - Route modification,
@@ -1879,7 +1897,7 @@ The system must preserve a complete audit trail for:
 - Area transfers,
 - Machine assignments,
 - Stockroom completion,
-- PO Allocation,
+- Work Order Allocation,
 - Allocation corrections,
 - quantity adjustments,
 - Undo,
@@ -1891,7 +1909,7 @@ Historical production records must never disappear.
 Database constraints should enforce, whenever practical:
 
 - unique PN,
-- unique PO Number where required by business rules,
+- unique Work Order Number where required by business rules,
 - unique barcode values,
 - unique Machine-to-Area relationships,
 - non-negative quantities,
@@ -1908,9 +1926,9 @@ The initial release should support:
 - Machine Shop,
 - PN master records,
 - reusable PN folder barcode,
-- manual PO entry,
-- file-based PO import,
-- PO Demand,
+- manual Work Order entry,
+- file-based Work Order import,
+- Work Order Demand,
 - Rework,
 - Modify,
 - Areas,
@@ -1921,11 +1939,11 @@ The initial release should support:
 - quantity splitting and merging,
 - Quantity Flow routes,
 - Stockroom completion,
-- suggested PO Allocation,
+- suggested Work Order Allocation,
 - manual Allocation adjustment by Admin and Manager,
 - optional Worker identification,
 - Scan Station,
-- PO Intake,
+- Work Orders,
 - Production Board,
 - Area Board,
 - Manager Summary,
@@ -1996,8 +2014,8 @@ Every future feature must reinforce these principles:
 
 - Track PN identity.
 - Track physical quantity, not individual pieces.
-- Keep PO Demand separate from production Movement.
-- Keep PO Allocation separate from production Movement.
+- Keep Work Order Demand separate from production Movement.
+- Keep Work Order Allocation separate from production Movement.
 - Assign Routes to Quantity Flows.
 - Derive current production state from immutable Movement history.
 - Preserve quantity integrity.

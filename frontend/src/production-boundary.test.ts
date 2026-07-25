@@ -69,7 +69,7 @@ test('development builds expose the mock views through the dev-only registry', (
       'area-board',
       'priority',
       'production-board',
-      'purchase-orders',
+      'work-orders',
       'scan-station',
       'tracking',
     ].sort(),

@@ -16,7 +16,7 @@ and the **Phase 2 Frontend Design System and Application Shell**:
 
 **Phases 1–2 contain no production domain schema and no business
 workflows.** All view content is development-only mock data; barcode
-resolution, PO intake, and all tracking behavior arrive in later phases.
+resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v6.html`)
@@ -33,8 +33,8 @@ an application-level not-found state):
 | `/production-board` | Production Board (large display, read-only) |
 | `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
 | `/management/tracking` | Management → Tracking (PN-centric) |
-| `/management/purchase-orders` | Management → Purchase Orders |
-| `/management/priority` | Management → Priority (Hot PO Demand ranking) |
+| `/management/work-orders` | Management → Work Orders |
+| `/management/priority` | Management → Priority (Hot WO Demand ranking) |
 | `/administration` | Administration |
 
 `/management` opens the last-used sub view of the current session

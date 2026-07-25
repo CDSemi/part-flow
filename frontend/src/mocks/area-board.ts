@@ -4,8 +4,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'material',
     pn: '0455-20-0118-03',
-    po: 'PO-1003 · Receiving',
-    job: 'ERP-88190',
+    workOrder: 'WO 007003 · Receiving',
+    job: '18190',
     qty: 8,
     machines: [['queue', 8]],
     due: '9 days remaining',
@@ -16,8 +16,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'cut',
     pn: '2027-60-8114-00',
-    po: 'PO-1001 · Cutting',
-    job: 'ERP-88112',
+    workOrder: 'WO 007001 · Cutting',
+    job: '18112',
     qty: 4,
     machines: [['Saw 1', 4]],
     due: '2 days remaining',
@@ -29,8 +29,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'lathe',
     pn: '2027-60-8114-00',
-    po: 'PO-1001 · Turning',
-    job: 'ERP-88112',
+    workOrder: 'WO 007001 · Turning',
+    job: '18112',
     qty: 6,
     machines: [
       ['Lathe 3', 4],
@@ -45,8 +45,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'lathe',
     pn: '0455-20-0118-03',
-    po: 'PO-1003 · Turning',
-    job: 'ERP-88190',
+    workOrder: 'WO 007003 · Turning',
+    job: '18190',
     qty: 4,
     machines: [['Lathe 2', 4]],
     due: '9 days remaining',
@@ -57,7 +57,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'lathe',
     pn: '214-406',
-    po: 'TMP-…-REWORK · Turning · REWORK',
+    workOrder: 'TMP-…-REWORK · Turning · REWORK',
     job: '— (internal)',
     qty: 2,
     machines: [['queue', 2]],
@@ -69,8 +69,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'mill',
     pn: '78-04-0031',
-    po: 'PO-1002 · Milling',
-    job: 'ERP-88102',
+    workOrder: 'WO 007002 · Milling',
+    job: '18102',
     qty: 3,
     machines: [['Mill 1', 3]],
     due: '16 days remaining',
@@ -83,8 +83,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     // anchored right; the PN truncates with an ellipsis + title tooltip.
     area: 'mill',
     pn: '0118-40-0022-07-0455-88-REV-C',
-    po: 'PO-1008 · Milling',
-    job: 'ERP-88455',
+    workOrder: 'WO 007008 · Milling',
+    job: '18455',
     qty: 2,
     machines: [['Mill 2', 2]],
     due: '12 days remaining',
@@ -95,8 +95,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'deburr',
     pn: '78-04-0031',
-    po: 'PO-1002 · Deburring',
-    job: 'ERP-88102',
+    workOrder: 'WO 007002 · Deburring',
+    job: '18102',
     qty: 3,
     machines: [['queue', 3]],
     due: '16 days remaining',
@@ -107,8 +107,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'external',
     pn: '142-260',
-    po: 'PO-1005 · Plating',
-    job: 'ERP-88031',
+    workOrder: 'WO 007005 · Plating',
+    job: '18031',
     qty: 20,
     machines: [['vendor', 20]],
     due: 'overdue 6 days',
@@ -120,8 +120,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'stockroom',
     pn: '309-127',
-    po: 'PO-0996 · stocked',
-    job: 'ERP-87740',
+    workOrder: 'WO 006996 · stocked',
+    job: '17740',
     qty: 50,
     machines: [],
     due: 'allocated 50/50',
@@ -137,8 +137,8 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
   {
     area: 'lathe',
     pn: '2199-60-9912-05-2027-11-REV-F',
-    po: 'PO-1042 · Turning',
-    job: 'ERP-90311-CUSTOMER-REF-00098',
+    workOrder: 'WO 007042 · Turning',
+    job: '19311-CUSTOMER-REF-00098',
     qty: 14,
     machines: [
       ['Lathe 1', 6],
@@ -155,8 +155,8 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
     return {
       area: 'lathe',
       pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
-      po: `PO-2${String(100 + n)} · Turning`,
-      job: `ERP-9${String(1000 + n)}`,
+      workOrder: `WO ${String(7200 + n).padStart(6, '0')} · Turning`,
+      job: String(19000 + n),
       qty: (n % 6) + 1,
       machines: [['queue', (n % 6) + 1]],
       due: `${(n % 15) + 3} days remaining`,

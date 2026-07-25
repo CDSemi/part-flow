@@ -28,7 +28,7 @@ function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
 
 function matches(card: MockAreaCard, query: string): boolean {
   if (!query) return true;
-  return (card.pn + card.po + card.job).toLowerCase().includes(query);
+  return (card.pn + card.workOrder + card.job).toLowerCase().includes(query);
 }
 
 // One view, two modes behind a single tab strip: the All Areas overview
@@ -100,8 +100,8 @@ export function AreaBoardView() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search PN, PO, Job Number…"
-          aria-label="Search PN, PO, Job Number"
+          placeholder="Search PN, WO, Job Number…"
+          aria-label="Search PN, WO, Job Number"
         />
         <select
           value={sort}
@@ -235,7 +235,7 @@ function AllAreasOverview({
             {areaCards.length ? (
               <ul className="mc-list">
                 {areaCards.map((c) => (
-                  <li key={`${c.pn}-${c.po}`}>
+                  <li key={`${c.pn}-${c.workOrder}`}>
                     <div className="r1">
                       {c.hotRank ? <HotChip rank={c.hotRank} /> : null}
                       <span className="p" title={c.pn}>
@@ -245,7 +245,7 @@ function AllAreasOverview({
                     </div>
                     <div className="r2">
                       <span className="mono">
-                        {c.po.split(' ·')[0]} · {c.job}
+                        {c.workOrder.split(' ·')[0]} · {c.job}
                       </span>
                       <span
                         className={`mono ${c.dueClass === 'ok' ? '' : c.dueClass}`}
@@ -294,7 +294,7 @@ function AreaDetail({
   return (
     <div className="ab-grid">
       {cards.map((c) => (
-        <div className="ab-card" key={`${c.pn}-${c.po}`}>
+        <div className="ab-card" key={`${c.pn}-${c.workOrder}`}>
           <div className="top">
             <div className="id">
               <div className="part" title={c.pn}>
@@ -305,7 +305,7 @@ function AreaDetail({
                 ) : null}
                 {c.pn}
               </div>
-              <div className="po">{c.po}</div>
+              <div className="wo">{c.workOrder}</div>
               <div className="ext">Job: {c.job}</div>
             </div>
             <div className="qtyblk">

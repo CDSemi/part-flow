@@ -3,11 +3,11 @@ import { useEffect, useRef, useState } from 'react';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { EmptyState } from '../../components/view-states';
-import type { MockPo, RequestType } from '../view-models';
+import type { MockWorkOrder, RequestType } from '../view-models';
 import { formatIsoDate } from './dates';
 import {
   RELEASED_REMOVE_EXPLANATION,
-  applyPoDueDateChange,
+  applyWorkOrderDueDateChange,
   createDraftLine,
   draftFromSavedLine,
   draftsToSavedLines,
@@ -20,15 +20,15 @@ import {
 import type { DemandLineDraft, LineError, LineField } from './demand-lines';
 
 /**
- * Detail of one PO (GUI_DESIGN §11.2). An OPEN PO is editable: demand
- * lines can be added (scanner-first ＋ Add Part), edited, and — while no
- * production quantity has been released for them — removed. Released
- * lines are read-only and can never be removed here (PROJECT_PROFILE
- * §13). All editing is a local draft: Save demand applies it to local
- * mock state only.
+ * Detail of one Work Order (GUI_DESIGN §11.2). An OPEN Work Order is
+ * editable: demand lines can be added (scanner-first ＋ Add Part),
+ * edited, and — while no production quantity has been released for them
+ * — removed. Released lines are read-only and can never be removed here
+ * (PROJECT_PROFILE §13). All editing is a local draft: Save demand
+ * applies it to local mock state only.
  */
-export function PoDetailPanel({
-  po,
+export function WorkOrderDetailPanel({
+  workOrder,
   releasedLines,
   writeBlocked,
   onBack,
@@ -37,21 +37,23 @@ export function PoDetailPanel({
   onDirtyChange,
   showNotice,
 }: {
-  po: MockPo | undefined;
+  workOrder: MockWorkOrder | undefined;
   releasedLines: Set<string>;
   writeBlocked: boolean;
   onBack: () => void;
   onRelease: (pn: string) => void;
-  onSaveDetail: (po: MockPo) => void;
+  onSaveDetail: (workOrder: MockWorkOrder) => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
-  // All hooks run unconditionally; the missing-PO branch renders below.
-  const editable = po ? po.status === 'Open' : false;
+  // All hooks run unconditionally; the missing-WO branch renders below.
+  const editable = workOrder ? workOrder.status === 'Open' : false;
   const [lines, setLines] = useState<DemandLineDraft[]>(() =>
-    po ? po.lines.map((line) => draftFromSavedLine(line, po.due)) : [],
+    workOrder
+      ? workOrder.lines.map((line) => draftFromSavedLine(line, workOrder.due))
+      : [],
   );
-  const [due, setDue] = useState(po?.due ?? '');
+  const [due, setDue] = useState(workOrder?.due ?? '');
   const [dirty, setDirty] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
@@ -83,20 +85,22 @@ export function PoDetailPanel({
     }
   }, [focusField, lines]);
 
-  if (!po) {
+  if (!workOrder) {
     return (
       <div>
-        <button className="po-back" onClick={onBack}>
-          ‹ All POs
+        <button className="wo-back" onClick={onBack}>
+          ‹ All Work Orders
         </button>
-        <EmptyState message="This PO is not available in the mock data." />
+        <EmptyState message="This Work Order is not available in the mock data." />
       </div>
     );
   }
 
   // A release performed in this session (mock) also freezes its line.
   const display = lines.map((line) =>
-    !line.released && line.pn && releasedLines.has(`${po.po}:${line.pn}`)
+    !line.released &&
+    line.pn &&
+    releasedLines.has(`${workOrder.workOrderNumber}:${line.pn}`)
       ? { ...line, released: true, statusLabel: 'Released (mock)' }
       : line,
   );
@@ -119,7 +123,7 @@ export function PoDetailPanel({
 
   function handleDueChange(value: string) {
     setDue(value);
-    setLines((current) => applyPoDueDateChange(current, value));
+    setLines((current) => applyWorkOrderDueDateChange(current, value));
     setDirty(true);
   }
 
@@ -136,13 +140,13 @@ export function PoDetailPanel({
     if (result.kind === 'duplicate') {
       if (result.released) {
         showNotice(
-          `⚠ ${result.pn} is already on this PO and its production quantity is released — the line is read-only here.`,
+          `⚠ ${result.pn} is already on this Work Order and its production quantity is released — the line is read-only here.`,
         );
         scanRef.current?.focus();
         return;
       }
       showNotice(
-        `⚠ ${result.pn} is already on this PO — edit its quantity instead of adding a duplicate line.`,
+        `⚠ ${result.pn} is already on this Work Order — edit its quantity instead of adding a duplicate line.`,
       );
       setFocusField({ id: result.lineId, field: 'qty' });
       return;
@@ -155,7 +159,7 @@ export function PoDetailPanel({
     setLines((current) => [...current, line]);
     setDirty(true);
     showNotice(
-      `✓ ${result.pn} added as an unsaved draft line — Request Type NEW · due date from PO due date.`,
+      `✓ ${result.pn} added as an unsaved draft line — Request Type NEW · due date from WO due date.`,
     );
     setFocusField({ id: line.id, field: 'qty' });
   }
@@ -181,12 +185,12 @@ export function PoDetailPanel({
   }
 
   function handleSave() {
-    if (!po) return; // unreachable: save renders only with a PO present
+    if (!workOrder) return; // unreachable: save renders only with a WO present
     const errors = validateDemandLines(display);
     setLineErrors(errors);
     if (errors.length) {
       showNotice(
-        '✕ The PO has invalid demand lines — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.',
+        '✕ The Work Order has invalid demand lines — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.',
       );
       const first = errors[0];
       const el =
@@ -197,7 +201,7 @@ export function PoDetailPanel({
     }
     const savedLines = draftsToSavedLines(display);
     onSaveDetail({
-      ...po,
+      ...workOrder,
       due,
       preview: linesPreview(savedLines),
       lines: savedLines,
@@ -211,7 +215,7 @@ export function PoDetailPanel({
     if (
       dirty &&
       !window.confirm(
-        'This PO has unsaved changes. Discard them and return to the PO list?',
+        'This Work Order has unsaved changes. Discard them and return to the Work Order list?',
       )
     ) {
       return;
@@ -221,52 +225,56 @@ export function PoDetailPanel({
 
   return (
     <div>
-      <div className="po-head">
-        <button className="po-back" onClick={handleBack}>
-          ‹ All POs
+      <div className="wo-head">
+        <button className="wo-back" onClick={handleBack}>
+          ‹ All Work Orders
         </button>
-        <h1 className="mono">{po.po}</h1>
+        <h1 className="mono">{workOrder.workOrderNumber}</h1>
         <span className="spacer" />
         {editable && dirty ? (
           <span className="unsaved">● Unsaved changes</span>
         ) : null}
       </div>
-      <p className="po-sub">
-        received <b className="mono">{formatIsoDate(po.received)}</b> ·{' '}
+      <p className="wo-sub">
+        received <b className="mono">{formatIsoDate(workOrder.received)}</b> ·{' '}
         {editable ? (
           <>
-            PO due date{' '}
+            WO due date{' '}
             <input
               type="date"
-              className="mono po-due-input"
+              className="mono wo-due-input"
               value={due}
-              aria-label="PO due date"
+              aria-label="WO due date"
               onChange={(e) => handleDueChange(e.target.value)}
             />
           </>
         ) : (
           <>
-            PO due date <b className="mono">{formatIsoDate(po.due)}</b>
+            WO due date <b className="mono">{formatIsoDate(workOrder.due)}</b>
           </>
         )}{' '}
         · {display.length} demand line{display.length === 1 ? '' : 's'} ·{' '}
-        <span className={`postat ${po.status.toLowerCase()}`}>{po.status}</span>
-        {po.internal ? ' · temporary internal PO (auditable, unique)' : ''}
+        <span className={`wostat ${workOrder.status.toLowerCase()}`}>
+          {workOrder.status}
+        </span>
+        {workOrder.internal
+          ? ' · temporary internal Work Order (auditable, unique)'
+          : ''}
       </p>
-      <div className="po-card">
+      <div className="wo-card">
         {editable && (
-          <div className="pc-head">
+          <div className="woc-head">
             <span className="meta">
               Demand lines — each line's due date defaults to the{' '}
-              <b>PO due date</b> and may be edited per line. Editing is a local
+              <b>WO due date</b> and may be edited per line. Editing is a local
               draft (development mock) until <b>Save demand</b>.
             </span>
             <span className="spacer" />
             {dirty ? <span className="unsaved">● Unsaved changes</span> : null}
           </div>
         )}
-        <div className="po-lines">
-          <table className="po-table">
+        <div className="wo-lines">
+          <table className="wo-table">
             <thead>
               <tr>
                 <th>PN</th>
@@ -309,7 +317,7 @@ export function PoDetailPanel({
                             );
                             if (duplicate) {
                               showNotice(
-                                `⚠ ${pn} is already on this PO — edit the existing line instead of adding a duplicate.`,
+                                `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
                               );
                               e.target.value = '';
                               if (!duplicate.released) {
@@ -473,7 +481,7 @@ export function PoDetailPanel({
                     </td>
                     {editable ? (
                       <td>
-                        <div className="po-rowactions">
+                        <div className="wo-rowactions">
                           {line.saved || line.released ? (
                             <button
                               className="rel-btn"
@@ -521,13 +529,13 @@ export function PoDetailPanel({
           </table>
         </div>
         {editable && (
-          <div className="po-addpart">
+          <div className="wo-addpart">
             {addOpen ? (
               <>
-                <div className="np-scanrow">
+                <div className="nwo-scanrow">
                   <input
                     ref={scanRef}
-                    className="np-scan"
+                    className="nwo-scan"
                     placeholder="Scan PN barcode (PF:PN:…) — Enter"
                     aria-label="Scan PN barcode"
                     autoComplete="off"
@@ -553,12 +561,12 @@ export function PoDetailPanel({
                     Done
                   </button>
                 </div>
-                <div className="np-hint">
+                <div className="nwo-hint">
                   Scan an existing PN barcode, or add a line manually to look up
-                  / create a PN. A new line joins this PO as an{' '}
-                  <b>unsaved draft</b> with Request Type NEW and the PO due
-                  date. A PN already on this PO focuses its existing line
-                  instead of adding a duplicate.
+                  / create a PN. A new line joins this Work Order as an{' '}
+                  <b>unsaved draft</b> with Request Type NEW and the WO due
+                  date. A PN already on this Work Order focuses its existing
+                  line instead of adding a duplicate.
                 </div>
               </>
             ) : (
@@ -573,7 +581,7 @@ export function PoDetailPanel({
           </div>
         )}
         {editable && (
-          <div className="po-actions">
+          <div className="wo-actions">
             <button
               className="btn primary"
               disabled={writeBlocked}
@@ -589,21 +597,21 @@ export function PoDetailPanel({
           </div>
         )}
       </div>
-      <div className="po-note">
+      <div className="wo-note">
         A demand line can be removed only while no production quantity has been
         released for it: an unsaved draft is removed immediately, a saved
         unreleased line asks for confirmation, and a released line can no longer
         be removed here — corrections go through the correction and production
         workflows (PROJECT_PROFILE §13). Removal never deletes the PartNumber
-        master, Quantity Flows, Movements, release history, or other PO Demand
-        for the same PN. An <b>inactive PN</b> is flagged in lookup and cannot
-        be released without reactivation. Leaving this PO with unsaved changes
-        asks for confirmation.
+        master, Quantity Flows, Movements, release history, or other Work Order
+        Demand for the same PN. An <b>inactive PN</b> is flagged in lookup and
+        cannot be released without reactivation. Leaving this Work Order with
+        unsaved changes asks for confirmation.
       </div>
 
       {confirmRemove ? (
         <ConfirmDialog
-          title={`Remove ${confirmRemove.pn ?? 'line'} from ${po.po}?`}
+          title={`Remove ${confirmRemove.pn ?? 'line'} from ${workOrder.workOrderNumber}?`}
           confirmLabel="Remove line"
           cancelLabel="Cancel — keep the line"
           danger
@@ -622,11 +630,11 @@ export function PoDetailPanel({
           }}
           onCancel={() => setConfirmRemove(null)}
         >
-          No production quantity has been released for this PO Demand line (
-          <span className="mono">{confirmRemove.pn}</span> · qty{' '}
+          No production quantity has been released for this Work Order Demand
+          line (<span className="mono">{confirmRemove.pn}</span> · qty{' '}
           {confirmRemove.qty || '—'}). Removing it never deletes the PartNumber
-          master, Quantity Flows, Movements, release history, or other PO Demand
-          for the same PN. Phase 2: the removal affects{' '}
+          master, Quantity Flows, Movements, release history, or other Work
+          Order Demand for the same PN. Phase 2: the removal affects{' '}
           <b>local mock state only</b> and is applied by Save demand.
         </ConfirmDialog>
       ) : null}

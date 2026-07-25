@@ -99,16 +99,16 @@ test('returning to Management restores the last-used sub view during the session
   renderAt('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
-  fireEvent.click(screen.getByRole('link', { name: 'Purchase Orders' }));
-  expect(window.location.pathname).toBe('/management/purchase-orders');
+  fireEvent.click(screen.getByRole('link', { name: 'Work Orders' }));
+  expect(window.location.pathname).toBe('/management/work-orders');
 
   fireEvent.click(screen.getByRole('link', { name: 'Scan Station' }));
   expect(window.location.pathname).toBe('/scan-station');
 
   fireEvent.click(screen.getByRole('link', { name: 'Management' }));
-  expect(window.location.pathname).toBe('/management/purchase-orders');
+  expect(window.location.pathname).toBe('/management/work-orders');
   expect(
-    await screen.findByRole('heading', { name: 'Purchase Orders' }),
+    await screen.findByRole('heading', { name: 'Work Orders' }),
   ).toBeInTheDocument();
 });
 
@@ -117,7 +117,7 @@ test('a Management sub view renders directly from its URL', async () => {
 
   expect(
     await screen.findByRole('heading', {
-      name: 'Priority Management — Hot PO Demand',
+      name: 'Priority Management — Hot WO Demand',
     }),
   ).toBeInTheDocument();
 });

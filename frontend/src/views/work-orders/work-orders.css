@@ -1,12 +1,12 @@
-/* Purchase Orders — PO list · PO detail · scanner-first New PO (GUI §11). */
-.po-view {
+/* Work Orders — WO list · WO detail · scanner-first New Work Order (GUI §11). */
+.wo-view {
     background: var(--bg);
     color: var(--text);
     padding: 24px 28px;
     min-height: calc(100vh - 105px);
 }
 
-.po-head {
+.wo-head {
     display: flex;
     align-items: center;
     gap: 14px;
@@ -14,15 +14,15 @@
     flex-wrap: wrap;
 }
 
-.po-head h1 {
+.wo-head h1 {
     font-size: 22px;
 }
 
-.po-head .spacer {
+.wo-head .spacer {
     flex: 1;
 }
 
-.po-sub {
+.wo-sub {
     color: var(--muted);
     font-size: 13.5px;
     margin-bottom: 16px;
@@ -30,18 +30,18 @@
     max-width: 860px;
 }
 
-.po-sub b {
+.wo-sub b {
     color: var(--text);
 }
 
-.po-tools {
+.wo-tools {
     display: flex;
     gap: 10px;
     margin-bottom: 16px;
     align-items: center;
 }
 
-.po-tools input {
+.wo-tools input {
     flex: 1;
     max-width: 420px;
     background: var(--panel);
@@ -54,11 +54,11 @@
     outline: none;
 }
 
-.po-tools input:focus {
+.wo-tools input:focus {
     border-color: var(--info-t);
 }
 
-.polist {
+.wolist {
     width: 100%;
     max-width: 1060px;
     border-collapse: separate;
@@ -70,7 +70,7 @@
     box-shadow: var(--shadow);
 }
 
-.polist th {
+.wolist th {
     font-size: 11.5px;
     text-transform: uppercase;
     letter-spacing: 0.9px;
@@ -81,29 +81,29 @@
     background: var(--panel2);
 }
 
-.polist td {
+.wolist td {
     padding: 12px 14px;
     border-bottom: 1px solid var(--hair);
     font-size: 14px;
     vertical-align: top;
 }
 
-.polist tr:last-child td {
+.wolist tr:last-child td {
     border-bottom: none;
 }
 
-.polist tbody tr:hover td {
+.wolist tbody tr:hover td {
     background: var(--row-hover);
 }
 
-.polist .po {
+.wolist .wo {
     font-family: var(--mono), monospace;
     font-weight: 800;
     font-size: 15px;
     white-space: nowrap;
 }
 
-.polist .rowbtn {
+.wolist .rowbtn {
     font: inherit;
     color: inherit;
     text-align: left;
@@ -112,25 +112,25 @@
     width: 100%;
 }
 
-.polist .sub {
+.wolist .sub {
     font-size: 12px;
     color: var(--muted);
     margin-top: 2px;
     font-weight: 400;
 }
 
-.polist .mono-sm {
+.wolist .mono-sm {
     font-family: var(--mono), monospace;
     font-size: 13px;
 }
 
-.polist .empty {
+.wolist .empty {
     text-align: center;
     color: var(--faint);
     padding: 28px;
 }
 
-.postat {
+.wostat {
     font-size: 11.5px;
     font-weight: 750;
     padding: 3px 10px;
@@ -138,22 +138,22 @@
     display: inline-block;
 }
 
-.postat.open {
+.wostat.open {
     background: var(--info-surface);
     color: var(--info-t);
 }
 
-.postat.released {
+.wostat.released {
     background: var(--success-surface);
     color: var(--ok-t);
 }
 
-.postat.complete {
+.wostat.complete {
     background: var(--chip);
     color: var(--muted);
 }
 
-.po-back {
+.wo-back {
     border: 1px solid var(--border);
     border-radius: 9px;
     padding: 8px 14px;
@@ -164,12 +164,12 @@
     background: var(--panel);
 }
 
-.po-back:hover {
+.wo-back:hover {
     color: var(--info-t);
     border-color: var(--info-t);
 }
 
-.po-card {
+.wo-card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -179,7 +179,7 @@
     max-width: 1060px;
 }
 
-.po-card .pc-head {
+.wo-card .woc-head {
     display: flex;
     align-items: center;
     gap: 14px;
@@ -188,12 +188,12 @@
     background: var(--panel2);
 }
 
-.po-card .pc-head .meta {
+.wo-card .woc-head .meta {
     font-size: 12.5px;
     color: var(--muted);
 }
 
-.po-card .pc-head .spacer {
+.wo-card .woc-head .spacer {
     flex: 1;
 }
 
@@ -206,19 +206,19 @@
     color: var(--warn-t);
 }
 
-/* long PO line lists scroll; the header stays visible */
-.po-lines {
+/* long WO line lists scroll; the header stays visible */
+.wo-lines {
     max-height: 420px;
     overflow: auto;
 }
 
-.po-table {
+.wo-table {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
 }
 
-.po-table th {
+.wo-table th {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.8px;
@@ -232,36 +232,36 @@
     z-index: 2;
 }
 
-.po-table td {
+.wo-table td {
     padding: 11px 12px;
     border-bottom: 1px solid var(--hair);
     font-size: 13.5px;
     vertical-align: top;
 }
 
-.po-table tr:last-child td {
+.wo-table tr:last-child td {
     border-bottom: none;
 }
 
-.po-table .pn {
+.wo-table .pn {
     font-family: var(--mono), monospace;
     font-weight: 750;
     white-space: nowrap;
 }
 
-.po-table .bc {
+.wo-table .bc {
     font-family: var(--mono), monospace;
     font-size: 11.5px;
     color: var(--faint);
     margin-top: 2px;
 }
 
-.po-table .bc.newpn {
+.wo-table .bc.newpn {
     color: var(--info-t);
 }
 
-.po-table input,
-.po-table select {
+.wo-table input,
+.wo-table select {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -272,12 +272,12 @@
     max-width: 120px;
 }
 
-.po-table input:focus,
-.po-table select:focus {
+.wo-table input:focus,
+.wo-table select:focus {
     border-color: var(--info-t);
 }
 
-.po-table .err-cell input {
+.wo-table .err-cell input {
     border-color: var(--err-t);
     background: var(--error-surface-weak);
 }
@@ -331,7 +331,7 @@
     color: var(--err-t);
 }
 
-.po-actions {
+.wo-actions {
     display: flex;
     gap: 10px;
     align-items: center;
@@ -340,12 +340,12 @@
     flex-wrap: wrap;
 }
 
-.po-actions .hint {
+.wo-actions .hint {
     font-size: 12px;
     color: var(--faint);
 }
 
-.po-note {
+.wo-note {
     max-width: 1060px;
     background: var(--info-surface-weak);
     border: 1px solid var(--info-border);
@@ -357,8 +357,8 @@
     line-height: 1.6;
 }
 
-/* New PO header form */
-.np-form {
+/* New Work Order header form */
+.nwo-form {
     display: grid;
     grid-template-columns: 130px 230px 130px 230px;
     gap: 12px 14px;
@@ -368,17 +368,17 @@
 }
 
 @media (max-width: 900px) {
-    .np-form {
+    .nwo-form {
         grid-template-columns: 130px 1fr;
     }
 }
 
-.np-form label {
+.nwo-form label {
     color: var(--muted);
     font-weight: 650;
 }
 
-.np-form input {
+.nwo-form input {
     background: var(--panel);
     border: 1.5px solid var(--border);
     border-radius: 9px;
@@ -389,11 +389,11 @@
     outline: none;
 }
 
-.np-form input:focus {
+.nwo-form input:focus {
     border-color: var(--info-t);
 }
 
-.np-scanrow {
+.nwo-scanrow {
     display: flex;
     gap: 10px;
     margin: 0 0 4px;
@@ -401,7 +401,7 @@
     flex-wrap: wrap;
 }
 
-.np-scan {
+.nwo-scan {
     flex: 1;
     max-width: 540px;
     min-width: 260px;
@@ -417,14 +417,14 @@
     box-shadow: 0 0 0 3px var(--info-ring);
 }
 
-.np-hint {
+.nwo-hint {
     font-size: 12px;
     color: var(--faint);
     margin: 6px 2px 14px;
     line-height: 1.6;
 }
 
-.np-hint code {
+.nwo-hint code {
     font-family: var(--mono), monospace;
     background: var(--chip);
     border-radius: 5px;
@@ -432,7 +432,7 @@
     color: var(--muted);
 }
 
-.np-empty {
+.nwo-empty {
     text-align: center;
     color: var(--faint);
     padding: 24px;
@@ -453,52 +453,52 @@
     color: var(--err-t);
 }
 
-/* New PO modal dialog (over the PO list — GUI §11.3) */
-.npd-title {
+/* New Work Order modal dialog (over the WO list — GUI §11.3) */
+.nwo-title {
     font-size: 20px;
     margin-bottom: 4px;
 }
 
-.npd .np-form {
+.nwo .nwo-form {
     padding: 12px 0;
     align-items: start;
 }
 
-.npd .np-form label {
+.nwo .nwo-form label {
     padding-top: 10px;
 }
 
-.npd .np-form > div {
+.nwo .nwo-form > div {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.np-fieldhint {
+.nwo-fieldhint {
     font-size: 12px;
     color: var(--faint);
 }
 
 /* long line lists scroll inside the dialog; the dialog itself stays
    within the viewport (internal scrolling) */
-.npd-lines {
+.nwo-lines {
     max-height: min(44vh, 420px);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
 }
 
-.npd-actions {
+.nwo-actions {
     border-top: none;
     padding: 14px 0 0;
 }
 
-/* ＋ Add Part entry on an OPEN PO detail */
-.po-addpart {
+/* ＋ Add Part entry on an OPEN Work Order detail */
+.wo-addpart {
     padding: 12px 18px;
     border-top: 1px solid var(--hair);
 }
 
-.po-addpart .np-hint {
+.wo-addpart .nwo-hint {
     margin: 8px 2px 2px;
 }
 
@@ -507,7 +507,7 @@
     color: var(--warn-t);
 }
 
-.po-rowactions {
+.wo-rowactions {
     display: flex;
     gap: 6px;
     align-items: center;
@@ -518,8 +518,8 @@
     cursor: not-allowed;
 }
 
-/* Inline PO due date editor in the detail header line */
-.po-due-input {
+/* Inline WO due date editor in the detail header line */
+.wo-due-input {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -529,7 +529,7 @@
     outline: none;
 }
 
-.po-due-input:focus {
+.wo-due-input:focus {
     border-color: var(--info-t);
 }
 

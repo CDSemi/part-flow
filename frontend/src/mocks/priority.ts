@@ -3,7 +3,7 @@ import type { MockHotEntry } from '../views/view-models';
 export const MOCK_HOT_LIST: MockHotEntry[] = [
   {
     pn: '2027-60-8114-00',
-    po: 'PO-1001 · ERP-88112',
+    workOrder: 'WO 007001 · Job 18112',
     type: 'NEW',
     figures: [
       'requested 10',
@@ -17,7 +17,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
   },
   {
     pn: '142-260',
-    po: 'PO-1005 · ERP-88031',
+    workOrder: 'WO 007005 · Job 18031',
     type: 'NEW',
     figures: ['requested 20', 'allocated 0', 'shortage 20', 'at External 20'],
     due: 'Jul 16',
@@ -26,7 +26,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
   },
   {
     pn: '309-127',
-    po: 'PO-1006 · ERP-88355',
+    workOrder: 'WO 007006 · Job 18355',
     type: 'REWORK',
     figures: ['requested 12', 'allocated 0', 'shortage 12', 'not yet released'],
     due: 'Jul 25',
@@ -38,7 +38,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
 export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
   {
     pn: '0455-20-0118-03',
-    po: 'PO-1003 · ERP-88190',
+    workOrder: 'WO 007003 · Job 18190',
     type: 'NEW',
     figures: [
       'requested 12',
@@ -53,7 +53,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
   },
   {
     pn: '78-04-0031',
-    po: 'PO-1002 · ERP-88102',
+    workOrder: 'WO 007002 · Job 18102',
     type: 'NEW',
     figures: [
       'requested 6',
@@ -68,7 +68,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
   },
   {
     pn: '214-406',
-    po: 'TMP-20260721-0940-REWORK',
+    workOrder: 'TMP-20260721-0940-REWORK',
     type: 'REWORK',
     figures: ['requested 2', 'allocated 0', 'shortage 2', 'at Lathe queue 2'],
     due: 'Jul 21',

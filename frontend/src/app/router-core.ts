@@ -8,7 +8,7 @@
 export const MANAGEMENT_SUBVIEWS = [
   'area-board',
   'tracking',
-  'purchase-orders',
+  'work-orders',
   'priority',
 ] as const;
 

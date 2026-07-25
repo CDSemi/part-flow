@@ -77,7 +77,7 @@ export function TrackingView() {
   const rows = allRows.filter(
     (r) =>
       !query ||
-      (r.pn + r.name + r.demand.map((d) => d.po).join(' '))
+      (r.pn + r.name + r.demand.map((d) => d.workOrder).join(' '))
         .toLowerCase()
         .includes(query),
   );
@@ -91,8 +91,8 @@ export function TrackingView() {
           <h1>Tracking</h1>
           <div className="tk-filters">
             <input
-              placeholder="Search: PN, PO, Job Number…"
-              aria-label="Search PN, PO, Job Number"
+              placeholder="Search: PN, WO, Job Number…"
+              aria-label="Search PN, WO, Job Number"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -119,7 +119,7 @@ export function TrackingView() {
               <thead>
                 <tr>
                   <th>Part Number</th>
-                  <th>Active PO Demand</th>
+                  <th>Active WO Demand</th>
                   <th>Current distribution</th>
                   <th>Active qty</th>
                   <th>Stocked</th>
@@ -155,8 +155,8 @@ export function TrackingView() {
                     </td>
                     <td className="demandcell">
                       {row.demand.map((d) => (
-                        <div key={d.po}>
-                          {d.po} · {d.qty} <TypeChip type={d.type} />
+                        <div key={d.workOrder}>
+                          {d.workOrder} · {d.qty} <TypeChip type={d.type} />
                         </div>
                       ))}
                     </td>
@@ -224,21 +224,27 @@ function TrackingDetail() {
         <div>
           <h2>{d.pn}</h2>
           <div className="jsub">
-            {d.name} · revision <b>{d.revision}</b> (informational) · barcode{' '}
-            <b>{d.barcode}</b> · ERP id <b>{d.erpId}</b>
+            {d.name}
+            {d.revision ? (
+              <>
+                {' '}
+                · revision <b>{d.revision}</b> (informational)
+              </>
+            ) : null}{' '}
+            · barcode <b>{d.barcode}</b> · ERP id <b>{d.erpId}</b>
           </div>
         </div>
       </div>
 
       <div className="tk-sec">
         <h4>
-          Active PO Demand{' '}
+          Active WO Demand{' '}
           <span className="tag">business demand — separate from Movement</span>
         </h4>
         <table className="demand">
           <thead>
             <tr>
-              <th>PO</th>
+              <th>WO</th>
               <th>Type</th>
               <th>Req.</th>
               <th>Alloc.</th>
@@ -249,8 +255,8 @@ function TrackingDetail() {
           </thead>
           <tbody>
             {d.demand.map((row) => (
-              <tr key={row.po}>
-                <td className="mono">{row.po}</td>
+              <tr key={row.workOrder}>
+                <td className="mono">{row.workOrder}</td>
                 <td>
                   <TypeChip type={row.type} />
                 </td>
@@ -365,7 +371,7 @@ function TrackingDetail() {
       <div className="tk-sec">
         <h4>
           Stocked &amp; Allocation history{' '}
-          <span className="tag">PO Allocation — separate from Movement</span>
+          <span className="tag">WO Allocation — separate from Movement</span>
         </h4>
         <div className="prognote" style={{ marginTop: 0 }}>
           {d.stockedNote}
@@ -382,7 +388,7 @@ function TrackingDetail() {
         <div className="tk-actions">
           <button>Quantity adjustment…</button>
           <button>Edit assigned Route…</button>
-          <button>Adjust PO Allocation…</button>
+          <button>Adjust WO Allocation…</button>
           <button>Change priority…</button>
           <button>View audit trail…</button>
         </div>

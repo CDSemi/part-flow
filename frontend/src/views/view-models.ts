@@ -57,7 +57,8 @@ export interface MockBoardRow {
 export interface MockAreaCard {
   area: AreaKey;
   pn: string;
-  po: string;
+  /** Work Order context label, e.g. `WO 007003 · Receiving`. */
+  workOrder: string;
   job: string;
   qty: number;
   machines: [string, number][];
@@ -72,7 +73,7 @@ export interface MockTrackingRow {
   pn: string;
   name: string;
   hotRank?: number;
-  demand: { po: string; qty: number; type: RequestType }[];
+  demand: { workOrder: string; qty: number; type: RequestType }[];
   distribution: { area: AreaKey; label: string; qty: number }[];
   activeQty: number;
   stockedQty: number;
@@ -80,7 +81,7 @@ export interface MockTrackingRow {
   status: 'Active' | 'Stocked' | 'Completed';
 }
 
-export interface MockPoLine {
+export interface MockWorkOrderLine {
   pn: string;
   barcode: string;
   type: RequestType;
@@ -94,8 +95,9 @@ export interface MockPoLine {
   releasable?: boolean;
 }
 
-export interface MockPo {
-  po: string;
+export interface MockWorkOrder {
+  /** Opaque external Work Order Number (no fixed format). */
+  workOrderNumber: string;
   /** ISO `YYYY-MM-DD`; presentation formats it for display. */
   received: string;
   /** ISO `YYYY-MM-DD`; the entry default for demand-line due dates. */
@@ -104,12 +106,13 @@ export interface MockPo {
   status: 'Open' | 'Released' | 'Complete';
   internal?: boolean;
   preview: string;
-  lines: MockPoLine[];
+  lines: MockWorkOrderLine[];
 }
 
 export interface MockHotEntry {
   pn: string;
-  po: string;
+  /** Work Order Demand label, e.g. `WO 007001 · Job 18112`. */
+  workOrder: string;
   type: RequestType;
   figures: string[];
   due: string;

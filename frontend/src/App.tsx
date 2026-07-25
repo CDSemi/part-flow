@@ -48,7 +48,7 @@ const TOP_NAV: {
 const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
   { subview: 'area-board', label: 'Area Board' },
   { subview: 'tracking', label: 'Tracking' },
-  { subview: 'purchase-orders', label: 'Purchase Orders' },
+  { subview: 'work-orders', label: 'Work Orders' },
   { subview: 'priority', label: 'Priority' },
 ];
 
@@ -108,7 +108,7 @@ const VIEW_TITLES: Record<AppViewKey, string> = {
   'production-board': 'Production Board',
   'area-board': 'Area Board',
   tracking: 'Tracking',
-  'purchase-orders': 'Purchase Orders',
+  'work-orders': 'Work Orders',
   priority: 'Priority Management',
   administration: 'Administration',
 };

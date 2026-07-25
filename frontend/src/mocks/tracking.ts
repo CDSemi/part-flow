@@ -6,8 +6,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',
     hotRank: 1,
     demand: [
-      { po: 'PO-1001', qty: 10, type: 'NEW' },
-      { po: 'PO-1008', qty: 5, type: 'NEW' },
+      { workOrder: '007001', qty: 10, type: 'NEW' },
+      { workOrder: '007008', qty: 5, type: 'NEW' },
     ],
     distribution: [
       { area: 'cut', label: 'Cut', qty: 4 },
@@ -22,7 +22,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     pn: '142-260',
     name: 'PLATE, TOP COVER ALUM 6061-T6',
     hotRank: 2,
-    demand: [{ po: 'PO-1005', qty: 20, type: 'NEW' }],
+    demand: [{ workOrder: '007005', qty: 20, type: 'NEW' }],
     distribution: [{ area: 'external', label: 'External', qty: 20 }],
     activeQty: 20,
     stockedQty: 0,
@@ -32,7 +32,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {
     pn: '0455-20-0118-03',
     name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA',
-    demand: [{ po: 'PO-1003', qty: 12, type: 'NEW' }],
+    demand: [{ workOrder: '007003', qty: 12, type: 'NEW' }],
     distribution: [
       { area: 'material', label: 'Material', qty: 8 },
       { area: 'lathe', label: 'Lathe', qty: 4 },
@@ -46,8 +46,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     pn: '78-04-0031',
     name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     demand: [
-      { po: 'PO-1002', qty: 6, type: 'NEW' },
-      { po: 'TMP-…-0910', qty: 1, type: 'REWORK' },
+      { workOrder: '007002', qty: 6, type: 'NEW' },
+      { workOrder: 'TMP-…-0910', qty: 1, type: 'REWORK' },
     ],
     distribution: [
       { area: 'mill', label: 'Mill', qty: 3 },
@@ -61,7 +61,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {
     pn: '118-052',
     name: 'MOTOR, GEAR STEPPER 7.2T',
-    demand: [{ po: 'PO-1009', qty: 4, type: 'NEW' }],
+    demand: [{ workOrder: '007009', qty: 4, type: 'NEW' }],
     distribution: [{ area: 'manual', label: 'Manual', qty: 4 }],
     activeQty: 4,
     stockedQty: 0,
@@ -71,7 +71,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {
     pn: '309-127',
     name: 'PIN, DOWEL 1/4 X 1.00 SS',
-    demand: [{ po: 'PO-0996', qty: 50, type: 'NEW' }],
+    demand: [{ workOrder: '006996', qty: 50, type: 'NEW' }],
     distribution: [{ area: 'stockroom', label: 'Stockroom', qty: 50 }],
     activeQty: 0,
     stockedQty: 50,
@@ -84,7 +84,7 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
   {
     pn: '0118-40-0022-07-0455-88-REV-C',
     name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
-    demand: [{ po: 'PO-1008-SUPPLEMENTAL-B', qty: 8, type: 'NEW' }],
+    demand: [{ workOrder: '007008-SUPPLEMENTAL-B', qty: 8, type: 'NEW' }],
     distribution: [{ area: 'mill', label: 'Mill', qty: 8 }],
     activeQty: 8,
     stockedQty: 0,
@@ -92,12 +92,19 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
     status: 'Active',
   },
   ...MOCK_TRACKING_ROWS,
-  ...Array.from({ length: 20 }, (_, i): MockTrackingRow => {
+  // 28 generated rows: the long-data preview renders 30+ rows (§2.3).
+  ...Array.from({ length: 28 }, (_, i): MockTrackingRow => {
     const n = i + 1;
     return {
       pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
       name: `Spacer, sample lot ${n}, ALUM 6061-T6`,
-      demand: [{ po: `PO-2${String(100 + n)}`, qty: (n % 9) + 1, type: 'NEW' }],
+      demand: [
+        {
+          workOrder: String(7200 + n).padStart(6, '0'),
+          qty: (n % 9) + 1,
+          type: 'NEW',
+        },
+      ],
       distribution: [
         {
           area: n % 2 === 0 ? 'lathe' : 'mill',
@@ -123,7 +130,7 @@ export const MOCK_TRACKING_DETAIL = {
   erpId: 'ERP-PN-40412',
   demand: [
     {
-      po: 'PO-1001',
+      workOrder: '007001',
       type: 'NEW' as const,
       requested: 10,
       allocated: 0,
@@ -132,7 +139,7 @@ export const MOCK_TRACKING_DETAIL = {
       priority: '🔥 Hot #1',
     },
     {
-      po: 'PO-1008',
+      workOrder: '007008',
       type: 'NEW' as const,
       requested: 5,
       allocated: 0,
@@ -238,7 +245,7 @@ export const MOCK_TRACKING_DETAIL = {
       type: 'RECEIVED',
       typeClass: 'rec',
       description:
-        'Received into Material · qty 10 · QF-0140 · PO-1001 release · Route “Bracket std v3” assigned',
+        'Received into Material · qty 10 · QF-0140 · WO 007001 release · Route “Bracket std v3” assigned',
     },
   ],
   stockedNote:

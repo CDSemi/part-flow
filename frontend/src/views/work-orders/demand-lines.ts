@@ -1,14 +1,16 @@
-// Shared demand-line draft model for the Purchase Orders view: the New
-// PO dialog and the OPEN PO detail edit the same kind of line drafts.
+// Shared demand-line draft model for the Work Orders view: the New
+// Work Order dialog and the OPEN Work Order detail edit the same kind
+// of line drafts.
 //
 // Phase 2 scope: this is PRESENTATION-side mock validation and draft
 // bookkeeping against local mock state only. The canonical business
-// rules (PO Intake workflow, PO Demand removal) are owned by
+// rules (Work Order Intake workflow, Work Order Demand removal) are
+// owned by
 // PROJECT_PROFILE §13 and are enforced transactionally in the
 // Application/Domain layer when the Phase 4 backend slice exists.
 
-import { MOCK_PN_BARCODES } from '../../mocks/purchase-orders';
-import type { MockPoLine, RequestType } from '../view-models';
+import { MOCK_PN_BARCODES } from '../../mocks/work-orders';
+import type { MockWorkOrderLine, RequestType } from '../view-models';
 
 export interface DemandLineDraft {
   id: number;
@@ -20,13 +22,13 @@ export interface DemandLineDraft {
   qty: string;
   /** ISO `YYYY-MM-DD` (or '' while missing). */
   due: string;
-  /** True once the line's due date was edited away from the PO default. */
+  /** True once the line's due date was edited away from the WO default. */
   dueTouched: boolean;
   job: string;
   notes: string;
   /** True when the line exists in saved mock state (not an unsaved draft). */
   saved: boolean;
-  /** True when production quantity was already released for this PoDemand. */
+  /** True when production quantity was released for this WorkOrderDemand. */
   released: boolean;
   releasable: boolean;
   statusLabel: string;
@@ -68,8 +70,8 @@ export function createDraftLine(
 
 /** Load a saved mock line into an editable draft. */
 export function draftFromSavedLine(
-  line: MockPoLine,
-  poDue: string,
+  line: MockWorkOrderLine,
+  workOrderDue: string,
 ): DemandLineDraft {
   const saved = line.statusClass !== 'invalid';
   return createDraftLine({
@@ -79,9 +81,9 @@ export function draftFromSavedLine(
     type: line.type,
     qty: line.qty > 0 ? String(line.qty) : '',
     due: line.due,
-    // A line still holding the PO due date follows later PO-due edits;
+    // A line still holding the WO due date follows later WO-due edits;
     // a line with its own date keeps it (GUI_DESIGN §11).
-    dueTouched: line.due !== poDue,
+    dueTouched: line.due !== workOrderDue,
     job: line.job === '—' ? '' : line.job,
     notes: line.notes ?? '',
     saved,
@@ -117,8 +119,8 @@ export function processScan(
   return { kind: 'new', pn, barcode };
 }
 
-/** The PO due date is the default: update lines still holding it. */
-export function applyPoDueDateChange(
+/** The WO due date is the default: update lines still holding it. */
+export function applyWorkOrderDueDateChange(
   lines: readonly DemandLineDraft[],
   newDue: string,
 ): DemandLineDraft[] {
@@ -153,7 +155,7 @@ export function validateDemandLines(
       errors.push({
         lineId: line.id,
         field: 'pn',
-        message: `duplicate PN — ${line.pn} is already on this PO`,
+        message: `duplicate PN — ${line.pn} is already on this Work Order`,
       });
     } else {
       seen.set(line.pn, line.id);
@@ -179,11 +181,11 @@ export function validateDemandLines(
 export type RemoveRule = 'draft' | 'confirm' | 'blocked';
 
 /**
- * Phase 2 mirror of the canonical PoDemand removal rule
+ * Phase 2 mirror of the canonical WorkOrderDemand removal rule
  * (PROJECT_PROFILE §13): an unsaved draft is removed immediately, a
  * saved line with no released production quantity needs explicit
  * confirmation, and a line with released quantity can never be removed
- * from Purchase Orders.
+ * from Work Orders.
  */
 export function lineRemoveRule(line: DemandLineDraft): RemoveRule {
   if (line.released) return 'blocked';
@@ -193,7 +195,7 @@ export function lineRemoveRule(line: DemandLineDraft): RemoveRule {
 /** Convert validated drafts back into saved mock lines. */
 export function draftsToSavedLines(
   lines: readonly DemandLineDraft[],
-): MockPoLine[] {
+): MockWorkOrderLine[] {
   return lines.map((line) => ({
     pn: line.pn ?? '—',
     barcode: line.barcodeNote,
@@ -208,8 +210,8 @@ export function draftsToSavedLines(
   }));
 }
 
-/** PN preview text for the PO list row. */
-export function linesPreview(lines: readonly MockPoLine[]): string {
+/** PN preview text for the Work Order list row. */
+export function linesPreview(lines: readonly MockWorkOrderLine[]): string {
   const pns = lines.map((line) => line.pn).filter(Boolean);
   const head = pns.slice(0, 2).join(' · ');
   return pns.length > 2 ? `${head} · ${pns.length - 2} more` : head;

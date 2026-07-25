@@ -1,6 +1,6 @@
 # PartFlow Project Profile v6
 
-> **Status:** Living Document  
+> **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
 
 ---
@@ -224,7 +224,7 @@ A PN:
 - has one reusable drawing folder,
 - has one unique PartFlow barcode,
 - may be requested by multiple active POs,
-- may reference external Job Numbers for display and reporting,
+- may have multiple external Job Numbers (used only for display, searching, sorting, and reporting),
 - may have quantities in multiple Areas simultaneously,
 - may have quantities assigned to multiple Machines simultaneously,
 - may have different quantity flows following different Routes,
@@ -256,7 +256,7 @@ The following rules are mandatory:
 5. A PN may simultaneously have quantity assigned to multiple Machines.
 6. Quantity must never be accidentally created, destroyed, duplicated, lost, or made negative.
 7. No Movement may consume more quantity than is available in its source position.
-8. Unknown or ambiguous scans must never update production data.
+8. Unknown or invalid scans are rejected; ambiguous scans must never update production data until the ambiguity is explicitly confirmed.
 9. PO Demand and shop-floor Movement are separate concepts.
 10. PO Allocation and shop-floor Movement are separate concepts.
 11. PO Allocation may change without rewriting Movement history.
@@ -315,7 +315,7 @@ PO Demand contains the business context needed to answer:
 - due date,
 - priority,
 - request type,
-- external Job Numbers used only for display, searching, sorting, and reporting.
+- external Job Numbers (used only for display, searching, sorting, and reporting).
 
 PO Demand does not define the current production location.
 
@@ -416,11 +416,11 @@ A Machine:
 
 ## Quantity Flow (Internal Tracking Concept)
 
-An internal tracking concept representing a traceable portion of PN quantity when quantity-level identity is required.
+A traceable production portion of a PN quantity as it moves, splits, merges, queues, and becomes assigned to Areas or Machines.
 
 Quantity Flow does not represent individually labeled pieces.
 
-It exists only to preserve:
+It is the logical identity needed to preserve:
 
 - current quantity distribution,
 - route assignment,
@@ -517,6 +517,8 @@ Rules:
 
 - `part_number` must be unique.
 - `part_number` must be treated as an arbitrary string.
+- Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The exact string must be preserved everywhere; PN segments must never be parsed for business meaning.
+- `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
 - The folder barcode identifies only the PN.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.
@@ -858,16 +860,17 @@ ScanSession is temporary Application-layer state used to coordinate barcode scan
 
 It may retain temporary context such as:
 
-- active Area
+- Area
 - active Worker
 - active Machine
 - pending PN
 - pending Operation
 - pending quantity
+- expiration time
 
-ScanSession improves scanning efficiency.
+ScanSession exists to reduce repetitive scanning and improves scanning efficiency.
 
-It is never part of the production truth.
+It must never become the source of truth for production state.
 
 ---
 
@@ -938,7 +941,7 @@ No production write may occur until ambiguity is resolved.
 
 ---
 
-# 10. Quantity Model
+# 11. Quantity Model
 
 Quantity always represents physical parts.
 
@@ -1031,7 +1034,7 @@ History must never be silently rewritten.
 
 ---
 
-# 11. Processing Ownership Rules
+# 12. Processing Ownership Rules
 
 ## Area Without Machines
 
@@ -1090,7 +1093,7 @@ The Machine remains the current executor until the quantity is:
 
 ---
 
-# 12. Purchase Order Intake
+# 13. Purchase Order Intake
 
 POs may enter PartFlow through:
 
@@ -1105,18 +1108,40 @@ For a newly received PO:
 3. Locate the reusable PN folder.
 4. Create the PN master and barcode if the PN is new.
 5. Add PO Demand without creating a separate tracked PN.
-6. Confirm or assign the initial Route when production is released.
-7. Introduce the required quantity into the configured first Area.
+6. Save the business demand. Saving PO Demand never automatically creates production quantity.
+7. Confirm or assign the initial Route when production is released.
+
+Production release is a separate, explicit action. On production release:
+
+1. Confirm the release quantity.
+2. Confirm or assign the Route.
+3. Confirm the configured starting Area and Operation.
+4. Create the Quantity Flow.
+5. Snapshot the Assigned Route.
+6. Append an immutable `RECEIVED` Part Movement.
+7. Derive or update the current-position projection atomically with the Movement.
 
 New ERP production normally uses Request Type `NEW`.
 
-The initial Area may be Material or another configured starting Area.
+The starting Area may be Material or another configured starting Area.
 
-A new PO requesting an already active PN does not automatically create additional physical quantity or merge production state.
+If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new PO requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
+
+Purchase Order and PO Demand represent business demand; creating or editing PO Demand does not define current production position. Production release explicitly introduces physical quantity. Part Movement remains PN + Quantity Flow + quantity activity: PO Demand does not own shop-floor Movement, and PO Allocation remains separate from both.
+
+## PO Demand Removal
+
+A PO Demand line may be removed from its Purchase Order only while no production quantity has been released for it:
+
+- An unsaved draft line may be removed immediately.
+- A saved PO Demand with no released production quantity may be removed only after explicit confirmation.
+- Once any quantity for a PO Demand has been released to production, that PO Demand must not be deleted from Purchase Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
+
+Removing a PO Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other PO Demand records for the same PN.
 
 ---
 
-# 13. Rework and Modify Intake
+# 14. Rework and Modify Intake
 
 Rework and Modify represent why additional production work exists.
 
@@ -1150,7 +1175,7 @@ The system must never infer this from PN identity alone.
 
 ---
 
-# 14. Core Scan Workflow
+# 15. Core Scan Workflow
 
 The normal workflow is keyboard- and scanner-first.
 
@@ -1173,20 +1198,31 @@ For multi-machine Areas:
 3. Scan order may be reversed.
 4. Once both valid inputs are available, assign the selected quantity.
 
-The system must clearly reject:
+The system must clearly reject, with no write:
 
 - unknown barcodes,
 - inactive entities,
 - invalid Area/Machine combinations,
 - impossible quantities,
 - quantity exceeding available source quantity,
-- ambiguous PN context,
 - unauthorized corrections,
 - route deviations without required confirmation.
 
+An ambiguous PN context is not simply rejected. When multiple valid contexts exist, the system must present the relevant choices and require explicit confirmation; unresolved ambiguity blocks the write, and nothing is recorded until one choice is confirmed. Cancelling abandons the pending intent with no write.
+
+A duplicate transport retry carrying the same event id must return the original idempotent result and must not create another Movement.
+
 ---
 
-# 15. Undo and Correction
+## Scan Station Persistence
+
+A Scan Station's identity and its binding to one Area are stable application and infrastructure configuration. A database table such as `scan_stations` is permitted; Scan Station configuration is not required to be a core domain aggregate.
+
+ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
+
+---
+
+# 16. Undo and Correction
 
 Undo exists to correct recent scanning mistakes.
 
@@ -1208,7 +1244,7 @@ All corrections must remain auditable.
 
 ---
 
-# 16. Production Routing
+# 17. Production Routing
 
 A Route describes the expected manufacturing path of a Quantity Flow.
 
@@ -1295,7 +1331,7 @@ Expected duration is advisory and must never block production.
 
 ---
 
-# 17. Stockroom and Completion Allocation
+# 18. Stockroom and Completion Allocation
 
 Stockroom is the normal terminal Area.
 
@@ -1364,7 +1400,7 @@ When complete:
 
 ---
 
-# 18. Worker and Machine Sessions
+# 19. Worker and Machine Sessions
 
 Worker identification is configurable per Area.
 
@@ -1392,7 +1428,7 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 ---
 
-# 19. Roles and Permissions
+# 20. Roles and Permissions
 
 PartFlow uses role-based authorization.
 
@@ -1454,7 +1490,7 @@ Operators must never directly rewrite historical data.
 
 ---
 
-# 20. Application Views
+# 21. Application Views
 
 ## Scan Station
 
@@ -1495,18 +1531,24 @@ Requirements:
 - due-date sorting,
 - overdue highlighting,
 - Area color display,
-- distributed PN quantity display.
+- distributed PN quantity display,
+- time in current Area or Machine shown per distributed quantity,
+- Part Number rendered on a single line.
 
 Suggested columns:
 
-| No. | Part Number | Areas and Quantities | Job Numbers | Due Date | Days Left | Total Days |
-|---|---|---|---|---|---|---|
+| No. | Part Number | Areas and Quantities · Time | Job Numbers | Due Date | Total Days |
+|---|---|---|---|---|---|
 
-Example distribution:
+Days Left is displayed inside the Due Date column as a highlighted secondary line rather than as a separate column.
+
+Example distribution with time in location:
 
 ```text
-Cut (3), Lathe 1 (4), Lathe 2 (2), Mill (6)
+Cut (3 · 3h 40m), Lathe 1 (4 · 2h 05m), Lathe 2 (2 · 1h 10m), Mill (6 · 45m)
 ```
+
+Time in location may be highlighted when it exceeds the expected duration of the active Route Step.
 
 ---
 
@@ -1598,18 +1640,43 @@ It must not imply that the entire PN is at one Route Step.
 
 ---
 
+## PO Intake
+
+PO Intake is the management view for manual Purchase Order entry (§12). It is a light-theme management view.
+
+The view must support the minimum confirmed workflow:
+
+1. Create or locate a Purchase Order.
+2. Add or update one or more PO Demand records.
+3. Locate or create the PartNumber.
+4. Create the PN barcode when the PN is new.
+5. Enter: PO Number, received date, PN, Request Type (default `NEW`), requested quantity, due date, priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
+6. Save business demand without automatically creating production quantity.
+7. Provide a separate explicit `Release to production` action following the release steps in §12.
+
+On production release the view must confirm release quantity, Route, and the configured starting Area and Operation, and show the resulting Quantity Flow, Route, Area, quantity, and `RECEIVED` Movement.
+
+If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
+
+PO Intake must not grow into ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+
+---
+
 ## Priority Management
 
 Priority belongs to PO Demand.
 
-When a Manager marks PO Demand as Hot:
+The Hot list is managed within the Department:
 
-1. Show Hot PO Demand within the Department.
-2. Sort by explicit priority rank.
-3. Add new Hot entries at the bottom by default.
-4. Allow drag-and-drop reordering.
-5. Save or cancel changes.
-6. Use the stored rank as the highest work and allocation priority.
+1. Show Hot PO Demand sorted by explicit priority rank.
+2. Add PO Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
+3. If a PN has multiple active PO Demand records, each PO Demand is selected and ranked separately.
+4. Add new Hot entries at the bottom by default.
+5. Allow drag-and-drop reordering.
+6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and PO Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
+7. Apply Hot list changes immediately and record every change in the audit trail.
+8. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step.
+9. Use the stored rank as the highest work and allocation priority.
 
 Multiple POs requesting the same PN may have different priorities.
 
@@ -1638,7 +1705,7 @@ Administrative workflows must remain separate from normal production scanning.
 
 ---
 
-# 21. Department Scope
+# 22. Department Scope
 
 The initial deployment targets Machine Shop.
 
@@ -1668,7 +1735,7 @@ Department configuration may define:
 
 ---
 
-# 22. ERP Boundary
+# 23. ERP Boundary
 
 ERP owns business planning and source master data.
 
@@ -1687,7 +1754,7 @@ Rules:
 
 ---
 
-# 23. Application Architecture
+# 24. Application Architecture
 
 Preferred stack:
 
@@ -1722,7 +1789,7 @@ Rules:
 
 ---
 
-# 24. Transaction Requirements
+# 25. Transaction Requirements
 
 Every production write must be atomic.
 
@@ -1746,7 +1813,7 @@ The system must never partially record a production Movement.
 
 ---
 
-# 25. Logging
+# 26. Logging
 
 Logs must answer:
 
@@ -1768,7 +1835,7 @@ Do not expose raw internal exceptions to operators.
 
 ---
 
-# 26. Reporting
+# 27. Reporting
 
 The system should support:
 
@@ -1799,7 +1866,7 @@ Reports must distinguish:
 
 ---
 
-# 27. Audit and Data Integrity
+# 28. Audit and Data Integrity
 
 The system must preserve a complete audit trail for:
 
@@ -1830,11 +1897,11 @@ Database constraints should enforce, whenever practical:
 - non-negative quantities,
 - valid Area/Machine relationships,
 - allocation not exceeding available stock,
-- idempotent event identifiers if offline support is added.
+- idempotent scan-submission event identifiers (`device_event_id`).
 
 ---
 
-# 28. Initial Scope
+# 29. Initial Scope
 
 The initial release should support:
 
@@ -1858,6 +1925,7 @@ The initial release should support:
 - manual Allocation adjustment by Admin and Manager,
 - optional Worker identification,
 - Scan Station,
+- PO Intake,
 - Production Board,
 - Area Board,
 - Manager Summary,
@@ -1870,7 +1938,7 @@ ERP synchronization may be added later without replacing the core model.
 
 ---
 
-# 29. Future Scope
+# 30. Future Scope
 
 The following are outside the confirmed initial scope unless separately approved:
 
@@ -1892,7 +1960,7 @@ Future features must extend the existing PN, quantity, Movement, Route, and Allo
 
 ---
 
-# 30. Explicit Non-Goals
+# 31. Explicit Non-Goals
 
 PartFlow must not become:
 
@@ -1909,20 +1977,20 @@ Do not introduce these responsibilities without an explicit project decision.
 
 ---
 
-# 31. Remaining Open Decisions
+# 32. Remaining Open Decisions
 
 Only the following unresolved decisions remain:
 
 1. Whether stocked quantity may be returned to active production through a controlled reversal.
-3. Whether scrap and rejected quantity are first-class Movement types in the initial release.
-4. The exact expiration rules for Worker and Machine sessions.
-5. Whether offline scan synchronization will be included in a later release.
+2. Whether scrap and rejected quantity are first-class Movement types in the initial release.
+3. The exact expiration rules for Worker and Machine sessions.
+4. Whether offline scan synchronization will be included in a later release.
 
 Implementations must avoid assumptions that make these decisions difficult to change.
 
 ---
 
-# 32. Guiding Principles
+# 33. Guiding Principles
 
 Every future feature must reinforce these principles:
 

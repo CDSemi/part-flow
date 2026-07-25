@@ -4,13 +4,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PartFlow — GUI Mockup v6 · PROJECT_PROFILE v6</title>
+<title>PartFlow — GUI Mockup v6 · PROJECT_PROFILE v7</title>
 <!-- Mockup file: selectors are toggled dynamically from JS and font tokens carry
      their generic fallbacks inside var() definitions — suppress false positives. -->
 <!--suppress CssUnusedSymbol, CssNoGenericFontName -->
 <style>
 /* ================================================================
-   PartFlow GUI Mockup v6 — aligned to PROJECT_PROFILE v6
+   PartFlow GUI Mockup v6 — aligned to PROJECT_PROFILE v7
    One token set, two switchable themes (v5): a global Dark/Light mode
    toggle in the top navigation; EVERY view follows the selected mode.
    Dark is the default (shop-floor first). Component CSS uses semantic
@@ -234,7 +234,7 @@ body.dark #view-scan{background:radial-gradient(1200px 500px at 60% -10%,#101a2c
 /* Allocation dialog (Stockroom) */
 .alloc-row{display:grid;grid-template-columns:1fr auto auto;gap:8px 14px;align-items:center;border:1px solid var(--border);
   background:var(--panel2);border-radius:12px;padding:12px 14px;margin-bottom:10px}
-.alloc-row .po{font-family:var(--mono);font-size:16px;font-weight:800}
+.alloc-row .wo{font-family:var(--mono);font-size:16px;font-weight:800}
 .alloc-row .meta{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.55}
 .alloc-row .meta b{color:var(--text);font-family:var(--mono)}
 .stepper{display:flex;align-items:center;gap:0;border:1px solid var(--border2);border-radius:10px;overflow:hidden}
@@ -346,7 +346,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .ab-card .qlbl{font-size:9.5px;font-weight:800;color:var(--faint);text-transform:uppercase;letter-spacing:1.1px}
 .ab-card .qty-big{font-family:var(--mono);font-size:32px;font-weight:800;color:var(--info-t);line-height:1.1}
 .ab-card .qunit{font-size:11px;color:var(--muted)}
-.ab-card .po{font-family:var(--mono);font-size:13px;color:var(--muted);margin-top:3px}
+.ab-card .wo{font-family:var(--mono);font-size:13px;color:var(--muted);margin-top:3px}
 .ab-card .ext{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:2px}
 .ab-card .machines{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
 .ab-card .mrow{font-size:13px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:4px 10px;color:var(--muted)}
@@ -495,7 +495,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .pr-item .body{flex:1;min-width:0}
 .pr-item .l1{display:flex;align-items:center;gap:9px;font-size:15.5px}
 .pr-item .l1 .pn{font-family:var(--mono);font-weight:800}
-.pr-item .l1 .po{font-family:var(--mono);color:var(--muted);font-size:13px}
+.pr-item .l1 .wo{font-family:var(--mono);color:var(--muted);font-size:13px}
 .pr-item .l2{font-size:12.5px;color:var(--muted);margin-top:3px;display:flex;gap:12px;flex-wrap:wrap}
 .pr-item .l2 b{font-family:var(--mono);font-weight:650;color:var(--text)}
 .pr-item .due{flex:none;text-align:right;font-size:13px}
@@ -522,7 +522,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   background:var(--panel2);border-radius:11px;padding:13px 15px;margin-bottom:8px;transition:border-color .12s}
 .hotadd-item:hover{border-color:var(--info-t)}
 .hotadd-item .hpn{font-family:var(--mono);font-weight:800;font-size:15px}
-.hotadd-item .hpo{font-family:var(--mono);font-size:12.5px;color:var(--muted);flex:1}
+.hotadd-item .hwo{font-family:var(--mono);font-size:12.5px;color:var(--muted);flex:1}
 .hotadd-item .hdue{font-size:12.5px;color:var(--muted);flex:none}
 .hotadd-item .hdue.late{color:var(--err-t);font-weight:750}
 .hotadd-empty{color:var(--faint);font-size:13.5px;padding:18px;text-align:center}
@@ -566,65 +566,65 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   font-size:12.5px;color:var(--info-t);margin-top:16px;line-height:1.6}
 
 /* ============ PURCHASE ORDERS (light) ============ */
-#view-po{background:var(--bg);color:var(--text);padding:24px 28px}
-/* PO list (master) */
-.polist{width:100%;max-width:1060px;border-collapse:separate;border-spacing:0;background:var(--panel);border:1px solid var(--border);
+#view-wo{background:var(--bg);color:var(--text);padding:24px 28px}
+/* WO list (master) */
+.wolist{width:100%;max-width:1060px;border-collapse:separate;border-spacing:0;background:var(--panel);border:1px solid var(--border);
   border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow)}
-.polist th{font-size:11.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);text-align:left;
+.wolist th{font-size:11.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);text-align:left;
   padding:11px 14px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.polist td{padding:12px 14px;border-bottom:1px solid var(--hair);font-size:14px;vertical-align:top}
-.polist tr:last-child td{border-bottom:none}
-.polist tr:hover td{background:rgba(79,140,255,.04);cursor:pointer}
-.polist .po{font-family:var(--mono);font-weight:800;font-size:15px}
-.polist .sub{font-size:12px;color:var(--muted);margin-top:2px;font-weight:400}
-.polist .mono-sm{font-family:var(--mono);font-size:13px}
-.polist .duetxt.soon{color:var(--warn-t);font-weight:750}
-.polist .duetxt.late{color:var(--err-t);font-weight:750}
-.postat{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;display:inline-block}
-.postat.open{background:rgba(79,140,255,.12);color:var(--info-t)}
-.postat.released{background:rgba(49,210,135,.13);color:var(--ok-t)}
-.postat.complete{background:var(--chip);color:var(--muted)}
-.po-back{border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:13.5px;font-weight:700;
+.wolist td{padding:12px 14px;border-bottom:1px solid var(--hair);font-size:14px;vertical-align:top}
+.wolist tr:last-child td{border-bottom:none}
+.wolist tr:hover td{background:rgba(79,140,255,.04);cursor:pointer}
+.wolist .wo{font-family:var(--mono);font-weight:800;font-size:15px}
+.wolist .sub{font-size:12px;color:var(--muted);margin-top:2px;font-weight:400}
+.wolist .mono-sm{font-family:var(--mono);font-size:13px}
+.wolist .duetxt.soon{color:var(--warn-t);font-weight:750}
+.wolist .duetxt.late{color:var(--err-t);font-weight:750}
+.wostat{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;display:inline-block}
+.wostat.open{background:rgba(79,140,255,.12);color:var(--info-t)}
+.wostat.released{background:rgba(49,210,135,.13);color:var(--ok-t)}
+.wostat.complete{background:var(--chip);color:var(--muted)}
+.wo-back{border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:13.5px;font-weight:700;
   color:var(--muted);background:var(--panel)}
-.po-back:hover{color:var(--info-t);border-color:var(--info-t)}
-/* New PO */
-.np-form{display:grid;grid-template-columns:130px 230px 130px 230px;gap:12px 14px;align-items:center;padding:16px 18px;font-size:13.5px}
-.np-form label{color:var(--muted);font-weight:650}
-.np-form input{background:var(--panel);border:1.5px solid var(--border);border-radius:9px;font-size:14px;padding:9px 12px;color:var(--text);outline:none}
-.np-form input:focus{border-color:var(--info-t)}
-.np-form .err input{border-color:var(--err-t);background:rgba(255,97,102,.05)}
-.np-scanrow{display:flex;gap:10px;margin:0 0 4px;align-items:center}
-#np-scan{flex:1;max-width:540px;background:var(--panel);border:2px solid var(--info);border-radius:11px;font-size:16px;
+.wo-back:hover{color:var(--info-t);border-color:var(--info-t)}
+/* New Work Order */
+.nwo-form{display:grid;grid-template-columns:130px 230px 130px 230px;gap:12px 14px;align-items:center;padding:16px 18px;font-size:13.5px}
+.nwo-form label{color:var(--muted);font-weight:650}
+.nwo-form input{background:var(--panel);border:1.5px solid var(--border);border-radius:9px;font-size:14px;padding:9px 12px;color:var(--text);outline:none}
+.nwo-form input:focus{border-color:var(--info-t)}
+.nwo-form .err input{border-color:var(--err-t);background:rgba(255,97,102,.05)}
+.nwo-scanrow{display:flex;gap:10px;margin:0 0 4px;align-items:center}
+#nwo-scan{flex:1;max-width:540px;background:var(--panel);border:2px solid var(--info);border-radius:11px;font-size:16px;
   font-family:var(--mono);padding:12px 15px;color:var(--text);outline:none;box-shadow:0 0 0 3px rgba(79,140,255,.10)}
-.np-hint{font-size:12px;color:var(--faint);margin:6px 2px 14px;line-height:1.6}
-.np-hint b{font-family:var(--mono);background:var(--chip);border-radius:5px;padding:1px 6px;color:var(--muted)}
-.po-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
-.po-head h1{font-size:22px}
-.po-head .spacer{flex:1}
-.po-sub{color:var(--muted);font-size:13.5px;margin-bottom:16px;line-height:1.6;max-width:860px}
-.po-tools{display:flex;gap:10px;margin-bottom:16px;align-items:center}
-.po-tools input{flex:1;max-width:420px;background:var(--panel);border:1px solid var(--border);border-radius:10px;
+.nwo-hint{font-size:12px;color:var(--faint);margin:6px 2px 14px;line-height:1.6}
+.nwo-hint b{font-family:var(--mono);background:var(--chip);border-radius:5px;padding:1px 6px;color:var(--muted)}
+.wo-head{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.wo-head h1{font-size:22px}
+.wo-head .spacer{flex:1}
+.wo-sub{color:var(--muted);font-size:13.5px;margin-bottom:16px;line-height:1.6;max-width:860px}
+.wo-tools{display:flex;gap:10px;margin-bottom:16px;align-items:center}
+.wo-tools input{flex:1;max-width:420px;background:var(--panel);border:1px solid var(--border);border-radius:10px;
   font-size:14px;padding:11px 14px;color:var(--text);outline:none}
-.po-tools input:focus{border-color:var(--info-t)}
-.po-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden}
-.po-card .pc-head{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.po-card .pc-head .po{font-family:var(--mono);font-size:19px;font-weight:800}
-.po-card .pc-head .meta{font-size:12.5px;color:var(--muted)}
-.po-card .pc-head .spacer{flex:1}
+.wo-tools input:focus{border-color:var(--info-t)}
+.wo-card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden}
+.wo-card .woc-head{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.wo-card .woc-head .wo{font-family:var(--mono);font-size:19px;font-weight:800}
+.wo-card .woc-head .meta{font-size:12.5px;color:var(--muted)}
+.wo-card .woc-head .spacer{flex:1}
 .unsaved{font-size:11.5px;font-weight:750;padding:3px 10px;border-radius:20px;background:rgba(255,178,36,.16);color:var(--warn-t)}
-.po-lines{max-height:420px;overflow:auto}   /* long PO line lists scroll; header stays visible */
-.po-table{width:100%;border-collapse:separate;border-spacing:0}
-.po-table th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);text-align:left;
+.wo-lines{max-height:420px;overflow:auto}   /* long WO line lists scroll; header stays visible */
+.wo-table{width:100%;border-collapse:separate;border-spacing:0}
+.wo-table th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);text-align:left;
   padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0}
-.po-table td{padding:11px 12px;border-bottom:1px solid var(--hair);font-size:13.5px;vertical-align:top}
-.po-table tr:last-child td{border-bottom:none}
-.po-table .pn{font-family:var(--mono);font-weight:750}
-.po-table .bc{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:2px}
-.po-table .bc.newpn{color:var(--info-t)}
-.po-table input,.po-table select{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+.wo-table td{padding:11px 12px;border-bottom:1px solid var(--hair);font-size:13.5px;vertical-align:top}
+.wo-table tr:last-child td{border-bottom:none}
+.wo-table .pn{font-family:var(--mono);font-weight:750}
+.wo-table .bc{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:2px}
+.wo-table .bc.newpn{color:var(--info-t)}
+.wo-table input,.wo-table select{background:var(--panel);border:1px solid var(--border);border-radius:8px;
   font-size:13px;padding:6px 9px;color:var(--text);outline:none;max-width:120px}
-.po-table input:focus,.po-table select:focus{border-color:var(--info-t)}
-.po-table .err-cell input{border-color:var(--err-t);background:rgba(255,97,102,.05)}
+.wo-table input:focus,.wo-table select:focus{border-color:var(--info-t)}
+.wo-table .err-cell input{border-color:var(--err-t);background:rgba(255,97,102,.05)}
 .rowerr{font-size:11.5px;color:var(--err-t);font-weight:700;margin-top:4px}
 .rel-btn{border:1px solid var(--info);border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:750;color:var(--info-t);background:rgba(79,140,255,.06)}
 .rel-btn:hover{background:rgba(79,140,255,.14)}
@@ -634,25 +634,25 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .linestat.released{background:rgba(49,210,135,.13);color:var(--ok-t)}
 .linestat.invalid{background:rgba(255,97,102,.12);color:var(--err-t)}
 .linestat.draft{background:rgba(255,178,36,.15);color:var(--warn-t)}
-.po-rowactions{display:flex;gap:6px;align-items:center}
+.wo-rowactions{display:flex;gap:6px;align-items:center}
 .pr-x:disabled{opacity:.35;cursor:not-allowed}
-.po-due-input{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px 8px;color:var(--text);font-size:13px;outline:none;font-family:var(--mono)}
-.po-due-input:focus{border-color:var(--info-t)}
-/* v6: New PO modal dialog over the PO list */
+.wo-due-input{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px 8px;color:var(--text);font-size:13px;outline:none;font-family:var(--mono)}
+.wo-due-input:focus{border-color:var(--info-t)}
+/* v6: New Work Order modal dialog over the Work Order list */
 .dlg{max-height:92vh;overflow:auto}
 .dlg.xwide{width:min(980px,96vw)}
-.npd-title{font-size:20px;font-weight:800;color:var(--text);margin-bottom:4px}
-.npd-lines{max-height:min(44vh,420px);overflow:auto;border:1px solid var(--border);border-radius:9px}
-.npd-actions{border-top:none;padding:14px 0 0}
-.np-form>div{display:flex;flex-direction:column;gap:4px}
-.np-form{align-items:start}
-.np-form label{padding-top:10px}
-.np-fieldhint{font-size:12px;color:var(--faint)}
+.nwo-title{font-size:20px;font-weight:800;color:var(--text);margin-bottom:4px}
+.nwo-lines{max-height:min(44vh,420px);overflow:auto;border:1px solid var(--border);border-radius:9px}
+.nwo-actions{border-top:none;padding:14px 0 0}
+.nwo-form>div{display:flex;flex-direction:column;gap:4px}
+.nwo-form{align-items:start}
+.nwo-form label{padding-top:10px}
+.nwo-fieldhint{font-size:12px;color:var(--faint)}
 .bigbtn.danger{background:var(--err);color:#fff}
 body.dark{color-scheme:dark}
 body.light{color-scheme:light}
-.po-actions{display:flex;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--border)}
-.po-actions .hint{font-size:12px;color:var(--faint)}
+.wo-actions{display:flex;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--border)}
+.wo-actions .hint{font-size:12px;color:var(--faint)}
 .relwarn{background:rgba(255,178,36,.10);border:1px solid rgba(255,178,36,.5);border-radius:12px;padding:12px 14px;
   font-size:13px;color:var(--warn-t);margin-bottom:14px;line-height:1.55}
 .relgrid{display:grid;grid-template-columns:170px 1fr;gap:10px 12px;align-items:center;font-size:13.5px;margin-bottom:14px}
@@ -681,7 +681,7 @@ body.light{color-scheme:light}
   <button class="navbtn" data-v="admin" onclick="showView('admin')">Administration</button>
   <div class="spacer"></div>
   <button class="navbtn" id="themebtn" onclick="toggleTheme()" title="Switch between Dark and Light mode — every view follows">🌙 Dark</button>
-  <div class="mock-tag">GUI MOCKUP <b>v6</b> · PROJECT_PROFILE v6 · sample data</div>
+  <div class="mock-tag">GUI MOCKUP <b>v6</b> · PROJECT_PROFILE v7 · sample data</div>
 </nav>
 
 <!-- Management sub-view navigation — visible only while a Management sub view is active -->
@@ -689,7 +689,7 @@ body.light{color-scheme:light}
   <span class="subgrp">Management</span>
   <button class="subbtn" data-v="area" onclick="showView('area')">Area Board</button>
   <button class="subbtn" data-v="track" onclick="showView('track')">Tracking</button>
-  <button class="subbtn" data-v="po" onclick="showView('po')">Purchase Orders</button>
+  <button class="subbtn" data-v="wo" onclick="showView('wo')">Work Orders</button>
   <button class="subbtn" data-v="priority" onclick="showView('priority')">Priority</button>
 </nav>
 
@@ -823,7 +823,7 @@ body.light{color-scheme:light}
     <button class="choice" onclick="ambPick('rework')">
       <span class="cic rwk">RWK</span>
       <span><span class="ct1">Create REWORK demand</span><br>
-        <span class="ct2">Opens intake confirmation — quantity, PO link (or temporary PO <span class="mono">TMP-20260722-####-REWORK</span>), Route, starting Area. Nothing recorded yet.</span></span>
+        <span class="ct2">Opens intake confirmation — quantity, WO link (or temporary WO <span class="mono">TMP-20260722-####-REWORK</span>), Route, starting Area. Nothing recorded yet.</span></span>
     </button>
     <button class="choice" onclick="ambPick('modify')">
       <span class="cic mod">MOD</span>
@@ -853,15 +853,15 @@ body.light{color-scheme:light}
   <div class="dlg">
     <h3><span id="itype">REWORK</span> intake — confirm before anything is recorded</h3>
     <div class="big mono">2027-60-8114-00</div>
-    <div class="sub">Request Type <b id="itype2">REWORK</b>. Confirm quantity, PO link, Route and starting Area — <b>RECEIVED is appended only after confirmation</b>.</div>
+    <div class="sub">Request Type <b id="itype2">REWORK</b>. Confirm quantity, WO link, Route and starting Area — <b>RECEIVED is appended only after confirmation</b>.</div>
     <div class="fgrid">
       <label>Quantity</label>
       <input id="iqty" class="field mono" inputmode="numeric" placeholder="pcs" onkeydown="if(event.key==='Enter')confirmIntake()">
-      <label>Purchase Order</label>
-      <select id="ipo" class="field">
-        <option value="TMP">Temporary internal PO — TMP-20260722-####-…</option>
-        <option value="PO-1001">Link to active PO-1001</option>
-        <option value="PO-1008">Link to active PO-1008</option>
+      <label>Work Order</label>
+      <select id="iwo" class="field">
+        <option value="TMP">Temporary internal Work Order — TMP-20260722-####-…</option>
+        <option value="007001">Link to active WO 007001</option>
+        <option value="007008">Link to active WO 007008</option>
       </select>
       <label>Route</label>
       <select id="iroute" class="field">
@@ -884,19 +884,19 @@ body.light{color-scheme:light}
 <!-- Stockroom allocation dialog — §18: priority → earliest due date -->
 <div class="overlay" id="allocovl">
   <div class="dlg" style="width:min(640px,94vw)">
-    <h3>Stocked — suggested PO Allocation</h3>
+    <h3>Stocked — suggested WO Allocation</h3>
     <div class="big mono">309-127 <span style="font-size:16px;color:var(--muted);font-weight:600">× 20 stocked</span></div>
     <div class="sub">Movement <b>STOCKED</b> recorded. Suggested allocation order: <b>priority → earliest due date</b>. Operators may review and adjust before confirmation.</div>
     <div class="alloc-row">
       <div>
-        <div class="po">PO-1006 <span class="hot h1" style="vertical-align:2px">🔥 HOT #1</span></div>
+        <div class="wo">WO 007006 <span class="hot h1" style="vertical-align:2px">🔥 HOT #1</span></div>
         <div class="meta">requested <b>12</b> · allocated <b>0</b> · shortage <b>12</b> · due <b>Jul 25</b></div>
       </div>
       <div class="stepper"><button onclick="stepAlloc(0,-1)">−</button><span class="sv" id="al0">12</span><button onclick="stepAlloc(0,1)">+</button></div>
     </div>
     <div class="alloc-row">
       <div>
-        <div class="po">PO-1009</div>
+        <div class="wo">WO 007009</div>
         <div class="meta">requested <b>10</b> · allocated <b>2</b> · shortage <b>8</b> · due <b>Aug 04</b></div>
       </div>
       <div class="stepper"><button onclick="stepAlloc(1,-1)">−</button><span class="sv" id="al1">8</span><button onclick="stepAlloc(1,1)">+</button></div>
@@ -916,7 +916,7 @@ body.light{color-scheme:light}
     <div class="spacer"></div>
     <div class="clock" id="pbclock">14:32</div>
   </div>
-  <!-- Columns per PROJECT_PROFILE v6 §21 Production Board -->
+  <!-- Columns per PROJECT_PROFILE v7 §21 Production Board -->
   <table class="pb-table">
     <thead><tr>
       <th style="width:4%">No.</th>
@@ -927,7 +927,7 @@ body.light{color-scheme:light}
       <th style="width:10%">Total Days</th>
     </tr></thead>
     <tbody>
-      <!-- Hot PO Demand first, by priority rank; then by due date -->
+      <!-- Hot WO Demand first, by priority rank; then by due date -->
       <tr class="hotrow1">
         <td><div class="no">1</div></td>
         <td><div class="part blink">🔥 2027-60-8114-00<span class="hot h1" style="margin-left:9px">#1</span></div>
@@ -939,8 +939,8 @@ body.light{color-scheme:light}
           <div class="totline">total <b>10</b> pcs</div>
         </div></td>
         <td class="jobs">
-          <div class="j">ERP-88112 <span class="jm">· PO-1001 · 10 pcs</span></div>
-          <div class="j">ERP-88240 <span class="jm">· PO-1008 · 5 pcs queued</span></div>
+          <div class="j">18112 <span class="jm">· WO 007001 · 10 pcs</span></div>
+          <div class="j">18240 <span class="jm">· WO 007008 · 5 pcs queued</span></div>
         </td>
         <td class="due"><div class="d1">Jul 24</div><div class="d2 soon">2 days left</div></td>
         <td><div class="dtotal">10 d</div></td>
@@ -953,7 +953,7 @@ body.light{color-scheme:light}
           <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span><span class="ltime long">4d 02h</span></div>
           <div class="totline">total <b>20</b> pcs</div>
         </div></td>
-        <td class="jobs"><div class="j">ERP-88031 <span class="jm">· PO-1005 · 20 pcs</span></div></td>
+        <td class="jobs"><div class="j">18031 <span class="jm">· WO 007005 · 20 pcs</span></div></td>
         <td class="due"><div class="d1">Jul 16</div><div class="d2 late">overdue 6 days</div></td>
         <td><div class="dtotal">18 d</div></td>
       </tr>
@@ -965,7 +965,7 @@ body.light{color-scheme:light}
           <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">1h 05m</span></div>
           <div class="totline">total <b>12</b> pcs</div>
         </div></td>
-        <td class="jobs"><div class="j">ERP-88190 <span class="jm">· PO-1003 · 12 pcs</span></div></td>
+        <td class="jobs"><div class="j">18190 <span class="jm">· WO 007003 · 12 pcs</span></div></td>
         <td class="due"><div class="d1">Jul 31</div><div class="d2 ok">9 days left</div></td>
         <td><div class="dtotal">6 d</div></td>
       </tr>
@@ -978,7 +978,7 @@ body.light{color-scheme:light}
           <div class="totline">total <b>6</b> pcs</div>
         </div></td>
         <td class="jobs">
-          <div class="j">ERP-88102 <span class="jm">· PO-1002 · 6 pcs</span></div>
+          <div class="j">18102 <span class="jm">· WO 007002 · 6 pcs</span></div>
           <div class="j">— <span class="jm">· TMP-20260718-0910-REWORK · 1 pc</span></div>
         </td>
         <td class="due"><div class="d1">Aug 07</div><div class="d2 ok">16 days left</div></td>
@@ -991,7 +991,7 @@ body.light{color-scheme:light}
           <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span><span class="ltime">—</span></div>
           <div class="totline">total <b>50</b> pcs stocked</div>
         </div></td>
-        <td class="jobs"><div class="j">ERP-87740 <span class="jm">· PO-0996 · allocated 50/50</span></div></td>
+        <td class="jobs"><div class="j">17740 <span class="jm">· WO 006996 · allocated 50/50</span></div></td>
         <td class="due"><div class="d1">Jul 10</div><div class="d2 ok">✓ stocked</div></td>
         <td><div class="dtotal">12 d</div></td>
       </tr>
@@ -1002,15 +1002,15 @@ body.light{color-scheme:light}
           <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Vendor <span class="q">12</span><span class="ltime">1d 06h</span></div>
           <div class="totline">total <b>12</b> pcs</div>
         </div></td>
-        <td class="jobs"><div class="j">ERP-88377 <span class="jm">· PO-1007 · 12 pcs</span></div></td>
+        <td class="jobs"><div class="j">18377 <span class="jm">· WO 007007 · 12 pcs</span></div></td>
         <td class="due"><div class="d1">Aug 03</div><div class="d2 ok">9 days left</div></td>
         <td><div class="dtotal">3 d</div></td>
       </tr>
     </tbody>
   </table>
   <div class="pb-foot">
-    <span>Page 1 / 3 · rotates every 12 s</span>
-    <span class="pgdot on"></span><span class="pgdot"></span><span class="pgdot"></span>
+    <span>Page 1 / 1 — auto-rotation engages only when the list exceeds one page</span>
+    <span class="pgdot on"></span>
     <div class="spacer"></div>
     <span>🔥 #n = Hot priority rank · blinking PN = due soon / overdue · 5 active PNs · 60 pcs in production · 50 pcs stocked</span>
   </div>
@@ -1020,7 +1020,7 @@ body.light{color-scheme:light}
 <section id="view-area" class="view">
   <div class="ab-tabs" id="abtabs"></div>
   <div class="ab-tools">
-    <input id="absearch" placeholder="Search PN, PO, Job Number…" oninput="renderArea()">
+    <input id="absearch" placeholder="Search PN, WO, Job Number…" oninput="renderArea()">
     <select id="absort" onchange="renderArea()">
       <option value="due">Sort: Due date</option>
       <option value="prio">Sort: Priority</option>
@@ -1041,7 +1041,7 @@ body.light{color-scheme:light}
     <div class="tk-left">
       <h1>Tracking</h1>
       <div class="tk-filters">
-        <input placeholder="Search: PN, PO, Job Number…">
+        <input placeholder="Search: PN, WO, Job Number…">
         <select><option>Area: All</option><option>Material</option><option>Cut</option><option>Lathe</option><option>Mill</option><option>Manual</option><option>Deburr</option><option>External</option><option>Stockroom</option></select>
         <select><option>Operation: All</option><option>Cutting</option><option>Turning</option><option>Milling</option><option>Deburring</option><option>Plating</option></select>
         <select><option>Machine: All</option><option>Saw 1</option><option>Lathe 1–4</option><option>Mill 1–2</option></select>
@@ -1051,12 +1051,12 @@ body.light{color-scheme:light}
         <select><option>Due: Any</option><option>Overdue</option><option>This week</option><option>This month</option></select>
       </div>
       <table class="tk-table">
-        <thead><tr><th>Part Number</th><th>Active PO Demand</th><th>Current distribution</th><th>Active qty</th><th>Stocked</th><th>Due (next)</th><th>Status</th></tr></thead>
+        <thead><tr><th>Part Number</th><th>Active WO Demand</th><th>Current distribution</th><th>Active qty</th><th>Stocked</th><th>Due (next)</th><th>Status</th></tr></thead>
         <tbody>
           <tr class="sel" onclick="selectPN(this,'2027-60-8114-00')">
             <td><span class="part">🔥 2027-60-8114-00</span><span class="hot h1" style="margin-left:8px">#1</span><div class="sub">BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES</div></td>
-            <td><div class="mono" style="font-size:13px">PO-1001 · 10 <span class="typechip new">NEW</span></div>
-                <div class="mono" style="font-size:13px;margin-top:3px">PO-1008 · 5 <span class="typechip new">NEW</span></div></td>
+            <td><div class="mono" style="font-size:13px">007001 · 10 <span class="typechip new">NEW</span></div>
+                <div class="mono" style="font-size:13px;margin-top:3px">007008 · 5 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini">
               <span><span class="dot" style="background:var(--a-cut)"></span>Cut <b>4</b></span>
               <span><span class="dot" style="background:var(--a-lathe)"></span>Lathe <b>6</b></span></div></td>
@@ -1065,14 +1065,14 @@ body.light{color-scheme:light}
           </tr>
           <tr onclick="selectPN(this,'142-260')">
             <td><span class="part">🔥 142-260</span><span class="hot h2" style="margin-left:8px">#2</span><div class="sub">PLATE, TOP COVER ALUM 6061-T6</div></td>
-            <td><div class="mono" style="font-size:13px">PO-1005 · 20 <span class="typechip new">NEW</span></div></td>
+            <td><div class="mono" style="font-size:13px">007005 · 20 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini"><span><span class="dot" style="background:var(--a-external)"></span>External <b>20</b></span></div></td>
             <td class="mono">20</td><td class="mono">0</td><td>Jul 16</td>
             <td><span class="status active">Active</span></td>
           </tr>
           <tr onclick="selectPN(this,'0455-20-0118-03')">
             <td><span class="part">0455-20-0118-03</span><div class="sub">SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA</div></td>
-            <td><div class="mono" style="font-size:13px">PO-1003 · 12 <span class="typechip new">NEW</span></div></td>
+            <td><div class="mono" style="font-size:13px">007003 · 12 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini">
               <span><span class="dot" style="background:var(--a-material)"></span>Material <b>8</b></span>
               <span><span class="dot" style="background:var(--a-lathe)"></span>Lathe <b>4</b></span></div></td>
@@ -1081,7 +1081,7 @@ body.light{color-scheme:light}
           </tr>
           <tr onclick="selectPN(this,'78-04-0031')">
             <td><span class="part">78-04-0031</span><div class="sub">HOUSING, BEARING CAST AL 356-T6, MACHINED</div></td>
-            <td><div class="mono" style="font-size:13px">PO-1002 · 6 <span class="typechip new">NEW</span></div>
+            <td><div class="mono" style="font-size:13px">007002 · 6 <span class="typechip new">NEW</span></div>
                 <div class="mono" style="font-size:13px;margin-top:3px">TMP-…-0910 · 1 <span class="typechip rework">REWORK</span></div></td>
             <td><div class="distmini">
               <span><span class="dot" style="background:var(--a-mill)"></span>Mill <b>3</b></span>
@@ -1091,14 +1091,14 @@ body.light{color-scheme:light}
           </tr>
           <tr onclick="selectPN(this,'309-127')">
             <td><span class="part">309-127</span><div class="sub">PIN, DOWEL 1/4 X 1.00 SS</div></td>
-            <td><div class="mono" style="font-size:13px">PO-0996 · 50 <span class="typechip new">NEW</span></div></td>
+            <td><div class="mono" style="font-size:13px">006996 · 50 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini"><span><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <b>50</b></span></div></td>
             <td class="mono">0</td><td class="mono">50</td><td>—</td>
             <td><span class="status done">Completed</span></td>
           </tr>
           <tr onclick="selectPN(this,'118-052')">
             <td><span class="part">118-052</span><div class="sub">MOTOR, GEAR STEPPER 7.2T</div></td>
-            <td><div class="mono" style="font-size:13px">PO-1009 · 4 <span class="typechip new">NEW</span></div></td>
+            <td><div class="mono" style="font-size:13px">007009 · 4 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini"><span><span class="dot" style="background:var(--a-manual)"></span>Manual <b>4</b></span></div></td>
             <td class="mono">4</td><td class="mono">0</td><td>Aug 12</td>
             <td><span class="status active">Active</span></td>
@@ -1117,12 +1117,12 @@ body.light{color-scheme:light}
       </div>
 
       <div class="tk-sec">
-        <h4>Active PO Demand <span class="tag">business demand — separate from Movement</span></h4>
+        <h4>Active WO Demand <span class="tag">business demand — separate from Movement</span></h4>
         <table class="demand">
-          <thead><tr><th>PO</th><th>Type</th><th>Req.</th><th>Alloc.</th><th>Shortage</th><th>Due</th><th>Priority</th></tr></thead>
+          <thead><tr><th>WO</th><th>Type</th><th>Req.</th><th>Alloc.</th><th>Shortage</th><th>Due</th><th>Priority</th></tr></thead>
           <tbody>
-            <tr><td class="mono">PO-1001</td><td><span class="typechip new">NEW</span></td><td class="mono">10</td><td class="mono zero">0</td><td class="mono short">10</td><td>Jul 24</td><td>🔥 Hot #1</td></tr>
-            <tr><td class="mono">PO-1008</td><td><span class="typechip new">NEW</span></td><td class="mono">5</td><td class="mono zero">0</td><td class="mono short">5</td><td>Aug 02</td><td>—</td></tr>
+            <tr><td class="mono">007001</td><td><span class="typechip new">NEW</span></td><td class="mono">10</td><td class="mono zero">0</td><td class="mono short">10</td><td>Jul 24</td><td>🔥 Hot #1</td></tr>
+            <tr><td class="mono">007008</td><td><span class="typechip new">NEW</span></td><td class="mono">5</td><td class="mono zero">0</td><td class="mono short">5</td><td>Aug 02</td><td>—</td></tr>
           </tbody>
         </table>
         <div class="prog"><i style="width:0%"></i></div>
@@ -1173,12 +1173,12 @@ body.light{color-scheme:light}
           <li><span class="t">Jul 21 09:38</span><span class="mtype asg">ASSIGNED_TO_MACHINE</span><span class="desc">Lathe queue → <span class="mono">Lathe 1</span> · qty 2 · QF-0140 · W: H. Nguyen</span></li>
           <li><span class="t">Jul 20 15:22</span><span class="mtype spl">SPLIT</span><span class="desc">QF-0140 (10) → QF-0140 (6) + QF-0141 (4) · at Cut · W: V. Tran</span></li>
           <li><span class="t">Jul 20 08:12</span><span class="mtype tra">TRANSFERRED</span><span class="desc">Material → Cut · qty 10 · QF-0140 · W: V. Tran · <span class="mono">CUT-ST-01</span></span></li>
-          <li><span class="t">Jul 12 08:02</span><span class="mtype rec">RECEIVED</span><span class="desc">Received into Material · qty 10 · QF-0140 · PO-1001 release · Route “Bracket std v3” assigned</span></li>
+          <li><span class="t">Jul 12 08:02</span><span class="mtype rec">RECEIVED</span><span class="desc">Received into Material · qty 10 · QF-0140 · WO 007001 release · Route “Bracket std v3” assigned</span></li>
         </ul>
       </div>
 
       <div class="tk-sec">
-        <h4>Stocked &amp; Allocation history <span class="tag">PO Allocation — separate from Movement</span></h4>
+        <h4>Stocked &amp; Allocation history <span class="tag">WO Allocation — separate from Movement</span></h4>
         <div class="prognote" style="margin-top:0">No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due date (§18).</div>
       </div>
 
@@ -1187,7 +1187,7 @@ body.light{color-scheme:light}
         <div class="tk-actions">
           <button>Quantity adjustment…</button>
           <button>Edit assigned Route…</button>
-          <button>Adjust PO Allocation…</button>
+          <button>Adjust WO Allocation…</button>
           <button>Change priority…</button>
           <button>View audit trail…</button>
         </div>
@@ -1197,112 +1197,112 @@ body.light{color-scheme:light}
 </section>
 
 <!-- ==================== PURCHASE ORDERS (§21 / GUI §11 v6) ==================== -->
-<section id="view-po" class="view">
+<section id="view-wo" class="view">
 
-  <!-- ---------- PO list (master) — ＋ New PO opens a MODAL over this list (v6) ---------- -->
-  <div id="po-list-panel">
-    <div class="po-head">
-      <h1>Purchase Orders</h1>
+  <!-- ---------- WO list (master) — ＋ New Work Order opens a MODAL over this list (v6) ---------- -->
+  <div id="wo-list-panel">
+    <div class="wo-head">
+      <h1>Work Orders</h1>
       <div class="spacer"></div>
-      <button class="btn primary" id="npopenbtn" onclick="openNewPO()">＋ New PO</button>
+      <button class="btn primary" id="nwoopenbtn" onclick="openNewWO()">＋ New Work Order</button>
     </div>
-    <div class="po-sub">Manual Purchase Order entry and explicit production release (§13). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action on a demand line, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>. Select a PO to see its demand lines. <b>＋ New PO</b> opens a dialog over this list — the URL does not change.</div>
-    <div class="po-tools">
-      <input id="posearch" placeholder="Search PO Number… (an existing PO Number is opened — duplicates are never created)" oninput="renderPOList()">
+    <div class="wo-sub">Manual Work Order entry and explicit production release (§13). <b>Saving demand never creates production quantity</b> — physical quantity enters production only through the explicit <b>Release to production</b> action on a demand line, which creates the Quantity Flow, snapshots the Route, and appends <span class="mono">RECEIVED</span>. Select a Work Order to see its demand lines. <b>＋ New Work Order</b> opens a dialog over this list — the URL does not change.</div>
+    <div class="wo-tools">
+      <input id="wosearch" placeholder="Search WO Number… (an existing WO Number is opened — duplicates are never created)" oninput="renderWOList()">
     </div>
-    <table class="polist">
-      <thead><tr><th>PO Number</th><th>Received</th><th>Due date</th><th>Demand lines</th><th>Status</th></tr></thead>
-      <tbody id="polistbody"></tbody>
+    <table class="wolist">
+      <thead><tr><th>WO Number</th><th>Received</th><th>Due date</th><th>Demand lines</th><th>Status</th></tr></thead>
+      <tbody id="wolistbody"></tbody>
     </table>
-    <div class="pr-note" style="max-width:1060px">Completed POs (every PO Demand fully allocated) move out of the active list but remain permanently available in history (§8.2). Temporary internal POs (<span class="mono">TMP-…-REWORK/MODIFY</span>) appear here like any other PO. Purchase Orders handles business demand only — it is not customer, pricing, invoicing, shipping, purchasing, or accounting functionality.</div>
+    <div class="pr-note" style="max-width:1060px">Completed Work Orders (every Work Order Demand fully allocated) move out of the active list but remain permanently available in history (§8.2). Temporary internal Work Orders (<span class="mono">TMP-…-REWORK/MODIFY</span>) appear here like any other Work Order. Work Orders handles business demand only — it is not customer, pricing, invoicing, shipping, purchasing, or accounting functionality.</div>
   </div>
 
-  <!-- ---------- PO detail — demand lines; an OPEN PO is editable (v6) ---------- -->
-  <div id="po-detail-panel" style="display:none">
-    <div class="po-head">
-      <button class="po-back" onclick="podBack()">‹ All POs</button>
-      <h1 class="mono" id="pod-title">PO-1010</h1>
+  <!-- ---------- WO detail — demand lines; an OPEN Work Order is editable (v6) ---------- -->
+  <div id="wo-detail-panel" style="display:none">
+    <div class="wo-head">
+      <button class="wo-back" onclick="wodBack()">‹ All Work Orders</button>
+      <h1 class="mono" id="wod-title">007010</h1>
       <div class="spacer"></div>
-      <span class="unsaved" id="pod-dirty" style="display:none">● Unsaved changes</span>
+      <span class="unsaved" id="wod-dirty" style="display:none">● Unsaved changes</span>
     </div>
-    <div class="po-sub" id="pod-sub"></div>
-    <div class="po-card">
-      <div class="pc-head" id="pod-edithead" style="display:none">
-        <span class="meta">Demand lines — each line's due date defaults to the <b>PO due date</b> and may be edited per line. Editing is a <b>local draft (mock)</b> until <b>Save demand</b>.</span>
+    <div class="wo-sub" id="wod-sub"></div>
+    <div class="wo-card">
+      <div class="woc-head" id="wod-edithead" style="display:none">
+        <span class="meta">Demand lines — each line's due date defaults to the <b>WO due date</b> and may be edited per line. Editing is a <b>local draft (mock)</b> until <b>Save demand</b>.</span>
         <div class="spacer"></div>
       </div>
-      <div class="po-lines">
-        <table class="po-table">
-          <thead id="pod-head"></thead>
-          <tbody id="pod-body"></tbody>
+      <div class="wo-lines">
+        <table class="wo-table">
+          <thead id="wod-head"></thead>
+          <tbody id="wod-body"></tbody>
         </table>
       </div>
-      <div id="pod-addpart" style="display:none;padding:12px 18px;border-top:1px solid var(--hair)">
-        <button class="btn ghost" id="pod-addbtn" onclick="podToggleAdd(true)">＋ Add Part</button>
-        <div id="pod-addrow" style="display:none">
-          <div class="np-scanrow">
-            <input id="pod-scan" placeholder="Scan PN barcode (PF:PN:…) — Enter" onkeydown="podScanKey(event)" autocomplete="off">
-            <button class="btn ghost" onclick="podAddManual()">＋ Add line manually</button>
-            <button class="btn ghost" onclick="podToggleAdd(false)">Done</button>
+      <div id="wod-addpart" style="display:none;padding:12px 18px;border-top:1px solid var(--hair)">
+        <button class="btn ghost" id="wod-addbtn" onclick="wodToggleAdd(true)">＋ Add Part</button>
+        <div id="wod-addrow" style="display:none">
+          <div class="nwo-scanrow">
+            <input id="wod-scan" placeholder="Scan PN barcode (PF:PN:…) — Enter" onkeydown="wodScanKey(event)" autocomplete="off">
+            <button class="btn ghost" onclick="wodAddManual()">＋ Add line manually</button>
+            <button class="btn ghost" onclick="wodToggleAdd(false)">Done</button>
           </div>
-          <div class="np-hint">Scan an existing PN barcode (demo: <b>PF:PN:1021</b> · <b>PF:PN:1102</b>), or add a line manually to look up / create a PN. A new line joins this PO as an <b>unsaved draft</b> — Request Type NEW, due date from the PO due date. A PN already on this PO focuses its existing line instead of adding a duplicate.</div>
+          <div class="nwo-hint">Scan an existing PN barcode (demo: <b>PF:PN:1021</b> · <b>PF:PN:1102</b>), or add a line manually to look up / create a PN. A new line joins this Work Order as an <b>unsaved draft</b> — Request Type NEW, due date from the WO due date. A PN already on this Work Order focuses its existing line instead of adding a duplicate.</div>
         </div>
       </div>
-      <div class="po-actions" id="pod-actions" style="display:none">
-        <button class="btn primary" onclick="podSave()">Save demand</button>
+      <div class="wo-actions" id="wod-actions" style="display:none">
+        <button class="btn primary" onclick="wodSave()">Save demand</button>
         <span class="hint">Saving stores <b>business demand only</b> — no Quantity Flow, no Movement, no release. Invalid rows cannot be saved. (Mock — local state only; nothing is persisted.)</span>
       </div>
     </div>
-    <div class="pr-note" style="max-width:1060px">A demand line can be removed only while <b>no production quantity has been released</b> for it (§13): an unsaved draft is removed immediately, a saved unreleased line asks for confirmation, and a released line cannot be removed — "Cannot remove: production quantity has already been released." Removal never deletes the PartNumber master, Quantity Flows, Movements, release history, or other PO Demand for the same PN. An <b>inactive PN</b> is flagged in lookup and cannot be released without reactivation. Leaving a PO with unsaved changes asks for confirmation.</div>
-  </div><!-- /po-detail-panel -->
+    <div class="pr-note" style="max-width:1060px">A demand line can be removed only while <b>no production quantity has been released</b> for it (§13): an unsaved draft is removed immediately, a saved unreleased line asks for confirmation, and a released line cannot be removed — "Cannot remove: production quantity has already been released." Removal never deletes the PartNumber master, Quantity Flows, Movements, release history, or other Work Order Demand for the same PN. An <b>inactive PN</b> is flagged in lookup and cannot be released without reactivation. Leaving a Work Order with unsaved changes asks for confirmation.</div>
+  </div><!-- /wo-detail-panel -->
 
 </section>
 
-<!-- New PO — scanner-first entry as a MODAL DIALOG over the PO list (v6, GUI §11.3) -->
-<div class="overlay" id="npovl" onmousedown="if(event.target===this)npRequestClose()">
-  <div class="dlg xwide" role="dialog" aria-modal="true" aria-labelledby="npd-title">
-    <h2 class="npd-title" id="npd-title">New PO</h2>
-    <div class="po-sub" style="margin-bottom:10px">Enter the PO header, then <b>scan each part's PN barcode</b> and type its quantity — or add lines manually for a PN that does not exist yet. Every line defaults to Request Type <span class="typechip new">NEW</span> and to the <b>PO due date</b>; both can be changed per line. An existing PO Number is opened instead of duplicated. The PO list stays behind this dialog and the URL does not change; nothing is persisted (mock).</div>
-    <div class="np-form" style="padding:12px 0">
-      <label for="np-num">PO Number</label>
-      <div><input id="np-num" class="mono" placeholder="PO-____" oninput="npFieldChanged('num')"><div class="rowerr" id="np-num-err" style="display:none"></div></div>
-      <label for="np-recv">Received date</label>
-      <div><input id="np-recv" class="mono" type="date" oninput="npFieldChanged('recv')"><div class="rowerr" id="np-recv-err" style="display:none"></div></div>
-      <label for="np-due">PO due date</label>
-      <div><input id="np-due" class="mono" type="date" oninput="npDueChanged()"><span class="np-fieldhint">default due date for every demand line</span><div class="rowerr" id="np-due-err" style="display:none"></div></div>
+<!-- New Work Order — scanner-first entry as a MODAL DIALOG over the Work Order list (v6, GUI §11.3) -->
+<div class="overlay" id="nwoovl" onmousedown="if(event.target===this)nwoRequestClose()">
+  <div class="dlg xwide" role="dialog" aria-modal="true" aria-labelledby="nwo-title">
+    <h2 class="nwo-title" id="nwo-title">New Work Order</h2>
+    <div class="wo-sub" style="margin-bottom:10px">Enter the Work Order header, then <b>scan each part's PN barcode</b> and type its quantity — or add lines manually for a PN that does not exist yet. Every line defaults to Request Type <span class="typechip new">NEW</span> and to the <b>WO due date</b>; both can be changed per line. An existing WO Number is opened instead of duplicated. The WO list stays behind this dialog and the URL does not change; nothing is persisted (mock).</div>
+    <div class="nwo-form" style="padding:12px 0">
+      <label for="nwo-num">WO Number</label>
+      <div><input id="nwo-num" class="mono" placeholder="e.g. 007482" oninput="nwoFieldChanged('num')"><div class="rowerr" id="nwo-num-err" style="display:none"></div></div>
+      <label for="nwo-recv">Received date</label>
+      <div><input id="nwo-recv" class="mono" type="date" oninput="nwoFieldChanged('recv')"><div class="rowerr" id="nwo-recv-err" style="display:none"></div></div>
+      <label for="nwo-due">WO due date</label>
+      <div><input id="nwo-due" class="mono" type="date" oninput="nwoDueChanged()"><span class="nwo-fieldhint">default due date for every demand line</span><div class="rowerr" id="nwo-due-err" style="display:none"></div></div>
     </div>
-    <div class="np-scanrow">
-      <input id="np-scan" placeholder="Scan PN barcode (PF:PN:…) — Enter" onkeydown="npScanKey(event)" autocomplete="off">
-      <button class="btn ghost" onclick="npAddManual()">＋ Add line manually</button>
+    <div class="nwo-scanrow">
+      <input id="nwo-scan" placeholder="Scan PN barcode (PF:PN:…) — Enter" onkeydown="nwoScanKey(event)" autocomplete="off">
+      <button class="btn ghost" onclick="nwoAddManual()">＋ Add line manually</button>
     </div>
-    <div class="np-hint">Scan → the line is added and its <b>Qty</b> field gets focus → type the quantity → Enter returns focus to the scan input, ready for the next part. Demo barcodes: <b>PF:PN:1014</b> · <b>PF:PN:1021</b> · <b>PF:PN:1102</b>. Scanning a PN already on this PO focuses its existing line instead of adding a duplicate. Unknown barcodes are rejected — nothing is added.</div>
-    <div class="po-lines npd-lines">
-      <table class="po-table">
+    <div class="nwo-hint">Scan → the line is added and its <b>Qty</b> field gets focus → type the quantity → Enter returns focus to the scan input, ready for the next part. Demo barcodes: <b>PF:PN:1014</b> · <b>PF:PN:1021</b> · <b>PF:PN:1102</b>. Scanning a PN already on this Work Order focuses its existing line instead of adding a duplicate. Unknown barcodes are rejected — nothing is added.</div>
+    <div class="wo-lines nwo-lines">
+      <table class="wo-table">
         <thead><tr><th>PN</th><th>Request Type</th><th>Qty</th><th>Due date</th><th>Job Numbers</th><th>Notes</th><th></th></tr></thead>
-        <tbody id="np-lines"></tbody>
+        <tbody id="nwo-lines"></tbody>
       </table>
     </div>
-    <div class="po-actions npd-actions">
-      <button class="btn ghost" onclick="npRequestClose()">Cancel</button>
-      <button class="btn primary" onclick="npSave()">Save demand</button>
+    <div class="wo-actions nwo-actions">
+      <button class="btn ghost" onclick="nwoRequestClose()">Cancel</button>
+      <button class="btn primary" onclick="nwoSave()">Save demand</button>
       <span class="hint">Saving stores <b>business demand only</b> — no Quantity Flow, no Movement, no release. (Mock — nothing is persisted.)</span>
     </div>
   </div>
 </div>
 
-<!-- Discard confirmation for a dirty New PO dialog (v6) — closing never silently discards -->
-<div class="overlay" id="npdiscard" onmousedown="if(event.target===this)npDiscardCancel()">
-  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="npdiscard-title">
-    <h3 id="npdiscard-title">Discard this New PO?</h3>
-    <div class="sub" id="npdiscard-sub">The entered PO header and demand lines have not been saved. Closing the dialog discards them — nothing was persisted.</div>
+<!-- Discard confirmation for a dirty New Work Order dialog (v6) — closing never silently discards -->
+<div class="overlay" id="nwodiscard" onmousedown="if(event.target===this)nwoDiscardCancel()">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="nwodiscard-title">
+    <h3 id="nwodiscard-title">Discard this New Work Order?</h3>
+    <div class="sub" id="nwodiscard-sub">The entered Work Order header and demand lines have not been saved. Closing the dialog discards them — nothing was persisted.</div>
     <div class="row">
-      <button class="bigbtn ghost" onclick="npDiscardCancel()">Keep editing</button>
-      <button class="bigbtn danger" onclick="npDiscardConfirm()">Discard entries</button>
+      <button class="bigbtn ghost" onclick="nwoDiscardCancel()">Keep editing</button>
+      <button class="bigbtn danger" onclick="nwoDiscardConfirm()">Discard entries</button>
     </div>
   </div>
 </div>
 
-<!-- Remove-line confirmation — saved PO Demand with no released quantity (v6, §13) -->
+<!-- Remove-line confirmation — saved Work Order Demand with no released quantity (v6, §13) -->
 <div class="overlay" id="rmovl" onmousedown="if(event.target===this)rmCancel()">
   <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="rm-title">
     <h3 id="rm-title">Remove line?</h3>
@@ -1319,7 +1319,7 @@ body.light{color-scheme:light}
   <div class="dlg light" style="width:min(660px,94vw)" role="dialog" aria-modal="true" aria-label="Release to production — explicit action">
     <h3>Release to production — explicit action</h3>
     <div class="big mono" id="rel-pn">52-09-0114</div>
-    <div class="sub" id="rel-sub">PO-1010 demand · requested <b>8</b> · nothing is created until you confirm.</div>
+    <div class="sub" id="rel-sub">WO 007010 demand · requested <b>8</b> · nothing is created until you confirm.</div>
     <div class="relwarn" id="rel-warn" style="display:none">⚠ <b>This PN already has active quantity:</b> <span id="rel-dist" class="mono"></span>. Confirm intent explicitly — release always creates a <b>separate</b> Quantity Flow; it never automatically adds to or merges existing flows.</div>
     <div class="relgrid">
       <label>Release quantity</label>
@@ -1340,11 +1340,11 @@ body.light{color-scheme:light}
 <!-- ==================== PRIORITY MANAGEMENT ==================== -->
 <section id="view-priority" class="view">
   <div class="pr-head">
-    <h1>Priority Management — Hot PO Demand</h1>
+    <h1>Priority Management — Hot WO Demand</h1>
     <div class="spacer"></div>
     <button class="btn primary" onclick="openHotAdd()">+ Add to Hot list</button>
   </div>
-  <div class="pr-sub">Priority belongs to <b>PO Demand</b>, ranked per Department. Drag to reorder, ✕ to remove — changes apply immediately and are audited. New Hot entries are added at the bottom. Multiple POs for the same PN may hold different priorities.</div>
+  <div class="pr-sub">Priority belongs to <b>Work Order Demand</b>, ranked per Department. Drag to reorder, ✕ to remove — changes apply immediately and are audited. New Hot entries are added at the bottom. Multiple Work Orders for the same PN may hold different priorities.</div>
   <div class="pr-list" id="prlist"></div>
   <div class="pr-bar">
     <button class="btn ghost" id="prundo" onclick="prUndo()" disabled>⟲ Undo</button>
@@ -1356,11 +1356,11 @@ body.light{color-scheme:light}
 <!-- add-to-hot dialog: search & select, or scan PN barcode -->
 <div class="overlay" id="hotaddovl">
   <div class="dlg light">
-    <h3>Add PO Demand to Hot list</h3>
-    <div class="sub">Search by PN, PO or Job Number and select — or <b>scan the PN barcode</b> with this dialog open.</div>
-    <input id="hotsearch" placeholder="Search PN, PO, Job Number… or scan PN barcode" autocomplete="off"
+    <h3>Add WO Demand to Hot list</h3>
+    <div class="sub">Search by PN, WO or Job Number and select — or <b>scan the PN barcode</b> with this dialog open.</div>
+    <input id="hotsearch" placeholder="Search PN, WO, Job Number… or scan PN barcode" autocomplete="off"
            oninput="renderHotAdd()" onkeydown="hotSearchKey(event)">
-    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (0455-20-0118-03) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
+    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (0455-20-0118-03) — Enter adds it directly. If a PN has multiple active Work Order Demands, each is listed separately.</div>
     <div id="hotaddlist"></div>
     <div class="row"><button class="bigbtn ghost" onclick="closeHotAdd()">Cancel (Esc)</button></div>
   </div>
@@ -1371,7 +1371,7 @@ body.light{color-scheme:light}
   <div class="dlg light">
     <h3>Remove from Hot list?</h3>
     <div class="big mono" id="hrm-pn">—</div>
-    <div class="sub">PO Demand <b class="mono" id="hrm-po">—</b> will be removed from the Hot ranking. Remaining ranks close the gap. The change applies <b>immediately</b>, is audited, and can be restored with Undo.</div>
+    <div class="sub">Work Order Demand <b class="mono" id="hrm-wo">—</b> will be removed from the Hot ranking. Remaining ranks close the gap. The change applies <b>immediately</b>, is audited, and can be restored with Undo.</div>
     <div class="row">
       <button class="bigbtn ghost" onclick="closeHotRemove()">Cancel — nothing changes</button>
       <button class="bigbtn primary" style="background:var(--err);color:#fff" onclick="confirmHotRemove()">Remove entry</button>
@@ -1431,14 +1431,14 @@ body.light{color-scheme:light}
 /* ================= Mockup navigation =================
    Top level: Scan Station · Production Board · Management · Administration.
    'mgmt' is a container view — it opens its last-used sub view and shows
-   the Management sub-nav (Area Board, Tracking, Purchase Orders, Priority). */
-const MGMT_SUBS=['area','track','po','priority'];
+   the Management sub-nav (Area Board, Tracking, Work Orders, Priority). */
+const MGMT_SUBS=['area','track','wo','priority'];
 let mgmtLast='area';                       // last-used Management sub view (session only)
 function showView(v){
   if(v==='mgmt') v=mgmtLast;               // Management opens its last-used sub view
-  if(v!=='po' && poHasUnsaved()){          // unsaved-change protection (v6)
-    if(!confirm('Purchase Orders has unsaved changes. Discard them and leave this view?')) return;
-    poDiscardAll();
+  if(v!=='wo' && woHasUnsaved()){          // unsaved-change protection (v6)
+    if(!confirm('Work Orders has unsaved changes. Discard them and leave this view?')) return;
+    woDiscardAll();
   }
   const isMgmt=MGMT_SUBS.includes(v);
   if(isMgmt) mgmtLast=v;
@@ -1450,7 +1450,7 @@ function showView(v){
   document.querySelectorAll('#mgmtnav .subbtn').forEach(b=>b.classList.toggle('active',b.dataset.v===v));
   if(v==='scan') focusScan();
   if(v==='area') renderArea();
-  if(v==='po') renderPOList();
+  if(v==='wo') renderWOList();
 }
 /* ================= Theme mode (v5) =================
    Global user-switchable Dark/Light mode — every view follows.
@@ -1650,7 +1650,7 @@ function openIntake(t){
   document.getElementById('itype').textContent=t;
   document.getElementById('itype2').textContent=t;
   document.getElementById('iqty').value='';
-  document.getElementById('ipo').selectedIndex=0;
+  document.getElementById('iwo').selectedIndex=0;
   document.getElementById('intakeovl').classList.add('show');
   setTimeout(()=>document.getElementById('iqty').focus(),60);
 }
@@ -1663,14 +1663,14 @@ function closeIntake(){
 function confirmIntake(){
   const q=parseInt(document.getElementById('iqty').value||'0',10);
   if(!q){ document.getElementById('iqty').focus(); return; }   // quantity is confirmed, never assumed
-  const posel=document.getElementById('ipo').value;
-  const po= posel==='TMP' ? 'TMP-20260722-1432-'+intakeType : posel;
+  const wosel=document.getElementById('iwo').value;
+  const wo= wosel==='TMP' ? 'TMP-20260722-1432-'+intakeType : 'WO '+wosel;
   const route=document.getElementById('iroute').value;
   const area=document.getElementById('iarea').value.replace(' (this Area)','');
   const t=intakeType; intakeType=null;
   document.getElementById('intakeovl').classList.remove('show');
-  if(recordMovement('2027-60-8114-00','RECEIVED',t+' · '+po+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
-    feedback('ok',t+' demand released into '+area, po+' · new Quantity Flow QF-0158 × '+q+' · Route “'+route+'” snapshot assigned · RECEIVED appended after confirmation.','✓');
+  if(recordMovement('2027-60-8114-00','RECEIVED',t+' · '+wo+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
+    feedback('ok',t+' demand released into '+area, wo+' · new Quantity Flow QF-0158 × '+q+' · Route “'+route+'” snapshot assigned · RECEIVED appended after confirmation.','✓');
   focusScan();
 }
 
@@ -1726,8 +1726,8 @@ function refreshAlloc(){
 function closeAlloc(confirmed){
   document.getElementById('allocovl').classList.remove('show');
   if(confirmed){
-    // PO Allocation is recorded separately from the STOCKED Movement and is never itself a Movement
-    feedback('ok','Stocked & allocated','STOCKED Movement already recorded. PO Allocation (separate from Movement): PO-1006 × '+alloc[0]+' · PO-1009 × '+alloc[1]+' — auditable, adjustable by Manager/Admin.','✓');
+    // WO Allocation is recorded separately from the STOCKED Movement and is never itself a Movement
+    feedback('ok','Stocked & allocated','STOCKED Movement already recorded. WO Allocation (separate from Movement): WO 007006 × '+alloc[0]+' · WO 007009 × '+alloc[1]+' — auditable, adjustable by Manager/Admin.','✓');
   } else {
     feedback('warn','Stocked — allocation deferred','STOCKED Movement stands; quantity remains unallocated until confirmed.','!');
   }
@@ -1735,12 +1735,12 @@ function closeAlloc(confirmed){
 }
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape') return;
-  // Layered dialogs first; the New PO dialog gets a close REQUEST so a
+  // Layered dialogs first; the New Work Order dialog gets a close REQUEST so a
   // dirty form is never silently discarded (v6).
-  if(document.getElementById('npdiscard').classList.contains('show')){ npDiscardCancel(); return; }
+  if(document.getElementById('nwodiscard').classList.contains('show')){ nwoDiscardCancel(); return; }
   if(document.getElementById('rmovl').classList.contains('show')){ rmCancel(); return; }
   if(document.getElementById('relovl').classList.contains('show')){ closeRelease(); return; }
-  if(document.getElementById('npovl').classList.contains('show')){ npRequestClose(); return; }
+  if(document.getElementById('nwoovl').classList.contains('show')){ nwoRequestClose(); return; }
   ['qtyovl','ambovl','allocovl','hotaddovl','manovl','intakeovl','hotremovl'].forEach(id=>document.getElementById(id).classList.remove('show'));
   intakeType=null; hotRemoveIdx=null;
   if(document.getElementById('view-scan').classList.contains('active')) focusScan();
@@ -1758,16 +1758,16 @@ const AREAS=[
   {key:'stockroom',name:'Stockroom',color:'var(--a-stockroom)',desc:'Terminal Area — completed parts',ops:['Receiving'],terminal:true}
 ];
 const AB_CARDS=[
-  {area:'material',pn:'0455-20-0118-03',po:'PO-1003 · Receiving',job:'ERP-88190',qty:8,mach:[['queue',8]],due:'9 days remaining',dcls:'ok',tia:'2d 01h',prio:0,d:9},
-  {area:'cut',pn:'2027-60-8114-00',po:'PO-1001 · Cutting',job:'ERP-88112',qty:4,mach:[['Saw 1',4]],due:'2 days remaining',dcls:'soon',tia:'3h 40m',prio:1,d:2},
-  {area:'lathe',pn:'2027-60-8114-00',po:'PO-1001 · Turning',job:'ERP-88112',qty:6,mach:[['Lathe 3',4],['queue',2]],due:'2 days remaining',dcls:'soon',tia:'2h 05m',prio:1,d:2},
-  {area:'lathe',pn:'0455-20-0118-03',po:'PO-1003 · Turning',job:'ERP-88190',qty:4,mach:[['Lathe 2',4]],due:'9 days remaining',dcls:'ok',tia:'1h 05m',prio:0,d:9},
-  {area:'lathe',pn:'214-406',po:'TMP-…-REWORK · Turning · REWORK',job:'— (internal)',qty:2,mach:[['queue',2]],due:'overdue 1 day',dcls:'late',tia:'6h 12m',prio:0,d:-1},
-  {area:'mill',pn:'78-04-0031',po:'PO-1002 · Milling',job:'ERP-88102',qty:3,mach:[['Mill 1',3]],due:'16 days remaining',dcls:'ok',tia:'45m',prio:0,d:16},
-  {area:'mill',pn:'0118-40-0022-07-0455-88-REV-C',po:'PO-1008 · Milling',job:'ERP-88455',qty:2,mach:[['Mill 2',2]],due:'12 days remaining',dcls:'ok',tia:'1h 20m',prio:0,d:12},
-  {area:'deburr',pn:'78-04-0031',po:'PO-1002 · Deburring',job:'ERP-88102',qty:3,mach:[['queue',3]],due:'16 days remaining',dcls:'ok',tia:'30m',prio:0,d:16},
-  {area:'external',pn:'142-260',po:'PO-1005 · Plating',job:'ERP-88031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6},
-  {area:'stockroom',pn:'309-127',po:'PO-0996 · stocked',job:'ERP-87740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:99}
+  {area:'material',pn:'0455-20-0118-03',wo:'WO 007003 · Receiving',job:'18190',qty:8,mach:[['queue',8]],due:'9 days remaining',dcls:'ok',tia:'2d 01h',prio:0,d:9},
+  {area:'cut',pn:'2027-60-8114-00',wo:'WO 007001 · Cutting',job:'18112',qty:4,mach:[['Saw 1',4]],due:'2 days remaining',dcls:'soon',tia:'3h 40m',prio:1,d:2},
+  {area:'lathe',pn:'2027-60-8114-00',wo:'WO 007001 · Turning',job:'18112',qty:6,mach:[['Lathe 3',4],['queue',2]],due:'2 days remaining',dcls:'soon',tia:'2h 05m',prio:1,d:2},
+  {area:'lathe',pn:'0455-20-0118-03',wo:'WO 007003 · Turning',job:'18190',qty:4,mach:[['Lathe 2',4]],due:'9 days remaining',dcls:'ok',tia:'1h 05m',prio:0,d:9},
+  {area:'lathe',pn:'214-406',wo:'TMP-…-REWORK · Turning · REWORK',job:'— (internal)',qty:2,mach:[['queue',2]],due:'overdue 1 day',dcls:'late',tia:'6h 12m',prio:0,d:-1},
+  {area:'mill',pn:'78-04-0031',wo:'WO 007002 · Milling',job:'18102',qty:3,mach:[['Mill 1',3]],due:'16 days remaining',dcls:'ok',tia:'45m',prio:0,d:16},
+  {area:'mill',pn:'0118-40-0022-07-0455-88-REV-C',wo:'WO 007008 · Milling',job:'18455',qty:2,mach:[['Mill 2',2]],due:'12 days remaining',dcls:'ok',tia:'1h 20m',prio:0,d:12},
+  {area:'deburr',pn:'78-04-0031',wo:'WO 007002 · Deburring',job:'18102',qty:3,mach:[['queue',3]],due:'16 days remaining',dcls:'ok',tia:'30m',prio:0,d:16},
+  {area:'external',pn:'142-260',wo:'WO 007005 · Plating',job:'18031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6},
+  {area:'stockroom',pn:'309-127',wo:'WO 006996 · stocked',job:'17740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:99}
 ];
 let abActive='all';                        // 'all' = All Areas overview (default), or an Area key
 function abSorted(cards){
@@ -1796,7 +1796,7 @@ function renderAreaOverview(){
   const q=(document.getElementById('absearch').value||'').toLowerCase();
   let pns=0,pcs=0;
   document.getElementById('aboverview').innerHTML=AREAS.map(a=>{
-    const cards=abSorted(AB_CARDS.filter(c=>c.area===a.key).filter(c=>!q||(c.pn+c.po+c.job).toLowerCase().includes(q)));
+    const cards=abSorted(AB_CARDS.filter(c=>c.area===a.key).filter(c=>!q||(c.pn+c.wo+c.job).toLowerCase().includes(q)));
     const tot=cards.reduce((s,c)=>s+c.qty,0);
     const queued=cards.reduce((s,c)=>s+c.mach.filter(m=>m[0]==='queue'||m[0]==='vendor').reduce((x,m)=>x+m[1],0),0);
     const onMach=tot-queued;
@@ -1811,7 +1811,7 @@ function renderAreaOverview(){
     const list=cards.length? '<ul class="mc-list">'+cards.map(c=>{
         const hot=c.prio? '<span class="hot h'+c.prio+'">🔥 #'+c.prio+'</span>':'';
         const mach=c.mach.map(m=>(m[0]==='queue'?'queue':m[0]==='vendor'?'vendor':m[0])+' × '+m[1]).join(' · ');
-        const parts=[c.po.split(' ·')[0]+' · '+c.job, '<span class="'+(c.dcls==='ok'?'':c.dcls)+'">'+c.due+'</span>',
+        const parts=[c.wo.split(' ·')[0]+' · '+c.job, '<span class="'+(c.dcls==='ok'?'':c.dcls)+'">'+c.due+'</span>',
                      mach||null, c.tia!=='—'? c.tia+' in Area':null].filter(Boolean);
         return '<li><div class="r1">'+hot+'<span class="p" title="'+c.pn+'">'+c.pn+'</span><span class="q">'+c.qty+'</span></div>'+
                '<div class="r2">'+parts.map(s=>'<span class="mono">'+s+'</span>').join('')+'</div></li>';
@@ -1829,7 +1829,7 @@ function renderAreaOverview(){
 /* Single Area — card grid */
 function renderAreaDetail(){
   const q=(document.getElementById('absearch').value||'').toLowerCase();
-  const cards=abSorted(AB_CARDS.filter(c=>c.area===abActive).filter(c=>!q||(c.pn+c.po+c.job).toLowerCase().includes(q)));
+  const cards=abSorted(AB_CARDS.filter(c=>c.area===abActive).filter(c=>!q||(c.pn+c.wo+c.job).toLowerCase().includes(q)));
   const area=AREAS.find(a=>a.key===abActive);
   const tot=cards.reduce((s,c)=>s+c.qty,0);
   document.getElementById('abmeta').innerHTML='<b>'+cards.length+'</b> PN · <b>'+tot+'</b> pcs in '+area.name;
@@ -1837,7 +1837,7 @@ function renderAreaDetail(){
     const hot=c.prio? '<span class="hot h'+c.prio+'">🔥 #'+c.prio+'</span> ':'';
     const mach=c.mach.map(m=>'<span class="mrow'+(m[0]==='queue'?' queue':'')+'">'+(m[0]==='queue'?'queue':m[0])+' · <b>'+m[1]+'</b></span>').join('');
     return '<div class="ab-card"><div class="top"><div class="id">'+
-      '<div class="part" title="'+c.pn+'">'+hot+c.pn+'</div><div class="po">'+c.po+'</div><div class="ext">Job: '+c.job+'</div></div>'+
+      '<div class="part" title="'+c.pn+'">'+hot+c.pn+'</div><div class="wo">'+c.wo+'</div><div class="ext">Job: '+c.job+'</div></div>'+
       '<div class="qtyblk"><div class="qlbl">In this Area</div><div class="qty-big">'+c.qty+'</div><div class="qunit">pcs</div></div></div>'+
       (mach?'<div class="machines">'+mach+'</div>':'')+
       '<div class="foot"><span class="duetxt '+c.dcls+'">'+c.due+'</span><span class="tia">'+(c.tia==='—'?'':c.tia+' in Area')+'</span></div></div>';
@@ -1855,30 +1855,30 @@ function selectPN(row,pn){
    Hot list edits (reorder / add / remove) apply immediately and are audited.
    Undo/Redo replace Save/Cancel per current UI decision — supersedes §21 step 5. */
 let hotList=[
-  {pn:'2027-60-8114-00',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
-  {pn:'142-260',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
-  {pn:'309-127',po:'PO-1006 · ERP-88355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
+  {pn:'2027-60-8114-00',wo:'WO 007001 · 18112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
+  {pn:'142-260',wo:'WO 007005 · 18031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
+  {pn:'309-127',wo:'WO 007006 · 18355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
 ];
 const HOT_CANDIDATES=[
-  {pn:'0455-20-0118-03',po:'PO-1003 · ERP-88190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
-  {pn:'78-04-0031',po:'PO-1002 · ERP-88102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
-  {pn:'214-406',po:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
+  {pn:'0455-20-0118-03',wo:'WO 007003 · 18190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
+  {pn:'78-04-0031',wo:'WO 007002 · 18102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
+  {pn:'214-406',wo:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
 ];
 let undoHist=[], redoHist=[];
 const prlist=document.getElementById('prlist');
-const hotKey=h=>h.pn+'|'+h.po;
+const hotKey=h=>h.pn+'|'+h.wo;
 
 function renderHot(){
   prlist.innerHTML = hotList.length ? hotList.map((h,i)=>
     '<div class="pr-item" draggable="true" data-k="'+hotKey(h)+'">'+
       '<span class="grip">⠿</span><span class="rank">'+(i+1)+'</span>'+
-      '<div class="body"><div class="l1"><span class="pn">'+h.pn+'</span><span class="po">'+h.po+'</span>'+
+      '<div class="body"><div class="l1"><span class="pn">'+h.pn+'</span><span class="wo">'+h.wo+'</span>'+
         '<span class="typechip '+h.type+'">'+h.type.toUpperCase()+'</span></div>'+
         '<div class="l2">'+h.meta.split('|').map(s=>'<span>'+s+'</span>').join('')+'</div></div>'+
       '<div class="due"><div>'+h.due+'</div><div class="d2 '+h.d2c+'">'+h.d2+'</div></div>'+
       '<button class="pr-x" title="Remove from Hot list" onclick="removeHot('+i+')">✕</button>'+
     '</div>').join('')
-    : '<div class="pr-empty">No Hot PO Demand — add one with “+ Add to Hot list”, or scan a PN barcode in the add dialog.</div>';
+    : '<div class="pr-empty">No Hot WO Demand — add one with “+ Add to Hot list”, or scan a PN barcode in the add dialog.</div>';
   updatePrButtons();
 }
 function updatePrButtons(){
@@ -1898,13 +1898,13 @@ function prRedo(){
   hotList=JSON.parse(redoHist.pop()); renderHot();
   toast('⟳','Redo — change re-applied (audited)');
 }
-/* removal requires explicit confirmation identifying PN and PO Demand (§21 Priority) */
+/* removal requires explicit confirmation identifying PN and Work Order Demand (§21 Priority) */
 let hotRemoveIdx=null;
 function removeHot(i){
   hotRemoveIdx=i;
   const h=hotList[i];
   document.getElementById('hrm-pn').textContent=h.pn;
-  document.getElementById('hrm-po').textContent=h.po;
+  document.getElementById('hrm-wo').textContent=h.wo;
   document.getElementById('hotremovl').classList.add('show');
 }
 function closeHotRemove(){ document.getElementById('hotremovl').classList.remove('show'); hotRemoveIdx=null; }
@@ -1913,7 +1913,7 @@ function confirmHotRemove(){
   prSnapshot();
   const r=hotList.splice(hotRemoveIdx,1)[0];
   closeHotRemove(); renderHot();
-  toast('✕',r.pn+' · '+r.po.split(' ·')[0]+' removed from Hot list (audited) — remaining ranks close the gap · Undo can restore it');
+  toast('✕',r.pn+' · '+r.wo.split(' ·')[0]+' removed from Hot list (audited) — remaining ranks close the gap · Undo can restore it');
 }
 
 /* drag & drop reorder */
@@ -1951,21 +1951,21 @@ function openHotAdd(){
 function closeHotAdd(){ document.getElementById('hotaddovl').classList.remove('show'); }
 function renderHotAdd(){
   const q=document.getElementById('hotsearch').value.trim().toLowerCase();
-  const list=hotCandidates().filter(c=>!q||(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(q));
+  const list=hotCandidates().filter(c=>!q||(c.pn+' '+c.wo+' '+c.code).toLowerCase().includes(q));
   document.getElementById('hotaddlist').innerHTML = list.length ? list.map(c=>
     '<button class="hotadd-item" onclick="addHot(\''+c.pn+'\')">'+
-      '<span class="hpn">'+c.pn+'</span><span class="hpo">'+c.po+'</span>'+
+      '<span class="hpn">'+c.pn+'</span><span class="hwo">'+c.wo+'</span>'+
       '<span class="typechip '+c.type+'">'+c.type.toUpperCase()+'</span>'+
       '<span class="hdue '+(c.d2c==='late'?'late':'')+'">'+c.due+' · '+c.d2+'</span>'+
     '</button>').join('')
-    : '<div class="hotadd-empty">No matching active PO Demand'+(q?' for “'+q+'”':' — everything is already Hot')+'</div>';
+    : '<div class="hotadd-empty">No matching active Work Order Demand'+(q?' for “'+q+'”':' — everything is already Hot')+'</div>';
 }
 function hotSearchKey(e){
   if(e.key!=='Enter') return;
   const v=e.target.value.trim().toUpperCase();
   const byCode=hotCandidates().find(c=>c.code===v);
   if(byCode){ addHot(byCode.pn); return; }
-  const list=hotCandidates().filter(c=>(c.pn+' '+c.po+' '+c.code).toLowerCase().includes(v.toLowerCase()));
+  const list=hotCandidates().filter(c=>(c.pn+' '+c.wo+' '+c.code).toLowerCase().includes(v.toLowerCase()));
   if(list.length===1) addHot(list[0].pn);
 }
 function addHot(pn){
@@ -1973,13 +1973,13 @@ function addHot(pn){
   prSnapshot();
   const {code,...item}=c; hotList.push(item);   // new Hot entries join at the bottom (§21)
   renderHot(); closeHotAdd();
-  toast('🔥',c.pn+' · '+c.po.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
+  toast('🔥',c.pn+' · '+c.wo.split(' ·')[0]+' added at the bottom — rank #'+hotList.length);
 }
 renderHot();
 
-/* ================= Purchase Orders (§13, GUI §11 v6) =================
-   PO list · editable OPEN PO detail (＋ Add Part, guarded removal) ·
-   New PO as a modal dialog over the list. All state is mock-only. */
+/* ================= Work Orders (§13, GUI §11 v6) =================
+   WO list · editable OPEN WO detail (＋ Add Part, guarded removal) ·
+   New Work Order as a modal dialog over the list. All state is mock-only. */
 function fmtDate(iso){
   const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(iso||''); if(!m) return iso||'—';
   const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1991,367 +1991,367 @@ function todayISO(){
 }
 const PN_CATALOG={'PF:PN:1014':'0455-20-0118-03','PF:PN:1021':'78-04-0031','PF:PN:1102':'309-127','PF:PN:1033':'214-406'};
 /* Editable dates are ISO YYYY-MM-DD; read-only presentation formats them. */
-const PO_LIST=[
-  {po:'PO-1010',received:'2026-07-22',due:'2026-08-12',dcls:'',status:'Open',preview:'0455-20-0118-03 · 52-09-0114 · 2 more',lines:[
-    {pn:'0455-20-0118-03',bc:'existing PN · barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-08-12',job:'ERP-88411',notes:'',scls:'saved',stat:'Saved',rel:true},
-    {pn:'52-09-0114',bc:'new PN — barcode created with PN master: PF:PN:1201',type:'NEW',qty:8,due:'2026-08-20',job:'ERP-88420',notes:'hardened',scls:'saved',stat:'Saved',rel:true},
-    {pn:'2027-60-8114-00',bc:'existing PN · barcode PF:PN:1044',type:'NEW',qty:6,due:'2026-08-05',job:'ERP-88395',notes:'',scls:'released',stat:'Released · QF-0161'},
+const WO_LIST=[
+  {wo:'007010',received:'2026-07-22',due:'2026-08-12',dcls:'',status:'Open',preview:'0455-20-0118-03 · 52-09-0114 · 2 more',lines:[
+    {pn:'0455-20-0118-03',bc:'existing PN · barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-08-12',job:'18411',notes:'',scls:'saved',stat:'Saved',rel:true},
+    {pn:'52-09-0114',bc:'new PN — barcode created with PN master: PF:PN:1201',type:'NEW',qty:8,due:'2026-08-20',job:'18420',notes:'hardened',scls:'saved',stat:'Saved',rel:true},
+    {pn:'2027-60-8114-00',bc:'existing PN · barcode PF:PN:1044',type:'NEW',qty:6,due:'2026-08-05',job:'18395',notes:'',scls:'released',stat:'Released · QF-0161'},
     {pn:'',bc:'PN lookup or inline create required',type:'REWORK',qty:0,due:'',job:'',notes:'',scls:'invalid',stat:'Row invalid'}
   ]},
-  {po:'PO-1003',received:'2026-07-12',due:'2026-07-31',dcls:'',status:'Released',preview:'0455-20-0118-03',lines:[
-    {pn:'0455-20-0118-03',bc:'barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-07-31',job:'ERP-88190',notes:'',scls:'released',stat:'Released · QF-0148'}]},
-  {po:'PO-1005',received:'2026-07-06',due:'2026-07-16',dcls:'late',status:'Released',preview:'142-260',lines:[
-    {pn:'142-260',bc:'barcode PF:PN:1007',type:'NEW',qty:20,due:'2026-07-16',job:'ERP-88031',notes:'',scls:'released',stat:'Released · QF-0152'}]},
-  {po:'TMP-20260721-0940-REWORK',received:'2026-07-21',due:'2026-07-21',dcls:'late',status:'Released',preview:'214-406',internal:true,lines:[
+  {wo:'007003',received:'2026-07-12',due:'2026-07-31',dcls:'',status:'Released',preview:'0455-20-0118-03',lines:[
+    {pn:'0455-20-0118-03',bc:'barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-07-31',job:'18190',notes:'',scls:'released',stat:'Released · QF-0148'}]},
+  {wo:'007005',received:'2026-07-06',due:'2026-07-16',dcls:'late',status:'Released',preview:'142-260',lines:[
+    {pn:'142-260',bc:'barcode PF:PN:1007',type:'NEW',qty:20,due:'2026-07-16',job:'18031',notes:'',scls:'released',stat:'Released · QF-0152'}]},
+  {wo:'TMP-20260721-0940-REWORK',received:'2026-07-21',due:'2026-07-21',dcls:'late',status:'Released',preview:'214-406',internal:true,lines:[
     {pn:'214-406',bc:'barcode PF:PN:1033',type:'REWORK',qty:2,due:'2026-07-21',job:'— (internal)',notes:'',scls:'released',stat:'Released · QF-0158'}]},
-  {po:'PO-0996',received:'2026-06-18',due:'2026-07-10',dcls:'',status:'Complete',preview:'309-127',lines:[
-    {pn:'309-127',bc:'barcode PF:PN:1102',type:'NEW',qty:50,due:'2026-07-10',job:'ERP-87740',notes:'',scls:'released',stat:'Allocated 50 / 50'}]}
+  {wo:'006996',received:'2026-06-18',due:'2026-07-10',dcls:'',status:'Complete',preview:'309-127',lines:[
+    {pn:'309-127',bc:'barcode PF:PN:1102',type:'NEW',qty:50,due:'2026-07-10',job:'17740',notes:'',scls:'released',stat:'Allocated 50 / 50'}]}
 ];
-function poPanels(which){
-  ['po-list-panel','po-detail-panel'].forEach(id=>
+function woPanels(which){
+  ['wo-list-panel','wo-detail-panel'].forEach(id=>
     document.getElementById(id).style.display = id===which?'block':'none');
 }
-function showPOList(){ poPanels('po-list-panel'); renderPOList(); }
-function renderPOList(){
-  const q=(document.getElementById('posearch').value||'').trim().toLowerCase();
-  const list=PO_LIST.filter(p=>!q||(p.po+' '+p.preview).toLowerCase().includes(q));
-  document.getElementById('polistbody').innerHTML=list.length? list.map(p=>
-    '<tr onclick="openPO(\''+p.po+'\')">'+
-      '<td><div class="po">'+p.po+'</div>'+(p.internal?'<div class="sub">temporary internal PO</div>':'')+'</td>'+
+function showWOList(){ woPanels('wo-list-panel'); renderWOList(); }
+function renderWOList(){
+  const q=(document.getElementById('wosearch').value||'').trim().toLowerCase();
+  const list=WO_LIST.filter(p=>!q||(p.wo+' '+p.preview).toLowerCase().includes(q));
+  document.getElementById('wolistbody').innerHTML=list.length? list.map(p=>
+    '<tr onclick="openWO(\''+p.wo+'\')">'+
+      '<td><div class="wo">'+p.wo+'</div>'+(p.internal?'<div class="sub">temporary internal Work Order</div>':'')+'</td>'+
       '<td class="mono-sm">'+fmtDate(p.received)+'</td>'+
       '<td class="mono-sm"><span class="duetxt '+p.dcls+'">'+fmtDate(p.due)+'</span></td>'+
       '<td>'+p.lines.length+'<div class="sub mono-sm">'+p.preview+'</div></td>'+
-      '<td><span class="postat '+p.status.toLowerCase()+'">'+p.status+'</span></td>'+
+      '<td><span class="wostat '+p.status.toLowerCase()+'">'+p.status+'</span></td>'+
     '</tr>').join('')
-    : '<tr><td colspan="5" style="text-align:center;color:var(--faint);padding:28px">No PO matches “'+q+'” — check the number, or create it with ＋ New PO</td></tr>';
+    : '<tr><td colspan="5" style="text-align:center;color:var(--faint);padding:28px">No Work Order matches “'+q+'” — check the number, or create it with ＋ New Work Order</td></tr>';
 }
 
-/* ---- PO detail: an OPEN PO edits a local draft (mock) ---- */
+/* ---- WO detail: an OPEN Work Order edits a local draft (mock) ---- */
 const REMOVE_BLOCKED='Cannot remove: production quantity has already been released.';
-let podPO=null,podLines=[],podDue='',podDirty=false,podSeq=1,rmId=null;
-function openPO(po){
-  podPO=PO_LIST.find(x=>x.po===po); if(!podPO) return;
-  podDue=podPO.due; podDirty=false;
-  podLines=podPO.lines.map(l=>({id:podSeq++,pn:l.pn||null,bc:l.bc,isNew:l.bc.indexOf('new PN')===0,
-    type:l.type,qty:l.qty>0?String(l.qty):'',due:l.due,touched:l.due!==podPO.due,job:l.job==='—'?'':l.job,
+let wodWO=null,wodLines=[],wodDue='',wodDirty=false,wodSeq=1,rmId=null;
+function openWO(wo){
+  wodWO=WO_LIST.find(x=>x.wo===wo); if(!wodWO) return;
+  wodDue=wodWO.due; wodDirty=false;
+  wodLines=wodWO.lines.map(l=>({id:wodSeq++,pn:l.pn||null,bc:l.bc,isNew:l.bc.indexOf('new PN')===0,
+    type:l.type,qty:l.qty>0?String(l.qty):'',due:l.due,touched:l.due!==wodWO.due,job:l.job==='—'?'':l.job,
     notes:l.notes||'',saved:l.scls!=='invalid',released:l.scls==='released',stat:l.stat,rel:!!l.rel,err:{}}));
-  document.getElementById('pod-addrow').style.display='none';
-  document.getElementById('pod-addbtn').style.display='inline-flex';
-  poPanels('po-detail-panel'); renderPOD();
+  document.getElementById('wod-addrow').style.display='none';
+  document.getElementById('wod-addbtn').style.display='inline-flex';
+  woPanels('wo-detail-panel'); renderWOD();
 }
-function podEditable(){ return !!podPO && podPO.status==='Open'; }
-function podMarkDirty(){ podDirty=true; document.getElementById('pod-dirty').style.display='inline-block'; }
-function podClearDirty(){ podDirty=false; document.getElementById('pod-dirty').style.display='none'; }
-function renderPOD(){
-  const ed=podEditable();
-  document.getElementById('pod-title').textContent=podPO.po;
-  document.getElementById('pod-sub').innerHTML='received <b class="mono">'+fmtDate(podPO.received)+'</b> · PO due date '+
-    (ed?'<input type="date" class="po-due-input" id="pod-due" value="'+podDue+'" onchange="podDueChanged(this.value)" aria-label="PO due date">'
-       :'<b class="mono">'+fmtDate(podPO.due)+'</b>')+
-    ' · '+podLines.length+' demand line'+(podLines.length===1?'':'s')+
-    ' · <span class="postat '+podPO.status.toLowerCase()+'">'+podPO.status+'</span>'+
-    (podPO.internal?' · temporary internal PO (auditable, unique)':'');
-  document.getElementById('pod-edithead').style.display=ed?'flex':'none';
-  document.getElementById('pod-addpart').style.display=ed?'block':'none';
-  document.getElementById('pod-actions').style.display=ed?'flex':'none';
-  document.getElementById('pod-dirty').style.display=(ed&&podDirty)?'inline-block':'none';
-  document.getElementById('pod-head').innerHTML='<tr><th>PN</th><th>Request Type</th><th>Qty</th><th>Due date</th><th>Job Numbers</th><th>Status</th>'+(ed?'<th></th>':'')+'</tr>';
-  document.getElementById('pod-body').innerHTML=podLines.map(l=>podRow(l,ed)).join('');
+function wodEditable(){ return !!wodWO && wodWO.status==='Open'; }
+function wodMarkDirty(){ wodDirty=true; document.getElementById('wod-dirty').style.display='inline-block'; }
+function wodClearDirty(){ wodDirty=false; document.getElementById('wod-dirty').style.display='none'; }
+function renderWOD(){
+  const ed=wodEditable();
+  document.getElementById('wod-title').textContent=wodWO.wo;
+  document.getElementById('wod-sub').innerHTML='received <b class="mono">'+fmtDate(wodWO.received)+'</b> · WO due date '+
+    (ed?'<input type="date" class="wo-due-input" id="wod-due" value="'+wodDue+'" onchange="wodDueChanged(this.value)" aria-label="WO due date">'
+       :'<b class="mono">'+fmtDate(wodWO.due)+'</b>')+
+    ' · '+wodLines.length+' demand line'+(wodLines.length===1?'':'s')+
+    ' · <span class="wostat '+wodWO.status.toLowerCase()+'">'+wodWO.status+'</span>'+
+    (wodWO.internal?' · temporary internal Work Order (auditable, unique)':'');
+  document.getElementById('wod-edithead').style.display=ed?'flex':'none';
+  document.getElementById('wod-addpart').style.display=ed?'block':'none';
+  document.getElementById('wod-actions').style.display=ed?'flex':'none';
+  document.getElementById('wod-dirty').style.display=(ed&&wodDirty)?'inline-block':'none';
+  document.getElementById('wod-head').innerHTML='<tr><th>PN</th><th>Request Type</th><th>Qty</th><th>Due date</th><th>Job Numbers</th><th>Status</th>'+(ed?'<th></th>':'')+'</tr>';
+  document.getElementById('wod-body').innerHTML=wodLines.map(l=>wodRow(l,ed)).join('');
 }
-function podRow(l,ed){
+function wodRow(l,ed){
   const rowEd=ed&&!l.released;
   const scls=l.released?'released':(l.saved?'saved':'draft');
   const stat=l.released?l.stat:(l.saved?'Saved':'Draft (unsaved)');
   const pnCell = l.pn
     ? '<div class="pn">'+l.pn+'</div>'
-    : (rowEd?'<input placeholder="type PN — lookup or create" size="16" aria-label="PartNumber lookup or create" onchange="podManualPN('+l.id+',this)">':'<div class="pn" style="color:var(--faint)">—</div>');
+    : (rowEd?'<input placeholder="type PN — lookup or create" size="16" aria-label="PartNumber lookup or create" onchange="wodManualPN('+l.id+',this)">':'<div class="pn" style="color:var(--faint)">—</div>');
   return '<tr>'+
     '<td'+(l.err.pn?' class="err-cell"':'')+'>'+pnCell+
       '<div class="bc'+(l.isNew?' newpn':'')+'">'+l.bc+'</div>'+
       (l.notes?'<div class="bc">notes: '+l.notes+'</div>':'')+
       (l.err.pn?'<div class="rowerr">'+l.err.pn+'</div>':'')+'</td>'+
     '<td>'+(rowEd&&!l.saved
-      ? '<select onchange="podField('+l.id+',\'type\',this.value)">'+['NEW','REWORK','MODIFY'].map(t=>'<option'+(t===l.type?' selected':'')+'>'+t+'</option>').join('')+'</select>'
+      ? '<select onchange="wodField('+l.id+',\'type\',this.value)">'+['NEW','REWORK','MODIFY'].map(t=>'<option'+(t===l.type?' selected':'')+'>'+t+'</option>').join('')+'</select>'
       : '<span class="typechip '+l.type.toLowerCase()+'">'+l.type+'</span>')+'</td>'+
     '<td'+(l.err.qty?' class="err-cell"':'')+'>'+(rowEd
-      ? '<input class="mono" id="podq-'+l.id+'" value="'+l.qty+'" size="4" inputmode="numeric" placeholder="qty" aria-label="Quantity for '+(l.pn||'new line')+'" oninput="podField('+l.id+',\'qty\',this.value)" onkeydown="podQtyKey(event)">'+(l.err.qty?'<div class="rowerr">'+l.err.qty+'</div>':'')
+      ? '<input class="mono" id="wodq-'+l.id+'" value="'+l.qty+'" size="4" inputmode="numeric" placeholder="qty" aria-label="Quantity for '+(l.pn||'new line')+'" oninput="wodField('+l.id+',\'qty\',this.value)" onkeydown="wodQtyKey(event)">'+(l.err.qty?'<div class="rowerr">'+l.err.qty+'</div>':'')
       : '<span class="mono">'+l.qty+'</span>')+'</td>'+
     '<td'+(l.err.due?' class="err-cell"':'')+'>'+(rowEd
-      ? '<input type="date" class="mono podline-due" id="podd-'+l.id+'" value="'+l.due+'" aria-label="Due date for '+(l.pn||'new line')+'" onchange="podField('+l.id+',\'due\',this.value);podTouch('+l.id+')">'+(l.err.due?'<div class="rowerr">'+l.err.due+'</div>':'')
+      ? '<input type="date" class="mono wodline-due" id="wodd-'+l.id+'" value="'+l.due+'" aria-label="Due date for '+(l.pn||'new line')+'" onchange="wodField('+l.id+',\'due\',this.value);wodTouch('+l.id+')">'+(l.err.due?'<div class="rowerr">'+l.err.due+'</div>':'')
       : '<span class="mono">'+fmtDate(l.due)+'</span>')+'</td>'+
     '<td>'+(rowEd
-      ? '<input class="mono" value="'+l.job+'" size="10" placeholder="job #…" aria-label="Job Numbers for '+(l.pn||'new line')+'" oninput="podField('+l.id+',\'job\',this.value)">'
+      ? '<input class="mono" value="'+l.job+'" size="10" placeholder="job #…" aria-label="Job Numbers for '+(l.pn||'new line')+'" oninput="wodField('+l.id+',\'job\',this.value)">'
       : '<span class="mono">'+(l.job||'—')+'</span>')+'</td>'+
     '<td><span class="linestat '+scls+'">'+stat+'</span></td>'+
-    (ed?'<td><div class="po-rowactions">'+
+    (ed?'<td><div class="wo-rowactions">'+
         (l.saved||l.released?'<button class="rel-btn"'+((l.released||!l.rel)?' disabled':'')+' onclick="openRelease(\''+l.pn+'\')">Release to production…</button>':'')+
-        '<button class="pr-x"'+(l.released?' disabled':'')+' title="'+(l.released?REMOVE_BLOCKED:(l.saved?'Remove line (asks for confirmation)':'Remove draft line'))+'" aria-label="Remove line '+(l.pn||'')+'" onclick="podRemove('+l.id+')">✕</button></div>'+
+        '<button class="pr-x"'+(l.released?' disabled':'')+' title="'+(l.released?REMOVE_BLOCKED:(l.saved?'Remove line (asks for confirmation)':'Remove draft line'))+'" aria-label="Remove line '+(l.pn||'')+'" onclick="wodRemove('+l.id+')">✕</button></div>'+
         (l.released?'<div class="bc">'+REMOVE_BLOCKED+'</div>':'')+'</td>':'')+
   '</tr>';
 }
-function podLine(id){ return podLines.find(l=>l.id===id); }
-function podField(id,f,v){ const l=podLine(id); if(!l) return; l[f]=v; delete l.err[f]; podMarkDirty(); }
-function podTouch(id){ const l=podLine(id); if(l) l.touched=true; }
-function podQtyKey(e){
+function wodLine(id){ return wodLines.find(l=>l.id===id); }
+function wodField(id,f,v){ const l=wodLine(id); if(!l) return; l[f]=v; delete l.err[f]; wodMarkDirty(); }
+function wodTouch(id){ const l=wodLine(id); if(l) l.touched=true; }
+function wodQtyKey(e){
   if(e.key!=='Enter') return;
   const q=e.target.value.trim();
   if(!/^\d+$/.test(q)||parseInt(q,10)<1){ toast('✕','Quantity must be a positive whole number'); e.target.select(); return; }
-  const scan=document.getElementById('pod-scan');
-  if(document.getElementById('pod-addrow').style.display!=='none') scan.focus();
+  const scan=document.getElementById('wod-scan');
+  if(document.getElementById('wod-addrow').style.display!=='none') scan.focus();
 }
-function podDueChanged(v){
-  podDue=v; podMarkDirty();
-  podLines.forEach(l=>{ if(!l.touched&&!l.released){ l.due=v;
-    const el=document.getElementById('podd-'+l.id); if(el) el.value=v; } });
+function wodDueChanged(v){
+  wodDue=v; wodMarkDirty();
+  wodLines.forEach(l=>{ if(!l.touched&&!l.released){ l.due=v;
+    const el=document.getElementById('wodd-'+l.id); if(el) el.value=v; } });
 }
-function podToggleAdd(show){
-  document.getElementById('pod-addrow').style.display=show?'block':'none';
-  document.getElementById('pod-addbtn').style.display=show?'none':'inline-flex';
-  if(show) document.getElementById('pod-scan').focus();
+function wodToggleAdd(show){
+  document.getElementById('wod-addrow').style.display=show?'block':'none';
+  document.getElementById('wod-addbtn').style.display=show?'none':'inline-flex';
+  if(show) document.getElementById('wod-scan').focus();
 }
-function podAddDraft(pn,bc,isNew){
-  const l={id:podSeq++,pn:pn,bc:bc,isNew:!!isNew,type:'NEW',qty:'',due:podDue,touched:false,job:'',notes:'',saved:false,released:false,stat:'Draft (unsaved)',rel:false,err:{}};
-  podLines.push(l); podMarkDirty(); renderPOD(); podToggleAddKeep();
+function wodAddDraft(pn,bc,isNew){
+  const l={id:wodSeq++,pn:pn,bc:bc,isNew:!!isNew,type:'NEW',qty:'',due:wodDue,touched:false,job:'',notes:'',saved:false,released:false,stat:'Draft (unsaved)',rel:false,err:{}};
+  wodLines.push(l); wodMarkDirty(); renderWOD(); wodToggleAddKeep();
   return l;
 }
-function podToggleAddKeep(){ // re-render hid the add row state; restore it
-  document.getElementById('pod-addrow').style.display='block';
-  document.getElementById('pod-addbtn').style.display='none';
+function wodToggleAddKeep(){ // re-render hid the add row state; restore it
+  document.getElementById('wod-addrow').style.display='block';
+  document.getElementById('wod-addbtn').style.display='none';
 }
-function podScanKey(e){
+function wodScanKey(e){
   if(e.key!=='Enter') return;
   const v=e.target.value.trim().toUpperCase(); e.target.value='';
   if(!v) return;
   const pn=PN_CATALOG[v];
   if(!pn){ toast('✕','Unknown barcode “'+v+'” — nothing added. Only PN barcodes (PF:PN:…) add demand lines.'); return; }
-  const dup=podLines.find(l=>l.pn===pn);
+  const dup=wodLines.find(l=>l.pn===pn);
   if(dup){
-    if(dup.released){ toast('⚠',pn+' is already on this PO and its production quantity is released — the line is read-only here.'); return; }
-    toast('⚠',pn+' is already on this PO — edit its quantity instead of adding a duplicate line.');
-    const q=document.getElementById('podq-'+dup.id); if(q){ q.focus(); q.select(); } return;
+    if(dup.released){ toast('⚠',pn+' is already on this Work Order and its production quantity is released — the line is read-only here.'); return; }
+    toast('⚠',pn+' is already on this Work Order — edit its quantity instead of adding a duplicate line.');
+    const q=document.getElementById('wodq-'+dup.id); if(q){ q.focus(); q.select(); } return;
   }
-  const l=podAddDraft(pn,'existing PN · barcode '+v,false);
-  toast('✓',pn+' added as an unsaved draft line — Request Type NEW · due date from PO due date.');
-  const q=document.getElementById('podq-'+l.id); if(q) q.focus();
+  const l=wodAddDraft(pn,'existing PN · barcode '+v,false);
+  toast('✓',pn+' added as an unsaved draft line — Request Type NEW · due date from WO due date.');
+  const q=document.getElementById('wodq-'+l.id); if(q) q.focus();
 }
-function podAddManual(){
-  const l=podAddDraft(null,'PN lookup — an unknown PN is created inline with its barcode',false);
-  const row=document.getElementById('pod-body');
+function wodAddManual(){
+  const l=wodAddDraft(null,'PN lookup — an unknown PN is created inline with its barcode',false);
+  const row=document.getElementById('wod-body');
   const inp=row.querySelector('tr:last-child input[aria-label="PartNumber lookup or create"]');
   if(inp) inp.focus();
 }
-function podManualPN(id,inp){
+function wodManualPN(id,inp){
   const pn=inp.value.trim().toUpperCase(); if(!pn) return;
-  const dup=podLines.find(l=>l.id!==id&&l.pn===pn);
-  if(dup){ toast('⚠',pn+' is already on this PO — edit the existing line instead of adding a duplicate.');
-    inp.value=''; if(!dup.released){ const q=document.getElementById('podq-'+dup.id); if(q){ q.focus(); q.select(); } } return; }
-  const l=podLine(id); if(!l) return;
+  const dup=wodLines.find(l=>l.id!==id&&l.pn===pn);
+  if(dup){ toast('⚠',pn+' is already on this Work Order — edit the existing line instead of adding a duplicate.');
+    inp.value=''; if(!dup.released){ const q=document.getElementById('wodq-'+dup.id); if(q){ q.focus(); q.select(); } } return; }
+  const l=wodLine(id); if(!l) return;
   l.pn=pn; l.bc='new PN — barcode created with PN master: PF:PN:…'; l.isNew=true; delete l.err.pn;
-  podMarkDirty(); renderPOD(); podToggleAddKeep();
-  const q=document.getElementById('podq-'+l.id); if(q) q.focus();
+  wodMarkDirty(); renderWOD(); wodToggleAddKeep();
+  const q=document.getElementById('wodq-'+l.id); if(q) q.focus();
 }
-function podRemove(id){
-  const l=podLine(id); if(!l||l.released) return;
+function wodRemove(id){
+  const l=wodLine(id); if(!l||l.released) return;
   if(!l.saved){
-    podLines=podLines.filter(x=>x.id!==id); podMarkDirty(); renderPOD(); podToggleAddKeepIfOpen();
+    wodLines=wodLines.filter(x=>x.id!==id); wodMarkDirty(); renderWOD(); wodToggleAddKeepIfOpen();
     toast('✕','Draft line removed — it had never been saved.'); return;
   }
   rmId=id;
-  document.getElementById('rm-title').textContent='Remove '+(l.pn||'line')+' from '+podPO.po+'?';
-  document.getElementById('rm-sub').innerHTML='No production quantity has been released for this PO Demand line (<span class="mono">'+l.pn+'</span> · qty '+(l.qty||'—')+'). Removing it never deletes the PartNumber master, Quantity Flows, Movements, release history, or other PO Demand for the same PN. <b>Mock:</b> the removal affects local mock state only and is applied by Save demand.';
+  document.getElementById('rm-title').textContent='Remove '+(l.pn||'line')+' from '+wodWO.wo+'?';
+  document.getElementById('rm-sub').innerHTML='No production quantity has been released for this Work Order Demand line (<span class="mono">'+l.pn+'</span> · qty '+(l.qty||'—')+'). Removing it never deletes the PartNumber master, Quantity Flows, Movements, release history, or other Work Order Demand for the same PN. <b>Mock:</b> the removal affects local mock state only and is applied by Save demand.';
   document.getElementById('rmovl').classList.add('show');
 }
-function podToggleAddKeepIfOpen(){
-  if(!podEditable()) return;
-  const open=document.getElementById('pod-addrow').style.display!=='none';
-  if(open) podToggleAddKeep();
+function wodToggleAddKeepIfOpen(){
+  if(!wodEditable()) return;
+  const open=document.getElementById('wod-addrow').style.display!=='none';
+  if(open) wodToggleAddKeep();
 }
 function rmCancel(){ rmId=null; document.getElementById('rmovl').classList.remove('show'); }
 function rmConfirm(){
-  const l=podLine(rmId); rmId=null; document.getElementById('rmovl').classList.remove('show');
+  const l=wodLine(rmId); rmId=null; document.getElementById('rmovl').classList.remove('show');
   if(!l) return;
-  podLines=podLines.filter(x=>x.id!==l.id); podMarkDirty(); renderPOD();
+  wodLines=wodLines.filter(x=>x.id!==l.id); wodMarkDirty(); renderWOD();
   toast('✕',l.pn+' removed from the draft — Save demand applies it to local mock state only.');
 }
-function podSave(){
+function wodSave(){
   let firstErr=null; const seen={};
-  podLines.forEach(l=>{
+  wodLines.forEach(l=>{
     l.err={};
     if(l.released) return;
     if(!l.pn){ l.err.pn='PN is required — look up or create the PartNumber'; }
-    else if(seen[l.pn]){ l.err.pn='duplicate PN — '+l.pn+' is already on this PO'; }
+    else if(seen[l.pn]){ l.err.pn='duplicate PN — '+l.pn+' is already on this Work Order'; }
     else seen[l.pn]=1;
     if(!/^\d+$/.test((l.qty||'').trim())||parseInt(l.qty,10)<1) l.err.qty='quantity must be a positive whole number';
     if(!l.due) l.err.due='due date is required';
     if(!firstErr&&(l.err.pn||l.err.qty||l.err.due)) firstErr=l;
   });
   if(firstErr){
-    renderPOD(); podToggleAddKeepIfOpen();
-    toast('✕','The PO has invalid demand lines — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.');
-    const q=document.getElementById('podq-'+firstErr.id); if(q) q.focus();
+    renderWOD(); wodToggleAddKeepIfOpen();
+    toast('✕','The Work Order has invalid demand lines — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.');
+    const q=document.getElementById('wodq-'+firstErr.id); if(q) q.focus();
     return;
   }
-  podPO.due=podDue;
-  podPO.lines=podLines.map(l=>({pn:l.pn,bc:l.bc,type:l.type,qty:parseInt(l.qty,10),due:l.due,job:l.job||'—',notes:l.notes,
+  wodWO.due=wodDue;
+  wodWO.lines=wodLines.map(l=>({pn:l.pn,bc:l.bc,type:l.type,qty:parseInt(l.qty,10),due:l.due,job:l.job||'—',notes:l.notes,
     scls:l.released?'released':'saved',stat:l.released?l.stat:'Saved',rel:!l.released}));
-  const pns=podPO.lines.map(x=>x.pn);
-  podPO.preview=pns.slice(0,2).join(' · ')+(pns.length>2?' · '+(pns.length-2)+' more':'');
-  openPO(podPO.po); podClearDirty();
-  toast('💾',podPO.po+' demand updated (mock) — business demand only, local state only. Nothing was persisted to the backend. No release.');
+  const pns=wodWO.lines.map(x=>x.pn);
+  wodWO.preview=pns.slice(0,2).join(' · ')+(pns.length>2?' · '+(pns.length-2)+' more':'');
+  openWO(wodWO.wo); wodClearDirty();
+  toast('💾',wodWO.wo+' demand updated (mock) — business demand only, local state only. Nothing was persisted to the backend. No release.');
 }
-function podBack(){
-  if(podDirty&&!confirm('This PO has unsaved changes. Discard them and return to the PO list?')) return;
-  podClearDirty(); showPOList();
+function wodBack(){
+  if(wodDirty&&!confirm('This Work Order has unsaved changes. Discard them and return to the Work Order list?')) return;
+  wodClearDirty(); showWOList();
 }
 
-/* ---- New PO — scanner-first MODAL over the PO list (v6) ---- */
-let npDirtyF=false;
-function npOpen(){ return document.getElementById('npovl').classList.contains('show'); }
-function npAnyRows(){ return document.querySelectorAll('#np-lines tr.npline').length>0; }
-function npIsDirty(){ return npOpen()&&(npDirtyF||npAnyRows()||!!document.getElementById('np-num').value.trim()||!!document.getElementById('np-due').value); }
-function openNewPO(){
-  document.getElementById('np-num').value='';
-  document.getElementById('np-recv').value=todayISO();
-  document.getElementById('np-due').value='';
-  ['np-num-err','np-recv-err','np-due-err'].forEach(id=>{const el=document.getElementById(id);el.style.display='none';el.textContent='';});
-  document.getElementById('np-lines').innerHTML=
-    '<tr id="np-empty"><td colspan="7" style="text-align:center;color:var(--faint);padding:24px">No demand lines yet — scan the first PN barcode above</td></tr>';
-  npDirtyF=false;
-  document.getElementById('npovl').classList.add('show');
-  setTimeout(()=>document.getElementById('np-num').focus(),40);
+/* ---- New Work Order — scanner-first MODAL over the Work Order list (v6) ---- */
+let nwoDirtyF=false;
+function nwoOpen(){ return document.getElementById('nwoovl').classList.contains('show'); }
+function nwoAnyRows(){ return document.querySelectorAll('#nwo-lines tr.nwoline').length>0; }
+function nwoIsDirty(){ return nwoOpen()&&(nwoDirtyF||nwoAnyRows()||!!document.getElementById('nwo-num').value.trim()||!!document.getElementById('nwo-due').value); }
+function openNewWO(){
+  document.getElementById('nwo-num').value='';
+  document.getElementById('nwo-recv').value=todayISO();
+  document.getElementById('nwo-due').value='';
+  ['nwo-num-err','nwo-recv-err','nwo-due-err'].forEach(id=>{const el=document.getElementById(id);el.style.display='none';el.textContent='';});
+  document.getElementById('nwo-lines').innerHTML=
+    '<tr id="nwo-empty"><td colspan="7" style="text-align:center;color:var(--faint);padding:24px">No demand lines yet — scan the first PN barcode above</td></tr>';
+  nwoDirtyF=false;
+  document.getElementById('nwoovl').classList.add('show');
+  setTimeout(()=>document.getElementById('nwo-num').focus(),40);
 }
-function npClose(){
-  document.getElementById('npovl').classList.remove('show');
-  document.getElementById('npdiscard').classList.remove('show');
-  npDirtyF=false;
-  const b=document.getElementById('npopenbtn'); if(b) b.focus();   // focus returns to ＋ New PO
+function nwoClose(){
+  document.getElementById('nwoovl').classList.remove('show');
+  document.getElementById('nwodiscard').classList.remove('show');
+  nwoDirtyF=false;
+  const b=document.getElementById('nwoopenbtn'); if(b) b.focus();   // focus returns to ＋ New Work Order
 }
-function npRequestClose(){
-  if(npIsDirty()){
-    const n=document.querySelectorAll('#np-lines tr.npline').length;
-    document.getElementById('npdiscard-sub').innerHTML='The entered PO header'+(n?' and <b>'+n+'</b> demand line'+(n===1?'':'s'):'')+' have not been saved. Closing the dialog discards them — nothing was persisted.';
-    document.getElementById('npdiscard').classList.add('show');
-  } else npClose();
+function nwoRequestClose(){
+  if(nwoIsDirty()){
+    const n=document.querySelectorAll('#nwo-lines tr.nwoline').length;
+    document.getElementById('nwodiscard-sub').innerHTML='The entered Work Order header'+(n?' and <b>'+n+'</b> demand line'+(n===1?'':'s'):'')+' have not been saved. Closing the dialog discards them — nothing was persisted.';
+    document.getElementById('nwodiscard').classList.add('show');
+  } else nwoClose();
 }
-function npDiscardCancel(){ document.getElementById('npdiscard').classList.remove('show'); }
-function npDiscardConfirm(){ npClose(); }
-function npFieldChanged(which){ npDirtyF=true;
-  const el=document.getElementById('np-'+which+'-err'); if(el){ el.style.display='none'; el.textContent=''; } }
-function npFocusScan(){ setTimeout(()=>document.getElementById('np-scan').focus(),40); }
-function npLineFor(pn){ return document.querySelector('#np-lines tr[data-pn="'+pn+'"]'); }
-function npAddLine(pn,bcNote,isNew){
-  const empty=document.getElementById('np-empty'); if(empty) empty.remove();
-  npDirtyF=true;
-  const due=document.getElementById('np-due').value;
+function nwoDiscardCancel(){ document.getElementById('nwodiscard').classList.remove('show'); }
+function nwoDiscardConfirm(){ nwoClose(); }
+function nwoFieldChanged(which){ nwoDirtyF=true;
+  const el=document.getElementById('nwo-'+which+'-err'); if(el){ el.style.display='none'; el.textContent=''; } }
+function nwoFocusScan(){ setTimeout(()=>document.getElementById('nwo-scan').focus(),40); }
+function nwoLineFor(pn){ return document.querySelector('#nwo-lines tr[data-pn="'+pn+'"]'); }
+function nwoAddLine(pn,bcNote,isNew){
+  const empty=document.getElementById('nwo-empty'); if(empty) empty.remove();
+  nwoDirtyF=true;
+  const due=document.getElementById('nwo-due').value;
   const tr=document.createElement('tr');
-  tr.className='npline';
+  tr.className='nwoline';
   if(pn) tr.dataset.pn=pn;
   tr.innerHTML=
-    '<td>'+(pn?'<div class="pn">'+pn+'</div>':'<input placeholder="type PN — lookup or create" size="16" aria-label="PartNumber lookup or create" onchange="npManualPN(this)">')+
-      '<div class="bc'+(isNew?' newpn':'')+'">'+bcNote+'</div><div class="rowerr nperr-pn" style="display:none"></div></td>'+
+    '<td>'+(pn?'<div class="pn">'+pn+'</div>':'<input placeholder="type PN — lookup or create" size="16" aria-label="PartNumber lookup or create" onchange="nwoManualPN(this)">')+
+      '<div class="bc'+(isNew?' newpn':'')+'">'+bcNote+'</div><div class="rowerr nwoerr-pn" style="display:none"></div></td>'+
     '<td><select><option>NEW</option><option>REWORK</option><option>MODIFY</option></select></td>'+
-    '<td><input class="mono npqty" value="" size="4" inputmode="numeric" placeholder="qty" onkeydown="npQtyKey(event)"><div class="rowerr nperr-qty" style="display:none"></div></td>'+
-    '<td><input type="date" class="mono npdue" value="'+due+'" oninput="this.dataset.touched=1"><div class="rowerr nperr-due" style="display:none"></div></td>'+
-    '<td><input class="mono npjob" value="" size="10" placeholder="job #…"></td>'+
-    '<td><input class="npnotes" value="" size="10" placeholder="notes…"></td>'+
+    '<td><input class="mono nwoqty" value="" size="4" inputmode="numeric" placeholder="qty" onkeydown="nwoQtyKey(event)"><div class="rowerr nwoerr-qty" style="display:none"></div></td>'+
+    '<td><input type="date" class="mono nwodue" value="'+due+'" oninput="this.dataset.touched=1"><div class="rowerr nwoerr-due" style="display:none"></div></td>'+
+    '<td><input class="mono nwojob" value="" size="10" placeholder="job #…"></td>'+
+    '<td><input class="nwonotes" value="" size="10" placeholder="notes…"></td>'+
     '<td><button class="pr-x" title="Remove draft line" onclick="this.closest(\'tr\').remove()">✕</button></td>';
-  document.getElementById('np-lines').appendChild(tr);
+  document.getElementById('nwo-lines').appendChild(tr);
   return tr;
 }
-function npScanKey(e){
+function nwoScanKey(e){
   if(e.key!=='Enter') return;
   const v=e.target.value.trim().toUpperCase(); e.target.value='';
   if(!v) return;
   const pn=PN_CATALOG[v];
-  if(!pn){ toast('✕','Unknown barcode “'+v+'” — nothing added. Only PN barcodes (PF:PN:…) add demand lines.'); npFocusScan(); return; }
-  const dup=npLineFor(pn);
-  if(dup){ toast('⚠',pn+' is already on this PO — edit its quantity instead of adding a duplicate line.');
-    const q=dup.querySelector('.npqty'); q.focus(); q.select(); return; }
-  const tr=npAddLine(pn,'existing PN · barcode '+v,false);
-  toast('✓',pn+' added — Request Type NEW · due date from PO due date. Type the quantity.');
-  tr.querySelector('.npqty').focus();
+  if(!pn){ toast('✕','Unknown barcode “'+v+'” — nothing added. Only PN barcodes (PF:PN:…) add demand lines.'); nwoFocusScan(); return; }
+  const dup=nwoLineFor(pn);
+  if(dup){ toast('⚠',pn+' is already on this Work Order — edit its quantity instead of adding a duplicate line.');
+    const q=dup.querySelector('.nwoqty'); q.focus(); q.select(); return; }
+  const tr=nwoAddLine(pn,'existing PN · barcode '+v,false);
+  toast('✓',pn+' added — Request Type NEW · due date from WO due date. Type the quantity.');
+  tr.querySelector('.nwoqty').focus();
 }
-function npQtyKey(e){
+function nwoQtyKey(e){
   if(e.key!=='Enter') return;
   const q=e.target.value.trim();
   if(!/^\d+$/.test(q)||parseInt(q,10)<1){ toast('✕','Quantity must be a positive whole number'); e.target.select(); return; }
-  npFocusScan();                            // back to the scan input — ready for the next part
+  nwoFocusScan();                            // back to the scan input — ready for the next part
 }
-function npManualPN(inp){
+function nwoManualPN(inp){
   const pn=inp.value.trim().toUpperCase(); if(!pn) return;
   const tr=inp.closest('tr');
-  const dup=[...document.querySelectorAll('#np-lines tr[data-pn]')].find(r=>r!==tr&&r.dataset.pn===pn);
-  if(dup){ toast('⚠',pn+' is already on this PO — edit the existing line instead of adding a duplicate.');
-    inp.value=''; const q=dup.querySelector('.npqty'); q.focus(); q.select(); return; }
+  const dup=[...document.querySelectorAll('#nwo-lines tr[data-pn]')].find(r=>r!==tr&&r.dataset.pn===pn);
+  if(dup){ toast('⚠',pn+' is already on this Work Order — edit the existing line instead of adding a duplicate.');
+    inp.value=''; const q=dup.querySelector('.nwoqty'); q.focus(); q.select(); return; }
   tr.dataset.pn=pn;
-  tr.querySelector('td').innerHTML='<div class="pn">'+pn+'</div><div class="bc newpn">new PN — barcode created with PN master: PF:PN:…</div><div class="rowerr nperr-pn" style="display:none"></div>';
-  tr.querySelector('.npqty').focus();
+  tr.querySelector('td').innerHTML='<div class="pn">'+pn+'</div><div class="bc newpn">new PN — barcode created with PN master: PF:PN:…</div><div class="rowerr nwoerr-pn" style="display:none"></div>';
+  tr.querySelector('.nwoqty').focus();
 }
-function npAddManual(){
-  npAddLine(null,'PN lookup — an unknown PN is created inline with its barcode',false)
+function nwoAddManual(){
+  nwoAddLine(null,'PN lookup — an unknown PN is created inline with its barcode',false)
     .querySelector('input').focus();
 }
-function npDueChanged(){                    // PO due date is the default — update lines still holding it
-  npFieldChanged('due');
-  const due=document.getElementById('np-due').value;
-  document.querySelectorAll('#np-lines .npdue').forEach(i=>{ if(!i.dataset.touched) i.value=due; });
+function nwoDueChanged(){                    // WO due date is the default — update lines still holding it
+  nwoFieldChanged('due');
+  const due=document.getElementById('nwo-due').value;
+  document.querySelectorAll('#nwo-lines .nwodue').forEach(i=>{ if(!i.dataset.touched) i.value=due; });
 }
-function npHeaderErr(which,msg){
-  const el=document.getElementById('np-'+which+'-err'); el.textContent=msg; el.style.display='block';
+function nwoHeaderErr(which,msg){
+  const el=document.getElementById('nwo-'+which+'-err'); el.textContent=msg; el.style.display='block';
 }
-function npRowErr(tr,which,msg){
-  const el=tr.querySelector('.nperr-'+which);
+function nwoRowErr(tr,which,msg){
+  const el=tr.querySelector('.nwoerr-'+which);
   if(el){ el.textContent=msg; el.style.display='block'; el.closest('td').classList.add('err-cell'); }
 }
-function npClearRowErrs(){
-  document.querySelectorAll('#np-lines .rowerr').forEach(el=>{el.style.display='none';el.textContent='';});
-  document.querySelectorAll('#np-lines .err-cell').forEach(td=>td.classList.remove('err-cell'));
+function nwoClearRowErrs(){
+  document.querySelectorAll('#nwo-lines .rowerr').forEach(el=>{el.style.display='none';el.textContent='';});
+  document.querySelectorAll('#nwo-lines .err-cell').forEach(td=>td.classList.remove('err-cell'));
 }
-function npSave(){
-  const num=document.getElementById('np-num').value.trim().toUpperCase();
-  const rows=[...document.querySelectorAll('#np-lines tr.npline')];
-  const existing=PO_LIST.find(p=>p.po===num);
-  if(num&&existing){                        // an existing PO Number is opened, never duplicated
-    if(rows.length&&!confirm(num+' already exists. A PO Number is never duplicated — open the existing PO and discard the '+rows.length+' entered line'+(rows.length===1?'':'s')+'?')) return;
-    npClose(); toast('⚠','PO Number '+num+' already exists — opening the existing PO instead of duplicating it.'); openPO(num); return;
+function nwoSave(){
+  const num=document.getElementById('nwo-num').value.trim().toUpperCase();
+  const rows=[...document.querySelectorAll('#nwo-lines tr.nwoline')];
+  const existing=WO_LIST.find(p=>p.wo===num);
+  if(num&&existing){                        // an existing WO Number is opened, never duplicated
+    if(rows.length&&!confirm(num+' already exists. A WO Number is never duplicated — open the existing Work Order and discard the '+rows.length+' entered line'+(rows.length===1?'':'s')+'?')) return;
+    nwoClose(); toast('⚠','WO Number '+num+' already exists — opening the existing Work Order instead of duplicating it.'); openWO(num); return;
   }
-  npClearRowErrs();
+  nwoClearRowErrs();
   let bad=null, focusEl=null;
-  if(!num){ npHeaderErr('num','PO Number is required'); focusEl=document.getElementById('np-num'); }
-  if(!document.getElementById('np-recv').value){ npHeaderErr('recv','received date is required'); focusEl=focusEl||document.getElementById('np-recv'); }
-  if(!document.getElementById('np-due').value){ npHeaderErr('due','PO due date is required — it is the default for every demand line'); focusEl=focusEl||document.getElementById('np-due'); }
+  if(!num){ nwoHeaderErr('num','WO Number is required'); focusEl=document.getElementById('nwo-num'); }
+  if(!document.getElementById('nwo-recv').value){ nwoHeaderErr('recv','received date is required'); focusEl=focusEl||document.getElementById('nwo-recv'); }
+  if(!document.getElementById('nwo-due').value){ nwoHeaderErr('due','WO due date is required — it is the default for every demand line'); focusEl=focusEl||document.getElementById('nwo-due'); }
   const seen={};
   for(const r of rows){
     const pn=r.dataset.pn||'';
-    if(!pn){ npRowErr(r,'pn','PN is required — look up or create the PartNumber'); if(!focusEl) focusEl=r.querySelector('input')||r; bad=bad||r; continue; }
-    if(seen[pn]){ npRowErr(r,'pn','duplicate PN — '+pn+' is already on this PO'); focusEl=focusEl||r.querySelector('.npqty'); bad=bad||r; }
+    if(!pn){ nwoRowErr(r,'pn','PN is required — look up or create the PartNumber'); if(!focusEl) focusEl=r.querySelector('input')||r; bad=bad||r; continue; }
+    if(seen[pn]){ nwoRowErr(r,'pn','duplicate PN — '+pn+' is already on this Work Order'); focusEl=focusEl||r.querySelector('.nwoqty'); bad=bad||r; }
     seen[pn]=1;
-    const q=(r.querySelector('.npqty').value||'').trim();
-    if(!/^\d+$/.test(q)||parseInt(q,10)<1){ npRowErr(r,'qty','quantity must be a positive whole number'); focusEl=focusEl||r.querySelector('.npqty'); bad=bad||r; }
-    if(!r.querySelector('.npdue').value){ npRowErr(r,'due','due date is required'); focusEl=focusEl||r.querySelector('.npdue'); bad=bad||r; }
+    const q=(r.querySelector('.nwoqty').value||'').trim();
+    if(!/^\d+$/.test(q)||parseInt(q,10)<1){ nwoRowErr(r,'qty','quantity must be a positive whole number'); focusEl=focusEl||r.querySelector('.nwoqty'); bad=bad||r; }
+    if(!r.querySelector('.nwodue').value){ nwoRowErr(r,'due','due date is required'); focusEl=focusEl||r.querySelector('.nwodue'); bad=bad||r; }
   }
   if(focusEl){ toast('✕','The form has invalid fields — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.'); focusEl.focus(); return; }
-  if(!rows.length){ toast('✕','Add at least one demand line (scan a PN barcode)'); npFocusScan(); return; }
+  if(!rows.length){ toast('✕','Add at least one demand line (scan a PN barcode)'); nwoFocusScan(); return; }
   const pns=rows.map(r=>r.dataset.pn);
-  PO_LIST.unshift({po:num,received:document.getElementById('np-recv').value,due:document.getElementById('np-due').value,
+  WO_LIST.unshift({wo:num,received:document.getElementById('nwo-recv').value,due:document.getElementById('nwo-due').value,
     dcls:'',status:'Open',preview:pns.slice(0,2).join(' · ')+(pns.length>2?' · '+(pns.length-2)+' more':''),
     lines:rows.map(r=>({pn:r.dataset.pn,bc:'barcode PF:PN:…',type:r.querySelector('select').value,
-      qty:parseInt(r.querySelector('.npqty').value,10),due:r.querySelector('.npdue').value,
-      job:r.querySelector('.npjob').value||'—',notes:r.querySelector('.npnotes').value,scls:'saved',stat:'Saved',rel:true}))});
-  npClose();
+      qty:parseInt(r.querySelector('.nwoqty').value,10),due:r.querySelector('.nwodue').value,
+      job:r.querySelector('.nwojob').value||'—',notes:r.querySelector('.nwonotes').value,scls:'saved',stat:'Saved',rel:true}))});
+  nwoClose();
   toast('💾',num+' saved (mock) — business demand only ('+rows.length+' line'+(rows.length>1?'s':'')+'), local state only. Nothing was persisted to the backend. No release.');
-  showPOList();
+  showWOList();
 }
 
 /* ---- unsaved-change protection: navigation + reload/close (v6) ---- */
-function poHasUnsaved(){ return npIsDirty()||podDirty; }
-function poDiscardAll(){
-  document.getElementById('npovl').classList.remove('show');
-  document.getElementById('npdiscard').classList.remove('show');
-  npDirtyF=false; podClearDirty(); showPOList();
+function woHasUnsaved(){ return nwoIsDirty()||wodDirty; }
+function woDiscardAll(){
+  document.getElementById('nwoovl').classList.remove('show');
+  document.getElementById('nwodiscard').classList.remove('show');
+  nwoDirtyF=false; wodClearDirty(); showWOList();
 }
 window.addEventListener('beforeunload',e=>{
-  if(poHasUnsaved()){ e.preventDefault(); e.returnValue=''; }
+  if(woHasUnsaved()){ e.preventDefault(); e.returnValue=''; }
 });
 
 /* ---- demand save vs explicit release (mock) ---- */
@@ -2364,7 +2364,7 @@ function openRelease(pn){
   relPN=pn;
   const d=REL_DATA[pn]||{req:'—',route:['—'],active:null,qf:'QF-01xx'};
   document.getElementById('rel-pn').textContent=pn;
-  document.getElementById('rel-sub').innerHTML=(podPO?podPO.po:'PO')+' demand · requested <b>'+d.req+'</b> · nothing is created until you confirm — and confirming changes <b>local presentation state only</b> (mock).';
+  document.getElementById('rel-sub').innerHTML='WO '+(wodWO?wodWO.wo:'—')+' demand · requested <b>'+d.req+'</b> · nothing is created until you confirm — and confirming changes <b>local presentation state only</b> (mock).';
   document.getElementById('rel-qty').value=d.req;
   document.getElementById('rel-route').innerHTML=d.route.map(r=>'<option>'+r+'</option>').join('');
   const w=document.getElementById('rel-warn');
@@ -2391,10 +2391,10 @@ function confirmRelease(){
   if(!q||q<1){ document.getElementById('rel-qty').focus(); return; }
   const r=document.getElementById('rel-route').value;
   document.getElementById('relovl').classList.remove('show');
-  const l=podLines.find(x=>x.pn===relPN);
+  const l=wodLines.find(x=>x.pn===relPN);
   if(l){ l.released=true; l.saved=true; l.stat='Released · '+d.qf+' (mock)'; l.rel=false;
-    const pl=podPO.lines.find(x=>x.pn===relPN); if(pl){ pl.scls='released'; pl.stat='Released · '+d.qf; pl.rel=false; }
-    renderPOD(); }
+    const pl=wodWO.lines.find(x=>x.pn===relPN); if(pl){ pl.scls='released'; pl.stat='Released · '+d.qf; pl.rel=false; }
+    renderWOD(); }
   toast('✓',relPN+' marked released (mock) × '+q+' · Route “'+r+'” — presentation only, no production write occurred.');
   relPN=null;
 }

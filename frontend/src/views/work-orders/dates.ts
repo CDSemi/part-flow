@@ -1,4 +1,4 @@
-// Date helpers for the Purchase Orders view.
+// Date helpers for the Work Orders view.
 //
 // Editable date fields hold ISO `YYYY-MM-DD` values (native
 // <input type="date">); read-only presentation formats them as

@@ -3,10 +3,10 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
-import type { MockPo, RequestType } from '../view-models';
+import type { MockWorkOrder, RequestType } from '../view-models';
 import { todayIso } from './dates';
 import {
-  applyPoDueDateChange,
+  applyWorkOrderDueDateChange,
   createDraftLine,
   draftsToSavedLines,
   isPositiveInteger,
@@ -17,19 +17,19 @@ import {
 import type { DemandLineDraft, LineError, LineField } from './demand-lines';
 
 interface HeaderErrors {
-  po?: string;
+  workOrderNumber?: string;
   received?: string;
   due?: string;
 }
 
 /**
- * Scanner-first New PO entry as a modal dialog over the PO list
- * (GUI_DESIGN §11.3): enter the header, scan a PN barcode, type the
- * quantity, Enter returns focus to the scan input. The URL never
- * changes; closing with entered data requires explicit confirmation.
- * Phase 2: saving changes local mock state only.
+ * Scanner-first New Work Order entry as a modal dialog over the Work
+ * Orders list (GUI_DESIGN §11.3): enter the header, scan a PN barcode,
+ * type the quantity, Enter returns focus to the scan input. The URL
+ * never changes; closing with entered data requires explicit
+ * confirmation. Phase 2: saving changes local mock state only.
  */
-export function NewPoDialog({
+export function NewWorkOrderDialog({
   existing,
   writeBlocked,
   onClose,
@@ -41,13 +41,13 @@ export function NewPoDialog({
   existing: string[];
   writeBlocked: boolean;
   onClose: () => void;
-  onOpenExisting: (po: string) => void;
-  onSave: (po: MockPo) => void;
+  onOpenExisting: (workOrderNumber: string) => void;
+  onSave: (workOrder: MockWorkOrder) => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
   const headingId = useId();
-  const [poNumber, setPoNumber] = useState('');
+  const [workOrderNumber, setWorkOrderNumber] = useState('');
   const initialReceived = useRef(todayIso());
   const [received, setReceived] = useState(initialReceived.current);
   const [due, setDue] = useState('');
@@ -57,7 +57,7 @@ export function NewPoDialog({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmExisting, setConfirmExisting] = useState<string | null>(null);
 
-  const poNumRef = useRef<HTMLInputElement>(null);
+  const workOrderNumRef = useRef<HTMLInputElement>(null);
   const receivedRef = useRef<HTMLInputElement>(null);
   const dueRef = useRef<HTMLInputElement>(null);
   const scanRef = useRef<HTMLInputElement>(null);
@@ -68,7 +68,7 @@ export function NewPoDialog({
   } | null>(null);
 
   const dirty =
-    poNumber.trim() !== '' ||
+    workOrderNumber.trim() !== '' ||
     due !== '' ||
     received !== initialReceived.current ||
     lines.length > 0;
@@ -79,7 +79,7 @@ export function NewPoDialog({
 
   // Initial focus: the first header field, per the scanner-first flow.
   useEffect(() => {
-    poNumRef.current?.focus();
+    workOrderNumRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -118,7 +118,7 @@ export function NewPoDialog({
     }
     if (result.kind === 'duplicate') {
       showNotice(
-        `⚠ ${result.pn} is already on this PO — edit its quantity instead of adding a duplicate line.`,
+        `⚠ ${result.pn} is already on this Work Order — edit its quantity instead of adding a duplicate line.`,
       );
       setFocusField({ id: result.lineId, field: 'qty' });
       return;
@@ -130,7 +130,7 @@ export function NewPoDialog({
     });
     setLines((current) => [...current, line]);
     showNotice(
-      `✓ ${result.pn} added — Request Type NEW · due date from PO due date. Type the quantity.`,
+      `✓ ${result.pn} added — Request Type NEW · due date from WO due date. Type the quantity.`,
     );
     setFocusField({ id: line.id, field: 'qty' });
   }
@@ -144,12 +144,12 @@ export function NewPoDialog({
   function handleDueChange(value: string) {
     setDue(value);
     setHeaderErrors((current) => ({ ...current, due: undefined }));
-    // The PO due date is the default — update lines still holding it.
-    setLines((current) => applyPoDueDateChange(current, value));
+    // The WO due date is the default — update lines still holding it.
+    setLines((current) => applyWorkOrderDueDateChange(current, value));
   }
 
   function focusFirstInvalid(headerErr: HeaderErrors, lineErrs: LineError[]) {
-    if (headerErr.po) return poNumRef.current?.focus();
+    if (headerErr.workOrderNumber) return workOrderNumRef.current?.focus();
     if (headerErr.received) return receivedRef.current?.focus();
     if (headerErr.due) return dueRef.current?.focus();
     const first = lineErrs[0];
@@ -161,25 +161,25 @@ export function NewPoDialog({
   }
 
   function handleSave() {
-    const number = poNumber.trim().toUpperCase();
+    const number = workOrderNumber.trim().toUpperCase();
     if (number && existing.includes(number)) {
-      // An existing PO Number is opened, never duplicated (§11.3). With
+      // An existing WO Number is opened, never duplicated (§11.3). With
       // entered lines, opening discards them — confirm explicitly.
       if (lines.length === 0) onOpenExisting(number);
       else setConfirmExisting(number);
       return;
     }
     const headerErr: HeaderErrors = {};
-    if (!number) headerErr.po = 'PO Number is required';
+    if (!number) headerErr.workOrderNumber = 'WO Number is required';
     if (!received) headerErr.received = 'received date is required';
     if (!due)
       headerErr.due =
-        'PO due date is required — it is the default for every demand line';
+        'WO due date is required — it is the default for every demand line';
     const lineErrs = validateDemandLines(lines);
     setHeaderErrors(headerErr);
     setLineErrors(lineErrs);
     if (
-      headerErr.po ||
+      headerErr.workOrderNumber ||
       headerErr.received ||
       headerErr.due ||
       lineErrs.length
@@ -197,7 +197,7 @@ export function NewPoDialog({
     }
     const savedLines = draftsToSavedLines(lines);
     onSave({
-      po: number,
+      workOrderNumber: number,
       received,
       due,
       dueClass: '',
@@ -215,43 +215,46 @@ export function NewPoDialog({
   return (
     <>
       <ModalDialog labelledBy={headingId} onClose={requestClose} size="xwide">
-        <div className="npd">
-          <h2 id={headingId} className="npd-title">
-            New PO
+        <div className="nwo">
+          <h2 id={headingId} className="nwo-title">
+            New Work Order
           </h2>
-          <p className="po-sub">
-            Enter the PO header, then <b>scan each part's PN barcode</b> and
-            type its quantity — or add lines manually for a PN that does not
+          <p className="wo-sub">
+            Enter the Work Order header, then <b>scan each part's PN barcode</b>{' '}
+            and type its quantity — or add lines manually for a PN that does not
             exist yet. Every line defaults to Request Type{' '}
-            <TypeChip type="NEW" /> and to the <b>PO due date</b>; both can be
-            changed per line. An existing PO Number is opened instead of
-            duplicated. The PO list stays behind this dialog; nothing here is
-            persisted to the backend in Phase 2.
+            <TypeChip type="NEW" /> and to the <b>WO due date</b>; both can be
+            changed per line. An existing WO Number is opened instead of
+            duplicated. The Work Order list stays behind this dialog; nothing
+            here is persisted to the backend in Phase 2.
           </p>
 
-          <div className="np-form">
-            <label htmlFor="np-num">PO Number</label>
+          <div className="nwo-form">
+            <label htmlFor="nwo-num">WO Number</label>
             <div>
               <input
-                id="np-num"
-                ref={poNumRef}
+                id="nwo-num"
+                ref={workOrderNumRef}
                 className="mono"
-                placeholder="PO-____"
-                value={poNumber}
-                aria-invalid={headerErrors.po ? true : undefined}
+                placeholder="e.g. 007482"
+                value={workOrderNumber}
+                aria-invalid={headerErrors.workOrderNumber ? true : undefined}
                 onChange={(e) => {
-                  setPoNumber(e.target.value);
-                  setHeaderErrors((c) => ({ ...c, po: undefined }));
+                  setWorkOrderNumber(e.target.value);
+                  setHeaderErrors((c) => ({
+                    ...c,
+                    workOrderNumber: undefined,
+                  }));
                 }}
               />
-              {headerErrors.po ? (
-                <div className="rowerr">{headerErrors.po}</div>
+              {headerErrors.workOrderNumber ? (
+                <div className="rowerr">{headerErrors.workOrderNumber}</div>
               ) : null}
             </div>
-            <label htmlFor="np-recv">Received date</label>
+            <label htmlFor="nwo-recv">Received date</label>
             <div>
               <input
-                id="np-recv"
+                id="nwo-recv"
                 ref={receivedRef}
                 type="date"
                 className="mono"
@@ -266,10 +269,10 @@ export function NewPoDialog({
                 <div className="rowerr">{headerErrors.received}</div>
               ) : null}
             </div>
-            <label htmlFor="np-due">PO due date</label>
+            <label htmlFor="nwo-due">WO due date</label>
             <div>
               <input
-                id="np-due"
+                id="nwo-due"
                 ref={dueRef}
                 type="date"
                 className="mono"
@@ -277,7 +280,7 @@ export function NewPoDialog({
                 aria-invalid={headerErrors.due ? true : undefined}
                 onChange={(e) => handleDueChange(e.target.value)}
               />
-              <span className="np-fieldhint">
+              <span className="nwo-fieldhint">
                 default due date for every demand line
               </span>
               {headerErrors.due ? (
@@ -286,10 +289,10 @@ export function NewPoDialog({
             </div>
           </div>
 
-          <div className="np-scanrow">
+          <div className="nwo-scanrow">
             <input
               ref={scanRef}
-              className="np-scan"
+              className="nwo-scan"
               placeholder="Scan PN barcode (PF:PN:…) — Enter"
               aria-label="Scan PN barcode"
               autoComplete="off"
@@ -309,17 +312,18 @@ export function NewPoDialog({
               ＋ Add line manually
             </button>
           </div>
-          <div className="np-hint">
+          <div className="nwo-hint">
             Scan → the line is added and its <b>Qty</b> field gets focus → type
             the quantity → Enter returns focus to the scan input, ready for the
             next part. Demo barcodes: <code>PF:PN:1014</code> ·{' '}
             <code>PF:PN:1021</code> · <code>PF:PN:1102</code>. Scanning a PN
-            already on this PO focuses its existing line instead of adding a
-            duplicate. Unknown barcodes are rejected — nothing is added.
+            already on this Work Order focuses its existing line instead of
+            adding a duplicate. Unknown barcodes are rejected — nothing is
+            added.
           </div>
 
-          <div className="po-lines npd-lines">
-            <table className="po-table">
+          <div className="wo-lines nwo-lines">
+            <table className="wo-table">
               <thead>
                 <tr>
                   <th>PN</th>
@@ -334,7 +338,7 @@ export function NewPoDialog({
               <tbody>
                 {lines.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="np-empty">
+                    <td colSpan={7} className="nwo-empty">
                       No demand lines yet — scan the first PN barcode above
                     </td>
                   </tr>
@@ -367,7 +371,7 @@ export function NewPoDialog({
                               );
                               if (duplicate) {
                                 showNotice(
-                                  `⚠ ${pn} is already on this PO — edit the existing line instead of adding a duplicate.`,
+                                  `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
                                 );
                                 e.target.value = '';
                                 setFocusField({
@@ -527,7 +531,7 @@ export function NewPoDialog({
             </table>
           </div>
 
-          <div className="po-actions npd-actions">
+          <div className="wo-actions nwo-actions">
             <button className="btn ghost" onClick={requestClose}>
               Cancel
             </button>
@@ -549,14 +553,14 @@ export function NewPoDialog({
 
       {confirmDiscard ? (
         <ConfirmDialog
-          title="Discard this New PO?"
+          title="Discard this New Work Order?"
           confirmLabel="Discard entries"
           cancelLabel="Keep editing"
           danger
           onConfirm={onClose}
           onCancel={() => setConfirmDiscard(false)}
         >
-          The entered PO header
+          The entered Work Order header
           {lines.length > 0 ? (
             <>
               {' '}
@@ -572,12 +576,12 @@ export function NewPoDialog({
       {confirmExisting ? (
         <ConfirmDialog
           title={`${confirmExisting} already exists`}
-          confirmLabel="Open existing PO"
+          confirmLabel="Open existing Work Order"
           cancelLabel="Keep editing"
           onConfirm={() => onOpenExisting(confirmExisting)}
           onCancel={() => setConfirmExisting(null)}
         >
-          A PO Number is never duplicated — <b>{confirmExisting}</b> will be
+          A WO Number is never duplicated — <b>{confirmExisting}</b> will be
           opened instead. The {lines.length} line
           {lines.length === 1 ? '' : 's'} entered here will be discarded.
         </ConfirmDialog>

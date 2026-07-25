@@ -683,7 +683,7 @@ export function ScanStationView() {
               <span className="ct1">Create REWORK demand</span>
               <br />
               <span className="ct2">
-                Opens intake confirmation — quantity, PO link (or temporary PO{' '}
+                Opens intake confirmation — quantity, WO link (or temporary WO{' '}
                 <span className="mono">TMP-YYYYMMDD-HHMM-REWORK</span>), Route,
                 starting Area. Nothing recorded yet.
               </span>

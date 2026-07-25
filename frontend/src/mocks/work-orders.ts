@@ -1,6 +1,7 @@
-import type { MockPo } from '../views/view-models';
+import type { MockWorkOrder } from '../views/view-models';
 
-// Scanner-first New PO demo catalog: PN barcode → PartNumber (mock only).
+// Scanner-first New Work Order demo catalog: PN barcode → PartNumber
+// (mock only).
 export const MOCK_PN_BARCODES: Record<string, string> = {
   'PF:PN:1014': '0455-20-0118-03',
   'PF:PN:1021': '78-04-0031',
@@ -9,9 +10,11 @@ export const MOCK_PN_BARCODES: Record<string, string> = {
 };
 
 // Editable dates are ISO `YYYY-MM-DD`; the view formats them for display.
-export const MOCK_PO_LIST: MockPo[] = [
+// Work Order Numbers are opaque external strings — typically numeric-
+// looking (e.g. `007010`), but no format is ever assumed or parsed.
+export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
   {
-    po: 'PO-1010',
+    workOrderNumber: '007010',
     received: '2026-07-22',
     due: '2026-08-12',
     dueClass: '',
@@ -24,7 +27,7 @@ export const MOCK_PO_LIST: MockPo[] = [
         type: 'NEW',
         qty: 12,
         due: '2026-08-12',
-        job: 'ERP-88411',
+        job: '18411',
         status: 'Saved',
         statusClass: 'saved',
         releasable: true,
@@ -35,21 +38,22 @@ export const MOCK_PO_LIST: MockPo[] = [
         type: 'NEW',
         qty: 8,
         due: '2026-08-20',
-        job: 'ERP-88420',
+        job: '18420',
         status: 'Saved',
         statusClass: 'saved',
         releasable: true,
       },
       {
-        // Released production quantity exists for this PoDemand: the line
-        // can no longer be removed from Purchase Orders (PROJECT_PROFILE
-        // §13 — corrections go through correction/production workflows).
+        // Released production quantity exists for this WorkOrderDemand:
+        // the line can no longer be removed from Work Orders
+        // (PROJECT_PROFILE §13 — corrections go through correction/
+        // production workflows).
         pn: '2027-60-8114-00',
         barcode: 'existing PN · barcode PF:PN:1044',
         type: 'NEW',
         qty: 6,
         due: '2026-08-05',
-        job: 'ERP-88395',
+        job: '18395',
         status: 'Released · QF-0161',
         statusClass: 'released',
       },
@@ -66,7 +70,7 @@ export const MOCK_PO_LIST: MockPo[] = [
     ],
   },
   {
-    po: 'PO-1003',
+    workOrderNumber: '007003',
     received: '2026-07-12',
     due: '2026-07-31',
     dueClass: '',
@@ -79,14 +83,14 @@ export const MOCK_PO_LIST: MockPo[] = [
         type: 'NEW',
         qty: 12,
         due: '2026-07-31',
-        job: 'ERP-88190',
+        job: '18190',
         status: 'Released · QF-0148',
         statusClass: 'released',
       },
     ],
   },
   {
-    po: 'PO-1005',
+    workOrderNumber: '007005',
     received: '2026-07-06',
     due: '2026-07-16',
     dueClass: 'late',
@@ -99,14 +103,14 @@ export const MOCK_PO_LIST: MockPo[] = [
         type: 'NEW',
         qty: 20,
         due: '2026-07-16',
-        job: 'ERP-88031',
+        job: '18031',
         status: 'Released · QF-0152',
         statusClass: 'released',
       },
     ],
   },
   {
-    po: 'TMP-20260721-0940-REWORK',
+    workOrderNumber: 'TMP-20260721-0940-REWORK',
     received: '2026-07-21',
     due: '2026-07-21',
     dueClass: 'late',
@@ -127,7 +131,7 @@ export const MOCK_PO_LIST: MockPo[] = [
     ],
   },
   {
-    po: 'PO-0996',
+    workOrderNumber: '006996',
     received: '2026-06-18',
     due: '2026-07-10',
     dueClass: '',
@@ -140,7 +144,7 @@ export const MOCK_PO_LIST: MockPo[] = [
         type: 'NEW',
         qty: 50,
         due: '2026-07-10',
-        job: 'ERP-87740',
+        job: '17740',
         status: 'Allocated 50 / 50',
         statusClass: 'released',
       },
