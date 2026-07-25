@@ -69,6 +69,7 @@ Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6e
 - Identifiers (PN, PO, temporary PO, external Job Number, Quantity Flow id, barcode values, quantities, timestamps): monospace. Identifiers must be visually distinct from prose because operators read them against paper travelers and folder labels.
 - Shop-floor minimum sizes: body 16 px, PN ≥ 19 px, quantities ≥ 18 px bold. Production Board is sized for reading at 3–5 m (PN 22 px+, key figures 18 px+).
 - The PN is always rendered on a single line and never wraps. Where the container cannot grow with the identifier (Area Board cards and overview lists), an over-long PN is **truncated with an ellipsis** and the full PN is shown in a tooltip on hover; layout-critical figures (quantities) must never move because of PN length. Views sized around the PN (Production Board, Tracking) keep sizing the column to fit it.
+- **Realistic identifier and description shapes** (v6; PROJECT_PROFILE §8.1). PNs are opaque, commonly multi-segment hyphenated numeric strings of varying length (short `214-406` through long `0455-20-0118-03` and longer); the UI preserves the exact string, never derives meaning from segments, and search/filtering matches the hyphenated value and its punctuation literally. Part names/descriptions are free text — often uppercase with commas, slashes, fractions, dimensions and manufacturing abbreviations — and **may wrap naturally to two or three lines**; description wrapping must never shift quantity, status, date, or action columns (cap the description's width instead of widening the identifier column).
 
 ## 2.4 Touch and scanner ergonomics
 
@@ -357,6 +358,7 @@ All v5→v6 changes concern the Purchase Orders view (§11); Phase 2 implements 
 5. **Validation is corrected** (§11.2/§11.3): a manual row without a PN makes the form invalid instead of being silently filtered out at save; field-level errors cover missing PN, non-positive quantity, missing due date, and duplicate PNs; after a failed save the first invalid control receives focus and entered values are preserved.
 6. **Unsaved changes are guarded everywhere** (§11.2): the OPEN PO detail visibly tracks its dirty state, and navigation away — back action, top-level navigation, Management sub-navigation, browser back/forward, reload/tab close — requires explicit confirmation.
 7. **Production mock boundary made real** (implementation alignment): mock views and datasets load only in development builds; production builds show an explicit "not connected to a production data source yet" state per route, verified by a mock-sentinel check in the build.
+8. **Realistic data shapes** (§2.3): mock datasets and the mockup use representative synthetic PN formats (multi-segment hyphenated numeric strings) and manufacturing-style descriptions instead of demo-style `PF-…` identifiers; §2.3 now documents the identifier/description shape, search, and wrapping constraints.
 
 ## 12.2 Changes from GUI Design v4
 

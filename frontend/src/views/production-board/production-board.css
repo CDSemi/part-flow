@@ -91,6 +91,10 @@
     margin-top: 3px;
     font-family: var(--font), sans-serif;
     font-weight: 400;
+    /* long descriptions wrap under the PN instead of widening the column,
+     so quantity / due / day columns never shift (GUI_DESIGN §2.3) */
+    max-width: 46ch;
+    white-space: normal;
 }
 
 .pb-table .loc {

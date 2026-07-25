@@ -110,7 +110,7 @@ export function ScanStationView() {
           setPending(null);
           addScan(
             {
-              pn: 'PF-BRACKET-001',
+              pn: '2027-60-8114-00',
               description: `ASSIGNED_TO_MACHINE · Lathe queue → ${outcome.machine} (mock)`,
               time: MOCK_SCAN_TIME,
             },
@@ -168,7 +168,7 @@ export function ScanStationView() {
       case 'pn-ambiguous':
         setLastPn({
           pn: outcome.pn,
-          desc: 'Mounting bracket · multiple valid contexts',
+          desc: 'BRACKET, MOUNTING SS 304 · multiple valid contexts',
         });
         setAmbiguityPn(outcome.pn);
         break;
@@ -239,7 +239,7 @@ export function ScanStationView() {
   }
 
   function pickAmbiguity(choice: 'assign' | 'transfer' | 'rework' | 'modify') {
-    const pn = ambiguityPn ?? 'PF-BRACKET-001';
+    const pn = ambiguityPn ?? '2027-60-8114-00';
     setAmbiguityPn(null);
     if (choice === 'assign') {
       setPending(
@@ -274,11 +274,11 @@ export function ScanStationView() {
       focusScan();
       return;
     }
-    if (pn === 'PF-SHAFT-014') {
+    if (pn === '0455-20-0118-03') {
       setLastPn({ pn, desc: 'manual entry · single valid context' });
       setQtyValue('');
       setQtyDialog({ pn, available: 8 });
-    } else if (pn === 'PF-BRACKET-001') {
+    } else if (pn === '2027-60-8114-00') {
       setLastPn({ pn, desc: 'manual entry · multiple valid contexts' });
       setAmbiguityPn(pn);
     } else {
@@ -741,7 +741,7 @@ function ManualEntryDialog({
         ref={fieldRef}
         className="field mono"
         autoComplete="off"
-        placeholder="Exact PartNumber, e.g. PF-SHAFT-014"
+        placeholder="Exact PartNumber, e.g. 0455-20-0118-03"
         onKeyDown={(e) => {
           if (e.key === 'Enter') onConfirm(e.currentTarget.value);
         }}

@@ -129,7 +129,7 @@ test('the scanner-first save flow adds the PO to the list and reports mock-only'
 
   scanBarcode('PF:PN:1021');
   // Scanning appends a line and focuses its quantity field.
-  const qty = screen.getByLabelText('Quantity for PF-HOUSING-021');
+  const qty = screen.getByLabelText('Quantity for 78-04-0031');
   expect(document.activeElement).toBe(qty);
   fireEvent.change(qty, { target: { value: '5' } });
   // Enter returns focus to the scan input, ready for the next part.
@@ -168,9 +168,27 @@ test('scanning a duplicate PN focuses the existing line instead of adding one', 
   scanBarcode('PF:PN:1021');
   scanBarcode('PF:PN:1021');
 
-  const qtyFields = screen.getAllByLabelText('Quantity for PF-HOUSING-021');
+  const qtyFields = screen.getAllByLabelText('Quantity for 78-04-0031');
   expect(qtyFields).toHaveLength(1);
   expect(document.activeElement).toBe(qtyFields[0]);
+});
+
+test('search matches hyphenated PNs and PO numbers with punctuation', async () => {
+  await renderPurchaseOrders();
+
+  // Realistic PNs are multi-segment hyphenated strings; search must match
+  // them literally (PO Number and PN preview).
+  fireEvent.change(screen.getByLabelText('Search PO Number'), {
+    target: { value: '52-09-0114' },
+  });
+  expect(screen.getByText('PO-1010')).toBeInTheDocument();
+  expect(screen.queryByText('PO-1005')).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Search PO Number'), {
+    target: { value: 'TMP-20260721' },
+  });
+  expect(screen.getByText('TMP-20260721-0940-REWORK')).toBeInTheDocument();
+  expect(screen.queryByText('PO-1010')).not.toBeInTheDocument();
 });
 
 /* ============ Validation ============ */
@@ -209,7 +227,7 @@ test('an invalid quantity blocks save and keeps entered values', async () => {
     target: { value: '2026-09-01' },
   });
   scanBarcode('PF:PN:1021');
-  const qty = screen.getByLabelText('Quantity for PF-HOUSING-021');
+  const qty = screen.getByLabelText('Quantity for 78-04-0031');
   fireEvent.change(qty, { target: { value: '0' } });
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
@@ -259,7 +277,7 @@ test('editable date fields are calendar inputs (type="date")', async () => {
   expect(screen.getByLabelText('PO due date')).toHaveAttribute('type', 'date');
 
   scanBarcode('PF:PN:1021');
-  expect(screen.getByLabelText('Due date for PF-HOUSING-021')).toHaveAttribute(
+  expect(screen.getByLabelText('Due date for 78-04-0031')).toHaveAttribute(
     'type',
     'date',
   );
@@ -275,8 +293,8 @@ test('new lines inherit the PO due date; edited lines keep their own date', asyn
   scanBarcode('PF:PN:1021');
   scanBarcode('PF:PN:1102');
 
-  const due1 = screen.getByLabelText('Due date for PF-HOUSING-021');
-  const due2 = screen.getByLabelText('Due date for PF-PIN-102');
+  const due1 = screen.getByLabelText('Due date for 78-04-0031');
+  const due2 = screen.getByLabelText('Due date for 309-127');
   expect(due1).toHaveValue('2026-09-01');
   expect(due2).toHaveValue('2026-09-01');
 
@@ -314,7 +332,7 @@ test('scanning a new PN on an OPEN PO adds a draft line and marks unsaved', asyn
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
   scanBarcode('PF:PN:1021');
 
-  expect(screen.getByText('PF-HOUSING-021')).toBeInTheDocument();
+  expect(screen.getByText('78-04-0031')).toBeInTheDocument();
   // The new line joins the shipped invalid draft row as a second draft.
   expect(screen.getAllByText('Draft (unsaved)').length).toBeGreaterThanOrEqual(
     2,
@@ -327,9 +345,9 @@ test('a duplicate PN on an OPEN PO focuses the existing line', async () => {
   await openPoDetail('PO-1010');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
-  scanBarcode('PF:PN:1014'); // PF-SHAFT-014 is already on PO-1010
+  scanBarcode('PF:PN:1014'); // 0455-20-0118-03 is already on PO-1010
 
-  const qtyFields = screen.getAllByLabelText('Quantity for PF-SHAFT-014');
+  const qtyFields = screen.getAllByLabelText('Quantity for 0455-20-0118-03');
   expect(qtyFields).toHaveLength(1);
   expect(document.activeElement).toBe(qtyFields[0]);
 });
@@ -341,11 +359,11 @@ test('an unsaved draft line is removed immediately without a dialog', async () =
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part' }));
   scanBarcode('PF:PN:1021');
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line PF-HOUSING-021' }),
+    screen.getByRole('button', { name: 'Remove line 78-04-0031' }),
   );
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.queryByText('PF-HOUSING-021')).not.toBeInTheDocument();
+  expect(screen.queryByText('78-04-0031')).not.toBeInTheDocument();
 });
 
 test('removing a saved unreleased line requires confirmation', async () => {
@@ -353,10 +371,10 @@ test('removing a saved unreleased line requires confirmation', async () => {
   await openPoDetail('PO-1010');
 
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line PF-GEAR-201' }),
+    screen.getByRole('button', { name: 'Remove line 52-09-0114' }),
   );
   const confirm = screen.getByRole('dialog', {
-    name: 'Remove PF-GEAR-201 from PO-1010?',
+    name: 'Remove 52-09-0114 from PO-1010?',
   });
   expect(confirm).toBeInTheDocument();
 
@@ -364,14 +382,14 @@ test('removing a saved unreleased line requires confirmation', async () => {
   fireEvent.click(
     screen.getByRole('button', { name: 'Cancel — keep the line' }),
   );
-  expect(screen.getByText('PF-GEAR-201')).toBeInTheDocument();
+  expect(screen.getByText('52-09-0114')).toBeInTheDocument();
 
   // Confirm removes it from the draft (mock state only).
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line PF-GEAR-201' }),
+    screen.getByRole('button', { name: 'Remove line 52-09-0114' }),
   );
   fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
-  expect(screen.queryByText('PF-GEAR-201')).not.toBeInTheDocument();
+  expect(screen.queryByText('52-09-0114')).not.toBeInTheDocument();
   expect(screen.getByText(/local mock state only/)).toBeInTheDocument();
 });
 
@@ -380,7 +398,7 @@ test('a released line cannot be removed and explains why', async () => {
   await openPoDetail('PO-1010');
 
   const removeButton = screen.getByRole('button', {
-    name: 'Remove line PF-BRACKET-001',
+    name: 'Remove line 2027-60-8114-00',
   });
   expect(removeButton).toBeDisabled();
   expect(removeButton).toHaveAttribute(
@@ -401,7 +419,7 @@ test('saving an edited OPEN PO updates local mock state and reports mock-only', 
   // The mock data ships one invalid draft row — remove it first (drafts
   // are removed immediately), then save a real edit.
   fireEvent.click(screen.getByRole('button', { name: 'Remove draft line' }));
-  fireEvent.change(screen.getByLabelText('Quantity for PF-SHAFT-014'), {
+  fireEvent.change(screen.getByLabelText('Quantity for 0455-20-0118-03'), {
     target: { value: '14' },
   });
 
@@ -431,7 +449,7 @@ test('saving an OPEN PO with an incomplete row is blocked, not filtered', async 
 
 async function makeDetailDirty() {
   await openPoDetail('PO-1010');
-  fireEvent.change(screen.getByLabelText('Quantity for PF-SHAFT-014'), {
+  fireEvent.change(screen.getByLabelText('Quantity for 0455-20-0118-03'), {
     target: { value: '99' },
   });
   expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);

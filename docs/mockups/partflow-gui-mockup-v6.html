@@ -287,7 +287,7 @@ body.dark #view-scan{background:radial-gradient(1200px 500px at 60% -10%,#101a2c
 .pb-table td{padding:17px 18px;border-bottom:1px solid var(--hair);vertical-align:top}
 .pb-table .no{font-family:var(--mono);font-size:17px;color:var(--faint);font-weight:650}
 .pb-table .part{font-family:var(--mono);font-size:22px;font-weight:800;white-space:nowrap}
-.pb-table .pname{font-size:13px;color:var(--muted);margin-top:3px;font-family:var(--font);font-weight:400}
+.pb-table .pname{font-size:13px;color:var(--muted);margin-top:3px;font-family:var(--font);font-weight:400;max-width:46ch;white-space:normal}
 .pb-table .loc{display:flex;flex-direction:column;gap:6px}
 .pb-table .locrow{display:flex;align-items:center;gap:8px;font-size:16.5px}
 .pb-table .locrow .dot{width:11px;height:11px;border-radius:3.5px;flex:none}
@@ -409,7 +409,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .tk-table tr.sel td{background:rgba(79,140,255,.07)}
 .tk-table tr:hover td{background:rgba(79,140,255,.04);cursor:pointer}
 .tk-table .part{font-family:var(--mono);font-weight:750}
-.tk-table .sub{font-size:12px;color:var(--muted);margin-top:2px}
+.tk-table .sub{font-size:12px;color:var(--muted);margin-top:2px;max-width:44ch;white-space:normal}
 .tk-table .distmini{display:flex;flex-direction:column;gap:3px;font-size:12.5px}
 .tk-table .distmini span{display:inline-flex;align-items:center;gap:6px}
 .tk-table .distmini .dot{width:8px;height:8px;border-radius:2.5px}
@@ -725,8 +725,8 @@ body.light{color-scheme:light}
           <span class="note">select by scanning a Machine barcode — session persists until changed, cleared or expired (§19)</span></div>
         <div id="machines">
           <div class="mtile" data-m="Lathe 1">Lathe 1<span class="sub">idle</span></div>
-          <div class="mtile" data-m="Lathe 2">Lathe 2<span class="sub">running · SHAFT-014 × 4</span></div>
-          <div class="mtile" data-m="Lathe 3">Lathe 3<span class="sub">running · BRACKET-001 × 4</span></div>
+          <div class="mtile" data-m="Lathe 2">Lathe 2<span class="sub">running · 0455-20-0118-03 × 4</span></div>
+          <div class="mtile" data-m="Lathe 3">Lathe 3<span class="sub">running · 2027-60-8114-00 × 4</span></div>
           <div class="mtile maint" data-m="Lathe 4">Lathe 4<span class="sub">maintenance</span></div>
         </div>
       </div>
@@ -771,12 +771,12 @@ body.light{color-scheme:light}
         <div class="ph">In this Area now</div>
         <div class="invgrp">Assigned to Machines</div>
         <ul class="invlist" id="inv-assigned">
-          <li><span class="p">PF-BRACKET-001</span><span class="m">Lathe 3</span><span class="q">4</span></li>
-          <li><span class="p">PF-SHAFT-014</span><span class="m">Lathe 2</span><span class="q">4</span></li>
+          <li><span class="p">2027-60-8114-00</span><span class="m">Lathe 3</span><span class="q">4</span></li>
+          <li><span class="p">0455-20-0118-03</span><span class="m">Lathe 2</span><span class="q">4</span></li>
         </ul>
         <div class="invgrp">Area queue — awaiting Machine</div>
         <ul class="invlist" id="inv-queued">
-          <li><span class="p">PF-BRACKET-001</span><span class="m">queued</span><span class="q">2</span></li>
+          <li><span class="p">2027-60-8114-00</span><span class="m">queued</span><span class="q">2</span></li>
         </ul>
         <div class="invtotal">Total in Lathe<span class="q" id="invtotal">10</span></div>
       </div>
@@ -788,7 +788,7 @@ body.light{color-scheme:light}
 <div class="overlay" id="qtyovl">
   <div class="dlg">
     <h3>Enter quantity</h3>
-    <div class="big mono" id="qtypart">PF-SHAFT-014</div>
+    <div class="big mono" id="qtypart">0455-20-0118-03</div>
     <div class="sub" id="qtysub">Transfer Material → Lathe · available at source: <b>8</b></div>
     <div id="qtydisplay">&nbsp;</div>
     <div class="keypad">
@@ -808,7 +808,7 @@ body.light{color-scheme:light}
 <div class="overlay" id="ambovl">
   <div class="dlg">
     <h3>Multiple valid contexts — confirm intent</h3>
-    <div class="big mono">PF-BRACKET-001</div>
+    <div class="big mono">2027-60-8114-00</div>
     <div class="sub">This PN has more than one valid context at this station. Nothing is recorded until you choose:</div>
     <button class="choice" onclick="ambPick('assign')">
       <span class="cic que">QUE</span>
@@ -839,7 +839,7 @@ body.light{color-scheme:light}
   <div class="dlg">
     <h3>Manual PN entry — explicit fallback</h3>
     <div class="sub">Type the <b>exact PartNumber</b> (not a barcode). It is validated exactly like a scan — raw PN text is never interpreted as a barcode (§10). Nothing is recorded by this step.</div>
-    <input id="mpninput" class="field mono" autocomplete="off" placeholder="Exact PartNumber, e.g. PF-SHAFT-014"
+    <input id="mpninput" class="field mono" autocomplete="off" placeholder="Exact PartNumber, e.g. 0455-20-0118-03"
            onkeydown="if(event.key==='Enter')confirmManual()">
     <div class="row">
       <button class="bigbtn ghost" onclick="closeManual()">Cancel (Esc)</button>
@@ -852,7 +852,7 @@ body.light{color-scheme:light}
 <div class="overlay" id="intakeovl">
   <div class="dlg">
     <h3><span id="itype">REWORK</span> intake — confirm before anything is recorded</h3>
-    <div class="big mono">PF-BRACKET-001</div>
+    <div class="big mono">2027-60-8114-00</div>
     <div class="sub">Request Type <b id="itype2">REWORK</b>. Confirm quantity, PO link, Route and starting Area — <b>RECEIVED is appended only after confirmation</b>.</div>
     <div class="fgrid">
       <label>Quantity</label>
@@ -885,7 +885,7 @@ body.light{color-scheme:light}
 <div class="overlay" id="allocovl">
   <div class="dlg" style="width:min(640px,94vw)">
     <h3>Stocked — suggested PO Allocation</h3>
-    <div class="big mono">PF-PIN-102 <span style="font-size:16px;color:var(--muted);font-weight:600">× 20 stocked</span></div>
+    <div class="big mono">309-127 <span style="font-size:16px;color:var(--muted);font-weight:600">× 20 stocked</span></div>
     <div class="sub">Movement <b>STOCKED</b> recorded. Suggested allocation order: <b>priority → earliest due date</b>. Operators may review and adjust before confirmation.</div>
     <div class="alloc-row">
       <div>
@@ -930,8 +930,8 @@ body.light{color-scheme:light}
       <!-- Hot PO Demand first, by priority rank; then by due date -->
       <tr class="hotrow1">
         <td><div class="no">1</div></td>
-        <td><div class="part blink">🔥 PF-BRACKET-001<span class="hot h1" style="margin-left:9px">#1</span></div>
-            <div class="pname">Mounting bracket, alum 6061 · rev C</div></td>
+        <td><div class="part blink">🔥 2027-60-8114-00<span class="hot h1" style="margin-left:9px">#1</span></div>
+            <div class="pname">BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES · rev C</div></td>
         <td><div class="loc">
           <div class="locrow"><span class="dot" style="background:var(--a-cut)"></span>Cut <span class="q">4</span><span class="ltime">3h 40m</span></div>
           <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 3 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">2h 05m</span></div>
@@ -947,8 +947,8 @@ body.light{color-scheme:light}
       </tr>
       <tr class="hotrow2">
         <td><div class="no">2</div></td>
-        <td><div class="part blink">🔥 PF-PLATE-007<span class="hot h2" style="margin-left:9px">#2</span></div>
-            <div class="pname">Base plate 200×140</div></td>
+        <td><div class="part blink">🔥 142-260<span class="hot h2" style="margin-left:9px">#2</span></div>
+            <div class="pname">PLATE, TOP COVER ALUM 6061-T6</div></td>
         <td><div class="loc">
           <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Plating <span class="q">20</span><span class="ltime long">4d 02h</span></div>
           <div class="totline">total <b>20</b> pcs</div>
@@ -959,7 +959,7 @@ body.light{color-scheme:light}
       </tr>
       <tr>
         <td><div class="no">3</div></td>
-        <td><div class="part">PF-SHAFT-014</div><div class="pname">Drive shaft Ø25, 4140</div></td>
+        <td><div class="part">0455-20-0118-03</div><div class="pname">SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA</div></td>
         <td><div class="loc">
           <div class="locrow"><span class="dot" style="background:var(--a-material)"></span>Material <span class="q">8</span><span class="ltime">2d 01h</span></div>
           <div class="locrow"><span class="dot" style="background:var(--a-lathe)"></span>Lathe 2 <span class="q">4</span> <span class="qtag">machine</span><span class="ltime">1h 05m</span></div>
@@ -971,7 +971,7 @@ body.light{color-scheme:light}
       </tr>
       <tr>
         <td><div class="no">4</div></td>
-        <td><div class="part">PF-HOUSING-021</div><div class="pname">Gearbox housing</div></td>
+        <td><div class="part">78-04-0031</div><div class="pname">HOUSING, BEARING CAST AL 356-T6, MACHINED</div></td>
         <td><div class="loc">
           <div class="locrow"><span class="dot" style="background:var(--a-mill)"></span>Mill 1 <span class="q">3</span> <span class="qtag">machine</span><span class="ltime">45m</span></div>
           <div class="locrow"><span class="dot" style="background:var(--a-deburr)"></span>Deburr <span class="q">3</span><span class="ltime">30m</span></div>
@@ -986,7 +986,7 @@ body.light{color-scheme:light}
       </tr>
       <tr>
         <td><div class="no">5</div></td>
-        <td><div class="part">PF-PIN-102</div><div class="pname">Locating pin Ø8</div></td>
+        <td><div class="part">309-127</div><div class="pname">PIN, DOWEL 1/4 X 1.00 SS</div></td>
         <td><div class="loc">
           <div class="locrow"><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <span class="q">50</span><span class="ltime">—</span></div>
           <div class="totline">total <b>50</b> pcs stocked</div>
@@ -995,13 +995,24 @@ body.light{color-scheme:light}
         <td class="due"><div class="d1">Jul 10</div><div class="d2 ok">✓ stocked</div></td>
         <td><div class="dtotal">12 d</div></td>
       </tr>
+      <tr>
+        <td><div class="no">6</div></td>
+        <td><div class="part">0123-40-0007-22</div><div class="pname">CATCH CUP INSERT, COATER 3-5, VENDOR</div></td>
+        <td><div class="loc">
+          <div class="locrow"><span class="dot" style="background:var(--a-external)"></span>External — Vendor <span class="q">12</span><span class="ltime">1d 06h</span></div>
+          <div class="totline">total <b>12</b> pcs</div>
+        </div></td>
+        <td class="jobs"><div class="j">ERP-88377 <span class="jm">· PO-1007 · 12 pcs</span></div></td>
+        <td class="due"><div class="d1">Aug 03</div><div class="d2 ok">9 days left</div></td>
+        <td><div class="dtotal">3 d</div></td>
+      </tr>
     </tbody>
   </table>
   <div class="pb-foot">
     <span>Page 1 / 3 · rotates every 12 s</span>
     <span class="pgdot on"></span><span class="pgdot"></span><span class="pgdot"></span>
     <div class="spacer"></div>
-    <span>🔥 #n = Hot priority rank · blinking PN = due soon / overdue · 5 active PNs · 48 pcs in production · 50 pcs stocked</span>
+    <span>🔥 #n = Hot priority rank · blinking PN = due soon / overdue · 5 active PNs · 60 pcs in production · 50 pcs stocked</span>
   </div>
 </section>
 
@@ -1042,8 +1053,8 @@ body.light{color-scheme:light}
       <table class="tk-table">
         <thead><tr><th>Part Number</th><th>Active PO Demand</th><th>Current distribution</th><th>Active qty</th><th>Stocked</th><th>Due (next)</th><th>Status</th></tr></thead>
         <tbody>
-          <tr class="sel" onclick="selectPN(this,'PF-BRACKET-001')">
-            <td><span class="part">🔥 PF-BRACKET-001</span><span class="hot h1" style="margin-left:8px">#1</span><div class="sub">Mounting bracket, alum 6061</div></td>
+          <tr class="sel" onclick="selectPN(this,'2027-60-8114-00')">
+            <td><span class="part">🔥 2027-60-8114-00</span><span class="hot h1" style="margin-left:8px">#1</span><div class="sub">BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES</div></td>
             <td><div class="mono" style="font-size:13px">PO-1001 · 10 <span class="typechip new">NEW</span></div>
                 <div class="mono" style="font-size:13px;margin-top:3px">PO-1008 · 5 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini">
@@ -1052,15 +1063,15 @@ body.light{color-scheme:light}
             <td class="mono">10</td><td class="mono">0</td><td>Jul 24</td>
             <td><span class="status active">Active</span></td>
           </tr>
-          <tr onclick="selectPN(this,'PF-PLATE-007')">
-            <td><span class="part">🔥 PF-PLATE-007</span><span class="hot h2" style="margin-left:8px">#2</span><div class="sub">Base plate 200×140</div></td>
+          <tr onclick="selectPN(this,'142-260')">
+            <td><span class="part">🔥 142-260</span><span class="hot h2" style="margin-left:8px">#2</span><div class="sub">PLATE, TOP COVER ALUM 6061-T6</div></td>
             <td><div class="mono" style="font-size:13px">PO-1005 · 20 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini"><span><span class="dot" style="background:var(--a-external)"></span>External <b>20</b></span></div></td>
             <td class="mono">20</td><td class="mono">0</td><td>Jul 16</td>
             <td><span class="status active">Active</span></td>
           </tr>
-          <tr onclick="selectPN(this,'PF-SHAFT-014')">
-            <td><span class="part">PF-SHAFT-014</span><div class="sub">Drive shaft Ø25, 4140</div></td>
+          <tr onclick="selectPN(this,'0455-20-0118-03')">
+            <td><span class="part">0455-20-0118-03</span><div class="sub">SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA</div></td>
             <td><div class="mono" style="font-size:13px">PO-1003 · 12 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini">
               <span><span class="dot" style="background:var(--a-material)"></span>Material <b>8</b></span>
@@ -1068,8 +1079,8 @@ body.light{color-scheme:light}
             <td class="mono">12</td><td class="mono">0</td><td>Jul 31</td>
             <td><span class="status active">Active</span></td>
           </tr>
-          <tr onclick="selectPN(this,'PF-HOUSING-021')">
-            <td><span class="part">PF-HOUSING-021</span><div class="sub">Gearbox housing</div></td>
+          <tr onclick="selectPN(this,'78-04-0031')">
+            <td><span class="part">78-04-0031</span><div class="sub">HOUSING, BEARING CAST AL 356-T6, MACHINED</div></td>
             <td><div class="mono" style="font-size:13px">PO-1002 · 6 <span class="typechip new">NEW</span></div>
                 <div class="mono" style="font-size:13px;margin-top:3px">TMP-…-0910 · 1 <span class="typechip rework">REWORK</span></div></td>
             <td><div class="distmini">
@@ -1078,12 +1089,19 @@ body.light{color-scheme:light}
             <td class="mono">6</td><td class="mono">0</td><td>Aug 07</td>
             <td><span class="status active">Active</span></td>
           </tr>
-          <tr onclick="selectPN(this,'PF-PIN-102')">
-            <td><span class="part">PF-PIN-102</span><div class="sub">Locating pin Ø8</div></td>
+          <tr onclick="selectPN(this,'309-127')">
+            <td><span class="part">309-127</span><div class="sub">PIN, DOWEL 1/4 X 1.00 SS</div></td>
             <td><div class="mono" style="font-size:13px">PO-0996 · 50 <span class="typechip new">NEW</span></div></td>
             <td><div class="distmini"><span><span class="dot" style="background:var(--a-stockroom)"></span>Stockroom <b>50</b></span></div></td>
             <td class="mono">0</td><td class="mono">50</td><td>—</td>
             <td><span class="status done">Completed</span></td>
+          </tr>
+          <tr onclick="selectPN(this,'118-052')">
+            <td><span class="part">118-052</span><div class="sub">MOTOR, GEAR STEPPER 7.2T</div></td>
+            <td><div class="mono" style="font-size:13px">PO-1009 · 4 <span class="typechip new">NEW</span></div></td>
+            <td><div class="distmini"><span><span class="dot" style="background:var(--a-manual)"></span>Manual <b>4</b></span></div></td>
+            <td class="mono">4</td><td class="mono">0</td><td>Aug 12</td>
+            <td><span class="status active">Active</span></td>
           </tr>
         </tbody>
       </table>
@@ -1093,8 +1111,8 @@ body.light{color-scheme:light}
       <div class="tk-pnrow">
         <div class="tk-img">🔩</div>
         <div>
-          <h2>PF-BRACKET-001</h2>
-          <div class="jsub">Mounting bracket, alum 6061 · revision <b>C</b> (informational) · barcode <b>PF:PN:1001</b> · ERP id <b>ERP-PN-40412</b></div>
+          <h2>2027-60-8114-00</h2>
+          <div class="jsub">BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES · revision <b>C</b> (informational) · barcode <b>PF:PN:1001</b> · ERP id <b>ERP-PN-40412</b></div>
         </div>
       </div>
 
@@ -1300,7 +1318,7 @@ body.light{color-scheme:light}
 <div class="overlay" id="relovl">
   <div class="dlg light" style="width:min(660px,94vw)" role="dialog" aria-modal="true" aria-label="Release to production — explicit action">
     <h3>Release to production — explicit action</h3>
-    <div class="big mono" id="rel-pn">PF-GEAR-201</div>
+    <div class="big mono" id="rel-pn">52-09-0114</div>
     <div class="sub" id="rel-sub">PO-1010 demand · requested <b>8</b> · nothing is created until you confirm.</div>
     <div class="relwarn" id="rel-warn" style="display:none">⚠ <b>This PN already has active quantity:</b> <span id="rel-dist" class="mono"></span>. Confirm intent explicitly — release always creates a <b>separate</b> Quantity Flow; it never automatically adds to or merges existing flows.</div>
     <div class="relgrid">
@@ -1342,7 +1360,7 @@ body.light{color-scheme:light}
     <div class="sub">Search by PN, PO or Job Number and select — or <b>scan the PN barcode</b> with this dialog open.</div>
     <input id="hotsearch" placeholder="Search PN, PO, Job Number… or scan PN barcode" autocomplete="off"
            oninput="renderHotAdd()" onkeydown="hotSearchKey(event)">
-    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (PF-SHAFT-014) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
+    <div class="hotadd-hint">Demo barcode: <b>PF:PN:1014</b> (0455-20-0118-03) — Enter adds it directly. If a PN has multiple active PO Demands, each is listed separately.</div>
     <div id="hotaddlist"></div>
     <div class="row"><button class="bigbtn ghost" onclick="closeHotAdd()">Cancel (Esc)</button></div>
   </div>
@@ -1474,8 +1492,8 @@ function confirmManual(){
   const pn=document.getElementById('mpninput').value.trim().toUpperCase();
   document.getElementById('manovl').classList.remove('show');
   if(!pn){ focusScan(); return; }
-  if(pn==='PF-SHAFT-014'){ setLastPN('PF-SHAFT-014','manual entry · single valid context'); openQty('PF-SHAFT-014',8); }
-  else if(pn==='PF-BRACKET-001'){ setLastPN('PF-BRACKET-001','manual entry · multiple valid contexts'); document.getElementById('ambovl').classList.add('show'); }
+  if(pn==='0455-20-0118-03'){ setLastPN('0455-20-0118-03','manual entry · single valid context'); openQty('0455-20-0118-03',8); }
+  else if(pn==='2027-60-8114-00'){ setLastPN('2027-60-8114-00','manual entry · multiple valid contexts'); document.getElementById('ambovl').classList.add('show'); }
   else { feedback('err','Unknown PartNumber','“'+pn+'” matches no PN — nothing recorded. Manual entry is validated exactly like a scan.','✕'); focusScan(); }
 }
 
@@ -1545,12 +1563,12 @@ function doScan(){
     return;
   }
   if(v==='PF:PN:1014'){                       // single context
-    setLastPN('PF-SHAFT-014','Drive shaft Ø25 · single valid context');
-    openQty('PF-SHAFT-014',8);
+    setLastPN('0455-20-0118-03','SHAFT, DRIVE 0.750 DIA X 12.500 · single valid context');
+    openQty('0455-20-0118-03',8);
     return;
   }
   if(v==='PF:PN:1001'){                       // multiple contexts → never guess (§10)
-    setLastPN('PF-BRACKET-001','Mounting bracket · multiple valid contexts');
+    setLastPN('2027-60-8114-00','BRACKET, MOUNTING SS 304 · multiple valid contexts');
     document.getElementById('ambovl').classList.add('show');
     return;
   }
@@ -1616,10 +1634,10 @@ function closeAmb(){ document.getElementById('ambovl').classList.remove('show');
 function ambPick(k){
   document.getElementById('ambovl').classList.remove('show');
   if(k==='assign'){
-    pendingPN={pn:'PF-BRACKET-001',qty:2};
-    setPending('Pending context: PF-BRACKET-001 × 2 (Lathe queue) — scan a Machine barcode to assign.');
-    feedback('warn','Scan Machine barcode to assign','PF-BRACKET-001 × 2 selected from Lathe queue — nothing recorded until the Machine scan.','!');
-  } else if(k==='transfer'){ openQty('PF-BRACKET-001',4); }
+    pendingPN={pn:'2027-60-8114-00',qty:2};
+    setPending('Pending context: 2027-60-8114-00 × 2 (Lathe queue) — scan a Machine barcode to assign.');
+    feedback('warn','Scan Machine barcode to assign','2027-60-8114-00 × 2 selected from Lathe queue — nothing recorded until the Machine scan.','!');
+  } else if(k==='transfer'){ openQty('2027-60-8114-00',4); }
   else if(k==='rework'){ openIntake('REWORK'); return; }
   else { openIntake('MODIFY'); return; }
   focusScan();
@@ -1651,7 +1669,7 @@ function confirmIntake(){
   const area=document.getElementById('iarea').value.replace(' (this Area)','');
   const t=intakeType; intakeType=null;
   document.getElementById('intakeovl').classList.remove('show');
-  if(recordMovement('PF-BRACKET-001','RECEIVED',t+' · '+po+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
+  if(recordMovement('2027-60-8114-00','RECEIVED',t+' · '+po+' · qty '+q+' · into '+area+' · Route “'+route+'”'))
     feedback('ok',t+' demand released into '+area, po+' · new Quantity Flow QF-0158 × '+q+' · Route “'+route+'” snapshot assigned · RECEIVED appended after confirmation.','✓');
   focusScan();
 }
@@ -1689,9 +1707,9 @@ function toggleOffline(){
 const allocReq=[12,8]; let alloc=[12,8];
 function openAlloc(){
   // the STOCKED PartMovement is recorded first; the allocation dialog follows (GUI §11)
-  if(!recordMovement('PF-PIN-102','STOCKED','20 pcs into Stockroom · manufacturing-complete')) return;
+  if(!recordMovement('309-127','STOCKED','20 pcs into Stockroom · manufacturing-complete')) return;
   alloc=[...allocReq]; refreshAlloc();
-  setLastPN('PF-PIN-102','STOCKED × 20 — allocation suggestion open');
+  setLastPN('309-127','STOCKED × 20 — allocation suggestion open');
   document.getElementById('allocovl').classList.add('show');
 }
 function stepAlloc(i,d){
@@ -1740,16 +1758,16 @@ const AREAS=[
   {key:'stockroom',name:'Stockroom',color:'var(--a-stockroom)',desc:'Terminal Area — completed parts',ops:['Receiving'],terminal:true}
 ];
 const AB_CARDS=[
-  {area:'material',pn:'PF-SHAFT-014',po:'PO-1003 · Receiving',job:'ERP-88190',qty:8,mach:[['queue',8]],due:'9 days remaining',dcls:'ok',tia:'2d 01h',prio:0,d:9},
-  {area:'cut',pn:'PF-BRACKET-001',po:'PO-1001 · Cutting',job:'ERP-88112',qty:4,mach:[['Saw 1',4]],due:'2 days remaining',dcls:'soon',tia:'3h 40m',prio:1,d:2},
-  {area:'lathe',pn:'PF-BRACKET-001',po:'PO-1001 · Turning',job:'ERP-88112',qty:6,mach:[['Lathe 3',4],['queue',2]],due:'2 days remaining',dcls:'soon',tia:'2h 05m',prio:1,d:2},
-  {area:'lathe',pn:'PF-SHAFT-014',po:'PO-1003 · Turning',job:'ERP-88190',qty:4,mach:[['Lathe 2',4]],due:'9 days remaining',dcls:'ok',tia:'1h 05m',prio:0,d:9},
-  {area:'lathe',pn:'PF-VALVE-033',po:'TMP-…-REWORK · Turning · REWORK',job:'— (internal)',qty:2,mach:[['queue',2]],due:'overdue 1 day',dcls:'late',tia:'6h 12m',prio:0,d:-1},
-  {area:'mill',pn:'PF-HOUSING-021',po:'PO-1002 · Milling',job:'ERP-88102',qty:3,mach:[['Mill 1',3]],due:'16 days remaining',dcls:'ok',tia:'45m',prio:0,d:16},
-  {area:'mill',pn:'PF-MANIFOLD-ASSY-00847-REV-C',po:'PO-1008 · Milling',job:'ERP-88455',qty:2,mach:[['Mill 2',2]],due:'12 days remaining',dcls:'ok',tia:'1h 20m',prio:0,d:12},
-  {area:'deburr',pn:'PF-HOUSING-021',po:'PO-1002 · Deburring',job:'ERP-88102',qty:3,mach:[['queue',3]],due:'16 days remaining',dcls:'ok',tia:'30m',prio:0,d:16},
-  {area:'external',pn:'PF-PLATE-007',po:'PO-1005 · Plating',job:'ERP-88031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6},
-  {area:'stockroom',pn:'PF-PIN-102',po:'PO-0996 · stocked',job:'ERP-87740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:99}
+  {area:'material',pn:'0455-20-0118-03',po:'PO-1003 · Receiving',job:'ERP-88190',qty:8,mach:[['queue',8]],due:'9 days remaining',dcls:'ok',tia:'2d 01h',prio:0,d:9},
+  {area:'cut',pn:'2027-60-8114-00',po:'PO-1001 · Cutting',job:'ERP-88112',qty:4,mach:[['Saw 1',4]],due:'2 days remaining',dcls:'soon',tia:'3h 40m',prio:1,d:2},
+  {area:'lathe',pn:'2027-60-8114-00',po:'PO-1001 · Turning',job:'ERP-88112',qty:6,mach:[['Lathe 3',4],['queue',2]],due:'2 days remaining',dcls:'soon',tia:'2h 05m',prio:1,d:2},
+  {area:'lathe',pn:'0455-20-0118-03',po:'PO-1003 · Turning',job:'ERP-88190',qty:4,mach:[['Lathe 2',4]],due:'9 days remaining',dcls:'ok',tia:'1h 05m',prio:0,d:9},
+  {area:'lathe',pn:'214-406',po:'TMP-…-REWORK · Turning · REWORK',job:'— (internal)',qty:2,mach:[['queue',2]],due:'overdue 1 day',dcls:'late',tia:'6h 12m',prio:0,d:-1},
+  {area:'mill',pn:'78-04-0031',po:'PO-1002 · Milling',job:'ERP-88102',qty:3,mach:[['Mill 1',3]],due:'16 days remaining',dcls:'ok',tia:'45m',prio:0,d:16},
+  {area:'mill',pn:'0118-40-0022-07-0455-88-REV-C',po:'PO-1008 · Milling',job:'ERP-88455',qty:2,mach:[['Mill 2',2]],due:'12 days remaining',dcls:'ok',tia:'1h 20m',prio:0,d:12},
+  {area:'deburr',pn:'78-04-0031',po:'PO-1002 · Deburring',job:'ERP-88102',qty:3,mach:[['queue',3]],due:'16 days remaining',dcls:'ok',tia:'30m',prio:0,d:16},
+  {area:'external',pn:'142-260',po:'PO-1005 · Plating',job:'ERP-88031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6},
+  {area:'stockroom',pn:'309-127',po:'PO-0996 · stocked',job:'ERP-87740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:99}
 ];
 let abActive='all';                        // 'all' = All Areas overview (default), or an Area key
 function abSorted(cards){
@@ -1830,21 +1848,21 @@ function renderAreaDetail(){
 function selectPN(row,pn){
   document.querySelectorAll('.tk-table tr').forEach(r=>r.classList.remove('sel'));
   row.classList.add('sel');
-  if(pn!=='PF-BRACKET-001') toast('ℹ','Mockup shows the full detail panel for PF-BRACKET-001 only');
+  if(pn!=='2027-60-8114-00') toast('ℹ','Mockup shows the full detail panel for 2027-60-8114-00 only');
 }
 
 /* ================= Priority Management =================
    Hot list edits (reorder / add / remove) apply immediately and are audited.
    Undo/Redo replace Save/Cancel per current UI decision — supersedes §21 step 5. */
 let hotList=[
-  {pn:'PF-BRACKET-001',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
-  {pn:'PF-PLATE-007',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
-  {pn:'PF-PIN-102',po:'PO-1006 · ERP-88355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
+  {pn:'2027-60-8114-00',po:'PO-1001 · ERP-88112',type:'new',meta:'requested <b>10</b>|allocated <b>0</b>|shortage <b>10</b>|at Cut 4 · Lathe 6',due:'Jul 24',d2:'2 days left',d2c:'soon'},
+  {pn:'142-260',po:'PO-1005 · ERP-88031',type:'new',meta:'requested <b>20</b>|allocated <b>0</b>|shortage <b>20</b>|at External 20',due:'Jul 16',d2:'overdue 6 days',d2c:'late'},
+  {pn:'309-127',po:'PO-1006 · ERP-88355',type:'rework',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|not yet released',due:'Jul 25',d2:'3 days left',d2c:'soon'}
 ];
 const HOT_CANDIDATES=[
-  {pn:'PF-SHAFT-014',po:'PO-1003 · ERP-88190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
-  {pn:'PF-HOUSING-021',po:'PO-1002 · ERP-88102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
-  {pn:'PF-VALVE-033',po:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
+  {pn:'0455-20-0118-03',po:'PO-1003 · ERP-88190',type:'new',meta:'requested <b>12</b>|allocated <b>0</b>|shortage <b>12</b>|at Material 8 · Lathe 4',due:'Jul 31',d2:'9 days left',d2c:'ok',code:'PF:PN:1014'},
+  {pn:'78-04-0031',po:'PO-1002 · ERP-88102',type:'new',meta:'requested <b>6</b>|allocated <b>0</b>|shortage <b>6</b>|at Mill 3 · Deburr 3',due:'Aug 07',d2:'16 days left',d2c:'ok',code:'PF:PN:1021'},
+  {pn:'214-406',po:'TMP-20260721-0940-REWORK',type:'rework',meta:'requested <b>2</b>|allocated <b>0</b>|shortage <b>2</b>|at Lathe queue 2',due:'Jul 21',d2:'overdue 1 day',d2c:'late',code:'PF:PN:1033'}
 ];
 let undoHist=[], redoHist=[];
 const prlist=document.getElementById('prlist');
@@ -1971,23 +1989,23 @@ function todayISO(){
   const d=new Date();
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
-const PN_CATALOG={'PF:PN:1014':'PF-SHAFT-014','PF:PN:1021':'PF-HOUSING-021','PF:PN:1102':'PF-PIN-102','PF:PN:1033':'PF-VALVE-033'};
+const PN_CATALOG={'PF:PN:1014':'0455-20-0118-03','PF:PN:1021':'78-04-0031','PF:PN:1102':'309-127','PF:PN:1033':'214-406'};
 /* Editable dates are ISO YYYY-MM-DD; read-only presentation formats them. */
 const PO_LIST=[
-  {po:'PO-1010',received:'2026-07-22',due:'2026-08-12',dcls:'',status:'Open',preview:'PF-SHAFT-014 · PF-GEAR-201 · 2 more',lines:[
-    {pn:'PF-SHAFT-014',bc:'existing PN · barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-08-12',job:'ERP-88411',notes:'',scls:'saved',stat:'Saved',rel:true},
-    {pn:'PF-GEAR-201',bc:'new PN — barcode created with PN master: PF:PN:1201',type:'NEW',qty:8,due:'2026-08-20',job:'ERP-88420',notes:'hardened',scls:'saved',stat:'Saved',rel:true},
-    {pn:'PF-BRACKET-001',bc:'existing PN · barcode PF:PN:1044',type:'NEW',qty:6,due:'2026-08-05',job:'ERP-88395',notes:'',scls:'released',stat:'Released · QF-0161'},
+  {po:'PO-1010',received:'2026-07-22',due:'2026-08-12',dcls:'',status:'Open',preview:'0455-20-0118-03 · 52-09-0114 · 2 more',lines:[
+    {pn:'0455-20-0118-03',bc:'existing PN · barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-08-12',job:'ERP-88411',notes:'',scls:'saved',stat:'Saved',rel:true},
+    {pn:'52-09-0114',bc:'new PN — barcode created with PN master: PF:PN:1201',type:'NEW',qty:8,due:'2026-08-20',job:'ERP-88420',notes:'hardened',scls:'saved',stat:'Saved',rel:true},
+    {pn:'2027-60-8114-00',bc:'existing PN · barcode PF:PN:1044',type:'NEW',qty:6,due:'2026-08-05',job:'ERP-88395',notes:'',scls:'released',stat:'Released · QF-0161'},
     {pn:'',bc:'PN lookup or inline create required',type:'REWORK',qty:0,due:'',job:'',notes:'',scls:'invalid',stat:'Row invalid'}
   ]},
-  {po:'PO-1003',received:'2026-07-12',due:'2026-07-31',dcls:'',status:'Released',preview:'PF-SHAFT-014',lines:[
-    {pn:'PF-SHAFT-014',bc:'barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-07-31',job:'ERP-88190',notes:'',scls:'released',stat:'Released · QF-0148'}]},
-  {po:'PO-1005',received:'2026-07-06',due:'2026-07-16',dcls:'late',status:'Released',preview:'PF-PLATE-007',lines:[
-    {pn:'PF-PLATE-007',bc:'barcode PF:PN:1007',type:'NEW',qty:20,due:'2026-07-16',job:'ERP-88031',notes:'',scls:'released',stat:'Released · QF-0152'}]},
-  {po:'TMP-20260721-0940-REWORK',received:'2026-07-21',due:'2026-07-21',dcls:'late',status:'Released',preview:'PF-VALVE-033',internal:true,lines:[
-    {pn:'PF-VALVE-033',bc:'barcode PF:PN:1033',type:'REWORK',qty:2,due:'2026-07-21',job:'— (internal)',notes:'',scls:'released',stat:'Released · QF-0158'}]},
-  {po:'PO-0996',received:'2026-06-18',due:'2026-07-10',dcls:'',status:'Complete',preview:'PF-PIN-102',lines:[
-    {pn:'PF-PIN-102',bc:'barcode PF:PN:1102',type:'NEW',qty:50,due:'2026-07-10',job:'ERP-87740',notes:'',scls:'released',stat:'Allocated 50 / 50'}]}
+  {po:'PO-1003',received:'2026-07-12',due:'2026-07-31',dcls:'',status:'Released',preview:'0455-20-0118-03',lines:[
+    {pn:'0455-20-0118-03',bc:'barcode PF:PN:1014',type:'NEW',qty:12,due:'2026-07-31',job:'ERP-88190',notes:'',scls:'released',stat:'Released · QF-0148'}]},
+  {po:'PO-1005',received:'2026-07-06',due:'2026-07-16',dcls:'late',status:'Released',preview:'142-260',lines:[
+    {pn:'142-260',bc:'barcode PF:PN:1007',type:'NEW',qty:20,due:'2026-07-16',job:'ERP-88031',notes:'',scls:'released',stat:'Released · QF-0152'}]},
+  {po:'TMP-20260721-0940-REWORK',received:'2026-07-21',due:'2026-07-21',dcls:'late',status:'Released',preview:'214-406',internal:true,lines:[
+    {pn:'214-406',bc:'barcode PF:PN:1033',type:'REWORK',qty:2,due:'2026-07-21',job:'— (internal)',notes:'',scls:'released',stat:'Released · QF-0158'}]},
+  {po:'PO-0996',received:'2026-06-18',due:'2026-07-10',dcls:'',status:'Complete',preview:'309-127',lines:[
+    {pn:'309-127',bc:'barcode PF:PN:1102',type:'NEW',qty:50,due:'2026-07-10',job:'ERP-87740',notes:'',scls:'released',stat:'Allocated 50 / 50'}]}
 ];
 function poPanels(which){
   ['po-list-panel','po-detail-panel'].forEach(id=>
@@ -2338,8 +2356,8 @@ window.addEventListener('beforeunload',e=>{
 
 /* ---- demand save vs explicit release (mock) ---- */
 const REL_DATA={
-  'PF-SHAFT-014':{req:12,route:['Shaft std v2','Shaft short v1'],active:'Material 8 · Lathe 2 × 4',qf:'QF-0163'},
-  'PF-GEAR-201' :{req:8, route:['Gear std v1'],                  active:null,                      qf:'QF-0164'}
+  '0455-20-0118-03':{req:12,route:['Shaft std v2','Shaft short v1'],active:'Material 8 · Lathe 2 × 4',qf:'QF-0163'},
+  '52-09-0114' :{req:8, route:['Gear std v1'],                  active:null,                      qf:'QF-0164'}
 };
 let relPN=null;
 function openRelease(pn){

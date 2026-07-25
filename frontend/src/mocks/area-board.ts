@@ -3,7 +3,7 @@ import type { MockAreaCard } from '../views/view-models';
 export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'material',
-    pn: 'PF-SHAFT-014',
+    pn: '0455-20-0118-03',
     po: 'PO-1003 · Receiving',
     job: 'ERP-88190',
     qty: 8,
@@ -15,7 +15,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'cut',
-    pn: 'PF-BRACKET-001',
+    pn: '2027-60-8114-00',
     po: 'PO-1001 · Cutting',
     job: 'ERP-88112',
     qty: 4,
@@ -28,7 +28,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'lathe',
-    pn: 'PF-BRACKET-001',
+    pn: '2027-60-8114-00',
     po: 'PO-1001 · Turning',
     job: 'ERP-88112',
     qty: 6,
@@ -44,7 +44,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'lathe',
-    pn: 'PF-SHAFT-014',
+    pn: '0455-20-0118-03',
     po: 'PO-1003 · Turning',
     job: 'ERP-88190',
     qty: 4,
@@ -56,7 +56,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'lathe',
-    pn: 'PF-VALVE-033',
+    pn: '214-406',
     po: 'TMP-…-REWORK · Turning · REWORK',
     job: '— (internal)',
     qty: 2,
@@ -68,7 +68,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'mill',
-    pn: 'PF-HOUSING-021',
+    pn: '78-04-0031',
     po: 'PO-1002 · Milling',
     job: 'ERP-88102',
     qty: 3,
@@ -82,7 +82,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     // Long-PN reference case from GUI_DESIGN §6.3: the qty block stays
     // anchored right; the PN truncates with an ellipsis + title tooltip.
     area: 'mill',
-    pn: 'PF-MANIFOLD-ASSY-00847-REV-C',
+    pn: '0118-40-0022-07-0455-88-REV-C',
     po: 'PO-1008 · Milling',
     job: 'ERP-88455',
     qty: 2,
@@ -94,7 +94,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'deburr',
-    pn: 'PF-HOUSING-021',
+    pn: '78-04-0031',
     po: 'PO-1002 · Deburring',
     job: 'ERP-88102',
     qty: 3,
@@ -106,7 +106,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'external',
-    pn: 'PF-PLATE-007',
+    pn: '142-260',
     po: 'PO-1005 · Plating',
     job: 'ERP-88031',
     qty: 20,
@@ -119,7 +119,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
   },
   {
     area: 'stockroom',
-    pn: 'PF-PIN-102',
+    pn: '309-127',
     po: 'PO-0996 · stocked',
     job: 'ERP-87740',
     qty: 50,
@@ -136,7 +136,7 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
   ...MOCK_AREA_CARDS,
   {
     area: 'lathe',
-    pn: 'PF-TURBINE-SHAFT-ASSEMBLY-99120-REV-F-SPECIAL',
+    pn: '2199-60-9912-05-2027-11-REV-F',
     po: 'PO-1042 · Turning',
     job: 'ERP-90311-CUSTOMER-REF-00098',
     qty: 14,
@@ -154,7 +154,7 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
     const n = i + 1;
     return {
       area: 'lathe',
-      pn: `PF-LONGRUN-${String(n).padStart(3, '0')}`,
+      pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
       po: `PO-2${String(100 + n)} · Turning`,
       job: `ERP-9${String(1000 + n)}`,
       qty: (n % 6) + 1,

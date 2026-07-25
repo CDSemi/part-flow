@@ -322,7 +322,7 @@ function HotAddDialog({
         }}
       />
       <div className="hotadd-hint">
-        Demo barcode: <code>PF:PN:1014</code> (PF-SHAFT-014) — Enter adds it
+        Demo barcode: <code>PF:PN:1014</code> (0455-20-0118-03) — Enter adds it
         directly. If a PN has multiple active PO Demands, each is listed
         separately.
       </div>

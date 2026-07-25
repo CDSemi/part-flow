@@ -2,7 +2,7 @@ import type { MockHotEntry } from '../views/view-models';
 
 export const MOCK_HOT_LIST: MockHotEntry[] = [
   {
-    pn: 'PF-BRACKET-001',
+    pn: '2027-60-8114-00',
     po: 'PO-1001 · ERP-88112',
     type: 'NEW',
     figures: [
@@ -16,7 +16,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
     dueClass: 'soon',
   },
   {
-    pn: 'PF-PLATE-007',
+    pn: '142-260',
     po: 'PO-1005 · ERP-88031',
     type: 'NEW',
     figures: ['requested 20', 'allocated 0', 'shortage 20', 'at External 20'],
@@ -25,7 +25,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
     dueClass: 'late',
   },
   {
-    pn: 'PF-PIN-102',
+    pn: '309-127',
     po: 'PO-1006 · ERP-88355',
     type: 'REWORK',
     figures: ['requested 12', 'allocated 0', 'shortage 12', 'not yet released'],
@@ -37,7 +37,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
 
 export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
   {
-    pn: 'PF-SHAFT-014',
+    pn: '0455-20-0118-03',
     po: 'PO-1003 · ERP-88190',
     type: 'NEW',
     figures: [
@@ -52,7 +52,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     barcode: 'PF:PN:1014',
   },
   {
-    pn: 'PF-HOUSING-021',
+    pn: '78-04-0031',
     po: 'PO-1002 · ERP-88102',
     type: 'NEW',
     figures: [
@@ -67,7 +67,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     barcode: 'PF:PN:1021',
   },
   {
-    pn: 'PF-VALVE-033',
+    pn: '214-406',
     po: 'TMP-20260721-0940-REWORK',
     type: 'REWORK',
     figures: ['requested 2', 'allocated 0', 'shortage 2', 'at Lathe queue 2'],

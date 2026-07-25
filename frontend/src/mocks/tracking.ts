@@ -2,8 +2,8 @@ import type { MockTrackingRow } from '../views/view-models';
 
 export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {
-    pn: 'PF-BRACKET-001',
-    name: 'Mounting bracket, alum 6061',
+    pn: '2027-60-8114-00',
+    name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',
     hotRank: 1,
     demand: [
       { po: 'PO-1001', qty: 10, type: 'NEW' },
@@ -19,8 +19,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Active',
   },
   {
-    pn: 'PF-PLATE-007',
-    name: 'Base plate 200×140',
+    pn: '142-260',
+    name: 'PLATE, TOP COVER ALUM 6061-T6',
     hotRank: 2,
     demand: [{ po: 'PO-1005', qty: 20, type: 'NEW' }],
     distribution: [{ area: 'external', label: 'External', qty: 20 }],
@@ -30,8 +30,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Active',
   },
   {
-    pn: 'PF-SHAFT-014',
-    name: 'Drive shaft Ø25, 4140',
+    pn: '0455-20-0118-03',
+    name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA',
     demand: [{ po: 'PO-1003', qty: 12, type: 'NEW' }],
     distribution: [
       { area: 'material', label: 'Material', qty: 8 },
@@ -43,8 +43,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Active',
   },
   {
-    pn: 'PF-HOUSING-021',
-    name: 'Gearbox housing',
+    pn: '78-04-0031',
+    name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     demand: [
       { po: 'PO-1002', qty: 6, type: 'NEW' },
       { po: 'TMP-…-0910', qty: 1, type: 'REWORK' },
@@ -59,8 +59,18 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Active',
   },
   {
-    pn: 'PF-PIN-102',
-    name: 'Locating pin Ø8',
+    pn: '118-052',
+    name: 'MOTOR, GEAR STEPPER 7.2T',
+    demand: [{ po: 'PO-1009', qty: 4, type: 'NEW' }],
+    distribution: [{ area: 'manual', label: 'Manual', qty: 4 }],
+    activeQty: 4,
+    stockedQty: 0,
+    nextDue: 'Aug 12',
+    status: 'Active',
+  },
+  {
+    pn: '309-127',
+    name: 'PIN, DOWEL 1/4 X 1.00 SS',
     demand: [{ po: 'PO-0996', qty: 50, type: 'NEW' }],
     distribution: [{ area: 'stockroom', label: 'Stockroom', qty: 50 }],
     activeQty: 0,
@@ -72,8 +82,8 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
 
 export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
   {
-    pn: 'PF-MANIFOLD-ASSY-00847-REV-C-EXTENDED-VALIDATION',
-    name: 'Hydraulic manifold assembly, long identifier sample',
+    pn: '0118-40-0022-07-0455-88-REV-C',
+    name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
     demand: [{ po: 'PO-1008-SUPPLEMENTAL-B', qty: 8, type: 'NEW' }],
     distribution: [{ area: 'mill', label: 'Mill', qty: 8 }],
     activeQty: 8,
@@ -85,8 +95,8 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
   ...Array.from({ length: 20 }, (_, i): MockTrackingRow => {
     const n = i + 1;
     return {
-      pn: `PF-LONGRUN-${String(n).padStart(3, '0')}`,
-      name: `Long-list sample part ${n}`,
+      pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
+      name: `Spacer, sample lot ${n}, ALUM 6061-T6`,
       demand: [{ po: `PO-2${String(100 + n)}`, qty: (n % 9) + 1, type: 'NEW' }],
       distribution: [
         {
@@ -104,10 +114,10 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
 ];
 
 // Detail-panel sample for the selected PN (mirrors mockup v5, which
-// shows the full detail panel for PF-BRACKET-001).
+// shows the full detail panel for 2027-60-8114-00).
 export const MOCK_TRACKING_DETAIL = {
-  pn: 'PF-BRACKET-001',
-  name: 'Mounting bracket, alum 6061',
+  pn: '2027-60-8114-00',
+  name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',
   revision: 'C',
   barcode: 'PF:PN:1001',
   erpId: 'ERP-PN-40412',

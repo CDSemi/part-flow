@@ -56,10 +56,8 @@ test('the Production Board renders long data without wrapping the PN', async () 
   renderAt('/production-board?state=long');
 
   // Over-long identifier from the long-data mock set.
-  const longPn = await screen.findByText(
-    /PF-MANIFOLD-ASSY-00847-REV-C-EXTENDED-VALIDATION/,
-  );
+  const longPn = await screen.findByText(/0118-40-0022-07-0455-88-REV-C/);
   expect(longPn).toBeInTheDocument();
   // Many rows render without corrupting the table.
-  expect(screen.getByText('PF-LONGRUN-024')).toBeInTheDocument();
+  expect(screen.getByText('0114-60-0124-00')).toBeInTheDocument();
 });

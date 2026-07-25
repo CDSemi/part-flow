@@ -517,6 +517,8 @@ Rules:
 
 - `part_number` must be unique.
 - `part_number` must be treated as an arbitrary string.
+- Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The exact string must be preserved everywhere; PN segments must never be parsed for business meaning.
+- `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
 - The folder barcode identifies only the PN.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.

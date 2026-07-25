@@ -2,10 +2,10 @@ import type { MockPo } from '../views/view-models';
 
 // Scanner-first New PO demo catalog: PN barcode → PartNumber (mock only).
 export const MOCK_PN_BARCODES: Record<string, string> = {
-  'PF:PN:1014': 'PF-SHAFT-014',
-  'PF:PN:1021': 'PF-HOUSING-021',
-  'PF:PN:1102': 'PF-PIN-102',
-  'PF:PN:1033': 'PF-VALVE-033',
+  'PF:PN:1014': '0455-20-0118-03',
+  'PF:PN:1021': '78-04-0031',
+  'PF:PN:1102': '309-127',
+  'PF:PN:1033': '214-406',
 };
 
 // Editable dates are ISO `YYYY-MM-DD`; the view formats them for display.
@@ -16,10 +16,10 @@ export const MOCK_PO_LIST: MockPo[] = [
     due: '2026-08-12',
     dueClass: '',
     status: 'Open',
-    preview: 'PF-SHAFT-014 · PF-GEAR-201 · 2 more',
+    preview: '0455-20-0118-03 · 52-09-0114 · 2 more',
     lines: [
       {
-        pn: 'PF-SHAFT-014',
+        pn: '0455-20-0118-03',
         barcode: 'existing PN · barcode PF:PN:1014',
         type: 'NEW',
         qty: 12,
@@ -30,7 +30,7 @@ export const MOCK_PO_LIST: MockPo[] = [
         releasable: true,
       },
       {
-        pn: 'PF-GEAR-201',
+        pn: '52-09-0114',
         barcode: 'new PN — barcode created with PN master: PF:PN:1201',
         type: 'NEW',
         qty: 8,
@@ -44,7 +44,7 @@ export const MOCK_PO_LIST: MockPo[] = [
         // Released production quantity exists for this PoDemand: the line
         // can no longer be removed from Purchase Orders (PROJECT_PROFILE
         // §13 — corrections go through correction/production workflows).
-        pn: 'PF-BRACKET-001',
+        pn: '2027-60-8114-00',
         barcode: 'existing PN · barcode PF:PN:1044',
         type: 'NEW',
         qty: 6,
@@ -71,10 +71,10 @@ export const MOCK_PO_LIST: MockPo[] = [
     due: '2026-07-31',
     dueClass: '',
     status: 'Released',
-    preview: 'PF-SHAFT-014',
+    preview: '0455-20-0118-03',
     lines: [
       {
-        pn: 'PF-SHAFT-014',
+        pn: '0455-20-0118-03',
         barcode: 'barcode PF:PN:1014',
         type: 'NEW',
         qty: 12,
@@ -91,10 +91,10 @@ export const MOCK_PO_LIST: MockPo[] = [
     due: '2026-07-16',
     dueClass: 'late',
     status: 'Released',
-    preview: 'PF-PLATE-007',
+    preview: '142-260',
     lines: [
       {
-        pn: 'PF-PLATE-007',
+        pn: '142-260',
         barcode: 'barcode PF:PN:1007',
         type: 'NEW',
         qty: 20,
@@ -112,10 +112,10 @@ export const MOCK_PO_LIST: MockPo[] = [
     dueClass: 'late',
     status: 'Released',
     internal: true,
-    preview: 'PF-VALVE-033',
+    preview: '214-406',
     lines: [
       {
-        pn: 'PF-VALVE-033',
+        pn: '214-406',
         barcode: 'barcode PF:PN:1033',
         type: 'REWORK',
         qty: 2,
@@ -132,10 +132,10 @@ export const MOCK_PO_LIST: MockPo[] = [
     due: '2026-07-10',
     dueClass: '',
     status: 'Complete',
-    preview: 'PF-PIN-102',
+    preview: '309-127',
     lines: [
       {
-        pn: 'PF-PIN-102',
+        pn: '309-127',
         barcode: 'barcode PF:PN:1102',
         type: 'NEW',
         qty: 50,
@@ -153,12 +153,12 @@ export const MOCK_RELEASE_DATA: Record<
   string,
   { requested: number; routes: string[]; activeDistribution: string | null }
 > = {
-  'PF-SHAFT-014': {
+  '0455-20-0118-03': {
     requested: 12,
     routes: ['Shaft std v2', 'Shaft short v1'],
     activeDistribution: 'Material 8 · Lathe 2 × 4',
   },
-  'PF-GEAR-201': {
+  '52-09-0114': {
     requested: 8,
     routes: ['Gear std v1'],
     activeDistribution: null,

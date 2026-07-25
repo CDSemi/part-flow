@@ -2,8 +2,8 @@ import type { MockBoardRow } from '../views/view-models';
 
 export const MOCK_BOARD_ROWS: MockBoardRow[] = [
   {
-    pn: 'PF-BRACKET-001',
-    name: 'Mounting bracket, alum 6061 · rev C',
+    pn: '2027-60-8114-00',
+    name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES · rev C',
     hotRank: 1,
     blink: true,
     locations: [
@@ -28,8 +28,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     totalDays: '10 d',
   },
   {
-    pn: 'PF-PLATE-007',
-    name: 'Base plate 200×140',
+    pn: '142-260',
+    name: 'PLATE, TOP COVER ALUM 6061-T6',
     hotRank: 2,
     blink: true,
     locations: [
@@ -49,8 +49,21 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     totalDays: '18 d',
   },
   {
-    pn: 'PF-SHAFT-014',
-    name: 'Drive shaft Ø25, 4140',
+    pn: '0123-40-0007-22',
+    name: 'CATCH CUP INSERT, COATER 3-5, VENDOR',
+    locations: [
+      { area: 'external', label: 'External — Vendor', qty: 12, time: '1d 06h' },
+    ],
+    total: 12,
+    jobs: [{ job: 'ERP-88377', meta: '· PO-1007 · 12 pcs' }],
+    due: 'Aug 03',
+    dueNote: '9 days left',
+    dueClass: 'ok',
+    totalDays: '3 d',
+  },
+  {
+    pn: '0455-20-0118-03',
+    name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA',
     locations: [
       { area: 'material', label: 'Material', qty: 8, time: '2d 01h' },
       {
@@ -69,8 +82,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     totalDays: '6 d',
   },
   {
-    pn: 'PF-HOUSING-021',
-    name: 'Gearbox housing',
+    pn: '78-04-0031',
+    name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     locations: [
       { area: 'mill', label: 'Mill 1', qty: 3, tag: 'machine', time: '45m' },
       { area: 'deburr', label: 'Deburr', qty: 3, time: '30m' },
@@ -86,8 +99,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     totalDays: '4 d',
   },
   {
-    pn: 'PF-PIN-102',
-    name: 'Locating pin Ø8',
+    pn: '309-127',
+    name: 'PIN, DOWEL 1/4 X 1.00 SS',
     locations: [{ area: 'stockroom', label: 'Stockroom', qty: 50, time: '—' }],
     total: 50,
     totalStocked: true,
@@ -103,8 +116,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
 // board's single-line PN rule and dense-table behavior can be verified.
 export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
   {
-    pn: 'PF-MANIFOLD-ASSY-00847-REV-C-EXTENDED-VALIDATION',
-    name: 'Hydraulic manifold assembly, long identifier sample',
+    pn: '0118-40-0022-07-0455-88-REV-C',
+    name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
     hotRank: 1,
     blink: true,
     locations: [
@@ -132,8 +145,8 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
   ...Array.from({ length: 24 }, (_, i): MockBoardRow => {
     const n = i + 1;
     return {
-      pn: `PF-LONGRUN-${String(n).padStart(3, '0')}`,
-      name: `Long-list sample part ${n}`,
+      pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
+      name: `Spacer, sample lot ${n}, ALUM 6061-T6`,
       locations: [
         {
           area: n % 2 === 0 ? 'lathe' : 'mill',

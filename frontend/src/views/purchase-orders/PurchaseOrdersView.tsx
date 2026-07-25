@@ -31,7 +31,7 @@ const LONG_PREVIEW_POS: MockPo[] = [
       due: '2026-09-30',
       dueClass: '',
       status: 'Open',
-      preview: `PF-LONGRUN-${String(n).padStart(3, '0')}`,
+      preview: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
       lines: [],
     };
   }),
@@ -41,7 +41,7 @@ const LONG_PREVIEW_POS: MockPo[] = [
     due: '2026-10-15',
     dueClass: '',
     status: 'Open',
-    preview: 'PF-MANIFOLD-ASSY-00847-REV-C-EXTENDED-VALIDATION',
+    preview: '0118-40-0022-07-0455-88-REV-C',
     lines: [],
   },
 ];

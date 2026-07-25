@@ -202,7 +202,7 @@ export function TrackingView() {
           {selectedPn !== detail.pn ? (
             <EmptyState
               message={`Mock detail data exists for ${detail.pn} only.`}
-              hint="Select PF-BRACKET-001 to see the full detail panel (development mock)."
+              hint="Select 2027-60-8114-00 to see the full detail panel (development mock)."
             />
           ) : (
             <TrackingDetail />
