@@ -16,8 +16,8 @@ import {
   MOCK_RELEASE_DATA,
   MOCK_WORK_ORDER_LIST,
 } from '../../mocks/work-orders';
+import { formatIsoDate } from '../dates';
 import type { MockWorkOrder } from '../view-models';
-import { formatIsoDate } from './dates';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -31,7 +31,8 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
     return {
       workOrderNumber: String(7300 + n).padStart(6, '0'),
       received: '2026-07-01',
-      due: '2026-09-30',
+      // Every fifth long-preview Work Order has no due date (valid).
+      due: n % 5 === 0 ? null : '2026-09-30',
       dueClass: '',
       status: 'Open',
       preview: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
@@ -318,7 +319,7 @@ function WorkOrderListPanel({
                   </td>
                   <td className="mono-sm">{formatIsoDate(w.received)}</td>
                   <td className="mono-sm">
-                    <span className={`duetxt ${w.dueClass}`}>
+                    <span className={`duetxt ${w.due ? w.dueClass : 'none'}`}>
                       {formatIsoDate(w.due)}
                     </span>
                   </td>

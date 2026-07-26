@@ -3,32 +3,96 @@ import './area-board.css';
 import { useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
-import { AreaDot, HotChip } from '../../components/indicators';
+import { AreaDot, HotPn } from '../../components/indicators';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { MOCK_AREA_CARDS, MOCK_AREA_CARDS_LONG } from '../../mocks/area-board';
+import {
+  MOCK_AREA_CARDS,
+  MOCK_AREA_CARDS_LONG,
+  MOCK_AREA_MACHINES,
+} from '../../mocks/area-board';
 import { MOCK_AREAS } from '../../mocks/areas';
-import type { MockArea, MockAreaCard } from '../view-models';
+import { compareDemandOrder } from '../demand-order';
+import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 
 type SortKey = 'due' | 'prio' | 'tia' | 'qty';
 
 function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
-  return [...cards].sort((a, b) => {
+  const keyed = cards.map((card, seq) => ({ card, seq }));
+  keyed.sort((a, b) => {
     switch (sort) {
       case 'qty':
-        return b.qty - a.qty;
+        return b.card.qty - a.card.qty || a.seq - b.seq;
       case 'prio':
-        return (a.hotRank ?? 9) - (b.hotRank ?? 9);
+        return (a.card.hotRank ?? 9) - (b.card.hotRank ?? 9) || a.seq - b.seq;
       case 'tia':
-        return 0;
+        // Longest time in Area first — the most-waiting work surfaces.
+        return (
+          b.card.timeInAreaMinutes - a.card.timeInAreaMinutes || a.seq - b.seq
+        );
       default:
-        return a.dueDays - b.dueDays;
+        // Canonical demand order: Hot rank → earliest due date → undated
+        // demands after all dated ones, by WO received date → stable.
+        return compareDemandOrder(
+          {
+            hotRank: a.card.hotRank,
+            due: dueIso(a.card),
+            received: a.card.received,
+            seq: a.seq,
+          },
+          {
+            hotRank: b.card.hotRank,
+            due: dueIso(b.card),
+            received: b.card.received,
+            seq: b.seq,
+          },
+        );
     }
   });
+  return keyed.map((entry) => entry.card);
+}
+
+// The mock cards carry relative day counts instead of ISO dates; an
+// artificial-but-ordered ISO key keeps the shared comparator applicable.
+function dueIso(card: MockAreaCard): string | null {
+  if (card.dueDays === null) return null;
+  return `D${String(card.dueDays + 1000).padStart(5, '0')}`;
 }
 
 function matches(card: MockAreaCard, query: string): boolean {
   if (!query) return true;
   return (card.pn + card.workOrder + card.job).toLowerCase().includes(query);
+}
+
+const isQueueContext = (name: string) => name === 'queue' || name === 'vendor';
+
+interface Assignment {
+  card: MockAreaCard;
+  context: string;
+  qty: number;
+}
+
+/**
+ * Split each card's quantity into Machine assignments and queue
+ * portions. Every piece appears exactly once — quantities are never
+ * duplicated or lost by the grouping.
+ */
+function splitAssignments(cards: MockAreaCard[]): {
+  assigned: Assignment[];
+  queued: Assignment[];
+} {
+  const assigned: Assignment[] = [];
+  const queued: Assignment[] = [];
+  for (const card of cards) {
+    if (card.machines.length === 0) {
+      queued.push({ card, context: '—', qty: card.qty });
+      continue;
+    }
+    for (const [context, qty] of card.machines) {
+      if (isQueueContext(context)) queued.push({ card, context, qty });
+      else assigned.push({ card, context, qty });
+    }
+  }
+  return { assigned, queued };
 }
 
 // One view, two modes behind a single tab strip: the All Areas overview
@@ -165,7 +229,7 @@ function AllAreasOverview({
           (s, c) =>
             s +
             c.machines
-              .filter(([m]) => m === 'queue' || m === 'vendor')
+              .filter(([m]) => isQueueContext(m))
               .reduce((x, [, q]) => x + q, 0),
           0,
         );
@@ -237,10 +301,7 @@ function AllAreasOverview({
                 {areaCards.map((c) => (
                   <li key={`${c.pn}-${c.workOrder}`}>
                     <div className="r1">
-                      {c.hotRank ? <HotChip rank={c.hotRank} /> : null}
-                      <span className="p" title={c.pn}>
-                        {c.pn}
-                      </span>
+                      <HotPn rank={c.hotRank} pn={c.pn} pnClassName="p" />
                       <span className="q">{c.qty}</span>
                     </div>
                     <div className="r2">
@@ -276,6 +337,80 @@ function AllAreasOverview({
   );
 }
 
+function AssignmentList({ entries }: { entries: Assignment[] }) {
+  return (
+    <ul className="mc-list">
+      {entries.map(({ card, context, qty }) => (
+        <li key={`${card.pn}-${card.workOrder}-${context}`}>
+          <div className="r1">
+            <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
+            {context !== '—' ? <span className="ctx">{context}</span> : null}
+            <span className="q">{qty}</span>
+          </div>
+          <div className="r2">
+            <span className="mono">
+              {card.workOrder.split(' ·')[0]} · {card.job}
+            </span>
+            <span
+              className={`mono ${card.dueClass === 'ok' ? '' : card.dueClass}`}
+            >
+              {card.due}
+            </span>
+            {card.timeInArea !== '—' ? (
+              <span className="mono">{card.timeInArea} in Area</span>
+            ) : null}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const MACHINE_STATUS_LABEL: Record<MockAreaMachine['status'], string> = {
+  running: 'running',
+  idle: 'idle',
+  maintenance: 'maintenance',
+};
+
+function MachineCard({
+  machine,
+  entries,
+}: {
+  machine: MockAreaMachine;
+  entries: Assignment[];
+}) {
+  const totalQty = entries.reduce((s, e) => s + e.qty, 0);
+  return (
+    <div className={`abd-card abd-machine ${machine.status}`}>
+      <div className="mhead">
+        <span className="mname">{machine.name}</span>
+        <span className={`mstat ${machine.status}`}>
+          {MACHINE_STATUS_LABEL[machine.status]}
+        </span>
+      </div>
+      <div className="mtotals">
+        <b>{totalQty}</b> pcs assigned · <b>{entries.length}</b> PN
+        {entries.length === 1 ? '' : 's'}
+      </div>
+      {entries.length ? (
+        <AssignmentList entries={entries} />
+      ) : (
+        <div className="mempty">
+          {machine.status === 'maintenance'
+            ? 'Under maintenance — accepts no production'
+            : 'No production assigned'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Per-Area detail: first an Area summary card (statistics + a compact
+ * grouped PN list in the All Areas visual language), then one
+ * monitoring card per Machine belonging to the Area. Areas without
+ * Machines render only the summary card.
+ */
 function AreaDetail({
   area,
   cards,
@@ -284,55 +419,85 @@ function AreaDetail({
   cards: MockAreaCard[];
 }) {
   if (!area) return null;
-  if (!cards.length) {
-    return (
-      <div className="ab-grid">
-        <div className="ab-cardempty">No production in {area.name}</div>
-      </div>
-    );
-  }
+  const machines = MOCK_AREA_MACHINES[area.key] ?? [];
+  const { assigned, queued } = splitAssignments(cards);
+  const totalQty = cards.reduce((s, c) => s + c.qty, 0);
+  const queuedQty = queued.reduce((s, e) => s + e.qty, 0);
+  const machineQty = assigned.reduce((s, e) => s + e.qty, 0);
+  const hotCount = cards.filter((c) => c.hotRank !== undefined).length;
+
   return (
-    <div className="ab-grid">
-      {cards.map((c) => (
-        <div className="ab-card" key={`${c.pn}-${c.workOrder}`}>
-          <div className="top">
-            <div className="id">
-              <div className="part" title={c.pn}>
-                {c.hotRank ? (
-                  <>
-                    <HotChip rank={c.hotRank} />{' '}
-                  </>
-                ) : null}
-                {c.pn}
-              </div>
-              <div className="wo">{c.workOrder}</div>
-              <div className="ext">Job: {c.job}</div>
-            </div>
-            <div className="qtyblk">
-              <div className="qlbl">In this Area</div>
-              <div className="qty-big">{c.qty}</div>
-              <div className="qunit">pcs</div>
+    <div className="abd-grid">
+      <div
+        className="abd-card abd-summary"
+        style={{ ['--acol' as string]: area.colorVar }}
+      >
+        <div className="mhead">
+          <span className="mname">
+            <AreaDot colorVar={area.colorVar} size={12} /> {area.name}
+          </span>
+          <span className="mc-ops">
+            {area.operations.map((op) => (
+              <span className="opchip" key={op}>
+                {op}
+              </span>
+            ))}
+          </span>
+        </div>
+        <div className="abd-desc">{area.description}</div>
+        <div className="mc-stats">
+          <div className="stat">
+            <div className="n">{cards.length}</div>
+            <div className="l">PNs</div>
+          </div>
+          <div className="stat">
+            <div className="n">{totalQty}</div>
+            <div className="l">
+              {area.terminal ? 'Stocked pcs' : 'Total pcs'}
             </div>
           </div>
-          {c.machines.length ? (
-            <div className="machines">
-              {c.machines.map(([m, q]) => (
-                <span
-                  key={`${m}-${q}`}
-                  className={`mrow ${m === 'queue' ? 'queue' : ''}`}
-                >
-                  {m} · <b>{q}</b>
-                </span>
-              ))}
+          <div className="stat">
+            <div className="n q">{area.terminal ? '—' : queuedQty}</div>
+            <div className="l">Queued</div>
+          </div>
+          <div className="stat">
+            <div className="n m">
+              {area.terminal || machineQty === 0 ? '—' : machineQty}
             </div>
-          ) : null}
-          <div className="foot">
-            <span className={`duetxt ${c.dueClass}`}>{c.due}</span>
-            <span className="tia">
-              {c.timeInArea === '—' ? '' : `${c.timeInArea} in Area`}
-            </span>
+            <div className="l">On machines</div>
+          </div>
+          <div className="stat">
+            <div className="n h">{hotCount || '—'}</div>
+            <div className="l">Hot</div>
           </div>
         </div>
+        {cards.length === 0 ? (
+          <div className="empty">No production in {area.name}</div>
+        ) : (
+          <>
+            {assigned.length ? (
+              <>
+                <div className="abd-grp">Assigned to Machines</div>
+                <AssignmentList entries={assigned} />
+              </>
+            ) : null}
+            {queued.length ? (
+              <>
+                <div className="abd-grp">
+                  {area.terminal ? 'Stocked' : 'Area queue — awaiting Machine'}
+                </div>
+                <AssignmentList entries={queued} />
+              </>
+            ) : null}
+          </>
+        )}
+      </div>
+      {machines.map((machine) => (
+        <MachineCard
+          key={machine.name}
+          machine={machine}
+          entries={assigned.filter((e) => e.context === machine.name)}
+        />
       ))}
     </div>
   );

@@ -17,19 +17,32 @@ export function AreaDot({
   );
 }
 
-/** Hot WO Demand rank chip (🔥 #n). */
-export function HotChip({
+/**
+ * Standard Hot Part presentation: `🔥#n PN` — the flame and rank appear
+ * immediately before the PN, with no separate rank chip after it. Every
+ * view renders Hot PNs through this component so the visual order stays
+ * identical everywhere.
+ */
+export function HotPn({
   rank,
-  showFlame = true,
+  pn,
+  pnClassName,
 }: {
-  rank: number;
-  showFlame?: boolean;
+  rank?: number;
+  pn: string;
+  pnClassName?: string;
 }) {
-  const tier = rank <= 3 ? rank : 3;
+  const tier = rank !== undefined && rank <= 3 ? rank : 3;
   return (
-    <span className={`hot h${tier}`}>
-      {showFlame ? '🔥 ' : ''}#{rank}
-    </span>
+    <>
+      {rank !== undefined ? (
+        <span className={`hot h${tier}`}>🔥#{rank}</span>
+      ) : null}
+      {rank !== undefined ? ' ' : null}
+      <span className={pnClassName} title={pn}>
+        {pn}
+      </span>
+    </>
   );
 }
 

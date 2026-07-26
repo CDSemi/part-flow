@@ -2,7 +2,7 @@
 
 > **Status:** Analysis and design only. No migrations or application code.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.
-> **Basis:** `docs/PROJECT_PROFILE.md` (v7, canonical — §8, §13, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3–4), `docs/GUI_DESIGN.md` §12, `CLAUDE.md`.
+> **Basis:** `docs/PROJECT_PROFILE.md` (v8, canonical — §8, §13, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3–4), `docs/GUI_DESIGN.md` §12, `CLAUDE.md`.
 
 ---
 
@@ -28,7 +28,7 @@
 | 2 | `Area` | Stable physical location identity. Provides the configured starting Area for release; destination of `RECEIVED`. |
 | 3 | `Operation` | Work supported by an Area. The starting Area's Operation is resolved or confirmed at release and recorded on the `RECEIVED` Movement. |
 | 4 | `PartNumber` | Reusable PN master record; unique PN string and unique barcode. The primary tracked identity. |
-| 5 | `WorkOrder` | Business order shell: Work Order Number (arbitrary string), received date, status. |
+| 5 | `WorkOrder` | Business order shell: Work Order Number (arbitrary string, never null — generated `TMP-…` when unknown, §5), received date, nullable due date, status. |
 | 6 | `WorkOrderDemand` | Requested quantity of one PN for one Work Order: request type, requested quantity, due date, priority, external Job Numbers, requester/reason/notes. Business demand only — never production position. |
 | 7 | `RouteTemplate` | Reusable route definition selectable at release. |
 | 8 | `RouteStep` | Ordered step of a RouteTemplate: sequence, Area, Operation, expected duration, instructions. |
@@ -83,9 +83,11 @@ PartMovement carries **no** `work_order_demand_id`. A release may be initiated f
 
 ## 5. WorkOrder and WorkOrderDemand Validation
 
-- `work_order_number` is a non-empty arbitrary string, unique among WorkOrders. Creating an existing Work Order Number surfaces the existing Work Order (no duplicate); imports arrive in a later phase and must remain idempotent against the same rule.
-- `received_date` is required.
-- Each WorkOrderDemand requires: existing active `part_number_id`, `request_type IN ('NEW','REWORK','MODIFY')` (default `NEW`), `requested_quantity > 0`, and a due date when business rules require one.
+- `work_order_number` is a non-empty arbitrary string, unique among WorkOrders, and **NOT NULL** — the internal Work Order identity is never nullable. When the user confirms saving with a blank Work Order Number, the application generates a unique human-readable temporary internal Work Order Number `TMP-YYYYMMDD-HHMMSS`, extended with a deterministic `-2`, `-3`, … suffix on collision (PROJECT_PROFILE §7 Work Order); the generated value is stored, labeled temporary/internal in the UI, and searchable like any other Work Order Number. Entered Work Order Numbers are stored verbatim, never reformatted. Creating an existing Work Order Number surfaces the existing Work Order (no duplicate) — duplicate handling applies only when a Work Order Number was entered; imports arrive in a later phase and must remain idempotent against the same rule.
+- `received_date` is required and defaults to the current date during manual creation.
+- `work_orders.due_date` is nullable: a missing Work Order due date is valid data, not a validation error (PROJECT_PROFILE §8.2). It is an entry default for demand-line due dates only.
+- Each WorkOrderDemand requires: existing active `part_number_id`, `request_type IN ('NEW','REWORK','MODIFY')` (default `NEW`), and `requested_quantity > 0`. `due_date` is nullable — a missing due date is valid data, never a validation error, and never blocks saving (PROJECT_PROFILE §8.3).
+- **Canonical demand ordering key** (PROJECT_PROFILE §18), for every consumer that orders demand: `priority_rank` (Hot rank first), then `due_date` ascending with **NULLS LAST**, then the parent WorkOrder's `received_date` ascending for undated demand, then a stable deterministic tie-breaker (creation order / internal `id`). Slice 1 performs no such ordering itself; supporting indexes arrive with the phases that consume the ordering (allocation, boards, priority — Phases 10–12).
 - `job_numbers` stores external Job Numbers as data (list of arbitrary strings) — searchable, displayable, sortable; never a domain aggregate.
 - `priority_rank` is nullable; Hot ranking management is a later phase but the column belongs to WorkOrderDemand from the start.
 - Editing WorkOrderDemand is permitted (Admin/Manager per PROJECT_PROFILE §8.3); edits are audited (§16) and never touch QuantityFlow or Movement.
@@ -255,9 +257,9 @@ Rules:
 
 **`part_numbers`** — PK `id`; `part_number NOT NULL UNIQUE`; `barcode_value NOT NULL UNIQUE`; `is_active NOT NULL DEFAULT true`; `created_at`, `updated_at`.
 
-**`work_orders`** — PK `id`; `work_order_number NOT NULL UNIQUE`; `received_date NOT NULL`; `status`; `created_at`, `updated_at`.
+**`work_orders`** — PK `id`; `work_order_number NOT NULL UNIQUE` (never null — a blank entry receives a generated `TMP-YYYYMMDD-HHMMSS` number per §5; the UNIQUE constraint backs the deterministic collision suffix); `received_date NOT NULL`; `due_date` nullable (a missing Work Order due date is valid data, §5); `status`; `created_at`, `updated_at`.
 
-**`work_order_demands`** — PK `id`; FKs `work_order_id`, `part_number_id` NOT NULL; `request_type NOT NULL CHECK (request_type IN ('NEW','REWORK','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (required by validation rule per §5, not by constraint per §20); `priority_rank` nullable; `job_numbers text[] NOT NULL DEFAULT '{}'` (arbitrary external strings preserved verbatim; empty list valid; metadata only — no `Job` aggregate, no FK, and no GIN index in this slice because Slice 1 includes no Job Number search); `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(work_order_id)`, index `(part_number_id)`.
+**`work_order_demands`** — PK `id`; FKs `work_order_id`, `part_number_id` NOT NULL; `request_type NOT NULL CHECK (request_type IN ('NEW','REWORK','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (a missing due date is valid data per §5 — never required by validation rule or constraint; undated demand orders after dated demand per the canonical demand ordering key, §5); `priority_rank` nullable; `job_numbers text[] NOT NULL DEFAULT '{}'` (arbitrary external strings preserved verbatim; empty list valid; metadata only — no `Job` aggregate, no FK, and no GIN index in this slice because Slice 1 includes no Job Number search); `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(work_order_id)`, index `(part_number_id)`.
 
 **`route_templates`** — PK `id`; `name NOT NULL`; `version int NOT NULL CHECK (version > 0)` (simple positive integer — no semantic-version parsing, no route-version framework); `UNIQUE (name, version)`; `is_active`; `created_at`, `updated_at`.
 
@@ -326,4 +328,4 @@ Only items already tracked in PROJECT_PROFILE §32 touch this slice, and none bl
 
 - **§32.1** (return from stock to active production) and **§32.2** (scrap/reject Movement types) may later widen the movement-type enum — additive.
 - **§32.4** (offline scan synchronization) — this slice assumes synchronous online semantics (§14); `device_event_id` was chosen so a future approved offline design would not require renaming.
-- Whether a due date is mandatory on every WorkOrderDemand or only business-expected is not fixed by PROJECT_PROFILE; this design keeps the column required-by-validation-rule rather than by constraint, so either policy is configurable without migration. No new business entities are invented to resolve this.
+- The former due-date uncertainty is resolved: PROJECT_PROFILE v8 (§8.2, §8.3) fixes both `work_orders.due_date` and `work_order_demands.due_date` as nullable — a missing due date is valid data, never a validation error — with undated demand ordered after dated demand by the canonical demand ordering key (§5). No policy toggle or migration is needed.

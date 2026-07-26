@@ -3,7 +3,7 @@ import './tracking.css';
 import { useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
-import { AreaDot, HotChip, TypeChip } from '../../components/indicators';
+import { AreaDot, HotPn, TypeChip } from '../../components/indicators';
 import {
   EmptyState,
   ErrorState,
@@ -139,15 +139,9 @@ export function TrackingView() {
                         onClick={() => setSelectedPn(row.pn)}
                         aria-pressed={row.pn === selectedPn}
                       >
-                        <span className="part" title={row.pn}>
-                          {row.hotRank ? '🔥 ' : ''}
-                          {row.pn}
+                        <span className="part">
+                          <HotPn rank={row.hotRank} pn={row.pn} />
                         </span>
-                        {row.hotRank ? (
-                          <span style={{ marginLeft: 8 }}>
-                            <HotChip rank={row.hotRank} showFlame={false} />
-                          </span>
-                        ) : null}
                         <span className="sub" style={{ display: 'block' }}>
                           {row.name}
                         </span>

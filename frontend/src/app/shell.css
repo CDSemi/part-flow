@@ -1,247 +1,247 @@
 /* ============ Application chrome: top navigation + subnav ============ */
 .appnav {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: var(--navglass);
-    backdrop-filter: blur(8px);
-    border-bottom: 1px solid var(--border);
-    padding: 6px 16px;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    flex-wrap: wrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--navglass);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-wrap: wrap;
 }
 
 .appnav .logo {
-    font-weight: 800;
-    font-size: 19px;
-    letter-spacing: 0.4px;
-    margin-right: 10px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: 0.4px;
+  margin-right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .appnav .logo .mark {
-    width: 26px;
-    height: 26px;
-    border-radius: 8px;
-    background: linear-gradient(135deg, var(--info), var(--brand-secondary));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
-    font-weight: 900;
-    color: var(--on-accent);
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--info), var(--brand-secondary));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--on-accent);
 }
 
 .appnav .logo .pf {
-    color: var(--info-t);
+  color: var(--info-t);
 }
 
 .navbtn {
-    display: inline-flex;
-    align-items: center;
-    padding: 8px 14px;
-    min-height: var(--touch-min);
-    border-radius: 10px;
-    color: var(--muted);
-    font-size: 13.5px;
-    font-weight: 650;
-    text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 14px;
+  min-height: var(--touch-min);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-decoration: none;
 }
 
 .navbtn:hover {
-    background: var(--panel2);
-    color: var(--text);
+  background: var(--panel2);
+  color: var(--text);
 }
 
 .navbtn.active {
-    background: var(--info);
-    color: var(--active-nav-text);
-    font-weight: 800;
+  background: var(--info);
+  color: var(--active-nav-text);
+  font-weight: 800;
 }
 
 .appnav .spacer {
-    flex: 1;
+  flex: 1;
 }
 
 .appnav .mock-tag {
-    font-size: 11px;
-    color: var(--faint);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 4px 10px;
+  font-size: 11px;
+  color: var(--faint);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
 }
 
 .appnav .mock-tag b {
-    color: var(--muted);
+  color: var(--muted);
 }
 
 /* Connectivity chip — explicit text, never color alone */
 .connchip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    min-height: 40px;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    background: var(--panel2);
-    margin-right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  min-height: 40px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  margin-right: 6px;
 }
 
 .connchip .cdot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--ok);
-    box-shadow: 0 0 10px var(--ok);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 10px var(--ok);
 }
 
 .connchip.off .cdot {
-    background: var(--err);
-    box-shadow: 0 0 10px var(--err);
+  background: var(--err);
+  box-shadow: 0 0 10px var(--err);
 }
 
 .connchip.connecting .cdot {
-    background: var(--warn);
-    box-shadow: 0 0 10px var(--warn);
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
 }
 
 .connchip .ctxt {
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 0.5px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
 }
 
 /* ============ Management sub-view navigation ============ */
 .mgmtnav {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    padding: 4px 16px;
-    position: sticky;
-    top: 53px;
-    z-index: 99;
-    box-shadow: var(--subnav-shadow);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 16px;
+  position: sticky;
+  top: 53px;
+  z-index: 99;
+  box-shadow: var(--subnav-shadow);
 }
 
 .mgmtnav .subgrp {
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 1.6px;
-    color: var(--faint);
-    text-transform: uppercase;
-    margin-right: 10px;
-    padding-right: 14px;
-    border-right: 1px solid var(--border);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  color: var(--faint);
+  text-transform: uppercase;
+  margin-right: 10px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
 }
 
 .subbtn {
-    display: inline-flex;
-    align-items: center;
-    padding: 7px 13px;
-    min-height: var(--touch-min);
-    border-radius: 9px;
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 650;
-    text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 13px;
+  min-height: var(--touch-min);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
 }
 
 .subbtn:hover {
-    background: var(--panel2);
-    color: var(--text);
+  background: var(--panel2);
+  color: var(--text);
 }
 
 .subbtn.active {
-    background: var(--info-surface);
-    color: var(--info-t);
-    font-weight: 800;
+  background: var(--info-surface);
+  color: var(--info-t);
+  font-weight: 800;
 }
 
 /* ============ Offline banner — persistent, actionable ============ */
 .offbanner {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    background: var(--error-surface);
-    border-bottom: 1px solid var(--error-border);
-    color: var(--err-t);
-    padding: 9px 22px;
-    font-size: 14px;
-    font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--error-surface);
+  border-bottom: 1px solid var(--error-border);
+  color: var(--err-t);
+  padding: 9px 22px;
+  font-size: 14px;
+  font-weight: 650;
 }
 
 .offbanner .retry {
-    border: 1px solid var(--err-t);
-    border-radius: 9px;
-    padding: 7px 14px;
-    min-height: 40px;
-    font-size: 13px;
-    font-weight: 750;
-    color: var(--err-t);
-    background: transparent;
-    flex: none;
+  border: 1px solid var(--err-t);
+  border-radius: 9px;
+  padding: 7px 14px;
+  min-height: 40px;
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--err-t);
+  background: transparent;
+  flex: none;
 }
 
 .offbanner .retry:hover {
-    background: var(--error-surface);
+  background: var(--error-surface);
 }
 
 /* ============ Production not-connected state ============ */
 .unconnected {
-    max-width: 640px;
-    margin: 80px auto;
-    padding: 34px;
-    text-align: center;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
+  max-width: 640px;
+  margin: 80px auto;
+  padding: 34px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
 .unconnected h1 {
-    font-size: 22px;
-    margin-bottom: 8px;
+  font-size: 22px;
+  margin-bottom: 8px;
 }
 
 .unconnected p {
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.6;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 /* ============ Not-found state ============ */
 .notfound {
-    max-width: 560px;
-    margin: 80px auto;
-    padding: 34px;
-    text-align: center;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
+  max-width: 560px;
+  margin: 80px auto;
+  padding: 34px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
 .notfound h1 {
-    font-size: 22px;
-    margin-bottom: 8px;
+  font-size: 22px;
+  margin-bottom: 8px;
 }
 
 .notfound .path {
-    font-family: var(--mono), monospace;
-    color: var(--err-t);
-    word-break: break-all;
+  font-family: var(--mono), monospace;
+  color: var(--err-t);
+  word-break: break-all;
 }
 
 .notfound p {
-    color: var(--muted);
-    font-size: 14px;
-    margin: 12px 0 20px;
-    line-height: 1.6;
+  color: var(--muted);
+  font-size: 14px;
+  margin: 12px 0 20px;
+  line-height: 1.6;
 }

@@ -5,10 +5,10 @@
 
 ## Current State
 
-- Canonical project specification: `PROJECT_PROFILE.md` v7 (Work Order vocabulary — the business container previously called Purchase Order).
-- Approved target UI: `GUI_DESIGN.md` v6, with mockup v6 (`docs/mockups/partflow-gui-mockup-v6.html`) as its visual reference.
+- Canonical project specification: `PROJECT_PROFILE.md` v8 (nullable WorkOrder/WorkOrderDemand due dates, generated temporary internal Work Order Numbers for blank entries, canonical demand ordering with undated demand last, server-confirmed-write scan rule, confirmation before Hot reordering).
+- Approved target UI: `GUI_DESIGN.md` v7, with mockup v7 (`docs/mockups/partflow-gui-mockup-v7.html`) as its visual reference.
 - Phase 1 — Repository Foundation source code exists: React + TypeScript frontend, FastAPI backend, PostgreSQL, Alembic (no-op baseline), Docker Compose, the `/api/health` endpoint, formatter/linter/type-check/test tooling, and CI.
-- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a real development-only build boundary (mock views and datasets are loaded only when `import.meta.env.DEV` is true; production builds render an explicit not-connected state per route, verified by a mock-sentinel check in `npm run build`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration (persistent OFFLINE banner, Retry, write controls disabled while disconnected). The Work Orders view (route `/management/work-orders`) implements the approved GUI v6 interaction model against local mock state: New Work Order as a modal dialog over the WO list, OPEN Work Order demand-line adding/removal per the Work Order Demand removal rule (PROJECT_PROFILE §13), native calendar date inputs, mock validation, and unsaved-change protection. The canonical Purchase Order → Work Order vocabulary migration (PROJECT_PROFILE v7, GUI_DESIGN v6 §12.1) is applied across current documentation, frontend code, routes, tests, and the v6 mockup. No domain behavior, backend business APIs, or database writes exist yet.
+- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a real development-only build boundary (mock views and datasets are loaded only when `import.meta.env.DEV` is true; production builds render an explicit not-connected state per route, verified by a mock-sentinel check in `npm run build`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration with **fast connectivity detection** (GUI_DESIGN §3.6): browser online/offline events, ~1 s health polling with a request timeout below the probe interval and no overlapping probes, recheck on tab focus/visibility, passive probes never flipping the UI to a "connecting" state, persistent OFFLINE banner with Retry, write controls disabled while disconnected, and Scan Station input re-enable/refocus on recovery — no WebSocket/SSE and no offline write queueing. The views implement the approved GUI v7 interaction model against local mock state: the Work Orders view (route `/management/work-orders`) with New Work Order as a modal dialog over the WO list, optional WO Number and due dates (a blank number generates a temporary internal `TMP-YYYYMMDD-HHMMSS` number on confirmed save), the manual-first multi-step Add Part dialog with barcode scanning as a secondary method, the save-omission confirmation, OPEN Work Order demand-line adding/removal per the Work Order Demand removal rule (PROJECT_PROFILE §13), native calendar date inputs, mock validation, and unsaved-change protection; the Production Board with live header clock, the shared Hot presentation (`🔥#n` before the PN), urgency-text-only blinking, Job-Numbers-last column order, and dynamic height-measured pagination; the Area Board per-Area detail as an Area summary card plus per-Machine monitoring cards; the Scan Station with the bottom-edge Station caption, the visible manual-entry secondary action, explicit Movement-type badges, and full keyboard support in the quantity dialog; and Priority Management with confirmation before every order change. The canonical Purchase Order → Work Order vocabulary migration (PROJECT_PROFILE v7, GUI_DESIGN §12.2) is applied across current documentation, frontend code, routes, and tests. Phase 2 remains frontend presentation with development-only mock behavior: no domain implementation, no database migrations, no backend business APIs, and no persisted production writes exist yet.
 
 ## Implementation Principles
 
@@ -46,14 +46,19 @@ Scope:
 - shared tokens
 - dark and light contexts
 - application routing/navigation
-- approved mock views, including the Work Orders view in the application shell (New Work Order modal, OPEN Work Order line editing, calendar date inputs, mock validation, unsaved-change protection)
+- approved mock views, including the Work Orders view in the application shell (New Work Order modal with optional WO Number/due dates, manual-first Add Part flow, OPEN Work Order line editing, calendar date inputs, mock validation, unsaved-change protection)
+- fast connectivity detection: browser online/offline events plus ~1 s `/api/health` polling with focus/visibility recheck (WebSocket/SSE remain out of scope and deferred)
 - development-only mock data behind a real production build boundary (mock-sentinel verification in the build)
 - loading, empty, error, connectivity-loss, and long-data states
+
+Phase 2 is frontend presentation plus development-only mock behavior.
 
 Non-goals:
 
 - production business rules in mock components
-- database writes
+- domain implementation or database migrations
+- backend business APIs
+- persisted production writes (every Phase 2 save changes development-only mock state)
 - ERP integration
 
 ## Phase 3 — Minimum Canonical Domain and Data Foundation
@@ -84,6 +89,8 @@ Rules:
 The first business vertical slice, presented in the UI as the Work Orders view (GUI_DESIGN §11). It must:
 
 - create/find WorkOrder,
+- generate a unique temporary internal Work Order Number (`TMP-YYYYMMDD-HHMMSS`, deterministic suffix on collision) when demand is confirmed-saved without an external WO Number (PROJECT_PROFILE §7 Work Order — the persisted internal identity is never nullable),
+- accept null WorkOrder and WorkOrderDemand due dates as valid data (PROJECT_PROFILE §8.2/§8.3),
 - create/find PartNumber,
 - create/update WorkOrderDemand,
 - save demand separately from production quantity,
@@ -161,10 +168,10 @@ Temporary limitation: full-QuantityFlow movement only. Partial movement must not
 
 - `STOCKED` Movement
 - available stocked quantity
-- suggested allocation order:
+- suggested allocation follows the canonical demand ordering (PROJECT_PROFILE §18):
   1. highest manager-defined Work Order Demand priority
-  2. earliest due date
-- equal criteria resolved by a stable deterministic tie-breaker (implementation detail, not a business rule)
+  2. within the same priority: dated demand earliest-first; undated demand after all dated demand, ordered by parent WorkOrder received_date (oldest first)
+- equal values resolved by a stable deterministic tie-breaker (implementation detail, not a business rule)
 - WorkOrderAllocation recorded separately from PartMovement
 - authorization for allocation adjustment
 
@@ -179,10 +186,10 @@ Temporary limitation: full-QuantityFlow movement only. Partial movement must not
 ## Phase 12 — Priority Management
 
 - Hot WorkOrderDemand ranking
-- add/search/scan
-- reorder
-- confirmation before removal
-- immediate audited application
+- add/search/scan (adding at the bottom applies directly)
+- reorder (drag-and-drop, Move Up / Move Down)
+- confirmation before removal and before every order change of existing entries — including Undo and Redo (PROJECT_PROFILE §21 Priority Management)
+- audited application after explicit confirmation
 - Undo/Redo
 
 ## Phase 13 — Administration
@@ -222,6 +229,7 @@ Role-based authorization per PROJECT_PROFILE §19.
 
 - ERP synchronization
 - offline scan synchronization (not part of MVP; production writes stay blocked while disconnected)
+- WebSocket/SSE push connectivity (event-driven + polled health detection is the approved mechanism)
 - advanced analytics
 - speculative automation
 - broad ERP/MES features

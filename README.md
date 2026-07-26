@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v6.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v7.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -50,8 +50,11 @@ Frontend structure:
   `body.light` supply the values) and shared primitives (`global.css`).
   Component CSS consumes semantic tokens only.
 - `src/app/` — shell infrastructure: router, theme provider (Dark
-  default, session-only), connectivity provider (health check with
-  bounded timeout, periodic re-check, explicit Retry), dev state preview.
+  default, session-only), connectivity provider with fast detection
+  (browser online/offline events, ~1 s `/api/health` polling with a
+  request timeout below the probe interval, recheck on tab
+  focus/visibility, explicit Retry; no optimistic writes — a write is
+  recorded only after the server confirms it), dev state preview.
 - `src/mocks/` — the development-only mock datasets. Views read from
   here and pass data to components via props; nothing in `src/mocks`
   encodes production business rules or is written to the backend.

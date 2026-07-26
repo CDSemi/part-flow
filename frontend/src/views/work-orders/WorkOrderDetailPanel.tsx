@@ -3,11 +3,14 @@ import { useEffect, useRef, useState } from 'react';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { EmptyState } from '../../components/view-states';
+import { formatIsoDate } from '../dates';
 import type { MockWorkOrder, RequestType } from '../view-models';
-import { formatIsoDate } from './dates';
+import { AddPartDialog } from './AddPartDialog';
+import type { AddPartResult } from './AddPartDialog';
 import {
   RELEASED_REMOVE_EXPLANATION,
   applyWorkOrderDueDateChange,
+  collectMissingDemandInfo,
   createDraftLine,
   draftFromSavedLine,
   draftsToSavedLines,
@@ -17,7 +20,12 @@ import {
   processScan,
   validateDemandLines,
 } from './demand-lines';
-import type { DemandLineDraft, LineError, LineField } from './demand-lines';
+import type {
+  DemandLineDraft,
+  LineError,
+  LineField,
+  MissingDemandInfo,
+} from './demand-lines';
 
 /**
  * Detail of one Work Order (GUI_DESIGN §11.2). An OPEN Work Order is
@@ -55,11 +63,13 @@ export function WorkOrderDetailPanel({
   );
   const [due, setDue] = useState(workOrder?.due ?? '');
   const [dirty, setDirty] = useState(false);
-  const [addOpen, setAddOpen] = useState(false);
+  const [addPartOpen, setAddPartOpen] = useState(false);
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
   const [confirmRemove, setConfirmRemove] = useState<DemandLineDraft | null>(
     null,
   );
+  const [confirmMissing, setConfirmMissing] =
+    useState<MissingDemandInfo | null>(null);
 
   const scanRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -71,10 +81,6 @@ export function WorkOrderDetailPanel({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
-
-  useEffect(() => {
-    if (addOpen) scanRef.current?.focus();
-  }, [addOpen]);
 
   useEffect(() => {
     if (focusField) {
@@ -164,11 +170,25 @@ export function WorkOrderDetailPanel({
     setFocusField({ id: line.id, field: 'qty' });
   }
 
-  function addManualLine() {
-    const line = createDraftLine({ due });
+  function handleAddPartComplete(result: AddPartResult) {
+    setAddPartOpen(false);
+    const line = createDraftLine(result);
     setLines((current) => [...current, line]);
     setDirty(true);
-    setFocusField({ id: line.id, field: 'pn' });
+    showNotice(
+      `✓ ${result.pn} added as an unsaved draft line — Save demand applies it to local mock state only.`,
+    );
+  }
+
+  function handleAddPartDuplicate(pn: string) {
+    setAddPartOpen(false);
+    const duplicate = display.find((l) => l.pn === pn);
+    showNotice(
+      `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
+    );
+    if (duplicate && !duplicate.released) {
+      setFocusField({ id: duplicate.id, field: 'qty' });
+    }
   }
 
   function requestRemove(line: DemandLineDraft) {
@@ -182,6 +202,19 @@ export function WorkOrderDetailPanel({
       return;
     }
     setConfirmRemove(line);
+  }
+
+  function saveDetail() {
+    if (!workOrder) return; // unreachable: save renders only with a WO present
+    const savedLines = draftsToSavedLines(display);
+    onSaveDetail({
+      ...workOrder,
+      due: due || null,
+      preview: linesPreview(savedLines),
+      lines: savedLines,
+    });
+    setLines(savedLines.map((line) => draftFromSavedLine(line, due || null)));
+    setDirty(false);
   }
 
   function handleSave() {
@@ -199,16 +232,19 @@ export function WorkOrderDetailPanel({
       el?.focus();
       return;
     }
-    const savedLines = draftsToSavedLines(display);
-    onSaveDetail({
-      ...workOrder,
+    // Missing due dates are valid — but they are summarized and
+    // explicitly confirmed, never silently saved. Released lines are
+    // read-only history and are not re-confirmed.
+    const missing = collectMissingDemandInfo(
+      workOrder.workOrderNumber,
       due,
-      preview: linesPreview(savedLines),
-      lines: savedLines,
-    });
-    setLines(savedLines.map((line) => draftFromSavedLine(line, due)));
-    setDirty(false);
-    setAddOpen(false);
+      display.filter((line) => !line.released),
+    );
+    if (missing) {
+      setConfirmMissing(missing);
+      return;
+    }
+    saveDetail();
   }
 
   function handleBack() {
@@ -247,6 +283,9 @@ export function WorkOrderDetailPanel({
               aria-label="WO due date"
               onChange={(e) => handleDueChange(e.target.value)}
             />
+            {due === '' ? (
+              <span className="duetxt none"> no due date</span>
+            ) : null}
           </>
         ) : (
           <>
@@ -403,7 +442,7 @@ export function WorkOrderDetailPanel({
                                 e.currentTarget.select();
                                 return;
                               }
-                              if (addOpen) scanRef.current?.focus();
+                              scanRef.current?.focus();
                             }}
                           />
                           {errorFor(line.id, 'qty') ? (
@@ -416,7 +455,7 @@ export function WorkOrderDetailPanel({
                         <span className="mono">{line.qty}</span>
                       )}
                     </td>
-                    <td className={errorFor(line.id, 'due') ? 'err-cell' : ''}>
+                    <td>
                       {rowEditable ? (
                         <>
                           <input
@@ -429,25 +468,21 @@ export function WorkOrderDetailPanel({
                             className="mono"
                             value={line.due}
                             aria-label={`Due date for ${line.pn ?? 'new line'}`}
-                            aria-invalid={
-                              errorFor(line.id, 'due') ? true : undefined
-                            }
                             onChange={(e) => {
-                              clearLineError(line.id, 'due');
                               updateLine(line.id, {
                                 due: e.target.value,
                                 dueTouched: true,
                               });
                             }}
                           />
-                          {errorFor(line.id, 'due') ? (
-                            <div className="rowerr">
-                              {errorFor(line.id, 'due')}
-                            </div>
+                          {line.due === '' ? (
+                            <div className="bc">No due date</div>
                           ) : null}
                         </>
                       ) : (
-                        <span className="mono">{formatIsoDate(line.due)}</span>
+                        <span className="mono">
+                          {formatIsoDate(line.due || null)}
+                        </span>
                       )}
                     </td>
                     <td>
@@ -530,54 +565,36 @@ export function WorkOrderDetailPanel({
         </div>
         {editable && (
           <div className="wo-addpart">
-            {addOpen ? (
-              <>
-                <div className="nwo-scanrow">
-                  <input
-                    ref={scanRef}
-                    className="nwo-scan"
-                    placeholder="Scan PN barcode (PF:PN:…) — Enter"
-                    aria-label="Scan PN barcode"
-                    autoComplete="off"
-                    disabled={writeBlocked}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        handleScan(e.currentTarget.value);
-                        e.currentTarget.value = '';
-                      }
-                    }}
-                  />
-                  <button
-                    className="btn ghost"
-                    disabled={writeBlocked}
-                    onClick={addManualLine}
-                  >
-                    ＋ Add line manually
-                  </button>
-                  <button
-                    className="btn ghost"
-                    onClick={() => setAddOpen(false)}
-                  >
-                    Done
-                  </button>
-                </div>
-                <div className="nwo-hint">
-                  Scan an existing PN barcode, or add a line manually to look up
-                  / create a PN. A new line joins this Work Order as an{' '}
-                  <b>unsaved draft</b> with Request Type NEW and the WO due
-                  date. A PN already on this Work Order focuses its existing
-                  line instead of adding a duplicate.
-                </div>
-              </>
-            ) : (
+            <div className="nwo-scanrow">
               <button
-                className="btn ghost"
+                className="btn primary"
                 disabled={writeBlocked}
-                onClick={() => setAddOpen(true)}
+                onClick={() => setAddPartOpen(true)}
               >
-                ＋ Add Part
+                ＋ Add Part manually
               </button>
-            )}
+              <input
+                ref={scanRef}
+                className="nwo-scan"
+                placeholder="Optional: scan PN barcode (PF:PN:…) — Enter"
+                aria-label="Scan PN barcode"
+                autoComplete="off"
+                disabled={writeBlocked}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleScan(e.currentTarget.value);
+                    e.currentTarget.value = '';
+                  }
+                }}
+              />
+            </div>
+            <div className="nwo-hint">
+              Manual entry is the normal workflow; scanning stays a secondary
+              method for existing PN barcodes. A new line joins this Work Order
+              as an <b>unsaved draft</b> with Request Type NEW and the WO due
+              date default. A PN already on this Work Order focuses its existing
+              line instead of adding a duplicate.
+            </div>
           </div>
         )}
         {editable && (
@@ -608,6 +625,48 @@ export function WorkOrderDetailPanel({
         cannot be released without reactivation. Leaving this Work Order with
         unsaved changes asks for confirmation.
       </div>
+
+      {addPartOpen ? (
+        <AddPartDialog
+          workOrderDue={due}
+          existingPns={display.flatMap((l) => (l.pn ? [l.pn] : []))}
+          onCancel={() => setAddPartOpen(false)}
+          onDuplicate={handleAddPartDuplicate}
+          onComplete={handleAddPartComplete}
+        />
+      ) : null}
+
+      {confirmMissing ? (
+        <ConfirmDialog
+          title="Save demand with missing information?"
+          confirmLabel="Confirm and save"
+          cancelLabel="Cancel — keep editing"
+          onConfirm={() => {
+            setConfirmMissing(null);
+            saveDetail();
+          }}
+          onCancel={() => setConfirmMissing(null)}
+        >
+          These omissions are valid — confirm them explicitly:
+          <ul className="missinglist">
+            {confirmMissing.noWorkOrderDue ? (
+              <li>
+                No WO due date — the Work Order remains <b>unscheduled</b> until
+                a due date is added.
+              </li>
+            ) : null}
+            {confirmMissing.undatedLineCount ? (
+              <li>
+                <b>{confirmMissing.undatedLineCount}</b> demand line
+                {confirmMissing.undatedLineCount === 1 ? ' has' : 's have'} no
+                due date — they receive the lowest date priority and order by
+                the Work Order received date.
+              </li>
+            ) : null}
+          </ul>
+          Cancel returns to editing with every entered value preserved.
+        </ConfirmDialog>
+      ) : null}
 
       {confirmRemove ? (
         <ConfirmDialog

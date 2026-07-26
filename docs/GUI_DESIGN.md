@@ -1,9 +1,9 @@
-# PartFlow GUI Design v6
+# PartFlow GUI Design v7
 
-> **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v7).
+> **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v8).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v6.html`.
-> Supersedes GUI Design v5 (mockup: `archive/partflow-gui-mockup-v5.html`); the differences are listed in §12.1. Differences from v4, v3, v2 and v1 remain listed in §12.2–§12.5.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v7.html`.
+> Supersedes GUI Design v6 (mockup: `archive/partflow-gui-mockup-v6.html`); the differences are listed in §12.1. Differences from v5, v4, v3, v2 and v1 remain listed in §12.2–§12.6.
 
 ---
 
@@ -19,7 +19,7 @@ Covers the application-view content of PROJECT_PROFILE §21 in **seven GUI views
 6. Priority Management (Hot Work Order Demand ranking)
 7. Administration (configuration)
 
-> **Pending PROJECT_PROFILE alignment (v4).** PROJECT_PROFILE v7 still (a) lists Area Board and Manager Summary as separate views in §21, and (b) has no `due_date` on WorkOrder in §8.2. GUI v4 merges Manager Summary into Area Board as its All Areas overview (no content dropped), and introduces a Work-Order-level due date used as the entry default for demand-line due dates. (The former "PO Intake" view name was resolved by the v7 vocabulary migration: PROJECT_PROFILE §21 now names the view **Work Orders**.) PROJECT_PROFILE §21 and §8.2 still need the remaining updates; until then this document notes each deviation where it occurs.
+> **Pending PROJECT_PROFILE alignment (v4).** PROJECT_PROFILE v8 still lists Area Board and Manager Summary as separate views in §21. GUI v4 merges Manager Summary into Area Board as its All Areas overview (no content dropped). (Two earlier deviations are now resolved: PROJECT_PROFILE v8 §8.2 defines the nullable Work-Order-level `due_date` used as the entry default for demand-line due dates, and the former "PO Intake" view name was resolved by the v7 vocabulary migration — PROJECT_PROFILE §21 names the view **Work Orders**.) PROJECT_PROFILE §21 still needs the view-merge update; until then this document notes the deviation where it occurs.
 
 ## 1.1 Navigation structure
 
@@ -88,8 +88,9 @@ These apply to every view; they implement the profile's core principles in UI te
 3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each.
 4. **Quantity integrity is visible.** Quantity entry displays the available source quantity. Attempts to move more than available are rejected with an explicit error — the UI explains the limit rather than clamping silently (PROJECT_PROFILE §11 Quantity Model).
 5. **History is append-only in the UI too.** Undo appears as a new `REVERSED` entry in the scan list; the original entry stays visible. Tracking's Movement history has no edit/delete affordances (PROJECT_PROFILE §16).
-6. **Connectivity loss is an explicit write-blocked state.** Losing the connection shows a persistent OFFLINE / DISCONNECTED banner with an actionable message; production write submission is disabled while disconnected. Already loaded read-only information stays visible where practical. No production write is queued locally, no pending Movement indicator is shown, and the UI never claims that scans will synchronize later. On reconnection, input readiness and focus are restored. (Offline scan synchronization remains deferred and unapproved — PROJECT_PROFILE §30, §32.4.)
+6. **Connectivity loss is an explicit write-blocked state, detected fast.** Detection combines browser `online`/`offline` events with polling (no WebSocket/SSE in Phase 2): `offline` marks the application unavailable immediately; `online` triggers an immediate health check; `GET /api/health` is polled about every second with a request timeout below the probe interval and no overlapping probes; connectivity is rechecked on tab focus/visibility change. Passive probes never flip the UI to a "connecting" state — no flicker. Losing the connection shows a persistent OFFLINE / DISCONNECTED banner with an actionable message; production write submission is disabled while disconnected. Already loaded read-only information stays visible where practical. No production write is queued locally, no pending Movement indicator is shown, and the UI never claims that scans will synchronize later. On reconnection, input readiness and focus are restored — the Scan Station input is re-enabled and refocused. **A scan is successful only after the server confirms the write:** connectivity status is an early warning, never permission to record a Movement optimistically. If connectivity disappears between the last heartbeat and a write request, the request fails as "nothing recorded"; the UI must never display a false recorded result (PROJECT_PROFILE §15). This rule must be preserved unchanged in the production phases. (Offline scan synchronization remains deferred and unapproved — PROJECT_PROFILE §30, §32.4.)
 7. **PartFlow vocabulary everywhere.** UI labels use the canonical names: PN, WO / Work Order, Work Order Demand, Request Type (`NEW` / `REWORK` / `MODIFY`), Quantity Flow, Route, Movement types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`, `SPLIT`, `MERGED`, `STOCKED`, `REVERSED`, …), Work Order Allocation, Hot (PROJECT_PROFILE §7).
+8. **Missing due dates are valid data.** Work Order and demand-line due dates may be absent (PROJECT_PROFILE §8.2, §8.3). A missing due date renders as `No due date` where a note line exists and as `—` as the compact/table date value — consistently, and never as an error or warning state. Wherever demand is due-date ordered, the canonical demand ordering applies (PROJECT_PROFILE §18): dated demand first, earliest first; undated demand after all dated demand, ordered by the parent Work Order's received date, with a stable deterministic tie-breaker.
 
 ---
 
@@ -101,7 +102,7 @@ Fixed to one Area per station. Single screen, no navigation during normal produc
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Dept / AREA (color) / Operations · Station  [Machine session][Worker][●Online]│
+│ Dept / AREA (color) / Operations   [Machine session][Worker session][●Online] │
 │ (disconnected banner when connectivity is lost — writes blocked)              │
 ├──────────────────────────────────────┬────────────────────────────────────────┤
 │ Machine status strip (scan to select)│  UNDO LAST SCAN                        │
@@ -109,12 +110,16 @@ Fixed to one Area per station. Single screen, no navigation during normal produc
 │ Pending scan context banner          │  In this Area now:                     │
 │ Last scanned PN                      │    – assigned to Machines              │
 │ Feedback zone                        │    – Area queue (awaiting Machine)     │
-└──────────────────────────────────────┴────────────────────────────────────────┘
+├──────────────────────────────────────┴────────────────────────────────────────┤
+│ Station LATHE-ST-01                        (faint diagnostic caption, bottom) │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 4.2 Header
 
-Department, Area name with Area color, supported Operations, Station ID. Session pills for the active **Machine session** and **Worker session** (both show `—` when not applicable per Area configuration), each with a caption describing its lifetime. Connectivity indicator with explicit ONLINE/OFFLINE text — color alone is not sufficient.
+Department, Area name with Area color, and supported Operations stay prominent. Session pills for the active **Machine session** and **Worker session** (both show `—` when not applicable per Area configuration), each with a caption describing its lifetime. Connectivity indicator with explicit ONLINE/OFFLINE text — color alone is not sufficient.
+
+The **Station ID is not part of the header** (v7). It renders as a faint diagnostic caption at the bottom edge of the view (e.g. `Station LATHE-ST-01`) — present for troubleshooting, visually recessive so it never competes with production information.
 
 ## 4.3 Machine sessions — scan-only, sticky per §19
 
@@ -143,7 +148,7 @@ One input accepts every barcode type; the system classifies the scan determinist
 | Unknown PN / unrecognized value        | Error feedback, nothing recorded; raw ERP text is never auto-accepted           |
 | Inactive entity                        | Error feedback, nothing recorded                                                |
 
-Manual PN entry remains available as an explicit fallback link under the scan input. It opens a **separate manual-entry flow** that accepts the exact PartNumber text and resolves it through the same server-side validation as a scan. It never pre-fills or reuses the barcode input, and raw PN text is never silently interpreted as a barcode (PROJECT_PROFILE §10 Barcode Model).
+Manual PN entry is a **visible secondary action** under the scan input — a button labeled **⌨ Enter PN manually** with a caption explaining that it is the fallback when the scanner is unavailable. It opens a **separate manual-entry flow** that accepts the exact PartNumber text and resolves it through the same server-side validation as a scan. It never pre-fills or reuses the barcode input, and raw PN text is never silently interpreted as barcode input (PROJECT_PROFILE §10 Barcode Model).
 
 ## 4.5 Pending scan context and last scanned PN
 
@@ -158,12 +163,12 @@ Full-screen modal listing every valid context as a large tappable row, filtered 
 
 ## 4.7 Quantity entry
 
-Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard digits also accepted. Shows PN, source → target context, and available source quantity. Confirm is blocked for 0; quantities above the available source are rejected with an integrity error (server-validated in the real application).
+Modal with oversized numeric keypad (62 px keys) for touch **and full physical-keyboard support** (v7): digits append, Backspace removes one digit, Delete/Clear clears the value, Enter confirms when the quantity is valid, Escape cancels. Shows PN, source → target context, and available source quantity. Confirm is blocked for 0; quantities above the available source are rejected with an integrity error (server-validated in the real application) — keyboard input does not bypass any validation.
 
 ## 4.8 Right column
 
 - **Undo Last Scan** — one prominent button; only undoes recent eligible scans made at this Area. Creates a `REVERSED` compensating Movement referencing the original (PROJECT_PROFILE §16); disabled when nothing is undoable.
-- **Recent scans** — today's scans, newest first: PN, Movement type and description, time, status dot (green recorded / red reversed).
+- **Recent scans** — today's scans, newest first: PN, Movement type, description, time, and a recorded/reversed status. The **Movement type is an explicit field** (mock model field `movementType: MovementType`) rendered as its own badge next to the recorded/reversed status, separate from the PN and the description; movement types are never embedded at the start of description strings.
 - **In this Area now** — live Area inventory split into two labeled groups per §21: quantity **assigned to Machines** (with Machine name) and quantity in the **Area queue** awaiting Machine assignment, with the Area total beneath.
 
 ## 4.9 States
@@ -182,13 +187,17 @@ Modal with oversized numeric keypad (62 px keys) for touch; physical keyboard di
 
 Read-only, full-screen, for large shared displays. No interactive elements except an (optional, admin-gated) settings gesture.
 
-- Columns (PROJECT_PROFILE §21): **No. · Part Number · Areas & Quantities · Time · Job Numbers · Due Date · Total Days**.
-- **Part Number** renders on a single line — the column is sized so the PN, Hot flame and rank chip never wrap. Name and revision appear as a secondary line.
-- **Areas & Quantities · Time:** one row per location showing Area color dot, Area/Machine name, quantity, a `machine` / `queue` tag where relevant, and the **time in that location** right-aligned in monospace. A time turns amber when it exceeds the expected duration of the active Route Step. A dashed separator shows the PN total underneath.
-- **Due Date** carries a highlighted secondary line with days left (amber = due soon, red = overdue, neutral = comfortable / stocked). There is no separate Days Left column.
-- **Priority model:** Hot Work Order Demand rank (🔥 + `#n` chip) from Priority Management. Hot rows sort first in rank order with a row tint that gets redder the hotter the rank; non-Hot rows follow sorted by due date.
-- **Due-soon blink:** a PN approaching or past its due date blinks (threshold configurable). Blink is reserved for due-date urgency only — nothing else on the board may blink.
-- Long lists rotate pages automatically (page indicator + interval in footer). Footer carries the legend and aggregate stats (active PNs, pcs in production, pcs stocked).
+- **Header clock (v7):** the header shows the live local date **and time**, driven by a self-updating clock component — never a static mock timestamp.
+- Columns (PROJECT_PROFILE §21): **No. · Part Number · Areas & Quantities · Time · Due Date · Total Days · Job Numbers** — Job Numbers is deliberately last (v7).
+- **Content-driven column sizing (v7):** column widths come from semantic `colgroup` classes, not fixed percentage widths. No., Part Number, Due Date and Total Days shrink to their content and never wrap (Due Date keeps a minimum width so its secondary line always fits); Job Numbers absorbs the remaining width and may wrap.
+- **Part Number** renders on a single line — the column is sized so the Hot indicator and the PN never wrap. Name and revision appear as a secondary line.
+- **Standard Hot Part presentation (v7):** a Hot entry renders as `🔥#1 2027-60-8114-00` — flame and rank immediately **before** the PN, never as a separated rank chip after it. This is one shared component (`HotPn` in `src/components/indicators.tsx`) used identically on the Production Board, the Area Board (All Areas and per-Area detail), Tracking, and every Priority-related PN presentation.
+- **Areas & Quantities · Time** uses a **stable grid** (v7): Area/Machine label, quantity, machine/queue tag, and time occupy consistent columns so all quantities align vertically — including the `total … pcs` line — and a long Area or Machine name never pushes the quantity out of alignment. Each row shows the Area color dot, Area/Machine name, quantity, a `machine` / `queue` tag where relevant, and the **time in that location** right-aligned in monospace. A time turns amber when it exceeds the expected duration of the active Route Step. A dashed separator shows the PN total underneath.
+- **Due Date** carries a highlighted secondary line with days left (amber = due soon, red = overdue, neutral = comfortable / stocked). There is no separate Days Left column. A missing due date renders as `—` (§3.8).
+- **Priority model:** Hot Work Order Demand rank from Priority Management. Hot rows sort first in rank order with a row tint that gets redder the hotter the rank; non-Hot rows follow in the canonical demand ordering (PROJECT_PROFILE §18) — dated rows earliest-first, undated rows after all dated rows ordered by Work Order received date.
+- **Due-date urgency (v7):** only the urgency text — days remaining / days overdue — blinks (threshold configurable); the PN and the date itself stay steady. The footer legend states this. `prefers-reduced-motion` disables the blink animation while keeping the warning color and weight. Blink remains reserved for due-date urgency only — nothing else on the board may blink.
+- **Dynamic pagination (v7):** pages are calculated from the **actual available board height and actual rendered row heights** (via a hidden measurement table), recalculated on viewport/container resize, data changes, and theme/font-metric changes (ResizeObserver plus window resize). At least one row is always shown per page; the active page clamps when the page structure changes. Pages rotate automatically every 12 s **only when more than one page exists**; the page indicator is accurate and a single page never claims rotation. (In DOM environments without layout — tests — a fallback of 10 rows per page applies.)
+- Footer carries the legend and aggregate stats (active PNs, pcs in production, pcs stocked).
 - Auto-refresh; a "Live" indicator plus last-updated time when the feed is stale.
 
 ---
@@ -215,11 +224,13 @@ Search filters the PN lists; the sort selector orders PNs within each column.
 
 ## 6.3 Per-Area detail
 
-Card grid, one card per PN-in-Area:
+The detail mode is a monitoring layout of **one Area summary card followed by one monitoring card per Machine of the Area** (v7; supersedes the v2–v6 "one card per PN" grid):
 
-- PN (🔥 + `#n` chip for Hot demand), WO + Operation (+ Request Type when not `NEW`), and Job Number (`— (internal)` for temporary internal Work Orders). An over-long PN is truncated with an ellipsis; hovering shows the full PN as a tooltip (§2.3).
-- Quantity presented as a **right-aligned block anchored to the card's right edge** — its position is independent of PN length — with an explicit label ("IN THIS AREA" / big number / "pcs"), visually separated by a divider so the number cannot be misread.
-- Per-Machine chips (dashed style for queued quantity), due text with the same color ramp as the Production Board, and time in Area.
+- **Area summary card (first):** Area name, description and supported Operations; a stat row — PN count, total pcs, queued pcs, pcs on machines, Hot count; then a **compact PN list in the All Areas visual language**, grouped **"Assigned to Machines"** first, then **"Area queue — awaiting Machine"** (the terminal Stockroom shows **"Stocked"** instead). Each entry shows the Hot indicator + PN (`🔥#n` before the PN, §5), quantity, machine or queue context, WO + Job Number, due status, and time in Area. Grouping never duplicates or loses quantity.
+- **Machine monitoring cards:** one card per Machine of the Area — machine name, status (running / idle / maintenance), total quantity assigned, PN count, and the assigned PN list with quantity, WO, Job Number, due status and time in Area. Idle machines show a clear empty state; maintenance machines are visually distinct (dashed warning border). In Phase 2 the Machines come from the mock model `MOCK_AREA_MACHINES` (Cut → Saw 1; Lathe → Lathe 1 idle, Lathe 2 running, Lathe 3 running, Lathe 4 maintenance; Mill → Mill 1, Mill 2).
+- Areas without Machines render **only the summary card** — no placeholder Machine cards.
+- Search and the sort selector (§6.1) still narrow and order the PN lists. **Sort: Time in Area** orders by a sortable duration field (`timeInAreaMinutes` in the mock model), longest first.
+- An over-long PN is truncated with an ellipsis; hovering shows the full PN as a tooltip (§2.3).
 - Empty state: "No production in {Area}".
 
 ---
@@ -230,7 +241,7 @@ Primary management interface, **PN-centric** per PROJECT_PROFILE §21. Master–
 
 ## 7.1 Filters and list
 
-Search across PN, WO and Job Number; selects for Area, Operation, Machine, Request Type, priority (Hot only), status, and due window. List columns: PN (+ name, Hot chip), active WO Demand (WO · qty · Request Type chip), current distribution (Area color dots), active quantity, stocked quantity, next due date, status pill (Active / Stocked / Completed).
+Search across PN, WO and Job Number; selects for Area, Operation, Machine, Request Type, priority (Hot only), status, and due window. List columns: PN (+ name; Hot entries use the standard `🔥#n` presentation before the PN, §5), active WO Demand (WO · qty · Request Type chip), current distribution (Area color dots), active quantity, stocked quantity, next due date (`—` when the demand has no due date, §3.8), status pill (Active / Stocked / Completed).
 
 ## 7.2 Detail panel sections
 
@@ -252,12 +263,12 @@ Loading skeletons per section; empty filter result ("No PNs match — clear filt
 
 Manages the Department's Hot Work Order Demand list (PROJECT_PROFILE §21 Priority Management). Priority belongs to Work Order Demand; multiple Work Orders for the same PN may hold different ranks.
 
-- The list shows each Hot entry with rank badge, PN, WO + Job Number, Request Type chip, demand figures (requested / allocated / shortage), current distribution, and color-ramped due date.
+- The list shows each Hot entry with its rank in the standard Hot presentation (`🔥#n` immediately before the PN, §5), WO + Job Number, Request Type chip, demand figures (requested / allocated / shortage), current distribution, and color-ramped due date (`—` when absent, §3.8).
 - **Add:** the "+ Add to Hot list" button opens a dialog with a single search field that accepts free text (PN / WO / Job Number) *and* PN barcode scans — scanning with the dialog open adds the matching Work Order Demand directly. If a PN has multiple active Work Order Demand records, each is listed and added separately. New entries always join at the **bottom** of the list.
-- **Remove:** each entry has a remove (✕) affordance. Clicking it opens a **confirmation dialog identifying the PN and Work Order Demand**; Cancel changes nothing. On Confirm the entry is removed, remaining ranks close the gap, the change applies immediately and is audited, and Undo can restore it. Confirmation guards the removal; it does not reintroduce a separate save-or-cancel workflow.
-- **Reorder:** drag-and-drop with a visible grip; rank badges renumber live.
-- **Undo / Redo instead of save-or-cancel:** every change (reorder, add, remove) applies immediately, is audited, and can be stepped back and forward with Undo/Redo buttons. The buttons disable when the corresponding history is empty.
-- A footer note restates the rules: Hot is a label on top of `priority_rank`, and ordering criteria are ① Hot rank ② earliest due date; a stable deterministic tie-breaker is an implementation detail, not a business rule (PROJECT_PROFILE §18).
+- **Remove:** each entry has a remove (✕) affordance. Clicking it opens a **confirmation dialog identifying the PN and Work Order Demand**; Cancel changes nothing. On Confirm the entry is removed, remaining ranks close the gap, the change is applied and audited, and Undo can restore it. Confirmation guards the removal; it does not reintroduce a separate save-or-cancel workflow.
+- **Reorder requires confirmation (v7):** every operation that changes the order of existing Hot entries — drag-and-drop (visible grip), Move Up, Move Down, Undo, and Redo — opens a **confirmation dialog before applying**, showing the affected PN + Work Order Demand, the previous rank, the proposed new rank, and the action type. Cancel leaves the list and both Undo/Redo histories unchanged; the visible list is **never renumbered before confirmation**. Adding a new entry at the bottom keeps its direct behavior (no order-change confirmation).
+- **Undo / Redo instead of save-or-cancel:** every confirmed change is applied, audited, and can be stepped back and forward with Undo/Redo buttons — each step is itself an order change and shows the same confirmation. The buttons disable when the corresponding history is empty.
+- A footer note restates the rules: Hot is a label on top of `priority_rank`, and ordering follows the canonical demand ordering — ① Hot rank ② dated demand earliest-first, with undated demand after all dated demand ordered by Work Order received date; a stable deterministic tie-breaker is an implementation detail, not a business rule (PROJECT_PROFILE §18).
 
 ---
 
@@ -280,13 +291,13 @@ Editing an Area's display properties shows an inline note that identity and barc
 
 # 10. Completion / Receiving UI (Stockroom Scan Station)
 
-The Stockroom station reuses the Scan Station shell with one additional step: after the `STOCKED` Movement, an **allocation dialog** shows the suggested split across outstanding Work Order Demand in the exact §18 order — ① highest Hot rank ② earliest due date. Each row shows the Work Order, requested quantity, previously allocated quantity, remaining shortage and the proposed quantity, adjustable with +/− steppers — Operators may review and adjust the suggestion before confirmation (PROJECT_PROFILE §18). Confirm is enabled only when the allocated total equals the stocked quantity. Routine receiving requires no Manager involvement; Admin and Manager may adjust the allocation later, with every change audited.
+The Stockroom station reuses the Scan Station shell with one additional step: after the `STOCKED` Movement, an **allocation dialog** shows the suggested split across outstanding Work Order Demand in the exact §18 canonical demand ordering — ① highest Hot rank ② dated demand earliest-first, undated demand after all dated demand ordered by Work Order received date. Each row shows the Work Order, requested quantity, previously allocated quantity, remaining shortage and the proposed quantity, adjustable with +/− steppers — Operators may review and adjust the suggestion before confirmation (PROJECT_PROFILE §18). Confirm is enabled only when the allocated total equals the stocked quantity. Routine receiving requires no Manager involvement; Admin and Manager may adjust the allocation later, with every change audited.
 
 ---
 
 # 11. Work Orders
 
-Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §12.1). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §12.2). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 The view has two panels on one route (`/management/work-orders`): the **WO list** (master, the entry screen) and the **WO detail** (demand lines of one selected Work Order). **New Work Order** is a **modal dialog over the WO list** (v6) — it never replaces the list and never changes the URL.
 
@@ -296,10 +307,10 @@ In Phase 2 every Work Orders interaction changes **development-only local mock s
 
 ## 11.1 WO list
 
-- One row per Work Order: WO Number, received date, **WO due date** (color-ramped like all due dates), demand-line count with a PN preview, and status (**Open** / **Released** / **Complete**).
+- One row per Work Order: WO Number, received date, **WO due date** (color-ramped like all due dates; `—` when absent, §3.8), demand-line count with a PN preview, and status (**Open** / **Released** / **Complete**).
 - Search over WO Number. An existing WO Number is always opened, never duplicated; a miss offers "＋ New Work Order".
 - **＋ New Work Order opens the modal dialog of §11.3 over the list.** The list stays mounted and visible behind the overlay, and the URL remains `/management/work-orders`.
-- Temporary internal Work Orders (`TMP-…-REWORK/MODIFY`) appear like any other Work Order, labeled "temporary internal Work Order".
+- Temporary internal Work Orders — both scan-intake `TMP-…-REWORK/MODIFY` and generated `TMP-YYYYMMDD-HHMMSS` numbers (PROJECT_PROFILE §7) — appear like any other Work Order, clearly labeled "temporary internal Work Order", and are searchable like any other WO Number.
 - Completed Work Orders (every Work Order Demand fully allocated) move out of the active list but remain permanently available in history (PROJECT_PROFILE §8.2).
 - **Demand lines are shown only after a Work Order is selected** — selecting a row opens the WO detail panel.
 
@@ -307,29 +318,33 @@ In Phase 2 every Work Orders interaction changes **development-only local mock s
 
 - Header: "‹ All Work Orders" back action, WO Number, received date, WO due date (**editable with a calendar control while the Work Order is Open**), line count, status.
 - **WorkOrderDemand rows:** an editable table, one row per PN demand: PN (lookup or create), Request Type (`NEW` default / `REWORK` / `MODIFY`), requested quantity, due date (calendar control), priority when applicable, external Job Numbers, requester / reason / notes. Long WO line lists scroll with a sticky header and a line count.
-- **Adding demand lines (v6):** an **OPEN** Work Order shows a clear **＋ Add Part** action; CLOSED/completed Work Orders remain read-only. Add Part reuses the scanner-first entry of §11.3: scan an existing PN barcode, or add a line manually with PN lookup / inline create. A new line joins the Work Order as a visibly marked **unsaved draft** — Request Type defaults to `NEW`, the due date defaults to the WO due date. Scanning or entering a PN already on the Work Order focuses the existing line instead of adding a duplicate; a released line is announced as read-only instead.
+- **Adding demand lines (v7 — manual-first):** an **OPEN** Work Order shows a prominent **＋ Add Part manually** action; CLOSED/completed Work Orders remain read-only. Add Part manually opens the multi-step Add Part dialog of §11.3 (PN → quantity → due date → optional metadata). Barcode scanning remains available as a **secondary, optional method**: it accepts only valid PN barcodes and rejects unknown barcodes. A new line joins the Work Order as a visibly marked **unsaved draft** — Request Type defaults to `NEW`, the due date defaults to the WO due date when one exists. Scanning or entering a PN already on the Work Order focuses the existing line instead of adding a duplicate; a released line is announced as read-only instead.
 - **Removing demand lines (v6)** follows the canonical Work Order Demand removal rule (PROJECT_PROFILE §13):
   - an unsaved draft line is removed immediately;
   - a saved line with no released production quantity is removed only after an explicit confirmation dialog;
   - once any quantity has been released to production, the line's remove action is disabled with the explanation "Cannot remove: production quantity has already been released." — later adjustments go through correction/production workflows, never deletion;
   - removal never deletes the PartNumber master, Quantity Flows, Movements, release history, or other Work Order Demand for the same PN.
-- **Due-date default:** each line's due date defaults to the **WO due date** and may be edited per line. Changing the WO due date updates only lines still holding the inherited default; a line whose due date was manually changed keeps its value.
+- **Due-date default (v7):** each line's due date defaults to the **WO due date** (when one exists) and may be edited per line. A blank due date is valid and displays cleanly (§3.8). Changing the WO due date updates only lines still holding the previously inherited default; a line whose due date was manually changed keeps its value, and a line explicitly set to **"No due date"** counts as user-edited — it never inherits a later WO due date.
 - **PN lookup / create:** the PN field searches existing PartNumbers; a new PN can be created inline, which shows a **barcode preview** (`PF:PN:…`) and creates the unique PN barcode with the PN master. An **inactive PN** is flagged and cannot be released without reactivation.
-- **Validation states:** per-field errors (missing PN, quantity not a positive integer, missing due date, duplicate PN); a row with errors cannot be saved and is **never silently filtered out**. After a failed save the first invalid control receives focus and all entered values are preserved.
+- **Validation states (v7):** per-field errors (missing PN, quantity not a positive integer, duplicate PN); a row with errors cannot be saved and is **never silently filtered out**. A **missing due date is not an error and never blocks saving** (PROJECT_PROFILE §8.3) — absent dates are summarized in the save confirmation instead (§11.3). After a failed save the first invalid control receives focus and all entered values are preserved.
 - **Unsaved changes** are visibly marked ("● Unsaved changes") and guarded: leaving the Work Order — via the back action, top-level navigation, Management sub-navigation, browser back/forward, or reload/tab close (`beforeunload`) — requires explicit confirmation before the draft is discarded.
 
-## 11.3 New Work Order — scanner-first modal dialog
+## 11.3 New Work Order — manual-first modal dialog and Add Part flow
 
 - **Presentation (v6):** New Work Order opens as a **modal dialog over the WO list**. The dialog has `role="dialog"`, `aria-modal="true"`, an accessible name from its visible heading, initial focus inside the dialog, keyboard focus trapping, Escape and backdrop-click close requests, focus restoration to the **＋ New Work Order** button on close, responsive sizing with internal scrolling for long line lists, and follows both theme modes. The URL never changes.
 - **Nothing is silently discarded:** Escape, backdrop click, Cancel, or any other close request on a dialog with entered data first asks for explicit confirmation ("Discard this New Work Order?").
-- **Header form:** WO Number, received date (calendar control, defaults to today), and **WO due date** (calendar control) — the default due date for every demand line. Entering a WO Number that already exists opens the existing Work Order instead of duplicating it (duplicate handling); if lines were already entered, opening the existing Work Order is confirmed explicitly first.
-- **Scan loop:** a dedicated, visually prominent scan input accepts PN barcodes (`PF:PN:…`). Each scan appends one demand line — Request Type `NEW`, due date prefilled from the WO due date — and moves focus to that line's quantity field; Enter on the quantity returns focus to the scan input, ready for the next part. An entire Work Order can be entered scan → qty → scan → qty without touching the mouse.
-- Scanning a PN that is already on the Work Order focuses the existing line (edit its quantity) instead of adding a duplicate. Unknown or non-PN barcodes are rejected with an error — nothing is added.
-- **Manual lines** remain available ("＋ Add line manually") for PNs that do not exist yet, using the same PN lookup / inline-create as §11.2.
-- Changing the WO due date updates lines still holding the default; lines whose due date was edited keep their value. Request Type and due date stay editable per line before saving.
-- **Save demand** validates the header and all rows (§11.2 validation states — field-level errors, first invalid control focused, values preserved, incomplete rows never dropped), persists the WorkOrder and WorkOrderDemand rows only, closes the dialog, and shows the new Work Order in the list as **Open**. In Phase 2 the save changes local mock state only and reports that nothing was persisted to the backend.
+- **Header form (v7):** WO Number (**optional**), received date (calendar control, defaults to today, always available), and **WO due date** (calendar control, **optional**) — the default due date for demand lines when set. The dialog explains the consequences plainly: a blank WO Number generates a unique temporary internal Work Order Number on confirmed save (`TMP-YYYYMMDD-HHMMSS`, deterministic `-2`, `-3`, … suffix on collision — PROJECT_PROFILE §7); due dates can be added later; the Work Order can be saved without a due date. Entering a WO Number that already exists opens the existing Work Order instead of duplicating it — **duplicate handling applies only when a WO Number was entered**; if lines were already entered, opening the existing Work Order is confirmed explicitly first.
+- **Manual Part addition is the primary workflow (v7):** a prominent **＋ Add Part manually** action opens **one accessible multi-step dialog** (no stacked nested modals):
+  1. **PN** — search and select an existing PartNumber, or explicitly create a new one (with barcode preview, §11.2);
+  2. **quantity** — positive whole number, with the same keypad + physical-keyboard interaction as the Scan Station quantity dialog (§4.7);
+  3. **due date** — defaults to the WO due date when one exists; an explicit **"No due date"** choice is valid;
+  4. **optional metadata** — Job Numbers, Notes, Request Type.
+  Backward navigation preserves entered values. Completing the dialog creates an editable **draft row**; nothing is persisted until Save demand.
+- **Barcode scanning remains available as a secondary, optional method:** the scan input accepts only valid PN barcodes (`PF:PN:…`); unknown or non-PN barcodes are rejected with an error — nothing is added. Scanning a PN that is already on the Work Order focuses the existing line (edit its quantity) instead of adding a duplicate. The Work Order entry workflow is **no longer scanner-first** — it is desk work; the Scan Station shop-floor workflow (§4) remains scanner-first and is unchanged.
+- Changing the WO due date updates only lines still inheriting the previous default; lines whose due date was edited — including an explicit "No due date" — keep their value (§11.2). Request Type and due date stay editable per line before saving.
+- **Save demand with omission confirmation (v7):** Save validates the header and all rows (§11.2 validation states — field-level errors, first invalid control focused, values preserved, incomplete rows never dropped; missing due dates never block saving). When the external WO Number, the WO due date, or any line due dates are absent, a **confirmation dialog summarizes the omissions** before anything is saved: a temporary internal number will be generated, the Work Order remains unscheduled, and N undated lines get the lowest due-date priority with later received-date ordering (PROJECT_PROFILE §18). Save happens only after explicit confirmation; Cancel returns to editing with all values preserved. On save the dialog closes and the new Work Order appears in the list as **Open**. In Phase 2 the save changes local mock state only and reports that nothing was persisted to the backend.
 
-> **Data-model note (pending PROJECT_PROFILE update):** the WO due date requires a `due_date` attribute on WorkOrder (§8.2). It is an entry default only — WorkOrderDemand keeps its own `due_date` as the operative business value.
+> **Data-model note:** the WO due date is the nullable `due_date` attribute on WorkOrder (PROJECT_PROFILE v8 §8.2). It is an entry default only — WorkOrderDemand keeps its own nullable `due_date` as the operative business value.
 
 ## 11.4 Demand save vs. production release
 
@@ -347,9 +362,21 @@ In Phase 2 every Work Orders interaction changes **development-only local mock s
 
 # 12. Changes from previous versions
 
-> Historical entries in §12.2–§12.5 intentionally keep the vocabulary of the versions they describe (Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§12.1 item 9); those older names appear below only as history.
+> Historical entries in §12.3–§12.6 intentionally keep the vocabulary of the versions they describe (Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§12.2 item 9); those older names appear below only as history.
 
-## 12.1 Changes from GUI Design v5
+## 12.1 Changes from GUI Design v6
+
+All v6→v7 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v8.
+
+1. **Fast connectivity detection with a strict write-confirmation rule** (§3.6): browser `online`/`offline` events plus ~1 s polling of `GET /api/health` (request timeout below the probe interval, no overlapping probes), recheck on tab focus/visibility, no "connecting" flicker from passive probes, and Scan Station input re-enable and refocus on recovery. A scan is successful only after the server confirms the write — connectivity status is an early warning, never permission for optimistic recording; a write that cannot reach the server fails as "nothing recorded". WebSocket/SSE remain out of scope for Phase 2.
+2. **Missing due dates are valid data** (§3.8, §11; PROJECT_PROFILE v8 §8.2/§8.3): WorkOrder and demand-line due dates may be absent, rendered as `No due date` / `—`; "missing due date" is removed from the validation error list; ordering everywhere follows the canonical demand ordering (PROJECT_PROFILE §18 — dated earliest-first, undated after all dated demand by Work Order received date, stable tie-breaker).
+3. **Work Orders becomes manual-first with optional identifiers** (§11): WO Number and WO due date are both optional; a blank WO Number generates a temporary internal `TMP-YYYYMMDD-HHMMSS` number on confirmed save; **＋ Add Part manually** is the primary workflow through one accessible multi-step Add Part dialog (PN → quantity → due date with explicit "No due date" → optional metadata, backward navigation preserving values); barcode scanning is demoted to a secondary optional method (the Scan Station remains scanner-first); Save demand shows an omission-summary confirmation before saving. The modal-over-list architecture and URL behavior of v6 are unchanged; no new route is added.
+4. **Scan Station refinements** (§4): the Station ID leaves the header and becomes a faint bottom-edge diagnostic caption ("Station LATHE-ST-01"); manual PN entry becomes a visible secondary action **⌨ Enter PN manually** with an explanatory caption; recent scans carry the Movement type as an explicit field (`movementType: MovementType` in the mock model) rendered as its own badge plus a recorded/reversed status — never embedded at the start of description strings; the quantity dialog gains full physical-keyboard support (digits, Backspace, Delete/Clear, Enter, Escape).
+5. **Production Board hardening** (§5): live local date-and-time header clock (self-updating component, no static mock clock); standard Hot Part presentation `🔥#1 <PN>` via one shared component (`HotPn`, `src/components/indicators.tsx`) used on Production Board, Area Board, Tracking and Priority; only the due-date urgency text blinks (PN and date stay steady; `prefers-reduced-motion` honored; footer legend updated); stable Areas & Quantities grid with vertically aligned quantities; column order moves Job Numbers last (No. · Part Number · Areas & Quantities · Time · Due Date · Total Days · Job Numbers) with content-driven `colgroup` sizing; **dynamic pagination** measured from actual board and row heights replaces the former fixed rows-per-page assumption (12 s rotation only when more than one page exists; 10-row fallback in layout-less DOM environments).
+6. **Area Board per-Area detail redesigned** (§6.3): the "one card per PN" grid is replaced by an Area summary card (name, description, Operations, stats, grouped compact PN list — Assigned to Machines / Area queue / Stocked for terminal Stockroom) followed by one monitoring card per Machine (running / idle / maintenance with distinct empty and maintenance presentations, from the `MOCK_AREA_MACHINES` mock model); Areas without Machines render only the summary card; "Sort: Time in Area" works via the sortable `timeInAreaMinutes` duration field, longest first.
+7. **Priority reordering requires confirmation** (§8; PROJECT_PROFILE v8 §21): drag-and-drop, Move Up, Move Down, Undo and Redo confirm before applying — showing affected PN + Work Order Demand, previous rank, proposed new rank and action type; Cancel leaves the list and both histories unchanged and the visible list is never renumbered early; adding at the bottom stays direct; the existing remove confirmation is unchanged.
+
+## 12.2 Changes from GUI Design v5
 
 All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabulary; Phase 2 implements them against development-only local mock state.
 
@@ -363,12 +390,12 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 8. **Realistic data shapes** (§2.3): mock datasets and the mockup use representative synthetic identifiers — multi-segment hyphenated numeric PNs, manufacturing-style descriptions, numeric-looking opaque Work Order Numbers (`007482`), numeric-looking external Job Numbers (`18427`), and optional Revision values (populated and blank) — instead of demo-style `PF-…` / `PO-…` / `ERP-…` identifiers; §2.3 documents the identifier/description shapes, search, and wrapping constraints.
 9. **Canonical vocabulary migration: Purchase Order → Work Order** (PROJECT_PROFILE v7 §7). The business container previously called Purchase Order is a Work Order on the actual shop floor. The view is renamed **Work Orders**, its route is `/management/work-orders` (no legacy `/management/purchase-orders` alias — the application is not deployed yet), UI labels use Work Order / WO, and code names use the full `WorkOrder` / `WorkOrderDemand` / `WorkOrderAllocation` forms. Work Order Number and external Job Number remain separate identifiers; Job Number keeps its informational display/search/sort/report role.
 
-## 12.2 Changes from GUI Design v4
+## 12.3 Changes from GUI Design v4
 
 1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§14). This removes "dark/light user toggle" from the deferred list (§13).
 2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
 
-## 12.3 Changes from GUI Design v3
+## 12.4 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -376,14 +403,14 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 12.4 Changes from GUI Design v2
+## 12.5 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 12.5 Changes from GUI Design v1
+## 12.6 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 

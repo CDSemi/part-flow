@@ -59,13 +59,15 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Active',
   },
   {
+    // WO Demand without a due date: `—` in Due (next) means the demand
+    // has no due date — valid data, not missing data.
     pn: '118-052',
     name: 'MOTOR, GEAR STEPPER 7.2T',
-    demand: [{ workOrder: '007009', qty: 4, type: 'NEW' }],
+    demand: [{ workOrder: '007011', qty: 4, type: 'NEW' }],
     distribution: [{ area: 'manual', label: 'Manual', qty: 4 }],
     activeQty: 4,
     stockedQty: 0,
-    nextDue: 'Aug 12',
+    nextDue: '—',
     status: 'Active',
   },
   {
@@ -136,7 +138,7 @@ export const MOCK_TRACKING_DETAIL = {
       allocated: 0,
       shortage: 10,
       due: 'Jul 24',
-      priority: '🔥 Hot #1',
+      priority: '🔥#1',
     },
     {
       workOrder: '007008',

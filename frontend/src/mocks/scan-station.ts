@@ -22,20 +22,25 @@ export const MOCK_MACHINES: MockMachineTile[] = [
   { name: 'Lathe 4', note: 'maintenance', maintenance: true },
 ];
 
+// The Movement type is an explicit field — rendered as its own badge,
+// never embedded at the start of the description text.
 export const MOCK_RECENT_SCANS: MockScanRecord[] = [
   {
     pn: '2027-60-8114-00',
-    description: 'ASSIGNED_TO_MACHINE · Lathe queue → Lathe 3 · qty 4',
+    movementType: 'ASSIGNED_TO_MACHINE',
+    description: 'Lathe queue → Lathe 3 · qty 4',
     time: '13:05',
   },
   {
     pn: '2027-60-8114-00',
-    description: 'TRANSFERRED · Cut → Lathe (queue) · qty 6',
+    movementType: 'TRANSFERRED',
+    description: 'Cut → Lathe (queue) · qty 6',
     time: '11:20',
   },
   {
     pn: '0455-20-0118-03',
-    description: 'ASSIGNED_TO_MACHINE · Lathe queue → Lathe 2 · qty 4',
+    movementType: 'ASSIGNED_TO_MACHINE',
+    description: 'Lathe queue → Lathe 2 · qty 4',
     time: '09:12',
   },
 ];

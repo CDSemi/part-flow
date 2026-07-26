@@ -6,6 +6,8 @@ import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { applyQuantityKey } from '../../components/quantity-input';
+import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { LoadingState } from '../../components/view-states';
 import {
   MOCK_INVENTORY_ASSIGNED,
@@ -111,7 +113,8 @@ export function ScanStationView() {
           addScan(
             {
               pn: '2027-60-8114-00',
-              description: `ASSIGNED_TO_MACHINE · Lathe queue → ${outcome.machine} (mock)`,
+              movementType: 'ASSIGNED_TO_MACHINE',
+              description: `Lathe queue → ${outcome.machine} (mock)`,
               time: MOCK_SCAN_TIME,
             },
             true,
@@ -195,7 +198,8 @@ export function ScanStationView() {
       addScan(
         {
           pn,
-          description: `TRANSFERRED · Material → Lathe · qty ${qty} (mock)`,
+          movementType: 'TRANSFERRED',
+          description: `Material → Lathe · qty ${qty} (mock)`,
           time: MOCK_SCAN_TIME,
         },
         true,
@@ -211,7 +215,8 @@ export function ScanStationView() {
       addScan(
         {
           pn,
-          description: `TRANSFERRED · Material → Lathe queue · qty ${qty} (mock)`,
+          movementType: 'TRANSFERRED',
+          description: `Material → Lathe queue · qty ${qty} (mock)`,
           time: MOCK_SCAN_TIME,
         },
         true,
@@ -298,8 +303,8 @@ export function ScanStationView() {
     addScan(
       {
         pn: scans[0]?.pn ?? '—',
-        description:
-          'REVERSED · compensates previous scan · reason: operator undo (mock)',
+        movementType: 'REVERSED',
+        description: 'compensates previous scan · reason: operator undo (mock)',
         time: MOCK_SCAN_TIME,
         reversed: true,
       },
@@ -367,8 +372,7 @@ export function ScanStationView() {
             {MOCK_STATION.areaName}
           </div>
           <div className="op">
-            Operations: <b>{MOCK_STATION.operations}</b> · Station{' '}
-            <b className="mono">{MOCK_STATION.stationId}</b>
+            Operations: <b>{MOCK_STATION.operations}</b>
           </div>
         </div>
         <span className="spacer" />
@@ -466,15 +470,17 @@ export function ScanStationView() {
                 request type · <code>PF:PN:9999</code> unknown
               </div>
               <div className="ss-manual">
-                Scanner unavailable?{' '}
                 <button
+                  className="ss-manualbtn"
                   onClick={() => setManualOpen(true)}
                   disabled={writeBlocked}
                 >
-                  Manual PN entry…
-                </button>{' '}
-                — a separate explicit fallback; raw PN text is never treated as
-                a barcode
+                  ⌨ Enter PN manually
+                </button>
+                <span className="cap">
+                  Fallback when the scanner is unavailable — validated exactly
+                  like a scan; raw PN text is never treated as barcode input.
+                </span>
               </div>
             </div>
             {pending && (
@@ -538,6 +544,16 @@ export function ScanStationView() {
                     <span className="p" title={s.pn}>
                       {s.pn}
                     </span>
+                    <span className="mvline">
+                      <span
+                        className={`mvtype ${s.movementType.toLowerCase()}`}
+                      >
+                        {s.movementType}
+                      </span>
+                      <span className={`mvstat ${s.reversed ? 'rev' : ''}`}>
+                        {s.reversed ? '⟲ reversed' : '✓ recorded'}
+                      </span>
+                    </span>
                     <span className="d">{s.description}</span>
                   </span>
                   <span className="when">{s.time}</span>
@@ -586,56 +602,49 @@ export function ScanStationView() {
       </div>
 
       {qtyDialog && (
-        <ModalDialog label="Enter quantity" onClose={cancelDialog}>
-          <h3>Enter quantity</h3>
-          <div className="big mono">{qtyDialog.pn}</div>
-          <div className="sub">
-            Transfer Material → Lathe · available at source:{' '}
-            <b>{qtyDialog.available}</b>
-          </div>
-          <div
-            className="qtydisplay"
-            role="status"
-            aria-label={`Quantity: ${qtyValue || 'none'}`}
-          >
-            {qtyValue || ' '}
-          </div>
-          <div className="keypad">
-            {['7', '8', '9', '4', '5', '6', '1', '2', '3'].map((k) => (
-              <button
-                key={k}
-                onClick={() => setQtyValue((v) => (v.length < 4 ? v + k : v))}
-              >
-                {k}
+        <ModalDialog
+          label="Enter quantity"
+          onClose={cancelDialog}
+          // Physical keyboard works exactly like the keypad: digits
+          // append, Backspace removes one, Delete/Clear clears, Enter
+          // confirms when valid, Escape cancels (ModalDialog). A
+          // focused button still activates normally on Enter.
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              if (e.target instanceof HTMLButtonElement) return;
+              if (parseInt(qtyValue || '0', 10)) {
+                e.preventDefault();
+                confirmQty();
+              }
+              return;
+            }
+            const next = applyQuantityKey(qtyValue, e.key);
+            if (next !== null) {
+              e.preventDefault();
+              setQtyValue(next);
+            }
+          }}
+        >
+          <div>
+            <h3>Enter quantity</h3>
+            <div className="big mono">{qtyDialog.pn}</div>
+            <div className="sub">
+              Transfer Material → Lathe · available at source:{' '}
+              <b>{qtyDialog.available}</b> · keypad or physical keyboard
+            </div>
+            <QuantityKeypad value={qtyValue} onChange={setQtyValue} />
+            <div className="row">
+              <button className="bigbtn ghost" onClick={cancelDialog}>
+                Cancel
               </button>
-            ))}
-            <button className="act" onClick={() => setQtyValue('')}>
-              CLEAR
-            </button>
-            <button
-              onClick={() => setQtyValue((v) => (v.length < 4 ? v + '0' : v))}
-            >
-              0
-            </button>
-            <button
-              className="act"
-              onClick={() => setQtyValue((v) => v.slice(0, -1))}
-              aria-label="Backspace"
-            >
-              ⌫
-            </button>
-          </div>
-          <div className="row">
-            <button className="bigbtn ghost" onClick={cancelDialog}>
-              Cancel
-            </button>
-            <button
-              className="bigbtn primary"
-              onClick={confirmQty}
-              disabled={!parseInt(qtyValue || '0', 10)}
-            >
-              Confirm
-            </button>
+              <button
+                className="bigbtn primary"
+                onClick={confirmQty}
+                disabled={!parseInt(qtyValue || '0', 10)}
+              >
+                Confirm
+              </button>
+            </div>
           </div>
         </ModalDialog>
       )}
@@ -713,6 +722,12 @@ export function ScanStationView() {
       {manualOpen && (
         <ManualEntryDialog onCancel={cancelDialog} onConfirm={confirmManual} />
       )}
+
+      {/* Faint diagnostic caption: the Station ID stays available for
+          troubleshooting without competing with production info. */}
+      <footer className="ss-stationfoot">
+        Station <span className="mono">{MOCK_STATION.stationId}</span>
+      </footer>
     </section>
   );
 }

@@ -1,655 +1,726 @@
 /* Scan Station — dark-first shop-floor view (GUI_DESIGN §4). */
 .ss {
-    display: flex;
-    flex-direction: column;
-    min-height: calc(100vh - 53px);
-    background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 53px);
+  background: var(--bg);
 }
 
 /* Dark mode adds a subtle radial glow; light mode is a flat surface
    (the theme supplies the value — GUI_DESIGN §2.1). */
 .ss {
-    background: var(--scan-backdrop);
+  background: var(--scan-backdrop);
 }
 
 .ss-head {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px 22px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 
 .ss-head .dept {
-    font-size: 11px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 1.6px;
-    font-weight: 700;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  font-weight: 700;
 }
 
 .ss-head .area {
-    font-size: 28px;
-    font-weight: 800;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    line-height: 1.15;
+  font-size: 28px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.15;
 }
 
 .ss-head .area .areadot {
-    width: 16px;
-    height: 16px;
-    border-radius: 5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
 }
 
 .ss-head .op {
-    font-size: 13px;
-    color: var(--muted);
-    margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 2px;
 }
 
 .ss-head .op b {
-    color: var(--text);
-    font-weight: 650;
+  color: var(--text);
+  font-weight: 650;
 }
 
 .ss-head .spacer {
-    flex: 1;
+  flex: 1;
 }
 
 .ss-pill {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 9px 14px;
-    min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 9px 14px;
+  min-width: 150px;
 }
 
 .ss-pill .lbl {
-    font-size: 10px;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: 750;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 750;
 }
 
 .ss-pill .val {
-    font-size: 16px;
-    font-weight: 750;
-    display: flex;
-    align-items: center;
-    gap: 7px;
+  font-size: 16px;
+  font-weight: 750;
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .ss-pill .val .sdot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--ok);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
 }
 
 .ss-pill .val.none {
-    color: var(--faint);
-    font-weight: 450;
+  color: var(--faint);
+  font-weight: 450;
 }
 
 .ss-pill .sub {
-    font-size: 10.5px;
-    color: var(--faint);
+  font-size: 10.5px;
+  color: var(--faint);
 }
 
 .ss-body {
-    flex: 1;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 400px;
-    gap: 16px;
-    padding: 16px 22px;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 16px;
+  padding: 16px 22px;
 }
 
 @media (max-width: 1100px) {
-    .ss-body {
-        grid-template-columns: 1fr;
-    }
+  .ss-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ss-main,
 .ss-side {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
 /* Machine session strip — read-only status display (§4.3) */
 .ss-machines {
-    display: flex;
-    gap: 10px;
-    padding: 14px 18px;
-    flex-wrap: wrap;
+  display: flex;
+  gap: 10px;
+  padding: 14px 18px;
+  flex-wrap: wrap;
 }
 
 .mtile {
-    min-height: 60px;
-    min-width: 118px;
-    border-radius: 12px;
-    border: 2px solid var(--border);
-    background: var(--panel2);
-    font-size: 17px;
-    font-weight: 750;
-    color: var(--muted);
-    padding: 9px 18px;
-    text-align: center;
+  min-height: 60px;
+  min-width: 118px;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  background: var(--panel2);
+  font-size: 17px;
+  font-weight: 750;
+  color: var(--muted);
+  padding: 9px 18px;
+  text-align: center;
 }
 
 .mtile.session {
-    border-color: var(--info-t);
-    background: var(--info-surface);
-    color: var(--info-t);
-    box-shadow: 0 0 0 3px var(--info-ring);
+  border-color: var(--info-t);
+  background: var(--info-surface);
+  color: var(--info-t);
+  box-shadow: 0 0 0 3px var(--info-ring);
 }
 
 .mtile .sub {
-    display: block;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--faint);
-    margin-top: 2px;
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--faint);
+  margin-top: 2px;
 }
 
 .mtile.session .sub {
-    color: var(--info-t);
+  color: var(--info-t);
 }
 
 .mtile.maint {
-    opacity: 0.45;
+  opacity: 0.45;
 }
 
 /* Pending scan context (§4.5) */
 .ss-pending {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 0 18px 14px;
-    padding: 13px 16px;
-    border-radius: 12px;
-    border: 1px solid var(--warning-border);
-    background: var(--warning-surface-weak);
-    color: var(--warn-t);
-    font-size: 15.5px;
-    font-weight: 750;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 18px 14px;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-surface-weak);
+  color: var(--warn-t);
+  font-size: 15.5px;
+  font-weight: 750;
 }
 
 .ss-pending .pulse {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--warn);
-    animation: ss-pulse 1s infinite;
-    flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: ss-pulse 1s infinite;
+  flex: none;
 }
 
 @keyframes ss-pulse {
-    0%,
-    100% {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.25;
-    }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
 }
 
 /* Scan input */
 .ss-scanwrap {
-    padding: 20px 18px 14px;
+  padding: 20px 18px 14px;
 }
 
 .ss-scanrow {
-    display: flex;
-    gap: 12px;
+  display: flex;
+  gap: 12px;
 }
 
 .ss-scaninput {
-    flex: 1;
-    min-width: 0;
-    background: var(--field-bg);
-    border: 2px solid var(--border2);
-    border-radius: 12px;
-    color: var(--text);
-    font-size: 27px;
-    font-family: var(--mono), monospace;
-    padding: 17px 20px;
-    outline: none;
-    transition:
-        border-color 0.15s,
-        box-shadow 0.15s;
+  flex: 1;
+  min-width: 0;
+  background: var(--field-bg);
+  border: 2px solid var(--border2);
+  border-radius: 12px;
+  color: var(--text);
+  font-size: 27px;
+  font-family: var(--mono), monospace;
+  padding: 17px 20px;
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 
 .ss-scaninput:focus {
-    border-color: var(--info-t);
-    box-shadow: 0 0 0 4px var(--info-ring);
+  border-color: var(--info-t);
+  box-shadow: 0 0 0 4px var(--info-ring);
 }
 
 .ss-scaninput::placeholder {
-    color: var(--faint);
-    font-family: var(--font), sans-serif;
-    font-size: 20px;
+  color: var(--faint);
+  font-family: var(--font), sans-serif;
+  font-size: 20px;
 }
 
 .ss-scaninput:disabled,
 .ss-scanbtn:disabled {
-    opacity: 0.45;
+  opacity: 0.45;
 }
 
 .ss-scanbtn {
-    min-width: 112px;
-    min-height: var(--touch-primary);
-    border-radius: 12px;
-    background: var(--info);
-    color: var(--on-info);
-    font-size: 18px;
-    font-weight: 800;
+  min-width: 112px;
+  min-height: var(--touch-primary);
+  border-radius: 12px;
+  background: var(--info);
+  color: var(--on-info);
+  font-size: 18px;
+  font-weight: 800;
 }
 
 .ss-scanbtn:hover:not(:disabled) {
-    filter: brightness(1.08);
+  filter: brightness(1.08);
 }
 
 .ss-hint {
-    margin-top: 11px;
-    font-size: 12.5px;
-    color: var(--faint);
-    line-height: 1.7;
+  margin-top: 11px;
+  font-size: 12.5px;
+  color: var(--faint);
+  line-height: 1.7;
 }
 
 .ss-hint code {
-    color: var(--muted);
-    font-family: var(--mono), monospace;
-    font-weight: 600;
-    background: var(--panel2);
-    border-radius: 5px;
-    padding: 1px 6px;
+  color: var(--muted);
+  font-family: var(--mono), monospace;
+  font-weight: 600;
+  background: var(--panel2);
+  border-radius: 5px;
+  padding: 1px 6px;
 }
 
+/* Manual PN entry — a visible secondary action (clear, but never
+   competing with barcode scanning as the primary workflow). */
 .ss-manual {
-    margin-top: 8px;
-    font-size: 12.5px;
-    color: var(--faint);
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--faint);
 }
 
-.ss-manual button {
-    color: var(--info-t);
-    font-weight: 650;
-    font-size: 12.5px;
-    text-decoration: underline;
-    padding: 4px;
+.ss-manualbtn {
+  border: 1px solid var(--border2);
+  background: var(--panel2);
+  color: var(--info-t);
+  font-weight: 750;
+  font-size: 13px;
+  border-radius: 9px;
+  padding: 8px 14px;
+  flex: none;
+}
+
+.ss-manualbtn:hover {
+  background: var(--info-surface);
+}
+
+.ss-manual .cap {
+  line-height: 1.4;
 }
 
 /* Last scanned PN (§4.5) */
 .ss-lastpn {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin: 0 18px 16px;
-    padding: 10px 16px;
-    border-radius: 12px;
-    background: var(--panel2);
-    border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 18px 16px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
 }
 
 .ss-lastpn .l {
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--faint);
-    flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--faint);
+  flex: none;
 }
 
 .ss-lastpn .p {
-    font-family: var(--mono), monospace;
-    font-size: var(--fs-pn);
-    font-weight: 800;
-    white-space: nowrap;
+  font-family: var(--mono), monospace;
+  font-size: var(--fs-pn);
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .ss-lastpn .d {
-    font-size: 12.5px;
-    color: var(--muted);
+  font-size: 12.5px;
+  color: var(--muted);
 }
 
 /* Feedback zone — tri-state (§3.3) */
 .ss-feedback {
-    min-height: 92px;
-    border-radius: 12px;
-    border: 1px dashed var(--border2);
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 15px 18px;
-    margin: 0 18px 18px;
+  min-height: 92px;
+  border-radius: 12px;
+  border: 1px dashed var(--border2);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 15px 18px;
+  margin: 0 18px 18px;
 }
 
 .ss-feedback .fic {
-    width: 48px;
-    height: 48px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    font-weight: 900;
-    flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  font-weight: 900;
+  flex: none;
 }
 
 .ss-feedback.idle {
-    color: var(--faint);
+  color: var(--faint);
 }
 
 .ss-feedback.ok {
-    border: 1px solid var(--success-border);
-    background: var(--success-surface-weak);
+  border: 1px solid var(--success-border);
+  background: var(--success-surface-weak);
 }
 
 .ss-feedback.ok .fic {
-    background: var(--ok);
-    color: var(--on-ok);
+  background: var(--ok);
+  color: var(--on-ok);
 }
 
 .ss-feedback.warn {
-    border: 1px solid var(--warning-border);
-    background: var(--warning-surface-weak);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-surface-weak);
 }
 
 .ss-feedback.warn .fic {
-    background: var(--warn);
-    color: var(--on-warn);
+  background: var(--warn);
+  color: var(--on-warn);
 }
 
 .ss-feedback.err {
-    border: 1px solid var(--error-border);
-    background: var(--error-surface-weak);
+  border: 1px solid var(--error-border);
+  background: var(--error-surface-weak);
 }
 
 .ss-feedback.err .fic {
-    background: var(--err);
-    color: var(--on-err);
+  background: var(--err);
+  color: var(--on-err);
 }
 
 .ss-feedback .t1 {
-    font-size: 19px;
-    font-weight: 800;
+  font-size: 19px;
+  font-weight: 800;
 }
 
 .ss-feedback .t2 {
-    font-size: 13.5px;
-    color: var(--muted);
-    margin-top: 3px;
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-top: 3px;
 }
 
 /* Right column */
 .ss-undo {
-    width: 100%;
-    min-height: var(--touch-primary);
-    border-radius: 12px;
-    border: 1px solid var(--error-border);
-    background: var(--error-surface-weak);
-    color: var(--err-t);
-    font-size: 16px;
-    font-weight: 800;
-    letter-spacing: 0.3px;
+  width: 100%;
+  min-height: var(--touch-primary);
+  border-radius: 12px;
+  border: 1px solid var(--error-border);
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
 }
 
 .ss-undo:hover:not(:disabled) {
-    background: var(--error-surface);
+  background: var(--error-surface);
 }
 
 .ss-undo:disabled {
-    opacity: 0.3;
+  opacity: 0.3;
 }
 
 .scanlist {
-    list-style: none;
-    max-height: 280px;
-    overflow: auto;
+  list-style: none;
+  max-height: 280px;
+  overflow: auto;
 }
 
 .scanlist li {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 18px;
-    border-bottom: 1px solid var(--border);
-    font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
 }
 
 .scanlist li:last-child {
-    border-bottom: none;
+  border-bottom: none;
 }
 
 .scanlist .sic {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--ok);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
 }
 
 .scanlist .sic.undo {
-    background: var(--err);
+  background: var(--err);
 }
 
 .scanlist .what {
-    flex: 1;
-    min-width: 0;
+  flex: 1;
+  min-width: 0;
 }
 
 .scanlist .what .p {
-    font-weight: 750;
-    font-family: var(--mono), monospace;
-    font-size: 13.5px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  font-weight: 750;
+  font-family: var(--mono), monospace;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Movement type badge + recorded/reversed status — separated from the
+   PN and the movement description. */
+.scanlist .what .mvline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.scanlist .what .mvtype {
+  font-family: var(--mono), monospace;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  border-radius: 6px;
+  padding: 1px 7px;
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.scanlist .what .mvtype.transferred {
+  background: var(--info-surface);
+  color: var(--info-t);
+}
+
+.scanlist .what .mvtype.assigned_to_machine {
+  background: var(--success-surface);
+  color: var(--ok-t);
+}
+
+.scanlist .what .mvtype.reversed {
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+}
+
+.scanlist .what .mvstat {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--faint);
+}
+
+.scanlist .what .mvstat.rev {
+  color: var(--err-t);
 }
 
 .scanlist .what .d {
-    color: var(--muted);
-    font-size: 12px;
-    margin-top: 1px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 1px;
 }
 
 .scanlist .when {
-    color: var(--faint);
-    font-size: 12px;
-    flex: none;
+  color: var(--faint);
+  font-size: 12px;
+  flex: none;
 }
 
 /* In this Area now — queued vs assigned separated (§4.8) */
 .invgrp {
-    padding: 9px 18px 4px;
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--faint);
+  padding: 9px 18px 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--faint);
 }
 
 .invlist {
-    list-style: none;
-    max-height: 260px;
-    overflow: auto;
+  list-style: none;
+  max-height: 260px;
+  overflow: auto;
 }
 
 .invlist li {
-    display: flex;
-    align-items: center;
-    padding: 10px 18px;
-    border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
 }
 
 .invlist li:last-child {
-    border-bottom: none;
+  border-bottom: none;
 }
 
 .invlist .p {
-    font-family: var(--mono), monospace;
-    font-weight: 750;
-    font-size: 14.5px;
-    flex: 1;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  font-size: 14.5px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .invlist .m {
-    color: var(--muted);
-    font-size: 12.5px;
-    margin: 0 14px;
-    flex: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 0 14px;
+  flex: none;
 }
 
 .invlist .q {
-    font-family: var(--mono), monospace;
-    font-size: 18px;
-    font-weight: 800;
-    color: var(--info-t);
-    flex: none;
+  font-family: var(--mono), monospace;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--info-t);
+  flex: none;
 }
 
 .invempty {
-    padding: 18px;
-    color: var(--faint);
-    font-size: 13px;
-    text-align: center;
+  padding: 18px;
+  color: var(--faint);
+  font-size: 13px;
+  text-align: center;
 }
 
 .invtotal {
-    display: flex;
-    align-items: center;
-    padding: 11px 18px;
-    background: var(--panel2);
-    border-top: 1px solid var(--border);
-    border-radius: 0 0 var(--radius) var(--radius);
-    font-size: 12px;
-    font-weight: 800;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    color: var(--muted);
+  display: flex;
+  align-items: center;
+  padding: 11px 18px;
+  background: var(--panel2);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .invtotal .q {
-    margin-left: auto;
-    font-family: var(--mono), monospace;
-    font-size: 19px;
-    color: var(--text);
+  margin-left: auto;
+  font-family: var(--mono), monospace;
+  font-size: 19px;
+  color: var(--text);
 }
 
 /* Quantity keypad (§4.7) */
 .qtydisplay {
-    font-family: var(--mono), monospace;
-    font-size: 46px;
-    font-weight: 800;
-    text-align: right;
-    background: var(--field-bg);
-    border: 2px solid var(--border2);
-    border-radius: 12px;
-    padding: 10px 18px;
-    margin-bottom: 14px;
-    min-height: 76px;
+  font-family: var(--mono), monospace;
+  font-size: 46px;
+  font-weight: 800;
+  text-align: right;
+  background: var(--field-bg);
+  border: 2px solid var(--border2);
+  border-radius: 12px;
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  min-height: 76px;
 }
 
 .keypad {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
 }
 
 .keypad button {
-    height: 62px;
-    border-radius: 12px;
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    font-size: 24px;
-    font-weight: 700;
+  height: 62px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  font-size: 24px;
+  font-weight: 700;
 }
 
 .keypad button:hover {
-    background: var(--border);
+  background: var(--border);
 }
 
 .keypad button.act {
-    background: var(--info-surface);
-    color: var(--info-t);
-    font-size: 15px;
-    font-weight: 800;
+  background: var(--info-surface);
+  color: var(--info-t);
+  font-size: 15px;
+  font-weight: 800;
 }
 
 /* Ambiguity choices (§4.6) */
 .choice {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    text-align: left;
-    border: 2px solid var(--border);
-    background: var(--panel2);
-    border-radius: 12px;
-    padding: 14px 16px;
-    margin-bottom: 10px;
-    min-height: 66px;
-    transition: border-color 0.12s;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+  border: 2px solid var(--border);
+  background: var(--panel2);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  min-height: 66px;
+  transition: border-color 0.12s;
 }
 
 .choice:hover {
-    border-color: var(--info-t);
+  border-color: var(--info-t);
 }
 
 .choice .cic {
-    width: 42px;
-    height: 42px;
-    border-radius: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    font-weight: 800;
-    flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 800;
+  flex: none;
 }
 
 .choice .cic.run {
-    background: var(--success-surface);
-    color: var(--ok-t);
+  background: var(--success-surface);
+  color: var(--ok-t);
 }
 
 .choice .cic.que {
-    background: var(--warning-surface);
-    color: var(--warn-t);
+  background: var(--warning-surface);
+  color: var(--warn-t);
 }
 
 .choice .cic.rwk {
-    background: var(--rework-surface);
-    color: var(--a-external);
+  background: var(--rework-surface);
+  color: var(--a-external);
 }
 
 .choice .cic.mod {
-    background: var(--modify-surface);
-    color: var(--a-mill);
+  background: var(--modify-surface);
+  color: var(--a-mill);
 }
 
 .choice .ct1 {
-    font-size: 16.5px;
-    font-weight: 750;
+  font-size: 16.5px;
+  font-weight: 750;
 }
 
 .choice .ct2 {
-    font-size: 13px;
-    color: var(--muted);
-    margin-top: 3px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+/* Faint diagnostic footer: the Station ID stays available for
+   troubleshooting without competing with production information. */
+.ss-stationfoot {
+  margin-top: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.6px;
 }

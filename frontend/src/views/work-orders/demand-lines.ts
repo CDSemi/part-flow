@@ -20,9 +20,16 @@ export interface DemandLineDraft {
   isNewPn: boolean;
   type: RequestType;
   qty: string;
-  /** ISO `YYYY-MM-DD` (or '' while missing). */
+  /**
+   * ISO `YYYY-MM-DD`, or '' when the line has no due date. A blank due
+   * date is valid data — it never blocks saving.
+   */
   due: string;
-  /** True once the line's due date was edited away from the WO default. */
+  /**
+   * True once the line's due date was edited away from the WO default —
+   * including an explicit `No due date` choice. Only untouched lines
+   * follow later WO due-date changes.
+   */
   dueTouched: boolean;
   job: string;
   notes: string;
@@ -71,7 +78,7 @@ export function createDraftLine(
 /** Load a saved mock line into an editable draft. */
 export function draftFromSavedLine(
   line: MockWorkOrderLine,
-  workOrderDue: string,
+  workOrderDue: string | null,
 ): DemandLineDraft {
   const saved = line.statusClass !== 'invalid';
   return createDraftLine({
@@ -80,10 +87,10 @@ export function draftFromSavedLine(
     isNewPn: line.barcode.startsWith('new PN'),
     type: line.type,
     qty: line.qty > 0 ? String(line.qty) : '',
-    due: line.due,
+    due: line.due ?? '',
     // A line still holding the WO due date follows later WO-due edits;
-    // a line with its own date keeps it (GUI_DESIGN §11).
-    dueTouched: line.due !== workOrderDue,
+    // a line with its own date (or explicit No due date) keeps it.
+    dueTouched: (line.due ?? '') !== (workOrderDue ?? ''),
     job: line.job === '—' ? '' : line.job,
     notes: line.notes ?? '',
     saved,
@@ -119,7 +126,11 @@ export function processScan(
   return { kind: 'new', pn, barcode };
 }
 
-/** The WO due date is the default: update lines still holding it. */
+/**
+ * The WO due date is the entry default: update lines still inheriting
+ * it. A line whose due date was edited — including an explicit
+ * `No due date` — is user-owned and never overwritten.
+ */
 export function applyWorkOrderDueDateChange(
   lines: readonly DemandLineDraft[],
   newDue: string,
@@ -134,9 +145,11 @@ export function isPositiveInteger(raw: string): boolean {
 }
 
 /**
- * Mock validation for saving demand: every line needs a PN, a positive
- * whole quantity and a due date; duplicate PNs are rejected. Incomplete
- * rows are never silently filtered out.
+ * Mock validation for saving demand: every line needs a PN and a
+ * positive whole quantity; duplicate PNs are rejected. A missing due
+ * date is NOT a validation error — it is summarized by the Save Demand
+ * confirmation instead. Incomplete rows are never silently filtered
+ * out.
  */
 export function validateDemandLines(
   lines: readonly DemandLineDraft[],
@@ -167,15 +180,37 @@ export function validateDemandLines(
         message: 'quantity must be a positive whole number',
       });
     }
-    if (!line.due) {
-      errors.push({
-        lineId: line.id,
-        field: 'due',
-        message: 'due date is required',
-      });
-    }
   }
   return errors;
+}
+
+/**
+ * Information that may be absent when demand is saved. None of these
+ * are validation errors — they are summarized in an explicit Save
+ * Demand confirmation before anything is applied.
+ */
+export interface MissingDemandInfo {
+  /** No external WO Number — a temporary internal one will be generated. */
+  noWorkOrderNumber: boolean;
+  /** No WO due date — the Work Order stays unscheduled. */
+  noWorkOrderDue: boolean;
+  /** Demand lines without a due date (lowest date priority later). */
+  undatedLineCount: number;
+}
+
+export function collectMissingDemandInfo(
+  workOrderNumber: string,
+  workOrderDue: string,
+  lines: readonly DemandLineDraft[],
+): MissingDemandInfo | null {
+  const info: MissingDemandInfo = {
+    noWorkOrderNumber: workOrderNumber.trim() === '',
+    noWorkOrderDue: workOrderDue === '',
+    undatedLineCount: lines.filter((line) => line.due === '').length,
+  };
+  return info.noWorkOrderNumber || info.noWorkOrderDue || info.undatedLineCount
+    ? info
+    : null;
 }
 
 export type RemoveRule = 'draft' | 'confirm' | 'blocked';
@@ -201,7 +236,7 @@ export function draftsToSavedLines(
     barcode: line.barcodeNote,
     type: line.type,
     qty: Number.parseInt(line.qty, 10),
-    due: line.due,
+    due: line.due || null,
     job: line.job || '—',
     notes: line.notes || undefined,
     status: line.released ? line.statusLabel : 'Saved',

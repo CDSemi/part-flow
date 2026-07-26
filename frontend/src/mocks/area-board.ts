@@ -1,5 +1,29 @@
-import type { MockAreaCard } from '../views/view-models';
+import type {
+  AreaKey,
+  MockAreaCard,
+  MockAreaMachine,
+} from '../views/view-models';
 
+// Machines belonging to each Area (Area Board detail monitoring cards).
+// Areas without Machines (Material, Manual, Deburr, External, Stockroom)
+// render only the Area summary card — no placeholder Machine cards.
+export const MOCK_AREA_MACHINES: Partial<Record<AreaKey, MockAreaMachine[]>> = {
+  cut: [{ name: 'Saw 1', status: 'running' }],
+  lathe: [
+    { name: 'Lathe 1', status: 'idle' },
+    { name: 'Lathe 2', status: 'running' },
+    { name: 'Lathe 3', status: 'running' },
+    { name: 'Lathe 4', status: 'maintenance' },
+  ],
+  mill: [
+    { name: 'Mill 1', status: 'running' },
+    { name: 'Mill 2', status: 'running' },
+  ],
+};
+
+// `dueDays: null` marks a WO Demand without a due date (valid data);
+// `received` (parent WO received date) orders undated demands and
+// `timeInAreaMinutes` backs `Sort: Time in Area`.
 export const MOCK_AREA_CARDS: MockAreaCard[] = [
   {
     area: 'material',
@@ -12,6 +36,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '2d 01h',
     dueDays: 9,
+    timeInAreaMinutes: 2941,
+    received: '2026-07-12',
   },
   {
     area: 'cut',
@@ -25,6 +51,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     timeInArea: '3h 40m',
     hotRank: 1,
     dueDays: 2,
+    timeInAreaMinutes: 220,
+    received: '2026-07-12',
   },
   {
     area: 'lathe',
@@ -41,6 +69,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     timeInArea: '2h 05m',
     hotRank: 1,
     dueDays: 2,
+    timeInAreaMinutes: 125,
+    received: '2026-07-12',
   },
   {
     area: 'lathe',
@@ -53,6 +83,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '1h 05m',
     dueDays: 9,
+    timeInAreaMinutes: 65,
+    received: '2026-07-12',
   },
   {
     area: 'lathe',
@@ -65,6 +97,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'late',
     timeInArea: '6h 12m',
     dueDays: -1,
+    timeInAreaMinutes: 372,
+    received: '2026-07-21',
   },
   {
     area: 'mill',
@@ -77,6 +111,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '45m',
     dueDays: 16,
+    timeInAreaMinutes: 45,
+    received: '2026-07-14',
   },
   {
     // Long-PN reference case from GUI_DESIGN §6.3: the qty block stays
@@ -91,6 +127,24 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '1h 20m',
     dueDays: 12,
+    timeInAreaMinutes: 80,
+    received: '2026-07-04',
+  },
+  {
+    // WO Demand without a due date — displayed as `No due date` and
+    // ordered after all dated demands by the WO received date.
+    area: 'manual',
+    pn: '118-052',
+    workOrder: 'WO 007011 · Manual work',
+    job: '18520',
+    qty: 4,
+    machines: [['queue', 4]],
+    due: 'No due date',
+    dueClass: 'none',
+    timeInArea: '5h 20m',
+    dueDays: null,
+    timeInAreaMinutes: 320,
+    received: '2026-07-19',
   },
   {
     area: 'deburr',
@@ -103,6 +157,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '30m',
     dueDays: 16,
+    timeInAreaMinutes: 30,
+    received: '2026-07-14',
   },
   {
     area: 'external',
@@ -116,6 +172,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     timeInArea: '4d 02h',
     hotRank: 2,
     dueDays: -6,
+    timeInAreaMinutes: 5880,
+    received: '2026-07-06',
   },
   {
     area: 'stockroom',
@@ -128,6 +186,8 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueClass: 'ok',
     timeInArea: '—',
     dueDays: 99,
+    timeInAreaMinutes: 0,
+    received: '2026-06-18',
   },
 ];
 
@@ -149,6 +209,8 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
     dueClass: 'soon',
     timeInArea: '9h 45m',
     dueDays: 4,
+    timeInAreaMinutes: 585,
+    received: '2026-07-10',
   },
   ...Array.from({ length: 14 }, (_, i): MockAreaCard => {
     const n = i + 1;
@@ -159,10 +221,12 @@ export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [
       job: String(19000 + n),
       qty: (n % 6) + 1,
       machines: [['queue', (n % 6) + 1]],
-      due: `${(n % 15) + 3} days remaining`,
-      dueClass: 'ok',
+      due: n % 5 === 0 ? 'No due date' : `${(n % 15) + 3} days remaining`,
+      dueClass: n % 5 === 0 ? 'none' : 'ok',
       timeInArea: `${(n % 8) + 1}h 10m`,
-      dueDays: (n % 15) + 3,
+      dueDays: n % 5 === 0 ? null : (n % 15) + 3,
+      timeInAreaMinutes: ((n % 8) + 1) * 60 + 10,
+      received: `2026-07-${String((n % 20) + 1).padStart(2, '0')}`,
     };
   }),
 ];

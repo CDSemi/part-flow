@@ -3,10 +3,13 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { todayIso } from '../dates';
 import type { MockWorkOrder, RequestType } from '../view-models';
-import { todayIso } from './dates';
+import { AddPartDialog } from './AddPartDialog';
+import type { AddPartResult } from './AddPartDialog';
 import {
   applyWorkOrderDueDateChange,
+  collectMissingDemandInfo,
   createDraftLine,
   draftsToSavedLines,
   isPositiveInteger,
@@ -14,20 +17,27 @@ import {
   processScan,
   validateDemandLines,
 } from './demand-lines';
-import type { DemandLineDraft, LineError, LineField } from './demand-lines';
+import type {
+  DemandLineDraft,
+  LineError,
+  LineField,
+  MissingDemandInfo,
+} from './demand-lines';
+import { generateTemporaryWorkOrderNumber } from './work-order-number';
 
 interface HeaderErrors {
-  workOrderNumber?: string;
   received?: string;
-  due?: string;
 }
 
 /**
- * Scanner-first New Work Order entry as a modal dialog over the Work
- * Orders list (GUI_DESIGN §11.3): enter the header, scan a PN barcode,
- * type the quantity, Enter returns focus to the scan input. The URL
- * never changes; closing with entered data requires explicit
- * confirmation. Phase 2: saving changes local mock state only.
+ * New Work Order entry as a modal dialog over the Work Orders list
+ * (GUI_DESIGN): the header inputs (WO Number, WO due date) are both
+ * optional — a temporary internal WO Number is generated when none is
+ * entered, and a Work Order may be saved without a due date. Manual
+ * Part addition (multi-step Add Part dialog) is the primary workflow;
+ * barcode scanning stays available as a secondary method. The URL never
+ * changes; closing with entered data requires explicit confirmation.
+ * Phase 2: saving changes local mock state only.
  */
 export function NewWorkOrderDialog({
   existing,
@@ -56,10 +66,12 @@ export function NewWorkOrderDialog({
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmExisting, setConfirmExisting] = useState<string | null>(null);
+  const [confirmMissing, setConfirmMissing] =
+    useState<MissingDemandInfo | null>(null);
+  const [addPartOpen, setAddPartOpen] = useState(false);
 
   const workOrderNumRef = useRef<HTMLInputElement>(null);
   const receivedRef = useRef<HTMLInputElement>(null);
-  const dueRef = useRef<HTMLInputElement>(null);
   const scanRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
   const [focusField, setFocusField] = useState<{
@@ -77,7 +89,7 @@ export function NewWorkOrderDialog({
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
-  // Initial focus: the first header field, per the scanner-first flow.
+  // Initial focus: the first header field.
   useEffect(() => {
     workOrderNumRef.current?.focus();
   }, []);
@@ -135,23 +147,32 @@ export function NewWorkOrderDialog({
     setFocusField({ id: line.id, field: 'qty' });
   }
 
-  function addManualLine() {
-    const line = createDraftLine({ due });
+  function handleAddPartComplete(result: AddPartResult) {
+    setAddPartOpen(false);
+    const line = createDraftLine(result);
     setLines((current) => [...current, line]);
-    setFocusField({ id: line.id, field: 'pn' });
+    showNotice(
+      `✓ ${result.pn} added as an editable draft line — nothing is saved until Save demand.`,
+    );
+  }
+
+  function handleAddPartDuplicate(pn: string) {
+    setAddPartOpen(false);
+    const duplicate = lines.find((l) => l.pn === pn);
+    showNotice(
+      `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
+    );
+    if (duplicate) setFocusField({ id: duplicate.id, field: 'qty' });
   }
 
   function handleDueChange(value: string) {
     setDue(value);
-    setHeaderErrors((current) => ({ ...current, due: undefined }));
     // The WO due date is the default — update lines still holding it.
     setLines((current) => applyWorkOrderDueDateChange(current, value));
   }
 
   function focusFirstInvalid(headerErr: HeaderErrors, lineErrs: LineError[]) {
-    if (headerErr.workOrderNumber) return workOrderNumRef.current?.focus();
     if (headerErr.received) return receivedRef.current?.focus();
-    if (headerErr.due) return dueRef.current?.focus();
     const first = lineErrs[0];
     if (!first) return;
     const el =
@@ -160,30 +181,42 @@ export function NewWorkOrderDialog({
     el?.focus();
   }
 
+  function saveWorkOrder() {
+    const entered = workOrderNumber.trim().toUpperCase();
+    // The internal Work Order identity is never nullable: when no
+    // external WO Number was entered, a unique temporary internal
+    // number is generated (TMP-YYYYMMDD-HHMMSS, auditable, searchable).
+    const finalNumber =
+      entered || generateTemporaryWorkOrderNumber(existing, new Date());
+    const savedLines = draftsToSavedLines(lines);
+    onSave({
+      workOrderNumber: finalNumber,
+      received,
+      due: due || null,
+      dueClass: '',
+      status: 'Open',
+      internal: entered ? undefined : true,
+      preview: linesPreview(savedLines),
+      lines: savedLines,
+    });
+  }
+
   function handleSave() {
     const number = workOrderNumber.trim().toUpperCase();
     if (number && existing.includes(number)) {
-      // An existing WO Number is opened, never duplicated (§11.3). With
-      // entered lines, opening discards them — confirm explicitly.
+      // An entered WO Number that already exists is opened, never
+      // duplicated. With entered lines, opening discards them —
+      // confirm explicitly. (Does not apply to blank WO Numbers.)
       if (lines.length === 0) onOpenExisting(number);
       else setConfirmExisting(number);
       return;
     }
     const headerErr: HeaderErrors = {};
-    if (!number) headerErr.workOrderNumber = 'WO Number is required';
     if (!received) headerErr.received = 'received date is required';
-    if (!due)
-      headerErr.due =
-        'WO due date is required — it is the default for every demand line';
     const lineErrs = validateDemandLines(lines);
     setHeaderErrors(headerErr);
     setLineErrors(lineErrs);
-    if (
-      headerErr.workOrderNumber ||
-      headerErr.received ||
-      headerErr.due ||
-      lineErrs.length
-    ) {
+    if (headerErr.received || lineErrs.length) {
       showNotice(
         '✕ The form has invalid fields — fix them to save. Entered values are preserved; incomplete rows are never dropped silently.',
       );
@@ -191,20 +224,17 @@ export function NewWorkOrderDialog({
       return;
     }
     if (lines.length === 0) {
-      showNotice('✕ Add at least one demand line (scan a PN barcode)');
-      scanRef.current?.focus();
+      showNotice('✕ Add at least one demand line (＋ Add Part manually)');
       return;
     }
-    const savedLines = draftsToSavedLines(lines);
-    onSave({
-      workOrderNumber: number,
-      received,
-      due,
-      dueClass: '',
-      status: 'Open',
-      preview: linesPreview(savedLines),
-      lines: savedLines,
-    });
+    // Absent WO Number / due dates are NOT validation errors — they are
+    // summarized and explicitly confirmed before saving.
+    const missing = collectMissingDemandInfo(number, due, lines);
+    if (missing) {
+      setConfirmMissing(missing);
+      return;
+    }
+    saveWorkOrder();
   }
 
   function requestClose() {
@@ -220,36 +250,31 @@ export function NewWorkOrderDialog({
             New Work Order
           </h2>
           <p className="wo-sub">
-            Enter the Work Order header, then <b>scan each part's PN barcode</b>{' '}
-            and type its quantity — or add lines manually for a PN that does not
-            exist yet. Every line defaults to Request Type{' '}
-            <TypeChip type="NEW" /> and to the <b>WO due date</b>; both can be
-            changed per line. An existing WO Number is opened instead of
-            duplicated. The Work Order list stays behind this dialog; nothing
-            here is persisted to the backend in Phase 2.
+            The header is optional: leave <b>WO Number</b> blank and a clearly
+            labeled <b>temporary internal Work Order Number</b> (
+            <span className="mono">TMP-YYYYMMDD-HHMMSS</span>) is generated on
+            save; leave <b>WO due date</b> blank and the Work Order is saved
+            without one — due dates can be added later. Add Parts manually with{' '}
+            <b>＋ Add Part manually</b>; every line defaults to Request Type{' '}
+            <TypeChip type="NEW" /> and to the WO due date, and both can be
+            changed per line. Nothing here is persisted to the backend in Phase
+            2.
           </p>
 
           <div className="nwo-form">
-            <label htmlFor="nwo-num">WO Number</label>
+            <label htmlFor="nwo-num">WO Number (optional)</label>
             <div>
               <input
                 id="nwo-num"
                 ref={workOrderNumRef}
                 className="mono"
-                placeholder="e.g. 007482"
+                placeholder="e.g. 007482 — blank generates TMP-…"
                 value={workOrderNumber}
-                aria-invalid={headerErrors.workOrderNumber ? true : undefined}
-                onChange={(e) => {
-                  setWorkOrderNumber(e.target.value);
-                  setHeaderErrors((c) => ({
-                    ...c,
-                    workOrderNumber: undefined,
-                  }));
-                }}
+                onChange={(e) => setWorkOrderNumber(e.target.value)}
               />
-              {headerErrors.workOrderNumber ? (
-                <div className="rowerr">{headerErrors.workOrderNumber}</div>
-              ) : null}
+              <span className="nwo-fieldhint">
+                blank = a temporary internal number is generated on save
+              </span>
             </div>
             <label htmlFor="nwo-recv">Received date</label>
             <div>
@@ -262,38 +287,41 @@ export function NewWorkOrderDialog({
                 aria-invalid={headerErrors.received ? true : undefined}
                 onChange={(e) => {
                   setReceived(e.target.value);
-                  setHeaderErrors((c) => ({ ...c, received: undefined }));
+                  setHeaderErrors({});
                 }}
               />
               {headerErrors.received ? (
                 <div className="rowerr">{headerErrors.received}</div>
               ) : null}
             </div>
-            <label htmlFor="nwo-due">WO due date</label>
+            <label htmlFor="nwo-due">WO due date (optional)</label>
             <div>
               <input
                 id="nwo-due"
-                ref={dueRef}
                 type="date"
                 className="mono"
                 value={due}
-                aria-invalid={headerErrors.due ? true : undefined}
                 onChange={(e) => handleDueChange(e.target.value)}
               />
               <span className="nwo-fieldhint">
-                default due date for every demand line
+                default due date for demand lines — blank is valid; it can be
+                added later
               </span>
-              {headerErrors.due ? (
-                <div className="rowerr">{headerErrors.due}</div>
-              ) : null}
             </div>
           </div>
 
           <div className="nwo-scanrow">
+            <button
+              className="btn primary"
+              disabled={writeBlocked}
+              onClick={() => setAddPartOpen(true)}
+            >
+              ＋ Add Part manually
+            </button>
             <input
               ref={scanRef}
               className="nwo-scan"
-              placeholder="Scan PN barcode (PF:PN:…) — Enter"
+              placeholder="Optional: scan PN barcode (PF:PN:…) — Enter"
               aria-label="Scan PN barcode"
               autoComplete="off"
               disabled={writeBlocked}
@@ -304,22 +332,14 @@ export function NewWorkOrderDialog({
                 }
               }}
             />
-            <button
-              className="btn ghost"
-              disabled={writeBlocked}
-              onClick={addManualLine}
-            >
-              ＋ Add line manually
-            </button>
           </div>
           <div className="nwo-hint">
-            Scan → the line is added and its <b>Qty</b> field gets focus → type
-            the quantity → Enter returns focus to the scan input, ready for the
-            next part. Demo barcodes: <code>PF:PN:1014</code> ·{' '}
-            <code>PF:PN:1021</code> · <code>PF:PN:1102</code>. Scanning a PN
+            Manual entry is the normal workflow. Scanning stays available as a
+            secondary method: only valid PN barcodes add lines (demo:{' '}
+            <code>PF:PN:1014</code> · <code>PF:PN:1021</code> ·{' '}
+            <code>PF:PN:1102</code>), unknown barcodes are rejected, and a PN
             already on this Work Order focuses its existing line instead of
-            adding a duplicate. Unknown barcodes are rejected — nothing is
-            added.
+            adding a duplicate.
           </div>
 
           <div className="wo-lines nwo-lines">
@@ -339,58 +359,19 @@ export function NewWorkOrderDialog({
                 {lines.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="nwo-empty">
-                      No demand lines yet — scan the first PN barcode above
+                      No demand lines yet — add the first Part with ＋ Add Part
+                      manually
                     </td>
                   </tr>
                 ) : (
                   lines.map((line) => (
                     <tr key={line.id}>
                       <td className={errorFor(line.id, 'pn') ? 'err-cell' : ''}>
-                        {line.pn ? (
-                          <div className="pn" title={line.pn}>
-                            {line.pn}
-                          </div>
-                        ) : (
-                          <input
-                            ref={(el) => {
-                              if (el)
-                                fieldRefs.current.set(`${line.id}:pn`, el);
-                              else fieldRefs.current.delete(`${line.id}:pn`);
-                            }}
-                            placeholder="type PN — lookup or create"
-                            size={16}
-                            aria-label="PartNumber lookup or create"
-                            aria-invalid={
-                              errorFor(line.id, 'pn') ? true : undefined
-                            }
-                            onBlur={(e) => {
-                              const pn = e.target.value.trim().toUpperCase();
-                              if (!pn) return;
-                              const duplicate = lines.find(
-                                (l) => l.id !== line.id && l.pn === pn,
-                              );
-                              if (duplicate) {
-                                showNotice(
-                                  `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
-                                );
-                                e.target.value = '';
-                                setFocusField({
-                                  id: duplicate.id,
-                                  field: 'qty',
-                                });
-                                return;
-                              }
-                              clearLineError(line.id, 'pn');
-                              updateLine(line.id, {
-                                pn,
-                                barcodeNote:
-                                  'new PN — barcode created with PN master: PF:PN:…',
-                                isNewPn: true,
-                              });
-                              setFocusField({ id: line.id, field: 'qty' });
-                            }}
-                          />
-                        )}
+                        {/* Lines always carry a PN here: they come from
+                            the Add Part flow or a valid PN barcode. */}
+                        <div className="pn" title={line.pn ?? ''}>
+                          {line.pn}
+                        </div>
                         <div className={`bc ${line.isNewPn ? 'newpn' : ''}`}>
                           {line.barcodeNote}
                         </div>
@@ -454,9 +435,7 @@ export function NewWorkOrderDialog({
                           </div>
                         ) : null}
                       </td>
-                      <td
-                        className={errorFor(line.id, 'due') ? 'err-cell' : ''}
-                      >
+                      <td>
                         <input
                           ref={(el) => {
                             if (el) fieldRefs.current.set(`${line.id}:due`, el);
@@ -466,21 +445,15 @@ export function NewWorkOrderDialog({
                           className="mono"
                           value={line.due}
                           aria-label={`Due date for ${line.pn ?? 'new line'}`}
-                          aria-invalid={
-                            errorFor(line.id, 'due') ? true : undefined
-                          }
                           onChange={(e) => {
-                            clearLineError(line.id, 'due');
                             updateLine(line.id, {
                               due: e.target.value,
                               dueTouched: true,
                             });
                           }}
                         />
-                        {errorFor(line.id, 'due') ? (
-                          <div className="rowerr">
-                            {errorFor(line.id, 'due')}
-                          </div>
+                        {line.due === '' ? (
+                          <div className="bc">No due date</div>
                         ) : null}
                       </td>
                       <td>
@@ -550,6 +523,56 @@ export function NewWorkOrderDialog({
           </div>
         </div>
       </ModalDialog>
+
+      {addPartOpen ? (
+        <AddPartDialog
+          workOrderDue={due}
+          existingPns={lines.flatMap((l) => (l.pn ? [l.pn] : []))}
+          onCancel={() => setAddPartOpen(false)}
+          onDuplicate={handleAddPartDuplicate}
+          onComplete={handleAddPartComplete}
+        />
+      ) : null}
+
+      {confirmMissing ? (
+        <ConfirmDialog
+          title="Save demand with missing information?"
+          confirmLabel="Confirm and save"
+          cancelLabel="Cancel — keep editing"
+          onConfirm={() => {
+            setConfirmMissing(null);
+            saveWorkOrder();
+          }}
+          onCancel={() => setConfirmMissing(null)}
+        >
+          These omissions are valid — confirm them explicitly:
+          <ul className="missinglist">
+            {confirmMissing.noWorkOrderNumber ? (
+              <li>
+                No external WO Number — a{' '}
+                <b>temporary internal Work Order Number</b> (
+                <span className="mono">TMP-YYYYMMDD-HHMMSS</span>) will be
+                generated and clearly labeled.
+              </li>
+            ) : null}
+            {confirmMissing.noWorkOrderDue ? (
+              <li>
+                No WO due date — the Work Order remains <b>unscheduled</b> until
+                a due date is added.
+              </li>
+            ) : null}
+            {confirmMissing.undatedLineCount ? (
+              <li>
+                <b>{confirmMissing.undatedLineCount}</b> demand line
+                {confirmMissing.undatedLineCount === 1 ? ' has' : 's have'} no
+                due date — they receive the lowest date priority and order by
+                the Work Order received date.
+              </li>
+            ) : null}
+          </ul>
+          Cancel returns to editing with every entered value preserved.
+        </ConfirmDialog>
+      ) : null}
 
       {confirmDiscard ? (
         <ConfirmDialog

@@ -1,17 +1,52 @@
 import type { MockWorkOrder } from '../views/view-models';
 
-// Scanner-first New Work Order demo catalog: PN barcode → PartNumber
-// (mock only).
+// PN barcode → PartNumber catalog for the optional barcode entry path
+// in Work Orders (mock only). Manual Part addition is the normal
+// workflow; scanning stays available as a secondary method.
 export const MOCK_PN_BARCODES: Record<string, string> = {
   'PF:PN:1014': '0455-20-0118-03',
   'PF:PN:1021': '78-04-0031',
   'PF:PN:1102': '309-127',
   'PF:PN:1033': '214-406',
+  'PF:PN:1050': '118-052',
 };
 
-// Editable dates are ISO `YYYY-MM-DD`; the view formats them for display.
-// Work Order Numbers are opaque external strings — typically numeric-
-// looking (e.g. `007010`), but no format is ever assumed or parsed.
+// Existing PartNumber catalog for the Add Part search step (mock only).
+export const MOCK_PN_CATALOG: { pn: string; name: string; barcode: string }[] =
+  [
+    {
+      pn: '0455-20-0118-03',
+      name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900',
+      barcode: 'PF:PN:1014',
+    },
+    {
+      pn: '78-04-0031',
+      name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
+      barcode: 'PF:PN:1021',
+    },
+    {
+      pn: '309-127',
+      name: 'PIN, DOWEL 1/4 X 1.00 SS',
+      barcode: 'PF:PN:1102',
+    },
+    {
+      pn: '214-406',
+      name: 'SPACER, THREADED 10-32, BRASS',
+      barcode: 'PF:PN:1033',
+    },
+    {
+      pn: '118-052',
+      name: 'MOTOR, GEAR STEPPER 7.2T',
+      barcode: 'PF:PN:1050',
+    },
+  ];
+
+// Editable dates are ISO `YYYY-MM-DD`; the view formats them for
+// display. `due: null` is valid — both a Work Order and its demand
+// lines may have no due date. Work Order Numbers are opaque external
+// strings — typically numeric-looking (e.g. `007010`), but no format is
+// ever assumed or parsed; generated temporary internal numbers use
+// `TMP-YYYYMMDD-HHMMSS`.
 export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
   {
     workOrderNumber: '007010',
@@ -62,7 +97,7 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
         barcode: 'PN lookup or inline create required',
         type: 'REWORK',
         qty: 0,
-        due: '',
+        due: null,
         job: '',
         status: 'Row invalid',
         statusClass: 'invalid',
@@ -105,6 +140,28 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
         due: '2026-07-16',
         job: '18031',
         status: 'Released · QF-0152',
+        statusClass: 'released',
+      },
+    ],
+  },
+  {
+    // Work Order without a due date: it stays unscheduled until one is
+    // added; its undated demand orders by the received date.
+    workOrderNumber: '007011',
+    received: '2026-07-19',
+    due: null,
+    dueClass: '',
+    status: 'Released',
+    preview: '118-052',
+    lines: [
+      {
+        pn: '118-052',
+        barcode: 'barcode PF:PN:1050',
+        type: 'NEW',
+        qty: 4,
+        due: null,
+        job: '18520',
+        status: 'Released · QF-0163',
         statusClass: 'released',
       },
     ],

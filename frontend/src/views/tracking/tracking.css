@@ -1,497 +1,497 @@
 /* Tracking — PN-centric master–detail management view (GUI_DESIGN §7). */
 .tk-wrap {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 520px;
-    min-height: calc(100vh - 105px);
-    background: var(--bg);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 520px;
+  min-height: calc(100vh - 105px);
+  background: var(--bg);
 }
 
 @media (max-width: 1200px) {
-    .tk-wrap {
-        grid-template-columns: 1fr;
-    }
+  .tk-wrap {
+    grid-template-columns: 1fr;
+  }
 }
 
 .tk-left {
-    padding: 22px 24px;
-    min-width: 0;
+  padding: 22px 24px;
+  min-width: 0;
 }
 
 .tk-left h1 {
-    font-size: 21px;
-    margin-bottom: 14px;
+  font-size: 21px;
+  margin-bottom: 14px;
 }
 
 .tk-filters {
-    display: flex;
-    gap: 9px;
-    flex-wrap: wrap;
-    margin-bottom: 14px;
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
 }
 
 .tk-filters input,
 .tk-filters select {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    font-size: 13.5px;
-    padding: 9px 12px;
-    color: var(--text);
-    outline: none;
-    min-height: 42px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13.5px;
+  padding: 9px 12px;
+  color: var(--text);
+  outline: none;
+  min-height: 42px;
 }
 
 .tk-filters input {
-    min-width: 300px;
+  min-width: 300px;
 }
 
 .tk-filters input:focus,
 .tk-filters select:focus {
-    border-color: var(--info-t);
+  border-color: var(--info-t);
 }
 
 .tk-table {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    box-shadow: var(--shadow);
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
 .tk-table th {
-    font-size: 11.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.9px;
-    color: var(--muted);
-    text-align: left;
-    padding: 11px 14px;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel2);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
 }
 
 .tk-table td {
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--hair);
-    font-size: 14px;
-    vertical-align: top;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 14px;
+  vertical-align: top;
 }
 
 .tk-table tr:last-child td {
-    border-bottom: none;
+  border-bottom: none;
 }
 
 .tk-table tr.sel td {
-    background: var(--info-surface-weak);
+  background: var(--info-surface-weak);
 }
 
 .tk-table tbody tr:hover td {
-    background: var(--row-hover);
+  background: var(--row-hover);
 }
 
 /* PN never wraps; the column sizes to fit it (§2.3) */
 .tk-table .part {
-    font-family: var(--mono), monospace;
-    font-weight: 750;
-    white-space: nowrap;
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .tk-table .rowbtn {
-    font: inherit;
-    color: inherit;
-    text-align: left;
-    padding: 0;
-    display: block;
-    width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  display: block;
+  width: 100%;
 }
 
 .tk-table .sub {
-    font-size: 12px;
-    color: var(--muted);
-    margin-top: 2px;
-    /* descriptions wrap naturally without widening the PN column */
-    max-width: 44ch;
-    white-space: normal;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  /* descriptions wrap naturally without widening the PN column */
+  max-width: 44ch;
+  white-space: normal;
 }
 
 .tk-table .demandcell {
-    font-family: var(--mono), monospace;
-    font-size: 13px;
+  font-family: var(--mono), monospace;
+  font-size: 13px;
 }
 
 .tk-table .demandcell > div + div {
-    margin-top: 3px;
+  margin-top: 3px;
 }
 
 .tk-table .distmini {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
 }
 
 .tk-table .distmini span {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tk-table .distmini .areadot {
-    width: 8px;
-    height: 8px;
-    border-radius: 2.5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2.5px;
 }
 
 .tk-table .distmini b {
-    font-family: var(--mono), monospace;
+  font-family: var(--mono), monospace;
 }
 
 .tk-right {
-    background: var(--panel);
-    border-left: 1px solid var(--border);
-    padding: 22px;
-    overflow: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 22px;
+  overflow: auto;
 }
 
 .tk-pnrow {
-    display: flex;
-    gap: 14px;
-    align-items: flex-start;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
 }
 
 .tk-img {
-    width: 64px;
-    height: 64px;
-    border-radius: 12px;
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    flex: none;
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  flex: none;
 }
 
 .tk-right h2 {
-    font-family: var(--mono), monospace;
-    font-size: 23px;
+  font-family: var(--mono), monospace;
+  font-size: 23px;
 }
 
 .tk-right .jsub {
-    color: var(--muted);
-    font-size: 13px;
-    margin: 3px 0 0;
-    line-height: 1.6;
+  color: var(--muted);
+  font-size: 13px;
+  margin: 3px 0 0;
+  line-height: 1.6;
 }
 
 .tk-right .jsub b {
-    font-family: var(--mono), monospace;
-    color: var(--text);
-    font-weight: 650;
+  font-family: var(--mono), monospace;
+  color: var(--text);
+  font-weight: 650;
 }
 
 .tk-sec {
-    margin: 20px 0;
+  margin: 20px 0;
 }
 
 .tk-sec h4 {
-    font-size: 11.5px;
-    text-transform: uppercase;
-    letter-spacing: 1.1px;
-    color: var(--muted);
-    margin-bottom: 9px;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 6px;
-    font-weight: 800;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  color: var(--muted);
+  margin-bottom: 9px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .tk-sec h4 .tag {
-    font-size: 10px;
-    letter-spacing: 0.4px;
-    text-transform: none;
-    background: var(--chip);
-    border-radius: 5px;
-    padding: 1px 7px;
-    color: var(--faint);
-    font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: none;
+  background: var(--chip);
+  border-radius: 5px;
+  padding: 1px 7px;
+  color: var(--faint);
+  font-weight: 700;
 }
 
 .demand {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
 }
 
 .demand th {
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-    color: var(--faint);
-    text-align: left;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--faint);
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
 }
 
 .demand td {
-    padding: 7px 8px;
-    border-bottom: 1px solid var(--hair);
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--hair);
 }
 
 .demand .mono {
-    font-weight: 650;
+  font-weight: 650;
 }
 
 .demand .short {
-    color: var(--err-t);
-    font-weight: 750;
+  color: var(--err-t);
+  font-weight: 750;
 }
 
 .demand .zero {
-    color: var(--faint);
+  color: var(--faint);
 }
 
 .dist {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .dist .drow {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 13.5px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
 }
 
 .dist .drow .nm {
-    width: 120px;
+  width: 120px;
 }
 
 .dist .drow .nm .sub {
-    font-size: 11px;
-    color: var(--faint);
+  font-size: 11px;
+  color: var(--faint);
 }
 
 .dist .drow .bar {
-    flex: 1;
-    height: 16px;
-    background: var(--track-bar);
-    border-radius: 6px;
-    overflow: hidden;
+  flex: 1;
+  height: 16px;
+  background: var(--track-bar);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .dist .drow .bar i {
-    display: block;
-    height: 100%;
-    border-radius: 6px;
+  display: block;
+  height: 100%;
+  border-radius: 6px;
 }
 
 .dist .drow .q {
-    font-family: var(--mono), monospace;
-    font-weight: 750;
-    width: 28px;
-    text-align: right;
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  width: 28px;
+  text-align: right;
 }
 
 .qflow {
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 12px 14px;
-    margin-bottom: 10px;
-    background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--panel2);
 }
 
 .qflow .qf-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    margin-bottom: 9px;
-    flex-wrap: wrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  margin-bottom: 9px;
+  flex-wrap: wrap;
 }
 
 .qflow .qf-id {
-    font-family: var(--mono), monospace;
-    font-weight: 800;
-    font-size: 13.5px;
+  font-family: var(--mono), monospace;
+  font-weight: 800;
+  font-size: 13.5px;
 }
 
 .qflow .qf-q {
-    font-family: var(--mono), monospace;
-    font-weight: 750;
-    color: var(--info-t);
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  color: var(--info-t);
 }
 
 .qflow .qf-pos {
-    color: var(--muted);
-    font-size: 12.5px;
+  color: var(--muted);
+  font-size: 12.5px;
 }
 
 .route {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 4px;
-    font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12.5px;
 }
 
 .rstep {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    font-weight: 650;
-    color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-weight: 650;
+  color: var(--muted);
 }
 
 .rstep.done {
-    background: var(--success-surface);
-    border-color: var(--success-border);
-    color: var(--ok-t);
+  background: var(--success-surface);
+  border-color: var(--success-border);
+  color: var(--ok-t);
 }
 
 .rstep.cur {
-    background: var(--info-surface);
-    border-color: var(--info-t);
-    color: var(--info-t);
-    box-shadow: 0 0 0 2px var(--info-ring);
+  background: var(--info-surface);
+  border-color: var(--info-t);
+  color: var(--info-t);
+  box-shadow: 0 0 0 2px var(--info-ring);
 }
 
 .rstep.queuedstep {
-    background: var(--warning-surface);
-    border-color: var(--warning-border);
-    color: var(--warn-t);
+  background: var(--warning-surface);
+  border-color: var(--warning-border);
+  color: var(--warn-t);
 }
 
 .rstep.dev {
-    background: var(--rework-surface);
-    border-color: var(--rework-border);
-    color: var(--dev-t);
+  background: var(--rework-surface);
+  border-color: var(--rework-border);
+  color: var(--dev-t);
 }
 
 .rarrow {
-    color: var(--faint);
+  color: var(--faint);
 }
 
 .devnote {
-    font-size: 12px;
-    color: var(--dev-t);
-    margin-top: 7px;
-    line-height: 1.5;
+  font-size: 12px;
+  color: var(--dev-t);
+  margin-top: 7px;
+  line-height: 1.5;
 }
 
 .mv {
-    list-style: none;
-    font-size: 12.5px;
+  list-style: none;
+  font-size: 12.5px;
 }
 
 .mv li {
-    display: flex;
-    gap: 10px;
-    padding: 8px 0;
-    border-bottom: 1px dashed var(--hair);
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--hair);
 }
 
 .mv li:last-child {
-    border-bottom: none;
+  border-bottom: none;
 }
 
 .mv .t {
-    font-family: var(--mono), monospace;
-    color: var(--muted);
-    flex: none;
-    width: 112px;
+  font-family: var(--mono), monospace;
+  color: var(--muted);
+  flex: none;
+  width: 112px;
 }
 
 .mv .mtype {
-    font-weight: 800;
-    width: 118px;
-    flex: none;
-    font-size: 10.5px;
-    letter-spacing: 0.2px;
-    padding-top: 2px;
-    overflow-wrap: anywhere;
-    line-height: 1.35;
+  font-weight: 800;
+  width: 118px;
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  padding-top: 2px;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .mv .mtype.rec {
-    color: var(--ok-t);
+  color: var(--ok-t);
 }
 
 .mv .mtype.tra {
-    color: var(--info-t);
+  color: var(--info-t);
 }
 
 .mv .mtype.asg {
-    color: var(--asg-t);
+  color: var(--asg-t);
 }
 
 .mv .mtype.spl {
-    color: var(--spl-t);
+  color: var(--spl-t);
 }
 
 .mv .mtype.stk {
-    color: var(--stk-t);
+  color: var(--stk-t);
 }
 
 .mv .mtype.rev {
-    color: var(--err-t);
+  color: var(--err-t);
 }
 
 .mv .desc {
-    flex: 1;
-    color: var(--text);
-    line-height: 1.5;
+  flex: 1;
+  color: var(--text);
+  line-height: 1.5;
 }
 
 .tk-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .tk-actions button {
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 8px 14px;
-    min-height: 42px;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text);
-    background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 14px;
+  min-height: 42px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--panel2);
 }
 
 .tk-actions button:hover {
-    border-color: var(--info-t);
-    color: var(--info-t);
+  border-color: var(--info-t);
+  color: var(--info-t);
 }
 
 .prog {
-    height: 10px;
-    background: var(--track-bar);
-    border-radius: 6px;
-    overflow: hidden;
-    margin-top: 8px;
+  height: 10px;
+  background: var(--track-bar);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 8px;
 }
 
 .prog i {
-    display: block;
-    height: 100%;
-    background: var(--ok);
-    border-radius: 6px;
+  display: block;
+  height: 100%;
+  background: var(--ok);
+  border-radius: 6px;
 }
 
 .prognote {
-    font-size: 12px;
-    color: var(--muted);
-    margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 5px;
 }

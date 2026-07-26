@@ -1,4 +1,4 @@
-# PartFlow Project Profile v7
+# PartFlow Project Profile v8
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -299,7 +299,16 @@ A Work Order Number:
 - originates externally or is manually entered,
 - has no fixed format,
 - must be treated as an opaque, arbitrary string,
-- is the canonical business container identifier used by PartFlow.
+- is the canonical business container identifier used by PartFlow,
+- is never reformatted, padded, or normalized once entered.
+
+The persisted internal Work Order identity is never nullable. The user may create demand without knowing an external Work Order Number: when the Work Order Number is left blank and the user explicitly confirms saving, PartFlow generates a unique, human-readable **temporary internal Work Order Number** in the format `TMP-YYYYMMDD-HHMMSS`, extended with a deterministic `-2`, `-3`, … suffix on collision. A generated temporary number:
+
+- is clearly labeled as temporary and internal wherever it is displayed,
+- is auditable and searchable like any other Work Order Number,
+- may later be replaced by the real external Work Order Number through an audited edit.
+
+No UUID or other machine identifier is ever the user-facing Work Order identifier. Work Order Numbers that were entered by the user remain opaque arbitrary strings and are never reformatted. (Scan-intake temporary Work Orders for Rework and Modify keep their own established convention, §14.)
 
 Work Order Number and external Job Number are separate identifiers (for example Work Order Number `007125` versus external Job Number `17555`). Job Numbers remain informational metadata on Work Order Demand: usable for display, search, sorting, and reporting, but never an internal identity, a movement identity, or a workflow key.
 
@@ -538,6 +547,7 @@ Typical attributes (illustrative only):
 - `id`
 - `work_order_number`
 - `received_date`
+- `due_date`
 - `status`
 - `erp_id`
 - `created_at`
@@ -546,6 +556,9 @@ Typical attributes (illustrative only):
 Rules:
 
 - `work_order_number` must be treated as an arbitrary string.
+- `work_order_number` is never null. When no external Work Order Number is known at creation, the confirmed save generates a temporary internal Work Order Number (`TMP-YYYYMMDD-HHMMSS`, deterministic `-2`, `-3`, … suffix on collision — §7 Work Order).
+- `received_date` is required and defaults to the current date during manual creation.
+- `due_date` may be null. A missing Work Order due date is valid data, not a validation error; it may be added later. The Work Order due date serves as the entry default for demand-line due dates.
 - A Work Order contains one or more Work Order Demand records.
 - A Work Order is complete when every Work Order Demand has been fully allocated.
 - Completed Work Orders move out of active views but remain permanently available in history.
@@ -577,6 +590,8 @@ Rules:
 
 - A PN may have multiple active Work Order Demand records.
 - Requested quantity represents physical pieces.
+- `due_date` may be null. A missing due date is valid data, not a validation error, and never blocks saving. Undated demand is ordered after all dated demand (§18 Allocation Order).
+- The PN itself owns no due date. A PN presented without a due date means the relevant Work Order Demand has no due date.
 - Work Order Demand may be edited by Admin or Manager.
 - Priority belongs to Work Order Demand.
 - Work Order Demand does not own shop-floor Movement.
@@ -1182,6 +1197,8 @@ TMP-20260721-1530-MODIFY
 
 Temporary identifiers must be unique and auditable.
 
+This scan-intake convention is separate from the temporary internal Work Order Number generated when a Work Order is saved without an external number (`TMP-YYYYMMDD-HHMMSS`, §7 Work Order). Both conventions coexist; neither replaces the other.
+
 If the PN already has active quantity, the system must explicitly confirm whether the new quantity:
 
 - joins an existing Quantity Flow,
@@ -1229,6 +1246,8 @@ The system must clearly reject, with no write:
 An ambiguous PN context is not simply rejected. When multiple valid contexts exist, the system must present the relevant choices and require explicit confirmation; unresolved ambiguity blocks the write, and nothing is recorded until one choice is confirmed. Cancelling abandons the pending intent with no write.
 
 A duplicate transport retry carrying the same event id must return the original idempotent result and must not create another Movement.
+
+A scan is successful only after the server confirms the recorded write. Connectivity status shown in the UI is an early warning, never permission to record a Movement optimistically. If connectivity disappears between the last successful connectivity check and a write request, the request must fail as "nothing recorded"; the UI must never display a false recorded result.
 
 ---
 
@@ -1365,14 +1384,17 @@ Production Movement and Work Order Allocation remain separate.
 
 ## Allocation Order
 
-The system must suggest allocation using this exact priority:
+The system must suggest allocation using the canonical demand ordering:
 
-1. Highest manager-defined Work Order Demand priority.
-2. Earliest due date.
+1. Highest manager-defined Work Order Demand priority (Hot rank).
+2. Within the same priority level:
+   - demand **with** a due date comes first, earliest due date first;
+   - demand **without** a due date comes after all dated demand;
+   - undated demand is ordered by the parent Work Order's `received_date`, oldest first.
 
-If both criteria are equal, implementation may use any stable deterministic tie-breaker such as Work Order Demand creation order or internal ID.
+Equal values are resolved by a stable deterministic tie-breaker such as Work Order Demand creation order or internal ID. The tie-breaker is an implementation detail, not a business rule.
 
-The tie-breaker is an implementation detail, not a business rule.
+This canonical demand ordering applies wherever due-date ordering appears — allocation suggestion, work ordering, and demand-sorted displays.
 
 ---
 
@@ -1545,8 +1567,7 @@ Requirements:
 - automatic pagination,
 - automatic page rotation,
 - dynamic rows per page,
-- priority sorting,
-- due-date sorting,
+- priority and due-date sorting following the canonical demand ordering (§18),
 - overdue highlighting,
 - Area color display,
 - distributed PN quantity display,
@@ -1555,7 +1576,7 @@ Requirements:
 
 Suggested columns:
 
-| No. | Part Number | Areas and Quantities · Time | Job Numbers | Due Date | Total Days |
+| No. | Part Number | Areas and Quantities · Time | Due Date | Total Days | Job Numbers |
 |---|---|---|---|---|---|
 
 Days Left is displayed inside the Due Date column as a highlighted secondary line rather than as a separate column.
@@ -1668,7 +1689,7 @@ The view must support the minimum confirmed workflow:
 2. Add or update one or more Work Order Demand records.
 3. Locate or create the PartNumber.
 4. Create the PN barcode when the PN is new.
-5. Enter: Work Order Number, received date, PN, Request Type (default `NEW`), requested quantity, due date, priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
+5. Enter: Work Order Number (optional — a blank number generates a temporary internal Work Order Number on confirmed save, §7 Work Order), received date (defaults to the current date), PN, Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
 6. Save business demand without automatically creating production quantity.
 7. Provide a separate explicit `Release to production` action following the release steps in §12.
 
@@ -1689,12 +1710,13 @@ The Hot list is managed within the Department:
 1. Show Hot Work Order Demand sorted by explicit priority rank.
 2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
 3. If a PN has multiple active Work Order Demand records, each Work Order Demand is selected and ranked separately.
-4. Add new Hot entries at the bottom by default.
+4. Add new Hot entries at the bottom by default; adding at the bottom applies directly.
 5. Allow drag-and-drop reordering.
 6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and Work Order Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
-7. Apply Hot list changes immediately and record every change in the audit trail.
-8. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step.
-9. Use the stored rank as the highest work and allocation priority.
+7. Require explicit confirmation before applying any operation that changes the order of existing Hot entries — drag-and-drop, Move Up, Move Down, Undo, and Redo. The confirmation identifies the affected PN and Work Order Demand, the previous rank, the proposed new rank, and the action type; cancelling leaves the list and both histories unchanged, and the visible list is never renumbered before confirmation.
+8. Apply every confirmed Hot list change and record it in the audit trail.
+9. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation.
+10. Use the stored rank as the highest work and allocation priority.
 
 Multiple Work Orders requesting the same PN may have different priorities.
 

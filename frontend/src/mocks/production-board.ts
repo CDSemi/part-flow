@@ -1,11 +1,14 @@
 import type { MockBoardRow } from '../views/view-models';
 
+// Due dates are ISO `YYYY-MM-DD` or null (a WO Demand may have no due
+// date); `received` is the parent Work Order received date that orders
+// undated demands. The view sorts rows with the canonical demand order
+// (Hot rank → earliest due date → undated by received date).
 export const MOCK_BOARD_ROWS: MockBoardRow[] = [
   {
     pn: '2027-60-8114-00',
     name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES · rev C',
     hotRank: 1,
-    blink: true,
     locations: [
       { area: 'cut', label: 'Cut', qty: 4, time: '3h 40m' },
       {
@@ -22,16 +25,16 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       { job: '18112', meta: '· WO 007001 · 10 pcs' },
       { job: '18240', meta: '· WO 007008 · 5 pcs queued' },
     ],
-    due: 'Jul 24',
+    due: '2026-07-24',
     dueNote: '2 days left',
     dueClass: 'soon',
     totalDays: '10 d',
+    received: '2026-07-12',
   },
   {
     pn: '142-260',
     name: 'PLATE, TOP COVER ALUM 6061-T6',
     hotRank: 2,
-    blink: true,
     locations: [
       {
         area: 'external',
@@ -43,10 +46,11 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     ],
     total: 20,
     jobs: [{ job: '18031', meta: '· WO 007005 · 20 pcs' }],
-    due: 'Jul 16',
+    due: '2026-07-16',
     dueNote: 'overdue 6 days',
     dueClass: 'late',
     totalDays: '18 d',
+    received: '2026-07-06',
   },
   {
     pn: '0123-40-0007-22',
@@ -56,10 +60,11 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     ],
     total: 12,
     jobs: [{ job: '18377', meta: '· WO 007007 · 12 pcs' }],
-    due: 'Aug 03',
+    due: '2026-08-03',
     dueNote: '9 days left',
     dueClass: 'ok',
     totalDays: '3 d',
+    received: '2026-07-18',
   },
   {
     pn: '0455-20-0118-03',
@@ -76,10 +81,11 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     ],
     total: 12,
     jobs: [{ job: '18190', meta: '· WO 007003 · 12 pcs' }],
-    due: 'Jul 31',
+    due: '2026-07-31',
     dueNote: '9 days left',
     dueClass: 'ok',
     totalDays: '6 d',
+    received: '2026-07-12',
   },
   {
     pn: '78-04-0031',
@@ -93,10 +99,25 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       { job: '18102', meta: '· WO 007002 · 6 pcs' },
       { job: '—', meta: '· TMP-20260718-0910-REWORK · 1 pc' },
     ],
-    due: 'Aug 07',
+    due: '2026-08-07',
     dueNote: '16 days left',
     dueClass: 'ok',
     totalDays: '4 d',
+    received: '2026-07-14',
+  },
+  {
+    // WO Demand without a due date: valid data — sorts after all dated
+    // demands, ordered by the parent Work Order received date.
+    pn: '118-052',
+    name: 'MOTOR, GEAR STEPPER 7.2T',
+    locations: [{ area: 'manual', label: 'Manual', qty: 4, time: '5h 20m' }],
+    total: 4,
+    jobs: [{ job: '18520', meta: '· WO 007011 · 4 pcs' }],
+    due: null,
+    dueNote: 'No due date',
+    dueClass: 'none',
+    totalDays: '2 d',
+    received: '2026-07-19',
   },
   {
     pn: '309-127',
@@ -105,10 +126,11 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     total: 50,
     totalStocked: true,
     jobs: [{ job: '17740', meta: '· WO 006996 · allocated 50/50' }],
-    due: 'Jul 10',
+    due: '2026-07-10',
     dueNote: '✓ stocked',
     dueClass: 'none',
     totalDays: '12 d',
+    received: '2026-06-18',
   },
 ];
 
@@ -119,7 +141,6 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
     pn: '0118-40-0022-07-0455-88-REV-C',
     name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
     hotRank: 1,
-    blink: true,
     locations: [
       { area: 'mill', label: 'Mill 2', qty: 2, tag: 'machine', time: '1h 20m' },
       {
@@ -137,10 +158,11 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
         meta: '· WO 007008-SUPPLEMENTAL-B · 8 pcs',
       },
     ],
-    due: 'Jul 25',
+    due: '2026-07-25',
     dueNote: '1 day left',
     dueClass: 'soon',
     totalDays: '21 d',
+    received: '2026-07-04',
   },
   ...Array.from({ length: 24 }, (_, i): MockBoardRow => {
     const n = i + 1;
@@ -163,10 +185,16 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
           meta: `· WO ${String(7200 + n).padStart(6, '0')}`,
         },
       ],
-      due: 'Aug 15',
-      dueNote: `${(n % 20) + 4} days left`,
-      dueClass: 'ok',
+      // Every fourth generated demand has no due date so the long list
+      // also exercises the dated-first / undated-by-received ordering.
+      due:
+        n % 4 === 0
+          ? null
+          : `2026-08-${String((n % 14) + 15).padStart(2, '0')}`,
+      dueNote: n % 4 === 0 ? 'No due date' : `${(n % 20) + 4} days left`,
+      dueClass: n % 4 === 0 ? 'none' : 'ok',
       totalDays: `${(n % 12) + 1} d`,
+      received: `2026-07-${String((n % 20) + 1).padStart(2, '0')}`,
     };
   }),
 ];

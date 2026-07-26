@@ -20,6 +20,7 @@ export function ModalDialog({
   onClose,
   children,
   size,
+  onKeyDown,
 }: {
   /** Accessible name when no visible heading is referenced. */
   label?: string;
@@ -29,6 +30,12 @@ export function ModalDialog({
   children: ReactNode;
   /** Responsive width step; every size stays within the viewport. */
   size?: 'wide' | 'xwide';
+  /**
+   * Dialog-wide key handling (e.g. physical-keyboard quantity entry).
+   * Attached at the dialog root so keys work while the dialog itself
+   * holds focus; Escape and focus trapping stay owned by ModalDialog.
+   */
+  onKeyDown?: (event: React.KeyboardEvent) => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<Element | null>(null);
@@ -91,6 +98,7 @@ export function ModalDialog({
             return;
           }
           trapFocus(event);
+          onKeyDown?.(event);
         }}
       >
         {children}

@@ -6,173 +6,172 @@
    value from component CSS.
    ================================================================ */
 :root {
-    /* Raw palettes (referenced only by the theme blocks below) */
-    --d-bg: #0a0e14;
-    --d-bg2: #070a0f;
-    --d-panel: #121926;
-    --d-panel2: #1a2434;
-    --d-border: #243247;
-    --d-border2: #2e405c;
-    --d-text: #eaf1fa;
-    --d-muted: #93a5bc;
-    --d-faint: #5a6b82;
-    --l-bg: #e9edf5;
-    --l-panel: #ffffff;
-    --l-panel2: #f2f5fa;
-    --l-border: #c7d2e2;
-    --l-text: #0f1826;
-    --l-muted: #49596f;
-    --l-faint: #77869b;
+  /* Raw palettes (referenced only by the theme blocks below) */
+  --d-bg: #0a0e14;
+  --d-bg2: #070a0f;
+  --d-panel: #121926;
+  --d-panel2: #1a2434;
+  --d-border: #243247;
+  --d-border2: #2e405c;
+  --d-text: #eaf1fa;
+  --d-muted: #93a5bc;
+  --d-faint: #5a6b82;
+  --l-bg: #e9edf5;
+  --l-panel: #ffffff;
+  --l-panel2: #f2f5fa;
+  --l-border: #c7d2e2;
+  --l-text: #0f1826;
+  --l-muted: #49596f;
+  --l-faint: #77869b;
 
-    /* Status — semantic only, never decorative (GUI_DESIGN §2.2) */
-    --ok: #31d287;
-    --warn: #ffb224;
-    --err: #ff6166;
-    --info: #4f8cff;
-    --ok-d: #158f56;
-    --warn-d: #a8721a;
-    --err-d: #c43a41;
-    --info-d: #2563eb;
+  /* Status — semantic only, never decorative (GUI_DESIGN §2.2) */
+  --ok: #31d287;
+  --warn: #ffb224;
+  --err: #ff6166;
+  --info: #4f8cff;
+  --ok-d: #158f56;
+  --warn-d: #a8721a;
+  --err-d: #c43a41;
+  --info-d: #2563eb;
 
-    /* Text on solid accent / status fills (shared by both themes) */
-    --on-accent: #ffffff;
-    --on-ok: #04160c;
-    --on-warn: #1d1503;
-    --on-err: #210606;
-    --on-info: #04121f;
+  /* Text on solid accent / status fills (shared by both themes) */
+  --on-accent: #ffffff;
+  --on-ok: #04160c;
+  --on-warn: #1d1503;
+  --on-err: #210606;
+  --on-info: #04121f;
 
-    /* Brand */
-    --brand-secondary: #7c5cff;
+  /* Brand */
+  --brand-secondary: #7c5cff;
 
-    /* Status surfaces — shared tints and borders (GUI_DESIGN §2.1:
+  /* Status surfaces — shared tints and borders (GUI_DESIGN §2.1:
        status backgrounds/tints are identical in both themes) */
-    --success-surface: rgba(49, 210, 135, 0.13);
-    --success-surface-weak: rgba(49, 210, 135, 0.09);
-    --success-border: rgba(49, 210, 135, 0.5);
-    --warning-surface: rgba(255, 178, 36, 0.15);
-    --warning-surface-weak: rgba(255, 178, 36, 0.09);
-    --warning-border: rgba(255, 178, 36, 0.5);
-    --error-surface: rgba(255, 97, 102, 0.13);
-    --error-surface-weak: rgba(255, 97, 102, 0.08);
-    --error-border: rgba(255, 97, 102, 0.5);
-    --info-surface: rgba(79, 140, 255, 0.12);
-    --info-surface-weak: rgba(79, 140, 255, 0.07);
-    --info-border: rgba(79, 140, 255, 0.25);
-    --info-ring: rgba(79, 140, 255, 0.14);
-    --row-hover: rgba(79, 140, 255, 0.04);
-    --hot1-row-surface: rgba(255, 70, 70, 0.09);
-    --hot2-row-surface: rgba(255, 138, 76, 0.06);
-    --hot1-chip-surface: rgba(255, 97, 102, 0.18);
-    --hot2-chip-surface: rgba(255, 138, 76, 0.18);
-    --hot3-chip-surface: rgba(255, 178, 36, 0.16);
+  --success-surface: rgba(49, 210, 135, 0.13);
+  --success-surface-weak: rgba(49, 210, 135, 0.09);
+  --success-border: rgba(49, 210, 135, 0.5);
+  --warning-surface: rgba(255, 178, 36, 0.15);
+  --warning-surface-weak: rgba(255, 178, 36, 0.09);
+  --warning-border: rgba(255, 178, 36, 0.5);
+  --error-surface: rgba(255, 97, 102, 0.13);
+  --error-surface-weak: rgba(255, 97, 102, 0.08);
+  --error-border: rgba(255, 97, 102, 0.5);
+  --info-surface: rgba(79, 140, 255, 0.12);
+  --info-surface-weak: rgba(79, 140, 255, 0.07);
+  --info-border: rgba(79, 140, 255, 0.25);
+  --info-ring: rgba(79, 140, 255, 0.14);
+  --row-hover: rgba(79, 140, 255, 0.04);
+  --hot1-row-surface: rgba(255, 70, 70, 0.09);
+  --hot2-row-surface: rgba(255, 138, 76, 0.06);
+  --hot1-chip-surface: rgba(255, 97, 102, 0.18);
+  --hot2-chip-surface: rgba(255, 138, 76, 0.18);
+  --hot3-chip-surface: rgba(255, 178, 36, 0.16);
 
-    /* Request-type chip tints — derived from stable identity colors,
+  /* Request-type chip tints — derived from stable identity colors,
        shared by both themes like the Area colors themselves */
-    --rework-surface: rgba(255, 138, 76, 0.15);
-    --rework-border: rgba(255, 138, 76, 0.5);
-    --modify-surface: rgba(155, 110, 243, 0.15);
+  --rework-surface: rgba(255, 138, 76, 0.15);
+  --rework-border: rgba(255, 138, 76, 0.5);
+  --modify-surface: rgba(155, 110, 243, 0.15);
 
-    /* Overlay behind modal dialogs and panel inset highlight */
-    --overlay: rgba(4, 7, 12, 0.78);
-    --panel-inset-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
-    --subnav-shadow: 0 1px 2px rgba(20, 30, 43, 0.04);
+  /* Overlay behind modal dialogs and panel inset highlight */
+  --overlay: rgba(4, 7, 12, 0.78);
+  --panel-inset-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  --subnav-shadow: 0 1px 2px rgba(20, 30, 43, 0.04);
 
-    /* Area identity colors — stable across ALL views and BOTH themes */
-    --a-material: #8b93a8;
-    --a-cut: #f5b83d;
-    --a-lathe: #3da5ff;
-    --a-mill: #9b6ef3;
-    --a-manual: #e06fae;
-    --a-deburr: #2fbf9b;
-    --a-external: #ff8a4c;
-    --a-stockroom: #2fca7c;
+  /* Area identity colors — stable across ALL views and BOTH themes */
+  --a-material: #8b93a8;
+  --a-cut: #f5b83d;
+  --a-lathe: #3da5ff;
+  --a-mill: #9b6ef3;
+  --a-manual: #e06fae;
+  --a-deburr: #2fbf9b;
+  --a-external: #ff8a4c;
+  --a-stockroom: #2fca7c;
 
-    /* Radius */
-    --radius: 14px;
-    --radius-sm: 9px;
+  /* Radius */
+  --radius: 14px;
+  --radius-sm: 9px;
 
-    /* Typography — system stack, no webfont (GUI_DESIGN §2.3) */
-    --font: system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    --mono: 'Cascadia Code', 'Consolas', 'SF Mono', Menlo, monospace;
-    --fs-body: 16px;
-    --fs-pn: 19px;
-    --fs-qty: 18px;
+  /* Typography — system stack, no webfont (GUI_DESIGN §2.3) */
+  --font: system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: 'Cascadia Code', 'Consolas', 'SF Mono', Menlo, monospace;
+  --fs-body: 16px;
+  --fs-pn: 19px;
+  --fs-qty: 18px;
 
-    /* Spacing scale */
-    --sp-1: 4px;
-    --sp-2: 8px;
-    --sp-3: 12px;
-    --sp-4: 16px;
-    --sp-5: 22px;
-    --sp-6: 30px;
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 22px;
+  --sp-6: 30px;
 
-    /* Touch and scanner ergonomics (GUI_DESIGN §2.4) */
-    --touch-min: 48px;
-    --touch-primary: 56px;
+  /* Touch and scanner ergonomics (GUI_DESIGN §2.4) */
+  --touch-min: 48px;
+  --touch-primary: 56px;
 }
 
 /* ============ Theme modes — user-switchable, every view follows ============ */
 body.dark {
-    --bg: var(--d-bg);
-    --bg2: var(--d-bg2);
-    --panel: var(--d-panel);
-    --panel2: var(--d-panel2);
-    --border: var(--d-border);
-    --border2: var(--d-border2);
-    --text: var(--d-text);
-    --muted: var(--d-muted);
-    --faint: var(--d-faint);
-    --hair: #1a2434;
-    --chip: #1e2a3d;
-    --thumb: #2c3a50;
-    --track-bar: #22304a;
-    --ok-t: var(--ok);
-    --warn-t: var(--warn);
-    --err-t: var(--err);
-    --info-t: #79a8ff;
-    --asg-t: #a789f0;
-    --spl-t: #d9a23f;
-    --stk-t: #35c9a5;
-    --dev-t: #ff9a5c;
-    --navglass: rgba(7, 10, 15, 0.92);
-    --shadow: 0 8px 28px rgba(3, 8, 18, 0.42);
-    --active-nav-text: var(--on-info);
-    --field-bg: var(--d-bg2);
-    --scan-backdrop: radial-gradient(
-        1200px 500px at 60% -10%,
-        #101a2c 0%,
-        var(--d-bg) 55%
-    );
+  --bg: var(--d-bg);
+  --bg2: var(--d-bg2);
+  --panel: var(--d-panel);
+  --panel2: var(--d-panel2);
+  --border: var(--d-border);
+  --border2: var(--d-border2);
+  --text: var(--d-text);
+  --muted: var(--d-muted);
+  --faint: var(--d-faint);
+  --hair: #1a2434;
+  --chip: #1e2a3d;
+  --thumb: #2c3a50;
+  --track-bar: #22304a;
+  --ok-t: var(--ok);
+  --warn-t: var(--warn);
+  --err-t: var(--err);
+  --info-t: #79a8ff;
+  --asg-t: #a789f0;
+  --spl-t: #d9a23f;
+  --stk-t: #35c9a5;
+  --dev-t: #ff9a5c;
+  --navglass: rgba(7, 10, 15, 0.92);
+  --shadow: 0 8px 28px rgba(3, 8, 18, 0.42);
+  --active-nav-text: var(--on-info);
+  --field-bg: var(--d-bg2);
+  --scan-backdrop: radial-gradient(
+    1200px 500px at 60% -10%,
+    #101a2c 0%,
+    var(--d-bg) 55%
+  );
 }
 
 body.light {
-    --bg: var(--l-bg);
-    --bg2: #dbe1ec;
-    --panel: var(--l-panel);
-    --panel2: var(--l-panel2);
-    --border: var(--l-border);
-    --border2: #a7b7cc;
-    --text: var(--l-text);
-    --muted: var(--l-muted);
-    --faint: var(--l-faint);
-    --hair: #dfe5ef;
-    --chip: #e2e8f1;
-    --thumb: #a7b6ca;
-    --track-bar: #dbe2ed;
-    --ok-t: var(--ok-d);
-    --warn-t: var(--warn-d);
-    --err-t: var(--err-d);
-    --info-t: var(--info-d);
-    --asg-t: #7141d8;
-    --spl-t: #a8721a;
-    --stk-t: #157a63;
-    --dev-t: #c05a1e;
-    --navglass: rgba(255, 255, 255, 0.95);
-    --shadow:
-        0 1px 2px rgba(20, 30, 43, 0.1), 0 6px 22px rgba(20, 30, 43, 0.12);
-    --active-nav-text: var(--on-accent);
-    /* text-entry surfaces stay white in light mode (a tinted fill reads
+  --bg: var(--l-bg);
+  --bg2: #dbe1ec;
+  --panel: var(--l-panel);
+  --panel2: var(--l-panel2);
+  --border: var(--l-border);
+  --border2: #a7b7cc;
+  --text: var(--l-text);
+  --muted: var(--l-muted);
+  --faint: var(--l-faint);
+  --hair: #dfe5ef;
+  --chip: #e2e8f1;
+  --thumb: #a7b6ca;
+  --track-bar: #dbe2ed;
+  --ok-t: var(--ok-d);
+  --warn-t: var(--warn-d);
+  --err-t: var(--err-d);
+  --info-t: var(--info-d);
+  --asg-t: #7141d8;
+  --spl-t: #a8721a;
+  --stk-t: #157a63;
+  --dev-t: #c05a1e;
+  --navglass: rgba(255, 255, 255, 0.95);
+  --shadow: 0 1px 2px rgba(20, 30, 43, 0.1), 0 6px 22px rgba(20, 30, 43, 0.12);
+  --active-nav-text: var(--on-accent);
+  /* text-entry surfaces stay white in light mode (a tinted fill reads
        as disabled — see GUI_DESIGN light-theme contrast decisions) */
-    --field-bg: var(--l-panel);
-    --scan-backdrop: var(--l-bg);
+  --field-bg: var(--l-panel);
+  --scan-backdrop: var(--l-bg);
 }
