@@ -1,4 +1,4 @@
-# PartFlow Project Profile v9
+# PartFlow Project Profile v8
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -302,14 +302,13 @@ A Work Order Number:
 - is the canonical business container identifier used by PartFlow,
 - is never reformatted, padded, or normalized once entered.
 
-The external Work Order Number is **nullable**. The user may create demand without knowing an external Work Order Number: when the Work Order Number is left blank and the user explicitly confirms saving, PartFlow stores `work_order_number = NULL` on an internal Work Order. A Work Order without an external number:
+The persisted internal Work Order identity is never nullable. The user may create demand without knowing an external Work Order Number: when the Work Order Number is left blank and the user explicitly confirms saving, PartFlow generates a unique, human-readable **temporary internal Work Order Number** in the format `TMP-YYYYMMDD-HHMMSS`, extended with a deterministic `-2`, `-3`, … suffix on collision. A generated temporary number:
 
-- displays as `—` wherever a Work Order Number is presented (the `—` placeholder is display-only and is **never persisted**),
-- is clearly labeled as an internal Work Order without an external number,
-- may later receive the real external Work Order Number through an audited edit,
-- keeps its own stable internal identity (a database key that is never the user-facing identifier).
+- is clearly labeled as temporary and internal wherever it is displayed,
+- is auditable and searchable like any other Work Order Number,
+- may later be replaced by the real external Work Order Number through an audited edit.
 
-No temporary Work Order Number (such as `TMP-YYYYMMDD-HHMMSS`) is ever generated — that earlier convention is removed. Multiple Work Orders may simultaneously have a null external number; uniqueness applies to non-null Work Order Numbers only. No UUID or other machine identifier is ever the user-facing Work Order identifier. Work Order Numbers that were entered by the user remain opaque arbitrary strings and are never reformatted.
+No UUID or other machine identifier is ever the user-facing Work Order identifier. Work Order Numbers that were entered by the user remain opaque arbitrary strings and are never reformatted. (Scan-intake temporary Work Orders for Rework and Modify keep their own established convention, §14.)
 
 Work Order Number and external Job Number are separate identifiers (for example Work Order Number `007125` versus external Job Number `17555`). Job Numbers remain informational metadata on Work Order Demand: usable for display, search, sorting, and reporting, but never an internal identity, a movement identity, or a workflow key.
 
@@ -341,11 +340,10 @@ Describes why a Work Order Demand or internal demand exists.
 Initial values:
 
 - `NEW`
+- `REWORK`
 - `MODIFY`
 
-`NEW` is externally requested production. `MODIFY` means physical quantity of a PN is introduced for modification work — an internal PartFlow concept that does not need to exist in ERP. A MODIFY intake may have no external Work Order Number, no predefined Route, and no pre-existing active Work Order Demand; PartFlow still creates the minimum internal records needed for quantity integrity and traceability (an internal WorkOrder with a null number, one WorkOrderDemand, a QuantityFlow, and immutable Movement history).
-
-**Repair is not a Request Type.** `REPAIR` is an explicit production movement intent (a `movement_reason` on a transfer, §8.11): some or all quantity already in production returns to a previously visited Area to correct work performed earlier. Repair creates no new physical quantity and no new business demand.
+Rework and Modify are internal PartFlow concepts and do not need to exist in ERP.
 
 ---
 
@@ -445,16 +443,11 @@ Different Quantity Flows of the same PN may follow different Routes.
 
 ---
 
-## Route and Route Mode
+## Route
 
 The ordered production path expected for a Quantity Flow.
 
-Every Quantity Flow has a **route mode**:
-
-- `FLOATING` (the **default**) — no predefined sequence is required. The actual route is derived from immutable Movement history: each visited Area extends the observed route trace, repeated Areas are preserved, different Quantity Flows of the same PN may have different traces, and split flows continue independently. A Floating Route has no AssignedRoute snapshot.
-- `PLANNED` — the flow carries an AssignedRoute snapshot copied from a Route Template as guidance.
-
-A Planned Route may contain:
+A Route may contain:
 
 - Areas,
 - Operations,
@@ -462,7 +455,7 @@ A Planned Route may contain:
 - instructions,
 - preferred Machines.
 
-A Route is guidance. Actual Movement history remains authoritative in both modes, and no second mutable route history may duplicate PartMovement.
+A Route is guidance. Actual Movement history remains authoritative.
 
 ---
 
@@ -534,13 +527,11 @@ Typical attributes (illustrative only):
 
 Rules:
 
-- `part_number` must be unique **case-insensitively**: `abc`, `ABC`, and `Abc` resolve to the same PartNumber. Persistence uses a normalized lookup key or case-insensitive unique constraint (e.g. a unique index on `lower(part_number)`); the stored and displayed value keeps the exact casing of first creation and is never silently re-cased.
+- `part_number` must be unique.
 - `part_number` must be treated as an arbitrary string.
-- A PartNumber is **created on first valid use**: no pre-populated authoritative PN catalog is required, ERP is never called during MVP, and manual PN entry accepts any non-empty PN value. The internal PartNumber record is still required for references, tracking, metadata, history, and future ERP mapping.
 - Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The exact string must be preserved everywhere; PN segments must never be parsed for business meaning.
 - `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
-- The folder barcode identifies only the PN and carries the PN itself: `PF:PN:<part-number>` (§10).
-- An Administrator may archive (soft-delete) junk or test PartNumbers (§28 Administrative Archival and Purge): archived PNs disappear from active lookup and intake, while historical displays keep the original PN text with an explicit `(archived)` marker.
+- The folder barcode identifies only the PN.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.
 - The PN barcode is reused across all Work Orders requesting the PN.
@@ -565,7 +556,7 @@ Typical attributes (illustrative only):
 Rules:
 
 - `work_order_number` must be treated as an arbitrary string.
-- `work_order_number` is **nullable** (§7 Work Order). A null number is valid data on an internal Work Order, displays as `—` (never persisted as a placeholder), and may be replaced by the real external number through an audited edit. The database allows multiple Work Orders with a null number while preserving uniqueness for non-null numbers (partial unique index).
+- `work_order_number` is never null. When no external Work Order Number is known at creation, the confirmed save generates a temporary internal Work Order Number (`TMP-YYYYMMDD-HHMMSS`, deterministic `-2`, `-3`, … suffix on collision — §7 Work Order).
 - `received_date` is required and defaults to the current date during manual creation.
 - `due_date` may be null. A missing Work Order due date is valid data, not a validation error; it may be added later. The Work Order due date serves as the entry default for demand-line due dates.
 - A Work Order contains one or more Work Order Demand records.
@@ -624,6 +615,7 @@ Typical attributes (illustrative only):
 - `icon_url`
 - `is_terminal`
 - `is_active`
+- `machine_assignment_mode`
 - `worker_identification_mode`
 - `created_at`
 - `updated_at`
@@ -635,7 +627,7 @@ Rules:
 - An Area may contain zero, one, or multiple Machines.
 - An Area may support one or multiple Operations.
 - Stockroom is normally a terminal Area.
-- Assignment behavior follows from the Area's Machines (§12): an Area without Machines processes directly; an Area with Machines — one or many — always uses `QUEUE_AND_ASSIGN`. There is no per-Area machine-assignment configuration and no auto-assignment for single-Machine Areas.
+- Area configuration determines assignment behavior.
 
 ---
 
@@ -679,8 +671,8 @@ Rules:
 - Every Machine barcode must be unique.
 - A Machine belongs to exactly one Area.
 - Machine assignment identifies the current executor.
-- An Area without Machines involves no Machine assignment at all.
-- Assignment behavior follows from the Area's Machines (§12): with Machines, quantity queues and is assigned through the explicit one-shot workflow — never by configuration and never by Machine count.
+- Machine assignment is optional for Areas without Machines.
+- Machine assignment behavior is controlled by Area configuration.
 
 ---
 
@@ -694,8 +686,6 @@ Typical attributes (illustrative only):
 - `part_number_id`
 - `quantity`
 - `status`
-- `route_mode`
-- `assigned_route_id` (nullable)
 - `parent_flow_id`
 - `created_at`
 - `closed_at`
@@ -706,7 +696,7 @@ Rules:
 - A Quantity Flow may split into child flows.
 - Multiple Quantity Flows of the same PN may merge.
 - Splitting and merging must preserve full history.
-- `route_mode` is `FLOATING` (default) or `PLANNED` (§7 Route and Route Mode); `assigned_route_id` is set only for `PLANNED` flows — a Floating flow has no AssignedRoute and its route trace is derived from Movement history.
+- Route assignment belongs to Quantity Flow.
 - Current Position must be derived from Movement history.
 - Quantity Flow must not be exposed to operators as unnecessary administrative complexity.
 
@@ -763,7 +753,7 @@ Expected duration must never block production.
 
 ## 8.10 AssignedRoute
 
-Represents a Route snapshot assigned to one **PLANNED** Quantity Flow. An AssignedRoute is optional: Floating flows (the default) have none.
+Represents a Route snapshot assigned to one Quantity Flow.
 
 Rules:
 
@@ -800,7 +790,6 @@ Typical attributes (illustrative only):
 - `station_id`
 - `occurred_at`
 - `server_received_at`
-- `movement_reason`
 - `reason`
 - `reverses_movement_id`
 - `device_event_id`
@@ -816,14 +805,9 @@ Initial Movement types may include:
 - `MERGED`
 - `STOCKED`
 - `QUANTITY_ADJUSTED`
-- `SCRAPPED`
 - `ROUTE_ADJUSTED`
 - `ROUTE_DEVIATION_CONFIRMED`
 - `REVERSED`
-
-`movement_reason` is a typed, optional movement intent; its first value is `REPAIR` — an explicit return of quantity to a previously visited Area to correct earlier work (`movement_type = TRANSFERRED`, `movement_reason = REPAIR`). Repair is chosen explicitly by the user, never inferred from the route history, and is not a Work Order Demand and not a Request Type. `reason` remains the free-text explanation and is required for Repair, Scrap, and quantity adjustments.
-
-`QUANTITY_ADJUSTED` with `direction = INCREASE` records the intentional addition of physical quantity (operator-allowed, mandatory reason, auditable, never hidden as an ordinary transfer, never changing the requested quantity). `SCRAPPED` records damaged quantity removed from active production (§11 Quantity Model).
 
 Rules:
 
@@ -896,11 +880,15 @@ It may retain temporary context such as:
 
 - Area
 - active Worker
+- active Machine
+- pending PN
+- pending Operation
+- pending quantity
 - expiration time
 
-There is **no persistent Machine Session and no persistent PN intent**: every Scan Station production action is a one-shot dialog — scanning a Machine barcode only opens a one-shot assignment dialog with that Machine preselected, and completing or cancelling any dialog clears the temporary context. Only the Worker Session persists (§19).
+ScanSession exists to reduce repetitive scanning and improves scanning efficiency.
 
-ScanSession must never become the source of truth for production state.
+It must never become the source of truth for production state.
 
 ---
 
@@ -910,35 +898,23 @@ Barcode scanning is the primary interaction method.
 
 Every barcode must identify its entity type deterministically.
 
-Logical formats:
+Recommended logical formats:
 
 ```text
-PF:PN:<part-number>
+PF:PN:<stable-id>
+PF:AREA:<stable-id>
 PF:MACHINE:<stable-id>
 PF:WORKER:<stable-id>
-PF:AREA:<stable-id>
-PF:SCRAP
+PF:ACTION:REWORK
+PF:ACTION:MODIFY
 ```
-
-The `PF:` namespace exists to identify PartFlow-owned barcodes, determine the entity type safely, and avoid confusing unrelated factory or vendor barcodes with PartFlow entities.
-
-The PN barcode carries the PN itself. Parsing rules:
-
-1. Trim scanner terminators and surrounding whitespace.
-2. Require the exact `PF:PN:` prefix for scanned PN barcodes.
-3. Treat the entire non-empty suffix as the PN.
-4. Never parse PN segments and never validate a PN format.
-5. Do not require the PN to exist in a preloaded catalog — the internal PartNumber record is created on first valid use (§8.1); ERP is not called during MVP.
-6. Preserve the originally entered PN text for display; identity is case-insensitive (§8.1).
-
-There are **no Action barcodes**. Action intent (Modify intake, Repair, Scrap, quantity addition) is selected through explicit one-shot dialogs, never through persistent armed barcode state. `PF:SCRAP` is a single dedicated, context-sensitive barcode: it is accepted only inside the Scrap workflow, where each scan increments a pending scrap counter (§11); scanning it in the main Scan Station input is rejected.
 
 Requirements:
 
 - Barcode values must be unique.
 - Barcode identity must not depend on mutable display names.
 - Raw ERP PN text must not automatically be treated as a PartFlow barcode.
-- Manual PN entry must remain available and accepts any non-empty PN value.
+- Manual PN entry must remain available.
 - Barcode parsing must be deterministic.
 - Unknown barcodes must be rejected clearly.
 - Inactive entities must not accept production updates.
@@ -973,11 +949,11 @@ It must present only relevant choices or request confirmation.
 
 Examples of ambiguity include:
 
-- multiple possible source Areas or Quantity Flows (never combined silently),
+- multiple possible quantities at the source Area,
 - multiple valid Operations in the Area,
-- selecting between a normal transfer and an explicit Repair return to a previously visited Area,
-- several plausible blank-number MODIFY Work Orders for the same PN (an explicit selection is required — never a guess),
-- unexpected Route destination on a Planned Route.
+- selecting between joining active production and creating Rework,
+- unexpected Route destination,
+- multiple pending scan contexts.
 
 No production write may occur until ambiguity is resolved.
 
@@ -1003,11 +979,10 @@ Mill            6
 
 The sum of active quantity must remain reconcilable with:
 
-```text
-introduced quantity = active quantity + stocked quantity + scrapped quantity
-```
-
-where introduced quantity covers production releases, Modify intakes, and explicit `QUANTITY_ADJUSTED` additions. Scrap never reduces the Work Order Demand requested quantity.
+- quantity introduced into production,
+- explicit quantity adjustments,
+- stocked quantity,
+- future scrap or rejected quantity if supported.
 
 ---
 
@@ -1077,23 +1052,6 @@ History must never be silently rewritten.
 
 ---
 
-## Scrap
-
-Damaged quantity is removed from active production with the canonical Movement type `SCRAPPED` (UI wording: “Scrap damaged quantity”).
-
-The Scrap workflow:
-
-- is entered explicitly from a PN action dialog;
-- counts damaged pieces with the dedicated `PF:SCRAP` barcode — one scan increments the pending count by one, no production state changes while counting, and the pending count can be corrected or reset before confirmation;
-- requires one common scrap reason;
-- shows a final summary (PN, Area, Machine where applicable, original available quantity, scrap quantity, remaining active quantity, Worker, Scan Station, reason) before applying;
-- on Cancel discards the pending count with no write;
-- on Confirm creates **one** auditable `SCRAPPED` operation for the total quantity.
-
-Scrapped quantity is displayed wherever a PN is presented operationally (Scan Station, Production Board, Area Board, Tracking), and Tracking shows the scrap history explicitly.
-
----
-
 # 12. Processing Ownership Rules
 
 ## Area Without Machines
@@ -1103,8 +1061,6 @@ Example:
 - Area: `External`
 - Operation: `Plating`
 
-An Area with zero Machines has no queue: it directly owns and processes received quantity.
-
 When an operator scans PN quantity into the Area:
 
 - the Area receives ownership,
@@ -1112,25 +1068,44 @@ When an operator scans PN quantity into the Area:
 - the configured Operation is recorded,
 - Machine remains null.
 
-The UI shows no placeholder Machine cards and no queued/on-machines statistics for such an Area.
-
 If the Area supports multiple Operations, the applicable Operation must be resolved or confirmed.
 
 ---
 
-## Area With Machines — `QUEUE_AND_ASSIGN`
+## Area With One Machine
 
-An Area with one or more Machines always uses `QUEUE_AND_ASSIGN`. One Machine behaves exactly like several — behavior never differs by Machine count and quantity is **never auto-assigned** merely because the Area has a single Machine.
+Behavior is controlled by Area configuration.
 
-- Newly received quantity enters the Area queue.
-- Quantity is assigned to a Machine through an explicit **one-shot assignment workflow** (scan the Machine as a shortcut, or start from the PN); there is no persistent Machine Session (§9).
-- One Machine may hold quantities of multiple PNs.
-- A queued PN row offers an `ASSIGN` action; a Machine-assigned PN row offers a `QUEUE` action that returns quantity to the Area queue (`RELEASED_FROM_MACHINE`).
+The Area may:
+
+- automatically assign received quantity to the single Machine, or
+- receive quantity into an Area queue until the Machine is explicitly selected.
+
+The system must not infer business behavior solely from machine count.
+
+---
+
+## Area With Multiple Machines
+
+When an operator scans PN quantity into the Area:
+
+- the Area receives ownership,
+- the quantity enters the Area queue,
+- no Machine is assigned yet.
+
+When the operator scans:
+
+- PN barcode, and
+- Machine barcode,
+
+the quantity becomes assigned to that Machine.
+
+Scan order must not matter.
 
 The Machine remains the current executor until the quantity is:
 
 - transferred,
-- released back to the queue,
+- released,
 - reversed,
 - or reassigned through an explicit event.
 
@@ -1152,15 +1127,15 @@ For a newly received Work Order:
 4. Create the PN master and barcode if the PN is new.
 5. Add Work Order Demand without creating a separate tracked PN.
 6. Save the business demand. Saving Work Order Demand never automatically creates production quantity.
-7. Confirm the Route Mode (Floating by default) — and the Planned Route where chosen — when production is released.
+7. Confirm or assign the initial Route when production is released.
 
 Production release is a separate, explicit action. On production release:
 
 1. Confirm the release quantity.
-2. Confirm the Route Mode — `FLOATING` (default, no Route required) or `PLANNED` with a selected Route.
+2. Confirm or assign the Route.
 3. Confirm the configured starting Area and Operation.
-4. Create the Quantity Flow with its route mode.
-5. Snapshot the Assigned Route **only** for a `PLANNED` flow — a Floating release has no AssignedRoute.
+4. Create the Quantity Flow.
+5. Snapshot the Assigned Route.
 6. Append an immutable `RECEIVED` Part Movement.
 7. Derive or update the current-position projection atomically with the Movement.
 
@@ -1199,42 +1174,39 @@ Removing a Work Order Demand must never delete the PartNumber master, any Quanti
 
 ---
 
-# 14. Modify Intake and Repair
+# 14. Rework and Modify Intake
 
-## Modify Intake
+Rework and Modify represent why additional production work exists.
 
-`MODIFY` introduces physical quantity of a PN for modification work. A MODIFY intake may have no external Work Order Number, no predefined Route, and no existing active Work Order Demand — PartFlow still creates the minimum internal records needed for quantity integrity and traceability: an internal `WorkOrder` (`work_order_number = NULL`), one `WorkOrderDemand`, a `QuantityFlow`, and immutable Movement history.
+When Rework or Modify is introduced:
 
-When a scan opens the intake flow (PN has no active Work Order Demand):
+1. Scan or enter the PN.
+2. Scan or select Request Type.
+3. Confirm quantity.
+4. Associate it with an applicable active Work Order when appropriate.
+5. Otherwise create or select a temporary internal Work Order.
+6. Assign a Route to the new Quantity Flow.
+7. Receive the quantity directly into the required starting Area.
 
-1. Scan or enter the PN (created on first valid use, §8.1).
-2. Confirm or change the Request Type — `MODIFY` is the **default, not a forced value**.
-3. Confirm or change the Route Mode — `FLOATING` is the **default, not a forced value**; a Planned Route is selected only when `PLANNED` is chosen.
-4. Confirm quantity, optional due date (owned by the WorkOrderDemand — the PN never owns a due date), and reason/notes where applicable.
-5. Confirm the starting/current Area and, when needed, the Operation. `received_date` defaults to the scan timestamp.
-
-On confirmation, the transaction creates or reuses the PartNumber, creates or reuses an applicable internal blank-number MODIFY Work Order, creates the WorkOrderDemand and QuantityFlow, records the initial Movement, establishes the current position, and places quantity in the Area queue (Area with Machines) or directly into Area processing (Area without Machines).
-
-Work Order reuse must never guess: if the same PN has exactly one clearly applicable active blank-number MODIFY Work Order, reuse it; if multiple are plausible, an explicit selection dialog is required.
-
-If the PN already has active quantity, the system must explicitly confirm whether the new quantity joins an existing Quantity Flow or creates a separate one. The system must never infer this from PN identity alone.
-
-## Repair
-
-`REPAIR` means some or all quantity already in production must return to a previously visited Area to correct work performed earlier:
+Suggested temporary Work Order format:
 
 ```text
-A → B → C → D → B
+TMP-20260721-1523-REWORK
+TMP-20260721-1530-MODIFY
 ```
 
-Rules:
+Temporary identifiers must be unique and auditable.
 
-- Repair does not create new physical quantity, is not a WorkOrderDemand, and is not a Request Type.
-- Repair operates on an existing QuantityFlow: partial Repair splits the flow (depends on SPLIT); full-flow Repair moves the whole flow.
-- Repair is recorded as a movement intent: `movement_type = TRANSFERRED`, `movement_reason = REPAIR` (§8.11) — no separate Repair aggregate.
-- Returning to a previously visited Area must **never** automatically be assumed to be Repair — a previously visited Area may legitimately be the next normal production step, and a normal transfer there remains possible. The user explicitly chooses the Repair intent (UI wording: “Send quantity here for repair”, never “Create REPAIR demand”).
-- The Repair workflow collects: source Area / source QuantityFlow, destination repair Area, repair quantity, a required reason, the affected PN, Worker, Scan Station, and timestamp, and ends with a summary confirmation that identifies the movement as a Repair movement.
-- Actual Movement history remains authoritative; the Repair return extends a Floating Route's observed trace.
+This scan-intake convention is separate from the temporary internal Work Order Number generated when a Work Order is saved without an external number (`TMP-YYYYMMDD-HHMMSS`, §7 Work Order). Both conventions coexist; neither replaces the other.
+
+If the PN already has active quantity, the system must explicitly confirm whether the new quantity:
+
+- joins an existing Quantity Flow,
+- creates a separate Quantity Flow,
+- represents Rework,
+- represents Modify.
+
+The system must never infer this from PN identity alone.
 
 ---
 
@@ -1242,23 +1214,24 @@ Rules:
 
 The normal workflow is keyboard- and scanner-first.
 
-1. The Scan Station is bound to one Area (selected through the Station Selector, §21).
-2. The operator scans a barcode (PN or Worker; a Machine barcode is a one-shot assignment shortcut).
+1. The Scan Station is bound to one Area.
+2. The operator scans a barcode.
 3. The system identifies barcode type.
 4. The system validates entity state and scan context.
-5. The system resolves PN, source quantity, Operation, and Machine context; the quantity source is always explicit — with more than one valid source Area or QuantityFlow, the user selects exactly one (sources are never combined silently).
-6. The system requests quantity only when necessary (transfer and assignment default to the available MAX; quantity additions have no default and no MAX).
-7. The system requests confirmation only when ambiguity or deviation exists; every completed action shows its summary before Confirm.
+5. The system resolves PN, source quantity, Operation, and Machine context.
+6. The system requests quantity only when necessary.
+7. The system requests confirmation only when ambiguity or deviation exists.
 8. The system records an immutable Movement.
 9. The system derives the new production state.
 10. The Area view and dashboards refresh immediately.
-11. Barcode input regains focus and the temporary dialog context is cleared — nothing stays armed.
+11. Barcode input regains focus.
 
-Scan Station actions are **one-shot**:
+For multi-machine Areas:
 
-- **Machine-first:** scanning a Machine barcode opens a one-shot assignment dialog with the Machine preselected; the operator selects or scans the PN, enters the quantity (MAX default), reviews the summary, and confirms. It never creates a sticky Machine Session.
-- **PN-first:** scanning a PN barcode opens the applicable one-shot dialog — intake when the PN has no active demand (§14), source-explicit transfer when the quantity is elsewhere, or an action dialog with only the currently valid choices (assign queued quantity, receive more, add quantity, Repair, Scrap) when the PN already has quantity in the Area.
-- Completing or cancelling a dialog clears the pending context; Cancel always means no write.
+1. Scan PN.
+2. Scan Machine.
+3. Scan order may be reversed.
+4. Once both valid inputs are available, assign the selected quantity.
 
 The system must clearly reject, with no write:
 
@@ -1280,7 +1253,7 @@ A scan is successful only after the server confirms the recorded write. Connecti
 
 ## Scan Station Persistence
 
-A Scan Station's identity and its binding to one Area are stable application and infrastructure configuration. The Scan Station UI is addressed per station (`/scan-station/<station-id>`); the bare Scan Station route shows a Station Selector and never auto-selects or silently substitutes a station. A database table such as `scan_stations` is permitted; Scan Station configuration is not required to be a core domain aggregate.
+A Scan Station's identity and its binding to one Area are stable application and infrastructure configuration. A database table such as `scan_stations` is permitted; Scan Station configuration is not required to be a core domain aggregate.
 
 ScanSession remains temporary context. Neither Scan Station configuration nor ScanSession is the source of truth for production state — that remains the immutable Part Movement history. Part Movement records the stable station identity (`station_id`) for audit.
 
@@ -1300,10 +1273,6 @@ Instead, the system must:
 - record Worker and timestamp,
 - require a reason when configured.
 
-Undo targets the most recent eligible **completed PN operation** and always shows a summary confirmation first (PN, original action, quantity, source and destination, Machine where applicable, Worker, timestamp, and the effect of the reversal); Cancel performs no write. After a confirmed Undo the “last scanned PN” context advances to the next eligible previous operation; Undo disables when nothing is eligible.
-
-Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records, the reversal compensates the whole command rather than blindly reversing one arbitrary row.
-
 Operators may undo only recent eligible actions when authorized.
 
 Managers and Admins may perform broader corrections.
@@ -1314,17 +1283,9 @@ All corrections must remain auditable.
 
 # 17. Production Routing
 
-Every Quantity Flow has a route mode (§7 Route and Route Mode): `FLOATING` by default, `PLANNED` when guidance is wanted.
+A Route describes the expected manufacturing path of a Quantity Flow.
 
-## Floating Route (default)
-
-A Floating Route has no predefined sequence and no AssignedRoute snapshot. The actual route is **derived from immutable Movement history**: each visited Area extends the observed trace, repeated Areas are preserved (including Repair returns), different Quantity Flows of the same PN may have different traces, and split flows continue independently. Tracking derives and displays the Floating Route trace from Movement history; no second mutable route history duplicates PartMovement.
-
-## Planned Route
-
-A Planned Route describes the expected manufacturing path of a Quantity Flow.
-
-Planned Routes provide planning and tracking guidance.
+Routes provide planning and tracking guidance.
 
 They do not override actual Movement history.
 
@@ -1361,7 +1322,7 @@ Material
 
 ## Assigned Route
 
-When production of a `PLANNED` flow begins, a Route snapshot is assigned to the Quantity Flow. Floating flows have no Assigned Route.
+When production begins, a Route snapshot is assigned to a Quantity Flow.
 
 Rules:
 
@@ -1375,7 +1336,7 @@ Rules:
 
 ## Route Deviation
 
-Route deviation applies to Planned Routes only (a Floating Route has no expectation to deviate from). When quantity reaches an unexpected Area:
+When quantity reaches an unexpected Area:
 
 1. Warn the operator.
 2. Require confirmation when configured.
@@ -1479,7 +1440,7 @@ When complete:
 
 ---
 
-# 19. Worker Sessions
+# 19. Worker and Machine Sessions
 
 Worker identification is configurable per Area.
 
@@ -1493,12 +1454,15 @@ When Worker scanning is enabled:
 
 - scanning a Worker barcode activates that Worker,
 - subsequent scans use the active Worker,
-- a Worker scan never replaces the last-scanned-PN context,
 - the session ends when another Worker signs in, the Worker signs out, or the session expires.
 
-Worker identity is accountability metadata and must never determine business correctness.
+For Machine selection:
 
-There is **no Machine session** of any kind: Machine selection is always part of a one-shot assignment action (§12, §15). The active Worker must always be visible on the Scan Station.
+- Areas without Machines require no Machine session.
+- Areas configured for direct single-Machine assignment may auto-select the Machine.
+- Areas requiring Machine selection retain the active Machine until changed, cleared, or expired.
+
+The active Worker and Machine must always be visible on the Scan Station.
 
 Session state reduces repetitive scanning but must never replace persistent Movement history.
 
@@ -1521,7 +1485,7 @@ Administrator capabilities include:
 - manage barcode configuration,
 - manage Route Templates,
 - manage scan behavior,
-- manage Worker session policies,
+- manage Worker and Machine session policies,
 - manage correction permissions,
 - edit Work Order Demand,
 - edit Work Order Allocation,
@@ -1570,26 +1534,26 @@ Operators must never directly rewrite historical data.
 
 ## Scan Station
 
-The Scan Station is a fixed production interface assigned to one Area. Stations are addressed per URL: the bare Scan Station route shows a Station Selector (Station ID, Department, Area, supported Operations, whether the Area has Machines) and never auto-redirects; an unknown or inactive Station ID is an explicit error, never a silent fallback. The Station ID stays a faint footer caption that is subtly clickable for switching stations (an unobtrusive maintenance affordance, not a promoted operator workflow).
+The Scan Station is a fixed production interface assigned to one Area.
 
 Requirements:
 
 - one-screen normal workflow,
 - no normal navigation,
-- large focused barcode input directly under the header, spanning the full width (PN and Worker barcodes; Machine barcode only as a one-shot assignment shortcut; no Action barcodes),
+- large focused barcode input,
 - automatic input refocus,
 - immediate validation feedback,
-- visible Department, Area identity/color, and Operations,
-- visible Area statistics in the header (Areas with Machines: Total PNs, Total pcs, Queued, On machines, Hot; Areas without Machines: only meaningful values such as Total PNs, Total pcs, Processing, Hot — no zero-value noise),
+- visible Department, Area, and Operations,
+- visible selected Machine,
 - visible active Worker,
-- visible last scanned PN inside the scan card, with the Undo action anchored at its right edge (only completed PN operations become the last scanned PN; Worker scans and cancelled dialogs never replace it),
+- visible pending scan context,
+- visible last scanned PN,
 - quantity entry only when required,
-- current Area quantity in the shared Area/Machine monitoring layout (§ Area Board) — the `In this Area now` card left, Machine cards in a right-side grid that wraps within itself; no Machine region for Areas without Machines,
-- separate queued and Machine-assigned quantity (Areas with Machines) or a direct processing group (Areas without Machines),
-- authorized Undo with a summary confirmation (§16),
-- manual entry fallback accepting any non-empty PN value.
-
-There is no persistent Machine Session, no pending armed context, and no Recent Scans list.
+- recent scan history,
+- current Area quantity,
+- separate queued and Machine-assigned quantity,
+- authorized Undo,
+- manual entry fallback.
 
 ---
 
@@ -1608,8 +1572,6 @@ Requirements:
 - Area color display,
 - distributed PN quantity display,
 - time in current Area or Machine shown per distributed quantity,
-- clear scrapped/damaged quantity visibility without making the board unreadable,
-- a blank external Work Order Number rendered as `—`,
 - Part Number rendered on a single line.
 
 Suggested columns:
@@ -1631,7 +1593,7 @@ Time in location may be highlighted when it exceeds the expected duration of the
 
 ## Area Board
 
-The Area Board provides a focused view of production currently owned by one Area. Its per-Area detail uses the same shared Area/Machine monitoring layout and presentation components as the Scan Station (`In this Area now` summary card left, Machine monitoring cards in the right-side grid; the summary card spans the full width for Areas without Machines) — read-only, without the Scan Station action buttons, and without visual drift between the two views.
+The Area Board provides a focused view of production currently owned by one Area.
 
 It should show:
 
@@ -1645,7 +1607,6 @@ It should show:
 - due dates,
 - priority,
 - time in Area,
-- scrapped quantity in the PN summaries,
 - search and sorting.
 
 ---
@@ -1698,23 +1659,21 @@ The selected PN view must show:
 - remaining shortage by Work Order,
 - current quantity by Area,
 - current Machine assignments,
-- Quantity Flows with their route mode,
-- Planned Routes and Floating actual route traces,
+- Quantity Flows,
+- assigned Routes,
 - actual Movement history,
-- scrap history and cumulative scrapped quantity,
 - time in each Area,
 - stocked quantity,
 - Allocation history,
-- correction history,
-- the `(archived)` marker on archived/soft-deleted PNs (original PN text preserved),
-- a blank external Work Order Number as `—`.
+- correction history.
 
-Route visualization supports both modes. For Planned Routes it must distinguish completed, active, queued, and future steps plus deviations. For Floating Routes it derives the actual trace from Movement history, shows repeated Areas, shows split flows independently, and marks Repair transfers explicitly, for example:
+Route visualization must distinguish:
 
-```text
-A → B → C → D → B
-                ⟲ REPAIR
-```
+- completed steps,
+- active steps,
+- queued steps,
+- future steps,
+- deviations.
 
 It must not imply that the entire PN is at one Route Step.
 
@@ -1730,11 +1689,11 @@ The view must support the minimum confirmed workflow:
 2. Add or update one or more Work Order Demand records.
 3. Locate or create the PartNumber.
 4. Create the PN barcode when the PN is new.
-5. Enter: Work Order Number (optional — a blank number is saved as NULL on an internal Work Order and displays as `—`, §7 Work Order), received date (defaults to the current date), PN (any non-empty PN text — created on first use, §8.1), Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
+5. Enter: Work Order Number (optional — a blank number generates a temporary internal Work Order Number on confirmed save, §7 Work Order), received date (defaults to the current date), PN, Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
 6. Save business demand without automatically creating production quantity.
 7. Provide a separate explicit `Release to production` action following the release steps in §12.
 
-On production release the view must confirm release quantity, Route Mode (Floating by default; a Route only for Planned), and the configured starting Area and Operation, and show the resulting Quantity Flow, route mode, Area, quantity, and `RECEIVED` Movement.
+On production release the view must confirm release quantity, Route, and the configured starting Area and Operation, and show the resulting Quantity Flow, Route, Area, quantity, and `RECEIVED` Movement.
 
 If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
 
@@ -1772,7 +1731,6 @@ Administration includes:
 - Operations,
 - Machines,
 - Workers,
-- PartNumber maintenance (archive/soft-delete, separate explicit purge — §28 Administrative Archival and Purge),
 - users,
 - roles,
 - permissions,
@@ -1780,10 +1738,10 @@ Administration includes:
 - barcode configuration,
 - scan behavior,
 - Worker policies,
-- history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
+- Machine assignment policies,
 - application settings.
 
-Administrative workflows must remain separate from normal production scanning; retention settings belong in Administration/configuration, never in production workflow logic.
+Administrative workflows must remain separate from normal production scanning.
 
 ---
 
@@ -1812,6 +1770,7 @@ Department configuration may define:
 - terminal Area,
 - scan behavior,
 - Worker requirements,
+- Machine assignment behavior,
 - display settings.
 
 ---
@@ -1831,7 +1790,7 @@ Rules:
 - PN and Work Order Number formats must never be assumed.
 - Production history is owned by PartFlow.
 - ERP changes must not erase local Movement history.
-- Modify intake and Repair movements remain valid PartFlow concepts even when ERP does not model them.
+- Rework and Modify remain valid PartFlow concepts even when ERP does not model them.
 
 ---
 
@@ -1879,8 +1838,8 @@ A scan transaction may include:
 1. Parse barcode.
 2. Validate entity state.
 3. Validate permission.
-4. Resolve ScanSession context (Worker) and the one-shot dialog input.
-5. Resolve source Quantity Flow (explicitly selected when several are valid).
+4. Resolve ScanSession context.
+5. Resolve source Quantity Flow.
 6. Validate available quantity.
 7. Validate Area, Operation, Machine, and Route.
 8. Record Movement.
@@ -1962,15 +1921,12 @@ The system must preserve a complete audit trail for:
 - Stockroom completion,
 - Work Order Allocation,
 - Allocation corrections,
-- quantity adjustments (including auditable quantity additions),
-- Repair movements,
-- Scrap operations,
+- quantity adjustments,
 - Undo,
 - Worker Sessions,
-- administrative configuration changes,
-- administrative archival and purge operations (who, when, scope, reason).
+- administrative configuration changes.
 
-Historical production records never disappear through normal application workflows — normal production runtime is append-only (**immutable during production runtime**).
+Historical production records must never disappear.
 
 Database constraints should enforce, whenever practical:
 
@@ -1985,30 +1941,6 @@ Database constraints should enforce, whenever practical:
 
 ---
 
-## Administrative Archival and Purge
-
-Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment** (**explicit Admin archival/purge maintenance**). Archival is always preferred over destructive deletion.
-
-**PartNumber archival/deletion.** Admin may remove junk or test PartNumber records:
-
-- the default administrative “delete” archives (soft-deletes) the PN;
-- archived PartNumbers disappear from normal active lookup and intake;
-- historical displays retain the original PN text; references display the PN with a clear `(archived)` or `(deleted)` marker;
-- no cascading delete may destroy unrelated tracking history; a PN text snapshot is stored or preserved where required for historical rendering;
-- archived records remain available to Admin history/audit tools;
-- a physical purge may exist as a separate, explicitly named maintenance operation — never as the normal delete button.
-
-**History archival and purge.** Admin may archive or purge history in every environment through explicit maintenance workflows, triggered by an Admin-configured periodic retention policy, an Admin-configured maximum data-size threshold, or a manual Admin request. Rules:
-
-- normal application workflows cannot delete history;
-- maintenance operations require explicit Admin authorization, show a scope/impact preview before execution, require a reason, and record who initiated the operation and when;
-- archive is the default and preferred behavior; physical purge is separate and more explicit;
-- the operation never silently cascades into active production state — active quantity and current projections must remain reconcilable;
-- archived history remains queryable through an Admin archive view or export path where practical;
-- retention settings live in Administration/configuration, not in production workflow logic.
-
----
-
 # 29. Initial Scope
 
 The initial release should support:
@@ -2019,9 +1951,8 @@ The initial release should support:
 - manual Work Order entry,
 - file-based Work Order import,
 - Work Order Demand,
-- Modify intake,
-- explicit Repair movements,
-- Scrap,
+- Rework,
+- Modify,
 - Areas,
 - multiple Operations per Area,
 - optional Machines,
@@ -2091,10 +2022,9 @@ Do not introduce these responsibilities without an explicit project decision.
 Only the following unresolved decisions remain:
 
 1. Whether stocked quantity may be returned to active production through a controlled reversal.
-2. The exact expiration rules for Worker sessions.
-3. Whether offline scan synchronization will be included in a later release.
-
-(The former scrap question is resolved: `SCRAPPED` is a first-class Movement type, §8.11/§11. Machine sessions no longer exist, so no expiration rule applies to them.)
+2. Whether scrap and rejected quantity are first-class Movement types in the initial release.
+3. The exact expiration rules for Worker and Machine sessions.
+4. Whether offline scan synchronization will be included in a later release.
 
 Implementations must avoid assumptions that make these decisions difficult to change.
 
@@ -2108,8 +2038,8 @@ Every future feature must reinforce these principles:
 - Track physical quantity, not individual pieces.
 - Keep Work Order Demand separate from production Movement.
 - Keep Work Order Allocation separate from production Movement.
-- Default to Floating Routes; assign Planned Route snapshots only where guidance is wanted.
-- Derive current production state — and Floating Route traces — from immutable Movement history.
+- Assign Routes to Quantity Flows.
+- Derive current production state from immutable Movement history.
 - Preserve quantity integrity.
 - Prefer scanner-first workflows.
 - Minimize operator interaction.

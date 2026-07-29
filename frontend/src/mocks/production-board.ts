@@ -21,6 +21,7 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       { area: 'lathe', label: 'Lathe', qty: 2, tag: 'queue', time: '1h 10m' },
     ],
     total: 10,
+    scrapped: 1,
     jobs: [
       { job: '18112', meta: '· WO 007001 · 10 pcs' },
       { job: '18240', meta: '· WO 007008 · 5 pcs queued' },
@@ -45,6 +46,7 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       },
     ],
     total: 20,
+    scrapped: 2,
     jobs: [{ job: '18031', meta: '· WO 007005 · 20 pcs' }],
     due: '2026-07-16',
     dueNote: 'overdue 6 days',
@@ -97,7 +99,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     total: 6,
     jobs: [
       { job: '18102', meta: '· WO 007002 · 6 pcs' },
-      { job: '—', meta: '· TMP-20260718-0910-REWORK · 1 pc' },
+      // Internal MODIFY demand without an external WO Number → `—`.
+      { job: '—', meta: '· WO — · MODIFY · 1 pc' },
     ],
     due: '2026-08-07',
     dueNote: '16 days left',

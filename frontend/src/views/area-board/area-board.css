@@ -1,418 +1,308 @@
 /* Area Board — All Areas overview + per-Area detail (GUI_DESIGN §6). */
 .ab {
-  background: var(--bg);
-  color: var(--text);
-  padding: 20px 26px;
-  min-height: calc(100vh - 105px);
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px 26px;
+    min-height: calc(100vh - 105px);
 }
 
 .ab-tabs {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
 }
 
 .ab-tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 17px;
-  min-height: var(--touch-min);
-  border-radius: 11px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 17px;
+    min-height: var(--touch-min);
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--muted);
 }
 
 .ab-tab .cnt {
-  font-family: var(--mono), monospace;
-  font-size: 12px;
-  background: var(--panel2);
-  border-radius: 12px;
-  padding: 1px 8px;
+    font-family: var(--mono), monospace;
+    font-size: 12px;
+    background: var(--panel2);
+    border-radius: 12px;
+    padding: 1px 8px;
 }
 
 .ab-tab.active {
-  color: var(--text);
-  background: var(--info-surface);
-  border-color: var(--info-t);
+    color: var(--text);
+    background: var(--info-surface);
+    border-color: var(--info-t);
 }
 
 .ab-tab.all {
-  font-weight: 800;
+    font-weight: 800;
 }
 
 .ab-tab.all::before {
-  content: '⊞';
-  font-size: 14px;
-  color: var(--info-t);
+    content: '⊞';
+    font-size: 14px;
+    color: var(--info-t);
 }
 
 .ab-tools {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-  align-items: center;
-  flex-wrap: wrap;
+    display: flex;
+    gap: 10px;
+    margin-bottom: 16px;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 .ab-tools input {
-  flex: 1;
-  max-width: 380px;
-  min-width: 220px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  color: var(--text);
-  font-size: 15px;
-  padding: 11px 15px;
-  outline: none;
-  min-height: var(--touch-min);
+    flex: 1;
+    max-width: 380px;
+    min-width: 220px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    color: var(--text);
+    font-size: 15px;
+    padding: 11px 15px;
+    outline: none;
+    min-height: var(--touch-min);
 }
 
 .ab-tools input:focus {
-  border-color: var(--info-t);
+    border-color: var(--info-t);
 }
 
 .ab-tools select {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  color: var(--muted);
-  font-size: 14px;
-  padding: 11px 12px;
-  min-height: var(--touch-min);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    color: var(--muted);
+    font-size: 14px;
+    padding: 11px 12px;
+    min-height: var(--touch-min);
 }
 
 .ab-meta {
-  margin-left: auto;
-  font-size: 13px;
-  color: var(--faint);
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--faint);
 }
 
 .ab-meta b {
-  color: var(--muted);
+    color: var(--muted);
 }
 
 /* Per-Area detail — Area summary card + one card per Machine */
-.abd-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 15px;
-  align-items: start;
-}
-
-.abd-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: var(--shadow);
-}
-
-.abd-card .mhead {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.abd-card .mname {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 18px;
-  font-weight: 800;
-}
-
-.abd-summary {
-  border-top: 4px solid var(--acol, var(--faint));
-}
-
-.abd-summary .mc-ops {
-  margin-top: 0;
-  margin-left: auto;
-}
-
-.abd-desc {
-  padding: 8px 16px;
-  font-size: 12.5px;
-  color: var(--faint);
-  border-bottom: 1px solid var(--border);
-}
-
-.abd-grp {
-  padding: 10px 16px 4px;
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: var(--faint);
-  border-top: 1px solid var(--border);
-}
-
-/* Machine monitoring cards */
-.abd-machine .mstat {
-  margin-left: auto;
-  font-size: 11.5px;
-  font-weight: 750;
-  padding: 3px 10px;
-  border-radius: 20px;
-}
-
-.abd-machine .mstat.running {
-  background: var(--success-surface);
-  color: var(--ok-t);
-}
-
-.abd-machine .mstat.idle {
-  background: var(--chip);
-  color: var(--muted);
-}
-
-.abd-machine .mstat.maintenance {
-  background: var(--warning-surface);
-  color: var(--warn-t);
-}
-
-.abd-machine .mtotals {
-  padding: 9px 16px;
-  font-size: 13px;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-}
-
-.abd-machine .mtotals b {
-  font-family: var(--mono), monospace;
-  color: var(--text);
-}
-
-/* An inactive/maintenance Machine stays visually distinct. */
-.abd-machine.maintenance {
-  border-style: dashed;
-  border-color: var(--warn-t);
-  opacity: 0.85;
-}
-
-.abd-machine.idle .mtotals {
-  color: var(--faint);
-}
-
-.abd-machine .mempty {
-  padding: 24px 16px;
-  color: var(--faint);
-  font-size: 13px;
-  text-align: center;
-  font-style: italic;
-}
-
 /* All Areas overview — one column per Area, horizontal scroll (§6.2) */
 .ms-scroll {
-  display: flex;
-  gap: 15px;
-  overflow-x: auto;
-  padding-bottom: 14px;
-  align-items: flex-start;
+    display: flex;
+    gap: 15px;
+    overflow-x: auto;
+    padding-bottom: 14px;
+    align-items: flex-start;
 }
 
 .ms-col {
-  flex: 0 0 330px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: var(--shadow);
+    flex: 0 0 330px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow);
 }
 
 .ms-col .mc-head {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
-  border-top: 4px solid var(--acol, var(--faint));
-  transition: background 0.12s;
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    border-top: 4px solid var(--acol, var(--faint));
+    transition: background 0.12s;
 }
 
 .ms-col .mc-head:hover {
-  background: var(--panel2);
+    background: var(--panel2);
 }
 
 .ms-col .mc-title {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 18px;
-  font-weight: 800;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 18px;
+    font-weight: 800;
 }
 
 .ms-col .mc-title .areadot {
-  width: 12px;
-  height: 12px;
-  border-radius: 4px;
+    width: 12px;
+    height: 12px;
+    border-radius: 4px;
 }
 
 .ms-col .mc-title .go {
-  margin-left: auto;
-  font-size: 13px;
-  color: var(--faint);
-  font-weight: 650;
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--faint);
+    font-weight: 650;
 }
 
 .ms-col .mc-head:hover .go {
-  color: var(--info-t);
+    color: var(--info-t);
 }
 
 .ms-col .mc-desc {
-  font-size: 12px;
-  color: var(--faint);
-  margin-top: 3px;
+    font-size: 12px;
+    color: var(--faint);
+    margin-top: 3px;
 }
 
 .ab .mc-ops {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 9px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 9px;
 }
 
 .ab .opchip {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
 }
 
 .ab .mc-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    border-bottom: 1px solid var(--border);
 }
 
 .ab .stat {
-  padding: 10px 8px;
-  text-align: center;
-  border-right: 1px solid var(--border);
+    padding: 10px 8px;
+    text-align: center;
+    border-right: 1px solid var(--border);
 }
 
 .ab .stat:last-child {
-  border-right: none;
+    border-right: none;
 }
 
 .ab .stat .n {
-  font-family: var(--mono), monospace;
-  font-size: 21px;
-  font-weight: 800;
+    font-family: var(--mono), monospace;
+    font-size: 21px;
+    font-weight: 800;
 }
 
 .ab .stat .n.q {
-  color: var(--warn-t);
+    color: var(--warn-t);
 }
 
 .ab .stat .n.m {
-  color: var(--info-t);
+    color: var(--info-t);
 }
 
 .ab .stat .l {
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--faint);
-  margin-top: 2px;
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin-top: 2px;
 }
 
 .ab .mc-list {
-  list-style: none;
+    list-style: none;
 }
 
 .ab .mc-list li {
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--panel2);
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--panel2);
 }
 
 .ab .mc-list li:last-child {
-  border-bottom: none;
+    border-bottom: none;
 }
 
 .ab .mc-list .r1 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 /* PN truncates; qty stays put (§6.2 + §2.3 amendment) */
 .ab .mc-list .p {
-  font-family: var(--mono), monospace;
-  font-size: 14.5px;
-  font-weight: 750;
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+    font-family: var(--mono), monospace;
+    font-size: 14.5px;
+    font-weight: 750;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .ab .mc-list .q {
-  font-family: var(--mono), monospace;
-  font-size: 16px;
-  font-weight: 800;
-  color: var(--info-t);
+    font-family: var(--mono), monospace;
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--info-t);
 }
 
 .ab .mc-list .r2 {
-  display: flex;
-  gap: 10px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 3px;
-  flex-wrap: wrap;
+    display: flex;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 3px;
+    flex-wrap: wrap;
 }
 
 .ab .mc-list .r2 .late {
-  color: var(--err-t);
-  font-weight: 700;
+    color: var(--err-t);
+    font-weight: 700;
 }
 
 .ab .mc-list .r2 .soon {
-  color: var(--warn-t);
-  font-weight: 700;
+    color: var(--warn-t);
+    font-weight: 700;
 }
 
 .ab .mc-list .r2 .mono {
-  font-size: 11.5px;
+    font-size: 11.5px;
 }
 
 .ab .empty {
-  padding: 22px 16px;
-  color: var(--faint);
-  font-size: 13px;
-  text-align: center;
+    padding: 22px 16px;
+    color: var(--faint);
+    font-size: 13px;
+    text-align: center;
 }
 
 /* Machine/queue context chip inside compact list rows */
 .ab .mc-list .ctx {
-  flex: none;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1px 7px;
+    flex: none;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1px 7px;
 }
 
 .ab .stat .n.h {
-  color: var(--err-t);
+    color: var(--err-t);
 }
 
-.abd-summary .mc-stats {
-  grid-template-columns: repeat(5, 1fr);
+.ab .mc-list .r2 .scraptxt {
+    color: var(--err-t);
+    font-weight: 700;
 }

@@ -3,6 +3,11 @@ import './area-board.css';
 import { useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
+import {
+  AreaMachineLayout,
+  AreaSummaryCard,
+  MachineMonitoringCard,
+} from '../../components/area-monitoring';
 import { AreaDot, HotPn } from '../../components/indicators';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
@@ -11,8 +16,9 @@ import {
   MOCK_AREA_MACHINES,
 } from '../../mocks/area-board';
 import { MOCK_AREAS } from '../../mocks/areas';
+import { isQueueContext, splitAssignments } from '../area-monitoring';
 import { compareDemandOrder } from '../demand-order';
-import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
+import type { MockArea, MockAreaCard } from '../view-models';
 
 type SortKey = 'due' | 'prio' | 'tia' | 'qty';
 
@@ -61,38 +67,6 @@ function dueIso(card: MockAreaCard): string | null {
 function matches(card: MockAreaCard, query: string): boolean {
   if (!query) return true;
   return (card.pn + card.workOrder + card.job).toLowerCase().includes(query);
-}
-
-const isQueueContext = (name: string) => name === 'queue' || name === 'vendor';
-
-interface Assignment {
-  card: MockAreaCard;
-  context: string;
-  qty: number;
-}
-
-/**
- * Split each card's quantity into Machine assignments and queue
- * portions. Every piece appears exactly once — quantities are never
- * duplicated or lost by the grouping.
- */
-function splitAssignments(cards: MockAreaCard[]): {
-  assigned: Assignment[];
-  queued: Assignment[];
-} {
-  const assigned: Assignment[] = [];
-  const queued: Assignment[] = [];
-  for (const card of cards) {
-    if (card.machines.length === 0) {
-      queued.push({ card, context: '—', qty: card.qty });
-      continue;
-    }
-    for (const [context, qty] of card.machines) {
-      if (isQueueContext(context)) queued.push({ card, context, qty });
-      else assigned.push({ card, context, qty });
-    }
-  }
-  return { assigned, queued };
 }
 
 // One view, two modes behind a single tab strip: the All Areas overview
@@ -224,6 +198,7 @@ function AllAreasOverview({
     <div className="ms-scroll">
       {MOCK_AREAS.map((area) => {
         const areaCards = cards.filter((c) => c.area === area.key);
+        const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;
         const total = areaCards.reduce((s, c) => s + c.qty, 0);
         const queued = areaCards.reduce(
           (s, c) =>
@@ -269,15 +244,11 @@ function AllAreasOverview({
                     <div className="l">Stocked pcs</div>
                   </div>
                   <div className="stat">
-                    <div className="n q">—</div>
-                    <div className="l">Queued</div>
-                  </div>
-                  <div className="stat">
-                    <div className="n m">—</div>
-                    <div className="l">On machines</div>
+                    <div className="n">{areaCards.length}</div>
+                    <div className="l">PNs</div>
                   </div>
                 </>
-              ) : (
+              ) : hasMachines ? (
                 <>
                   <div className="stat">
                     <div className="n">{total}</div>
@@ -292,6 +263,18 @@ function AllAreasOverview({
                       {onMachines > 0 ? onMachines : '—'}
                     </div>
                     <div className="l">On machines</div>
+                  </div>
+                </>
+              ) : (
+                // No Machines: no meaningless queue/Machine zeros.
+                <>
+                  <div className="stat">
+                    <div className="n">{total}</div>
+                    <div className="l">Total pcs</div>
+                  </div>
+                  <div className="stat">
+                    <div className="n m">{total > 0 ? total : '—'}</div>
+                    <div className="l">Processing</div>
                   </div>
                 </>
               )}
@@ -323,6 +306,9 @@ function AllAreasOverview({
                       {c.timeInArea !== '—' ? (
                         <span className="mono">{c.timeInArea} in Area</span>
                       ) : null}
+                      {c.scrapped ? (
+                        <span className="scraptxt">{c.scrapped} scrapped</span>
+                      ) : null}
                     </div>
                   </li>
                 ))}
@@ -337,79 +323,12 @@ function AllAreasOverview({
   );
 }
 
-function AssignmentList({ entries }: { entries: Assignment[] }) {
-  return (
-    <ul className="mc-list">
-      {entries.map(({ card, context, qty }) => (
-        <li key={`${card.pn}-${card.workOrder}-${context}`}>
-          <div className="r1">
-            <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
-            {context !== '—' ? <span className="ctx">{context}</span> : null}
-            <span className="q">{qty}</span>
-          </div>
-          <div className="r2">
-            <span className="mono">
-              {card.workOrder.split(' ·')[0]} · {card.job}
-            </span>
-            <span
-              className={`mono ${card.dueClass === 'ok' ? '' : card.dueClass}`}
-            >
-              {card.due}
-            </span>
-            {card.timeInArea !== '—' ? (
-              <span className="mono">{card.timeInArea} in Area</span>
-            ) : null}
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-const MACHINE_STATUS_LABEL: Record<MockAreaMachine['status'], string> = {
-  running: 'running',
-  idle: 'idle',
-  maintenance: 'maintenance',
-};
-
-function MachineCard({
-  machine,
-  entries,
-}: {
-  machine: MockAreaMachine;
-  entries: Assignment[];
-}) {
-  const totalQty = entries.reduce((s, e) => s + e.qty, 0);
-  return (
-    <div className={`abd-card abd-machine ${machine.status}`}>
-      <div className="mhead">
-        <span className="mname">{machine.name}</span>
-        <span className={`mstat ${machine.status}`}>
-          {MACHINE_STATUS_LABEL[machine.status]}
-        </span>
-      </div>
-      <div className="mtotals">
-        <b>{totalQty}</b> pcs assigned · <b>{entries.length}</b> PN
-        {entries.length === 1 ? '' : 's'}
-      </div>
-      {entries.length ? (
-        <AssignmentList entries={entries} />
-      ) : (
-        <div className="mempty">
-          {machine.status === 'maintenance'
-            ? 'Under maintenance — accepts no production'
-            : 'No production assigned'}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
- * Per-Area detail: first an Area summary card (statistics + a compact
- * grouped PN list in the All Areas visual language), then one
- * monitoring card per Machine belonging to the Area. Areas without
- * Machines render only the summary card.
+ * Per-Area detail — the shared Area/Machine monitoring layout:
+ * `[ In this Area now | Machine cards grid ]`. Area Board stays
+ * read-only: no Scan Station action buttons are passed to the shared
+ * components. Areas without Machines render only the full-width Area
+ * summary card.
  */
 function AreaDetail({
   area,
@@ -420,85 +339,25 @@ function AreaDetail({
 }) {
   if (!area) return null;
   const machines = MOCK_AREA_MACHINES[area.key] ?? [];
-  const { assigned, queued } = splitAssignments(cards);
-  const totalQty = cards.reduce((s, c) => s + c.qty, 0);
-  const queuedQty = queued.reduce((s, e) => s + e.qty, 0);
-  const machineQty = assigned.reduce((s, e) => s + e.qty, 0);
-  const hotCount = cards.filter((c) => c.hotRank !== undefined).length;
+  const { assigned } = splitAssignments(cards);
 
   return (
-    <div className="abd-grid">
-      <div
-        className="abd-card abd-summary"
-        style={{ ['--acol' as string]: area.colorVar }}
-      >
-        <div className="mhead">
-          <span className="mname">
-            <AreaDot colorVar={area.colorVar} size={12} /> {area.name}
-          </span>
-          <span className="mc-ops">
-            {area.operations.map((op) => (
-              <span className="opchip" key={op}>
-                {op}
-              </span>
-            ))}
-          </span>
-        </div>
-        <div className="abd-desc">{area.description}</div>
-        <div className="mc-stats">
-          <div className="stat">
-            <div className="n">{cards.length}</div>
-            <div className="l">PNs</div>
-          </div>
-          <div className="stat">
-            <div className="n">{totalQty}</div>
-            <div className="l">
-              {area.terminal ? 'Stocked pcs' : 'Total pcs'}
-            </div>
-          </div>
-          <div className="stat">
-            <div className="n q">{area.terminal ? '—' : queuedQty}</div>
-            <div className="l">Queued</div>
-          </div>
-          <div className="stat">
-            <div className="n m">
-              {area.terminal || machineQty === 0 ? '—' : machineQty}
-            </div>
-            <div className="l">On machines</div>
-          </div>
-          <div className="stat">
-            <div className="n h">{hotCount || '—'}</div>
-            <div className="l">Hot</div>
-          </div>
-        </div>
-        {cards.length === 0 ? (
-          <div className="empty">No production in {area.name}</div>
-        ) : (
-          <>
-            {assigned.length ? (
-              <>
-                <div className="abd-grp">Assigned to Machines</div>
-                <AssignmentList entries={assigned} />
-              </>
-            ) : null}
-            {queued.length ? (
-              <>
-                <div className="abd-grp">
-                  {area.terminal ? 'Stocked' : 'Area queue — awaiting Machine'}
-                </div>
-                <AssignmentList entries={queued} />
-              </>
-            ) : null}
-          </>
-        )}
-      </div>
-      {machines.map((machine) => (
-        <MachineCard
+    <AreaMachineLayout
+      summary={
+        <AreaSummaryCard
+          area={area}
+          cards={cards}
+          machines={machines}
+          title={`In this Area now — ${area.name}`}
+        />
+      }
+      machineCards={machines.map((machine) => (
+        <MachineMonitoringCard
           key={machine.name}
           machine={machine}
           entries={assigned.filter((e) => e.context === machine.name)}
         />
       ))}
-    </div>
+    />
   );
 }

@@ -4,7 +4,9 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './App';
 
 beforeEach(() => {
-  window.history.replaceState({}, '', '/scan-station');
+  // A concrete station URL: /scan-station itself is the Station
+  // Selector and has no scan input.
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01');
 });
 
 afterEach(() => {
@@ -110,12 +112,9 @@ test('disables production-write controls while disconnected but keeps read-only 
   // Write-oriented controls are disabled.
   expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
   expect(screen.getByRole('button', { name: 'ENTER' })).toBeDisabled();
-  expect(
-    screen.getByRole('button', { name: '⟲ UNDO LAST SCAN' }),
-  ).toBeDisabled();
+  expect(screen.getByRole('button', { name: '⟲ UNDO' })).toBeDisabled();
 
   // Already displayed read-only mock information stays visible.
-  expect(screen.getByText('Recent scans')).toBeInTheDocument();
   expect(screen.getByText('In this Area now')).toBeInTheDocument();
 });
 

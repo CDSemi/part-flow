@@ -1,0 +1,1194 @@
+You are working directly in the current `CDSemi/part-flow` repository.
+
+Implement the following PartFlow domain, documentation, mock UI, routing, interaction, and test changes carefully and consistently.
+
+Do not merely analyze the request. Inspect the current repository first, then make the required changes.
+
+Do not commit or push anything.
+
+## Primary goal
+
+Redesign the PartFlow Scan Station workflow around:
+
+* PN-centric one-shot actions.
+* No persistent Machine Session.
+* Floating Routes as the default.
+* `MODIFY` as internal demand without an external Work Order Number.
+* `REPAIR` as an explicit production movement intent, not a Request Type.
+* Explicit quantity source selection.
+* Auditable quantity additions, scrap, undo, archive, and administrative cleanup.
+* Shared Area/Machine monitoring layouts between Scan Station and Area Board.
+
+The repository is currently Phase 2. Production domain APIs and persistence do not exist yet.
+
+Therefore:
+
+1. Update the canonical documentation and roadmap.
+2. Update the approved mockup and frontend mock interactions.
+3. Update shared view models and tests.
+4. Do not pretend production backend workflows are implemented.
+5. Clearly document future domain and persistence requirements.
+
+---
+
+# 1. Canonical terminology and domain decisions
+
+## 1.1 Request Type
+
+Remove `REWORK` from `RequestType`.
+
+The initial Request Types are now:
+
+```text
+NEW
+MODIFY
+```
+
+`REPAIR` is not a Request Type and does not create new business demand by itself.
+
+Update all documentation, TypeScript types, mock data, filters, dialogs, tests, and stale terminology guards accordingly.
+
+## 1.2 MODIFY
+
+`MODIFY` means physical quantity of a PN is introduced for modification work.
+
+A MODIFY intake may have:
+
+* no external Work Order Number,
+* no predefined Route,
+* no existing active Work Order Demand.
+
+PartFlow must still create the minimum internal records needed for quantity integrity and traceability:
+
+* an internal `WorkOrder`,
+* `work_order_number = NULL`,
+* one `WorkOrderDemand`,
+* a `QuantityFlow`,
+* immutable Movement history.
+
+Do not generate temporary numbers such as:
+
+```text
+TMP-20260721-0940
+TMP-YYYYMMDD-HHMMSS
+```
+
+A Work Order without an external number displays as:
+
+```text
+—
+```
+
+Never persist the display placeholder `—`.
+
+The database design must allow multiple Work Orders with a null external Work Order Number while preserving uniqueness for non-null numbers.
+
+When a scan creates a MODIFY intake:
+
+* `request_type = MODIFY` is the default, not a forced value.
+* `route_mode = FLOATING` is the default, not a forced value.
+* The user may select another valid Request Type or Route Mode before confirming.
+* `received_date` defaults to the scan timestamp.
+* Due date belongs to `WorkOrderDemand`, never `PartNumber`.
+
+If the same PN already has one clearly applicable active blank-number MODIFY Work Order, reuse it.
+
+If multiple blank-number MODIFY Work Orders are plausible, show an explicit selection dialog. Never guess.
+
+## 1.3 REPAIR
+
+Use the correct spelling:
+
+```text
+REPAIR
+```
+
+REPAIR means some or all quantity already in production must return to a previously visited Area to correct work performed earlier.
+
+Example:
+
+```text
+A → B → C → D
+```
+
+Some quantity at D may return to B for repair:
+
+```text
+A → B → C → D → B
+```
+
+Rules:
+
+* REPAIR does not create new physical quantity.
+* REPAIR is not a `WorkOrderDemand`.
+* REPAIR is not a `RequestType`.
+* REPAIR operates on an existing `QuantityFlow`.
+* Partial REPAIR may split a QuantityFlow.
+* Full-flow REPAIR may move the whole QuantityFlow.
+* Actual Movement history remains authoritative.
+* Returning to a previously visited Area must never automatically be assumed to be REPAIR.
+* The user must explicitly choose the Repair intent.
+* A previously visited Area may also legitimately be the next normal production step.
+
+Use a clear UI label such as:
+
+```text
+Send quantity here for repair
+```
+
+Do not use:
+
+```text
+Create REPAIR demand
+```
+
+For future domain design, represent REPAIR as a movement intent/reason associated with a transfer, not as new demand.
+
+Prefer a minimal explicit model such as:
+
+```text
+movement_type = TRANSFERRED
+movement_reason = REPAIR
+```
+
+or an equivalently clear typed design consistent with the existing architecture.
+
+Do not create a large speculative Repair aggregate unless the existing architecture truly requires it.
+
+The Repair workflow must collect:
+
+* source Area / source QuantityFlow,
+* destination repair Area,
+* repair quantity,
+* required reason,
+* affected PN,
+* Worker,
+* Scan Station,
+* timestamp,
+* summary confirmation.
+
+Partial repair depends on QuantityFlow splitting. Update the roadmap dependencies honestly and do not claim backend support before SPLIT exists.
+
+## 1.4 Floating Route
+
+Add an explicit route mode:
+
+```text
+FLOATING
+PLANNED
+```
+
+`FLOATING` is the default.
+
+A Floating Route means:
+
+* no predefined sequence is required,
+* the actual route is derived from immutable Movement history,
+* each visited Area extends the observed route trace,
+* repeated Areas are preserved,
+* different QuantityFlows of the same PN may have different traces,
+* split flows may continue independently.
+
+Suggested shape:
+
+```text
+QuantityFlow
+- route_mode
+- assigned_route_id nullable
+```
+
+Rules:
+
+* `assigned_route_id` is optional for Floating Routes.
+* Do not create a second mutable route history that duplicates PartMovement.
+* Tracking must derive and display the Floating Route from Movement history.
+* Planned Routes remain guidance.
+* Actual Movement always remains authoritative.
+
+Update `SLICE1_DATA_MODEL.md`, because it currently requires every production release to snapshot an AssignedRoute.
+
+Production release must allow a Floating Route without an AssignedRoute.
+
+## 1.5 PartNumber creation and uniqueness
+
+PN values have no guaranteed format.
+
+Barcode format is:
+
+```text
+PF:PN:<part-number>
+```
+
+Examples:
+
+```text
+PF:PN:0455-20-0118-03
+PF:PN:ABC
+PF:PN:abc
+```
+
+Current behavior mapping opaque values such as `PF:PN:1014` to a different PN must be removed.
+
+Parsing rules:
+
+1. Trim scanner terminators and surrounding whitespace.
+2. Require the exact `PF:PN:` prefix for scanned PN barcodes.
+3. Treat the entire non-empty suffix as the PN.
+4. Do not parse PN segments.
+5. Do not validate PN format.
+6. Do not require the PN to exist in a preloaded catalog.
+7. Create the internal `PartNumber` record on first valid use.
+8. Do not call ERP during MVP.
+9. Manual PN entry accepts any non-empty PN value.
+
+Preserve the originally entered PN text for display.
+
+Uniqueness and lookup must be case-insensitive:
+
+```text
+abc
+ABC
+Abc
+```
+
+must resolve to the same PartNumber.
+
+Do not silently change the stored/displayed casing after first creation.
+
+Document and design an appropriate normalized lookup key or case-insensitive unique constraint.
+
+The internal `PartNumber` record is still required for references, tracking, metadata, history, and future ERP mapping. What is removed is the requirement for a pre-populated authoritative PartNumber catalog.
+
+## 1.6 Barcode prefixes
+
+Keep the `PF:` namespace.
+
+Supported logical barcode types include:
+
+```text
+PF:PN:<part-number>
+PF:MACHINE:<stable-id>
+PF:WORKER:<stable-id>
+PF:AREA:<stable-id>
+```
+
+The prefix exists to:
+
+* identify PartFlow-owned barcodes,
+* determine entity type safely,
+* avoid confusing unrelated factory/vendor barcodes with PartFlow entities.
+
+Remove Action barcode workflows such as:
+
+```text
+PF:ACTION:REWORK
+PF:ACTION:MODIFY
+```
+
+Action intent is selected through explicit dialogs, not persistent armed barcode state.
+
+---
+
+# 2. Area ownership and Machine behavior
+
+Simplify Area behavior to exactly two modes.
+
+## 2.1 Area without Machines
+
+An Area with zero Machines:
+
+* has no queue,
+* directly owns and processes received quantity,
+* records the Area and Operation,
+* keeps `Machine = NULL`,
+* shows no placeholder Machine cards,
+* shows no “queued” or “on machines” statistics.
+
+## 2.2 Area with Machines
+
+An Area with one or more Machines always uses:
+
+```text
+QUEUE_AND_ASSIGN
+```
+
+This applies equally to one Machine and multiple Machines.
+
+Rules:
+
+* Newly received quantity enters the Area queue.
+* Quantity is assigned explicitly through a one-shot Machine assignment workflow.
+* Never auto-assign merely because the Area has one Machine.
+* There is no Machine Session.
+* One Machine may hold quantities from multiple PNs.
+* A queued PN row has an `ASSIGN` action.
+* A Machine-assigned PN row has a `QUEUE` action to return quantity to the Area queue.
+
+Remove any configuration or documentation that suggests behavior should differ between one Machine and multiple Machines unless still needed for another confirmed requirement.
+
+---
+
+# 3. Scan Station routing and station selection
+
+Change Scan Station routing from:
+
+```text
+/scan-station
+```
+
+as a fixed station page to:
+
+```text
+/scan-station
+/scan-station/:stationId
+```
+
+Required behavior:
+
+## `/scan-station`
+
+Show a Station Selector.
+
+Do not automatically redirect to any station.
+
+The selector should list active Scan Stations with enough information to distinguish them:
+
+* Station ID,
+* Department,
+* Area,
+* supported Operations,
+* whether the Area has Machines.
+
+## `/scan-station/:stationId`
+
+Load the selected station.
+
+Example:
+
+```text
+/scan-station/LATHE-ST-01
+```
+
+Unknown or inactive Station IDs must show a clear error and must not silently fall back to another station.
+
+The footer keeps the faint Station ID.
+
+Make the Station ID subtly clickable.
+
+Clicking it opens the Station Selector for switching stations.
+
+Switching stations is intentionally unobtrusive and not promoted as a normal operator workflow.
+
+Update:
+
+* router types,
+* route resolution,
+* redirects,
+* navigation behavior,
+* view registry integration,
+* tests,
+* README route table.
+
+Add mock stations for at least:
+
+1. An Area with Machines, such as Lathe.
+2. An Area without Machines, such as External, Deburr, or Cut.
+
+---
+
+# 4. Scan Station layout redesign
+
+## 4.1 Card appearance
+
+Use the same subtle semantic shadow token already used by Management cards:
+
+```css
+box-shadow: var(--shadow);
+```
+
+Do not introduce a separate strong shadow or decorative glow system.
+
+## 4.2 Header
+
+Remove:
+
+* Machine Session pill,
+* Machine status selection strip,
+* persistent active Machine state.
+
+Keep:
+
+* Department,
+* Area identity and Area color,
+* Operations,
+* Worker Session,
+* connectivity state.
+
+Replace Machine Session information with Area statistics.
+
+For Areas with Machines, show:
+
+* Total PNs,
+* Total pcs,
+* Queued,
+* On machines,
+* Hot.
+
+For Areas without Machines, show only meaningful statistics, such as:
+
+* Total PNs,
+* Total pcs,
+* Processing,
+* Hot.
+
+Do not show meaningless queue or Machine counts as zero-value noise.
+
+## 4.3 Scan barcode card
+
+Place the Scan Barcode card immediately under the header.
+
+It spans the full available width.
+
+The main scan input supports:
+
+* PN barcode,
+* Worker barcode,
+* Machine barcode only as a one-shot shortcut.
+
+Do not support Action barcodes.
+
+Update the placeholder and mock hints accordingly.
+
+## 4.4 Last scanned PN and Undo
+
+Keep the Last Scanned PN surface inside the Scan Barcode card.
+
+Move the Undo action into this surface, anchored to the right edge.
+
+Remove the separate Undo card/button.
+
+Remove the Recent Scans list entirely.
+
+Rules:
+
+* Worker scans do not replace Last Scanned PN.
+* Cancelled dialogs do not replace Last Scanned PN.
+* Only completed PN-related actions become Last Scanned PN.
+* Undo must target the most recent eligible completed PN operation.
+* Undo creates compensating/reversal history and never deletes the original action.
+* Before applying Undo, show a clear summary confirmation containing:
+
+  * PN,
+  * original action,
+  * quantity,
+  * source and destination,
+  * Machine if applicable,
+  * Worker,
+  * timestamp,
+  * effect of the reversal.
+* Cancel performs no write.
+* After confirmed Undo, Last Scanned PN advances to the next eligible previous PN operation.
+* If nothing is eligible, disable Undo.
+
+Document that future production Undo should operate on the complete application command, not blindly reverse one arbitrary row when one user action created multiple related Movement records.
+
+## 4.5 Area and Machine monitoring layout
+
+Use this layout on Scan Station:
+
+```text
+[ In this Area now ] [ Machine cards grid                    ]
+[ fixed left col   ] [ Machine 1 ][ Machine 2 ][ Machine 3   ]
+[ grows vertically ] [ Machine 4 ][ Machine 5 ]              ]
+```
+
+Requirements:
+
+* `In this Area now` is the left column.
+* Machine cards occupy only the right-side grid.
+* Machine cards may wrap to additional rows within the right-side grid.
+* Machine cards must never wrap underneath the left Area card.
+* The left card may grow vertically based on its PN list.
+* Use `align-items: start`.
+* At narrow responsive breakpoints, a deliberate single-column fallback is acceptable.
+
+For Areas without Machines:
+
+* render only `In this Area now`,
+* make it span the full width,
+* do not show a blank Machine region.
+
+The `In this Area now` card must:
+
+* use the Area color along its top edge,
+* use the same PN presentation language as Management → Area Board → Area,
+* contain `Assigned to Machines` and `Area queue — awaiting Machine` only when the Area has Machines,
+* use a direct processing group for Areas without Machines.
+
+Each PN row should consistently show, where available:
+
+* Hot indicator/rank,
+* PN,
+* quantity,
+* Machine or queue/direct-processing context,
+* Work Order Number or `—`,
+* Job Number,
+* due status,
+* time in Area,
+* damaged/scrapped quantity,
+* action button where applicable.
+
+Extract and reuse shared presentation components rather than duplicating nearly identical Scan Station and Area Board markup.
+
+Suggested reusable components may include:
+
+```text
+AreaPnRow
+AreaSummaryCard
+MachineMonitoringCard
+DueStatus
+QuantityStatus
+```
+
+Use domain-appropriate names rather than vague `Helper` or `Utility` names.
+
+---
+
+# 5. Apply the same layout to Area Board detail
+
+Change:
+
+```text
+Management → Area Board → <Area>
+```
+
+to use the same structural layout:
+
+```text
+[ In this Area now ] [ Machine cards grid                    ]
+[ fixed left col   ] [ Machine 1 ][ Machine 2 ][ Machine 3   ]
+[ grows vertically ] [ Machine 4 ][ Machine 5 ]              ]
+```
+
+Area Board remains read-only.
+
+Do not add Scan Station action buttons to Area Board.
+
+Requirements:
+
+* same Area summary presentation,
+* same Machine card presentation,
+* same responsive wrapping behavior,
+* no Machine cards for no-Machine Areas,
+* shared reusable components where practical,
+* no visual drift between the two views.
+
+---
+
+# 6. One-shot Scan Station workflows
+
+There is no persistent Machine Session and no persistent PN intent after a dialog completes or is cancelled.
+
+## 6.1 Machine-first scan
+
+Scanning a Machine barcode in the main input acts only as a shortcut:
+
+```text
+Scan Machine
+→ open one-shot Machine assignment dialog
+→ Machine is preselected
+→ scan or manually select PN
+→ enter quantity
+→ review summary
+→ confirm
+→ clear pending context
+```
+
+It never creates a sticky Machine Session.
+
+## 6.2 PN-first scan
+
+Scanning a PN barcode in the main input opens a one-shot PN movement/action dialog.
+
+If the PN already has queued quantity in the current Area, the relevant assignment option should be prominent.
+
+After the workflow completes or is cancelled, clear the temporary PN context.
+
+## 6.3 Worker scan
+
+Worker barcode scanning continues to activate or switch the Worker Session.
+
+Worker Session remains visible.
+
+Worker identity must not determine business correctness.
+
+---
+
+# 7. PN scan resolution cases
+
+## 7.1 PN has no active Work Order Demand
+
+Open an intake flow equivalent to the Work Orders “Add Part” workflow.
+
+Defaults:
+
+```text
+Request Type = MODIFY
+Route Mode = FLOATING
+```
+
+Both remain editable.
+
+The flow must collect or confirm:
+
+* PN,
+* quantity,
+* Request Type,
+* due date,
+* reason/notes where applicable,
+* Route Mode,
+* Planned Route only when `PLANNED`,
+* starting/current Area,
+* Operation when needed.
+
+On confirmation, the future production transaction will:
+
+1. create or reuse the PartNumber,
+2. create or reuse an applicable internal blank-number MODIFY Work Order,
+3. create WorkOrderDemand,
+4. create QuantityFlow,
+5. record the initial Movement,
+6. establish current position,
+7. place quantity in the Area queue when the Area has Machines,
+8. place quantity directly in Area processing when it has no Machines.
+
+The Phase 2 mock must demonstrate this flow without pretending persistence exists.
+
+## 7.2 PN is not currently in the Area
+
+Resolve the source quantity.
+
+If one valid source QuantityFlow exists:
+
+```text
+Enter quantity
+→ MAX defaults to available source quantity
+→ summary
+→ confirm
+```
+
+If multiple source Areas or QuantityFlows exist:
+
+```text
+Select source Area / QuantityFlow
+→ Enter quantity
+→ MAX defaults to selected source availability
+→ summary
+→ confirm
+```
+
+Never combine quantities from multiple sources silently.
+
+## 7.3 PN already has quantity in the Area
+
+Show only currently valid choices.
+
+Possible choices include:
+
+### Assign queued quantity to a Machine
+
+Show only when queued quantity exists.
+
+Flow:
+
+```text
+scan/select Machine
+→ enter quantity
+→ MAX defaults to queued quantity
+→ summary
+→ confirm
+```
+
+### Receive more quantity from another Area
+
+Show only when transferable quantity exists elsewhere.
+
+If multiple source Areas/QuantityFlows exist, list them for explicit selection.
+
+### Add more quantity
+
+This intentionally introduces additional physical quantity.
+
+Requirements:
+
+* operator is allowed,
+* Manager approval is not required,
+* reason is mandatory,
+* quantity is mandatory,
+* no MAX button,
+* no default value,
+* summary confirmation is required,
+* event is auditable,
+* does not silently change WorkOrderDemand requested quantity.
+
+For an Area with Machines, added quantity enters the Area queue.
+
+For an Area without Machines, added quantity enters direct Area processing.
+
+Represent this future event clearly, for example:
+
+```text
+QUANTITY_ADJUSTED
+direction = INCREASE
+```
+
+or another explicit typed design consistent with existing conventions.
+
+Do not hide it as an ordinary transfer.
+
+### Send quantity here for repair
+
+Show when quantity elsewhere may intentionally return to this previously visited Area for repair.
+
+Never auto-select this intent merely because the Area appears earlier in history.
+
+Flow:
+
+```text
+choose Repair intent
+→ select source Area / QuantityFlow
+→ enter repair quantity
+→ require reason
+→ show summary
+→ confirm
+```
+
+The summary must identify that the movement is explicitly a Repair movement.
+
+Partial quantity may require a QuantityFlow split.
+
+A normal transfer to a previously visited Area must remain possible when valid.
+
+### Scrap damaged quantity
+
+See the dedicated Scrap workflow below.
+
+---
+
+# 8. Scrap workflow
+
+Use the canonical domain term:
+
+```text
+SCRAPPED
+```
+
+The UI may use:
+
+```text
+Scrap damaged quantity
+```
+
+Use one dedicated barcode value, for example:
+
+```text
+PF:SCRAP
+```
+
+This barcode is context-sensitive.
+
+Rules:
+
+* It is accepted only inside the Scrap workflow.
+* Scanning it in the main Scan Station input is rejected.
+* Each scan increments a pending scrap counter by one.
+* No production state changes occur while counting.
+* The user may correct/reset the pending count before confirmation.
+* A common scrap reason is mandatory.
+* Show a final summary before applying.
+* Cancel discards the pending count with no write.
+* Confirm creates one auditable scrap operation for the total quantity.
+
+Summary must include:
+
+* PN,
+* Area,
+* Machine if applicable,
+* original available quantity,
+* scrap quantity,
+* remaining active quantity,
+* Worker,
+* Station,
+* reason.
+
+Future quantity reconciliation becomes:
+
+```text
+introduced quantity
+=
+active quantity
++ stocked quantity
++ scrapped quantity
+```
+
+Scrap does not reduce WorkOrderDemand requested quantity.
+
+Display scrap quantity wherever a PN is presented operationally, including:
+
+* Scan Station,
+* Production Board,
+* Area Board,
+* Tracking.
+
+Tracking must show scrap history explicitly.
+
+---
+
+# 9. Quantity entry keyboard behavior
+
+Fix the current keypad focus behavior.
+
+Requirements:
+
+* Quantity dialog opens with the numeric entry focused.
+* Physical keyboard works without clicking first.
+* Use a real focusable numeric text input or equivalent accessible control.
+* Use `inputMode="numeric"`.
+* Do not use native number-spinner behavior if it harms scanner/keyboard ergonomics.
+* Virtual keypad buttons must use `type="button"`.
+* Clicking a virtual keypad button must not leave focus in a state where Space or Enter activates that button later.
+* Prevent virtual keypad pointer interaction from stealing the intended input focus where appropriate.
+* Consider `tabIndex={-1}` for virtual keypad buttons if accessibility behavior remains acceptable.
+* Handle physical keys centrally.
+
+Required mapping:
+
+```text
+0–9       append digit
+Backspace remove last digit
+Delete    clear
+Enter     Confirm
+Escape    Cancel
+Space     ignored
+Other     ignored
+```
+
+Enter must always mean Confirm for the quantity dialog, regardless of which virtual keypad button was clicked previously.
+
+Escape must always mean Cancel.
+
+For transfer and assignment:
+
+* show MAX,
+* default value is MAX,
+* user may enter a smaller valid quantity.
+
+For Add More Quantity:
+
+* no MAX,
+* no default value.
+
+All server-side quantity validation requirements must remain documented.
+
+---
+
+# 10. Administrative PartNumber and history lifecycle
+
+Normal production runtime remains append-only and must not silently rewrite or delete history.
+
+However, Administrators have explicit maintenance authority in every environment.
+
+Prefer archival over destructive deletion.
+
+## 10.1 PartNumber archival/deletion
+
+Admin may remove junk/test PartNumber records.
+
+Requirements:
+
+* default administrative “delete” behavior should archive/soft-delete,
+* archived PartNumbers disappear from normal active lookup and intake,
+* historical displays retain the original PN text,
+* references display the PN with a clear marker such as:
+
+  * `(archived)`, or
+  * `(deleted)`,
+* do not use cascading deletes that destroy unrelated tracking history,
+* store or preserve a PN text snapshot where required for historical rendering,
+* archived records remain available to Admin history/audit tools.
+
+A physical purge may exist as a separate explicit maintenance operation, not as the normal delete button.
+
+## 10.2 History archival and purge
+
+Admin may archive or purge history in every environment through explicit maintenance workflows.
+
+Triggers may include:
+
+* an Admin-configured periodic retention policy,
+* an Admin-configured maximum data-size threshold,
+* a manual Admin request.
+
+Rules:
+
+* normal application workflows cannot delete history,
+* maintenance operations require explicit Admin authorization,
+* show a scope/impact preview before execution,
+* require a reason,
+* record who initiated the operation and when,
+* archive is the default and preferred behavior,
+* physical purge is separate and more explicit,
+* never silently cascade into active production state,
+* active quantity and current projections must remain reconcilable,
+* archived history must remain queryable through an Admin archive view or export path where practical,
+* retention settings belong in Administration/configuration, not in production workflow logic.
+
+Do not build an unnecessary full retention engine during Phase 2.
+
+Update:
+
+* canonical domain policy,
+* Administration mock/specification where appropriate,
+* roadmap phase ownership,
+* future persistence requirements.
+
+Clearly distinguish:
+
+```text
+immutable during production runtime
+```
+
+from:
+
+```text
+explicit Admin archival/purge maintenance
+```
+
+---
+
+# 11. Other view changes
+
+## 11.1 Production Board
+
+Add clear scrapped/damaged quantity visibility without making the board unreadable.
+
+Blank Work Order Number renders as `—`.
+
+## 11.2 Area Board
+
+Show scrap quantity in PN summaries.
+
+Use the shared Area/Machine layout described above.
+
+## 11.3 Tracking
+
+Change route presentation from only:
+
+```text
+Quantity Flows & assigned Routes
+```
+
+to a concept that supports both:
+
+* Planned Route,
+* Floating / Actual Route Trace.
+
+For Floating Routes:
+
+* derive the trace from Movement history,
+* show repeated Areas,
+* show splits independently,
+* mark Repair transfers explicitly.
+
+Example:
+
+```text
+A → B → C → D → B
+                  REPAIR
+```
+
+Show:
+
+* scrap history,
+* cumulative scrapped quantity,
+* archived/deleted PN marker where applicable,
+* blank Work Order Number as `—`.
+
+## 11.4 Work Orders
+
+Remove temporary Work Order Number generation.
+
+Allow null Work Order Number.
+
+Update UI copy, mock state, tests, types, and documentation.
+
+Manual Add Part must accept arbitrary non-empty PN text and create-on-first-use behavior in the future domain workflow.
+
+---
+
+# 12. Canonical documentation and versioning
+
+Update at least:
+
+```text
+docs/PROJECT_PROFILE.md
+docs/GUI_DESIGN.md
+docs/IMPLEMENTATION_ROADMAP.md
+docs/SLICE1_DATA_MODEL.md
+README.md
+```
+
+Archive the current canonical versions according to the repository’s existing documentation versioning convention.
+
+Create the next mockup version, likely:
+
+```text
+docs/mockups/partflow-gui-mockup-v8.html
+```
+
+and archive the previous mockup appropriately.
+
+Ensure the documents agree with each other.
+
+Remove stale statements including:
+
+* REWORK as RequestType,
+* temporary Work Order Number generation,
+* required AssignedRoute for every QuantityFlow,
+* sticky Machine Session,
+* Action barcode workflows,
+* raw PN barcode values mapping through opaque stable IDs,
+* one-input-for-every-action wording,
+* Recent Scans requirement,
+* mandatory Machine selection sessions,
+* different one-Machine behavior.
+
+Update the roadmap honestly.
+
+In particular:
+
+* Floating Route must be supported by the data foundation.
+* AssignedRoute becomes optional.
+* SPLIT is a prerequisite for partial Repair.
+* Machine assignment is one-shot, not session-based.
+* Scrap and quantity addition need auditable events.
+* Admin archival/purge belongs to a later maintenance/hardening phase.
+* Do not claim these backend workflows already exist.
+
+---
+
+# 13. Frontend implementation targets
+
+Inspect the repository and modify the correct files, including likely:
+
+```text
+frontend/src/app/router-core.ts
+frontend/src/app/router-provider.tsx
+frontend/src/app/dev-views.ts
+frontend/src/views/scan-station/ScanStationView.tsx
+frontend/src/views/scan-station/scan-station.css
+frontend/src/views/area-board/AreaBoardView.tsx
+frontend/src/views/area-board/area-board.css
+frontend/src/views/tracking/
+frontend/src/views/work-orders/
+frontend/src/views/production-board/
+frontend/src/views/administration/
+frontend/src/views/view-models.ts
+frontend/src/mocks/scan-station.ts
+frontend/src/components/QuantityKeypad.tsx
+frontend/src/components/quantity-input.ts
+```
+
+This list is guidance, not permission to modify unrelated code.
+
+Preserve:
+
+* semantic design tokens,
+* dark/light themes,
+* development-only mock boundary,
+* production mock sentinel checks,
+* keyboard-first behavior,
+* connectivity write blocking,
+* no optimistic production write claims.
+
+Update all affected tests.
+
+Add regression coverage for at least:
+
+* `/scan-station` Station Selector.
+* `/scan-station/:stationId`.
+* unknown Station ID.
+* Area with Machines.
+* Area without Machines.
+* no Machine Session.
+* Machine-first one-shot dialog.
+* PN-first one-shot dialog.
+* arbitrary `PF:PN:<part-number>` parsing.
+* case-insensitive PN identity behavior in mock/domain documentation helpers.
+* removal of REWORK RequestType.
+* Floating Route default.
+* null Work Order Number rendering.
+* source QuantityFlow selection.
+* Add More Quantity reason requirement.
+* Repair intent confirmation.
+* Scrap counter, reason, summary, cancel, and confirm.
+* Undo summary confirmation.
+* quantity keypad physical-key behavior.
+* Space/Enter not reactivating a previously clicked virtual keypad button.
+* Scan Station and Area Board shared layout behavior.
+* no-Machine full-width Area card.
+
+Update the production-boundary sentinel list when mock values change.
+
+---
+
+# 14. Implementation constraints
+
+* Keep Presentation → Application → Domain → Infrastructure boundaries.
+* Do not place future production business rules inside reusable presentation components.
+* Phase 2 mock state may simulate the approved interaction, but must clearly remain mock-only.
+* Do not add dependencies unless necessary and justified.
+* Do not rewrite unrelated UI.
+* Do not perform broad refactoring.
+* Reuse existing semantic tokens and shared components.
+* Preserve accessibility and focus restoration.
+* Preserve the rule that no scan is successful until a future server confirms the write.
+* Never silently guess ambiguous quantity, source Area, QuantityFlow, Route intent, Repair intent, or Work Order reuse.
+* Cancel always means no write.
+* Do not commit.
+
+---
+
+# 15. Validation
+
+Run the canonical Docker-based quality commands documented by the repository.
+
+At minimum, run the complete frontend quality gate:
+
+```bash
+docker compose exec frontend sh -lc "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
+```
+
+If formatting fails, format first using the repository’s documented Docker command, then rerun the checks.
+
+Run any relevant documentation or mockup validation available in the repository.
+
+Do not claim a check passed unless it actually ran and passed.
+
+---
+
+# 16. Final report
+
+After completing the work, report:
+
+1. Canonical domain decisions changed.
+2. Files changed.
+3. Scan Station behavior changed.
+4. Area Board layout changed.
+5. Route/Repair/Scrap/Undo behavior represented.
+6. Tests added or updated.
+7. Exact validation commands run and their results.
+8. Anything intentionally deferred because the repository is still Phase 2.
+9. Any remaining genuine ambiguity or architecture risk.
+
+Do not provide a commit message unless explicitly requested.

@@ -9,7 +9,8 @@
 // PROJECT_PROFILE §13 and are enforced transactionally in the
 // Application/Domain layer when the Phase 4 backend slice exists.
 
-import { MOCK_PN_BARCODES } from '../../mocks/work-orders';
+import { catalogPartNumber } from '../../mocks/work-orders';
+import { parseScan, pnKey } from '../scan-station/barcode';
 import type { MockWorkOrderLine, RequestType } from '../view-models';
 
 export interface DemandLineDraft {
@@ -103,27 +104,43 @@ export function draftFromSavedLine(
 export type ScanResult =
   | { kind: 'invalid'; barcode: string }
   | { kind: 'duplicate'; lineId: number; pn: string; released: boolean }
-  | { kind: 'new'; pn: string; barcode: string };
+  | { kind: 'new'; pn: string; barcode: string; isNewPn: boolean };
 
-/** Resolve a PN barcode against the mock catalog and the current lines. */
+/**
+ * Resolve a scanned PN barcode. `PF:PN:<part-number>` carries the PN
+ * itself: the entire non-empty suffix is the PN (no format validation,
+ * no opaque id mapping). A PN outside the catalog is create-on-first-
+ * use; identity is case-insensitive and an existing PN keeps its
+ * stored casing. Non-PN barcodes never add demand lines.
+ */
 export function processScan(
   value: string,
   lines: readonly DemandLineDraft[],
 ): ScanResult | null {
-  const barcode = value.trim().toUpperCase();
-  if (!barcode) return null;
-  const pn = MOCK_PN_BARCODES[barcode];
-  if (!pn) return { kind: 'invalid', barcode };
-  const duplicate = lines.find((line) => line.pn === pn);
+  const parsed = parseScan(value);
+  if (parsed.kind === 'empty') return null;
+  if (parsed.kind !== 'pn') {
+    return { kind: 'invalid', barcode: value.trim() };
+  }
+  const known = catalogPartNumber(parsed.pn);
+  const pn = known?.pn ?? parsed.pn;
+  const duplicate = lines.find(
+    (line) => line.pn !== null && pnKey(line.pn) === pnKey(pn),
+  );
   if (duplicate) {
     return {
       kind: 'duplicate',
       lineId: duplicate.id,
-      pn,
+      pn: duplicate.pn ?? pn,
       released: duplicate.released,
     };
   }
-  return { kind: 'new', pn, barcode };
+  return {
+    kind: 'new',
+    pn,
+    barcode: `PF:PN:${pn}`,
+    isNewPn: known === undefined,
+  };
 }
 
 /**
@@ -190,7 +207,10 @@ export function validateDemandLines(
  * Demand confirmation before anything is applied.
  */
 export interface MissingDemandInfo {
-  /** No external WO Number — a temporary internal one will be generated. */
+  /**
+   * No external WO Number — the Work Order is saved with a null number
+   * (internal), displays as `—`, and the number can be added later.
+   */
   noWorkOrderNumber: boolean;
   /** No WO due date — the Work Order stays unscheduled. */
   noWorkOrderDue: boolean;

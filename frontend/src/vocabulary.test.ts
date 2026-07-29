@@ -4,11 +4,17 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from 'vitest';
 
-// Canonical vocabulary migration guard (PROJECT_PROFILE v7): the
-// business container previously called Purchase Order is a Work Order.
-// No current frontend source, style, script, or test may retain the
-// obsolete Purchase Order vocabulary — in identifiers, routes, labels,
-// or CSS class names.
+// Canonical vocabulary guards:
+// 1. PROJECT_PROFILE v7 — the business container previously called
+//    Purchase Order is a Work Order; the obsolete vocabulary may not
+//    return in identifiers, routes, labels, or CSS class names.
+// 2. PROJECT_PROFILE v9 — REWORK is no longer a Request Type (Repair is
+//    a movement intent, not demand), temporary Work Order Numbers
+//    (TMP-…) are never generated (a blank number is NULL and displays
+//    as —), Action barcodes were removed, and there is no persistent
+//    Machine Session and no Recent Scans list. (Deliberate negative
+//    mentions of the Machine Session stay allowed — the UI explains
+//    that none exists.)
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
 const roots = [srcDir, join(srcDir, '..', 'scripts')];
@@ -32,6 +38,13 @@ const STALE_PATTERNS: RegExp[] = [
   /\bNew PO\b/,
   /\bPO Number\b/,
   /\bPO Intake\b/,
+  // Scan-workflow redesign (PROJECT_PROFILE v9):
+  /\bREWORK\b/,
+  /PF:ACTION/,
+  /\bTMP-\d/,
+  /TMP-YYYYMMDD/,
+  /generateTemporaryWorkOrderNumber/,
+  /Recent scans/i,
 ];
 
 function walk(dir: string): string[] {

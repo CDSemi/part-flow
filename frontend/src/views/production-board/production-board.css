@@ -1,125 +1,125 @@
 /* Production Board — read-only large-display view (GUI_DESIGN §5). */
 .pb {
-  background: var(--bg2);
-  min-height: calc(100vh - 53px);
-  /* anchors the hidden measurement copy (.pb-measure) */
-  position: relative;
+    background: var(--bg2);
+    min-height: calc(100vh - 53px);
+    /* anchors the hidden measurement copy (.pb-measure) */
+    position: relative;
 }
 
 .pb-head {
-  display: flex;
-  align-items: baseline;
-  gap: 18px;
-  padding: 20px 30px 10px;
+    display: flex;
+    align-items: baseline;
+    gap: 18px;
+    padding: 20px 30px 10px;
 }
 
 .pb-head h1 {
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: 0.4px;
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: 0.4px;
 }
 
 .pb-head .live {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 650;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 650;
 }
 
 .pb-head .live .ld {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--ok);
-  animation: ss-pulse 2s infinite;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--ok);
+    animation: ss-pulse 2s infinite;
 }
 
 .pb-head .spacer {
-  flex: 1;
+    flex: 1;
 }
 
 /* Live local date + time (self-updating clock component). */
 .pb-head .clockwrap {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 14px;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 14px;
 }
 
 .pb-head .clockdate {
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--muted);
+    font-size: 15px;
+    font-weight: 650;
+    color: var(--muted);
 }
 
 .pb-head .clock {
-  font-family: var(--mono), monospace;
-  font-size: 27px;
-  font-weight: 750;
-  color: var(--muted);
+    font-family: var(--mono), monospace;
+    font-size: 27px;
+    font-weight: 750;
+    color: var(--muted);
 }
 
 /* Content-driven column sizing: the table lays out by content; the
    final Job Numbers column absorbs the remaining width (and may wrap),
    while No. / Part Number / Due Date / Total Days never wrap. */
 .pb-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: auto;
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
 }
 
 .pb-table col.col-jobs {
-  width: 100%;
+    width: 100%;
 }
 
 .pb-table th {
-  font-size: 12.5px;
-  text-transform: uppercase;
-  letter-spacing: 1.3px;
-  color: var(--faint);
-  text-align: left;
-  padding: 12px 18px;
-  border-bottom: 2px solid var(--border);
-  position: sticky;
-  top: 53px;
-  background: var(--bg2);
-  z-index: 5;
-  white-space: nowrap;
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.3px;
+    color: var(--faint);
+    text-align: left;
+    padding: 12px 18px;
+    border-bottom: 2px solid var(--border);
+    position: sticky;
+    top: 53px;
+    background: var(--bg2);
+    z-index: 5;
+    white-space: nowrap;
 }
 
 .pb-table td {
-  padding: 17px 18px;
-  border-bottom: 1px solid var(--hair);
-  vertical-align: top;
+    padding: 17px 18px;
+    border-bottom: 1px solid var(--hair);
+    vertical-align: top;
 }
 
 .pb-table .no {
-  font-family: var(--mono), monospace;
-  font-size: 17px;
-  color: var(--faint);
-  font-weight: 650;
+    font-family: var(--mono), monospace;
+    font-size: 17px;
+    color: var(--faint);
+    font-weight: 650;
 }
 
 /* PN never wraps — the column sizes to the widest displayed PN/Hot
    label (§2.3) */
 .pb-table .part {
-  font-family: var(--mono), monospace;
-  font-size: 22px;
-  font-weight: 800;
-  white-space: nowrap;
+    font-family: var(--mono), monospace;
+    font-size: 22px;
+    font-weight: 800;
+    white-space: nowrap;
 }
 
 .pb-table .pname {
-  font-size: 13px;
-  color: var(--muted);
-  margin-top: 3px;
-  font-family: var(--font), sans-serif;
-  font-weight: 400;
-  /* long descriptions wrap under the PN instead of widening the column,
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 3px;
+    font-family: var(--font), sans-serif;
+    font-weight: 400;
+    /* long descriptions wrap under the PN instead of widening the column,
      so quantity / due / day columns never shift (GUI_DESIGN §2.3) */
-  max-width: 46ch;
-  white-space: normal;
+    max-width: 46ch;
+    white-space: normal;
 }
 
 /* Areas & Quantities: one grid per row block — label, quantity, tag and
@@ -127,216 +127,222 @@
    `total … pcs` line) aligns vertically. Long Area/Machine names
    truncate instead of pushing the quantity out of alignment. */
 .pb-table .loc {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
-  column-gap: 0;
-  row-gap: 6px;
-  align-items: baseline;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content max-content max-content;
+    column-gap: 0;
+    row-gap: 6px;
+    align-items: baseline;
 }
 
 .pb-table .locrow {
-  display: contents;
+    display: contents;
 }
 
 .pb-table .lname {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 16.5px;
-  padding-right: 12px;
-  max-width: 30ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 16.5px;
+    padding-right: 12px;
+    max-width: 30ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .pb-table .lname .areadot {
-  width: 11px;
-  height: 11px;
+    width: 11px;
+    height: 11px;
 }
 
 .pb-table .lqty {
-  font-family: var(--mono), monospace;
-  font-weight: 800;
-  font-size: 16.5px;
-  text-align: right;
+    font-family: var(--mono), monospace;
+    font-weight: 800;
+    font-size: 16.5px;
+    text-align: right;
 }
 
 .pb-table .ltag {
-  font-size: 11px;
-  color: var(--faint);
-  font-weight: 650;
-  padding-left: 8px;
+    font-size: 11px;
+    color: var(--faint);
+    font-weight: 650;
+    padding-left: 8px;
 }
 
 .pb-table .ltime {
-  font-family: var(--mono), monospace;
-  font-size: 13px;
-  color: var(--faint);
-  font-weight: 600;
-  padding-left: 14px;
-  text-align: right;
+    font-family: var(--mono), monospace;
+    font-size: 13px;
+    color: var(--faint);
+    font-weight: 600;
+    padding-left: 14px;
+    text-align: right;
 }
 
 .pb-table .ltime.long {
-  color: var(--warn-t);
-  font-weight: 750;
+    color: var(--warn-t);
+    font-weight: 750;
 }
 
 .pb-table .locrow.total > * {
-  border-top: 1px dashed var(--border);
-  padding-top: 6px;
-  margin-top: 2px;
+    border-top: 1px dashed var(--border);
+    padding-top: 6px;
+    margin-top: 2px;
 }
 
 .pb-table .locrow.total .lname {
-  font-family: var(--mono), monospace;
-  font-size: 14px;
-  color: var(--muted);
+    font-family: var(--mono), monospace;
+    font-size: 14px;
+    color: var(--muted);
 }
 
 .pb-table .locrow.total .lqty {
-  font-size: 18px;
-  color: var(--info-t);
+    font-size: 18px;
+    color: var(--info-t);
 }
 
 .pb-table .locrow.total .ltag {
-  font-family: var(--mono), monospace;
-  font-size: 14px;
-  color: var(--muted);
+    font-family: var(--mono), monospace;
+    font-size: 14px;
+    color: var(--muted);
 }
 
 .pb-table .jobs .j {
-  font-family: var(--mono), monospace;
-  font-size: 15px;
-  font-weight: 650;
+    font-family: var(--mono), monospace;
+    font-size: 15px;
+    font-weight: 650;
 }
 
 .pb-table .jobs .j .jm {
-  color: var(--muted);
-  font-weight: 400;
-  font-size: 13px;
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 13px;
 }
 
 /* Due Date: never wraps; minimum width fits the formatted date. */
 .pb-table td.due {
-  min-width: 9ch;
+    min-width: 9ch;
 }
 
 .pb-table .due .d1 {
-  font-size: 18px;
-  font-weight: 750;
-  white-space: nowrap;
+    font-size: 18px;
+    font-weight: 750;
+    white-space: nowrap;
 }
 
 .pb-table .due .d2 {
-  font-size: 13.5px;
-  margin-top: 3px;
-  font-weight: 750;
-  white-space: nowrap;
+    font-size: 13.5px;
+    margin-top: 3px;
+    font-weight: 750;
+    white-space: nowrap;
 }
 
 .pb-table .due .d2.none,
 .pb-table .due .d2.ok {
-  color: var(--muted);
+    color: var(--muted);
 }
 
 .pb-table .due .d2.ok,
 .pb-table .due .d2.none {
-  font-weight: 450;
+    font-weight: 450;
 }
 
 .pb-table .due .d2.soon {
-  color: var(--warn-t);
+    color: var(--warn-t);
 }
 
 .pb-table .due .d2.late {
-  color: var(--err-t);
+    color: var(--err-t);
 }
 
 .pb-table .dtotal {
-  font-family: var(--mono), monospace;
-  font-size: 17px;
-  color: var(--muted);
-  font-weight: 650;
-  white-space: nowrap;
+    font-family: var(--mono), monospace;
+    font-size: 17px;
+    color: var(--muted);
+    font-weight: 650;
+    white-space: nowrap;
 }
 
 tr.hotrow1 td {
-  background: var(--hot1-row-surface);
+    background: var(--hot1-row-surface);
 }
 
 tr.hotrow1 td:first-child {
-  border-left: 5px solid var(--err);
+    border-left: 5px solid var(--err);
 }
 
 tr.hotrow2 td {
-  background: var(--hot2-row-surface);
+    background: var(--hot2-row-surface);
 }
 
 tr.hotrow2 td:first-child {
-  border-left: 5px solid var(--a-external);
+    border-left: 5px solid var(--a-external);
 }
 
 /* Due-urgency blink — only the days-remaining / days-overdue text
    blinks; the PN and the date itself stay steady (§5). */
 @keyframes blinkdue {
-  0%,
-  58% {
-    opacity: 1;
-  }
-  59%,
-  100% {
-    opacity: 0.18;
-  }
+    0%,
+    58% {
+        opacity: 1;
+    }
+    59%,
+    100% {
+        opacity: 0.18;
+    }
 }
 
 .pb-table .due .d2.blink {
-  animation: blinkdue 1.1s step-end infinite;
+    animation: blinkdue 1.1s step-end infinite;
 }
 
 /* Users who disable animation still get the warning color and weight. */
 @media (prefers-reduced-motion: reduce) {
-  .pb-table .due .d2.blink {
-    animation: none;
-  }
+    .pb-table .due .d2.blink {
+        animation: none;
+    }
 }
 
 /* Hidden measurement copy for height-aware pagination: identical
    classes → identical metrics; never visible, never interactive. */
 .pb-measure {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  visibility: hidden;
-  pointer-events: none;
-  z-index: -1;
-  overflow: hidden;
-  height: 0;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: -1;
+    overflow: hidden;
+    height: 0;
 }
 
 .pb-foot {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 15px 30px;
-  color: var(--faint);
-  font-size: 13.5px;
-  flex-wrap: wrap;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 15px 30px;
+    color: var(--faint);
+    font-size: 13.5px;
+    flex-wrap: wrap;
 }
 
 .pb-foot .pgdot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--border);
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--border);
 }
 
 .pb-foot .pgdot.on {
-  background: var(--info);
+    background: var(--info);
 }
 
 .pb-foot .spacer {
-  flex: 1;
+    flex: 1;
+}
+
+/* Scrapped companion value on the total line — visible, not loud. */
+.pb-table .locrow .ltime.scraptot {
+    color: var(--err-t);
+    font-weight: 700;
 }

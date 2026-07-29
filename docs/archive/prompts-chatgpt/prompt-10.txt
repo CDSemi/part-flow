@@ -1,0 +1,31 @@
+https://github.com/CDSemi/part-flow Bạn hãy kiểm tra lại Phase 2 đã ổn chưa. Ngoài ra tôi có một số thay đổi như sau:
+1. Work Order có thể không có due date (tương tự PN cũng vậy). Nếu không có due date thì hiểu là chúng có độ ưu tiên thấp nhất, và sẽ được sắp xếp theo thứ tự received date từ xa đến gần.
+2. Nếu được, tôi muốn có cơ chế phát hiện offline tức thời (hoặc tối thiểu cũng nhanh trong khoảng 1s) chứ hiện tại detect hơi chậm, lỡ họ scan barocde trong khi chưa kịp phát hiện offline thì sao?
+3. Scan Station:
+    - Không cần hiện station code (ví dụ: Station LATHE-ST-01) to rõ trên header như vậy, nó chỉ để tôi dễ debug nên có thể in mờ nó dưới footer.
+    - "Manual PN entry…" nên trình bày sao cho trực quan dễ thấy chút. ví dụ đổi thành button hoặc nếu có idea nào hay hơn thì hãy làm.
+    - Recent Scans: Mấy cái "ASSIGNED_TO_MACHINE", "00TRANSFERRED"... hiện đang bị dính vào PN, cần tách nó ra 1 chút.
+4. Production Board:
+    - Ngoài giờ hiện tại, cần hiện luôn ngày tháng hiện tại.
+    - Sửa lại hot part name 1 chút, cho #n nằm ngay sau 🔥 (ví dụ: 🔥#1 2027-60-8114-00), giống như cách trình bày trong Management/Area Board/<Area>/Parts vậy. (Thống nhất cách trình bày này cho mọi view liên quan có hiển thị hot part)
+    - Parts sắp tới due (hoặc over due) thì ko cần nhấp nháy tên part nữa, thay vào đó nhấp nháy ngày còn lại (hoặc số ngày quá hạn)
+    - Số lượng part (của từng area/machine) trong "Areas & Quantities · Time" cần align thẳng hàng với nhau. Và số "total ... pcs" cũng cần align thẳng hàng với các qty con này.
+    - Đưa cột "Job Numbers" về cuối (ngay sau cột "Total Days")
+    - Nếu được thì tôi muốn cột "Due Date" có max-width động (vừa đủ cho nội dung đang hiển thị), và có min-width là độ rộng của ngày tháng (ko để ngày tháng bị xuống hàng)
+    - Cột "No.", "Part Number", "Areas & Quantities · Time" và "Total Days" nên auto-width theo nội dung đang hiển thị. Phần độ rộng còn lại nên dồn qua cho cột "Job Numbers"
+    - Tôi chưa thấy việc tự động dàn trang theo kích thước page và auto rotate pages every n seconds -> Cần bổ sung nếu việc này thuộc phase 2.
+5. Management:
+    - Area Board: Trong từng Area details, thay vì liệt kê các part dạng Card như hiện tại thỉ đổi sang liệt kê machines:
+        + Card đầu tiên là thông tin về Area, có bao nhiêu part, queued bao nhiêu, ... danh sách part (trình bày giống như bên trong 1 column của "All Areas"). Danh sách part phía dưới được list theo nhóm "Assigned to Machines" trước, sau đó là "Area queue — awaiting Machine".
+        + Các card tiếp theo sẽ là các machines có trong area (nếu có). Cách trình bày machine card này thì bạn tự sáng tạo nhe.
+    - Work Orders -> New Work Order:
+        + WO có thể ko có, cho nên nếu user không nhập WO thì tự chế đại gì đó.
+        + Như đã nói ở trên, WO có thể không có due date, cho nên ko bắt buộc phải chọn due date.
+        + Khi bấm nút "New Work Order" -> Hiện dialog cho nhập WO và chọn due date (cho phép skip).
+        + Khi "Save Demand" nếu kiểm tra thấy không có WO hoặc due date thì hiện cảnh báo yêu cầu xác nhận rồi mới được save.
+        + Trước mắt "+ Add line manually" sẽ là thao tác chính được sử dụng thường xuyên nhất. Barcode scan chỉ là optional. Cho nên thiết kế lại sao cho thuận tiện chút.
+        + Khi add một part, hiện lên dialog yêu cầu nhập vào PN -> hiện dialog yêu cầu nhập số lượng (kiểu giống như dialog nhập Qty khi scan single context PN bên "Scan Station" vậy á) -> hiện dialog yêu cầu chọn due date, mặc định là WO due date nếu có (có nút cho phép bỏ qua due date (hoặc chữ gì đó dễ hiểu) cho phép user không xác định due date cũng được) -> dialog cho nhập các meta data như Job Numbers, Note... (user có thể ko cần nhập gì cũng đc) -> Kết thúc (tạo line mới như hiện tại với những thông tin đc nhập)
+        + Bảng danh sách Part bên dưới vẫn cho phép thay đổi các số liệu như hiện tại.
+    - Priority: Mỗi khi thay đổi thứ tự (do kéo thả, undo/redo, up/down) thì đều phải xác nhận lại trước khi apply.
+
+Tạm thời vậy. Nếu bạn cảm thấy có chỗ nào không hiểu thì hãy hỏi thêm. Nếu OK thì viết prompt yêu cầu claude sửa giúp tôi.

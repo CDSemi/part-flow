@@ -23,7 +23,8 @@ import type {
   LineField,
   MissingDemandInfo,
 } from './demand-lines';
-import { generateTemporaryWorkOrderNumber } from './work-order-number';
+
+let nextInternalWorkOrderId = 1;
 
 interface HeaderErrors {
   received?: string;
@@ -32,12 +33,14 @@ interface HeaderErrors {
 /**
  * New Work Order entry as a modal dialog over the Work Orders list
  * (GUI_DESIGN): the header inputs (WO Number, WO due date) are both
- * optional — a temporary internal WO Number is generated when none is
- * entered, and a Work Order may be saved without a due date. Manual
- * Part addition (multi-step Add Part dialog) is the primary workflow;
- * barcode scanning stays available as a secondary method. The URL never
- * changes; closing with entered data requires explicit confirmation.
- * Phase 2: saving changes local mock state only.
+ * optional — a blank WO Number saves an internal Work Order with a
+ * NULL number that displays as `—` (no temporary number is ever
+ * generated; the real external number can be added later through an
+ * audited edit). Manual Part addition (multi-step Add Part dialog) is
+ * the primary workflow; barcode scanning stays available as a
+ * secondary method. The URL never changes; closing with entered data
+ * requires explicit confirmation. Phase 2: saving changes local mock
+ * state only.
  */
 export function NewWorkOrderDialog({
   existing,
@@ -137,7 +140,10 @@ export function NewWorkOrderDialog({
     }
     const line = createDraftLine({
       pn: result.pn,
-      barcodeNote: `existing PN · barcode ${result.barcode}`,
+      isNewPn: result.isNewPn,
+      barcodeNote: result.isNewPn
+        ? `new PN — barcode created with PN master: ${result.barcode}`
+        : `existing PN · barcode ${result.barcode}`,
       due,
     });
     setLines((current) => [...current, line]);
@@ -182,15 +188,16 @@ export function NewWorkOrderDialog({
   }
 
   function saveWorkOrder() {
-    const entered = workOrderNumber.trim().toUpperCase();
-    // The internal Work Order identity is never nullable: when no
-    // external WO Number was entered, a unique temporary internal
-    // number is generated (TMP-YYYYMMDD-HHMMSS, auditable, searchable).
-    const finalNumber =
-      entered || generateTemporaryWorkOrderNumber(existing, new Date());
+    // Entered Work Order Numbers stay opaque strings (never
+    // reformatted). A blank number is saved as NULL — displayed as `—`
+    // (the placeholder itself is never persisted); multiple Work
+    // Orders may have a null number while non-null numbers stay
+    // unique.
+    const entered = workOrderNumber.trim();
     const savedLines = draftsToSavedLines(lines);
     onSave({
-      workOrderNumber: finalNumber,
+      id: `wo-manual-${nextInternalWorkOrderId++}`,
+      workOrderNumber: entered || null,
       received,
       due: due || null,
       dueClass: '',
@@ -202,7 +209,7 @@ export function NewWorkOrderDialog({
   }
 
   function handleSave() {
-    const number = workOrderNumber.trim().toUpperCase();
+    const number = workOrderNumber.trim();
     if (number && existing.includes(number)) {
       // An entered WO Number that already exists is opened, never
       // duplicated. With entered lines, opening discards them —
@@ -250,15 +257,16 @@ export function NewWorkOrderDialog({
             New Work Order
           </h2>
           <p className="wo-sub">
-            The header is optional: leave <b>WO Number</b> blank and a clearly
-            labeled <b>temporary internal Work Order Number</b> (
-            <span className="mono">TMP-YYYYMMDD-HHMMSS</span>) is generated on
-            save; leave <b>WO due date</b> blank and the Work Order is saved
-            without one — due dates can be added later. Add Parts manually with{' '}
-            <b>＋ Add Part manually</b>; every line defaults to Request Type{' '}
-            <TypeChip type="NEW" /> and to the WO due date, and both can be
-            changed per line. Nothing here is persisted to the backend in Phase
-            2.
+            The header is optional: leave <b>WO Number</b> blank and the Work
+            Order is saved as an{' '}
+            <b>internal Work Order without an external number</b> — it displays
+            as <span className="mono">—</span> and the real number can be added
+            later through an audited edit; leave <b>WO due date</b> blank and
+            the Work Order is saved without one — due dates can be added later.
+            Add Parts manually with <b>＋ Add Part manually</b>; every line
+            defaults to Request Type <TypeChip type="NEW" /> and to the WO due
+            date, and both can be changed per line. Nothing here is persisted to
+            the backend in Phase 2.
           </p>
 
           <div className="nwo-form">
@@ -268,12 +276,12 @@ export function NewWorkOrderDialog({
                 id="nwo-num"
                 ref={workOrderNumRef}
                 className="mono"
-                placeholder="e.g. 007482 — blank generates TMP-…"
+                placeholder="e.g. 007482 — optional"
                 value={workOrderNumber}
                 onChange={(e) => setWorkOrderNumber(e.target.value)}
               />
               <span className="nwo-fieldhint">
-                blank = a temporary internal number is generated on save
+                blank = saved without an external number (displays —)
               </span>
             </div>
             <label htmlFor="nwo-recv">Received date</label>
@@ -335,11 +343,11 @@ export function NewWorkOrderDialog({
           </div>
           <div className="nwo-hint">
             Manual entry is the normal workflow. Scanning stays available as a
-            secondary method: only valid PN barcodes add lines (demo:{' '}
-            <code>PF:PN:1014</code> · <code>PF:PN:1021</code> ·{' '}
-            <code>PF:PN:1102</code>), unknown barcodes are rejected, and a PN
-            already on this Work Order focuses its existing line instead of
-            adding a duplicate.
+            secondary method: a PN barcode carries the PN itself (
+            <code>PF:PN:&lt;part-number&gt;</code>, e.g.{' '}
+            <code>PF:PN:78-04-0031</code>); a PN not in the catalog is created
+            on first use, non-PN barcodes are rejected, and a PN already on this
+            Work Order focuses its existing line instead of adding a duplicate.
           </div>
 
           <div className="wo-lines nwo-lines">
@@ -392,7 +400,6 @@ export function NewWorkOrderDialog({
                           }
                         >
                           <option>NEW</option>
-                          <option>REWORK</option>
                           <option>MODIFY</option>
                         </select>
                       </td>
@@ -549,10 +556,11 @@ export function NewWorkOrderDialog({
           <ul className="missinglist">
             {confirmMissing.noWorkOrderNumber ? (
               <li>
-                No external WO Number — a{' '}
-                <b>temporary internal Work Order Number</b> (
-                <span className="mono">TMP-YYYYMMDD-HHMMSS</span>) will be
-                generated and clearly labeled.
+                No external WO Number — the Work Order is saved as an{' '}
+                <b>internal Work Order without an external number</b>. It
+                displays as <span className="mono">—</span> (never persisted as
+                a placeholder) and the real number can be added later through an
+                audited edit.
               </li>
             ) : null}
             {confirmMissing.noWorkOrderDue ? (

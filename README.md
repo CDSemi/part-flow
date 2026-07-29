@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v7.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v8.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -29,7 +29,8 @@ an application-level not-found state):
 
 | URL | View |
 |---|---|
-| `/scan-station` | Scan Station (root `/` redirects here) |
+| `/scan-station` | Scan Station — Station Selector (root `/` redirects here; never auto-redirects to a station) |
+| `/scan-station/:stationId` | One Scan Station (e.g. `/scan-station/LATHE-ST-01`); unknown or inactive Station IDs show an explicit error |
 | `/production-board` | Production Board (large display, read-only) |
 | `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
 | `/management/tracking` | Management → Tracking (PN-centric) |
@@ -66,9 +67,13 @@ Frontend structure:
   known mock sentinel values (`scripts/check-production-boundary.mjs`).
   Shared view-model types live in `src/views/view-models.ts` (types
   only — production-safe).
-- `src/views/<view>/` — one folder per GUI view.
+- `src/views/<view>/` — one folder per GUI view. `src/views/scan-station/barcode.ts`
+  holds the deterministic `PF:` barcode parsing (PN barcodes carry the PN
+  itself — `PF:PN:<part-number>` — with case-insensitive PN identity).
 - `src/components/` — genuinely shared pieces (Area dot, Hot/Type chips,
-  view-state blocks, accessible mock dialog).
+  view-state blocks, accessible mock dialog, quantity keypad, and the
+  shared Area/Machine monitoring components used by both the Scan
+  Station and the Area Board detail).
 
 ### Previewing UI states (development only)
 

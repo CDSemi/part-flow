@@ -15,7 +15,13 @@ export const MANAGEMENT_SUBVIEWS = [
 export type ManagementSubview = (typeof MANAGEMENT_SUBVIEWS)[number];
 
 export type Route =
-  | { view: 'scan-station' }
+  /**
+   * `/scan-station` (stationId null) shows the Station Selector — it
+   * never auto-redirects to a station. `/scan-station/:stationId`
+   * loads that station; an unknown or inactive Station ID shows an
+   * explicit error and never silently falls back to another station.
+   */
+  | { view: 'scan-station'; stationId: string | null }
   | { view: 'production-board' }
   | { view: 'management'; subview: ManagementSubview }
   | { view: 'administration' }
@@ -37,7 +43,16 @@ export function resolvePath(
 ): Route | { redirect: string } {
   const path = pathname.replace(/\/+$/, '') || '/';
   if (path === '/') return { redirect: '/scan-station' };
-  if (path === '/scan-station') return { view: 'scan-station' };
+  if (path === '/scan-station') {
+    return { view: 'scan-station', stationId: null };
+  }
+  const stationMatch = /^\/scan-station\/([^/]+)$/.exec(path);
+  if (stationMatch) {
+    return {
+      view: 'scan-station',
+      stationId: decodeURIComponent(stationMatch[1]),
+    };
+  }
   if (path === '/production-board') return { view: 'production-board' };
   if (path === '/administration') return { view: 'administration' };
   if (path === '/management')

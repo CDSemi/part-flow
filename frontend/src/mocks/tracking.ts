@@ -1,5 +1,8 @@
 import type { MockTrackingRow } from '../views/view-models';
 
+// `demand.workOrder: '—'` marks internal demand without an external
+// Work Order Number (the placeholder is display-only, never persisted).
+// `scrappedQty` is the cumulative SCRAPPED quantity of the PN.
 export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   {
     pn: '2027-60-8114-00',
@@ -15,6 +18,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     ],
     activeQty: 10,
     stockedQty: 0,
+    scrappedQty: 1,
     nextDue: 'Jul 24',
     status: 'Active',
   },
@@ -26,6 +30,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     distribution: [{ area: 'external', label: 'External', qty: 20 }],
     activeQty: 20,
     stockedQty: 0,
+    scrappedQty: 2,
     nextDue: 'Jul 16',
     status: 'Active',
   },
@@ -39,15 +44,18 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     ],
     activeQty: 12,
     stockedQty: 0,
+    scrappedQty: 0,
     nextDue: 'Jul 31',
     status: 'Active',
   },
   {
+    // Internal MODIFY demand without an external Work Order Number:
+    // the blank number renders as `—` everywhere.
     pn: '78-04-0031',
     name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     demand: [
       { workOrder: '007002', qty: 6, type: 'NEW' },
-      { workOrder: 'TMP-…-0910', qty: 1, type: 'REWORK' },
+      { workOrder: '—', qty: 1, type: 'MODIFY' },
     ],
     distribution: [
       { area: 'mill', label: 'Mill', qty: 3 },
@@ -55,6 +63,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     ],
     activeQty: 6,
     stockedQty: 0,
+    scrappedQty: 0,
     nextDue: 'Aug 07',
     status: 'Active',
   },
@@ -67,6 +76,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     distribution: [{ area: 'manual', label: 'Manual', qty: 4 }],
     activeQty: 4,
     stockedQty: 0,
+    scrappedQty: 0,
     nextDue: '—',
     status: 'Active',
   },
@@ -77,8 +87,24 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     distribution: [{ area: 'stockroom', label: 'Stockroom', qty: 50 }],
     activeQty: 0,
     stockedQty: 50,
+    scrappedQty: 0,
     nextDue: '—',
     status: 'Completed',
+  },
+  {
+    // Archived PN: junk/test record soft-deleted by an Administrator.
+    // It disappears from active lookup and intake; history keeps the
+    // original PN text with an explicit `(archived)` marker.
+    pn: 'TEST-SCRAP-PLATE',
+    name: 'TEST PLATE — created during scanner testing',
+    demand: [],
+    distribution: [],
+    activeQty: 0,
+    stockedQty: 0,
+    scrappedQty: 3,
+    nextDue: '—',
+    status: 'Completed',
+    archived: true,
   },
 ];
 
@@ -90,6 +116,7 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
     distribution: [{ area: 'mill', label: 'Mill', qty: 8 }],
     activeQty: 8,
     stockedQty: 0,
+    scrappedQty: 0,
     nextDue: 'Jul 25',
     status: 'Active',
   },
@@ -116,19 +143,23 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
       ],
       activeQty: (n % 9) + 1,
       stockedQty: 0,
+      scrappedQty: 0,
       nextDue: 'Aug 15',
       status: 'Active',
     };
   }),
 ];
 
-// Detail-panel sample for the selected PN (mirrors mockup v5, which
-// shows the full detail panel for 2027-60-8114-00).
+// Detail-panel sample for the selected PN. QF-0140 demonstrates a
+// PLANNED route (AssignedRoute snapshot as guidance); QF-0141 is a
+// FLOATING route — no AssignedRoute, the actual route trace is derived
+// from immutable Movement history, repeated Areas preserved and Repair
+// transfers marked explicitly.
 export const MOCK_TRACKING_DETAIL = {
   pn: '2027-60-8114-00',
   name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',
   revision: 'C',
-  barcode: 'PF:PN:1001',
+  barcode: 'PF:PN:2027-60-8114-00',
   erpId: 'ERP-PN-40412',
   demand: [
     {
@@ -173,6 +204,7 @@ export const MOCK_TRACKING_DETAIL = {
     {
       id: 'QF-0140',
       qty: 6,
+      routeMode: 'PLANNED' as const,
       position: 'Lathe (4 on Lathe 3 · 2 queued) · 2h 05m in Area',
       route: [
         { step: 'Material', state: 'done' },
@@ -181,28 +213,42 @@ export const MOCK_TRACKING_DETAIL = {
         { step: 'Deburr', state: 'future' },
         { step: 'Stockroom', state: 'future' },
       ],
+      routeNote:
+        'Planned Route “Bracket std v3” (snapshot) — guidance only; actual Movement history stays authoritative.',
     },
     {
       id: 'QF-0141',
       qty: 4,
+      routeMode: 'FLOATING' as const,
       position: 'Cut · Saw 1 · 3h 40m in Area · SPLIT from QF-0140',
+      // Actual route trace derived from Movement history: the repeated
+      // Cut visit is a confirmed Repair return, preserved in order.
       route: [
         { step: 'Material', state: 'done' },
-        { step: 'Cut', state: 'cur' },
-        { step: 'Lathe', state: 'future' },
-        {
-          step: 'External ⚠',
-          state: 'dev',
-          title: 'Deviation — External inserted Jul 20 by T. Le',
-        },
-        { step: 'Deburr', state: 'future' },
-        { step: 'Stockroom', state: 'future' },
+        { step: 'Cut', state: 'done' },
+        { step: 'Lathe', state: 'done' },
+        { step: 'Cut', state: 'cur', repair: true },
       ],
-      deviationNote:
-        '⚠ ROUTE_ADJUSTED — “External · Plating” inserted Jul 20 by T. Le (Manager). Reason: plating added per customer. Previous route preserved in audit.',
+      routeNote:
+        'Floating Route — no AssignedRoute; the trace above is the actual Movement history (repeated Areas preserved). ⟲ REPAIR marks the explicit Repair return to Cut.',
     },
   ],
   movements: [
+    {
+      time: 'Jul 22 14:10',
+      type: 'SCRAPPED',
+      typeClass: 'scr',
+      description:
+        'Scrapped 1 at Lathe · QF-0140 · reason: tool crash — gouged face · W: H. Nguyen · LATHE-ST-01',
+    },
+    {
+      time: 'Jul 22 13:40',
+      type: 'TRANSFERRED',
+      typeClass: 'tra',
+      description:
+        'Lathe → Cut · qty 4 · QF-0141 · movement_reason: REPAIR · reason: shoulder cut short — recut required · W: H. Nguyen · LATHE-ST-01',
+      repair: true,
+    },
     {
       time: 'Jul 22 13:05',
       type: 'ASSIGNED_TO_MACHINE',
@@ -214,7 +260,13 @@ export const MOCK_TRACKING_DETAIL = {
       time: 'Jul 22 11:20',
       type: 'TRANSFERRED',
       typeClass: 'tra',
-      description: 'Cut → Lathe (queue) · qty 6 · QF-0140 · W: H. Nguyen',
+      description: 'Cut → Lathe (queue) · qty 7 · QF-0140 · W: H. Nguyen',
+    },
+    {
+      time: 'Jul 21 10:15',
+      type: 'TRANSFERRED',
+      typeClass: 'tra',
+      description: 'Cut → Lathe · qty 4 · QF-0141 · W: V. Tran · CUT-ST-01',
     },
     {
       time: 'Jul 21 09:41',
@@ -234,22 +286,24 @@ export const MOCK_TRACKING_DETAIL = {
       type: 'SPLIT',
       typeClass: 'spl',
       description:
-        'QF-0140 (10) → QF-0140 (6) + QF-0141 (4) · at Cut · W: V. Tran',
+        'QF-0140 (11) → QF-0140 (7) + QF-0141 (4) · at Cut · W: V. Tran',
     },
     {
       time: 'Jul 20 08:12',
       type: 'TRANSFERRED',
       typeClass: 'tra',
-      description: 'Material → Cut · qty 10 · QF-0140 · W: V. Tran · CUT-ST-01',
+      description: 'Material → Cut · qty 11 · QF-0140 · W: V. Tran · CUT-ST-01',
     },
     {
       time: 'Jul 12 08:02',
       type: 'RECEIVED',
       typeClass: 'rec',
       description:
-        'Received into Material · qty 10 · QF-0140 · WO 007001 release · Route “Bracket std v3” assigned',
+        'Received into Material · qty 11 · QF-0140 · WO 007001 release · Planned Route “Bracket std v3” assigned',
     },
   ],
+  scrapNote:
+    'Cumulative scrapped: 1 pc (SCRAPPED events above — auditable, never reduces the WO Demand requested quantity). Reconciliation: introduced = active + stocked + scrapped.',
   stockedNote:
     'No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due date (§18).',
 };

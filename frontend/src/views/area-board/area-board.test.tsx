@@ -134,3 +134,40 @@ test('Sort: Due date applies canonical order — undated demands last', () => {
   );
   expect(pns[0]).toBe('2027-60-8114-00');
 });
+
+test('the detail uses the shared [summary | machine grid] layout, read-only', () => {
+  render(<AreaBoardView />);
+  openArea(/^Lathe/);
+
+  // Shared structural layout: left summary column + right Machine grid.
+  const layout = document.querySelector('.am');
+  expect(layout).not.toBeNull();
+  expect(layout?.classList.contains('am-single')).toBe(false);
+  expect(document.querySelectorAll('.am-machines .abd-machine').length).toBe(4);
+  // Area Board stays read-only — no Scan Station action buttons.
+  expect(screen.queryByRole('button', { name: 'ASSIGN' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'QUEUE' })).toBeNull();
+});
+
+test('a no-Machine Area renders the full-width single-column layout', () => {
+  render(<AreaBoardView />);
+  openArea(/^Deburr/);
+
+  const layout = document.querySelector('.am');
+  expect(layout?.classList.contains('am-single')).toBe(true);
+  expect(document.querySelector('.abd-machine')).toBeNull();
+  // Direct processing group — no queue wording for a no-Machine Area.
+  expect(document.querySelector('.abd-summary')?.textContent).toContain(
+    'In processing',
+  );
+});
+
+test('scrap quantities appear in the PN summaries', () => {
+  render(<AreaBoardView />);
+  openArea(/^Lathe/);
+
+  const summary = document.querySelector('.abd-summary');
+  expect(summary?.textContent).toContain('1 scrapped');
+  // The blank-number internal MODIFY Work Order renders as `—`.
+  expect(summary?.textContent).toContain('WO —');
+});

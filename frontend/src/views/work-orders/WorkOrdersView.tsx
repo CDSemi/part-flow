@@ -21,7 +21,11 @@ import type { MockWorkOrder } from '../view-models';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
-type Panel = { kind: 'list' } | { kind: 'detail'; workOrderNumber: string };
+type Panel = { kind: 'list' } | { kind: 'detail'; id: string };
+
+/** Display form of a Work Order Number — `—` when no external number
+ * is known (display-only placeholder, never persisted). */
+const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
 
 // Long-data preview rows (?state=long): many Work Orders plus over-long
 // WO and PN identifiers to exercise dense-table and truncation behavior.
@@ -29,6 +33,7 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
   ...Array.from({ length: 20 }, (_, i): MockWorkOrder => {
     const n = i + 1;
     return {
+      id: `wo-long-${n}`,
       workOrderNumber: String(7300 + n).padStart(6, '0'),
       received: '2026-07-01',
       // Every fifth long-preview Work Order has no due date (valid).
@@ -40,6 +45,7 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
     };
   }),
   {
+    id: 'wo-long-supplemental',
     workOrderNumber: '007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
     received: '2026-07-20',
     due: '2026-10-15',
@@ -70,7 +76,7 @@ export function WorkOrdersView() {
   const [detailDirty, setDetailDirty] = useState(false);
   const [releasedLines, setReleasedLines] = useState<Set<string>>(new Set());
   const [releaseDialog, setReleaseDialog] = useState<{
-    workOrderNumber: string;
+    workOrderId: string;
     pn: string;
   } | null>(null);
 
@@ -134,9 +140,9 @@ export function WorkOrdersView() {
         ? [...workOrderList, ...LONG_PREVIEW_WORK_ORDERS]
         : workOrderList;
 
-  const openWorkOrder = (workOrderNumber: string) => {
+  const openWorkOrder = (id: string) => {
     setDetailDirty(false);
-    setPanel({ kind: 'detail', workOrderNumber });
+    setPanel({ kind: 'detail', id });
   };
 
   const closeNewWorkOrder = () => {
@@ -157,27 +163,21 @@ export function WorkOrdersView() {
       )}
       {panel.kind === 'detail' && (
         <WorkOrderDetailPanel
-          key={panel.workOrderNumber}
-          workOrder={listData.find(
-            (w) => w.workOrderNumber === panel.workOrderNumber,
-          )}
+          key={panel.id}
+          workOrder={listData.find((w) => w.id === panel.id)}
           releasedLines={releasedLines}
           writeBlocked={writeBlocked}
           onBack={() => {
             setDetailDirty(false);
             setPanel({ kind: 'list' });
           }}
-          onRelease={(pn) =>
-            setReleaseDialog({ workOrderNumber: panel.workOrderNumber, pn })
-          }
+          onRelease={(pn) => setReleaseDialog({ workOrderId: panel.id, pn })}
           onSaveDetail={(updated) => {
             setWorkOrderList((current) =>
-              current.map((w) =>
-                w.workOrderNumber === updated.workOrderNumber ? updated : w,
-              ),
+              current.map((w) => (w.id === updated.id ? updated : w)),
             );
             showNotice(
-              `💾 WO ${updated.workOrderNumber} demand updated (mock) — business demand only, local state only. No Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
+              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated (mock) — business demand only, local state only. No Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
             );
           }}
           onDirtyChange={handleDetailDirtyChange}
@@ -187,7 +187,9 @@ export function WorkOrdersView() {
 
       {newWorkOrderOpen && (
         <NewWorkOrderDialog
-          existing={workOrderList.map((w) => w.workOrderNumber)}
+          existing={workOrderList.flatMap((w) =>
+            w.workOrderNumber === null ? [] : [w.workOrderNumber],
+          )}
           writeBlocked={writeBlocked}
           onClose={closeNewWorkOrder}
           onOpenExisting={(workOrderNumber) => {
@@ -195,13 +197,16 @@ export function WorkOrdersView() {
             showNotice(
               `⚠ WO Number ${workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
             );
-            openWorkOrder(workOrderNumber);
+            const existing = workOrderList.find(
+              (w) => w.workOrderNumber === workOrderNumber,
+            );
+            if (existing) openWorkOrder(existing.id);
           }}
           onSave={(workOrder) => {
             setWorkOrderList((current) => [workOrder, ...current]);
             closeNewWorkOrder();
             showNotice(
-              `💾 WO ${workOrder.workOrderNumber} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), local state only. Nothing was persisted to the backend. No release.`,
+              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), local state only. Nothing was persisted to the backend. No release.`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}
@@ -219,7 +224,7 @@ export function WorkOrdersView() {
           onConfirm={(qty, route) => {
             setReleasedLines((current) =>
               new Set(current).add(
-                `${releaseDialog.workOrderNumber}:${releaseDialog.pn}`,
+                `${releaseDialog.workOrderId}:${releaseDialog.pn}`,
               ),
             );
             setReleaseDialog(null);
@@ -244,14 +249,16 @@ function WorkOrderListPanel({
   list: MockWorkOrder[];
   search: string;
   onSearch: (v: string) => void;
-  onOpen: (workOrderNumber: string) => void;
+  onOpen: (id: string) => void;
   onNew: () => void;
 }) {
   const query = search.trim().toLowerCase();
   const rows = list.filter(
     (w) =>
       !query ||
-      (w.workOrderNumber + ' ' + w.preview).toLowerCase().includes(query),
+      ((w.workOrderNumber ?? '') + ' ' + w.preview)
+        .toLowerCase()
+        .includes(query),
   );
   return (
     <div>
@@ -301,18 +308,15 @@ function WorkOrderListPanel({
               </tr>
             ) : (
               rows.map((w) => (
-                <tr key={w.workOrderNumber}>
+                <tr key={w.id}>
                   <td>
-                    <button
-                      className="rowbtn"
-                      onClick={() => onOpen(w.workOrderNumber)}
-                    >
-                      <span className="wo" title={w.workOrderNumber}>
-                        {w.workOrderNumber}
+                    <button className="rowbtn" onClick={() => onOpen(w.id)}>
+                      <span className="wo" title={woDisplay(w.workOrderNumber)}>
+                        {woDisplay(w.workOrderNumber)}
                       </span>
                       {w.internal ? (
                         <span className="sub" style={{ display: 'block' }}>
-                          temporary internal Work Order
+                          internal Work Order — no external number yet
                         </span>
                       ) : null}
                     </button>
@@ -340,12 +344,12 @@ function WorkOrderListPanel({
       )}
       <div className="wo-note">
         Completed Work Orders (every Work Order Demand fully allocated) move out
-        of the active list but remain permanently available in history.
-        Temporary internal Work Orders (
-        <span className="mono">TMP-…-REWORK/MODIFY</span>) appear here like any
-        other Work Order. Work Orders handles business demand only — it is not
-        customer, pricing, invoicing, shipping, purchasing, or accounting
-        functionality.
+        of the active list but remain permanently available in history. Internal
+        Work Orders without an external number (e.g. Scan Station MODIFY intake)
+        display <span className="mono">—</span> and may receive the real
+        external number later through an audited edit. Work Orders handles
+        business demand only — it is not customer, pricing, invoicing, shipping,
+        purchasing, or accounting functionality.
       </div>
     </div>
   );

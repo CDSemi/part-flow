@@ -4,9 +4,10 @@ import type {
   MockAreaMachine,
 } from '../views/view-models';
 
-// Machines belonging to each Area (Area Board detail monitoring cards).
-// Areas without Machines (Material, Manual, Deburr, External, Stockroom)
-// render only the Area summary card — no placeholder Machine cards.
+// Machines belonging to each Area — shared by the Area Board detail and
+// the Scan Station monitoring layout. Areas without Machines (Material,
+// Manual, Deburr, External, Stockroom) render only the full-width Area
+// summary card — no placeholder Machine cards, no queue statistics.
 export const MOCK_AREA_MACHINES: Partial<Record<AreaKey, MockAreaMachine[]>> = {
   cut: [{ name: 'Saw 1', status: 'running' }],
   lathe: [
@@ -31,7 +32,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     workOrder: 'WO 007003 · Receiving',
     job: '18190',
     qty: 8,
-    machines: [['queue', 8]],
+    machines: [],
     due: '9 days remaining',
     dueClass: 'ok',
     timeInArea: '2d 01h',
@@ -71,6 +72,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueDays: 2,
     timeInAreaMinutes: 125,
     received: '2026-07-12',
+    scrapped: 1,
   },
   {
     area: 'lathe',
@@ -87,9 +89,11 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     received: '2026-07-12',
   },
   {
+    // Internal MODIFY demand without an external Work Order Number:
+    // the blank number displays as `—` (display-only placeholder).
     area: 'lathe',
     pn: '214-406',
-    workOrder: 'TMP-…-REWORK · Turning · REWORK',
+    workOrder: 'WO — · Turning · MODIFY',
     job: '— (internal)',
     qty: 2,
     machines: [['queue', 2]],
@@ -99,6 +103,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueDays: -1,
     timeInAreaMinutes: 372,
     received: '2026-07-21',
+    scrapped: 1,
   },
   {
     area: 'mill',
@@ -138,7 +143,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     workOrder: 'WO 007011 · Manual work',
     job: '18520',
     qty: 4,
-    machines: [['queue', 4]],
+    machines: [],
     due: 'No due date',
     dueClass: 'none',
     timeInArea: '5h 20m',
@@ -152,7 +157,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     workOrder: 'WO 007002 · Deburring',
     job: '18102',
     qty: 3,
-    machines: [['queue', 3]],
+    machines: [],
     due: '16 days remaining',
     dueClass: 'ok',
     timeInArea: '30m',
@@ -174,6 +179,7 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     dueDays: -6,
     timeInAreaMinutes: 5880,
     received: '2026-07-06',
+    scrapped: 2,
   },
   {
     area: 'stockroom',

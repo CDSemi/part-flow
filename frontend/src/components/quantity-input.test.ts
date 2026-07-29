@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 
-import { applyQuantityKey } from './quantity-input';
+import { applyQuantityKey, sanitizeQuantity } from './quantity-input';
 
 test('digits append up to the maximum length', () => {
   expect(applyQuantityKey('', '4')).toBe('4');
@@ -20,4 +20,15 @@ test('non-quantity keys are left to the dialog (null)', () => {
   expect(applyQuantityKey('42', 'Escape')).toBeNull();
   expect(applyQuantityKey('42', 'a')).toBeNull();
   expect(applyQuantityKey('42', 'Tab')).toBeNull();
+});
+
+test('Space is consumed but ignored — the value never changes', () => {
+  expect(applyQuantityKey('42', ' ')).toBe('42');
+  expect(applyQuantityKey('', ' ')).toBe('');
+});
+
+test('sanitizeQuantity keeps digits only, capped at the maximum length', () => {
+  expect(sanitizeQuantity('4a2 ')).toBe('42');
+  expect(sanitizeQuantity('123456')).toBe('1234');
+  expect(sanitizeQuantity('')).toBe('');
 });

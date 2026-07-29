@@ -46,12 +46,45 @@ test('the application shell renders with the four top-level entries', async () =
   expect(await screen.findByText('ONLINE')).toBeInTheDocument();
 });
 
-test('the root URL redirects to the Scan Station', async () => {
+test('the root URL redirects to the Station Selector — never to a station', async () => {
   renderAt('/');
 
   expect(window.location.pathname).toBe('/scan-station');
   expect(
     await screen.findByRole('region', { name: 'Scan Station' }),
+  ).toBeInTheDocument();
+  // The selector lists the active stations; no station is auto-loaded.
+  expect(
+    screen.getByRole('heading', { name: 'Select a Scan Station' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText('Scan barcode')).not.toBeInTheDocument();
+});
+
+test('/scan-station/:stationId loads the selected station', async () => {
+  renderAt('/scan-station/LATHE-ST-01');
+
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+  expect(screen.getByText('LATHE-ST-01')).toBeInTheDocument();
+});
+
+test('selecting a station from the Station Selector navigates to its URL', async () => {
+  renderAt('/scan-station');
+
+  fireEvent.click(await screen.findByRole('button', { name: /DEBURR-ST-01/ }));
+
+  expect(window.location.pathname).toBe('/scan-station/DEBURR-ST-01');
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+});
+
+test('an unknown Station ID shows an explicit error — no silent fallback', async () => {
+  renderAt('/scan-station/NO-SUCH-STATION');
+
+  expect(
+    await screen.findByText(/Unknown or inactive Scan Station/),
+  ).toBeInTheDocument();
+  expect(screen.queryByLabelText('Scan barcode')).not.toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: 'Choose a Scan Station' }),
   ).toBeInTheDocument();
 });
 

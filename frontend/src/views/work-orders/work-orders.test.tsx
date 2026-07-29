@@ -4,11 +4,13 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from '../../App';
 
 // Work Orders regression tests: New Work Order modal workflow (optional
-// WO Number and due date, temporary internal number generation,
+// WO Number — a blank number saves a NULL number rendered as `—`, no
+// temporary number generation — and optional due dates,
 // missing-information Save Demand confirmation), the multi-step Add
-// Part dialog, OPEN Work Order editing, nullable due-date behavior,
-// mock validation, and unsaved-change protection. Everything here
-// exercises Phase 2 development mock state only.
+// Part dialog, PN-carrying barcodes with create-on-first-use, OPEN
+// Work Order editing, nullable due-date behavior, mock validation, and
+// unsaved-change protection. Everything here exercises Phase 2
+// development mock state only.
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -136,7 +138,7 @@ test('a complete save flow (number + due entered) saves without extra confirmati
   });
 
   // Barcode scanning remains available as a secondary method.
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   const qty = screen.getByLabelText('Quantity for 78-04-0031');
   expect(document.activeElement).toBe(qty);
   fireEvent.change(qty, { target: { value: '5' } });
@@ -154,26 +156,44 @@ test('a complete save flow (number + due entered) saves without extra confirmati
   ).toBeInTheDocument();
 });
 
-test('an unknown barcode is rejected and adds nothing', async () => {
+test('a non-PN barcode is rejected and adds nothing', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:9999');
+  scanBarcode('PF:MACHINE:L2');
 
   expect(
-    screen.getByText(/Unknown barcode “PF:PN:9999” — nothing added/),
+    screen.getByText(/Unknown barcode “PF:MACHINE:L2” — nothing added/),
   ).toBeInTheDocument();
   expect(
     screen.getByText(/No demand lines yet — add the first Part/),
   ).toBeInTheDocument();
 });
 
+test('a PN barcode carries the PN itself; an unknown PN is created on first use', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  // Arbitrary non-empty suffix — no format, no opaque id mapping.
+  scanBarcode('PF:PN:NEW-PLATE-9');
+
+  expect(screen.getByText('NEW-PLATE-9')).toBeInTheDocument();
+  expect(
+    screen.getByText(/new PN — barcode created with PN master/),
+  ).toBeInTheDocument();
+
+  // Case-insensitive identity: a re-scan in different casing focuses
+  // the existing line instead of duplicating it.
+  scanBarcode('PF:PN:new-plate-9');
+  expect(screen.getAllByLabelText('Quantity for NEW-PLATE-9')).toHaveLength(1);
+});
+
 test('scanning a duplicate PN focuses the existing line instead of adding one', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:1021');
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
+  scanBarcode('PF:PN:78-04-0031');
 
   const qtyFields = screen.getAllByLabelText('Quantity for 78-04-0031');
   expect(qtyFields).toHaveLength(1);
@@ -191,11 +211,16 @@ test('search matches hyphenated PNs and WO numbers with punctuation', async () =
   expect(screen.getByText('007010')).toBeInTheDocument();
   expect(screen.queryByText('007005')).not.toBeInTheDocument();
 
+  // An internal Work Order without an external number is found through
+  // its PN preview and displays `—` as its number.
   fireEvent.change(screen.getByLabelText('Search WO Number'), {
-    target: { value: 'TMP-20260721' },
+    target: { value: '214-406' },
   });
-  expect(screen.getByText('TMP-20260721-0940-REWORK')).toBeInTheDocument();
   expect(screen.queryByText('007010')).not.toBeInTheDocument();
+  const internalRow = screen
+    .getByText('internal Work Order — no external number yet')
+    .closest('tr');
+  expect(internalRow?.querySelector('.wo')?.textContent).toBe('—');
 });
 
 /* ============ Optional header + Save Demand confirmation ============ */
@@ -204,7 +229,7 @@ test('missing WO Number and due dates open a confirmation, never a validation er
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   fireEvent.change(screen.getByLabelText('Quantity for 78-04-0031'), {
     target: { value: '5' },
   });
@@ -214,9 +239,13 @@ test('missing WO Number and due dates open a confirmation, never a validation er
     name: 'Save demand with missing information?',
   });
   expect(confirm).toHaveTextContent(/No external WO Number/);
-  expect(confirm).toHaveTextContent(/TMP-YYYYMMDD-HHMMSS/);
+  expect(confirm).toHaveTextContent(
+    /internal Work Order without an external number/,
+  );
   expect(confirm).toHaveTextContent(/No WO due date/);
   expect(confirm).toHaveTextContent(/1 demand line has no due date/);
+  // No temporary number is generated — the number stays NULL.
+  expect(confirm.textContent).not.toMatch(/TMP-/);
 
   // Cancel returns to editing with every entered value preserved.
   fireEvent.click(
@@ -227,22 +256,26 @@ test('missing WO Number and due dates open a confirmation, never a validation er
   ).toBeInTheDocument();
   expect(screen.getByLabelText('Quantity for 78-04-0031')).toHaveValue('5');
 
-  // Confirming generates the labeled temporary internal WO Number.
+  // Confirming saves an internal Work Order with a NULL number that
+  // renders as `—` (the placeholder itself is never persisted).
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm and save' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText(/^TMP-\d{8}-\d{6}$/)).toBeInTheDocument();
-  expect(
-    screen.getAllByText('temporary internal Work Order').length,
-  ).toBeGreaterThan(0);
+  const labels = screen.getAllByText(
+    'internal Work Order — no external number yet',
+  );
+  expect(labels.length).toBeGreaterThan(0);
+  const savedRow = labels[0].closest('tr');
+  expect(savedRow?.querySelector('.wo')?.textContent).toBe('—');
+  expect(screen.queryByText(/TMP-\d{8}/)).not.toBeInTheDocument();
 });
 
 test('an invalid quantity still blocks save and keeps entered values', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   const qty = screen.getByLabelText('Quantity for 78-04-0031');
   fireEvent.change(qty, { target: { value: '0' } });
 
@@ -290,19 +323,16 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
     screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
   ).toBeInTheDocument();
 
-  // Step 2: same keypad + physical-keyboard interaction as Scan Station.
+  // Step 2: same keypad + physical-keyboard interaction as Scan Station
+  // (a real focusable numeric input, focused on entry).
   fireEvent.keyDown(dialog, { key: '5' });
-  expect(
-    screen.getByRole('status', { name: 'Quantity: 5' }),
-  ).toBeInTheDocument();
+  expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
 
   // Back preserves entered values.
   fireEvent.click(screen.getByRole('button', { name: '‹ Back' }));
   expect(screen.getByLabelText('Search PartNumber')).toHaveValue('309');
   fireEvent.click(screen.getByRole('button', { name: /309-127/ }));
-  expect(
-    screen.getByRole('status', { name: 'Quantity: 5' }),
-  ).toBeInTheDocument();
+  expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
 
   // Step 3: `No due date` is an explicit, valid choice.
@@ -334,7 +364,7 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
 test('the Add Part flow rejects a PN already on the Work Order', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
   fireEvent.change(screen.getByLabelText('Search PartNumber'), {
@@ -361,7 +391,7 @@ test('editable date fields are calendar inputs (type="date")', async () => {
   );
   expect(screen.getByLabelText(/^WO due date/)).toHaveAttribute('type', 'date');
 
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   expect(screen.getByLabelText('Due date for 78-04-0031')).toHaveAttribute(
     'type',
     'date',
@@ -375,8 +405,8 @@ test('new lines inherit the WO due date; edited lines keep their own date', asyn
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
     target: { value: '2026-09-01' },
   });
-  scanBarcode('PF:PN:1021');
-  scanBarcode('PF:PN:1102');
+  scanBarcode('PF:PN:78-04-0031');
+  scanBarcode('PF:PN:309-127');
 
   const due1 = screen.getByLabelText('Due date for 78-04-0031');
   const due2 = screen.getByLabelText('Due date for 309-127');
@@ -400,7 +430,7 @@ test('a line whose due date is cleared is user-edited and stops inheriting', asy
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
     target: { value: '2026-09-01' },
   });
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   const due = screen.getByLabelText('Due date for 78-04-0031');
   fireEvent.change(due, { target: { value: '' } });
   expect(screen.getAllByText('No due date').length).toBeGreaterThan(0);
@@ -447,7 +477,7 @@ test('scanning a new PN on an OPEN Work Order adds a draft line and marks unsave
   await renderWorkOrders();
   await openWorkOrderDetail('007010');
 
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
 
   expect(screen.getByText('78-04-0031')).toBeInTheDocument();
   // The new line joins the shipped invalid draft row as a second draft.
@@ -461,7 +491,7 @@ test('a duplicate PN on an OPEN Work Order focuses the existing line', async () 
   await renderWorkOrders();
   await openWorkOrderDetail('007010');
 
-  scanBarcode('PF:PN:1014'); // 0455-20-0118-03 is already on WO 007010
+  scanBarcode('PF:PN:0455-20-0118-03'); // already on WO 007010
 
   const qtyFields = screen.getAllByLabelText('Quantity for 0455-20-0118-03');
   expect(qtyFields).toHaveLength(1);
@@ -472,7 +502,7 @@ test('an unsaved draft line is removed immediately without a dialog', async () =
   await renderWorkOrders();
   await openWorkOrderDetail('007010');
 
-  scanBarcode('PF:PN:1021');
+  scanBarcode('PF:PN:78-04-0031');
   fireEvent.click(
     screen.getByRole('button', { name: 'Remove line 78-04-0031' }),
   );

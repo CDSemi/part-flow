@@ -46,7 +46,7 @@ export function HotPn({
   );
 }
 
-/** Request Type chip: NEW / REWORK / MODIFY (canonical vocabulary). */
+/** Request Type chip: NEW / MODIFY (canonical vocabulary). */
 export function TypeChip({ type }: { type: RequestType }) {
   return <span className={`typechip ${type.toLowerCase()}`}>{type}</span>;
 }

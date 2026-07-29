@@ -1,0 +1,20 @@
+1. Yes. MODIFY không có WO nghĩa là không có external WO number, nhưng vẫn tạo internal WorkOrder row có number null.
+2. Tôi theo ý bạn, REWORK không còn là RequestType. Tuy nhiên dùng từ REWORK có thể hơi gây hiểu lầm, tôi nghĩ nên đổi thành REPARE sẽ chính xác hơn. Vì use case của nó là trong quá trình gia công, có thể phát hiện ra một vài PN pcs bị sai sót ở môt khâu nào đó trước đó, cần phải đưa về đó sửa lại. Cho nên REPARE có thể split QuantityFlow hiện tại ra, chứ không phải lúc nào cũng bê nguyên cục QuantityFlow đi repare. (Ví dụ: PN quantity đang chạy A → B → C → D, thì sau đó có thể có vài pcs quay lại B để làm lại chứ không phải toàn bộ đều quay lại B). Toàn bộ (hoặc một phần) quay lại B có thể là next step tong toàn bộ quá trình gia công. Cho nên khi một PN được scan tại một Area mà nó đã đi qua thì không được tự động assume rằng nó là REPARE, cần phải xác định thông qua tùy chọn "Create REPARE demand" (hoặc gọi là gì đó tùy bạn)
+3. Yes. Machine-first scanning tại main input chỉ hoạt động như shortcut nhằm mở one-shot assignment dialog với preselected machine, không tạo session. Tương tự, PN barcode scanning tại main input cũng chỉ nhằm mở one-shot PN movement dialog (hoặc one-shot assignment dialog nếu PN đó đang có trong area queue).
+4. Area có đúng một Machine cũng tương đượng với area nhiều machine. có đầy đủ QUEUE_AND_ASSIGN. Bởi vì nếu muốn auto-assign thì chỉ cần tạo area không có machine là được (ví dụ CUT area có thể không có saw machine). Như vậy sẽ đơn giản hơn rất nhiều, chỉ cần phân biệt area có machine hay không có machine là đủ.
+5. Yes, Khi PN có quantity ở nhiều source Areas, Receive more quantity thì bắt người dùng chọn source Area/flow. (list ra cho họ chọn)
+6. Add more quantity bắt buộc nhập reason (operator được phép làm, không yêu cầu Manager) và event phải audit được.
+7. Scrap scan sẽ tích counter rồi Confirm. Đồng thời cũng yêu cầu phải nhập reason (chung). Và phải có bước summary để user verify trước khi apply.
+8. Auto-created blank-number MODIFY Work Order: nếu cùng PN đã có một blank MODIFY WO active, lần scan sau sẽ reuse nếu nó rõ ràng là cùng một active MODIFY intake; nếu không rõ thì hỏi người dùng.
+9. PN uniqueness không phân biệt hoa/thường: Giữ nguyên preserve nguyên text khi hiển thị nhưng lookup uniqueness case-insensitive để tránh abc và ABC thành hai PN khác nhau.
+10. Nếu 1 WorkOrder có nhiều WorkOrderDemand thì “Due date của PN” là due date của WorkOrderDemand, PN master NEVER sở hữu due date.
+11. PartNumber record nội bộ phải cho Admin xóa được (để xóa rác trong quá trình test vói dump PN). Tương tự các history cũng cần phải cho Admin được phép xóa. Các object tham chiếu đến PN bị xóa chỉ cần giữ part-number kèm ghi chú (deleted) là đủ.
+12. Bố cục này (ở mục thảo luận số 6.3) cũng nên áp dụng cho Management -> Area Board -> <Area>:
+[ In this Area now ] [ Machine cards grid                    ]
+[ fixed left col   ] [ Machine 1 ][ Machine 2 ][ Machine 3   ]
+[ grows vertically ] [ Machine 4 ][ Machine 5 ]              ]
+13. Station URL và station switching (ở mục thảo luận số 7): Với "/scan-station", tôi muốn hiện station selector chứ đừng tự redirect tới station nào cả.
+14. Undo Last Scan (ở mục thảo luận số 7): Cần có summary rõ ràng để confirm trước khi áp dụng UNDO.
+15. Scan workflow mới - PN chưa có active Work Order Demand: Với request_type = MODIFY và route_mode = FLOATING đều chỉ là default value, vẫn cho phép user select lựa chọn khác nếu muốn.
+
+==> Nếu bạn còn cảm thấy các câu trả lời của tôi có gì chưa thỏa đáng thì hãy hỏi làm rõ thêm trước khi viết prompt cho claude.

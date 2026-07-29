@@ -72,19 +72,27 @@ export function AddPartDialog({
     if (step === 0) searchRef.current?.focus();
   }, [step]);
 
-  const trimmed = query.trim().toUpperCase();
+  // Search and identity are case-insensitive; the entered casing is
+  // preserved when a new PN is created (never silently re-cased).
+  const trimmed = query.trim();
+  const upper = trimmed.toUpperCase();
   const matches = MOCK_PN_CATALOG.filter(
     (entry) =>
-      !trimmed ||
+      !upper ||
       `${entry.pn} ${entry.name} ${entry.barcode}`
         .toUpperCase()
-        .includes(trimmed),
+        .includes(upper),
   );
-  const exactMatch = MOCK_PN_CATALOG.some((entry) => entry.pn === trimmed);
+  const exactMatch = MOCK_PN_CATALOG.some(
+    (entry) => entry.pn.toUpperCase() === upper,
+  );
 
   function choosePn(value: string, asNewPn: boolean, barcodeNote: string) {
-    if (existingPns.includes(value)) {
-      onDuplicate(value);
+    const duplicate = existingPns.find(
+      (existing) => existing.toUpperCase() === value.toUpperCase(),
+    );
+    if (duplicate) {
+      onDuplicate(duplicate);
       return;
     }
     setPn(value);
@@ -120,8 +128,10 @@ export function AddPartDialog({
 
   function handleQuantityKeys(event: React.KeyboardEvent) {
     if (step !== 1) return;
-    if (event.target instanceof HTMLButtonElement && event.key === 'Enter') {
-      return; // let a focused button (Back / Cancel) activate normally
+    if (event.target instanceof HTMLButtonElement) {
+      // Focusable buttons (Back / Cancel) keep native activation;
+      // keypad buttons are non-focusable and never receive keys.
+      return;
     }
     if (event.key === 'Enter') {
       if (qtyValid) {
@@ -196,7 +206,7 @@ export function AddPartDialog({
                   choosePn(
                     trimmed,
                     true,
-                    'new PN — barcode created with PN master: PF:PN:…',
+                    `new PN — barcode created with PN master: PF:PN:${trimmed}`,
                   )
                 }
               >
@@ -281,7 +291,6 @@ export function AddPartDialog({
               onChange={(e) => setType(e.target.value as RequestType)}
             >
               <option>NEW</option>
-              <option>REWORK</option>
               <option>MODIFY</option>
             </select>
             <label htmlFor="ap-job">Job Numbers</label>

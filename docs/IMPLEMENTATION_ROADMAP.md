@@ -5,10 +5,10 @@
 
 ## Current State
 
-- Canonical project specification: `PROJECT_PROFILE.md` v8 (nullable WorkOrder/WorkOrderDemand due dates, generated temporary internal Work Order Numbers for blank entries, canonical demand ordering with undated demand last, server-confirmed-write scan rule, confirmation before Hot reordering).
-- Approved target UI: `GUI_DESIGN.md` v7, with mockup v7 (`docs/mockups/partflow-gui-mockup-v7.html`) as its visual reference.
+- Canonical project specification: `PROJECT_PROFILE.md` v9 (Request Types `NEW`/`MODIFY` only; Repair as an explicit movement intent `TRANSFERRED · movement_reason REPAIR`; Floating Routes as the default route mode with optional AssignedRoute; nullable external Work Order Numbers rendered `—` — no temporary number generation; PN barcodes carrying the PN with create-on-first-use and case-insensitive identity; canonical `SCRAPPED` and auditable `QUANTITY_ADJUSTED · INCREASE` events; two Area ownership modes with one-shot Machine assignment and no Machine sessions; per-station Scan Station routing; administrative archival/purge maintenance policy; nullable due dates, canonical demand ordering, server-confirmed-write scan rule, confirmation before Hot reordering).
+- Approved target UI: `GUI_DESIGN.md` v8, with mockup v8 (`docs/mockups/partflow-gui-mockup-v8.html`) as its visual reference.
 - Phase 1 — Repository Foundation source code exists: React + TypeScript frontend, FastAPI backend, PostgreSQL, Alembic (no-op baseline), Docker Compose, the `/api/health` endpoint, formatter/linter/type-check/test tooling, and CI.
-- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a real development-only build boundary (mock views and datasets are loaded only when `import.meta.env.DEV` is true; production builds render an explicit not-connected state per route, verified by a mock-sentinel check in `npm run build`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration with **fast connectivity detection** (GUI_DESIGN §3.6): browser online/offline events, ~1 s health polling with a request timeout below the probe interval and no overlapping probes, recheck on tab focus/visibility, passive probes never flipping the UI to a "connecting" state, persistent OFFLINE banner with Retry, write controls disabled while disconnected, and Scan Station input re-enable/refocus on recovery — no WebSocket/SSE and no offline write queueing. The views implement the approved GUI v7 interaction model against local mock state: the Work Orders view (route `/management/work-orders`) with New Work Order as a modal dialog over the WO list, optional WO Number and due dates (a blank number generates a temporary internal `TMP-YYYYMMDD-HHMMSS` number on confirmed save), the manual-first multi-step Add Part dialog with barcode scanning as a secondary method, the save-omission confirmation, OPEN Work Order demand-line adding/removal per the Work Order Demand removal rule (PROJECT_PROFILE §13), native calendar date inputs, mock validation, and unsaved-change protection; the Production Board with live header clock, the shared Hot presentation (`🔥#n` before the PN), urgency-text-only blinking, Job-Numbers-last column order, and dynamic height-measured pagination; the Area Board per-Area detail as an Area summary card plus per-Machine monitoring cards; the Scan Station with the bottom-edge Station caption, the visible manual-entry secondary action, explicit Movement-type badges, and full keyboard support in the quantity dialog; and Priority Management with confirmation before every order change. The canonical Purchase Order → Work Order vocabulary migration (PROJECT_PROFILE v7, GUI_DESIGN §12.2) is applied across current documentation, frontend code, routes, and tests. Phase 2 remains frontend presentation with development-only mock behavior: no domain implementation, no database migrations, no backend business APIs, and no persisted production writes exist yet.
+- Phase 2 — Frontend Design System and Application Shell is implemented: semantic design tokens with switchable Dark/Light themes (Dark default), URL-based routing and navigation (Management remembers its last-used sub view per session), all seven approved GUI views as mock views behind a real development-only build boundary (mock views and datasets are loaded only when `import.meta.env.DEV` is true; production builds render an explicit not-connected state per route, verified by a mock-sentinel check in `npm run build`), loading/empty/error/disconnected/long-data states with a dev-only `?state=` preview, and the real `/api/health` connectivity integration with **fast connectivity detection** (GUI_DESIGN §3.6): browser online/offline events, ~1 s health polling with a request timeout below the probe interval and no overlapping probes, recheck on tab focus/visibility, passive probes never flipping the UI to a "connecting" state, persistent OFFLINE banner with Retry, write controls disabled while disconnected, and Scan Station input re-enable/refocus on recovery — no WebSocket/SSE and no offline write queueing. The views implement the approved GUI v8 interaction model against local mock state: the Work Orders view (route `/management/work-orders`) with New Work Order as a modal dialog over the WO list, optional WO Number and due dates (a blank number is saved as NULL and renders `—` — no temporary number generation), the manual-first multi-step Add Part dialog with PN-carrying barcodes and create-on-first-use as a secondary method, the save-omission confirmation, OPEN Work Order demand-line adding/removal per the Work Order Demand removal rule (PROJECT_PROFILE §13), native calendar date inputs, mock validation, and unsaved-change protection; the Production Board with live header clock, the shared Hot presentation (`🔥#n` before the PN), urgency-text-only blinking, scrap visibility on the total line, Job-Numbers-last column order, and dynamic height-measured pagination; the Scan Station as a per-station route (`/scan-station/:stationId` behind a Station Selector) with PN-centric one-shot dialogs (intake with MODIFY/FLOATING defaults, source-explicit transfers, one-shot Machine assignment without any Machine session, auditable quantity addition, explicit Repair intent, the PF:SCRAP counting workflow, Undo with summary confirmation) and Area statistics in the header; the Area Board per-Area detail and the Scan Station sharing one Area/Machine monitoring layout built from shared presentation components; and Priority Management with confirmation before every order change. The canonical Purchase Order → Work Order vocabulary migration (PROJECT_PROFILE v7, GUI_DESIGN §12.3) is applied across current documentation, frontend code, routes, and tests. Phase 2 remains frontend presentation with development-only mock behavior: no domain implementation, no database migrations, no backend business APIs, and no persisted production writes exist yet.
 
 ## Implementation Principles
 
@@ -68,35 +68,36 @@ Only the foundation required by manual Work Order Intake and production release:
 - Department
 - Area
 - Operation
-- PartNumber
-- WorkOrder
-- WorkOrderDemand
+- PartNumber (case-insensitive unique identity, create-on-first-use — no preloaded catalog requirement)
+- WorkOrder (nullable external `work_order_number`; uniqueness for non-null numbers only)
+- WorkOrderDemand (`request_type IN ('NEW','MODIFY')`)
 - RouteTemplate
 - RouteStep
-- AssignedRoute
-- QuantityFlow
-- PartMovement
+- AssignedRoute (optional — only `PLANNED` flows carry one)
+- QuantityFlow with `route_mode` (`FLOATING` default / `PLANNED`) and nullable `assigned_route_id` — **the data foundation must support Floating Routes from the start**
+- PartMovement (including the typed `movement_reason` column concept for later Repair movements)
 - derived current-position projection
 
 Rules:
 
-- Preserve canonical PartMovement field names when those fields are introduced: `station_id`, `occurred_at`, `server_received_at`, `device_event_id`.
+- Preserve canonical PartMovement field names when those fields are introduced: `station_id`, `occurred_at`, `server_received_at`, `device_event_id`, `movement_reason`.
 - Do not introduce competing names such as `client_event_id`.
 - Movement history is immutable; quantity integrity is enforced; domain invariants are covered by tests.
+- Floating Route traces are derived from Movement history — no second mutable route history table.
 
 ## Phase 4 — Manual Work Order Intake and Production Release
 
 The first business vertical slice, presented in the UI as the Work Orders view (GUI_DESIGN §11). It must:
 
 - create/find WorkOrder,
-- generate a unique temporary internal Work Order Number (`TMP-YYYYMMDD-HHMMSS`, deterministic suffix on collision) when demand is confirmed-saved without an external WO Number (PROJECT_PROFILE §7 Work Order — the persisted internal identity is never nullable),
+- save a confirmed blank external WO Number as `NULL` on an internal Work Order (rendered `—`, never persisted as a placeholder; replaceable later through an audited edit — PROJECT_PROFILE §7 Work Order; no temporary number is generated),
 - accept null WorkOrder and WorkOrderDemand due dates as valid data (PROJECT_PROFILE §8.2/§8.3),
-- create/find PartNumber,
+- create/find PartNumber (case-insensitive, create-on-first-use),
 - create/update WorkOrderDemand,
 - save demand separately from production quantity,
 - explicitly release production,
-- create QuantityFlow,
-- assign an independent Route snapshot,
+- create QuantityFlow with its route mode (`FLOATING` default),
+- snapshot an independent Route **only** for a `PLANNED` release — a Floating release has no AssignedRoute,
 - append `RECEIVED`,
 - establish current position,
 - remain transactional and idempotent,
@@ -128,24 +129,22 @@ Candidate resolution must respect current position, route, Operation, station co
 
 Temporary limitation: full-QuantityFlow movement only. Partial movement must not be claimed as supported before SPLIT (Phase 8); partial input is refused clearly with no write. The target GUI requirement for partial quantity (GUI_DESIGN §4.7) remains.
 
-## Phase 6 — Machine Assignment and Machine Sessions
+## Phase 6 — One-Shot Machine Assignment
 
-- Machine barcode resolution
+- Machine barcode resolution (one-shot shortcut only — **no Machine session of any kind**)
 - Machine/Area validation
-- PN -> Machine and Machine -> PN scan order
+- Machine-first (Machine scan opens the one-shot assignment dialog with the Machine preselected) and PN-first (assign action on queued quantity) entry points
 - `ASSIGNED_TO_MACHINE`
-- `RELEASED_FROM_MACHINE`
-- sticky Machine session
+- `RELEASED_FROM_MACHINE` (the `QUEUE` return action)
 - inactive Machine rejection
-- direct single-Machine mode later in this phase or a clearly named sub-phase
+- one Machine may hold quantities of multiple PNs; one Machine behaves exactly like several (never auto-assign by Machine count)
 
-## Phase 7 — Additional Area Ownership Modes
+## Phase 7 — Direct Area Processing (Areas Without Machines)
 
-- Area without Machines takes direct processing ownership
+- Area without Machines takes direct processing ownership (no queue)
 - Operation recorded and Machine null
-- direct single-Machine auto-assignment
 - multiple-Operation confirmation
-- behavior driven by Area configuration, never Machine count alone
+- exactly two Area modes exist: no Machines → direct processing; Machines → `QUEUE_AND_ASSIGN` (PROJECT_PROFILE §12) — no per-Area assignment-mode configuration and no single-Machine auto-assignment
 
 ## Phase 8 — Quantity SPLIT and MERGED Workflows
 
@@ -154,15 +153,21 @@ Temporary limitation: full-QuantityFlow movement only. Partial movement must not
 - quantity conservation
 - `SPLIT` and `MERGED` Movement history
 - quantity keypad supports valid partial amounts
+- **SPLIT is the prerequisite for partial Repair** (Phase 9): before SPLIT exists, partial Repair is refused clearly with no write — it must not be claimed as supported
 
-## Phase 9 — Undo and Corrections
+## Phase 9 — Undo, Corrections, and Auditable Quantity Events
 
-- `REVERSED` Movement
+- `REVERSED` Movement; Undo reverses the complete application command (never one arbitrary row of a multi-Movement action), with a summary confirmation before applying
 - original Movement preserved
 - authorization
 - reason when configured
 - projection restoration
 - audit visibility
+- **Repair movements**: `TRANSFERRED · movement_reason REPAIR` with mandatory reason; full-flow Repair from this phase, partial Repair only on top of SPLIT (Phase 8)
+- **Scrap**: canonical `SCRAPPED` events from the PF:SCRAP counting workflow — one auditable operation per confirmation; reconciliation `introduced = active + stocked + scrapped`
+- **Quantity additions**: `QUANTITY_ADJUSTED · direction INCREASE` with mandatory reason, never altering requested quantity
+
+None of these backend workflows exist yet — Phase 2 only demonstrates the approved interaction against mock state.
 
 ## Phase 10 — Stockroom and WorkOrderAllocation
 
@@ -201,7 +206,7 @@ Temporary limitation: full-QuantityFlow movement only. Partial movement must not
 - Workers
 - Route Templates
 - barcode configuration
-- session policies
+- Worker session policies
 - correction permissions
 
 ## Phase 14 — Authentication and Role Enforcement
@@ -215,7 +220,7 @@ Role-based authorization per PROJECT_PROFILE §19.
 - clear partial-failure reporting
 - no ERP dependency
 
-## Phase 16 — Deployment and Production Hardening
+## Phase 16 — Deployment, Production Hardening, and Admin Maintenance
 
 - backups
 - migrations
@@ -224,6 +229,7 @@ Role-based authorization per PROJECT_PROFILE §19.
 - rollback
 - reconciliation checks
 - pilot deployment
+- **administrative archival/purge maintenance** (PROJECT_PROFILE §28): PN archive/soft-delete with `(archived)` history markers and a separate explicit physical purge; history archival & purge with retention policy / size threshold / manual triggers, scope preview, mandatory reason, and full audit — normal runtime stays append-only; no full retention engine is built before this phase
 
 ## Deferred
 

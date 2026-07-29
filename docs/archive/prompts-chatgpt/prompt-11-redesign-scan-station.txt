@@ -1,0 +1,49 @@
+ Tôi cần thay đổi lại như sau, bạn hãy đọc repo và tổng kết lại những gì tôi cần thay đổi (có thể góp ý hoặc hỏi tôi thêm nếu cảm thấy chưa rõ hoặc thấy mâu thuẫn):
+
+0. General:
+    - Cần phải làm rõ:
+        + Part MODIFY nghĩa là một PN bất kỳ được lấy từ stock ra cần được sửa lại. Nó có thể ko có WO, không có flow/route cụ thể.
+        + Part REWORK nghĩa là một part đang được gia công đã đi qua các khâu A -> B -> C -> D, nhưng sau đó lại cần quay về làm lại ở một khâu nào trước đó, ví dụ B.
+        + Một PN có thể không được chỉ định một route cụ thể, khi đó route của nó sẽ là route "động". Và mặc định PN sẽ sử dụng route "động". Flow/route "động" (có thể gọi là "floating route" nếu bạn thấy hợp) có nghĩa là chúng được ghi nhận thực tế khi PN đi qua các areas (ví dụ PN bắt đầu được scan/add tại khâu A, thì floating rout của nó là A, sau đó PN tới khâu B và được scan tại đó thì floating route của nó sẽ là A -> B. Cứ tiếp tục như vậy cho đến khi vô stock). Có thể hiểu floating route giống như tracing route vậy đó.
+    - Tôi nghĩ lại rồi nếu tạo một Work Order mà ko nhập WO number thì có thể không cần tạo temporary WO làm gì, có thể cho blank hoặc hiển thị '-'. Chứ xài temporary WO No. như này TMP-20260721-0940 thì hơi dài dòng ko cần thiết vì thực ra nó chứa thông tin ngày giờ tạo WO thôi.
+    - PN barcode cần thay đổi lại format là "PF:PN:<part-number>", vì PN không có format cụ thể nên không thể xác định được liệu 1 PN vó valid hay không (trừ phi sau này làm việc với ERP thì mới hỏi ERP xem PN ABC có tồn tại hay không thì lúc đó mới biết PN có valid hay không). Cho nên hiện tại (chưa work với ERP) khi scan bất kỳ barcode nào có dạng "PF:PN:<part-number>" thì phần thông tin <part-number> đàng sau "PF:PN:" đều được xem như là 1 PN hợp lệ. (Không cần xác minh cũng không cần phải xây đựng PartNumber catalog vì nó không phù hợp với thực tế làm việc)
+
+1. Scan Station:
+    - Có nên đổ bóng cho Cards giống như bên Management không?
+    - Các mã barcode hiện tại (ví dụ Part Number, Machine, Worker, Action, ...) hình như đều bắt đầu bằng PF: hả? Nó có mục đích gì ko, nếu ko thì chắc tôi phải bỏ đi chứ để chi cho thừa thãi nhỉ?
+    - Sửa lại cách hoạt động cũng như giao diện như sau:
+        + Bỏ "Machine session", thay bằng parts info trong area (ví dụ: Total PNs, Total pcs, Queued, On machines, hot...)
+        + Bỏ Card "Machine status" vì không cần select nữa (cũng ko cần scan machine barcode để select).
+        + Card "Scan barcode" nằm ngay dưới header "Machine Shop", kéo dài từ trái qua phải.
+        + Vùng scan chỉ dùng để scan PN và Worker. Machine barcode sẽ được scan trong dialog riêng (mô tả ở dưới). Cũng không scan action barcode nữa.
+        + Nút "Undo Last Scan" đưa vào trong box "Last scanned PN", cho nó anchor với biên phải. Nếu click vào nút này thì nó sẽ undo last scanned PN hiện tại (nếu có), và "Last scanned PN" sẽ tự động hiển thị last scanned PN kế tiếp (nếu có).
+        + Bỏ danh sách "Recent scans".
+        + Ngay phía dưới Card "Scan barcode", cột ngoài cùng bên trái là Card "In this Area now" (độ dài thoải mái tùy theo số lượng PN đang có trong area). Nội dung vẫn bao gồm "Assigned to Machines" và "Area queue — awaiting Machine" (cách sắp xếp vẫn như cũ), nhưng nội dung hiển thị của mỗi PN row cần chi tiết và thống nhất như cách PN đang được hiển thị ở "Management -> Area Board -> Area (ví dụ Lathe)".
+        + Cột/card "In this Area now" có phần top được tô Area's Color giống như card trong "Management -> Area Board -> Area"
+        + Phía bên phải cột "In this Area now" là các machine cards, các machine cards này có thể xuống hàng nếu phần còn lại (phía bên phải) không đủ xếp trên cùng 1 hàng. Nhưng cho dù xuống hàng thì cũng chỉ nằm trong phạm vi phía bên phải cột "In this Area now", không được xếp nằm dưới chân cột "In this Area now".
+        + Nội dung các machine cards hiển thị thống nhất giống như machine card trong "Management -> Area Board -> Area"
+        + Nếu Area không có machine thì card "In this Area now" auto width từ trái sang phải luôn. (giống card "Scan barcode" ở trên)
+        + Để truy cập vào các Scan Station khác nhau thì cần chỉ định station id trong URL. Ví dụ: http://localhost:5173/scan-station/LATHE-ST-01
+        + Nếu click vào station id (dưới footer) thì hiện lên danh sách các scan station có trong PartFlow để cho switch. Vì việc switch giữa các Scan Station không được khuyến khích bởi người dùng bình thường, mà tôi cũng không muốn phức tạp hóa vấn đề nên chỉ cần hỗ trợ âm thầm như vậy là đủ cho tôi xài rồi.
+        + Tôi cần có thêm 1 mock gui "Scan Station" của area không có machine để xem có gì cần sửa thêm không.
+    - Khi scan part:
+        + Chấp nhận mọi giá trị PN (nếu nhập tay) hoặc barcode dạng "PF:PN:<part-number>".
+        + Nếu Area không có machine thì không có queue.
+        + Nếu Area có nhiều machine:
+            + thì mặc định Part sẽ nằm ở "Area Queue", không yêu cầu phải scan machine barcode ngay.
+            + Khi PN được scan lần thứ 2 ở cùng area thì lúc này mới hiện dialog: Scan machine barcode (cho phép manual select) -> Next: nhập số lượng PN sẽ gia công tại machine (có nút MAX, default MAX) -> Done: PN assigned to machine.
+            + Nếu scan machine barcode trước thì hiện dialog cho scan PN barcode -> Next: nhập số lượng PN sẽ gia công tại machine (có nút MAX, default MAX) -> Done: PN assigned to machine.
+            + Vì 1 machine có thể gia công cùng lúc nhiều PN nên cho phép assign thêm part thoải mái vô cùng 1 machine.
+            + Mỗi PN trong "assigned to machines" cần có nút QUEUE để move nó về lại queue
+            + Mỗi PN trong "Area queue — awaiting Machine" cần có nút ASSIGN để assign nó vô machine.
+    - Khi scan một PN tại "Scan Station" thì có thể có các trường hợp:
+        a. Scanned PN không có trong bất kỳ WO đang active trong PartFlow ==> PN này mặc định được xem là loại MODIFY: hiện dialog với các bước cho lựa chọn giống như khi "Add Part manually" trong "Management -> Work Orders -> New Work Order" (Request Type mặc định là MODIFY). Chỉ là sau bước "Add Part" thì một WQ w/o number được tạo riêng cho PN này. Có received date là thời diểm hiện tại mà PN đc scan, due date là due date của PN.
+        b. Scanned PN chưa có trong Area: Hiện dialog cho nhập số lượng PN được chuyển tới area này (có nút MAX, default MAX) -> Done: PN transfered to this area.
+        c. Scanned PN đang có trong Area: Hiện dialog với các option sau:
+            + Option "Assign queued quantity to a Machine" (chỉ hiện nếu PN có trong queue) --> Hiện dialog cho nhập số lượng PN sẽ gia công tại machine (có nút MAX, default MAX) -> Done: PN assigned to machine.
+            + Option "Receive more quantity from <area>" (chỉ hiện nếu PN còn bị rải rác ở các area trước đó trong route) --> Hiện dialog cho nhập số lượng PN được chuyển đến area này (có nút MAX, default MAX) -> Done: PN transferred to this area.
+            + Thêm option "Add more quantity" --> Hiện dialog cho nhập số lượng PN cần gia công thêm tại area này (không có nút MAX, ko có default value, bắt buộc phải nhập một số lượng cụ thể) -> Done: điều chỉnh lại total pcs of PN in this area (nếu area không có machine <=> ko có queue); hoặc điều chỉnh lại total pcs of PN in area queue (nếu area có nhiều machine).
+            + Thêm option "Reduce some quantity" --> Hiện dialog cho scan 1 loại barcode đặc biệt (chưa biết gọi là gì). Mỡi lần scan barcode đặc biệt này thì giảm số lượng của PN tại area đi 1. Có thể hiểu là PN có pcs bị hư, ko thể hoàn thành. Số lượng pcs bị hư này phải được record lại và hiển thị ở những nơi mà PN được hiển thị (ví dụ trong các view "Scan Station", "Production Board", "Area Board", ...)
+    - Enter quantity:
+        + Khi hiện lên dialog "Enter quantity" thì phải focus cho nó, để có thể nhập số từ physical keyboard luôn chứ không cần phải click chuột vào lấy focus thì mới nhập số được.
+        + Các button trong bàn phím ảo không nên bị tác động bởi các phím của bàn phím vật lý (ví dụ như spacebar). Vì hiện tại, khi nhấn một nút trên bàn phím ảo thì nút đó bị focus, mặc dù ko hiển thị trên GUI là đang bị focus nhưng nếu trên bàn phím vật lý mà tôi nhấn spacebar hoặc ENTER thì nút đang được focus trên bàn phím ảo sẽ bị nhấn. Tôi không muốn như vậy. Tôi chỉ muốn ngoài những phím vật lý tương ứng như phím số, backspace, ESC, ENTER khi nhấn thì tương đương với các button trên bàn phím ảo, còn lại thì ko tác động gì hết. Phím ENTER vật lý thì tương đương với nút "Confirm", Phím ESC tương đương nút Cancel

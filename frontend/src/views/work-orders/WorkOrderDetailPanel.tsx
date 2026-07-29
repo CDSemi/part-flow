@@ -102,11 +102,11 @@ export function WorkOrderDetailPanel({
     );
   }
 
+  const woDisplay = workOrder.workOrderNumber ?? '—';
+
   // A release performed in this session (mock) also freezes its line.
   const display = lines.map((line) =>
-    !line.released &&
-    line.pn &&
-    releasedLines.has(`${workOrder.workOrderNumber}:${line.pn}`)
+    !line.released && line.pn && releasedLines.has(`${workOrder.id}:${line.pn}`)
       ? { ...line, released: true, statusLabel: 'Released (mock)' }
       : line,
   );
@@ -159,7 +159,10 @@ export function WorkOrderDetailPanel({
     }
     const line = createDraftLine({
       pn: result.pn,
-      barcodeNote: `existing PN · barcode ${result.barcode}`,
+      isNewPn: result.isNewPn,
+      barcodeNote: result.isNewPn
+        ? `new PN — barcode created with PN master: ${result.barcode}`
+        : `existing PN · barcode ${result.barcode}`,
       due,
     });
     setLines((current) => [...current, line]);
@@ -236,7 +239,7 @@ export function WorkOrderDetailPanel({
     // explicitly confirmed, never silently saved. Released lines are
     // read-only history and are not re-confirmed.
     const missing = collectMissingDemandInfo(
-      workOrder.workOrderNumber,
+      workOrder.workOrderNumber ?? '',
       due,
       display.filter((line) => !line.released),
     );
@@ -265,7 +268,7 @@ export function WorkOrderDetailPanel({
         <button className="wo-back" onClick={handleBack}>
           ‹ All Work Orders
         </button>
-        <h1 className="mono">{workOrder.workOrderNumber}</h1>
+        <h1 className="mono">{woDisplay}</h1>
         <span className="spacer" />
         {editable && dirty ? (
           <span className="unsaved">● Unsaved changes</span>
@@ -297,7 +300,7 @@ export function WorkOrderDetailPanel({
           {workOrder.status}
         </span>
         {workOrder.internal
-          ? ' · temporary internal Work Order (auditable, unique)'
+          ? ' · internal Work Order — no external number yet (displays —)'
           : ''}
       </p>
       <div className="wo-card">
@@ -349,10 +352,15 @@ export function WorkOrderDetailPanel({
                             errorFor(line.id, 'pn') ? true : undefined
                           }
                           onBlur={(e) => {
-                            const pn = e.target.value.trim().toUpperCase();
+                            // The entered casing is preserved; identity
+                            // is case-insensitive (never re-cased).
+                            const pn = e.target.value.trim();
                             if (!pn) return;
                             const duplicate = display.find(
-                              (l) => l.id !== line.id && l.pn === pn,
+                              (l) =>
+                                l.id !== line.id &&
+                                l.pn !== null &&
+                                l.pn.toUpperCase() === pn.toUpperCase(),
                             );
                             if (duplicate) {
                               showNotice(
@@ -370,8 +378,7 @@ export function WorkOrderDetailPanel({
                             clearLineError(line.id, 'pn');
                             updateLine(line.id, {
                               pn,
-                              barcodeNote:
-                                'new PN — barcode created with PN master: PF:PN:…',
+                              barcodeNote: `new PN — barcode created with PN master: PF:PN:${pn}`,
                               isNewPn: true,
                             });
                             setFocusField({ id: line.id, field: 'qty' });
@@ -404,7 +411,6 @@ export function WorkOrderDetailPanel({
                           }
                         >
                           <option>NEW</option>
-                          <option>REWORK</option>
                           <option>MODIFY</option>
                         </select>
                       ) : (
@@ -670,7 +676,7 @@ export function WorkOrderDetailPanel({
 
       {confirmRemove ? (
         <ConfirmDialog
-          title={`Remove ${confirmRemove.pn ?? 'line'} from ${workOrder.workOrderNumber}?`}
+          title={`Remove ${confirmRemove.pn ?? 'line'} from ${woDisplay}?`}
           confirmLabel="Remove line"
           cancelLabel="Cancel — keep the line"
           danger

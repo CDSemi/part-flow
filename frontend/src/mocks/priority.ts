@@ -29,7 +29,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
   {
     pn: '309-127',
     workOrder: 'WO 007006 · Job 18355',
-    type: 'REWORK',
+    type: 'MODIFY',
     figures: ['requested 12', 'allocated 0', 'shortage 12', 'not yet released'],
     due: '2026-07-25',
     dueNote: '3 days left',
@@ -51,7 +51,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     due: '2026-07-31',
     dueNote: '9 days left',
     dueClass: 'ok',
-    barcode: 'PF:PN:1014',
+    barcode: 'PF:PN:0455-20-0118-03',
   },
   {
     pn: '78-04-0031',
@@ -66,7 +66,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     due: '2026-08-07',
     dueNote: '16 days left',
     dueClass: 'ok',
-    barcode: 'PF:PN:1021',
+    barcode: 'PF:PN:78-04-0031',
   },
   {
     // A WO Demand without a due date can still be made Hot: rank is the
@@ -78,16 +78,18 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     due: null,
     dueNote: 'No due date',
     dueClass: 'none',
-    barcode: 'PF:PN:1050',
+    barcode: 'PF:PN:118-052',
   },
   {
+    // Internal MODIFY demand — its Work Order has no external number
+    // and displays `—` (never persisted as a placeholder).
     pn: '214-406',
-    workOrder: 'TMP-20260721-0940-REWORK',
-    type: 'REWORK',
+    workOrder: 'WO — (internal MODIFY)',
+    type: 'MODIFY',
     figures: ['requested 2', 'allocated 0', 'shortage 2', 'at Lathe queue 2'],
     due: '2026-07-21',
     dueNote: 'overdue 1 day',
     dueClass: 'late',
-    barcode: 'PF:PN:1033',
+    barcode: 'PF:PN:214-406',
   },
 ];

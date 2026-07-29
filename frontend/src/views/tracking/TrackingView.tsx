@@ -36,7 +36,7 @@ const FILTERS: { label: string; options: string[] }[] = [
     options: ['All', 'Cutting', 'Turning', 'Milling', 'Deburring', 'Plating'],
   },
   { label: 'Machine', options: ['All', 'Saw 1', 'Lathe 1–4', 'Mill 1–2'] },
-  { label: 'Request Type', options: ['All', 'NEW', 'REWORK', 'MODIFY'] },
+  { label: 'Request Type', options: ['All', 'NEW', 'MODIFY'] },
   { label: 'Priority', options: ['All', 'Hot only'] },
   { label: 'Status', options: ['Active', 'Stocked', 'Completed', 'All'] },
   { label: 'Due', options: ['Any', 'Overdue', 'This week', 'This month'] },
@@ -123,6 +123,7 @@ export function TrackingView() {
                   <th>Current distribution</th>
                   <th>Active qty</th>
                   <th>Stocked</th>
+                  <th>Scrapped</th>
                   <th>Due (next)</th>
                   <th>Status</th>
                 </tr>
@@ -141,6 +142,9 @@ export function TrackingView() {
                       >
                         <span className="part">
                           <HotPn rank={row.hotRank} pn={row.pn} />
+                          {row.archived ? (
+                            <span className="archived">(archived)</span>
+                          ) : null}
                         </span>
                         <span className="sub" style={{ display: 'block' }}>
                           {row.name}
@@ -148,11 +152,15 @@ export function TrackingView() {
                       </button>
                     </td>
                     <td className="demandcell">
-                      {row.demand.map((d) => (
-                        <div key={d.workOrder}>
-                          {d.workOrder} · {d.qty} <TypeChip type={d.type} />
-                        </div>
-                      ))}
+                      {row.demand.length === 0 ? (
+                        <span className="sub">—</span>
+                      ) : (
+                        row.demand.map((d) => (
+                          <div key={`${d.workOrder}-${d.type}`}>
+                            {d.workOrder} · {d.qty} <TypeChip type={d.type} />
+                          </div>
+                        ))
+                      )}
                     </td>
                     <td>
                       <div className="distmini">
@@ -171,6 +179,9 @@ export function TrackingView() {
                     </td>
                     <td className="mono">{row.activeQty}</td>
                     <td className="mono">{row.stockedQty}</td>
+                    <td className={`mono ${row.scrappedQty ? 'scrapqty' : ''}`}>
+                      {row.scrappedQty || '—'}
+                    </td>
                     <td>{row.nextDue}</td>
                     <td>
                       <span
@@ -300,9 +311,10 @@ function TrackingDetail() {
 
       <div className="tk-sec">
         <h4>
-          Quantity Flows &amp; assigned Routes{' '}
+          Quantity Flows &amp; Routes{' '}
           <span className="tag">
-            flows may follow different Routes — the PN is not at one step
+            Planned Route (guidance) or Floating actual route trace — the PN is
+            not at one step
           </span>
         </h4>
         {d.flows.map((flow) => (
@@ -310,11 +322,19 @@ function TrackingDetail() {
             <div className="qf-head">
               <span className="qf-id">{flow.id}</span>
               <span className="qf-q">{flow.qty} pcs</span>
+              <span className={`qf-mode ${flow.routeMode.toLowerCase()}`}>
+                {flow.routeMode === 'FLOATING'
+                  ? 'FLOATING — actual trace'
+                  : 'PLANNED — snapshot'}
+              </span>
               <span className="qf-pos">{flow.position}</span>
             </div>
             <div className="route">
+              {/* Repeated Areas are preserved: the trace is Movement
+                  history, so the same Area may appear more than once
+                  and the step name alone is not a unique key. */}
               {flow.route.map((step, i) => (
-                <span key={step.step}>
+                <span key={`${step.step}-${i}`}>
                   {i > 0 && (
                     <span className="rarrow" aria-hidden="true">
                       →{' '}
@@ -326,19 +346,19 @@ function TrackingDetail() {
                         ? 'done'
                         : step.state === 'cur'
                           ? 'cur'
-                          : step.state === 'dev'
-                            ? 'dev'
-                            : ''
-                    }`}
-                    title={'title' in step ? step.title : undefined}
+                          : ''
+                    } ${'repair' in step && step.repair ? 'repair' : ''}`}
                   >
                     {step.step}
+                    {'repair' in step && step.repair ? (
+                      <span className="repairmark"> ⟲ REPAIR</span>
+                    ) : null}
                   </span>
                 </span>
               ))}
             </div>
-            {'deviationNote' in flow ? (
-              <div className="devnote">{flow.deviationNote}</div>
+            {'routeNote' in flow ? (
+              <div className="devnote">{flow.routeNote}</div>
             ) : null}
           </div>
         ))}
@@ -356,10 +376,25 @@ function TrackingDetail() {
             <li key={`${m.time}-${i}`}>
               <span className="t">{m.time}</span>
               <span className={`mtype ${m.typeClass}`}>{m.type}</span>
+              {'repair' in m && m.repair ? (
+                <span className="mtype scr">REPAIR</span>
+              ) : null}
               <span className="desc">{m.description}</span>
             </li>
           ))}
         </ul>
+      </div>
+
+      <div className="tk-sec">
+        <h4>
+          Scrap history{' '}
+          <span className="tag">
+            SCRAPPED — auditable; never reduces requested quantity
+          </span>
+        </h4>
+        <div className="prognote" style={{ marginTop: 0 }}>
+          {d.scrapNote}
+        </div>
       </div>
 
       <div className="tk-sec">

@@ -94,7 +94,11 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
             <span className="ltag">
               pcs{row.totalStocked ? ' stocked' : ''}
             </span>
-            <span className="ltime" />
+            {/* Scrapped quantity stays visible without widening the
+                board: one quiet companion value on the total line. */}
+            <span className={`ltime ${row.scrapped ? 'scraptot' : ''}`}>
+              {row.scrapped ? `⊘ ${row.scrapped} scrapped` : ''}
+            </span>
           </div>
         </div>
       </td>
@@ -273,6 +277,7 @@ export function ProductionBoardView() {
   const stocked = allRows
     .filter((r) => r.totalStocked)
     .reduce((s, r) => s + r.total, 0);
+  const scrappedTotal = allRows.reduce((s, r) => s + (r.scrapped ?? 0), 0);
 
   return (
     <section className="pb" aria-label="Production Board" ref={sectionRef}>
@@ -349,9 +354,10 @@ export function ProductionBoardView() {
         <span className="spacer" />
         <span>
           🔥#n before the PN = Hot priority rank · blinking days count = due
-          soon / overdue (the date and PN stay steady) · — = no due date ·{' '}
-          {activePns} active PNs · {inProduction} pcs in production · {stocked}{' '}
-          pcs stocked
+          soon / overdue (the date and PN stay steady) · — = no due date / no
+          external WO Number · ⊘ = scrapped quantity · {activePns} active PNs ·{' '}
+          {inProduction} pcs in production · {stocked} pcs stocked ·{' '}
+          {scrappedTotal} pcs scrapped
         </span>
       </div>
     </section>
