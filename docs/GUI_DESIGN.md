@@ -1,9 +1,9 @@
-# PartFlow GUI Design v8
+# PartFlow GUI Design v9
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v9).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v8.html`.
-> Supersedes GUI Design v7 (mockup: `archive/partflow-gui-mockup-v7.html`); the differences are listed in §12.1. Differences from v6, v5, v4, v3, v2 and v1 remain listed in §12.2–§12.7.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v9.html`.
+> Supersedes GUI Design v8 (mockup: `archive/partflow-gui-mockup-v8.html`); the differences are listed in §12.1. Differences from v7, v6, v5, v4, v3, v2 and v1 remain listed in §12.2–§12.8.
 
 ---
 
@@ -85,7 +85,7 @@ These apply to every view; they implement the profile's core principles in UI te
 
 1. **Focus discipline.** On the Scan Station, the barcode input regains focus automatically after every completed operation, dialog close, session change, and view activation. Nothing may steal focus permanently.
 2. **Ambiguity requires confirmation.** Whenever a scan resolves to more than one valid production context, the UI presents an explicit choice list (§4.6). The UI never guesses and never defaults silently; nothing is recorded until the choice is made (PROJECT_PROFILE §10 Barcode Model).
-3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each.
+3. **Feedback is tri-state and instant.** Every scan produces exactly one of: Success (green), Warning (amber — recorded but needs awareness, or an action is pending), Error (red — nothing recorded). Feedback shows *what happened* and *why* in one line each. On the Scan Station this feedback renders as a **floating notification** (§4.4) that reserves no layout space: only the most recent notice shows, it carries an explicit close button, success/neutral notices auto-dismiss after ~4 s and warnings/errors after ~8 s (a replacing notice restarts the timer). The persistent OFFLINE / DISCONNECTED banner (rule 6) is **not** a notification — it stays until connectivity is restored.
 4. **Quantity integrity is visible.** Quantity entry displays the available source quantity. Attempts to move more than available are rejected with an explicit error — the UI explains the limit rather than clamping silently (PROJECT_PROFILE §11 Quantity Model).
 5. **History is append-only in the UI too.** Undo appears as a new `REVERSED` entry in the scan list; the original entry stays visible. Tracking's Movement history has no edit/delete affordances (PROJECT_PROFILE §16).
 6. **Connectivity loss is an explicit write-blocked state, detected fast.** Detection combines browser `online`/`offline` events with polling (no WebSocket/SSE in Phase 2): `offline` marks the application unavailable immediately; `online` triggers an immediate health check; `GET /api/health` is polled about every second with a request timeout below the probe interval and no overlapping probes; connectivity is rechecked on tab focus/visibility change. Passive probes never flip the UI to a "connecting" state — no flicker. Losing the connection shows a persistent OFFLINE / DISCONNECTED banner with an actionable message; production write submission is disabled while disconnected. Already loaded read-only information stays visible where practical. No production write is queued locally, no pending Movement indicator is shown, and the UI never claims that scans will synchronize later. On reconnection, input readiness and focus are restored — the Scan Station input is re-enabled and refocused. **A scan is successful only after the server confirms the write:** connectivity status is an early warning, never permission to record a Movement optimistically. If connectivity disappears between the last heartbeat and a write request, the request fails as "nothing recorded"; the UI must never display a false recorded result (PROJECT_PROFILE §15). This rule must be preserved unchanged in the production phases. (Offline scan synchronization remains deferred and unapproved — PROJECT_PROFILE §30, §32.4.)
@@ -116,9 +116,8 @@ The footer keeps the faint Station ID caption; it is **subtly clickable** and op
 │ (disconnected banner when connectivity is lost — writes blocked)              │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Scan barcode card (full width)                                               │
-│   Scan input (large, focused) · manual PN fallback                           │
+│   Scan input (large, focused) …………………………… [⌨ Enter PN manually]              │
 │   Last scanned PN ……………………………………………………… [⟲ UNDO]                            │
-│   Feedback zone                                                              │
 ├────────────────────┬─────────────────────────────────────────────────────────┤
 │ In this Area now   │ Machine cards grid                                      │
 │ (fixed left col,   │ [Machine 1][Machine 2][Machine 3]                       │
@@ -126,6 +125,8 @@ The footer keeps the faint Station ID caption; it is **subtly clickable** and op
 ├────────────────────┴─────────────────────────────────────────────────────────┤
 │ Station LATHE-ST-01                        (faint, clickable station switch) │
 └──────────────────────────────────────────────────────────────────────────────┘
+                                        [floating scan notification — no
+                                         reserved layout space, bottom edge]
 ```
 
 Cards use the same subtle semantic shadow token as the Management cards (`box-shadow: var(--shadow)`) — no separate strong shadow or decorative glow system.
@@ -141,53 +142,71 @@ Department, Area name with Area color, and supported Operations stay prominent, 
 
 The Scan Barcode card sits immediately under the header and spans the full available width. The main input supports **PN barcodes**, **Worker barcodes**, and **Machine barcodes only as a one-shot shortcut** (§4.6). Action barcodes do not exist; `PF:SCRAP` in the main input is rejected — it counts only inside the Scrap workflow (§4.9). Unknown barcodes and raw PN text are rejected with nothing recorded.
 
-Manual PN entry stays a visible secondary action (**⌨ Enter PN manually**): it accepts **any non-empty PN value** (PROJECT_PROFILE §8.1 — created on first valid use, case-insensitive identity, entered casing preserved) and resolves it exactly like a scan.
+There is **no dedicated ENTER button**: the scanner submits with Enter, and the input's placeholder says so — `Scan PN / Worker / Machine barcode… (ENTER)`. The barcode input remains the primary and largest control.
+
+Manual PN entry stays a visible secondary action (**⌨ Enter PN manually**) placed **in the scan row itself**, at the input's right edge — visibly secondary to scanning but large enough for shop-floor use. It accepts **any non-empty PN value** (PROJECT_PROFILE §8.1 — created on first valid use, case-insensitive identity, entered casing preserved) and resolves it exactly like a scan. The fallback explanation remains only as a small hint line below the scan row — no separate button row.
+
+**Floating scan notification.** Scan feedback does not reserve layout space in the card. It renders as one floating notification near the viewport's bottom edge: only the most recent notice shows; an explicit `×` close button dismisses it; success/neutral notices auto-dismiss after ~4 s, warnings and errors after ~8 s; a replacing notice restarts the timer, and timers are cleaned up on replacement and unmount. Notices use the semantic success/warning/error styling and alert/status live-region semantics, stay inside the viewport on narrow screens, and never cover the main barcode input or dialog actions. The persistent OFFLINE / DISCONNECTED application banner is not a notification and remains until connectivity is restored. `Last scanned PN` stays fixed inside the Scan Barcode card — only the feedback surface floats.
 
 ## 4.5 Last scanned PN and Undo
 
 The Last Scanned PN surface lives inside the Scan Barcode card, with the **Undo action anchored to its right edge**. There is no separate Undo card and **no Recent Scans list**.
 
 - Worker scans never replace the Last Scanned PN; cancelled dialogs never replace it. Only completed PN-related actions become the Last Scanned PN.
-- Undo targets the most recent eligible completed PN operation and always shows a summary confirmation first: PN, original action, quantity, source and destination, Machine if applicable, Worker, timestamp, and the effect of the reversal. Cancel performs no write.
+- Undo targets the most recent eligible completed PN operation and always shows a summary confirmation first: PN, original action, quantity, source and destination, Machine if applicable, Worker, timestamp, and the effect of the reversal — presented with the same structured confirmation-summary layout as the production wizards (§4.6). Cancel performs no write.
 - Undo creates compensating/reversal history — the original action is never deleted. After a confirmed Undo, the Last Scanned PN advances to the next eligible previous PN operation; with nothing eligible, Undo disables.
 - Future production Undo operates on the complete application command (PROJECT_PROFILE §16), not on one arbitrary Movement row.
 
-## 4.6 One-shot workflows
+## 4.6 One-shot workflows — temporary wizards
 
-There is no persistent Machine Session and no persistent PN intent after a dialog completes or is cancelled.
+There is no persistent Machine Session and no persistent PN intent after a dialog completes or is cancelled. Every production action is **one temporary wizard inside one dialog lifecycle**: open → select or enter information → review a dedicated confirmation view → confirm or cancel → all temporary state cleared → focus restored to the main barcode input. The steps are views rendered inside the same modal — never nested dialogs, and the overlay never closes and reopens between steps.
 
-**Machine-first.** Scanning a Machine barcode acts only as a shortcut: it opens the one-shot Machine assignment dialog with the Machine preselected → scan or select the PN (queued PNs are listed) → quantity (MAX = queued quantity, the default) → summary → Confirm → pending context cleared. Inactive (maintenance) Machines and Machines of other Areas are rejected with nothing recorded.
+Wizard rules (all workflows):
 
-**PN-first.** Scanning a PN opens the applicable one-shot dialog (§4.7). Worker scans switch the Worker Session (visible in the header); Worker identity never determines business correctness.
+- **No production action is recorded before the final confirmation step.** Selection and entry steps never write.
+- The final view is a **structured confirmation summary** (a two-column term/value layout showing only the applicable fields: Action, PN, Quantity, Request Type, Route Mode, Planned Route, Work Order behavior, Source, Destination, Machine, Area/Operation, Due date, Reason/notes, Worker, Scan Station, resulting quantity state/effect) — never one long interpolated sentence and never a note inside a dashed box.
+- The confirmation view has **Back**, **Cancel (Esc)** and a **final Confirm whose label names the operation** (`Confirm intake`, `Confirm assignment`, `Confirm transfer`, `Confirm addition`, `Confirm repair`, `Confirm scrap`, `Confirm queue return`). Enter on the confirmation view activates the final Confirm while the operation remains valid.
+- **Back preserves all previously entered values** and appears only when a meaningful previous view exists — never as a second Cancel.
+- **Escape always cancels the entire workflow** from any step and records nothing; cancelled workflows never update the Last Scanned PN.
+- Selection views (source selection, “Choose the action for this PN”) stay selection views — they are not additional confirmation steps.
+- **Focus follows the steps.** The first useful control of each step receives focus (the quantity input is focused with its value selected on quantity steps; the barcode-selection input on assignment Step 1); Back restores focus to the relevant prior control; closing or completing the wizard restores focus to the main barcode input. Wizard state is local dialog state — no Context, and no hidden Machine or PN state survives the wizard.
 
-**Monitoring row actions.** In the `In this Area now` card, a queued PN row has an `ASSIGN` action (opens the one-shot assignment dialog) and a Machine-assigned PN row has a `QUEUE` action returning quantity to the Area queue (`RELEASED_FROM_MACHINE`, quantity MAX-defaulted, summary, Confirm).
+**Machine-first.** Scanning a Machine barcode acts only as a shortcut: it opens the one-shot Machine assignment wizard (three views in one modal) with the Machine preselected. Step 1 selects the Machine and a queued PN — by explicit buttons/cards when the Area has 6 or fewer Machines (or 6 or fewer queued PNs), by a compact accessible dropdown above that count (long PNs truncate without moving the queued quantity), and by a dedicated barcode input (`Scan Machine or queued PN barcode… (ENTER)`) that accepts a Machine barcode of the station's Area or a queued PN barcode; every invalid scan (unknown, other-Area or inactive Machine; PN without queued quantity; Worker/scrap/unsupported barcodes) shows an inline error and changes no selection. Scanning the second value completes the pair but never advances or records automatically. Step 2 enters the quantity (MAX = queued quantity, the default). Step 3 is the confirmation summary (`ASSIGNED_TO_MACHINE`, PN, quantity, Area queue → Machine, remaining queued after assignment, Worker, Station) → `Confirm assignment` → context cleared. Inactive (maintenance) Machines and Machines of other Areas are rejected with nothing recorded. No Machine context stays armed after completion or cancellation.
+
+**PN-first.** Scanning a PN opens the applicable one-shot wizard (§4.7); entering Machine assignment from the PN action dialog preselects the PN, and Step 1's Back returns to that action dialog. Worker scans switch the Worker Session (visible in the header); Worker identity never determines business correctness.
+
+**Monitoring row actions.** The `In this Area now` card shows **no row actions** — no `ASSIGN` and no `QUEUE`; assignment stays available through PN scan, Machine scan and the action dialog. Machine cards show only a `QUEUE` action returning quantity to the Area queue (`RELEASED_FROM_MACHINE`, quantity MAX-defaulted, then a dedicated confirmation view). The Area Board remains completely read-only.
 
 ## 4.7 PN scan resolution
 
-1. **PN has no active Work Order Demand** (including a PN seen for the first time): the intake flow opens — equivalent to the Work Orders “Add Part” workflow — with editable defaults `Request Type = MODIFY` and `Route Mode = FLOATING`. It collects/confirms PN, quantity (no default), Request Type, optional due date (owned by the WorkOrderDemand), reason/notes where applicable, Route Mode (Planned Route only when `PLANNED`), starting/current Area, and Operation when needed; `received_date` defaults to the scan timestamp. The confirmation summary names the internal blank-number MODIFY Work Order that will be created or reused (`—`; an explicit selection dialog appears when several are plausible — never a guess).
-2. **PN is not currently in the Area**: the source is resolved explicitly. One valid source → quantity entry (MAX = available source quantity, the default) → summary → Confirm. Multiple source Areas/QuantityFlows → an explicit source-selection dialog first; quantities from multiple sources are never combined silently.
-3. **PN already has quantity in the Area**: an action dialog shows only the currently valid choices:
-   - **Assign queued quantity to a Machine** (only when queued quantity exists) — machine pick/scan → quantity (MAX = queued) → summary → Confirm.
+1. **PN has no active Work Order Demand** (including a PN seen for the first time): the **three-step intake wizard** opens — equivalent to the Work Orders “Add Part” workflow — with editable defaults `Request Type = MODIFY` and `Route Mode = FLOATING`. **Step 1 — Intake settings:** PN shown prominently; review/edit Request Type, Route Mode (Planned Route only when `PLANNED`), optional due date (owned by the WorkOrderDemand), starting Area/Operation, reason/notes, and the internal Work Order reuse behavior; no quantity on this step; `received_date` defaults to the scan timestamp. **Step 2 — Quantity:** the PN, a concise recap of Step 1 (e.g. `MODIFY · FLOATING`, Area — Operation, `Due: —`, `Internal WO —`, notes), the guidance `Enter the physical quantity received. No default quantity is assumed.` directly above the input, then keypad. **Step 3 — Confirmation:** the structured summary (action, PN, quantity, Request Type, Route Mode, Planned Route when applicable, Work Order behavior, due date, starting Area/Operation, destination state, reason/notes, Worker, Scan Station) with `Confirm intake` as the only write point. The Work Order behavior names the internal blank-number MODIFY Work Order that will be created or reused (`—`; an explicit selection dialog appears when several are plausible — never a guess).
+2. **PN is not currently in the Area**: the source is resolved explicitly. One valid source → quantity view (MAX = available source quantity, the default) → dedicated confirmation view → `Confirm transfer`. Multiple source Areas/QuantityFlows → an explicit source-selection dialog first; quantities from multiple sources are never combined silently. Back on the confirmation returns to the quantity view with the source selection preserved.
+3. **PN already has quantity in the Area**: an action dialog shows only the currently valid choices (a selection view — not a confirmation step):
+   - **Assign queued quantity to a Machine** (only when queued quantity exists) — the assignment wizard (§4.6) with the PN preselected.
    - **Receive more quantity from another Area** (only when transferable quantity exists elsewhere; explicit source selection when several).
-   - **Add more quantity** — intentionally introduces additional physical quantity: operator-allowed, no Manager approval, mandatory reason, mandatory quantity with **no MAX button and no default value**, summary confirmation, auditable as `QUANTITY_ADJUSTED · direction INCREASE` (never hidden as an ordinary transfer, never changing the WO Demand requested quantity). Added quantity enters the Area queue (Areas with Machines) or direct processing (Areas without Machines).
-   - **Send quantity here for repair** (label wording — never “Create REPAIR demand”; only when quantity elsewhere may deliberately return to this previously visited Area): choose the Repair intent → select source Area/QuantityFlow → repair quantity → required reason → summary that explicitly identifies the Repair movement → Confirm. Never auto-selected merely because the Area appears earlier in history — a normal transfer to a previously visited Area stays possible. Partial quantity requires a QuantityFlow SPLIT.
+   - **Add more quantity** — intentionally introduces additional physical quantity: operator-allowed, no Manager approval, mandatory reason, mandatory quantity with **no MAX button and no default value**, then a dedicated confirmation view that clearly states `QUANTITY_ADJUSTED · INCREASE` (never hidden as an ordinary transfer, never changing the WO Demand requested quantity); `Confirm addition` is the only write point. Added quantity enters the Area queue (Areas with Machines) or direct processing (Areas without Machines).
+   - **Send quantity here for repair** (label wording — never “Create REPAIR demand”; only when quantity elsewhere may deliberately return to this previously visited Area): choose the Repair intent → select source Area/QuantityFlow, repair quantity and required reason → a dedicated confirmation view that explicitly identifies `movement_reason = REPAIR` → `Confirm repair`. Repair is never converted into a Request Type, and never auto-selected merely because the Area appears earlier in history — a normal transfer to a previously visited Area stays possible. Partial quantity requires a QuantityFlow SPLIT.
    - **Scrap damaged quantity** (§4.9).
 
 ## 4.8 Quantity entry
 
-Modal with an oversized keypad **and a real focusable numeric text input**: the dialog opens with the numeric entry focused, so a physical keyboard works without clicking first. `inputMode="numeric"`, no native number-spinner. Virtual keypad buttons are `type="button"` and non-focusable (`tabIndex={-1}`, focus kept on the input), so clicking one never leaves focus where Space or Enter would re-activate it. Physical keys are handled centrally:
+Quantity entry is a wizard step with an oversized keypad **and a real focusable numeric text input**: entering the step focuses the numeric entry and selects its value, so a physical keyboard works without clicking first. `inputMode="numeric"`, no native number-spinner. Virtual keypad buttons are `type="button"` and non-focusable (`tabIndex={-1}`, focus kept on the input), so clicking one never leaves focus where Space or Enter would re-activate it.
+
+Every quantity view uses one fixed visual order: **PN → selected context or instruction → guidance/validation message → quantity input → numpad → navigation buttons**. The guidance sits directly above the input as plain semantic text (never inside a framed or dashed summary box): muted text for neutral instructions (`Enter the physical quantity received. No default quantity is assumed.`), info/warning text for important limits or selected context (`Available at Manual: 4 pcs. MAX is selected by default.`, `Assigning to Lathe 2. Queued quantity: 8 pcs.`), error text for invalid input (`Quantity cannot exceed the 6 pcs currently available at the source.`). The validation message updates next to the input, and **Next stays disabled while the quantity is invalid**.
+
+Physical keys are handled centrally:
 
 ```text
 0–9       append digit
 Backspace remove last digit
 Delete    clear
-Enter     Confirm
-Escape    Cancel
+Enter     advance to the confirmation view (never directly to a write)
+Escape    cancel the whole workflow
 Space     ignored
 Other     ignored
 ```
 
-Enter always means Confirm for the quantity dialog regardless of which virtual keypad button was clicked previously; Escape always means Cancel. Transfer and assignment show **MAX** and default to it; a smaller valid quantity may be entered. Add More Quantity has no MAX and no default. Confirm is blocked for 0 and for quantities above the available source; all server-side quantity validation requirements remain (the mock validates presentation-side only).
+Enter on the quantity step always means “advance to the confirmation view” regardless of which virtual keypad button was clicked previously; Enter on the confirmation view performs the final Confirm; Escape always cancels the entire wizard. Transfer and assignment show **MAX** and default to it; a smaller valid quantity may be entered. Add More Quantity has no MAX and no default. Next is blocked for 0 and for quantities above the available source; all server-side quantity validation requirements remain (the mock validates presentation-side only).
 
 ## 4.9 Scrap workflow
 
@@ -197,8 +216,9 @@ Canonical term `SCRAPPED`; UI wording “Scrap damaged quantity”. One dedicate
 - each scan increments the pending scrap counter by one; counting changes no production state;
 - the pending count can be corrected (−1) or reset before confirmation;
 - a common scrap reason is mandatory;
-- the final summary shows PN, Area, Machine if applicable, original available quantity, scrap quantity, remaining active quantity, Worker, Station, and reason;
-- Cancel discards the pending count with no write; Confirm creates **one** auditable `SCRAPPED` operation for the total.
+- available, pending scrap and remaining quantities stay visible while counting;
+- the **dedicated confirmation view** shows PN, Area, Machine if applicable, original available quantity, scrap quantity, remaining active quantity, Worker, Station, and reason as a structured summary;
+- Cancel on any step discards the pending count with no write; `Confirm scrap` on the confirmation view is the only write point and creates **one** auditable `SCRAPPED` operation for the total.
 
 Scrapped quantity is displayed wherever the PN appears operationally (Scan Station, Production Board, Area Board, Tracking).
 
@@ -215,8 +235,20 @@ The shared layout (also used by the Area Board detail, §6.3):
 - `In this Area now` is the left column; Machine cards occupy only the right-side grid, wrap to additional rows **within** that grid, and never wrap underneath the left card (`align-items: start`). The left card may grow vertically with its PN list. A deliberate single-column fallback applies at narrow breakpoints.
 - Areas without Machines render only `In this Area now`, spanning the full width — no blank Machine region.
 - The `In this Area now` card uses the Area color along its top edge and the same PN presentation language as Management → Area Board → Area: groups `Assigned to Machines` and `Area queue — awaiting Machine` only when the Area has Machines, a direct `In processing` group otherwise (`Stocked` for the terminal Stockroom).
-- Each PN row consistently shows, where available: Hot indicator/rank, PN, quantity, Machine or queue/direct-processing context, Work Order Number or `—`, Job Number, due status, time in Area, damaged/scrapped quantity, and an action button where applicable (Scan Station only — Area Board stays read-only).
-- The presentation is built from shared components (`AreaPnRow`, `AreaSummaryCard`, `MachineMonitoringCard`, `DueStatus`, `QuantityStatus` — domain-named, no vague helpers) so Scan Station and Area Board never drift apart.
+- **PN row layout.** Each PN row is an explicit grid: production information on the left, the optional action in its own separated right-side cell:
+
+  ```text
+  ┌────────────────────────────────────────────────────────────┬──────────┐
+  │ Hot + PN                         Machine/Queue · quantity  │          │
+  │ WO Number · Job Numbers                    days remaining  │  ACTION  │
+  │ in-Area status                              time in Area   │          │
+  │ n scrapped                                                 │          │
+  └────────────────────────────────────────────────────────────┴──────────┘
+  ```
+
+  Line 1: Hot indicator and PN left; Machine/queue context and quantity (formatted with `pcs`) right. Line 2: Work Order Number (`—` when blank) and external Job Number left (may truncate with an ellipsis; the complete value stays available through a `title` tooltip); due/days-remaining status right. Line 3, when meaningful: in-Area status left (`Awaiting Machine`, `On Machine`, `In processing`, `External processing`); time in Area right. Line 4, only when scrapped quantity exists: `{n} scrapped`. Scrapped quantity appears **only** as this readable text — the compact `⊘n` indicator no longer exists and scrap is never displayed twice.
+- **Action rail.** When a row has an action, it sits in a dedicated right-side action cell — separated by spacing and a subtle vertical border, vertically centered, with a predictable minimum width — never immediately beside the PN, context or quantity. At very narrow widths the action may stack below the content but stays visually separated. PN rows are never clickable as a whole. Action visibility: `In this Area now` shows no row actions; Machine cards show only `QUEUE`; the Area Board passes no actions at all (read-only).
+- The presentation is built from shared components (`AreaPnRow`, `AreaSummaryCard`, `MachineMonitoringCard`, `DueStatus`, `QuantityStatus` — domain-named, no vague helpers) so Scan Station and Area Board never drift apart; changing the shared row affects both surfaces and both must be verified.
 
 ## 4.11 States
 
@@ -226,7 +258,7 @@ The shared layout (also used by the Area Board detail, §6.3):
 | Empty inventory | "No production in this Area" placeholder row                        |
 | Disconnected    | Persistent OFFLINE banner with actionable message; production write submission disabled; loaded read-only data stays visible |
 | Reconnected     | Banner clears; scan input re-enabled and refocused, ready for the next scan |
-| Error           | Red feedback zone; input cleared and refocused, ready for next scan |
+| Error           | Red floating notification (~8 s, closable); input cleared and refocused, ready for next scan |
 
 ---
 
@@ -280,10 +312,10 @@ The detail mode uses the **same structural layout as the Scan Station** (§4.10)
 [ grows vertically ] [ Machine 4 ][ Machine 5 ]              ]
 ```
 
-- **Area summary card (left):** Area color top edge, Area name/description/Operations; a stat row with only meaningful statistics (§4.3); then the grouped compact PN list — **"Assigned to Machines"** and **"Area queue — awaiting Machine"** only when the Area has Machines, a direct **"In processing"** group otherwise (the terminal Stockroom shows **"Stocked"**). Each entry uses the shared PN row presentation: Hot indicator + PN (`🔥#n` before the PN, §5), quantity with scrapped companion, machine/queue context, WO (or `—`) + Job Number, due status, time in Area. Grouping never duplicates or loses quantity.
+- **Area summary card (left):** Area color top edge, Area name/description/Operations; a stat row with only meaningful statistics (§4.3); then the grouped compact PN list — **"Assigned to Machines"** and **"Area queue — awaiting Machine"** only when the Area has Machines, a direct **"In processing"** group otherwise (the terminal Stockroom shows **"Stocked"**). Each entry uses the shared grid PN row presentation (§4.10): Hot indicator + PN (`🔥#n` before the PN, §5), machine/queue context with the quantity (`pcs`), WO (or `—`) + Job Number with a tooltip for truncated values, due status, in-Area status, time in Area, and `{n} scrapped` text when scrapped quantity exists. Grouping never duplicates or loses quantity.
 - **Machine monitoring cards (right-side grid only):** one card per Machine — name, status (running / idle / maintenance), total quantity assigned, PN count, assigned PN list in the same shared row presentation. Idle machines show a clear empty state; maintenance machines stay visually distinct (dashed warning border). Cards wrap to additional rows within the right grid and never underneath the left card; a deliberate single-column fallback applies at narrow breakpoints. In Phase 2 the Machines come from the mock model `MOCK_AREA_MACHINES` (Cut → Saw 1; Lathe → Lathe 1 idle, Lathe 2 running, Lathe 3 running, Lathe 4 maintenance; Mill → Mill 1, Mill 2).
 - Areas without Machines render **only the full-width summary card** — no placeholder Machine cards and no blank Machine region.
-- **Area Board remains read-only:** the shared components render without the Scan Station action buttons (`ASSIGN` / `QUEUE`), and there is no visual drift between the two views (shared `AreaPnRow`, `AreaSummaryCard`, `MachineMonitoringCard`, `DueStatus`, `QuantityStatus`).
+- **Area Board remains read-only:** the shared components render without any Scan Station action rail (no `QUEUE` buttons, no action cells), and there is no visual drift between the two views (shared `AreaPnRow`, `AreaSummaryCard`, `MachineMonitoringCard`, `DueStatus`, `QuantityStatus`).
 - Search and the sort selector (§6.1) still narrow and order the PN lists. **Sort: Time in Area** orders by the sortable duration field (`timeInAreaMinutes`), longest first.
 - An over-long PN is truncated with an ellipsis; hovering shows the full PN as a tooltip (§2.3).
 - Empty state: "No production in {Area}".
@@ -355,7 +387,7 @@ The Stockroom station reuses the Scan Station shell with one additional step: af
 
 # 11. Work Orders
 
-Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §12.3). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §12.4). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 The view has two panels on one route (`/management/work-orders`): the **WO list** (master, the entry screen) and the **WO detail** (demand lines of one selected Work Order). **New Work Order** is a **modal dialog over the WO list** (v6) — it never replaces the list and never changes the URL.
 
@@ -420,9 +452,22 @@ In Phase 2 every Work Orders interaction changes **development-only local mock s
 
 # 12. Changes from previous versions
 
-> Historical entries in §12.2–§12.7 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§12.3 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history.
+> Historical entries in §12.3–§12.8 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§12.4 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history.
 
-## 12.1 Changes from GUI Design v7
+## 12.1 Changes from GUI Design v8
+
+All v8→v9 changes are Scan Station interaction and presentation refinements, implemented in the Phase 2 frontend against development-only mock state. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; the one-shot rule is preserved — every multi-step workflow remains one temporary dialog with no armed state.
+
+1. **Dedicated confirmation views for every production action** (§4.6): each one-shot action (intake, Machine assignment, transfer, add quantity, repair, scrap, queue return) is a temporary wizard inside one modal — data entry views followed by a separate structured confirmation summary (two-column term/value layout, operation-naming Confirm buttons such as `Confirm intake` / `Confirm assignment`); the inline dashed `Summary:` note inside entry views is removed; nothing is recorded before the final confirmation; Back preserves entered values; Escape cancels the whole workflow; the Undo confirmation shares the same summary presentation.
+2. **Three-step intake wizard** (§4.7): Step 1 settings (Request Type, Route Mode, Planned Route, due date, starting Area/Operation, notes, Work Order reuse behavior — no quantity), Step 2 quantity with a recap of the settings and the no-default guidance, Step 3 structured confirmation with `Confirm intake` as the only write point.
+3. **Three-step Machine assignment wizard** (§4.6): Step 1 selects Machine and queued PN — explicit buttons up to 6 options, a compact accessible dropdown above 6 (no new dependency), plus a dedicated Step-1 barcode input accepting this Area's Machine barcodes and queued PN barcodes with inline errors for every invalid scan; Machine-first, PN-first (Back returns to the action dialog) and manual selection entry points preserved; Step 2 quantity (MAX = queued default); Step 3 confirmation with remaining-queued-after-assignment; `Confirm assignment` is the only write point and nothing stays armed afterwards.
+4. **Quantity-step guidance and Enter semantics** (§4.8): fixed step order PN → context → guidance/validation → input → numpad → buttons; semantic guidance text directly above the input (neutral/info/warn/error — no framed box); validation updates near the input with Next disabled while invalid; Enter on a quantity step advances to the confirmation view (never directly to a write); Enter on the confirmation view performs the final Confirm.
+5. **Scan Barcode card without an ENTER button** (§4.4): the scanner submits with Enter and the placeholder says so (`Scan PN / Worker / Machine barcode… (ENTER)`); **⌨ Enter PN manually** moves into the scan row as the secondary action (the separate manual-entry row is removed; the fallback explanation stays as a small hint).
+6. **Floating scan notification** (§3.3, §4.4): the permanently reserved feedback block is removed; feedback is one closable floating notification (success/neutral ~4 s, warning/error ~8 s, timer reset on replacement, semantic styling, alert/status live-region semantics, viewport-safe on narrow screens); the persistent OFFLINE banner is unchanged and is not a notification; `Last scanned PN` stays fixed in the card.
+7. **PN row grid layout** (§4.10): four content lines (Hot+PN | context · quantity `pcs`; WO·Job — truncating with a `title` tooltip | due status; in-Area status | time in Area; `{n} scrapped`), with the action in a dedicated, visually separated right-side action rail (stacking below only at very narrow widths); the compact `⊘n` scrap indicator is removed — scrapped quantity renders only as `{n} scrapped` text; rows are never clickable as a whole.
+8. **Row-action visibility** (§4.6, §4.10): `In this Area now` shows no `ASSIGN`/`QUEUE` row buttons; Machine cards show only `QUEUE`; Machine assignment stays available through PN scan, Machine scan and the action dialog; the Area Board remains completely read-only. The underlying one-shot assignment capability is unchanged.
+
+## 12.2 Changes from GUI Design v7
 
 All v7→v8 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v9.
 
@@ -439,7 +484,7 @@ All v7→v8 changes are implemented in the Phase 2 frontend against development-
 11. **Quantity keypad keyboard fix** (§4.8): a real focusable numeric input opens focused (`inputMode="numeric"`); keys are handled centrally (0–9, Backspace, Delete, Enter=Confirm, Escape=Cancel, Space ignored); keypad buttons are `type="button"`, non-focusable, and never re-activate on Space/Enter; MAX exists (and is the default) only for transfer/assignment.
 12. **Administrative archival/purge specified** (§9; PROJECT_PROFILE §28): PN archive (soft-delete) with `(archived)` markers and preserved historical text; Admin-only history archival & purge maintenance with preview, reason, and audit; archive preferred over purge; retention settings in Administration. Phase 2 carries these as specification placeholders only.
 
-## 12.2 Changes from GUI Design v6
+## 12.3 Changes from GUI Design v6
 
 All v6→v7 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v8.
 
@@ -451,7 +496,7 @@ All v6→v7 changes are implemented in the Phase 2 frontend against development-
 6. **Area Board per-Area detail redesigned** (§6.3): the "one card per PN" grid is replaced by an Area summary card (name, description, Operations, stats, grouped compact PN list — Assigned to Machines / Area queue / Stocked for terminal Stockroom) followed by one monitoring card per Machine (running / idle / maintenance with distinct empty and maintenance presentations, from the `MOCK_AREA_MACHINES` mock model); Areas without Machines render only the summary card; "Sort: Time in Area" works via the sortable `timeInAreaMinutes` duration field, longest first.
 7. **Priority reordering requires confirmation** (§8; PROJECT_PROFILE v8 §21): drag-and-drop, Move Up, Move Down, Undo and Redo confirm before applying — showing affected PN + Work Order Demand, previous rank, proposed new rank and action type; Cancel leaves the list and both histories unchanged and the visible list is never renumbered early; adding at the bottom stays direct; the existing remove confirmation is unchanged.
 
-## 12.3 Changes from GUI Design v5
+## 12.4 Changes from GUI Design v5
 
 All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabulary; Phase 2 implements them against development-only local mock state.
 
@@ -465,12 +510,12 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 8. **Realistic data shapes** (§2.3): mock datasets and the mockup use representative synthetic identifiers — multi-segment hyphenated numeric PNs, manufacturing-style descriptions, numeric-looking opaque Work Order Numbers (`007482`), numeric-looking external Job Numbers (`18427`), and optional Revision values (populated and blank) — instead of demo-style `PF-…` / `PO-…` / `ERP-…` identifiers; §2.3 documents the identifier/description shapes, search, and wrapping constraints.
 9. **Canonical vocabulary migration: Purchase Order → Work Order** (PROJECT_PROFILE v7 §7). The business container previously called Purchase Order is a Work Order on the actual shop floor. The view is renamed **Work Orders**, its route is `/management/work-orders` (no legacy `/management/purchase-orders` alias — the application is not deployed yet), UI labels use Work Order / WO, and code names use the full `WorkOrder` / `WorkOrderDemand` / `WorkOrderAllocation` forms. Work Order Number and external Job Number remain separate identifiers; Job Number keeps its informational display/search/sort/report role.
 
-## 12.4 Changes from GUI Design v4
+## 12.5 Changes from GUI Design v4
 
 1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§14). This removes "dark/light user toggle" from the deferred list (§13).
 2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
 
-## 12.5 Changes from GUI Design v3
+## 12.6 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -478,14 +523,14 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 12.6 Changes from GUI Design v2
+## 12.7 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 12.7 Changes from GUI Design v1
+## 12.8 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 

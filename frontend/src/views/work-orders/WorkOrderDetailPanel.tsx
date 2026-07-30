@@ -381,11 +381,19 @@ export function WorkOrderDetailPanel({
                               barcodeNote: `new PN — barcode created with PN master: PF:PN:${pn}`,
                               isNewPn: true,
                             });
-                            setFocusField({ id: line.id, field: 'qty' });
+                            setFocusField({
+                              id: line.id,
+                              field: 'qty',
+                            });
                           }}
                         />
                       ) : (
-                        <div className="pn" style={{ color: 'var(--faint)' }}>
+                        <div
+                          className="pn"
+                          style={{
+                            color: 'var(--faint)',
+                          }}
+                        >
                           —
                         </div>
                       )}
@@ -437,7 +445,9 @@ export function WorkOrderDetailPanel({
                             }
                             onChange={(e) => {
                               clearLineError(line.id, 'qty');
-                              updateLine(line.id, { qty: e.target.value });
+                              updateLine(line.id, {
+                                qty: e.target.value,
+                              });
                             }}
                             onKeyDown={(e) => {
                               if (e.key !== 'Enter') return;
@@ -500,7 +510,9 @@ export function WorkOrderDetailPanel({
                           value={line.job}
                           aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
                           onChange={(e) =>
-                            updateLine(line.id, { job: e.target.value })
+                            updateLine(line.id, {
+                              job: e.target.value,
+                            })
                           }
                         />
                       ) : (

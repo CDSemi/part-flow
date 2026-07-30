@@ -38,60 +38,87 @@ export function DueStatus({
   );
 }
 
-/** Quantity plus its damaged/scrapped companion where present. */
-export function QuantityStatus({
-  qty,
-  scrapped,
-}: {
-  qty: number;
-  scrapped?: number;
-}) {
+/** Quantity with its `pcs` unit; the number stays its own element. */
+export function QuantityStatus({ qty }: { qty: number }) {
   return (
-    <>
-      <span className="q">{qty}</span>
-      {scrapped ? (
-        <span className="scrap" title={`${scrapped} pcs scrapped (SCRAPPED)`}>
-          ⊘{scrapped}
-        </span>
-      ) : null}
-    </>
+    <span className="qtyline">
+      <span className="q">{qty}</span> pcs
+    </span>
   );
 }
 
+/** Readable in-Area status of one PN presence (row line 3). */
+function inAreaStatusLabel(
+  context: string,
+  directLabel: string,
+): string | null {
+  if (context === 'queue') return 'Awaiting Machine';
+  if (context === 'vendor') return 'External processing';
+  if (context === '—') return directLabel;
+  return 'On Machine';
+}
+
 /**
- * One PN row in the shared Area presentation language: Hot indicator,
- * PN, quantity (+ scrap), Machine/queue context, WO Number (`—` when
- * blank), Job Number, due status, time in Area, and an optional
- * action supplied by the owning view (Scan Station only).
+ * One PN row in the shared Area presentation language, laid out as an
+ * explicit grid: production information on the left, an optional
+ * action rail in its own separated right-side cell (Scan Station
+ * only — Area Board passes no actions).
+ *
+ *   line 1: Hot + PN                    Machine/queue · quantity (pcs)
+ *   line 2: WO Number (`—` when blank) · Job    due / days remaining
+ *   line 3: in-Area status                             time in Area
+ *   line 4: `{n} scrapped` — only when scrapped quantity exists
+ *
+ * WO/Job text may truncate; the full value stays available through the
+ * `title` tooltip. Scrapped quantity appears only as readable text —
+ * never as a compact `⊘` indicator.
  */
 export function AreaPnRow({
   entry,
   action,
+  directLabel = 'In processing',
 }: {
   entry: AreaAssignment;
   action?: ReactNode;
+  /** Line-3 label for direct (no-Machine) presence, e.g. `Stocked`. */
+  directLabel?: string;
 }) {
   const { card, context, qty } = entry;
+  const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const status = inAreaStatusLabel(context, directLabel);
   return (
-    <li>
-      <div className="r1">
-        <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
-        {context !== '—' ? <span className="ctx">{context}</span> : null}
-        <QuantityStatus qty={qty} scrapped={card.scrapped} />
-        {action}
-      </div>
-      <div className="r2">
-        <span className="mono">
-          {card.workOrder.split(' ·')[0]} · {card.job}
-        </span>
-        <DueStatus due={card.due} dueClass={card.dueClass} />
-        {card.timeInArea !== '—' ? (
-          <span className="mono">{card.timeInArea} in Area</span>
+    <li className={action ? 'has-action' : undefined}>
+      <div className="rowmain">
+        <div className="r1">
+          <span className="pnwrap">
+            <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
+          </span>
+          <span className="r1r">
+            {context !== '—' ? <span className="ctx">{context}</span> : null}
+            <QuantityStatus qty={qty} />
+          </span>
+        </div>
+        <div className="r2">
+          <span className="mono wo" title={woJob}>
+            {woJob}
+          </span>
+          <DueStatus due={card.due} dueClass={card.dueClass} />
+        </div>
+        {status || card.timeInArea !== '—' ? (
+          <div className="r3">
+            <span className="st">{status}</span>
+            {card.timeInArea !== '—' ? (
+              <span className="mono tia">{card.timeInArea} in Area</span>
+            ) : null}
+          </div>
         ) : null}
         {card.scrapped ? (
-          <span className="scraptxt">{card.scrapped} scrapped</span>
+          <div className="r4">
+            <span className="scraptxt">{card.scrapped} scrapped</span>
+          </div>
         ) : null}
       </div>
+      {action ? <div className="actcell">{action}</div> : null}
     </li>
   );
 }
@@ -99,9 +126,11 @@ export function AreaPnRow({
 export function AreaPnList({
   entries,
   rowAction,
+  directLabel,
 }: {
   entries: AreaAssignment[];
   rowAction?: (entry: AreaAssignment) => ReactNode;
+  directLabel?: string;
 }) {
   return (
     <ul className="mc-list">
@@ -110,6 +139,7 @@ export function AreaPnList({
           key={`${entry.card.pn}-${entry.card.workOrder}-${entry.context}`}
           entry={entry}
           action={rowAction?.(entry)}
+          directLabel={directLabel}
         />
       ))}
     </ul>
@@ -139,6 +169,7 @@ export function AreaSummaryCard({
   const hasMachines = machines.length > 0;
   const { assigned, queued } = splitAssignments(cards);
   const stats = areaStats(area, cards, hasMachines);
+  const directLabel = area.terminal ? 'Stocked' : 'In processing';
   return (
     <div
       className="abd-card abd-summary"
@@ -183,7 +214,11 @@ export function AreaSummaryCard({
               <div className="abd-grp">
                 {directGroupLabel(area, hasMachines)}
               </div>
-              <AreaPnList entries={queued} rowAction={rowAction} />
+              <AreaPnList
+                entries={queued}
+                rowAction={rowAction}
+                directLabel={directLabel}
+              />
             </>
           ) : null}
         </>

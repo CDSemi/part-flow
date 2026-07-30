@@ -1,6 +1,14 @@
 import './scan-station.css';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type { ReactNode } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
@@ -41,14 +49,21 @@ import type {
 } from '../view-models';
 import { parseScan, pnKey, SCRAP_BARCODE } from './barcode';
 
-type Feedback = {
-  kind: 'idle' | 'ok' | 'warn' | 'err';
+/**
+ * One floating scan notification. Success/info notices auto-dismiss
+ * after ~4 s, warnings and errors after ~8 s; a new notice replaces
+ * the previous one and restarts the timer. The persistent OFFLINE
+ * application banner is NOT a notice — it stays until reconnection.
+ */
+type Notice = {
+  kind: 'ok' | 'warn' | 'err' | 'info';
   icon?: string;
   title: string;
   detail?: string;
 };
 
-const IDLE_FEEDBACK: Feedback = { kind: 'idle', title: 'Ready to scan…' };
+const NOTICE_OK_MS = 4000;
+const NOTICE_WARN_MS = 8000;
 
 // Mock-only "clock" for newly recorded actions — deterministic on purpose.
 const MOCK_SCAN_TIME = '14:32';
@@ -62,7 +77,13 @@ interface SourceOption {
 
 /** One-shot dialog flows — no persistent context survives a dialog. */
 type Flow =
-  | { kind: 'machine-assign'; machine: string | null; pn: string | null }
+  | {
+      kind: 'machine-assign';
+      machine: string | null;
+      pn: string | null;
+      /** True when opened from the PN action dialog (enables Back). */
+      fromActions?: boolean;
+    }
   | { kind: 'pn-actions'; pn: string }
   | {
       kind: 'transfer';
@@ -102,7 +123,8 @@ function StationSelector() {
         <p className="ss-select-sub">
           Each Scan Station is bound to one Area. Choose the station you are
           working at — the station keeps its own URL (
-          <span className="mono">/scan-station/&lt;station-id&gt;</span>).
+          <span className="mono">/scan-station/&lt;station-id&gt;</span>
+          ).
         </p>
         <ul className="ss-stationlist">
           {MOCK_SCAN_STATIONS.filter((s) => s.active).map((s) => {
@@ -182,7 +204,7 @@ function StationView({ station }: { station: MockScanStation }) {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [worker, setWorker] = useState(MOCK_WORKER.name);
-  const [feedback, setFeedback] = useState<Feedback>(IDLE_FEEDBACK);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   // Completed PN operations, newest first; reversed entries stay for
   // audit display but are no longer Undo-eligible.
@@ -194,6 +216,20 @@ function StationView({ station }: { station: MockScanStation }) {
   const [createdPns, setCreatedPns] = useState<Map<string, string>>(
     () => new Map(),
   );
+
+  // Auto-dismiss the floating notification: ~4 s for success/info,
+  // ~8 s for warnings and errors. A replacing notice restarts the
+  // timer; the cleanup clears it on replacement and unmount.
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(
+      () => setNotice(null),
+      notice.kind === 'warn' || notice.kind === 'err'
+        ? NOTICE_WARN_MS
+        : NOTICE_OK_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
 
   const focusScan = useCallback(() => {
     // §3.1 focus discipline: the barcode input regains focus after every
@@ -262,8 +298,8 @@ function StationView({ station }: { station: MockScanStation }) {
     setHistory((current) => [{ action, reversed: false }, ...current]);
   }, []);
 
-  const blockedFeedback = useCallback(() => {
-    setFeedback({
+  const blockedNotice = useCallback(() => {
+    setNotice({
       kind: 'err',
       icon: '✕',
       title: 'Disconnected — production writes are blocked',
@@ -276,7 +312,7 @@ function StationView({ station }: { station: MockScanStation }) {
     (message?: string) => {
       setFlow(null);
       if (message) {
-        setFeedback({ kind: 'idle', title: message });
+        setNotice({ kind: 'info', title: message });
       }
       focusScan();
     },
@@ -318,7 +354,7 @@ function StationView({ station }: { station: MockScanStation }) {
     const input = inputRef.current;
     if (!input) return;
     if (writeBlocked) {
-      blockedFeedback();
+      blockedNotice();
       return;
     }
     const raw = input.value;
@@ -329,7 +365,7 @@ function StationView({ station }: { station: MockScanStation }) {
       case 'empty':
         return;
       case 'scrap':
-        setFeedback({
+        setNotice({
           kind: 'err',
           icon: '✕',
           title: `${SCRAP_BARCODE} is accepted only inside the Scrap workflow`,
@@ -340,7 +376,7 @@ function StationView({ station }: { station: MockScanStation }) {
       case 'worker': {
         const name = MOCK_WORKER_BARCODES[parsed.id];
         if (!name) {
-          setFeedback({
+          setNotice({
             kind: 'err',
             icon: '✕',
             title: 'Unknown Worker barcode',
@@ -350,7 +386,7 @@ function StationView({ station }: { station: MockScanStation }) {
         }
         setWorker(name);
         // A Worker scan never replaces the Last Scanned PN.
-        setFeedback({
+        setNotice({
           kind: 'ok',
           icon: '✓',
           title: `Worker session: ${name}`,
@@ -362,7 +398,7 @@ function StationView({ station }: { station: MockScanStation }) {
       case 'machine': {
         const machine = MOCK_MACHINE_BARCODES[parsed.id];
         if (!machine) {
-          setFeedback({
+          setNotice({
             kind: 'err',
             icon: '✕',
             title: 'Unknown Machine barcode',
@@ -371,7 +407,7 @@ function StationView({ station }: { station: MockScanStation }) {
           return;
         }
         if (machine.area !== station.area) {
-          setFeedback({
+          setNotice({
             kind: 'err',
             icon: '✕',
             title: `${machine.machine} belongs to another Area`,
@@ -382,7 +418,7 @@ function StationView({ station }: { station: MockScanStation }) {
         }
         const status = machines.find((m) => m.name === machine.machine)?.status;
         if (status === 'maintenance') {
-          setFeedback({
+          setNotice({
             kind: 'err',
             icon: '✕',
             title: `${machine.machine} is inactive (maintenance)`,
@@ -400,7 +436,7 @@ function StationView({ station }: { station: MockScanStation }) {
         return;
       }
       case 'area':
-        setFeedback({
+        setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Area barcodes are not used at a Scan Station',
@@ -411,7 +447,7 @@ function StationView({ station }: { station: MockScanStation }) {
         openPnFlow(parsed.pn);
         return;
       case 'unknown':
-        setFeedback({
+        setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Unrecognized barcode',
@@ -437,7 +473,7 @@ function StationView({ station }: { station: MockScanStation }) {
       );
     });
     setFlow(null);
-    setFeedback({
+    setNotice({
       kind: 'warn',
       icon: '⟲',
       title: `Undo recorded as REVERSED — ${target.pn}`,
@@ -458,16 +494,13 @@ function StationView({ station }: { station: MockScanStation }) {
               placeholder="Connecting…"
               aria-label="Scan barcode"
             />
-            <button className="ss-scanbtn" disabled>
-              ENTER
-            </button>
           </div>
         </div>
       </section>
     );
   }
 
-  const shownFeedback: Feedback =
+  const shownNotice: Notice | null =
     preview === 'error'
       ? {
           kind: 'err',
@@ -476,43 +509,27 @@ function StationView({ station }: { station: MockScanStation }) {
           detail:
             'Rejected — unknown or invalid scans never update tracking data. Nothing recorded.',
         }
-      : feedback;
+      : notice;
 
-  const queuedRowAction = (entry: AreaAssignment) =>
-    hasMachines && entry.context !== '—' ? (
-      <button
-        className="rowact"
-        disabled={writeBlocked}
-        onClick={() =>
-          setFlow({ kind: 'machine-assign', machine: null, pn: entry.card.pn })
-        }
-      >
-        ASSIGN
-      </button>
-    ) : null;
-
-  const rowAction = (entry: AreaAssignment) => {
-    if (!hasMachines) return null;
-    const isQueued = entry.context === 'queue';
-    if (isQueued) return queuedRowAction(entry);
-    if (entry.context === '—' || entry.context === 'vendor') return null;
-    return (
-      <button
-        className="rowact"
-        disabled={writeBlocked}
-        onClick={() =>
-          setFlow({
-            kind: 'queue-return',
-            pn: entry.card.pn,
-            machine: entry.context,
-            max: entry.qty,
-          })
-        }
-      >
-        QUEUE
-      </button>
-    );
-  };
+  // Row actions: `In this Area now` carries NO row actions (assignment
+  // stays available through PN scan, Machine scan and the action
+  // dialog); Machine cards carry only the one-shot QUEUE return.
+  const machineRowAction = (entry: AreaAssignment) => (
+    <button
+      className="rowact"
+      disabled={writeBlocked}
+      onClick={() =>
+        setFlow({
+          kind: 'queue-return',
+          pn: entry.card.pn,
+          machine: entry.context,
+          max: entry.qty,
+        })
+      }
+    >
+      QUEUE
+    </button>
+  );
 
   return (
     <section className="ss" aria-label="Scan Station">
@@ -614,7 +631,7 @@ function StationView({ station }: { station: MockScanStation }) {
                     ? 'Disconnected — scanning blocked'
                     : status === 'connecting'
                       ? 'Connecting…'
-                      : 'Scan PN / Worker / Machine barcode…'
+                      : 'Scan PN / Worker / Machine barcode… (ENTER)'
                 }
                 aria-label="Scan barcode"
                 onKeyDown={(e) => {
@@ -622,11 +639,11 @@ function StationView({ station }: { station: MockScanStation }) {
                 }}
               />
               <button
-                className="ss-scanbtn"
-                onClick={handleScan}
+                className="ss-manualbtn"
+                onClick={() => setFlow({ kind: 'manual-pn' })}
                 disabled={writeBlocked}
               >
-                ENTER
+                ⌨ Enter PN manually
               </button>
             </div>
             <div className="ss-hint">
@@ -637,19 +654,10 @@ function StationView({ station }: { station: MockScanStation }) {
               <code>PF:MACHINE:L2</code> one-shot assign ·{' '}
               <code>PF:WORKER:88</code> worker
             </div>
-            <div className="ss-manual">
-              <button
-                className="ss-manualbtn"
-                onClick={() => setFlow({ kind: 'manual-pn' })}
-                disabled={writeBlocked}
-              >
-                ⌨ Enter PN manually
-              </button>
-              <span className="cap">
-                Fallback when the scanner is unavailable — any non-empty PN
-                value is accepted and validated exactly like a scan; raw PN text
-                is never treated as barcode input.
-              </span>
+            <div className="ss-manualcap">
+              Manual PN entry is the fallback when the scanner is unavailable —
+              any non-empty PN value is validated exactly like a scan; raw PN
+              text is never treated as barcode input.
             </div>
             <div className="ss-lastpn">
               <span className="l">Last scanned PN</span>
@@ -667,28 +675,6 @@ function StationView({ station }: { station: MockScanStation }) {
                 ⟲ UNDO
               </button>
             </div>
-            <div className={`ss-feedback ${shownFeedback.kind}`} role="status">
-              {shownFeedback.kind !== 'idle' && (
-                <div className="fic" aria-hidden="true">
-                  {shownFeedback.icon}
-                </div>
-              )}
-              <div>
-                <div
-                  className="t1"
-                  style={
-                    shownFeedback.kind === 'idle'
-                      ? { color: 'var(--faint)', fontWeight: 400 }
-                      : undefined
-                  }
-                >
-                  {shownFeedback.title}
-                </div>
-                {shownFeedback.detail && (
-                  <div className="t2">{shownFeedback.detail}</div>
-                )}
-              </div>
-            </div>
           </div>
         </div>
 
@@ -700,7 +686,6 @@ function StationView({ station }: { station: MockScanStation }) {
                 cards={areaCards}
                 machines={machines}
                 title="In this Area now"
-                rowAction={rowAction}
               />
             ) : null
           }
@@ -709,11 +694,15 @@ function StationView({ station }: { station: MockScanStation }) {
               key={machine.name}
               machine={machine}
               entries={assigned.filter((e) => e.context === machine.name)}
-              rowAction={rowAction}
+              rowAction={machineRowAction}
             />
           ))}
         />
       </div>
+
+      {shownNotice ? (
+        <FloatingNotice notice={shownNotice} onClose={() => setNotice(null)} />
+      ) : null}
 
       {flow?.kind === 'machine-assign' && (
         <MachineAssignDialog
@@ -721,10 +710,16 @@ function StationView({ station }: { station: MockScanStation }) {
           initialMachine={flow.machine}
           initialPn={flow.pn}
           queuedQtyFor={queuedQtyFor}
+          resolvePn={resolvePn}
           areaCards={areaCards}
           worker={worker}
+          onBack={
+            flow.fromActions && flow.pn
+              ? () => setFlow({ kind: 'pn-actions', pn: flow.pn! })
+              : undefined
+          }
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -760,7 +755,7 @@ function StationView({ station }: { station: MockScanStation }) {
           hasMachines={hasMachines}
           worker={worker}
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -782,7 +777,7 @@ function StationView({ station }: { station: MockScanStation }) {
             })
           }
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -794,7 +789,7 @@ function StationView({ station }: { station: MockScanStation }) {
           hasMachines={hasMachines}
           worker={worker}
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -806,7 +801,7 @@ function StationView({ station }: { station: MockScanStation }) {
           sources={repairSourcesFor(flow.pn)}
           worker={worker}
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -818,7 +813,7 @@ function StationView({ station }: { station: MockScanStation }) {
           available={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
           worker={worker}
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -831,7 +826,7 @@ function StationView({ station }: { station: MockScanStation }) {
           max={flow.max}
           worker={worker}
           onRecord={record}
-          onFeedback={setFeedback}
+          onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
         />
@@ -875,28 +870,166 @@ function StationView({ station }: { station: MockScanStation }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* One-shot dialogs                                                    */
+/* Floating notification                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The single floating scan notification. It never reserves layout
+ * space, shows only the most recent notice, carries an explicit close
+ * button, and stays clear of the barcode input (bottom edge) and of
+ * dialog actions (it renders beneath the modal overlay).
+ */
+function FloatingNotice({
+  notice,
+  onClose,
+}: {
+  notice: Notice;
+  onClose: () => void;
+}) {
+  const alerting = notice.kind === 'warn' || notice.kind === 'err';
+  return (
+    <div
+      className={`ss-toast ${notice.kind}`}
+      role={alerting ? 'alert' : 'status'}
+    >
+      {notice.icon ? (
+        <div className="fic" aria-hidden="true">
+          {notice.icon}
+        </div>
+      ) : null}
+      <div className="tx">
+        <div className="t1">{notice.title}</div>
+        {notice.detail ? <div className="t2">{notice.detail}</div> : null}
+      </div>
+      <button
+        type="button"
+        className="tclose"
+        aria-label="Dismiss notification"
+        onClick={onClose}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Wizard building blocks                                              */
 /* ------------------------------------------------------------------ */
 
 interface ActionDialogProps {
   station: MockScanStation;
   worker: string;
   onRecord: (action: MockCompletedAction) => void;
-  onFeedback: (f: Feedback) => void;
+  onNotice: (n: Notice) => void;
   onClose: (message?: string) => void;
   onCancel: () => void;
 }
 
 /**
- * Central physical-key handling for quantity dialogs: 0–9 append,
- * Backspace removes, Delete clears, Enter confirms, Escape cancels
- * (ModalDialog), Space is ignored. Keys typed into other text fields
- * (reason, notes, scan-within-dialog) are left alone.
+ * Structured confirmation summary — the dedicated final view of every
+ * production wizard. Two columns (term / value); rows without a value
+ * are omitted. Never a single interpolated sentence.
+ */
+function ConfirmationSummary({ rows }: { rows: [string, ReactNode][] }) {
+  return (
+    <dl className="ss-confirm">
+      {rows
+        .filter(([, value]) => value !== null && value !== undefined)
+        .map(([label, value]) => (
+          <Fragment key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </Fragment>
+        ))}
+    </dl>
+  );
+}
+
+/** Semantic quantity/step guidance directly above the related input. */
+function Guidance({
+  tone = 'neutral',
+  children,
+}: {
+  tone?: 'neutral' | 'info' | 'warn' | 'error';
+  children: ReactNode;
+}) {
+  return <div className={`ss-guide ${tone}`}>{children}</div>;
+}
+
+/** Concise recap of the selections carried into the current step. */
+function StepRecap({ lines }: { lines: ReactNode[] }) {
+  return (
+    <div className="ss-recap">
+      {lines.filter(Boolean).map((line, index) => (
+        <div key={index} className="ss-recapline">
+          {line}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Wizard navigation row: Back only when a meaningful previous view
+ * exists, Cancel (Esc) always abandons the whole one-shot workflow
+ * with no write, and the primary button names the actual operation.
+ */
+function StepButtons({
+  onBack,
+  onCancel,
+  cancelLabel = 'Cancel (Esc) — nothing recorded',
+  primary,
+}: {
+  onBack?: () => void;
+  onCancel: () => void;
+  cancelLabel?: string;
+  primary: {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    danger?: boolean;
+    autoFocus?: boolean;
+  };
+}) {
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  const { autoFocus } = primary;
+  useEffect(() => {
+    if (autoFocus) primaryRef.current?.focus();
+  }, [autoFocus]);
+  return (
+    <div className="row">
+      {onBack ? (
+        <button className="bigbtn ghost ss-back" onClick={onBack}>
+          ‹ Back
+        </button>
+      ) : null}
+      <button className="bigbtn ghost" onClick={onCancel}>
+        {cancelLabel}
+      </button>
+      <button
+        ref={primaryRef}
+        className={`bigbtn ${primary.danger ? 'danger' : 'primary'}`}
+        disabled={primary.disabled}
+        onClick={primary.onClick}
+      >
+        {primary.label}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Central physical-key handling for quantity steps: 0–9 append,
+ * Backspace removes, Delete clears, Enter advances (to the next step —
+ * never directly to a write), Escape cancels (ModalDialog), Space is
+ * ignored. Keys typed into other text fields (reason, notes,
+ * scan-within-dialog) are left alone.
  */
 function quantityKeyHandler(
   value: string,
   onChange: (next: string) => void,
-  onConfirm: () => void,
+  onAdvance: () => void,
 ) {
   return (event: React.KeyboardEvent) => {
     const target = event.target;
@@ -907,9 +1040,9 @@ function quantityKeyHandler(
     // reclaim Enter or Space.
     if (target instanceof HTMLButtonElement) return;
     if (event.key === 'Enter') {
-      // Enter always means Confirm for the quantity dialog.
+      // Enter always means "advance" for the quantity step.
       event.preventDefault();
-      onConfirm();
+      onAdvance();
       return;
     }
     const inOtherField =
@@ -930,32 +1063,87 @@ function quantityKeyHandler(
   };
 }
 
+/**
+ * Enter handling for non-quantity steps (settings/confirmation):
+ * Enter performs the given action unless focus sits on a button or in
+ * a text-entry control (those keep their native behavior).
+ */
+function enterKeyHandler(onEnter: () => void) {
+  return (event: React.KeyboardEvent) => {
+    const target = event.target;
+    if (
+      target instanceof HTMLButtonElement ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLSelectElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      onEnter();
+    }
+  };
+}
+
+/** Standard quantity validation message for a 1..max range. */
+function quantityValidation(
+  parsed: number,
+  max: number,
+  overMessage: string,
+): { tone: 'neutral' | 'error'; text: string } | null {
+  if (parsed > max) return { tone: 'error', text: overMessage };
+  if (parsed < 1) {
+    return {
+      tone: 'neutral',
+      text: `Enter a quantity between 1 and ${max}.`,
+    };
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* One-shot dialogs (temporary wizards)                                */
+/* ------------------------------------------------------------------ */
+
 function MachineAssignDialog({
   station,
   initialMachine,
   initialPn,
   queuedQtyFor,
+  resolvePn,
   areaCards,
   worker,
+  onBack,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & {
   initialMachine: string | null;
   initialPn: string | null;
   queuedQtyFor: (pn: string) => number;
+  resolvePn: (pn: string) => string;
   areaCards: MockAreaCard[];
+  /** Back from Step 1 to the PN action dialog (PN-first entry only). */
+  onBack?: () => void;
 }) {
   const machines = MOCK_AREA_MACHINES[station.area] ?? [];
+  const [step, setStep] = useState<'select' | 'qty' | 'confirm'>('select');
   const [machine, setMachine] = useState<string | null>(initialMachine);
   const [pn, setPn] = useState<string | null>(initialPn);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scanRef = useRef<HTMLInputElement>(null);
   const max = pn ? queuedQtyFor(pn) : 0;
   const [qty, setQty] = useState('');
   // MAX is the default for assignment quantity.
   useEffect(() => {
     setQty(max > 0 ? String(max) : '');
   }, [max]);
+  // The barcode-selection input receives focus when entering Step 1.
+  useEffect(() => {
+    if (step === 'select') scanRef.current?.focus();
+  }, [step]);
 
   const queuedPns = Array.from(
     new Set(
@@ -966,7 +1154,66 @@ function MachineAssignDialog({
   );
 
   const parsedQty = parseInt(qty || '0', 10);
-  const valid = machine && pn && parsedQty >= 1 && parsedQty <= max;
+  const pairSelected = machine !== null && pn !== null && max > 0;
+  const qtyValid = parsedQty >= 1 && parsedQty <= max;
+  const valid = pairSelected && qtyValid;
+
+  /**
+   * Step 1 barcode selection: a Machine barcode of this Area selects
+   * the Machine; a queued PN barcode selects the PN. Everything else
+   * is an inline error with no selection change — and nothing is ever
+   * recorded during selection.
+   */
+  function handleSelectScan(raw: string) {
+    const parsed = parseScan(raw);
+    if (parsed.kind === 'empty') return;
+    if (parsed.kind === 'machine') {
+      const known = MOCK_MACHINE_BARCODES[parsed.id];
+      if (!known) {
+        setScanError('Unknown Machine barcode — selection unchanged.');
+        return;
+      }
+      if (known.area !== station.area) {
+        setScanError(
+          `${known.machine} belongs to another Area — selection unchanged.`,
+        );
+        return;
+      }
+      const status = machines.find((m) => m.name === known.machine)?.status;
+      if (status === 'maintenance') {
+        setScanError(
+          `${known.machine} is inactive (maintenance) — selection unchanged.`,
+        );
+        return;
+      }
+      setMachine(known.machine);
+      setScanError(null);
+      return;
+    }
+    if (parsed.kind === 'pn') {
+      const resolved = resolvePn(parsed.pn);
+      if (queuedQtyFor(resolved) < 1) {
+        setScanError(
+          `${resolved} has no queued quantity in this Area — selection unchanged.`,
+        );
+        return;
+      }
+      setPn(resolved);
+      setScanError(null);
+      return;
+    }
+    setScanError(
+      'Only a Machine barcode of this Area or a queued PN barcode selects here — selection unchanged, nothing recorded.',
+    );
+  }
+
+  function goQty() {
+    if (pairSelected) setStep('qty');
+  }
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
 
   function confirm() {
     if (!valid || !machine || !pn) return;
@@ -982,7 +1229,7 @@ function MachineAssignDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Returns ${parsedQty} pcs from ${machine} to the Area queue.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} → ${machine}`,
@@ -992,80 +1239,218 @@ function MachineAssignDialog({
     onClose();
   }
 
+  const keys =
+    step === 'qty'
+      ? quantityKeyHandler(qty, setQty, goConfirm)
+      : step === 'confirm'
+        ? enterKeyHandler(confirm)
+        : enterKeyHandler(goQty);
+
   return (
     <ModalDialog
       label="One-shot Machine assignment"
       onClose={onCancel}
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      size="wide"
+      onKeyDown={keys}
     >
       <h3>One-shot Machine assignment</h3>
-      <div className="sub">
-        Assign queued quantity to a Machine. This is a single action — there is
-        no persistent Machine Session; when this dialog closes, nothing stays
-        armed.
-      </div>
-      <div className="ss-dlgrid">
-        <span className="lbl">Machine</span>
-        <div className="ss-choicerow">
-          {machines.map((m) => (
-            <button
-              key={m.name}
-              type="button"
-              className={`pickbtn ${machine === m.name ? 'sel' : ''}`}
-              disabled={m.status === 'maintenance'}
-              title={
-                m.status === 'maintenance'
-                  ? 'Under maintenance — accepts no production'
-                  : undefined
-              }
-              onClick={() => setMachine(m.name)}
-            >
-              {m.name}
-              <span className="s">{m.status}</span>
-            </button>
-          ))}
-        </div>
-        <span className="lbl">PN (queued)</span>
-        <div className="ss-choicerow">
-          {queuedPns.length === 0 ? (
-            <span className="sub">No queued quantity in this Area.</span>
-          ) : (
-            queuedPns.map((queuedPn) => (
-              <button
-                key={queuedPn}
-                type="button"
-                className={`pickbtn mono ${pn === queuedPn ? 'sel' : ''}`}
-                onClick={() => setPn(queuedPn)}
-              >
-                {queuedPn}
-                <span className="s">queued {queuedQtyFor(queuedPn)}</span>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-      {pn ? (
+      {step === 'select' ? (
         <>
           <div className="sub">
-            Quantity — MAX defaults to the queued quantity (<b>{max}</b>); a
-            smaller valid quantity may be entered.
+            Assign queued quantity to a Machine. This is a single action — there
+            is no persistent Machine Session; when this dialog closes, nothing
+            stays armed.
           </div>
-          <QuantityKeypad value={qty} onChange={setQty} max={max} />
+          <input
+            ref={scanRef}
+            className="field mono"
+            autoComplete="off"
+            placeholder="Scan Machine or queued PN barcode… (ENTER)"
+            aria-label="Scan Machine or queued PN barcode"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleSelectScan(e.currentTarget.value);
+                e.currentTarget.value = '';
+              }
+            }}
+          />
+          {scanError ? <div className="ss-scannote">{scanError}</div> : null}
+          <div className="ss-dlgrid">
+            <span className="lbl" id="ma-machine-lbl">
+              Machine
+            </span>
+            {machines.length > 6 ? (
+              <select
+                aria-label="Machine"
+                value={machine ?? ''}
+                onChange={(e) => setMachine(e.target.value)}
+              >
+                <option value="" disabled>
+                  Select a Machine…
+                </option>
+                {machines.map((m) => (
+                  <option
+                    key={m.name}
+                    value={m.name}
+                    disabled={m.status === 'maintenance'}
+                  >
+                    {m.name}
+                    {m.status === 'maintenance'
+                      ? ' — maintenance (unavailable)'
+                      : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div
+                className="ss-choicerow"
+                role="group"
+                aria-labelledby="ma-machine-lbl"
+              >
+                {machines.map((m) => (
+                  <button
+                    key={m.name}
+                    type="button"
+                    className={`pickbtn ${machine === m.name ? 'sel' : ''}`}
+                    disabled={m.status === 'maintenance'}
+                    title={
+                      m.status === 'maintenance'
+                        ? 'Under maintenance — accepts no production'
+                        : undefined
+                    }
+                    onClick={() => setMachine(m.name)}
+                  >
+                    {m.name}
+                    <span className="s">{m.status}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <span className="lbl" id="ma-pn-lbl">
+              PN (queued)
+            </span>
+            {queuedPns.length === 0 ? (
+              <span className="sub">No queued quantity in this Area.</span>
+            ) : queuedPns.length > 6 ? (
+              <select
+                aria-label="PN (queued)"
+                className="mono"
+                value={pn ?? ''}
+                onChange={(e) => setPn(e.target.value)}
+              >
+                <option value="" disabled>
+                  Select a queued PN…
+                </option>
+                {queuedPns.map((queuedPn) => (
+                  <option key={queuedPn} value={queuedPn}>
+                    {queuedPn} — queued {queuedQtyFor(queuedPn)}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div
+                className="ss-choicerow"
+                role="group"
+                aria-labelledby="ma-pn-lbl"
+              >
+                {queuedPns.map((queuedPn) => (
+                  <button
+                    key={queuedPn}
+                    type="button"
+                    className={`pickbtn mono ${pn === queuedPn ? 'sel' : ''}`}
+                    onClick={() => setPn(queuedPn)}
+                  >
+                    <span className="pickpn" title={queuedPn}>
+                      {queuedPn}
+                    </span>
+                    <span className="s">queued {queuedQtyFor(queuedPn)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <StepButtons
+            onBack={onBack}
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goQty,
+              disabled: !pairSelected,
+            }}
+          />
         </>
       ) : null}
-      <div className="ss-summary">
-        {valid
-          ? `Summary: ASSIGNED_TO_MACHINE · ${pn} × ${parsedQty} · Area queue → ${machine} · Worker ${worker} · ${station.stationId}`
-          : 'Select a Machine, a queued PN and a valid quantity.'}
-      </div>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc) — nothing recorded
-        </button>
-        <button className="bigbtn primary" disabled={!valid} onClick={confirm}>
-          Confirm
-        </button>
-      </div>
+      {step === 'qty' && pn ? (
+        <>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <StepRecap
+            lines={[
+              <>
+                Assigning to <b>{machine}</b>. Queued quantity: <b>{max} pcs</b>
+                .
+              </>,
+              <>Source: Area queue → Destination: {machine}</>,
+            ]}
+          />
+          <Guidance tone="info">
+            MAX defaults to the queued quantity. Enter a smaller quantity if
+            needed.
+          </Guidance>
+          {(() => {
+            const v = quantityValidation(
+              parsedQty,
+              max,
+              `Quantity cannot exceed the ${max} pcs currently queued in this Area.`,
+            );
+            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+          })()}
+          <QuantityKeypad value={qty} onChange={setQty} max={max} />
+          <StepButtons
+            onBack={() => setStep('select')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
+        </>
+      ) : null}
+      {step === 'confirm' && pn && machine ? (
+        <>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the assignment, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'ASSIGNED_TO_MACHINE'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Source', 'Area queue'],
+              ['Destination Machine', machine],
+              [
+                'Remaining queued after assignment',
+                <span className="mono">{max - parsedQty} pcs</span>,
+              ],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('qty')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm assignment',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
+        </>
+      ) : null}
     </ModalDialog>
   );
 }
@@ -1108,7 +1493,14 @@ function PnActionsDialog({
       {hasMachines && queuedQty > 0 ? (
         <button
           className="choice"
-          onClick={() => onPick({ kind: 'machine-assign', machine: null, pn })}
+          onClick={() =>
+            onPick({
+              kind: 'machine-assign',
+              machine: null,
+              pn,
+              fromActions: true,
+            })
+          }
         >
           <span className="cic que" aria-hidden="true">
             ASN
@@ -1128,7 +1520,11 @@ function PnActionsDialog({
           className="choice"
           onClick={() =>
             sources.length === 1
-              ? onPick({ kind: 'transfer', pn, source: sources[0] })
+              ? onPick({
+                  kind: 'transfer',
+                  pn,
+                  source: sources[0],
+                })
               : onPick({ kind: 'source-select', pn, sources })
           }
         >
@@ -1263,7 +1659,7 @@ function TransferDialog({
   hasMachines,
   worker,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & {
@@ -1272,12 +1668,17 @@ function TransferDialog({
   hasMachines: boolean;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   const [qty, setQty] = useState(String(source.qty)); // MAX default
   const parsedQty = parseInt(qty || '0', 10);
   const valid = parsedQty >= 1 && parsedQty <= source.qty;
   const destinationNote = hasMachines
     ? `${areaName} queue (awaiting Machine)`
     : `${areaName} — direct processing (Machine = NULL)`;
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
 
   function confirm() {
     if (!valid) return;
@@ -1292,7 +1693,7 @@ function TransferDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} → ${destinationNote}`,
@@ -1304,36 +1705,83 @@ function TransferDialog({
 
   return (
     <ModalDialog
-      label="Enter quantity"
+      label="Transfer into this Area"
       onClose={onCancel}
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      onKeyDown={
+        step === 'qty'
+          ? quantityKeyHandler(qty, setQty, goConfirm)
+          : enterKeyHandler(confirm)
+      }
     >
-      <div>
-        <h3>Enter quantity</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          Transfer {source.areaLabel} → {areaName} · available at source:{' '}
-          <b>{source.qty}</b> (MAX, the default) · keypad or physical keyboard.
+      <h3>Transfer into this Area</h3>
+      {step === 'qty' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <StepRecap
+            lines={[
+              <>
+                Transfer {source.areaLabel} → {destinationNote}
+              </>,
+              <>{source.card.workOrder}</>,
+            ]}
+          />
+          <Guidance tone="info">
+            Available at {source.areaLabel}: <b>{source.qty} pcs</b>. MAX is
+            selected by default.
+          </Guidance>
+          {(() => {
+            const v = quantityValidation(
+              parsedQty,
+              source.qty,
+              `Quantity cannot exceed the ${source.qty} pcs currently available at the source.`,
+            );
+            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+          })()}
+          <QuantityKeypad value={qty} onChange={setQty} max={source.qty} />
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
         </div>
-        <QuantityKeypad value={qty} onChange={setQty} max={source.qty} />
-        <div className="ss-summary">
-          {valid
-            ? `Summary: TRANSFERRED · ${pn} × ${parsedQty} · ${source.areaLabel} → ${destinationNote} · Worker ${worker} · ${station.stationId}`
-            : `Enter a quantity between 1 and ${source.qty}.`}
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the transfer, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'TRANSFERRED'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Source', source.areaLabel],
+              ['Destination', destinationNote],
+              [
+                'Remaining at source',
+                <span className="mono">{source.qty - parsedQty} pcs</span>,
+              ],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('qty')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm transfer',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm
-          </button>
-        </div>
-      </div>
+      )}
     </ModalDialog>
   );
 }
@@ -1345,7 +1793,7 @@ function IntakeDialog({
   worker,
   onCreatePn,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & {
@@ -1355,6 +1803,7 @@ function IntakeDialog({
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const operations = areaByKey(station.area)?.operations ?? [];
+  const [step, setStep] = useState<'settings' | 'qty' | 'confirm'>('settings');
   const [qty, setQty] = useState(''); // intake has no MAX and no default
   const [requestType, setRequestType] = useState<RequestType>('MODIFY');
   const [routeMode, setRouteMode] = useState<RouteMode>('FLOATING');
@@ -1362,14 +1811,32 @@ function IntakeDialog({
   const [due, setDue] = useState('');
   const [notes, setNotes] = useState('');
   const [operation, setOperation] = useState(operations[0] ?? '');
+  const firstFieldRef = useRef<HTMLSelectElement>(null);
+  useEffect(() => {
+    if (step === 'settings') firstFieldRef.current?.focus();
+  }, [step]);
   const parsedQty = parseInt(qty || '0', 10);
-  const valid = parsedQty >= 1 && (routeMode === 'FLOATING' || plannedRoute);
+  const settingsValid = routeMode === 'FLOATING' || plannedRoute !== '';
+  const valid = parsedQty >= 1 && settingsValid;
   const isKnown = catalogPartNumber(pn) !== undefined;
   // One clearly applicable blank-number MODIFY Work Order is reused;
   // with several plausible ones an explicit selection dialog would
   // appear (never a guess). The mock data carries one such WO.
   const reusableInternalWo =
     requestType === 'MODIFY' && pnKey(pn) === pnKey('214-406');
+  const woBehavior = reusableInternalWo
+    ? 'Reuses the applicable internal MODIFY Work Order (WO —)'
+    : requestType === 'MODIFY'
+      ? 'Creates an internal Work Order without an external number (displays —)'
+      : 'Creates/uses the applicable Work Order';
+
+  function goQty() {
+    if (settingsValid) setStep('qty');
+  }
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
 
   function confirm() {
     if (!valid) return;
@@ -1385,7 +1852,7 @@ function IntakeDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Removes the ${parsedQty} pcs introduced by this intake.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} received into ${areaName}${hasMachines ? ' queue' : ''}`,
@@ -1406,112 +1873,195 @@ function IntakeDialog({
     onClose();
   }
 
+  const keys =
+    step === 'qty'
+      ? quantityKeyHandler(qty, setQty, goConfirm)
+      : step === 'confirm'
+        ? enterKeyHandler(confirm)
+        : enterKeyHandler(goQty);
+
   return (
     <ModalDialog
       label="Receive quantity — intake"
       onClose={onCancel}
       size="wide"
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      onKeyDown={keys}
     >
-      <div>
-        <h3>Receive quantity — intake</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          {isKnown ? (
-            <>This PN has no active Work Order Demand.</>
-          ) : (
-            <>
-              New PN — the internal PartNumber record is created on first valid
-              use (no preloaded catalog required; identity is case-insensitive,
-              this exact text is preserved).
-            </>
-          )}{' '}
-          Defaults: Request Type <b>MODIFY</b>, Route Mode <b>FLOATING</b> —
-          both editable. Received date defaults to the scan timestamp; the due
-          date belongs to the WorkOrderDemand and may stay empty.
+      <h3>Receive quantity — intake</h3>
+      {step === 'settings' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">
+            {isKnown ? (
+              <>This PN has no active Work Order Demand.</>
+            ) : (
+              <>
+                New PN — the internal PartNumber record is created on first
+                valid use (no preloaded catalog required; identity is
+                case-insensitive, this exact text is preserved).
+              </>
+            )}{' '}
+            Defaults: Request Type <b>MODIFY</b>, Route Mode <b>FLOATING</b> —
+            both editable. Received date defaults to the scan timestamp; the due
+            date belongs to the WorkOrderDemand and may stay empty. Quantity
+            follows on the next step.
+          </div>
+          <div className="ss-dlgrid">
+            <label htmlFor="in-type">Request Type</label>
+            <select
+              id="in-type"
+              ref={firstFieldRef}
+              value={requestType}
+              onChange={(e) => setRequestType(e.target.value as RequestType)}
+            >
+              <option>MODIFY</option>
+              <option>NEW</option>
+            </select>
+            <label htmlFor="in-route">Route Mode</label>
+            <select
+              id="in-route"
+              value={routeMode}
+              onChange={(e) => setRouteMode(e.target.value as RouteMode)}
+            >
+              <option>FLOATING</option>
+              <option>PLANNED</option>
+            </select>
+            {routeMode === 'PLANNED' ? (
+              <>
+                <label htmlFor="in-planned">Planned Route</label>
+                <select
+                  id="in-planned"
+                  value={plannedRoute}
+                  onChange={(e) => setPlannedRoute(e.target.value)}
+                >
+                  <option>Bracket std v3</option>
+                  <option>Shaft std v2</option>
+                </select>
+              </>
+            ) : null}
+            <label htmlFor="in-due">Due date (optional)</label>
+            <input
+              id="in-due"
+              type="date"
+              className="mono"
+              value={due}
+              onChange={(e) => setDue(e.target.value)}
+            />
+            <label htmlFor="in-op">Starting Area · Operation</label>
+            <select
+              id="in-op"
+              value={operation}
+              onChange={(e) => setOperation(e.target.value)}
+            >
+              {operations.map((op) => (
+                <option key={op}>{`${areaName} — ${op}`}</option>
+              ))}
+            </select>
+            <label htmlFor="in-notes">Reason / notes</label>
+            <input
+              id="in-notes"
+              value={notes}
+              placeholder="optional for MODIFY intake"
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </div>
+          <div className="ss-recap">
+            <div className="ss-recapline">Work Order: {woBehavior}.</div>
+          </div>
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goQty,
+              disabled: !settingsValid,
+            }}
+          />
         </div>
-        <div className="ss-dlgrid">
-          <label htmlFor="in-type">Request Type</label>
-          <select
-            id="in-type"
-            value={requestType}
-            onChange={(e) => setRequestType(e.target.value as RequestType)}
-          >
-            <option>MODIFY</option>
-            <option>NEW</option>
-          </select>
-          <label htmlFor="in-route">Route Mode</label>
-          <select
-            id="in-route"
-            value={routeMode}
-            onChange={(e) => setRouteMode(e.target.value as RouteMode)}
-          >
-            <option>FLOATING</option>
-            <option>PLANNED</option>
-          </select>
-          {routeMode === 'PLANNED' ? (
-            <>
-              <label htmlFor="in-planned">Planned Route</label>
-              <select
-                id="in-planned"
-                value={plannedRoute}
-                onChange={(e) => setPlannedRoute(e.target.value)}
-              >
-                <option>Bracket std v3</option>
-                <option>Shaft std v2</option>
-              </select>
-            </>
+      ) : null}
+      {step === 'qty' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <StepRecap
+            lines={[
+              <>
+                {requestType} · {routeMode}
+                {routeMode === 'PLANNED' ? <> · “{plannedRoute}”</> : null}
+              </>,
+              <>{operation}</>,
+              <>Due: {due || '—'}</>,
+              <>
+                {reusableInternalWo || requestType === 'MODIFY'
+                  ? 'Internal WO —'
+                  : 'Work Order to be created/selected'}
+              </>,
+              notes ? <>Notes: {notes}</> : null,
+            ]}
+          />
+          <Guidance>
+            Enter the physical quantity received. No default quantity is
+            assumed.
+          </Guidance>
+          {parsedQty < 1 ? (
+            <Guidance>Enter a positive quantity.</Guidance>
           ) : null}
-          <label htmlFor="in-due">Due date (optional)</label>
-          <input
-            id="in-due"
-            type="date"
-            className="mono"
-            value={due}
-            onChange={(e) => setDue(e.target.value)}
-          />
-          <label htmlFor="in-op">Starting Area · Operation</label>
-          <select
-            id="in-op"
-            value={operation}
-            onChange={(e) => setOperation(e.target.value)}
-          >
-            {operations.map((op) => (
-              <option key={op}>{`${areaName} — ${op}`}</option>
-            ))}
-          </select>
-          <label htmlFor="in-notes">Reason / notes</label>
-          <input
-            id="in-notes"
-            value={notes}
-            placeholder="optional for MODIFY intake"
-            onChange={(e) => setNotes(e.target.value)}
+          <QuantityKeypad value={qty} onChange={setQty} />
+          <StepButtons
+            onBack={() => setStep('settings')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
           />
         </div>
-        <div className="sub">
-          Quantity — no default; enter the physical count.
+      ) : null}
+      {step === 'confirm' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the intake, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'Receive quantity — intake (RECEIVED)'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Request Type', requestType],
+              ['Route Mode', routeMode],
+              routeMode === 'PLANNED'
+                ? ['Planned Route', plannedRoute]
+                : ['Planned Route', null],
+              ['Work Order', woBehavior],
+              ['Due date', due || '—'],
+              ['Starting Area · Operation', operation],
+              [
+                'Destination',
+                hasMachines
+                  ? `${areaName} queue (awaiting Machine)`
+                  : `${areaName} — direct processing (Machine = NULL)`,
+              ],
+              ['Reason / notes', notes || null],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('qty')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm intake',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-        <QuantityKeypad value={qty} onChange={setQty} />
-        <div className="ss-summary">
-          {valid
-            ? `Summary: intake ${pn} × ${parsedQty} · ${requestType} · ${routeMode}${
-                routeMode === 'PLANNED' ? ` (“${plannedRoute}”)` : ''
-              } · WO ${reusableInternalWo ? '— (reused internal MODIFY WO)' : requestType === 'MODIFY' ? '— (internal, no external number)' : 'to be selected'} · due ${due || '—'} · ${areaName}${hasMachines ? ' queue' : ' direct processing'} · Worker ${worker} · ${station.stationId}`
-            : 'Enter a positive quantity.'}
-        </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm intake
-          </button>
-        </div>
-      </div>
+      ) : null}
     </ModalDialog>
   );
 }
@@ -1522,15 +2072,20 @@ function AddQuantityDialog({
   hasMachines,
   worker,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & { pn: string; hasMachines: boolean }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'entry' | 'confirm'>('entry');
   const [qty, setQty] = useState(''); // deliberately no MAX, no default
   const [reason, setReason] = useState('');
   const parsedQty = parseInt(qty || '0', 10);
   const valid = parsedQty >= 1 && reason.trim() !== '';
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
 
   function confirm() {
     if (!valid) return;
@@ -1545,7 +2100,7 @@ function AddQuantityDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Removes the ${parsedQty} added pcs again.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} +${parsedQty} pcs at ${areaName}`,
@@ -1562,47 +2117,85 @@ function AddQuantityDialog({
     <ModalDialog
       label="Add more quantity"
       onClose={onCancel}
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      onKeyDown={
+        step === 'entry'
+          ? quantityKeyHandler(qty, setQty, goConfirm)
+          : enterKeyHandler(confirm)
+      }
     >
-      <div>
-        <h3>Add more quantity</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          Intentionally introduces additional physical quantity at {areaName}.
-          Operators may do this without Manager approval; the reason is
-          mandatory and the event is auditable (QUANTITY_ADJUSTED · INCREASE).
-          There is deliberately <b>no MAX and no default</b> — enter the actual
-          count.
+      <h3>Add more quantity</h3>
+      {step === 'entry' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">
+            Intentionally introduces additional physical quantity at {areaName}.
+            Operators may do this without Manager approval; the reason is
+            mandatory and the event is auditable (QUANTITY_ADJUSTED · INCREASE).
+          </div>
+          <Guidance>
+            There is deliberately no MAX and no default — enter the actual
+            physical count.
+          </Guidance>
+          {parsedQty < 1 ? (
+            <Guidance>Enter a positive quantity.</Guidance>
+          ) : null}
+          <QuantityKeypad value={qty} onChange={setQty} />
+          <label className="ss-reasonlbl" htmlFor="addq-reason">
+            Reason (required)
+          </label>
+          <input
+            id="addq-reason"
+            className="field"
+            value={reason}
+            placeholder="e.g. found 2 additional blanks with the lot"
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
         </div>
-        <QuantityKeypad value={qty} onChange={setQty} />
-        <label className="ss-reasonlbl" htmlFor="addq-reason">
-          Reason (required)
-        </label>
-        <input
-          id="addq-reason"
-          className="field"
-          value={reason}
-          placeholder="e.g. found 2 additional blanks with the lot"
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <div className="ss-summary">
-          {valid
-            ? `Summary: QUANTITY_ADJUSTED (INCREASE) · ${pn} +${parsedQty} at ${areaName} · reason: ${reason.trim()} · Worker ${worker} · ${station.stationId}`
-            : 'Enter a quantity and the mandatory reason.'}
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the quantity addition, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'QUANTITY_ADJUSTED · INCREASE'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">+{parsedQty} pcs</span>],
+              ['Area', areaName],
+              [
+                'Destination',
+                hasMachines
+                  ? `${areaName} queue (awaiting Machine)`
+                  : `${areaName} — direct processing (Machine = NULL)`,
+              ],
+              ['Reason', reason.trim()],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('entry')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm addition',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm addition
-          </button>
-        </div>
-      </div>
+      )}
     </ModalDialog>
   );
 }
@@ -1613,7 +2206,7 @@ function RepairDialog({
   sources,
   worker,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & {
@@ -1621,6 +2214,7 @@ function RepairDialog({
   sources: { areaLabel: string; qty: number; flow: string; note: string }[];
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'entry' | 'confirm'>('entry');
   const [source, setSource] = useState(
     sources.length === 1 ? sources[0] : null,
   );
@@ -1638,6 +2232,10 @@ function RepairDialog({
     reason.trim() !== '';
   const partial = source !== null && parsedQty >= 1 && parsedQty < source.qty;
 
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
+
   function confirm() {
     if (!valid || !source) return;
     onRecord({
@@ -1651,7 +2249,7 @@ function RepairDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `REPAIR — ${pn} × ${parsedQty} returns to ${areaName}`,
@@ -1669,73 +2267,118 @@ function RepairDialog({
       label="Send quantity here for repair"
       onClose={onCancel}
       size="wide"
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      onKeyDown={
+        step === 'entry'
+          ? quantityKeyHandler(qty, setQty, goConfirm)
+          : enterKeyHandler(confirm)
+      }
     >
-      <div>
-        <h3>Send quantity here for repair</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          An explicit Repair intent: quantity already in production returns to{' '}
-          {areaName} — an Area it previously visited — to correct earlier work.
-          Repair is a movement (TRANSFERRED · movement_reason REPAIR), never a
-          Request Type and never new demand or new quantity. Returning to a
-          previously visited Area is <b>not</b> assumed to be Repair — you chose
-          it here.
-        </div>
-        <div className="ss-dlgrid">
-          <span className="lbl">Source</span>
-          <div className="ss-choicerow">
-            {sources.map((s) => (
-              <button
-                key={s.areaLabel}
-                type="button"
-                className={`pickbtn ${source?.areaLabel === s.areaLabel ? 'sel' : ''}`}
-                onClick={() => setSource(s)}
-              >
-                {s.areaLabel} · {s.qty} pcs · {s.flow}
-                <span className="s">{s.note}</span>
-              </button>
-            ))}
+      <h3>Send quantity here for repair</h3>
+      {step === 'entry' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
           </div>
-        </div>
-        {source ? (
-          <>
-            <div className="sub">
-              Repair quantity — MAX {max}. A partial quantity splits the
-              QuantityFlow (requires SPLIT — Phase 8); the full quantity moves
-              the whole flow.
+          <div className="sub">
+            An explicit Repair intent: quantity already in production returns to{' '}
+            {areaName} — an Area it previously visited — to correct earlier
+            work. Repair is a movement (TRANSFERRED · movement_reason REPAIR),
+            never a Request Type and never new demand or new quantity. Returning
+            to a previously visited Area is <b>not</b> assumed to be Repair —
+            you chose it here.
+          </div>
+          <div className="ss-dlgrid">
+            <span className="lbl">Source</span>
+            <div className="ss-choicerow">
+              {sources.map((s) => (
+                <button
+                  key={s.areaLabel}
+                  type="button"
+                  className={`pickbtn ${source?.areaLabel === s.areaLabel ? 'sel' : ''}`}
+                  onClick={() => setSource(s)}
+                >
+                  {s.areaLabel} · {s.qty} pcs · {s.flow}
+                  <span className="s">{s.note}</span>
+                </button>
+              ))}
             </div>
-            <QuantityKeypad value={qty} onChange={setQty} max={max} />
-          </>
-        ) : null}
-        <label className="ss-reasonlbl" htmlFor="rep-reason">
-          Reason (required)
-        </label>
-        <input
-          id="rep-reason"
-          className="field"
-          value={reason}
-          placeholder="what must be corrected?"
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <div className="ss-summary">
-          {valid && source
-            ? `Summary: REPAIR movement · ${pn} × ${parsedQty} · ${source.areaLabel} → ${areaName} · ${source.flow} · reason: ${reason.trim()} · Worker ${worker} · ${station.stationId} · ${MOCK_SCAN_TIME}`
-            : 'Select the source, a valid quantity and the mandatory reason.'}
+          </div>
+          {source ? (
+            <>
+              <Guidance tone="warn">
+                Repair quantity — MAX {max} pcs, the default. A partial quantity
+                splits the QuantityFlow (requires SPLIT — Phase 8); the full
+                quantity moves the whole flow.
+              </Guidance>
+              {(() => {
+                const v = quantityValidation(
+                  parsedQty,
+                  max,
+                  `Quantity cannot exceed the ${max} pcs of the selected source flow.`,
+                );
+                return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+              })()}
+              <QuantityKeypad value={qty} onChange={setQty} max={max} />
+            </>
+          ) : null}
+          <label className="ss-reasonlbl" htmlFor="rep-reason">
+            Reason (required)
+          </label>
+          <input
+            id="rep-reason"
+            className="field"
+            value={reason}
+            placeholder="what must be corrected?"
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
         </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm repair movement
-          </button>
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the Repair movement, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'TRANSFERRED · movement_reason REPAIR'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              [
+                'Source',
+                source ? `${source.areaLabel} · ${source.flow}` : null,
+              ],
+              ['Destination', areaName],
+              [
+                'Effect',
+                partial
+                  ? 'Partial quantity — the QuantityFlow splits first (SPLIT, Phase 8)'
+                  : 'Moves the whole Quantity Flow',
+              ],
+              ['Reason', reason.trim()],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('entry')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm repair',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-      </div>
+      )}
     </ModalDialog>
   );
 }
@@ -1746,18 +2389,19 @@ function ScrapDialog({
   available,
   worker,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & { pn: string; available: number }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'count' | 'confirm'>('count');
   const [count, setCount] = useState(0);
   const [reason, setReason] = useState('');
   const [scanNote, setScanNote] = useState<string | null>(null);
   const scanRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    scanRef.current?.focus();
-  }, []);
+    if (step === 'count') scanRef.current?.focus();
+  }, [step]);
   const valid = count >= 1 && count <= available && reason.trim() !== '';
 
   function handleScrapScan(value: string) {
@@ -1774,6 +2418,10 @@ function ScrapDialog({
     setScanNote(null);
   }
 
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
+
   function confirm() {
     if (!valid) return;
     onRecord({
@@ -1787,7 +2435,7 @@ function ScrapDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Restores the ${count} scrapped pcs to active quantity.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `SCRAPPED — ${pn} × ${count} at ${areaName}`,
@@ -1797,80 +2445,141 @@ function ScrapDialog({
     onClose();
   }
 
+  const countKeys = (event: React.KeyboardEvent) => {
+    const target = event.target;
+    if (target instanceof HTMLButtonElement) return;
+    if (
+      target instanceof HTMLInputElement &&
+      target.getAttribute('aria-label') === 'Scrap barcode input'
+    ) {
+      return; // the scrap counting input owns its Enter handling
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      goConfirm();
+    }
+  };
+
   return (
-    <ModalDialog label="Scrap damaged quantity" onClose={onCancel} size="wide">
-      <div>
-        <h3>Scrap damaged quantity</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          Scan <code>{SCRAP_BARCODE}</code> once per damaged piece — the barcode
-          is context-sensitive and counts only inside this workflow. Counting
-          changes no production state; one auditable SCRAPPED operation is
-          created only on Confirm.
+    <ModalDialog
+      label="Scrap damaged quantity"
+      onClose={onCancel}
+      size="wide"
+      onKeyDown={step === 'count' ? countKeys : enterKeyHandler(confirm)}
+    >
+      <h3>Scrap damaged quantity</h3>
+      {step === 'count' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">
+            Scan <code>{SCRAP_BARCODE}</code> once per damaged piece — the
+            barcode is context-sensitive and counts only inside this workflow.
+            Counting changes no production state; one auditable SCRAPPED
+            operation is created only on the final confirmation.
+          </div>
+          <Guidance tone="warn">
+            Available at {areaName}: <b>{available} pcs</b> · pending scrap{' '}
+            <b>{count}</b> · remaining after scrap{' '}
+            <b>{Math.max(0, available - count)} pcs</b>.
+          </Guidance>
+          {count > available ? (
+            <Guidance tone="error">
+              Scrap count cannot exceed the {available} pcs available at{' '}
+              {areaName}.
+            </Guidance>
+          ) : null}
+          <div className="ss-scrapcount" role="status">
+            <span className="lbl">Pending scrap count</span>
+            <span className="cnt mono">{count}</span>
+            <button
+              type="button"
+              className="pickbtn"
+              disabled={count === 0}
+              onClick={() => setCount((c) => Math.max(0, c - 1))}
+            >
+              −1 correct
+            </button>
+            <button
+              type="button"
+              className="pickbtn"
+              disabled={count === 0}
+              onClick={() => setCount(0)}
+            >
+              Reset
+            </button>
+          </div>
+          <input
+            ref={scanRef}
+            className="field mono"
+            placeholder={`Scan ${SCRAP_BARCODE} — Enter`}
+            aria-label="Scrap barcode input"
+            autoComplete="off"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleScrapScan(e.currentTarget.value);
+                e.currentTarget.value = '';
+              }
+            }}
+          />
+          {scanNote ? <div className="ss-scannote">{scanNote}</div> : null}
+          <label className="ss-reasonlbl" htmlFor="scrap-reason">
+            Common scrap reason (required)
+          </label>
+          <input
+            id="scrap-reason"
+            className="field"
+            value={reason}
+            placeholder="e.g. tool crash — gouged face"
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <StepButtons
+            onCancel={onCancel}
+            cancelLabel="Cancel (Esc) — discard count, nothing recorded"
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
         </div>
-        <div className="ss-scrapcount" role="status">
-          <span className="lbl">Pending scrap count</span>
-          <span className="cnt mono">{count}</span>
-          <button
-            type="button"
-            className="pickbtn"
-            disabled={count === 0}
-            onClick={() => setCount((c) => Math.max(0, c - 1))}
-          >
-            −1 correct
-          </button>
-          <button
-            type="button"
-            className="pickbtn"
-            disabled={count === 0}
-            onClick={() => setCount(0)}
-          >
-            Reset
-          </button>
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the scrap operation, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'SCRAPPED'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Area', areaName],
+              ['Machine', '—'],
+              ['Available', <span className="mono">{available} pcs</span>],
+              ['Scrap quantity', <span className="mono">{count} pcs</span>],
+              [
+                'Remaining active quantity',
+                <span className="mono">{available - count} pcs</span>,
+              ],
+              ['Reason', reason.trim()],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('count')}
+            onCancel={onCancel}
+            cancelLabel="Cancel (Esc) — discard count, nothing recorded"
+            primary={{
+              label: 'Confirm scrap',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-        <input
-          ref={scanRef}
-          className="field mono"
-          placeholder={`Scan ${SCRAP_BARCODE} — Enter`}
-          aria-label="Scrap barcode input"
-          autoComplete="off"
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              handleScrapScan(e.currentTarget.value);
-              e.currentTarget.value = '';
-            }
-          }}
-        />
-        {scanNote ? <div className="ss-scannote">{scanNote}</div> : null}
-        <label className="ss-reasonlbl" htmlFor="scrap-reason">
-          Common scrap reason (required)
-        </label>
-        <input
-          id="scrap-reason"
-          className="field"
-          value={reason}
-          placeholder="e.g. tool crash — gouged face"
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <div className="ss-summary">
-          Summary: SCRAPPED · {pn} · Area {areaName} · Machine — · available{' '}
-          {available} · scrap {count} · remaining{' '}
-          {Math.max(0, available - count)} · Worker {worker} ·{' '}
-          {station.stationId} · reason: {reason.trim() || '—'}
-        </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — discard count, nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm scrap
-          </button>
-        </div>
-      </div>
+      )}
     </ModalDialog>
   );
 }
@@ -1882,14 +2591,19 @@ function QueueReturnDialog({
   max,
   worker,
   onRecord,
-  onFeedback,
+  onNotice,
   onClose,
   onCancel,
 }: ActionDialogProps & { pn: string; machine: string; max: number }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   const [qty, setQty] = useState(String(max)); // MAX default
   const parsedQty = parseInt(qty || '0', 10);
   const valid = parsedQty >= 1 && parsedQty <= max;
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
 
   function confirm() {
     if (!valid) return;
@@ -1905,7 +2619,7 @@ function QueueReturnDialog({
       time: MOCK_SCAN_TIME,
       reversalEffect: `Re-assigns ${parsedQty} pcs to ${machine}.`,
     });
-    onFeedback({
+    onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} returned to the ${areaName} queue`,
@@ -1919,34 +2633,79 @@ function QueueReturnDialog({
     <ModalDialog
       label="Return quantity to the Area queue"
       onClose={onCancel}
-      onKeyDown={quantityKeyHandler(qty, setQty, confirm)}
+      onKeyDown={
+        step === 'qty'
+          ? quantityKeyHandler(qty, setQty, goConfirm)
+          : enterKeyHandler(confirm)
+      }
     >
-      <div>
-        <h3>Return quantity to the Area queue</h3>
-        <div className="big mono">{pn}</div>
-        <div className="sub">
-          {machine} → {areaName} queue · assigned on {machine}: <b>{max}</b>{' '}
-          (MAX, the default).
+      <h3>Return quantity to the Area queue</h3>
+      {step === 'qty' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <StepRecap
+            lines={[
+              <>
+                {machine} → {areaName} queue
+              </>,
+            ]}
+          />
+          <Guidance tone="info">
+            Assigned on {machine}: <b>{max} pcs</b>. MAX is selected by default.
+          </Guidance>
+          {(() => {
+            const v = quantityValidation(
+              parsedQty,
+              max,
+              `Quantity cannot exceed the ${max} pcs currently assigned on ${machine}.`,
+            );
+            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+          })()}
+          <QuantityKeypad value={qty} onChange={setQty} max={max} />
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
         </div>
-        <QuantityKeypad value={qty} onChange={setQty} max={max} />
-        <div className="ss-summary">
-          {valid
-            ? `Summary: RELEASED_FROM_MACHINE · ${pn} × ${parsedQty} · ${machine} → ${areaName} queue · Worker ${worker} · ${station.stationId}`
-            : `Enter a quantity between 1 and ${max}.`}
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">Review the queue return, then confirm.</div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'RELEASED_FROM_MACHINE'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Source Machine', machine],
+              ['Destination', `${areaName} queue`],
+              [
+                'Remaining on Machine',
+                <span className="mono">{max - parsedQty} pcs</span>,
+              ],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('qty')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm queue return',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
         </div>
-        <div className="row">
-          <button className="bigbtn ghost" onClick={onCancel}>
-            Cancel (Esc) — nothing recorded
-          </button>
-          <button
-            className="bigbtn primary"
-            onClick={confirm}
-            disabled={!valid}
-          >
-            Confirm
-          </button>
-        </div>
-      </div>
+      )}
     </ModalDialog>
   );
 }
@@ -1968,36 +2727,26 @@ function UndoConfirmDialog({
         Undo creates a compensating REVERSED Movement — the original action is
         preserved, never deleted.
       </div>
-      <dl className="ss-undosummary">
-        <dt>Original action</dt>
-        <dd>{target.movementType}</dd>
-        <dt>Quantity</dt>
-        <dd className="mono">{target.qty}</dd>
-        <dt>Source → destination</dt>
-        <dd>
-          {target.source} → {target.destination}
-        </dd>
-        {target.machine ? (
-          <>
-            <dt>Machine</dt>
-            <dd>{target.machine}</dd>
-          </>
-        ) : null}
-        <dt>Worker</dt>
-        <dd>{target.worker}</dd>
-        <dt>Time</dt>
-        <dd className="mono">{target.time}</dd>
-        <dt>Effect of the reversal</dt>
-        <dd>{target.reversalEffect}</dd>
-      </dl>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel — keep the operation
-        </button>
-        <button className="bigbtn danger" onClick={onConfirm}>
-          Confirm Undo
-        </button>
-      </div>
+      <ConfirmationSummary
+        rows={[
+          ['Original action', target.movementType],
+          ['Quantity', <span className="mono">{target.qty}</span>],
+          ['Source → destination', `${target.source} → ${target.destination}`],
+          ['Machine', target.machine ?? null],
+          ['Worker', target.worker],
+          ['Time', <span className="mono">{target.time}</span>],
+          ['Effect of the reversal', target.reversalEffect],
+        ]}
+      />
+      <StepButtons
+        onCancel={onCancel}
+        cancelLabel="Cancel — keep the operation"
+        primary={{
+          label: 'Confirm Undo',
+          onClick: onConfirm,
+          danger: true,
+        }}
+      />
     </ModalDialog>
   );
 }

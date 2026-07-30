@@ -144,9 +144,11 @@ test('the detail uses the shared [summary | machine grid] layout, read-only', ()
   expect(layout).not.toBeNull();
   expect(layout?.classList.contains('am-single')).toBe(false);
   expect(document.querySelectorAll('.am-machines .abd-machine').length).toBe(4);
-  // Area Board stays read-only — no Scan Station action buttons.
+  // Area Board stays read-only — no Scan Station action buttons and no
+  // action rail cells at all.
   expect(screen.queryByRole('button', { name: 'ASSIGN' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'QUEUE' })).toBeNull();
+  expect(document.querySelector('.mc-list .actcell')).toBeNull();
 });
 
 test('a no-Machine Area renders the full-width single-column layout', () => {
@@ -162,12 +164,15 @@ test('a no-Machine Area renders the full-width single-column layout', () => {
   );
 });
 
-test('scrap quantities appear in the PN summaries', () => {
+test('scrap quantities appear in the PN summaries as text only', () => {
   render(<AreaBoardView />);
   openArea(/^Lathe/);
 
   const summary = document.querySelector('.abd-summary');
   expect(summary?.textContent).toContain('1 scrapped');
+  // Scrap is never displayed twice: the compact ⊘ indicator is gone.
+  expect(summary?.textContent).not.toContain('⊘');
+  expect(document.querySelector('.mc-list .scrap')).toBeNull();
   // The blank-number internal MODIFY Work Order renders as `—`.
   expect(summary?.textContent).toContain('WO —');
 });

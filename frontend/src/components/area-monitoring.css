@@ -7,306 +7,386 @@
    Machine cards wrap only within the right grid — never underneath
    the left card; the left card may grow vertically independently. */
 .am {
-    display: grid;
-    grid-template-columns: minmax(340px, 420px) 1fr;
-    gap: 15px;
-    align-items: start;
+  display: grid;
+  grid-template-columns: minmax(340px, 420px) 1fr;
+  gap: 15px;
+  align-items: start;
 }
 
 .am.am-single {
-    grid-template-columns: 1fr;
+  grid-template-columns: 1fr;
 }
 
 .am-machines {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 15px;
-    align-items: start;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 15px;
+  align-items: start;
 }
 
 /* Deliberate single-column fallback at narrow breakpoints. */
 @media (max-width: 1100px) {
-    .am {
-        grid-template-columns: 1fr;
-    }
+  .am {
+    grid-template-columns: 1fr;
+  }
 }
 
 .am .abd-card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    box-shadow: var(--shadow);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
 .am .abd-card .mhead {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
 }
 
 .am .abd-card .mname {
-    display: inline-flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 18px;
-    font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 18px;
+  font-weight: 800;
 }
 
 /* Area identity color along the summary card's top edge. */
 .am .abd-summary {
-    border-top: 4px solid var(--acol, var(--faint));
+  border-top: 4px solid var(--acol, var(--faint));
 }
 
 .am .abd-summary .mc-ops {
-    margin-top: 0;
-    margin-left: auto;
+  margin-top: 0;
+  margin-left: auto;
 }
 
 .am .abd-desc {
-    padding: 8px 16px;
-    font-size: 12.5px;
-    color: var(--faint);
-    border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
 }
 
 .am .abd-grp {
-    padding: 10px 16px 4px;
-    font-size: 10.5px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: var(--faint);
-    border-top: 1px solid var(--border);
+  padding: 10px 16px 4px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--faint);
+  border-top: 1px solid var(--border);
 }
 
 /* Machine monitoring cards */
 .am .abd-machine .mstat {
-    margin-left: auto;
-    font-size: 11.5px;
-    font-weight: 750;
-    padding: 3px 10px;
-    border-radius: 20px;
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 750;
+  padding: 3px 10px;
+  border-radius: 20px;
 }
 
 .am .abd-machine .mstat.running {
-    background: var(--success-surface);
-    color: var(--ok-t);
+  background: var(--success-surface);
+  color: var(--ok-t);
 }
 
 .am .abd-machine .mstat.idle {
-    background: var(--chip);
-    color: var(--muted);
+  background: var(--chip);
+  color: var(--muted);
 }
 
 .am .abd-machine .mstat.maintenance {
-    background: var(--warning-surface);
-    color: var(--warn-t);
+  background: var(--warning-surface);
+  color: var(--warn-t);
 }
 
 .am .abd-machine .mtotals {
-    padding: 9px 16px;
-    font-size: 13px;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
+  padding: 9px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
 }
 
 .am .abd-machine .mtotals b {
-    font-family: var(--mono), monospace;
-    color: var(--text);
+  font-family: var(--mono), monospace;
+  color: var(--text);
 }
 
 /* An inactive/maintenance Machine stays visually distinct. */
 .am .abd-machine.maintenance {
-    border-style: dashed;
-    border-color: var(--warn-t);
-    opacity: 0.85;
+  border-style: dashed;
+  border-color: var(--warn-t);
+  opacity: 0.85;
 }
 
 .am .abd-machine.idle .mtotals {
-    color: var(--faint);
+  color: var(--faint);
 }
 
 .am .abd-machine .mempty {
-    padding: 24px 16px;
-    color: var(--faint);
-    font-size: 13px;
-    text-align: center;
-    font-style: italic;
+  padding: 24px 16px;
+  color: var(--faint);
+  font-size: 13px;
+  text-align: center;
+  font-style: italic;
 }
 
 .am .mc-ops {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 
 .am .opchip {
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--muted);
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
 }
 
 .am .mc-stats {
-    display: grid;
-    border-bottom: 1px solid var(--border);
+  display: grid;
+  border-bottom: 1px solid var(--border);
 }
 
 .am .stat {
-    padding: 10px 8px;
-    text-align: center;
-    border-right: 1px solid var(--border);
+  padding: 10px 8px;
+  text-align: center;
+  border-right: 1px solid var(--border);
 }
 
 .am .stat:last-child {
-    border-right: none;
+  border-right: none;
 }
 
 .am .stat .n {
-    font-family: var(--mono), monospace;
-    font-size: 21px;
-    font-weight: 800;
+  font-family: var(--mono), monospace;
+  font-size: 21px;
+  font-weight: 800;
 }
 
 .am .stat .n.q {
-    color: var(--warn-t);
+  color: var(--warn-t);
 }
 
 .am .stat .n.m {
-    color: var(--info-t);
+  color: var(--info-t);
 }
 
 .am .stat .n.h {
-    color: var(--err-t);
+  color: var(--err-t);
 }
 
 .am .stat .l {
-    font-size: 9.5px;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color: var(--faint);
-    margin-top: 2px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-top: 2px;
 }
 
 .am .mc-list {
-    list-style: none;
+  list-style: none;
 }
 
+/* PN row — explicit grid: production information on the left, the
+   optional action rail in its own separated right-side cell. The
+   content column may truncate; the action cell never moves. */
 .am .mc-list li {
-    padding: 11px 16px;
-    border-bottom: 1px solid var(--panel2);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--panel2);
+}
+
+.am .mc-list li.has-action {
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 14px;
 }
 
 .am .mc-list li:last-child {
-    border-bottom: none;
+  border-bottom: none;
 }
 
-.am .mc-list .r1 {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+.am .mc-list .rowmain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Each content line: left part truncates, right part stays anchored. */
+.am .mc-list .r1,
+.am .mc-list .r2,
+.am .mc-list .r3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.am .mc-list .pnwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 /* PN truncates; qty stays put (§2.3 amendment) */
 .am .mc-list .p {
-    font-family: var(--mono), monospace;
-    font-size: 14.5px;
-    font-weight: 750;
-    flex: 1;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  font-family: var(--mono), monospace;
+  font-size: 14.5px;
+  font-weight: 750;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.am .mc-list .r1r {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.am .mc-list .qtyline {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .am .mc-list .q {
-    font-family: var(--mono), monospace;
-    font-size: 16px;
-    font-weight: 800;
-    color: var(--info-t);
+  font-family: var(--mono), monospace;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--info-t);
 }
 
-/* Damaged/scrapped companion quantity (SCRAPPED — auditable). */
-.am .mc-list .scrap {
-    font-family: var(--mono), monospace;
-    font-size: 12px;
-    font-weight: 800;
-    color: var(--err-t);
+.am .mc-list .r2,
+.am .mc-list .r3,
+.am .mc-list .r4 {
+  font-size: 12px;
+  color: var(--muted);
 }
 
-.am .mc-list .r2 .scraptxt {
-    color: var(--err-t);
-    font-weight: 700;
+/* WO Number · Job Number may truncate; the full value stays available
+   through the title tooltip. The due status never moves. */
+.am .mc-list .r2 .wo {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.am .mc-list .r2 {
-    display: flex;
-    gap: 10px;
-    font-size: 12px;
-    color: var(--muted);
-    margin-top: 3px;
-    flex-wrap: wrap;
+.am .mc-list .r2 > .mono:last-child {
+  flex: none;
+}
+
+.am .mc-list .r3 .st {
+  color: var(--faint);
+  font-weight: 650;
+}
+
+.am .mc-list .r3 .tia {
+  flex: none;
+}
+
+.am .mc-list .r4 .scraptxt {
+  color: var(--err-t);
+  font-weight: 700;
 }
 
 .am .mc-list .r2 .late {
-    color: var(--err-t);
-    font-weight: 700;
+  color: var(--err-t);
+  font-weight: 700;
 }
 
 .am .mc-list .r2 .soon {
-    color: var(--warn-t);
-    font-weight: 700;
+  color: var(--warn-t);
+  font-weight: 700;
 }
 
 .am .mc-list .r2 .mono {
-    font-size: 11.5px;
+  font-size: 11.5px;
 }
 
 .am .empty {
-    padding: 22px 16px;
-    color: var(--faint);
-    font-size: 13px;
-    text-align: center;
+  padding: 22px 16px;
+  color: var(--faint);
+  font-size: 13px;
+  text-align: center;
 }
 
 /* Machine/queue context chip inside compact list rows */
 .am .mc-list .ctx {
-    flex: none;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--muted);
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1px 7px;
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 7px;
+}
+
+/* Action rail — a dedicated, visually separated right-side cell:
+   vertically centered, predictable minimum width, subtle divider. */
+.am .mc-list .actcell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 86px;
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
 }
 
 /* Row action affordance (Scan Station only — Area Board is read-only) */
 .am .mc-list .rowact {
-    flex: none;
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 0.5px;
-    color: var(--info-t);
-    background: var(--panel2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 9px;
-    cursor: pointer;
+  flex: none;
+  min-height: var(--touch-min);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--info-t);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 12px;
+  cursor: pointer;
 }
 
 .am .mc-list .rowact:hover {
-    border-color: var(--info-t);
+  border-color: var(--info-t);
 }
 
 .am .mc-list .rowact:disabled {
-    opacity: 0.5;
-    cursor: default;
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Very narrow: the action stacks below the content but stays
+   visually separated from it. */
+@media (max-width: 560px) {
+  .am .mc-list li.has-action {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .am .mc-list .actcell {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+    padding: 8px 0 0;
+    justify-content: flex-end;
+  }
 }

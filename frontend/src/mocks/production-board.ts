@@ -146,13 +146,7 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
     hotRank: 1,
     locations: [
       { area: 'mill', label: 'Mill 2', qty: 2, tag: 'machine', time: '1h 20m' },
-      {
-        area: 'deburr',
-        label: 'Deburr',
-        qty: 6,
-        time: '5d 11h',
-        timeLong: true,
-      },
+      { area: 'deburr', label: 'Deburr', qty: 6, time: '5d 11h', timeLong: true },
     ],
     total: 8,
     jobs: [
