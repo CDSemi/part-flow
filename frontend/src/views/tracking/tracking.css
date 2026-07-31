@@ -333,11 +333,16 @@
   font-size: 12.5px;
 }
 
+/* Route visualization: step and arrow elements are separate sibling
+   flex items (step, arrow, step, …). `align-items: center` keeps each
+   arrow vertically centered between adjacent steps, and the row-gap
+   keeps wrapped trace lines readable — arrows never overlap steps. */
 .route {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  column-gap: 5px;
+  row-gap: 7px;
   font-size: 12.5px;
 }
 
@@ -345,6 +350,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
+  flex: none;
   padding: 5px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -374,6 +380,8 @@
 
 .rarrow {
   color: var(--faint);
+  flex: none;
+  line-height: 1;
 }
 
 .devnote {
@@ -516,6 +524,24 @@
   color: var(--warn-t);
   font-weight: 800;
   font-size: 10.5px;
+}
+
+/* AREA_COMPLETED movement badge — success tone: Area completion
+   (READY_TO_TRANSFER), distinct from the STOCKED badge tone. */
+.mv .mtype.don {
+  color: var(--ok-t);
+}
+
+/* Area-completion (ready to transfer) row in the distribution:
+   success tone on the state text; the bar keeps the Area color
+   because the Area is still the physical location. */
+.dist .drow.done .nm .sub {
+  color: var(--ok-t);
+  font-weight: 700;
+}
+
+.donenote {
+  color: var(--ok-t);
 }
 
 /* SCRAPPED movement badge + cumulative scrapped quantity */

@@ -7,19 +7,31 @@
 }
 
 /* Dark mode adds a subtle radial glow; light mode is a flat surface
-   (the theme supplies the value — GUI_DESIGN §2.1). */
+   (the theme supplies the value — GUI_DESIGN §2.1). The view root is
+   the inline-size container for the header and monitoring layout
+   container queries. */
 .ss {
   background: var(--scan-backdrop);
+  container-type: inline-size;
 }
 
+/* Header grid — no spacer-based wrapping: the Area identity group
+   (Department / Area / Operations) and the Worker Session pill always
+   share the main row; the Area totals sit between them while space
+   allows and drop to a full-width second row when it does not. The
+   Worker Session never wraps onto a row of its own. */
 .ss-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 14px;
+  gap: 12px 14px;
   padding: 14px 22px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
+}
+
+.ss-head .ss-id {
+  min-width: 0;
 }
 
 .ss-head .dept {
@@ -48,20 +60,38 @@
 .ss-head .op {
   font-size: 13px;
   color: var(--muted);
-  margin-top: 2px;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
 }
 
-.ss-head .op b {
-  color: var(--text);
-  font-weight: 650;
+/* Operations render as light informational chips — labels, not
+   controls: subtle surface, subtle border, rounded corners, no action
+   color, no button-like hover. They wrap cleanly; the Area name above
+   stays visually dominant. */
+.ss-head .opchips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 
-.ss-head .spacer {
-  flex: 1;
+.ss-head .opchip {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  white-space: nowrap;
 }
 
-/* Area statistics — replaces the former Machine session pill. Only
-   meaningful values render (no zero-value queue/Machine noise). */
+/* Area statistics — the single Area summary surface (the `In this
+   Area now` card carries no statistics block). Semantic number tones:
+   Queued warning, On machines / Processing information, Done success,
+   Hot error; plain totals keep the default text color. */
 .ss-stats {
   display: flex;
   border: 1px solid var(--border);
@@ -86,6 +116,22 @@
   font-weight: 800;
 }
 
+.ss-stats .stat .n.q {
+  color: var(--warn-t);
+}
+
+.ss-stats .stat .n.m {
+  color: var(--info-t);
+}
+
+.ss-stats .stat .n.d {
+  color: var(--ok-t);
+}
+
+.ss-stats .stat .n.h {
+  color: var(--err-t);
+}
+
 .ss-stats .stat .l {
   font-size: 9.5px;
   font-weight: 800;
@@ -93,6 +139,40 @@
   text-transform: uppercase;
   color: var(--faint);
   margin-top: 2px;
+}
+
+/* When the header row cannot hold the identity group, the totals and
+   the Worker Session together, the totals move to a full-width second
+   row and its cells divide that width evenly. The identity group and
+   the Worker Session stay together on the main row. */
+@container (max-width: 1179px) {
+  .ss-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .ss-head .ss-stats {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+}
+
+@supports not (container-type: inline-size) {
+  @media (max-width: 1220px) {
+    .ss-head {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .ss-head .ss-stats {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
+    }
+  }
 }
 
 .ss-pill {
@@ -534,59 +614,8 @@
   margin-bottom: 16px;
 }
 
-/* Quantity entry — a real focusable numeric input + keypad (§4.7) */
-.qtydisplay {
-  width: 100%;
-  color: var(--text);
-  font-family: var(--mono), monospace;
-  font-size: 46px;
-  font-weight: 800;
-  text-align: right;
-  background: var(--field-bg);
-  border: 2px solid var(--border2);
-  border-radius: 12px;
-  padding: 10px 18px;
-  margin-bottom: 14px;
-  min-height: 76px;
-  outline: none;
-}
-
-.qtydisplay:focus {
-  border-color: var(--info-t);
-  box-shadow: 0 0 0 4px var(--info-ring);
-}
-
-.keypad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-}
-
-.keypad button {
-  height: 62px;
-  border-radius: 12px;
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  font-size: 24px;
-  font-weight: 700;
-}
-
-.keypad button:hover {
-  background: var(--border);
-}
-
-.keypad button.act {
-  background: var(--info-surface);
-  color: var(--info-t);
-  font-size: 15px;
-  font-weight: 800;
-}
-
-/* MAX shortcut — present only for transfer/assignment flows. */
-.keypad button.keypad-max {
-  grid-column: 1 / -1;
-  height: 48px;
-}
+/* Quantity entry styles (.qtydisplay / .keypad) live with the shared
+   component: components/QuantityKeypad.css. */
 
 /* One-shot dialog helpers */
 .ss-dlgrid {

@@ -50,7 +50,10 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
   },
   {
     // Internal MODIFY demand without an external Work Order Number:
-    // the blank number renders as `—` everywhere.
+    // the blank number renders as `—` everywhere. The 3 pcs at Deburr
+    // finished processing there (AREA_COMPLETED → READY_TO_TRANSFER on
+    // the finished rack, aligned with the Area Board mock); the compact
+    // distribution column shows location only, so no state appears here.
     pn: '78-04-0031',
     name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     demand: [
@@ -154,7 +157,9 @@ export const MOCK_TRACKING_ROWS_LONG: MockTrackingRow[] = [
 // PLANNED route (AssignedRoute snapshot as guidance); QF-0141 is a
 // FLOATING route — no AssignedRoute, the actual route trace is derived
 // from immutable Movement history, repeated Areas preserved and Repair
-// transfers marked explicitly.
+// transfers marked explicitly. AREA_COMPLETED never adds a route step:
+// DONE is completion inside the source Area (the finished rack is not
+// an Area) — only TRANSFERRED extends a trace.
 export const MOCK_TRACKING_DETAIL = {
   pn: '2027-60-8114-00',
   name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',
@@ -182,30 +187,54 @@ export const MOCK_TRACKING_DETAIL = {
     },
   ],
   allocationNote: 'Allocated 0 / 15 requested — nothing stocked yet',
+  // Current holding state per portion: `machine` = actively assigned,
+  // `queue` = waiting for a Machine, `done` = Area completion
+  // (AREA_COMPLETED → READY_TO_TRANSFER): the finished piece left
+  // Lathe 3 for the finished rack but is still located in the Lathe
+  // Area — never Stocked, and no Machine holds it anymore.
   distribution: [
-    { area: 'cut' as const, name: 'Cut', sub: 'Saw 1', pct: 40, qty: 4 },
     {
-      area: 'lathe' as const,
-      name: 'Lathe 3',
-      sub: 'machine',
+      area: 'cut' as const,
+      name: 'Cut',
+      sub: 'Saw 1',
+      state: 'machine' as const,
       pct: 40,
       qty: 4,
     },
     {
       area: 'lathe' as const,
+      name: 'Lathe 3',
+      sub: 'machine',
+      state: 'machine' as const,
+      pct: 30,
+      qty: 3,
+    },
+    {
+      area: 'lathe' as const,
       name: 'Lathe',
       sub: 'queue',
+      state: 'queue' as const,
       pct: 20,
       qty: 2,
-      queued: true,
+    },
+    {
+      area: 'lathe' as const,
+      name: 'Lathe',
+      sub: 'ready to transfer',
+      state: 'done' as const,
+      pct: 10,
+      qty: 1,
     },
   ],
+  readyNote:
+    'Completed processing at Lathe — ready to transfer. Completed at Lathe 3; the piece waits on the finished rack in Lathe until it is transferred.',
   flows: [
     {
       id: 'QF-0140',
       qty: 6,
       routeMode: 'PLANNED' as const,
-      position: 'Lathe (4 on Lathe 3 · 2 queued) · 2h 05m in Area',
+      position:
+        'Lathe (3 on Lathe 3 · 2 queued · 1 ready to transfer) · 2h 05m in Area',
       route: [
         { step: 'Material', state: 'done' },
         { step: 'Cut', state: 'done' },
@@ -234,6 +263,16 @@ export const MOCK_TRACKING_DETAIL = {
     },
   ],
   movements: [
+    {
+      // DONE at the Area: the piece left Lathe 3 for the finished rack
+      // (READY_TO_TRANSFER) and stays located in Lathe until it is
+      // transferred — Area completion, never Stockroom completion.
+      time: 'Jul 22 15:05',
+      type: 'AREA_COMPLETED',
+      typeClass: 'don',
+      description:
+        'Lathe 3 → Lathe finished rack · qty 1 · QF-0140 · W: H. Nguyen · LATHE-ST-01',
+    },
     {
       time: 'Jul 22 14:10',
       type: 'SCRAPPED',
@@ -303,7 +342,7 @@ export const MOCK_TRACKING_DETAIL = {
     },
   ],
   scrapNote:
-    'Cumulative scrapped: 1 pc (SCRAPPED events above — auditable, never reduces the WO Demand requested quantity). Reconciliation: introduced = active + stocked + scrapped.',
+    'Cumulative scrapped: 1 pc — recorded in the Movement history above; scrap is auditable and never reduces the WO Demand requested quantity. Reconciliation: introduced = active + stocked + scrapped.',
   stockedNote:
-    'No STOCKED quantity yet for this PN. Allocation suggestions will follow priority → earliest due date (§18).',
+    'Nothing stocked yet for this PN. Allocation suggestions will follow priority first, then the earliest due date.',
 };

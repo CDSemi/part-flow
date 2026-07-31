@@ -15,23 +15,52 @@ import type { MockHotEntry } from '../view-models';
 
 const hotKey = (h: MockHotEntry) => `${h.pn}|${h.workOrder}`;
 
+/** "WO 007001 · Job 18112" → "WO 007001" for compact one-line summaries. */
+const shortWorkOrder = (workOrder: string) => workOrder.split(' ·')[0];
+
 type ReorderAction =
   'Drag and drop' | 'Move Up' | 'Move Down' | 'Undo' | 'Redo';
 
+// Undo/Redo confirmations lead with what the confirmation does, not with
+// the implementation action name (GUI change §9.1); the action name stays
+// available as secondary detail.
+const REORDER_TITLES: Record<ReorderAction, string> = {
+  'Drag and drop': 'Confirm Hot ranking change',
+  'Move Up': 'Confirm Hot ranking change',
+  'Move Down': 'Confirm Hot ranking change',
+  Undo: 'Restore previous ranking',
+  Redo: 'Reapply ranking',
+};
+
+const RESTORE_SUMMARIES: Partial<Record<ReorderAction, string>> = {
+  Undo: 'The Hot ranking returns to its previous confirmed order.',
+  Redo: 'The last undone ranking change is applied again.',
+};
+
 interface RankChange {
+  key: string;
   pn: string;
   workOrder: string;
-  from: number;
-  to: number;
+  /** Current rank; null when the entry is not currently listed. */
+  from: number | null;
+  /** Proposed rank; null when the entry leaves the list. */
+  to: number | null;
 }
 
 interface PendingReorder {
   action: ReorderAction;
   next: MockHotEntry[];
   changes: RankChange[];
+  /** Entry the user acted on directly; null for Undo/Redo restores. */
+  movedKey: string | null;
 }
 
-/** Every entry whose rank would change, previous → proposed. */
+/**
+ * Every entry whose rank would change, current → proposed. Entries that
+ * would join or leave the list (an Undo/Redo may restore a removed entry
+ * or take back an added one) are included with a null rank on the absent
+ * side, so those restores are real changes rather than silent no-ops.
+ */
 function diffRanks(
   current: readonly MockHotEntry[],
   next: readonly MockHotEntry[],
@@ -39,24 +68,54 @@ function diffRanks(
   const changes: RankChange[] = [];
   next.forEach((entry, index) => {
     const from = current.findIndex((h) => hotKey(h) === hotKey(entry));
-    if (from !== -1 && from !== index) {
+    if (from !== index) {
       changes.push({
+        key: hotKey(entry),
         pn: entry.pn,
         workOrder: entry.workOrder,
-        from: from + 1,
+        from: from === -1 ? null : from + 1,
         to: index + 1,
       });
     }
   });
+  current.forEach((entry, index) => {
+    if (!next.some((h) => hotKey(h) === hotKey(entry))) {
+      changes.push({
+        key: hotKey(entry),
+        pn: entry.pn,
+        workOrder: entry.workOrder,
+        from: index + 1,
+        to: null,
+      });
+    }
+  });
+  // Proposed order keeps the comparison scannable; departures go last.
+  changes.sort(
+    (a, b) =>
+      (a.to ?? Number.MAX_SAFE_INTEGER) - (b.to ?? Number.MAX_SAFE_INTEGER),
+  );
   return changes;
 }
 
+/** e.g. "2 other demands will shift down." — real counts from the diff. */
+function shiftSummary(others: readonly RankChange[]): string | null {
+  const ranked = others.filter((c) => c.from !== null && c.to !== null);
+  const up = ranked.filter((c) => (c.to as number) < (c.from as number)).length;
+  const down = ranked.length - up;
+  const parts: string[] = [];
+  if (up) parts.push(`${up} other demand${up === 1 ? '' : 's'} will shift up`);
+  if (down) {
+    parts.push(`${down} other demand${down === 1 ? '' : 's'} will shift down`);
+  }
+  return parts.length ? `${parts.join('; ')}.` : null;
+}
+
 // Hot WO Demand ranking. All interactions are local presentation state:
-// reorder / add / remove change the mock list only and are labeled as
-// development mocks — real prioritization persistence is a later phase.
-// Every operation that changes the order of existing Hot entries (drag,
-// Move Up/Down, Undo, Redo) requires explicit confirmation before it is
-// applied; the visible list is never renumbered before confirmation.
+// reorder / add / remove change the mock list only — the intro carries the
+// single development-only note saying so. Every operation that changes the
+// order of existing Hot entries (drag, Move Up/Down, Undo, Redo) requires
+// explicit confirmation before it is applied; the visible list is never
+// renumbered before confirmation.
 export function PriorityView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
@@ -99,10 +158,14 @@ export function PriorityView() {
   }
 
   /** Ask for confirmation before any reorder of existing entries. */
-  function requestReorder(action: ReorderAction, next: MockHotEntry[]) {
+  function requestReorder(
+    action: ReorderAction,
+    next: MockHotEntry[],
+    movedKey: string | null = null,
+  ) {
     const changes = diffRanks(hotList, next);
     if (!changes.length) return;
-    setPending({ action, next, changes });
+    setPending({ action, next, changes, movedKey });
   }
 
   function confirmPending() {
@@ -113,19 +176,17 @@ export function PriorityView() {
       setUndoHistory((h) => h.slice(0, -1));
       setRedoHistory((h) => [...h, hotList]);
       setHotList(next);
-      showNotice(
-        '⟲ Undo — previous Hot ranking restored (mock, audited in the real system)',
-      );
+      showNotice('⟲ Previous Hot ranking restored');
       return;
     }
     if (action === 'Redo') {
       setRedoHistory((h) => h.slice(0, -1));
       setUndoHistory((h) => [...h, hotList]);
       setHotList(next);
-      showNotice('⟳ Redo — change re-applied (mock)');
+      showNotice('⟳ Ranking change reapplied');
       return;
     }
-    applyChange(next, '🔥 Hot ranking updated (mock) — presentation only');
+    applyChange(next, '🔥 Hot ranking updated');
   }
 
   function undo() {
@@ -143,19 +204,24 @@ export function PriorityView() {
     if (target < 0 || target >= hotList.length) return;
     const next = [...hotList];
     [next[index], next[target]] = [next[target], next[index]];
-    requestReorder(delta < 0 ? 'Move Up' : 'Move Down', next);
+    requestReorder(
+      delta < 0 ? 'Move Up' : 'Move Down',
+      next,
+      hotKey(hotList[index]),
+    );
   }
 
   function handleDrop(event: DragEvent, targetIndex: number) {
     event.preventDefault();
     if (!dragKey) return;
-    const fromIndex = hotList.findIndex((h) => hotKey(h) === dragKey);
+    const movedKey = dragKey;
+    const fromIndex = hotList.findIndex((h) => hotKey(h) === movedKey);
     setDragKey(null);
     if (fromIndex < 0 || fromIndex === targetIndex) return;
     const next = [...hotList];
     const [moved] = next.splice(fromIndex, 1);
     next.splice(targetIndex, 0, moved);
-    requestReorder('Drag and drop', next);
+    requestReorder('Drag and drop', next, movedKey);
   }
 
   const candidates = MOCK_HOT_CANDIDATES.filter(
@@ -178,11 +244,11 @@ export function PriorityView() {
       <p className="pr-sub">
         Priority belongs to <b>Work Order Demand</b>, ranked per Department.
         Drag (or use the arrow buttons) to reorder — every reorder of existing
-        entries asks for confirmation before it is applied. ✕ removes (with
-        confirmation). In the real application confirmed changes are audited; in
-        Phase 2 they change local mock state only. New Hot entries are added at
-        the bottom. Multiple Work Orders for the same PN may hold different
-        priorities.
+        entries asks for confirmation before it is applied, and ✕ removes with
+        its own confirmation. Confirmed changes can be stepped back and forward
+        with Undo/Redo. New Hot entries are added at the bottom. Multiple Work
+        Orders for the same PN may hold different priorities. Phase 2 preview:
+        confirmed changes update local mock data only.
       </p>
 
       {shownList.length === 0 ? (
@@ -291,34 +357,11 @@ export function PriorityView() {
       </div>
 
       {pending ? (
-        <ModalDialog
-          label="Confirm Hot ranking change"
-          onClose={() => setPending(null)}
-        >
-          <h3>Confirm Hot ranking change</h3>
-          <div className="sub">
-            <b>{pending.action}</b> — the following Work Order Demand rank
-            {pending.changes.length === 1 ? ' changes' : 's change'} when
-            applied. Nothing has changed yet.
-          </div>
-          <ul className="rankchanges">
-            {pending.changes.map((change) => (
-              <li key={`${change.pn}-${change.workOrder}`}>
-                <span className="mono">{change.pn}</span> ·{' '}
-                <span className="mono">{change.workOrder}</span> — rank{' '}
-                <b>#{change.from}</b> → <b>#{change.to}</b>
-              </li>
-            ))}
-          </ul>
-          <div className="row">
-            <button className="bigbtn ghost" onClick={() => setPending(null)}>
-              Cancel — nothing changes
-            </button>
-            <button className="bigbtn primary" onClick={confirmPending}>
-              Apply new ranking
-            </button>
-          </div>
-        </ModalDialog>
+        <ReorderConfirmDialog
+          pending={pending}
+          onCancel={() => setPending(null)}
+          onConfirm={confirmPending}
+        />
       ) : null}
 
       {addOpen && (
@@ -331,7 +374,7 @@ export function PriorityView() {
             // reordered, so no reorder confirmation is required.
             applyChange(
               [...hotList, candidate],
-              `🔥 ${candidate.pn} · ${candidate.workOrder.split(' ·')[0]} added at the bottom (mock) — rank #${hotList.length + 1}`,
+              `🔥 ${candidate.pn} · ${shortWorkOrder(candidate.workOrder)} added at the bottom — rank #${hotList.length + 1}`,
             );
           }}
         />
@@ -347,16 +390,15 @@ export function PriorityView() {
           <div className="sub">
             Work Order Demand{' '}
             <b className="mono">{hotList[removeIndex].workOrder}</b> will be
-            removed from the Hot ranking. Remaining ranks close the gap. In the
-            real application the confirmed change is audited and can be restored
-            with Undo — here it changes mock state only.
+            removed from the Hot ranking. Remaining ranks close the gap; Undo
+            can restore the entry.
           </div>
           <div className="row">
             <button
               className="bigbtn ghost"
               onClick={() => setRemoveIndex(null)}
             >
-              Cancel — nothing changes
+              Cancel (Esc)
             </button>
             <button
               className="bigbtn danger"
@@ -365,7 +407,7 @@ export function PriorityView() {
                 setRemoveIndex(null);
                 applyChange(
                   hotList.filter((_, i) => i !== removeIndex),
-                  `✕ ${removed.pn} · ${removed.workOrder.split(' ·')[0]} removed from Hot list (mock) — remaining ranks close the gap · Undo can restore it`,
+                  `✕ ${removed.pn} · ${shortWorkOrder(removed.workOrder)} removed from Hot list — remaining ranks close the gap · Undo can restore it`,
                 );
               }}
             >
@@ -376,6 +418,94 @@ export function PriorityView() {
       )}
       {noticeElement}
     </section>
+  );
+}
+
+/**
+ * Reorder confirmation (GUI change §9.1): a primary summary of the item
+ * the user moved, a current-versus-proposed rank comparison limited to the
+ * affected entries, and explicit Apply/Cancel actions. Undo/Redo restores
+ * have no directly moved item — they lead with what the restore does and
+ * show the same comparison.
+ */
+function ReorderConfirmDialog({
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  pending: PendingReorder;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const title = REORDER_TITLES[pending.action];
+  const moved = pending.movedKey
+    ? pending.changes.find((c) => c.key === pending.movedKey)
+    : undefined;
+  const others = pending.changes.filter((c) => c !== moved);
+  const shifts = moved ? shiftSummary(others) : null;
+  return (
+    <ModalDialog label={title} onClose={onCancel}>
+      <h3>{title}</h3>
+      {moved ? (
+        <div className="pr-move-summary">
+          Move <span className="mono">{moved.pn}</span> ·{' '}
+          <span className="mono">{shortWorkOrder(moved.workOrder)}</span> from{' '}
+          <b>#{moved.from}</b> to <b>#{moved.to}</b>
+        </div>
+      ) : (
+        <div className="pr-move-summary">
+          {RESTORE_SUMMARIES[pending.action]}
+        </div>
+      )}
+      <div className="sub">
+        {shifts ? `${shifts} ` : null}
+        Action: {pending.action}.
+      </div>
+      <table className="pr-compare">
+        <thead>
+          <tr>
+            <th scope="col">Work Order Demand</th>
+            <th scope="col">Current</th>
+            <th scope="col">New</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pending.changes.map((change) => (
+            <tr
+              key={change.key}
+              className={change === moved ? 'moved' : 'shifted'}
+            >
+              <th scope="row">
+                <span className="mono cpn">{change.pn}</span>{' '}
+                <span className="mono cwo">{change.workOrder}</span>
+              </th>
+              <td className="rankcell">
+                {change.from === null ? '—' : `#${change.from}`}
+              </td>
+              <td className="rankcell">
+                {change.to === null ? '—' : `#${change.to}`}
+                {change.from !== null && change.to !== null ? (
+                  <span
+                    className={`dir ${change.to < change.from ? 'up' : 'down'}`}
+                  >
+                    {change.to < change.from ? '↑' : '↓'}
+                  </span>
+                ) : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="sub">No ranks change until you confirm.</div>
+      <div className="row">
+        <button className="bigbtn ghost" onClick={onCancel}>
+          Cancel (Esc)
+        </button>
+        <button className="bigbtn primary" onClick={onConfirm}>
+          Apply ranking
+        </button>
+      </div>
+    </ModalDialog>
   );
 }
 

@@ -24,6 +24,7 @@ export const MOCK_SENTINELS = [
   'DEBURR-ST-01', // mocks/scan-station.ts (no-Machine station)
   'QF-0161', // mocks/work-orders.ts (released-line status)
   'PF:PN:214-406', // mock PN barcode catalog (PN-carrying barcodes)
+  'Demo barcodes', // ScanStationView dev-only demo barcode hint
 ];
 
 const distDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');

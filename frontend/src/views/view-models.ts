@@ -34,13 +34,23 @@ export type RequestType = 'NEW' | 'MODIFY';
  */
 export type RouteMode = 'FLOATING' | 'PLANNED';
 
-/** Canonical PartMovement event types surfaced by the mock views. */
+/**
+ * Canonical PartMovement event types surfaced by the mock views.
+ * `AREA_COMPLETED` records that a selected quantity finished processing
+ * at its current Area (user-facing DONE): the current Machine clears,
+ * the Area stays the physical location, and the derived holding state
+ * is `READY_TO_TRANSFER` — waiting on the finished rack for transfer.
+ * It is never Work Order completion, Stockroom completion (`STOCKED`),
+ * allocation, or QC approval.
+ */
 export type MovementType =
   | 'RECEIVED'
   | 'TRANSFERRED'
   | 'ASSIGNED_TO_MACHINE'
   | 'RELEASED_FROM_MACHINE'
+  | 'AREA_COMPLETED'
   | 'SPLIT'
+  | 'STOCKED'
   | 'QUANTITY_ADJUSTED'
   | 'SCRAPPED'
   | 'REVERSED';
@@ -70,11 +80,23 @@ export interface MockAreaMachine {
   status: MachineStatus;
 }
 
+/**
+ * One distributed quantity position on the Production Board. The Area
+ * and Machine are explicit presentation data — never one combined
+ * display string that would have to be parsed back apart:
+ * - `state: 'machine'` — actively assigned; `machine` is the executor.
+ * - `state: 'done'` — finished at the Area (`READY_TO_TRANSFER`);
+ *   `machine` is optional completion context only, never the executor.
+ * - `state: 'queue' | 'processing' | 'stocked'` — no Machine involved.
+ */
 export interface MockLocationRow {
   area: AreaKey;
+  /** Area display label (never combined with a Machine name). */
   label: string;
+  /** Machine name — executor for `machine`, context for `done`. */
+  machine?: string;
   qty: number;
-  tag?: 'machine' | 'queue';
+  state: 'machine' | 'queue' | 'processing' | 'done' | 'stocked';
   time: string;
   timeLong?: boolean;
 }
@@ -129,6 +151,15 @@ export interface MockAreaCard {
   received: string;
   /** Damaged quantity scrapped from this PN in this Area (mock). */
   scrapped?: number;
+  /**
+   * Portions of `qty` that finished processing at this Area and wait on
+   * the finished rack for transfer (`READY_TO_TRANSFER`). `completedBy`
+   * is completion context only — the current Machine is cleared, and
+   * the quantity remains located in this Area until transferred.
+   * Quantity conservation: Machine/queue portions + finished portions
+   * (+ the direct-processing remainder in a no-Machine Area) = `qty`.
+   */
+  finished?: { qty: number; completedBy?: string }[];
 }
 
 export interface MockTrackingRow {
@@ -206,11 +237,17 @@ export interface MockHotEntry {
 /**
  * One completed PN operation eligible for Undo. The Scan Station keeps
  * a session-local stack of these; Undo always shows this summary before
- * a compensating reversal is applied (never a deletion).
+ * a compensating reversal is applied (never a deletion). One operation
+ * is one atomic application command: when a single user action appends
+ * several related Movement events (e.g. `AREA_COMPLETED` followed by
+ * `TRANSFERRED` for a transfer that implicitly completes source
+ * processing), `movements` lists them in order and Undo reverses the
+ * whole command — never one arbitrary row.
  */
 export interface MockCompletedAction {
   pn: string;
-  movementType: MovementType;
+  /** Movement events of the command, in append order. */
+  movements: MovementType[];
   /** One-line action summary, e.g. `Material → Lathe queue · qty 4`. */
   description: string;
   qty: number;

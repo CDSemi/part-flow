@@ -122,6 +122,7 @@ test('an Area with Machines shows queue statistics and the shared layout', async
   const stats = document.querySelector('.ss-stats');
   expect(stats?.textContent).toContain('Queued');
   expect(stats?.textContent).toContain('On machines');
+  expect(stats?.textContent).toContain('Done');
   // Shared layout: left summary card + right-side Machine cards grid.
   const layout = document.querySelector('.am');
   expect(layout).not.toBeNull();
@@ -129,24 +130,28 @@ test('an Area with Machines shows queue statistics and the shared layout', async
   const machineCards = document.querySelectorAll('.am-machines .abd-machine');
   expect(machineCards.length).toBe(4);
   const summary = document.querySelector('.abd-summary');
-  expect(summary?.textContent).toContain('Assigned to Machines');
+  expect(summary?.textContent).toContain('On Machines');
   expect(summary?.textContent).toContain('Area queue — awaiting Machine');
+  expect(summary?.textContent).toContain('Finished — ready to move');
 });
 
 test('an Area without Machines renders a full-width card and no Machine region', async () => {
   await renderStation('DEBURR-ST-01');
 
-  // No meaningless queue/Machine statistics.
+  // No meaningless queue/Machine statistics — but Processing and Done
+  // (the no-Machine reconciliation pair) are present.
   const stats = document.querySelector('.ss-stats');
   expect(stats?.textContent).toContain('Processing');
+  expect(stats?.textContent).toContain('Done');
   expect(stats?.textContent).not.toContain('Queued');
   expect(stats?.textContent).not.toContain('On machines');
   // Full-width single-column layout, no Machine cards at all.
   const layout = document.querySelector('.am');
   expect(layout?.classList.contains('am-single')).toBe(true);
   expect(document.querySelector('.abd-machine')).toBeNull();
+  // Deburr's whole mock quantity is finished — READY_TO_TRANSFER.
   const summary = document.querySelector('.abd-summary');
-  expect(summary?.textContent).toContain('In processing');
+  expect(summary?.textContent).toContain('Finished — ready to move');
   expect(summary?.textContent).not.toContain('awaiting Machine');
 });
 
@@ -287,23 +292,46 @@ test('PN rows use the grid layout: context+quantity right, status line, tooltip 
   expect(machineCard.textContent).not.toContain('Awaiting Machine');
 });
 
-test('In this Area now has no row actions; Machine cards offer only QUEUE', async () => {
+test('In this Area now has no row actions; Machine-card rows offer DONE and QUEUE', async () => {
   await renderStation();
 
   const summary = document.querySelector('.abd-summary')! as HTMLElement;
   expect(within(summary).queryByRole('button', { name: 'ASSIGN' })).toBeNull();
-  expect(within(summary).queryByRole('button', { name: 'QUEUE' })).toBeNull();
+  expect(
+    within(summary).queryByRole('button', { name: 'Return to Area queue' }),
+  ).toBeNull();
+  expect(
+    within(summary).queryByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toBeNull();
 
   const machineRegion = document.querySelector('.am-machines')! as HTMLElement;
   expect(
     within(machineRegion).queryByRole('button', { name: 'ASSIGN' }),
   ).toBeNull();
-  const queueButtons = within(machineRegion).getAllByRole('button', {
-    name: 'QUEUE',
+  // Two DISTINCT actions with clear accessible names: DONE completes
+  // Area processing; QUEUE returns unfinished quantity to the queue.
+  const doneButtons = within(machineRegion).getAllByRole('button', {
+    name: 'Complete Area processing',
   });
-  expect(queueButtons.length).toBeGreaterThan(0);
-  // The action lives in its own separated action cell.
-  expect(queueButtons[0].closest('.actcell')).not.toBeNull();
+  const queueButtons = within(machineRegion).getAllByRole('button', {
+    name: 'Return to Area queue',
+  });
+  expect(doneButtons.length).toBeGreaterThan(0);
+  expect(queueButtons.length).toBe(doneButtons.length);
+  // Distinct wording and visual treatment; icon above the text label
+  // (the icon is never the only source of meaning).
+  expect(doneButtons[0]).toHaveTextContent('DONE');
+  expect(doneButtons[0].classList.contains('done')).toBe(true);
+  expect(queueButtons[0]).toHaveTextContent('QUEUE');
+  expect(queueButtons[0].classList.contains('done')).toBe(false);
+  expect(queueButtons[0].querySelector('.ric')).not.toBeNull();
+  // Both actions live in the row's separated action cell.
+  expect(doneButtons[0].closest('.actcell')).not.toBeNull();
+  expect(queueButtons[0].closest('.actcell')).toBe(
+    doneButtons[0].closest('.actcell'),
+  );
   expect(
     queueButtons[0].closest('li')?.querySelector('.rowmain'),
   ).not.toBeNull();
@@ -779,8 +807,9 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
   const dialog = await screen.findByRole('dialog', {
     name: 'Send quantity here for repair',
   });
-  expect(dialog).toHaveTextContent('movement_reason REPAIR');
-  expect(dialog).toHaveTextContent('never a Request Type');
+  // Operator wording — the intent is explicit, never inferred.
+  expect(dialog).toHaveTextContent('never assumed to be a repair');
+  expect(dialog).toHaveTextContent('no new quantity and no new demand');
 
   // The single known source is preselected; quantity defaults to MAX.
   expect(screen.getByLabelText('Quantity: 4')).toBeInTheDocument();
@@ -800,7 +829,7 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
   fireEvent.click(screen.getByRole('button', { name: 'Confirm repair' }));
 
   expect(
-    screen.getByText(/REPAIR — 0455-20-0118-03 × 4 returns to Lathe/),
+    screen.getByText(/Repair — 0455-20-0118-03 × 4 returned to Lathe/),
   ).toBeInTheDocument();
 });
 
@@ -853,11 +882,11 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   expect(dialog.textContent).toContain('4 pcs'); // remaining
   expect(lastPnText()).toBe('—');
 
-  // Cancel discards the pending count with no write.
+  // Cancel (standard label) discards the pending count with no write.
   fireEvent.click(
-    screen.getAllByRole('button', {
-      name: 'Cancel (Esc) — discard count, nothing recorded',
-    })[0],
+    within(dialog as HTMLElement).getByRole('button', {
+      name: 'Cancel (Esc)',
+    }),
   );
   expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
@@ -880,10 +909,10 @@ test('confirming Scrap records one auditable SCRAPPED operation', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Confirm scrap' }));
 
   expect(
-    screen.getByText('SCRAPPED — 2027-60-8114-00 × 1 at Lathe'),
+    screen.getByText('Scrapped — 2027-60-8114-00 × 1 at Lathe'),
   ).toBeInTheDocument();
   expect(document.querySelector('.ss-toast .t2')?.textContent).toContain(
-    'introduced = active + stocked + scrapped',
+    'never reduces the WO Demand requested quantity',
   );
 });
 
@@ -903,7 +932,9 @@ test('QUEUE return uses quantity then a dedicated confirmation view', async () =
 
   const machineRegion = document.querySelector('.am-machines')! as HTMLElement;
   fireEvent.click(
-    within(machineRegion).getAllByRole('button', { name: 'QUEUE' })[0],
+    within(machineRegion).getAllByRole('button', {
+      name: 'Return to Area queue',
+    })[0],
   );
   const dialog = await screen.findByRole('dialog', {
     name: 'Return quantity to the Area queue',
@@ -970,9 +1001,7 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   // Confirmed Undo reverses and advances to the next eligible action.
   fireEvent.click(undoButton());
   fireEvent.click(screen.getByRole('button', { name: 'Confirm Undo' }));
-  expect(
-    screen.getByText('Undo recorded as REVERSED — 78-04-0031'),
-  ).toBeInTheDocument();
+  expect(screen.getByText('Undo recorded — 78-04-0031')).toBeInTheDocument();
   expect(lastPnText()).toBe('118-052');
 
   // Undo the remaining operation; afterwards nothing is eligible.
@@ -1096,4 +1125,416 @@ test('recovery re-enables and refocuses the scan input', async () => {
 
   await waitFor(() => expect(input).toBeEnabled());
   await waitFor(() => expect(input).toHaveFocus());
+});
+
+/* ============ Keyboard-wedge capture (main input must not lose scans) ============ */
+
+function wedgeType(text: string) {
+  for (const key of text) {
+    fireEvent.keyDown(document.body, { key });
+  }
+}
+
+test('a scan is captured while a non-input element has focus; the first character is preserved', async () => {
+  const input = (await renderStation()) as HTMLInputElement;
+
+  // Focus rests on the body — the wedge still reaches the main input.
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  fireEvent.keyDown(document.body, { key: 'P' });
+  // The FIRST character is never lost, and focus follows the scan.
+  expect(input.value).toBe('P');
+  expect(input).toHaveFocus();
+
+  wedgeType('F:WORKER:88');
+  expect(input.value).toBe('PF:WORKER:88');
+  fireEvent.keyDown(document.body, { key: 'Enter' });
+
+  // Submitted exactly once.
+  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(document.querySelectorAll('.ss-toast').length).toBe(1);
+  expect(input.value).toBe('');
+
+  // Enter with an empty input submits nothing new.
+  fireEvent.keyDown(document.body, { key: 'Enter' });
+  expect(document.querySelectorAll('.ss-toast').length).toBe(1);
+});
+
+test('scanning while the main input has focus keeps working (single submit)', async () => {
+  await renderStation();
+
+  scan('PF:WORKER:88');
+  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(document.querySelectorAll('.ss-toast').length).toBe(1);
+});
+
+test('wedge capture never interferes with dialogs, other fields, or buttons', async () => {
+  const input = (await renderStation()) as HTMLInputElement;
+
+  // While a Scan Station dialog is active, keystrokes are never routed
+  // to the main barcode input.
+  scan('PF:PN:0455-20-0118-03');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Choose the action for this PN',
+  });
+  fireEvent.keyDown(actions, { key: 'X' });
+  expect(input.value).toBe('');
+
+  // Typing into another text field inside a dialog is left alone.
+  fireEvent.click(screen.getByRole('button', { name: /Add more quantity/ }));
+  const reason = screen.getByLabelText('Reason (required)');
+  fireEvent.keyDown(reason, { key: '5' });
+  expect(input.value).toBe('');
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+
+  // Enter on a focused button stays button activation — it never
+  // submits the pending barcode value.
+  fireEvent.change(input, { target: { value: 'PF:WORKER:88' } });
+  const manual = screen.getByRole('button', { name: '⌨ Enter PN manually' });
+  manual.focus();
+  fireEvent.keyDown(manual, { key: 'Enter' });
+  expect(screen.queryByText('Worker session: V. Tran')).toBeNull();
+  expect(input.value).toBe('PF:WORKER:88');
+});
+
+/* ============ Header structure, Operations chips, and totals ============ */
+
+test('the header groups Area identity with the Worker Session and renders Operations as chips', async () => {
+  await renderStation();
+
+  // Explicit grid structure: identity group, totals, Worker pill are
+  // the header's three cells — no spacer-based wrapping, so the
+  // Worker Session can never wrap onto a row of its own.
+  const head = document.querySelector('.ss-head')!;
+  const children = Array.from(head.children, (el) => el.className);
+  expect(children).toEqual(['ss-id', 'ss-stats', 'ss-pill']);
+  const id = head.querySelector('.ss-id')!;
+  expect(id.querySelector('.dept')?.textContent).toBe('Machine Shop');
+  expect(id.querySelector('.area')?.textContent).toContain('Lathe');
+
+  // Operations are light informational chips, not controls.
+  const chips = Array.from(id.querySelectorAll('.op .opchip'));
+  expect(chips.map((c) => c.textContent)).toEqual(['Turning']);
+  for (const chip of chips) {
+    expect(chip.tagName).not.toBe('BUTTON');
+  }
+});
+
+test('header totals use semantic tones, include Done, and reconcile', async () => {
+  await renderStation();
+
+  const stats = new Map(
+    Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
+      el.querySelector('.l')?.textContent,
+      el.querySelector('.n'),
+    ]),
+  );
+  expect([...stats.keys()]).toEqual([
+    'Total PNs',
+    'Total pcs',
+    'Queued',
+    'On machines',
+    'Done',
+    'Hot',
+  ]);
+  // Semantic tone classes: warning / info / success / error.
+  expect(stats.get('Queued')?.classList.contains('q')).toBe(true);
+  expect(stats.get('On machines')?.classList.contains('m')).toBe(true);
+  expect(stats.get('Done')?.classList.contains('d')).toBe(true);
+  expect(stats.get('Hot')?.classList.contains('h')).toBe(true);
+  // Quantity reconciliation: Total pcs = Queued + On machines + Done.
+  const value = (label: string) => Number(stats.get(label)?.textContent);
+  expect(value('Total pcs')).toBe(
+    value('Queued') + value('On machines') + value('Done'),
+  );
+  expect(value('Total pcs')).toBe(12);
+  expect(value('Done')).toBe(1);
+});
+
+test('the In this Area now card carries no statistics block', async () => {
+  await renderStation();
+
+  const summary = document.querySelector('.abd-summary')!;
+  expect(summary.querySelector('.mc-stats')).toBeNull();
+  expect(summary.querySelectorAll('.stat').length).toBe(0);
+  // The compact Area description stays in the card header block.
+  expect(summary.querySelector('.abd-desc')?.textContent).toBe(
+    'Turning cell · Lathe 1–4',
+  );
+});
+
+test('Machine-card rows do not repeat the Machine name; summary rows keep context', async () => {
+  await renderStation();
+
+  // Lathe 2 card (index 1) holds 0455-20-0118-03 — no `Lathe 2`
+  // context chip on the row; the card header already names it.
+  const machineCards = document.querySelectorAll('.am-machines .abd-machine');
+  const lathe2Row = machineCards[1].querySelector('.mc-list li')!;
+  expect(lathe2Row.querySelector('.r1r .ctx')).toBeNull();
+
+  // The same portion inside the Area summary keeps its context chip.
+  const summary = document.querySelector('.abd-summary')!;
+  const summaryChips = Array.from(
+    summary.querySelectorAll('.mc-list .r1r .ctx'),
+    (el) => el.textContent,
+  );
+  expect(summaryChips).toContain('Lathe 2');
+});
+
+/* ============ DONE — manual completion ============ */
+
+test('manual DONE moves the selected quantity to Finished — ready to move', async () => {
+  await renderStation();
+
+  // Lathe 3 card (index 2) actively processes 3 pcs of 2027-60-8114-00.
+  const machineCards = document.querySelectorAll('.am-machines .abd-machine');
+  const lathe3 = machineCards[2] as HTMLElement;
+  expect(lathe3.textContent).toContain('2027-60-8114-00');
+  fireEvent.click(
+    within(lathe3).getByRole('button', { name: 'Complete Area processing' }),
+  );
+
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Complete processing — DONE',
+  });
+  // MAX defaults to the quantity at the source position.
+  expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
+  expect(lastPnText()).toBe('—'); // nothing recorded yet
+
+  // Dedicated confirmation view with the required summary fields.
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
+  expect(dialog.textContent).toContain('Complete Area processing');
+  expect(dialog.textContent).toContain('Lathe 3');
+  expect(dialog.textContent).toContain('Finished — ready to move');
+  expect(dialog.textContent).toContain('AREA_COMPLETED');
+  expect(lastPnText()).toBe('—');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(
+    screen.getByText(/2027-60-8114-00 × 3 finished at Lathe/),
+  ).toBeInTheDocument();
+  expect(lastPnText()).toBe('2027-60-8114-00');
+
+  // The quantity left the Machine card (current Machine cleared) …
+  const lathe3After = document.querySelectorAll(
+    '.am-machines .abd-machine',
+  )[2] as HTMLElement;
+  expect(lathe3After.textContent).not.toContain('2027-60-8114-00');
+  expect(lathe3After.textContent).toContain('No production assigned');
+  // … and appears under Finished — ready to move in the Area summary,
+  // with the completing Machine kept only as completion context.
+  const summary = document.querySelector('.abd-summary')!;
+  expect(summary.textContent).toContain('Finished at Lathe 3 — ready to move');
+  // Other quantity of the same PN is untouched (2 pcs stay queued).
+  expect(summary.textContent).toContain('Awaiting Machine');
+  // Header totals follow: Done 1+3, On machines 7−3, Queued unchanged.
+  const stats = new Map(
+    Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
+      el.querySelector('.l')?.textContent,
+      Number(el.querySelector('.n')?.textContent),
+    ]),
+  );
+  expect(stats.get('Done')).toBe(4);
+  expect(stats.get('On machines')).toBe(4);
+  expect(stats.get('Queued')).toBe(4);
+  expect(stats.get('Total pcs')).toBe(12);
+});
+
+test('QUEUE returns quantity to the queue and never marks it DONE', async () => {
+  await renderStation();
+
+  // Lathe 2 card (index 1): 4 pcs of 0455-20-0118-03.
+  const machineCards = document.querySelectorAll('.am-machines .abd-machine');
+  const lathe2 = machineCards[1] as HTMLElement;
+  fireEvent.click(
+    within(lathe2).getByRole('button', { name: 'Return to Area queue' }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Return quantity to the Area queue',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm queue return' }));
+
+  // The quantity is queued again — not finished.
+  const lathe2After = document.querySelectorAll(
+    '.am-machines .abd-machine',
+  )[1] as HTMLElement;
+  expect(lathe2After.textContent).toContain('No production assigned');
+  const stats = new Map(
+    Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
+      el.querySelector('.l')?.textContent,
+      Number(el.querySelector('.n')?.textContent),
+    ]),
+  );
+  expect(stats.get('Queued')).toBe(8);
+  expect(stats.get('On machines')).toBe(3);
+  expect(stats.get('Done')).toBe(1); // unchanged
+  expect(lastPnText()).toBe('0455-20-0118-03');
+  expect(document.querySelector('.ss-lastpn .d')?.textContent).toContain(
+    'RELEASED_FROM_MACHINE',
+  );
+});
+
+test('a direct-processing Area can also mark quantity DONE', async () => {
+  await renderStation('EXT-ST-01');
+
+  scan('PF:PN:142-260');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Choose the action for this PN',
+  });
+  fireEvent.click(
+    within(actions as HTMLElement).getByRole('button', {
+      name: /Complete processing — DONE/,
+    }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Complete processing — DONE',
+  });
+  // No Machine field for a no-Machine Area; MAX = processing quantity.
+  expect(screen.getByLabelText('Quantity: 20')).toBeInTheDocument();
+  // Finish only part of it: 5 pcs.
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '5' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  expect(dialog.textContent).toContain('Finished — ready to move');
+  expect(dialog.textContent).not.toContain('Machine');
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+
+  const stats = new Map(
+    Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
+      el.querySelector('.l')?.textContent,
+      Number(el.querySelector('.n')?.textContent),
+    ]),
+  );
+  expect(stats.get('Processing')).toBe(15);
+  expect(stats.get('Done')).toBe(5);
+  expect(stats.get('Total pcs')).toBe(20);
+  expect(document.querySelector('.abd-summary')?.textContent).toContain(
+    'Finished — ready to move',
+  );
+});
+
+/* ============ Transfers complete source processing atomically ============ */
+
+test('a transfer from actively processing quantity appends AREA_COMPLETED, then TRANSFERRED', async () => {
+  await renderStation();
+
+  scan('PF:PN:78-04-0031'); // Mill (on Mill 1) + Deburr (finished)
+  fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+
+  // One atomic command: completion of source processing + transfer.
+  expect(dialog.textContent).toContain('Source processing');
+  expect(dialog.textContent).toContain('Completed by this transfer');
+  expect(dialog.textContent).toContain(
+    'AREA_COMPLETED, then TRANSFERRED — one atomic operation',
+  );
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+
+  expect(lastPnText()).toBe('78-04-0031');
+  expect(document.querySelector('.ss-lastpn .d')?.textContent).toContain(
+    'AREA_COMPLETED + TRANSFERRED',
+  );
+  // The transferred quantity waits in this Area's queue.
+  expect(document.querySelector('.abd-summary')?.textContent).toContain(
+    '78-04-0031',
+  );
+});
+
+test('a transfer from READY_TO_TRANSFER quantity appends only TRANSFERRED', async () => {
+  await renderStation();
+
+  scan('PF:PN:78-04-0031');
+  fireEvent.click(screen.getByRole('button', { name: /Deburr — 3 pcs/ }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+
+  // No duplicate completion — the source quantity was already DONE.
+  expect(dialog.textContent).not.toContain('AREA_COMPLETED');
+  expect(dialog.textContent).not.toContain('Source processing');
+  expect(dialog.textContent).toContain('TRANSFERRED');
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+
+  expect(document.querySelector('.ss-lastpn .d')?.textContent).toContain(
+    'TRANSFERRED',
+  );
+  expect(document.querySelector('.ss-lastpn .d')?.textContent).not.toContain(
+    'AREA_COMPLETED',
+  );
+});
+
+test('partial completion-and-transfer preserves the remaining source quantity', async () => {
+  await renderStation();
+
+  scan('PF:PN:78-04-0031');
+  fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+  // Move only 2 of the 3 pcs.
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '2' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+  // The remaining 1 pc stays at the source in its existing state.
+  scan('PF:PN:78-04-0031');
+  const select = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  expect(select).toHaveTextContent('Mill — 1 pcs available');
+  expect(select).toHaveTextContent('Deburr — 3 pcs available');
+});
+
+test('whole-command Undo reverses completion-plus-transfer together', async () => {
+  await renderStation();
+
+  scan('PF:PN:78-04-0031');
+  fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
+  enterThroughConfirmation();
+  expect(document.querySelector('.abd-summary')?.textContent).toContain(
+    '78-04-0031',
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Undo last PN operation?',
+  });
+  // The Undo summary names the COMPLETE command, not one arbitrary row.
+  expect(dialog).toHaveTextContent('AREA_COMPLETED + TRANSFERRED');
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm Undo' }));
+
+  // Both effects reverse together: the quantity left this Area again …
+  expect(document.querySelector('.abd-summary')?.textContent).not.toContain(
+    '78-04-0031',
+  );
+  // … and the source processing state is restored.
+  scan('PF:PN:78-04-0031');
+  const select = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  expect(select).toHaveTextContent('Mill — 3 pcs available');
+});
+
+/* ============ Standard Cancel label ============ */
+
+test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => {
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+  const cancel = within(dialog as HTMLElement).getByRole('button', {
+    name: 'Cancel (Esc)',
+  });
+  expect(cancel.textContent).toBe('Cancel (Esc)'); // no long suffixes
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 });

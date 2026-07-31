@@ -5,10 +5,11 @@ import { useState } from 'react';
 import { getViewStatePreview } from '../../app/view-state';
 import {
   AreaMachineLayout,
+  AreaOverviewRow,
   AreaSummaryCard,
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
-import { AreaDot, HotPn } from '../../components/indicators';
+import { AreaDot } from '../../components/indicators';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import {
   MOCK_AREA_CARDS,
@@ -16,7 +17,7 @@ import {
   MOCK_AREA_MACHINES,
 } from '../../mocks/area-board';
 import { MOCK_AREAS } from '../../mocks/areas';
-import { isQueueContext, splitAssignments } from '../area-monitoring';
+import { splitAssignments } from '../area-monitoring';
 import { compareDemandOrder } from '../demand-order';
 import type { MockArea, MockAreaCard } from '../view-models';
 
@@ -200,15 +201,12 @@ function AllAreasOverview({
         const areaCards = cards.filter((c) => c.area === area.key);
         const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;
         const total = areaCards.reduce((s, c) => s + c.qty, 0);
-        const queued = areaCards.reduce(
-          (s, c) =>
-            s +
-            c.machines
-              .filter(([m]) => isQueueContext(m))
-              .reduce((x, [, q]) => x + q, 0),
-          0,
-        );
-        const onMachines = total - queued;
+        // The shared grouping keeps queued / on-Machine / finished
+        // portions distinguishable (finished = READY_TO_TRANSFER).
+        const split = splitAssignments(areaCards);
+        const queued = split.queued.reduce((s, e) => s + e.qty, 0);
+        const onMachines = split.assigned.reduce((s, e) => s + e.qty, 0);
+        const finished = split.finished.reduce((s, e) => s + e.qty, 0);
         return (
           <div
             className="ms-col"
@@ -264,6 +262,12 @@ function AllAreasOverview({
                     </div>
                     <div className="l">On machines</div>
                   </div>
+                  {finished > 0 ? (
+                    <div className="stat">
+                      <div className="n d">{finished}</div>
+                      <div className="l">Done</div>
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 // No Machines: no meaningless queue/Machine zeros.
@@ -273,44 +277,24 @@ function AllAreasOverview({
                     <div className="l">Total pcs</div>
                   </div>
                   <div className="stat">
-                    <div className="n m">{total > 0 ? total : '—'}</div>
+                    <div className="n m">
+                      {total - finished > 0 ? total - finished : '—'}
+                    </div>
                     <div className="l">Processing</div>
                   </div>
+                  {finished > 0 ? (
+                    <div className="stat">
+                      <div className="n d">{finished}</div>
+                      <div className="l">Done</div>
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
             {areaCards.length ? (
               <ul className="mc-list">
                 {areaCards.map((c) => (
-                  <li key={`${c.pn}-${c.workOrder}`}>
-                    <div className="r1">
-                      <HotPn rank={c.hotRank} pn={c.pn} pnClassName="p" />
-                      <span className="q">{c.qty}</span>
-                    </div>
-                    <div className="r2">
-                      <span className="mono">
-                        {c.workOrder.split(' ·')[0]} · {c.job}
-                      </span>
-                      <span
-                        className={`mono ${c.dueClass === 'ok' ? '' : c.dueClass}`}
-                      >
-                        {c.due}
-                      </span>
-                      {c.machines.length ? (
-                        <span className="mono">
-                          {c.machines
-                            .map(([m, q]) => `${m} × ${q}`)
-                            .join(' · ')}
-                        </span>
-                      ) : null}
-                      {c.timeInArea !== '—' ? (
-                        <span className="mono">{c.timeInArea} in Area</span>
-                      ) : null}
-                      {c.scrapped ? (
-                        <span className="scraptxt">{c.scrapped} scrapped</span>
-                      ) : null}
-                    </div>
-                  </li>
+                  <AreaOverviewRow key={`${c.pn}-${c.workOrder}`} card={c} />
                 ))}
               </ul>
             ) : (

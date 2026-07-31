@@ -1,9 +1,12 @@
-/* Area Board — All Areas overview + per-Area detail (GUI_DESIGN §6). */
+/* Area Board — All Areas overview + per-Area detail (GUI_DESIGN §6).
+   The view root is the inline-size container for the shared
+   Area/Machine monitoring layout's container query. */
 .ab {
   background: var(--bg);
   color: var(--text);
   padding: 20px 26px;
   min-height: calc(100vh - 105px);
+  container-type: inline-size;
 }
 
 .ab-tabs {
@@ -218,91 +221,14 @@
   margin-top: 2px;
 }
 
-.ab .mc-list {
-  list-style: none;
-}
+/* PN rows (overview and detail) come from the shared presentation in
+   components/area-monitoring.css — no independent row styling here, so
+   the surfaces cannot drift apart (GUI §6.1). */
 
-.ab .mc-list li {
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--panel2);
-}
-
-.ab .mc-list li:last-child {
-  border-bottom: none;
-}
-
-.ab .mc-list .r1 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* PN truncates; qty stays put (§6.2 + §2.3 amendment) */
-.ab .mc-list .p {
-  font-family: var(--mono), monospace;
-  font-size: 14.5px;
-  font-weight: 750;
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ab .mc-list .q {
-  font-family: var(--mono), monospace;
-  font-size: 16px;
-  font-weight: 800;
-  color: var(--info-t);
-}
-
-.ab .mc-list .r2 {
-  display: flex;
-  gap: 10px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 3px;
-  flex-wrap: wrap;
-}
-
-.ab .mc-list .r2 .late {
-  color: var(--err-t);
-  font-weight: 700;
-}
-
-.ab .mc-list .r2 .soon {
-  color: var(--warn-t);
-  font-weight: 700;
-}
-
-.ab .mc-list .r2 .mono {
-  font-size: 11.5px;
-}
-
-.ab .empty {
-  padding: 22px 16px;
-  color: var(--faint);
-  font-size: 13px;
-  text-align: center;
-}
-
-/* Machine/queue context chip inside compact list rows */
-.ab .mc-list .ctx {
-  flex: none;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1px 7px;
+.ab .stat .n.d {
+  color: var(--ok-t);
 }
 
 .ab .stat .n.h {
   color: var(--err-t);
-}
-
-.ab .mc-list .r2 .scraptxt {
-  color: var(--err-t);
-  font-weight: 700;
 }

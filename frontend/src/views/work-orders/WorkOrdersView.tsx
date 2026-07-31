@@ -21,8 +21,6 @@ import type { MockWorkOrder } from '../view-models';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
-type Panel = { kind: 'list' } | { kind: 'detail'; id: string };
-
 /** Display form of a Work Order Number — `—` when no external number
  * is known (display-only placeholder, never persisted). */
 const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
@@ -67,7 +65,10 @@ export function WorkOrdersView() {
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useMockNotice();
 
-  const [panel, setPanel] = useState<Panel>({ kind: 'list' });
+  // Selected Work Order — its details open as a modal dialog over the
+  // list (GUI_DESIGN §11.2); the list stays mounted and the URL never
+  // changes.
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [workOrderList, setWorkOrderList] =
     useState<MockWorkOrder[]>(MOCK_WORK_ORDER_LIST);
   const [search, setSearch] = useState('');
@@ -82,7 +83,7 @@ export function WorkOrdersView() {
 
   const dirty =
     (newWorkOrderOpen && newWorkOrderDirty) ||
-    (panel.kind === 'detail' && detailDirty);
+    (detailId !== null && detailDirty);
 
   // Unsaved-change protection for top-level navigation, Management
   // sub-navigation and browser back/forward (the router consults the
@@ -142,7 +143,12 @@ export function WorkOrdersView() {
 
   const openWorkOrder = (id: string) => {
     setDetailDirty(false);
-    setPanel({ kind: 'detail', id });
+    setDetailId(id);
+  };
+
+  const closeDetail = () => {
+    setDetailDirty(false);
+    setDetailId(null);
   };
 
   const closeNewWorkOrder = () => {
@@ -152,32 +158,27 @@ export function WorkOrdersView() {
 
   return (
     <section className="wo-view" aria-label="Work Orders">
-      {panel.kind === 'list' && (
-        <WorkOrderListPanel
-          list={listData}
-          search={search}
-          onSearch={setSearch}
-          onOpen={openWorkOrder}
-          onNew={() => setNewWorkOrderOpen(true)}
-        />
-      )}
-      {panel.kind === 'detail' && (
+      <WorkOrderListPanel
+        list={listData}
+        search={search}
+        onSearch={setSearch}
+        onOpen={openWorkOrder}
+        onNew={() => setNewWorkOrderOpen(true)}
+      />
+      {detailId !== null && (
         <WorkOrderDetailPanel
-          key={panel.id}
-          workOrder={listData.find((w) => w.id === panel.id)}
+          key={detailId}
+          workOrder={listData.find((w) => w.id === detailId)}
           releasedLines={releasedLines}
           writeBlocked={writeBlocked}
-          onBack={() => {
-            setDetailDirty(false);
-            setPanel({ kind: 'list' });
-          }}
-          onRelease={(pn) => setReleaseDialog({ workOrderId: panel.id, pn })}
+          onClose={closeDetail}
+          onRelease={(pn) => setReleaseDialog({ workOrderId: detailId, pn })}
           onSaveDetail={(updated) => {
             setWorkOrderList((current) =>
               current.map((w) => (w.id === updated.id ? updated : w)),
             );
             showNotice(
-              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated (mock) — business demand only, local state only. No Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
+              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated (mock) — business demand only: no Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
             );
           }}
           onDirtyChange={handleDetailDirtyChange}
@@ -206,7 +207,7 @@ export function WorkOrdersView() {
             setWorkOrderList((current) => [workOrder, ...current]);
             closeNewWorkOrder();
             showNotice(
-              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), local state only. Nothing was persisted to the backend. No release.`,
+              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), no release. Nothing was persisted to the backend.`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}
@@ -273,9 +274,10 @@ function WorkOrderListPanel({
         Manual Work Order entry and explicit production release.{' '}
         <b>Saving demand never creates production quantity</b> — physical
         quantity enters production only through the explicit{' '}
-        <b>Release to production</b> action on a demand line. Select a Work
-        Order to see its demand lines. <b>＋ New Work Order</b> opens a dialog
-        over this list — the URL does not change.
+        <b>Release to production</b> action on a demand line. Selecting a Work
+        Order opens its details in a dialog over this list, and{' '}
+        <b>＋ New Work Order</b> opens a dialog the same way — the URL never
+        changes.
       </p>
       <div className="wo-tools">
         <input
@@ -374,12 +376,12 @@ function ReleaseDialog({
       onClose={onCancel}
       size="wide"
     >
-      <h3>Release to production — explicit action (development mock)</h3>
+      <h3>Release to production — explicit action</h3>
       <div className="big mono">{pn}</div>
       <div className="sub">
-        WO 007010 demand · requested <b>{data?.requested ?? '—'}</b> · nothing
-        is created until you confirm — and in Phase 2 confirming changes{' '}
-        <b>local presentation state only</b>.
+        WO 007010 demand · requested <b>{data?.requested ?? '—'}</b> — nothing
+        is created until you confirm. (Development mock — confirming updates
+        local presentation state only.)
       </div>
       {data?.activeDistribution ? (
         <div className="relwarn">
@@ -424,14 +426,14 @@ function ReleaseDialog({
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel — nothing created
+          Cancel (Esc)
         </button>
         <button
           className="bigbtn primary"
           disabled={!parsedQty || parsedQty < 1}
           onClick={() => onConfirm(parsedQty, route)}
         >
-          Confirm release (mock)
+          Confirm release
         </button>
       </div>
     </ModalDialog>

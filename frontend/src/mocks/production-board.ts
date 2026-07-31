@@ -4,21 +4,46 @@ import type { MockBoardRow } from '../views/view-models';
 // date); `received` is the parent Work Order received date that orders
 // undated demands. The view sorts rows with the canonical demand order
 // (Hot rank → earliest due date → undated by received date).
+//
+// Location rows use the explicit presentation model: `label` is always
+// the Area name, `machine` is a separate field (executor for
+// `state: 'machine'`, completion context for `state: 'done'`), and
+// `state` is never encoded into the display string. Where a PN also
+// appears on the Area Board mocks, the distribution mirrors that state.
 export const MOCK_BOARD_ROWS: MockBoardRow[] = [
   {
     pn: '2027-60-8114-00',
     name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES · rev C',
     hotRank: 1,
     locations: [
-      { area: 'cut', label: 'Cut', qty: 4, time: '3h 40m' },
+      {
+        area: 'cut',
+        label: 'Cut',
+        machine: 'Saw 1',
+        qty: 4,
+        state: 'machine',
+        time: '3h 40m',
+      },
+      // Lathe mirror of the Area Board card: 3 pcs turning on Lathe 3,
+      // 2 pcs queued, 1 pc finished at the Area (completed by Lathe 3,
+      // waiting on the finished rack — no current Machine ownership).
       {
         area: 'lathe',
-        label: 'Lathe 3',
-        qty: 4,
-        tag: 'machine',
+        label: 'Lathe',
+        machine: 'Lathe 3',
+        qty: 3,
+        state: 'machine',
         time: '2h 05m',
       },
-      { area: 'lathe', label: 'Lathe', qty: 2, tag: 'queue', time: '1h 10m' },
+      { area: 'lathe', label: 'Lathe', qty: 2, state: 'queue', time: '1h 10m' },
+      {
+        area: 'lathe',
+        label: 'Lathe',
+        machine: 'Lathe 3',
+        qty: 1,
+        state: 'done',
+        time: '25m',
+      },
     ],
     total: 10,
     scrapped: 1,
@@ -41,6 +66,7 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         area: 'external',
         label: 'External — Plating',
         qty: 20,
+        state: 'processing',
         time: '4d 02h',
         timeLong: true,
       },
@@ -58,7 +84,13 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     pn: '0123-40-0007-22',
     name: 'CATCH CUP INSERT, COATER 3-5, VENDOR',
     locations: [
-      { area: 'external', label: 'External — Vendor', qty: 12, time: '1d 06h' },
+      {
+        area: 'external',
+        label: 'External — Vendor',
+        qty: 12,
+        state: 'processing',
+        time: '1d 06h',
+      },
     ],
     total: 12,
     jobs: [{ job: '18377', meta: '· WO 007007 · 12 pcs' }],
@@ -72,12 +104,19 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     pn: '0455-20-0118-03',
     name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA',
     locations: [
-      { area: 'material', label: 'Material', qty: 8, time: '2d 01h' },
+      {
+        area: 'material',
+        label: 'Material',
+        qty: 8,
+        state: 'processing',
+        time: '2d 01h',
+      },
       {
         area: 'lathe',
-        label: 'Lathe 2',
+        label: 'Lathe',
+        machine: 'Lathe 2',
         qty: 4,
-        tag: 'machine',
+        state: 'machine',
         time: '1h 05m',
       },
     ],
@@ -93,8 +132,17 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     pn: '78-04-0031',
     name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
     locations: [
-      { area: 'mill', label: 'Mill 1', qty: 3, tag: 'machine', time: '45m' },
-      { area: 'deburr', label: 'Deburr', qty: 3, time: '30m' },
+      {
+        area: 'mill',
+        label: 'Mill',
+        machine: 'Mill 1',
+        qty: 3,
+        state: 'machine',
+        time: '45m',
+      },
+      // Finished in a no-Machine Area: deburring completed for the
+      // whole portion — waiting on the finished rack, no `machine`.
+      { area: 'deburr', label: 'Deburr', qty: 3, state: 'done', time: '30m' },
     ],
     total: 6,
     jobs: [
@@ -113,7 +161,15 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     // demands, ordered by the parent Work Order received date.
     pn: '118-052',
     name: 'MOTOR, GEAR STEPPER 7.2T',
-    locations: [{ area: 'manual', label: 'Manual', qty: 4, time: '5h 20m' }],
+    locations: [
+      {
+        area: 'manual',
+        label: 'Manual',
+        qty: 4,
+        state: 'processing',
+        time: '5h 20m',
+      },
+    ],
     total: 4,
     jobs: [{ job: '18520', meta: '· WO 007011 · 4 pcs' }],
     due: null,
@@ -125,7 +181,15 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
   {
     pn: '309-127',
     name: 'PIN, DOWEL 1/4 X 1.00 SS',
-    locations: [{ area: 'stockroom', label: 'Stockroom', qty: 50, time: '—' }],
+    locations: [
+      {
+        area: 'stockroom',
+        label: 'Stockroom',
+        qty: 50,
+        state: 'stocked',
+        time: '—',
+      },
+    ],
     total: 50,
     totalStocked: true,
     jobs: [{ job: '17740', meta: '· WO 006996 · allocated 50/50' }],
@@ -145,8 +209,25 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
     name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
     hotRank: 1,
     locations: [
-      { area: 'mill', label: 'Mill 2', qty: 2, tag: 'machine', time: '1h 20m' },
-      { area: 'deburr', label: 'Deburr', qty: 6, time: '5d 11h', timeLong: true },
+      {
+        // Long Machine name reference case (see MOCK_AREA_MACHINES):
+        // the chip truncates with an ellipsis + title tooltip and never
+        // pushes the quantity, state, or time out of alignment.
+        area: 'mill',
+        label: 'Mill',
+        machine: 'Mill 3 — Horizontal Boring',
+        qty: 2,
+        state: 'machine',
+        time: '1h 20m',
+      },
+      {
+        area: 'deburr',
+        label: 'Deburr',
+        qty: 6,
+        state: 'processing',
+        time: '5d 11h',
+        timeLong: true,
+      },
     ],
     total: 8,
     jobs: [
@@ -171,7 +252,7 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
           area: n % 2 === 0 ? 'lathe' : 'mill',
           label: n % 2 === 0 ? 'Lathe' : 'Mill',
           qty: (n % 7) + 1,
-          tag: 'queue',
+          state: 'queue',
           time: `${(n % 9) + 1}h 0${n % 6}m`,
         },
       ],

@@ -13,7 +13,8 @@ end_of_line = lf
 [*.{bat,cmd,ps1,txt}]
 end_of_line = crlf
 
-[*.{tsx,ts,js,json,html}]
+# Frontend sources are 2-space (matches Prettier, which honors this file)
+[*.{tsx,ts,js,mjs,json,html,css}]
 indent_size = 2
 
 [package-lock.json]

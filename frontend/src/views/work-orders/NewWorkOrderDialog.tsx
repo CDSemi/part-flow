@@ -265,8 +265,7 @@ export function NewWorkOrderDialog({
             the Work Order is saved without one — due dates can be added later.
             Add Parts manually with <b>＋ Add Part manually</b>; every line
             defaults to Request Type <TypeChip type="NEW" /> and to the WO due
-            date, and both can be changed per line. Nothing here is persisted to
-            the backend in Phase 2.
+            date, and both can be changed per line.
           </p>
 
           <div className="nwo-form">
@@ -513,7 +512,7 @@ export function NewWorkOrderDialog({
 
           <div className="wo-actions nwo-actions">
             <button className="btn ghost" onClick={requestClose}>
-              Cancel
+              Cancel (Esc)
             </button>
             <button
               className="btn primary"

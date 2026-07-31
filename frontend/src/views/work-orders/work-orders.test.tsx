@@ -1,14 +1,22 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
 
-// Work Orders regression tests: New Work Order modal workflow (optional
-// WO Number — a blank number saves a NULL number rendered as `—`, no
-// temporary number generation — and optional due dates,
-// missing-information Save Demand confirmation), the multi-step Add
-// Part dialog, PN-carrying barcodes with create-on-first-use, OPEN
-// Work Order editing, nullable due-date behavior, mock validation, and
+// Work Orders regression tests: the Work Order Details modal dialog
+// over the always-mounted list (no URL change), the New Work Order
+// modal workflow (optional WO Number — a blank number saves a NULL
+// number rendered as `—`, no temporary number generation — and
+// optional due dates, missing-information Save Demand confirmation),
+// the multi-step Add Part dialog and its stacked-dialog behavior,
+// PN-carrying barcodes with create-on-first-use, OPEN Work Order
+// editing, nullable due-date behavior, mock validation, and
 // unsaved-change protection. Everything here exercises Phase 2
 // development mock state only.
 
@@ -51,12 +59,162 @@ function scanBarcode(barcode: string) {
   return scan;
 }
 
-async function openWorkOrderDetail(workOrderNumber: string) {
-  fireEvent.click(
-    screen.getByRole('button', { name: new RegExp(workOrderNumber) }),
-  );
-  await screen.findByRole('heading', { name: workOrderNumber });
+function workOrderRow(workOrderNumber: string) {
+  return screen.getByRole('button', { name: new RegExp(workOrderNumber) });
 }
+
+async function openWorkOrderDetail(workOrderNumber: string) {
+  const row = workOrderRow(workOrderNumber);
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  expect(dialog).toHaveTextContent(workOrderNumber);
+  return dialog;
+}
+
+/* ============ Work Order Details modal ============ */
+
+test('clicking a Work Order row opens the Work Order Details dialog over the list', async () => {
+  await renderWorkOrders();
+
+  const dialog = await openWorkOrderDetail('007010');
+
+  expect(dialog).toHaveAttribute('aria-modal', 'true');
+  // The URL never changes — the details are a dialog, not a route.
+  expect(window.location.pathname).toBe('/management/work-orders');
+  // The Work Order list stays mounted and visible behind the overlay.
+  expect(
+    screen.getByRole('heading', { name: 'Work Orders' }),
+  ).toBeInTheDocument();
+  expect(document.querySelector('.wolist')).toBeInTheDocument();
+  // Primary dialog actions.
+  expect(
+    within(dialog).getByRole('button', { name: 'Save demand' }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
+});
+
+test('a clean Work Order Details dialog closes directly and focus returns to its row', async () => {
+  await renderWorkOrders();
+
+  // Escape on a clean dialog closes without any confirmation.
+  const dialog = await openWorkOrderDetail('007010');
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(document.activeElement).toBe(workOrderRow('007010'));
+
+  // Cancel (Esc) behaves identically.
+  const reopened = await openWorkOrderDetail('007010');
+  fireEvent.click(
+    within(reopened).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(document.activeElement).toBe(workOrderRow('007010'));
+});
+
+test('closing a dirty Work Order Details dialog requires explicit discard confirmation', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007010');
+  const qty = within(dialog).getByLabelText('Quantity for 0455-20-0118-03');
+  fireEvent.change(qty, { target: { value: '99' } });
+
+  // Escape never discards silently: an explicit confirmation appears.
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(
+    screen.getByRole('dialog', { name: 'Discard unsaved demand changes?' }),
+  ).toBeInTheDocument();
+
+  // Cancelling the discard keeps the dialog and every entered value.
+  fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByLabelText('Quantity for 0455-20-0118-03'),
+  ).toHaveValue('99');
+
+  // A backdrop click is guarded exactly the same way.
+  fireEvent.mouseDown(dialog.parentElement!);
+  expect(
+    screen.getByRole('dialog', { name: 'Discard unsaved demand changes?' }),
+  ).toBeInTheDocument();
+
+  // Confirming the discard closes Work Order Details.
+  fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+test('Escape and backdrop on the Add Part child dialog close only the child', async () => {
+  await renderWorkOrders();
+  const details = await openWorkOrderDetail('007010');
+  fireEvent.click(
+    within(details).getByRole('button', { name: '＋ Add Part manually' }),
+  );
+
+  // Escape on the child closes the child, never Work Order Details.
+  const child = screen.getByRole('dialog', { name: /Add Part — step 1/ });
+  fireEvent.keyDown(child, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+
+  // A backdrop mousedown on the child closes only the child too.
+  fireEvent.click(
+    within(details).getByRole('button', { name: '＋ Add Part manually' }),
+  );
+  const child2 = screen.getByRole('dialog', { name: /Add Part — step 1/ });
+  fireEvent.mouseDown(child2.parentElement!);
+  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+});
+
+test('the Add Part quantity step renders its own keypad when Work Orders mounts directly', async () => {
+  // No Scan Station render first: the keypad presentation is owned by
+  // components/QuantityKeypad (its CSS ships with the component), so
+  // the structure must be complete with Work Orders mounted alone.
+  await renderWorkOrders();
+  const details = await openWorkOrderDetail('007010');
+  fireEvent.click(
+    within(details).getByRole('button', { name: '＋ Add Part manually' }),
+  );
+  const addPart = screen.getByRole('dialog', { name: /Add Part — step 1/ });
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: '309' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: /309-127/ }));
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+
+  // The focused numeric input and the full keypad are present; MAX is
+  // absent because Add Part provides no maximum.
+  const display = addPart.querySelector('input.qtydisplay');
+  expect(display).toBeInTheDocument();
+  expect(document.activeElement).toBe(display);
+  expect(addPart.querySelectorAll('.keypad button')).toHaveLength(12);
+  expect(addPart.querySelector('.keypad button.keypad-max')).toBeNull();
+
+  // Physical keys reach the quantity; completing the flow adds the
+  // draft line to the still-open Work Order Details dialog.
+  fireEvent.keyDown(addPart, { key: '5' });
+  expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add Part' }));
+
+  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
+  expect(within(details).getByLabelText('Quantity for 309-127')).toHaveValue(
+    '5',
+  );
+});
 
 /* ============ New Work Order modal ============ */
 
@@ -74,14 +232,14 @@ test('＋ New Work Order opens a dialog over the Work Order list without changin
   expect(screen.getByText('007010')).toBeInTheDocument();
 });
 
-test('Cancel closes a clean dialog and focus returns to ＋ New Work Order', async () => {
+test('Cancel (Esc) closes a clean dialog and focus returns to ＋ New Work Order', async () => {
   await renderWorkOrders();
   const newWorkOrderButton = screen.getByRole('button', {
     name: '＋ New Work Order',
   });
   openNewWorkOrderDialog();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(document.activeElement).toBe(newWorkOrderButton);
@@ -300,8 +458,15 @@ test('an existing WO Number is opened instead of duplicated', async () => {
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(await screen.findByRole('heading', { name: '007010' }));
+  // The New Work Order dialog closes and the existing Work Order opens
+  // in the Work Order Details dialog instead.
+  expect(
+    screen.queryByRole('dialog', { name: 'New Work Order' }),
+  ).not.toBeInTheDocument();
+  const details = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  expect(details).toHaveTextContent('007010');
   expect(screen.getByText(/already exists/)).toBeInTheDocument();
 });
 
@@ -448,8 +613,8 @@ test('a Work Order without a due date displays cleanly in list and detail', asyn
   const row = screen.getByText('007011').closest('tr');
   expect(row?.textContent).toContain('—');
 
-  await openWorkOrderDetail('007011');
-  const sub = document.querySelector('.wo-sub');
+  const dialog = await openWorkOrderDetail('007011');
+  const sub = dialog.querySelector('.wo-sub');
   expect(sub?.textContent).toContain('WO due date —');
 });
 
@@ -457,20 +622,33 @@ test('a Work Order without a due date displays cleanly in list and detail', asyn
 
 test('an OPEN Work Order offers manual-first Add Part; a non-OPEN Work Order stays read-only', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const open = await openWorkOrderDetail('007010');
   expect(
-    screen.getByRole('button', { name: '＋ Add Part manually' }),
+    within(open).getByRole('button', { name: '＋ Add Part manually' }),
   ).toBeEnabled();
-  expect(screen.getByLabelText('Scan PN barcode')).toBeInTheDocument();
+  expect(within(open).getByLabelText('Scan PN barcode')).toBeInTheDocument();
+  expect(
+    within(open).getByRole('button', { name: 'Save demand' }),
+  ).toBeInTheDocument();
+  fireEvent.click(within(open).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
-  await openWorkOrderDetail('007003');
+  const released = await openWorkOrderDetail('007003');
   expect(
-    screen.queryByRole('button', { name: '＋ Add Part manually' }),
+    within(released).queryByRole('button', { name: '＋ Add Part manually' }),
   ).not.toBeInTheDocument();
   expect(
-    screen.queryByRole('button', { name: /Remove line/ }),
+    within(released).queryByRole('button', { name: /Remove line/ }),
   ).not.toBeInTheDocument();
+  // Read-only: no Save demand, but the dialog still closes normally and
+  // explains why editing is unavailable.
+  expect(
+    within(released).queryByRole('button', { name: 'Save demand' }),
+  ).not.toBeInTheDocument();
+  expect(released).toHaveTextContent(/demand lines are read-only/);
+  expect(
+    within(released).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
 });
 
 test('scanning a new PN on an OPEN Work Order adds a draft line and marks unsaved', async () => {
@@ -498,7 +676,7 @@ test('a duplicate PN on an OPEN Work Order focuses the existing line', async () 
   expect(document.activeElement).toBe(qtyFields[0]);
 });
 
-test('an unsaved draft line is removed immediately without a dialog', async () => {
+test('an unsaved draft line is removed immediately without a confirmation dialog', async () => {
   await renderWorkOrders();
   await openWorkOrderDetail('007010');
 
@@ -507,7 +685,8 @@ test('an unsaved draft line is removed immediately without a dialog', async () =
     screen.getByRole('button', { name: 'Remove line 78-04-0031' }),
   );
 
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  // Only the Work Order Details dialog remains — no confirmation.
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
   expect(screen.queryByText('78-04-0031')).not.toBeInTheDocument();
 });
 
@@ -535,7 +714,7 @@ test('removing a saved unreleased line requires confirmation', async () => {
   );
   fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
   expect(screen.queryByText('52-09-0114')).not.toBeInTheDocument();
-  expect(screen.getByText(/local mock state only/)).toBeInTheDocument();
+  expect(screen.getByText(/removed from the draft/)).toBeInTheDocument();
 });
 
 test('a released line cannot be removed and explains why', async () => {
@@ -573,6 +752,10 @@ test('saving an edited OPEN Work Order updates local mock state and reports mock
   expect(screen.getByText(/demand updated \(mock\)/)).toBeInTheDocument();
   expect(
     screen.getByText(/nothing was persisted to the backend/),
+  ).toBeInTheDocument();
+  // Saving keeps Work Order Details open with the draft now clean.
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
   ).toBeInTheDocument();
   expect(screen.queryByText('● Unsaved changes')).not.toBeInTheDocument();
 });
@@ -619,11 +802,15 @@ test('saving an OPEN Work Order with an incomplete row is blocked, not filtered'
 /* ============ Unsaved changes and navigation protection ============ */
 
 async function makeDetailDirty() {
-  await openWorkOrderDetail('007010');
-  fireEvent.change(screen.getByLabelText('Quantity for 0455-20-0118-03'), {
-    target: { value: '99' },
-  });
+  const dialog = await openWorkOrderDetail('007010');
+  fireEvent.change(
+    within(dialog).getByLabelText('Quantity for 0455-20-0118-03'),
+    {
+      target: { value: '99' },
+    },
+  );
   expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);
+  return dialog;
 }
 
 test('cancelling the discard confirmation keeps the user on the dirty Work Order', async () => {
@@ -635,7 +822,9 @@ test('cancelling the discard confirmation keeps the user on the dirty Work Order
 
   expect(confirmSpy).toHaveBeenCalled();
   expect(window.location.pathname).toBe('/management/work-orders');
-  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
 });
 
 test('confirming the discard allows top-level navigation away', async () => {
@@ -659,22 +848,6 @@ test('Management sub-navigation is guarded too', async () => {
   expect(window.location.pathname).toBe('/management/work-orders');
 });
 
-test('returning to the Work Order list from a dirty detail asks for confirmation', async () => {
-  await renderWorkOrders();
-  await makeDetailDirty();
-  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-
-  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
-  expect(confirmSpy).toHaveBeenCalled();
-  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
-
-  confirmSpy.mockReturnValue(true);
-  fireEvent.click(screen.getByRole('button', { name: '‹ All Work Orders' }));
-  expect(
-    screen.getByRole('heading', { name: 'Work Orders' }),
-  ).toBeInTheDocument();
-});
-
 test('browser back is guarded while the Work Order detail is dirty', async () => {
   await renderWorkOrders();
   await makeDetailDirty();
@@ -684,7 +857,9 @@ test('browser back is guarded while the Work Order detail is dirty', async () =>
   fireEvent.popState(window);
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(screen.getByRole('heading', { name: '007010' })).toBeInTheDocument();
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
 });
 
 test('reload and tab close are guarded through beforeunload while dirty', async () => {

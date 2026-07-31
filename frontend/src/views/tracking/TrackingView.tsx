@@ -206,8 +206,8 @@ export function TrackingView() {
         <aside className="tk-right" aria-label="PN detail">
           {selectedPn !== detail.pn ? (
             <EmptyState
-              message={`Mock detail data exists for ${detail.pn} only.`}
-              hint="Select 2027-60-8114-00 to see the full detail panel (development mock)."
+              message="No detail preview for this PN yet."
+              hint={`Development note: detail data exists for ${detail.pn} only.`}
             />
           ) : (
             <TrackingDetail />
@@ -286,8 +286,15 @@ function TrackingDetail() {
           <span className="tag">derived from Movement history</span>
         </h4>
         <div className="dist">
+          {/* `state` keeps the holding states visually distinct: active
+              Machine assignment, Area-queue waiting, and Area completion
+              (`done` — READY_TO_TRANSFER). A done row names the Area as
+              the location; the Machine no longer holds the quantity. */}
           {d.distribution.map((row) => (
-            <div className="drow" key={`${row.name}-${row.sub}`}>
+            <div
+              className={`drow${row.state === 'done' ? ' done' : ''}`}
+              key={`${row.name}-${row.sub}`}
+            >
               <AreaDot
                 colorVar={areaByKey(row.area)?.colorVar ?? 'var(--faint)'}
               />
@@ -299,7 +306,7 @@ function TrackingDetail() {
                   style={{
                     width: `${row.pct}%`,
                     background: areaByKey(row.area)?.colorVar,
-                    opacity: row.queued ? 0.55 : 1,
+                    opacity: row.state === 'queue' ? 0.55 : 1,
                   }}
                 />
               </span>
@@ -307,6 +314,9 @@ function TrackingDetail() {
             </div>
           ))}
         </div>
+        {d.distribution.some((row) => row.state === 'done') ? (
+          <div className="prognote donenote">{d.readyNote}</div>
+        ) : null}
       </div>
 
       <div className="tk-sec">
@@ -330,17 +340,16 @@ function TrackingDetail() {
               <span className="qf-pos">{flow.position}</span>
             </div>
             <div className="route">
-              {/* Repeated Areas are preserved: the trace is Movement
+              {/* Steps and arrows are separate sibling flex items in
+                  document order (step, arrow, step, …) so an arrow can
+                  never overlap a step card and wrapping stays readable.
+                  Repeated Areas are preserved: the trace is Movement
                   history, so the same Area may appear more than once
                   and the step name alone is not a unique key. */}
-              {flow.route.map((step, i) => (
-                <span key={`${step.step}-${i}`}>
-                  {i > 0 && (
-                    <span className="rarrow" aria-hidden="true">
-                      →{' '}
-                    </span>
-                  )}
+              {flow.route.flatMap((step, i) => {
+                const stepNode = (
                   <span
+                    key={`step-${step.step}-${i}`}
                     className={`rstep ${
                       step.state === 'done'
                         ? 'done'
@@ -354,8 +363,19 @@ function TrackingDetail() {
                       <span className="repairmark"> ⟲ REPAIR</span>
                     ) : null}
                   </span>
-                </span>
-              ))}
+                );
+                if (i === 0) return [stepNode];
+                return [
+                  <span
+                    key={`arrow-${i}`}
+                    className="rarrow"
+                    aria-hidden="true"
+                  >
+                    →
+                  </span>,
+                  stepNode,
+                ];
+              })}
             </div>
             {'routeNote' in flow ? (
               <div className="devnote">{flow.routeNote}</div>
@@ -389,7 +409,7 @@ function TrackingDetail() {
         <h4>
           Scrap history{' '}
           <span className="tag">
-            SCRAPPED — auditable; never reduces requested quantity
+            auditable — scrap never reduces requested quantity
           </span>
         </h4>
         <div className="prognote" style={{ marginTop: 0 }}>

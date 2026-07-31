@@ -1,4 +1,4 @@
-# PartFlow Project Profile v10
+# PartFlow Project Profile v9
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -472,22 +472,6 @@ An immutable event recording the movement, assignment, completion, correction, s
 
 ---
 
-## Area Completion (DONE)
-
-The explicit completion of processing at the current Area for a **selected physical quantity**:
-
-- user-facing action/status: `DONE`;
-- canonical immutable Movement type: `AREA_COMPLETED`;
-- internal derived holding state: `READY_TO_TRANSFER`.
-
-`DONE` means: the selected physical quantity has completed processing at the current Area and is ready to be transferred to another Area — it waits on the Area's finished rack. The current Machine clears from the resulting position; the current Area remains the physical location until the quantity is transferred.
-
-`DONE` never means: PN completion, completion of every quantity of the PN, Work Order completion, manufacturing completion, stocked quantity, QC approval, or allocation to Work Order Demand. Manufacturing completion remains represented only by `STOCKED` at the terminal Stockroom.
-
-DONE is quantity-scoped, never a global PartNumber status: it applies to a selected physical quantity of a specific current Quantity Flow/position. The same PN may simultaneously have quantities queued, on Machines, directly processing, finished and ready to transfer, in other Areas, stocked, and scrapped. There is no `PartNumber.status = DONE`, and the state remains reconstructable from immutable Movement history.
-
----
-
 ## Current Position
 
 The derived current Area and optional Machine holding a Quantity Flow.
@@ -828,7 +812,6 @@ Initial Movement types may include:
 - `TRANSFERRED`
 - `ASSIGNED_TO_MACHINE`
 - `RELEASED_FROM_MACHINE`
-- `AREA_COMPLETED`
 - `SPLIT`
 - `MERGED`
 - `STOCKED`
@@ -841,10 +824,6 @@ Initial Movement types may include:
 `movement_reason` is a typed, optional movement intent; its first value is `REPAIR` — an explicit return of quantity to a previously visited Area to correct earlier work (`movement_type = TRANSFERRED`, `movement_reason = REPAIR`). Repair is chosen explicitly by the user, never inferred from the route history, and is not a Work Order Demand and not a Request Type. `reason` remains the free-text explanation and is required for Repair, Scrap, and quantity adjustments.
 
 `QUANTITY_ADJUSTED` with `direction = INCREASE` records the intentional addition of physical quantity (operator-allowed, mandatory reason, auditable, never hidden as an ordinary transfer, never changing the requested quantity). `SCRAPPED` records damaged quantity removed from active production (§11 Quantity Model).
-
-`AREA_COMPLETED` records Area Completion (§7 Area Completion): the selected quantity finished processing at its current Area and waits as `READY_TO_TRANSFER` on the finished rack. It clears the current Machine from the derived position while the Area remains the location, and it creates no route visit — completion happens inside the existing source Area. It is distinct from `RELEASED_FROM_MACHINE`, which returns **unfinished or paused** quantity from a Machine to the Area queue (`RELEASED_FROM_MACHINE → QUEUED`; `AREA_COMPLETED → READY_TO_TRANSFER`), and distinct from `STOCKED`, which alone represents manufacturing completion at the terminal Stockroom.
-
-When quantity that is still actively processing (`ON_MACHINE`, or directly processing in an Area without Machines) is scanned into a different Area through a normal transfer, processing at the source Area is treated as completed: one **atomic application command** appends `AREA_COMPLETED` immediately followed by `TRANSFERRED` — either all required Movement records are written or none are. No separate prior manual DONE is required. Quantity already `READY_TO_TRANSFER` transfers with a normal `TRANSFERRED` alone. Undo of such a command reverses the complete command (§16).
 
 Rules:
 
@@ -1150,44 +1129,10 @@ An Area with one or more Machines always uses `QUEUE_AND_ASSIGN`. One Machine be
 
 The Machine remains the current executor until the quantity is:
 
-- completed at the Area (`AREA_COMPLETED` — manual DONE or implicit completion during a transfer, §7 Area Completion),
 - transferred,
 - released back to the queue,
 - reversed,
 - or reassigned through an explicit event.
-
-## Area Processing States
-
-For an Area with Machines:
-
-```text
-QUEUED
-  -> ASSIGNED_TO_MACHINE
-ON_MACHINE
-  -> AREA_COMPLETED
-READY_TO_TRANSFER
-  -> TRANSFERRED
-next Area queue or direct processing
-```
-
-For an Area without Machines:
-
-```text
-PROCESSING
-  -> AREA_COMPLETED
-READY_TO_TRANSFER
-  -> TRANSFERRED
-next Area queue or direct processing
-```
-
-A Machine-assigned PN row offers two distinct actions that are never merged:
-
-- `DONE` — complete processing and move the quantity to the finished state (`AREA_COMPLETED → READY_TO_TRANSFER`);
-- `QUEUE` — return unfinished or paused quantity to the Area queue (`RELEASED_FROM_MACHINE → QUEUED`).
-
-The manual DONE workflow identifies the PN, the current Area, and the current Machine when applicable; selects or confirms the quantity (MAX defaults to the quantity at the current source position); shows a dedicated confirmation view; records nothing before final confirmation; then appends one immutable `AREA_COMPLETED` event, derives `READY_TO_TRANSFER`, clears the current Machine, keeps the current Area as the physical location, and restores focus to the barcode input. An Area without Machines uses the same workflow without a Machine field. Partial completion is valid: only the selected quantity completes; the remaining quantity keeps its existing state (split semantics where required); every quantity of the PN is never marked DONE by one action.
-
-Finished (`READY_TO_TRANSFER`) quantity is presented in the Area summary — Machine cards show only actively assigned quantity — and is never presented as stocked or manufacturing-complete.
 
 ---
 
@@ -1309,12 +1254,10 @@ The normal workflow is keyboard- and scanner-first.
 10. The Area view and dashboards refresh immediately.
 11. Barcode input regains focus and the temporary dialog context is cleared — nothing stays armed.
 
-A transfer whose source quantity is still actively processing implicitly completes that processing: the confirmation identifies the completion, and one atomic command appends `AREA_COMPLETED` then `TRANSFERRED` (§8.11). Repair remains an explicit movement intent — it is never inferred merely because a previously visited Area appears again, and source ambiguity rules are unchanged: multiple possible Quantity Flows or source positions require explicit selection and are never combined silently.
-
 Scan Station actions are **one-shot**:
 
 - **Machine-first:** scanning a Machine barcode opens a one-shot assignment dialog with the Machine preselected; the operator selects or scans the PN, enters the quantity (MAX default), reviews the summary, and confirms. It never creates a sticky Machine Session.
-- **PN-first:** scanning a PN barcode opens the applicable one-shot dialog — intake when the PN has no active demand (§14), source-explicit transfer when the quantity is elsewhere, or an action dialog with only the currently valid choices (assign queued quantity, receive more, add quantity, complete processing — DONE in a direct-processing Area, Repair, Scrap) when the PN already has quantity in the Area. Machine-assigned quantity is completed through the Machine-card row's `DONE` action (§12).
+- **PN-first:** scanning a PN barcode opens the applicable one-shot dialog — intake when the PN has no active demand (§14), source-explicit transfer when the quantity is elsewhere, or an action dialog with only the currently valid choices (assign queued quantity, receive more, add quantity, Repair, Scrap) when the PN already has quantity in the Area.
 - Completing or cancelling a dialog clears the pending context; Cancel always means no write.
 
 The system must clearly reject, with no write:
@@ -1359,7 +1302,7 @@ Instead, the system must:
 
 Undo targets the most recent eligible **completed PN operation** and always shows a summary confirmation first (PN, original action, quantity, source and destination, Machine where applicable, Worker, timestamp, and the effect of the reversal); Cancel performs no write. After a confirmed Undo the “last scanned PN” context advances to the next eligible previous operation; Undo disables when nothing is eligible.
 
-Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row.
+Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records, the reversal compensates the whole command rather than blindly reversing one arbitrary row.
 
 Operators may undo only recent eligible actions when authorized.
 
@@ -1637,13 +1580,12 @@ Requirements:
 - automatic input refocus,
 - immediate validation feedback,
 - visible Department, Area identity/color, and Operations,
-- visible Area statistics in the header, the single Area summary surface (Areas with Machines: Total PNs, Total pcs, Queued, On machines, Done, Hot — reconciling as Total pcs = Queued + On machines + Done; Areas without Machines: Total PNs, Total pcs, Processing, Done, Hot — reconciling as Total pcs = Processing + Done; semantic number tones: Queued warning, On machines/Processing information, Done success, Hot error),
+- visible Area statistics in the header (Areas with Machines: Total PNs, Total pcs, Queued, On machines, Hot; Areas without Machines: only meaningful values such as Total PNs, Total pcs, Processing, Hot — no zero-value noise),
 - visible active Worker,
 - visible last scanned PN inside the scan card, with the Undo action anchored at its right edge (only completed PN operations become the last scanned PN; Worker scans and cancelled dialogs never replace it),
 - quantity entry only when required,
 - current Area quantity in the shared Area/Machine monitoring layout (§ Area Board) — the `In this Area now` card left, Machine cards in a right-side grid that wraps within itself; no Machine region for Areas without Machines,
-- separate on-Machine, queued, and finished (`Finished — ready to move`) quantity (Areas with Machines) or direct processing and finished groups (Areas without Machines) — finished quantity belongs to the Area summary and Machine cards show only actively assigned quantity,
-- Machine-card PN rows with the two distinct actions `DONE` and `QUEUE` (§12),
+- separate queued and Machine-assigned quantity (Areas with Machines) or a direct processing group (Areas without Machines),
 - authorized Undo with a summary confirmation (§16),
 - manual entry fallback accepting any non-empty PN value.
 
@@ -1666,8 +1608,7 @@ Requirements:
 - Area color display,
 - distributed PN quantity display,
 - time in current Area or Machine shown per distributed quantity,
-- clear scrapped/damaged quantity visibility without making the board unreadable (scrapped quantity has its own layout space and never overlaps other fields),
-- explicit Area and Machine presentation data: actively Machine-assigned quantity shows the Machine as a compact chip with the concise state `on mch.`; finished quantity shows the current Area with a `done`/`ready` state, never `on mch.` and never the Machine as current executor,
+- clear scrapped/damaged quantity visibility without making the board unreadable,
 - a blank external Work Order Number rendered as `—`,
 - Part Number rendered on a single line.
 
@@ -1699,7 +1640,6 @@ It should show:
 - Area queue,
 - Operation,
 - Machine distribution,
-- finished (`READY_TO_TRANSFER`) quantity, distinguished from queued, on-Machine, and directly processing quantity — shown in the Area summary, never inside a Machine card and never as Stocked,
 - associated active Work Orders,
 - Job Numbers,
 - due dates,
@@ -1758,7 +1698,6 @@ The selected PN view must show:
 - remaining shortage by Work Order,
 - current quantity by Area,
 - current Machine assignments,
-- finished (`READY_TO_TRANSFER`) quantity per Area, distinct from active Machine assignment, direct processing, and `STOCKED` — with `AREA_COMPLETED` visible as an immutable Movement in history and operator wording such as `Completed processing at Lathe — ready to transfer` in summaries; the finished rack never appears as a route step,
 - Quantity Flows with their route mode,
 - Planned Routes and Floating actual route traces,
 - actual Movement history,

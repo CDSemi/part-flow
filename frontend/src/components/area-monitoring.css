@@ -24,10 +24,23 @@
   align-items: start;
 }
 
-/* Deliberate single-column fallback at narrow breakpoints. */
-@media (max-width: 1100px) {
+/* Container-aware single-column fallback: when the containing view is
+   too narrow to fit at least one usable Machine card (~300px) beside
+   the summary column, the summary card fills the full row and the
+   Machine cards continue below it at their normal width. The view
+   roots (.ss, .ab) establish the inline-size containers. */
+@container (max-width: 654px) {
   .am {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Viewport fallback for engines without container queries. */
+@supports not (container-type: inline-size) {
+  @media (max-width: 1100px) {
+    .am {
+      grid-template-columns: 1fr;
+    }
   }
 }
 
@@ -65,11 +78,21 @@
   margin-left: auto;
 }
 
+/* Compact Area description — part of the card header block, like the
+   All Areas overview column headers; never its own framed section. */
 .am .abd-desc {
-  padding: 8px 16px;
+  padding: 0 16px 10px;
+  margin-top: -6px;
   font-size: 12.5px;
   color: var(--faint);
-  border-bottom: 1px solid var(--border);
+}
+
+.am .abd-summary .mhead {
+  border-bottom: none;
+}
+
+.am .mc-stats {
+  border-top: 1px solid var(--border);
 }
 
 .am .abd-grp {
@@ -182,6 +205,10 @@
   color: var(--info-t);
 }
 
+.am .stat .n.d {
+  color: var(--ok-t);
+}
+
 .am .stat .n.h {
   color: var(--err-t);
 }
@@ -195,30 +222,30 @@
   margin-top: 2px;
 }
 
-.am .mc-list {
+.mc-list {
   list-style: none;
 }
 
 /* PN row — explicit grid: production information on the left, the
    optional action rail in its own separated right-side cell. The
    content column may truncate; the action cell never moves. */
-.am .mc-list li {
+.mc-list li {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   padding: 11px 16px;
   border-bottom: 1px solid var(--panel2);
 }
 
-.am .mc-list li.has-action {
+.mc-list li.has-action {
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: 14px;
 }
 
-.am .mc-list li:last-child {
+.mc-list li:last-child {
   border-bottom: none;
 }
 
-.am .mc-list .rowmain {
+.mc-list .rowmain {
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -226,16 +253,16 @@
 }
 
 /* Each content line: left part truncates, right part stays anchored. */
-.am .mc-list .r1,
-.am .mc-list .r2,
-.am .mc-list .r3 {
+.mc-list .r1,
+.mc-list .r2,
+.mc-list .r3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.am .mc-list .pnwrap {
+.mc-list .pnwrap {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -243,7 +270,7 @@
 }
 
 /* PN truncates; qty stays put (§2.3 amendment) */
-.am .mc-list .p {
+.mc-list .p {
   font-family: var(--mono), monospace;
   font-size: 14.5px;
   font-weight: 750;
@@ -253,75 +280,84 @@
   text-overflow: ellipsis;
 }
 
-.am .mc-list .r1r {
+.mc-list .r1r {
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.am .mc-list .qtyline {
+.mc-list .qtyline {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
 }
 
-.am .mc-list .q {
+.mc-list .q {
   font-family: var(--mono), monospace;
   font-size: 16px;
   font-weight: 800;
   color: var(--info-t);
 }
 
-.am .mc-list .r2,
-.am .mc-list .r3,
-.am .mc-list .r4 {
+.mc-list .r2,
+.mc-list .r3,
+.mc-list .r4 {
   font-size: 12px;
   color: var(--muted);
 }
 
 /* WO Number · Job Number may truncate; the full value stays available
    through the title tooltip. The due status never moves. */
-.am .mc-list .r2 .wo {
+.mc-list .r2 .wo {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.am .mc-list .r2 > .mono:last-child {
+.mc-list .r2 > .mono:last-child {
   flex: none;
 }
 
-.am .mc-list .r3 .st {
+.mc-list .r3 .st {
   color: var(--faint);
   font-weight: 650;
 }
 
-.am .mc-list .r3 .tia {
+/* Aggregated portion chips on All Areas overview rows. */
+.mc-list .r3 .ctxs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mc-list .r3 .tia {
   flex: none;
 }
 
-.am .mc-list .r4 .scraptxt {
+.mc-list .r4 .scraptxt {
   color: var(--err-t);
   font-weight: 700;
 }
 
-.am .mc-list .r2 .late {
+.mc-list .r2 .late {
   color: var(--err-t);
   font-weight: 700;
 }
 
-.am .mc-list .r2 .soon {
+.mc-list .r2 .soon {
   color: var(--warn-t);
   font-weight: 700;
 }
 
-.am .mc-list .r2 .mono {
+.mc-list .r2 .mono {
   font-size: 11.5px;
 }
 
-.am .empty {
+.am .empty,
+.ms-col .empty {
   padding: 22px 16px;
   color: var(--faint);
   font-size: 13px;
@@ -329,7 +365,7 @@
 }
 
 /* Machine/queue context chip inside compact list rows */
-.am .mc-list .ctx {
+.mc-list .ctx {
   flex: none;
   font-size: 11px;
   font-weight: 700;
@@ -340,20 +376,44 @@
   padding: 1px 7px;
 }
 
+/* Finished — ready to move: clear success/ready status. The quantity
+   stays located in the Area; no Machine ownership is implied. */
+.mc-list .ctx.done {
+  color: var(--ok-t);
+  background: var(--success-surface-weak);
+  border-color: var(--success-border);
+}
+
+.mc-list .r3 .st.done {
+  color: var(--ok-t);
+}
+
+.am .abd-grp.done {
+  color: var(--ok-t);
+}
+
 /* Action rail — a dedicated, visually separated right-side cell:
-   vertically centered, predictable minimum width, subtle divider. */
-.am .mc-list .actcell {
+   vertically centered, predictable minimum width, subtle divider.
+   Machine-card rows stack their two actions (DONE above QUEUE). */
+.mc-list .actcell {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   justify-content: center;
+  gap: 6px;
   min-width: 86px;
   border-left: 1px solid var(--border);
   padding-left: 14px;
 }
 
-/* Row action affordance (Scan Station only — Area Board is read-only) */
-.am .mc-list .rowact {
+/* Row action affordance (Scan Station only — Area Board is read-only).
+   Icon-above-label layout; the text stays the source of meaning. */
+.mc-list .rowact {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
   min-height: var(--touch-min);
   font-size: 12px;
   font-weight: 800;
@@ -362,15 +422,30 @@
   background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 3px 12px;
+  padding: 4px 12px;
   cursor: pointer;
 }
 
-.am .mc-list .rowact:hover {
+.mc-list .rowact .ric {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.mc-list .rowact:hover {
   border-color: var(--info-t);
 }
 
-.am .mc-list .rowact:disabled {
+/* DONE — complete Area processing — uses the distinct success tone;
+   QUEUE (return to the Area queue) keeps the neutral/info treatment. */
+.mc-list .rowact.done {
+  color: var(--ok-t);
+}
+
+.mc-list .rowact.done:hover {
+  border-color: var(--ok-t);
+}
+
+.mc-list .rowact:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -378,11 +453,11 @@
 /* Very narrow: the action stacks below the content but stays
    visually separated from it. */
 @media (max-width: 560px) {
-  .am .mc-list li.has-action {
+  .mc-list li.has-action {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .am .mc-list .actcell {
+  .mc-list .actcell {
     border-left: none;
     border-top: 1px solid var(--border);
     margin-top: 8px;

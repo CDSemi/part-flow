@@ -60,17 +60,32 @@
   color: var(--muted);
 }
 
-/* Content-driven column sizing: the table lays out by content; the
-   final Job Numbers column absorbs the remaining width (and may wrap),
-   while No. / Part Number / Due Date / Total Days never wrap. */
+/* Content-driven column sizing: the table lays out by content; No. /
+   Part Number / Due Date / Total Days never wrap and Job Numbers may
+   wrap. Once minimum content widths are satisfied, the remaining width
+   goes primarily to Part Number, Areas & Quantities · Time and Due
+   Date — Job Numbers gets a bounded share instead of absorbing
+   everything, and No. / Total Days stay content-sized. */
 .pb-table {
   width: 100%;
   border-collapse: collapse;
   table-layout: auto;
 }
 
+.pb-table col.col-pn {
+  width: 26%;
+}
+
+.pb-table col.col-areas {
+  width: 34%;
+}
+
+.pb-table col.col-due {
+  width: 14%;
+}
+
 .pb-table col.col-jobs {
-  width: 100%;
+  width: 26%;
 }
 
 .pb-table th {
@@ -99,6 +114,17 @@
   font-size: 17px;
   color: var(--faint);
   font-weight: 650;
+}
+
+/* The Part Number cell guarantees room for the standard 15-character
+   PN with its Hot indicator (`🔥#1 2027-60-8114-00`) on one line: a
+   real min-width on the header/cell (not only <col> hints), sized for
+   the 22px mono PN plus the Hot chip plus the 2×18px cell padding
+   (border-box). Longer PNs may widen the column further or truncate. */
+.pb-table th.pn,
+.pb-table td.pn {
+  min-width: 310px;
+  white-space: nowrap;
 }
 
 /* PN never wraps — the column sizes to the widest displayed PN/Hot
@@ -153,6 +179,27 @@
 .pb-table .lname .areadot {
   width: 11px;
   height: 11px;
+  flex: none;
+}
+
+/* Active Machine name: a quiet rounded chip (label look, no action
+   color, no button behavior). It shrinks inside the flex label cell
+   and truncates with an ellipsis, so a long Machine name can never
+   overlap the quantity / state / time columns; the full name stays
+   available through the `title` tooltip. */
+.pb-table .lname .mchip {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--muted);
+  max-width: 18ch;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pb-table .lqty {
@@ -167,6 +214,12 @@
   color: var(--faint);
   font-weight: 650;
   padding-left: 8px;
+}
+
+/* Done (finished at the Area, waiting for transfer): success tone —
+   ready status, never current Machine ownership. */
+.pb-table .ltag.done {
+  color: var(--ok-t);
 }
 
 .pb-table .ltime {
@@ -341,8 +394,14 @@ tr.hotrow2 td:first-child {
   flex: 1;
 }
 
-/* Scrapped companion value on the total line — visible, not loud. */
-.pb-table .locrow .ltime.scraptot {
-  color: var(--err-t);
+/* Scrapped quantity: its own full-width line under the dashed total
+   row — quiet but visible, right-aligned, and structurally unable to
+   collide with the label or time columns. */
+.pb-table .locrow.scrap .lscrap {
+  grid-column: 1 / -1;
+  justify-self: end;
+  font-family: var(--mono), monospace;
+  font-size: 13px;
   font-weight: 700;
+  color: var(--err-t);
 }

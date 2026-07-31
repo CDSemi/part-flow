@@ -23,7 +23,7 @@ import {
   MOCK_BOARD_ROWS_LONG,
 } from '../../mocks/production-board';
 import { formatIsoDateShort } from '../dates';
-import type { MockBoardRow } from '../view-models';
+import type { MockBoardRow, MockLocationRow } from '../view-models';
 import {
   FALLBACK_PAGE_SIZE,
   fallbackPageBreaks,
@@ -57,6 +57,64 @@ function LiveClock() {
   );
 }
 
+/**
+ * Concise operator wording for the state column. `on mch.` marks the
+ * active-Machine rows; canonical Movement type names never appear in
+ * board text. Stocked rows keep their quiet presentation (no tag —
+ * the `total … pcs stocked` line already states it).
+ */
+function locationStateLabel(state: MockLocationRow['state']): string {
+  switch (state) {
+    case 'machine':
+      return 'on mch.';
+    case 'queue':
+      return 'queue';
+    case 'processing':
+      return 'processing';
+    case 'done':
+      return 'done';
+    default:
+      return '';
+  }
+}
+
+function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
+  const onMachine = loc.state === 'machine' && loc.machine !== undefined;
+  // The completing Machine on a done row is secondary context only —
+  // it appears in the tooltip, never as the current executor.
+  const doneTitle =
+    loc.state === 'done'
+      ? loc.machine
+        ? `Completed at ${loc.machine} — ready to transfer`
+        : 'Completed — ready to transfer'
+      : undefined;
+  return (
+    <div className="locrow">
+      <span className="lname">
+        <AreaDot
+          colorVar={areaByKey(loc.area)?.colorVar ?? 'var(--faint)'}
+          size={11}
+        />
+        {onMachine ? (
+          <span className="mchip" title={loc.machine}>
+            {loc.machine}
+          </span>
+        ) : (
+          loc.label
+        )}
+      </span>
+      <span className="lqty">{loc.qty}</span>
+      <span
+        className={`ltag${loc.state === 'done' ? ' done' : ''}`}
+        title={doneTitle}
+      >
+        {locationStateLabel(loc.state)}
+      </span>
+      <span className={`ltime ${loc.timeLong ? 'long' : ''}`}>{loc.time}</span>
+    </div>
+  );
+}
+
 function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
   const urgent = row.dueClass === 'soon' || row.dueClass === 'late';
   return (
@@ -64,7 +122,7 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
       <td className="cell-no">
         <div className="no">{no}</div>
       </td>
-      <td>
+      <td className="pn">
         <div className="part">
           <HotPn rank={row.hotRank} pn={row.pn} />
         </div>
@@ -73,20 +131,10 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
       <td className="areas">
         <div className="loc">
           {row.locations.map((loc) => (
-            <div className="locrow" key={`${loc.label}-${loc.tag ?? ''}`}>
-              <span className="lname">
-                <AreaDot
-                  colorVar={areaByKey(loc.area)?.colorVar ?? 'var(--faint)'}
-                  size={11}
-                />
-                {loc.label}
-              </span>
-              <span className="lqty">{loc.qty}</span>
-              <span className="ltag">{loc.tag ?? ''}</span>
-              <span className={`ltime ${loc.timeLong ? 'long' : ''}`}>
-                {loc.time}
-              </span>
-            </div>
+            <BoardLocationRow
+              loc={loc}
+              key={`${loc.area}-${loc.machine ?? ''}-${loc.state}`}
+            />
           ))}
           <div className="locrow total">
             <span className="lname">total</span>
@@ -94,12 +142,16 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
             <span className="ltag">
               pcs{row.totalStocked ? ' stocked' : ''}
             </span>
-            {/* Scrapped quantity stays visible without widening the
-                board: one quiet companion value on the total line. */}
-            <span className={`ltime ${row.scrapped ? 'scraptot' : ''}`}>
-              {row.scrapped ? `⊘ ${row.scrapped} scrapped` : ''}
-            </span>
+            <span className="ltime" />
           </div>
+          {row.scrapped ? (
+            // Scrapped quantity gets its own full-width line under the
+            // dashed total row — it never shares the time column, so
+            // long Area/Machine names cannot collide with it.
+            <div className="locrow scrap">
+              <span className="lscrap">⊘ {row.scrapped} scrapped</span>
+            </div>
+          ) : null}
         </div>
       </td>
       <td className="due">
@@ -141,7 +193,7 @@ function BoardHeadRow() {
   return (
     <tr>
       <th>No.</th>
-      <th>Part Number</th>
+      <th className="pn">Part Number</th>
       <th>Areas &amp; Quantities · Time</th>
       <th>Due Date</th>
       <th>Total Days</th>

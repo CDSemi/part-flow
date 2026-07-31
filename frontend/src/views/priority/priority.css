@@ -214,6 +214,101 @@
   line-height: 1.6;
 }
 
+/* Reorder-confirmation dialog: primary move summary + current-vs-proposed
+   rank comparison. The directly moved entry gets a stronger surface and
+   border; indirectly shifted entries stay muted so the moved item reads
+   first. */
+.pr-move-summary {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+
+.pr-move-summary .mono {
+  font-family: var(--mono), monospace;
+}
+
+.pr-compare {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 12px;
+  font-size: 14px;
+}
+
+.pr-compare thead th {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--faint);
+  text-align: left;
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pr-compare thead th + th {
+  text-align: right;
+  width: 84px;
+}
+
+.pr-compare tbody th,
+.pr-compare tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  font-weight: 500;
+}
+
+.pr-compare tbody .rankcell {
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.pr-compare .cpn {
+  font-family: var(--mono), monospace;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.pr-compare .cwo {
+  font-family: var(--mono), monospace;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.pr-compare tr.moved th,
+.pr-compare tr.moved td {
+  background: var(--info-surface-weak);
+  border-top: 1px solid var(--info-border);
+  border-bottom: 1px solid var(--info-border);
+}
+
+.pr-compare tr.shifted th,
+.pr-compare tr.shifted td {
+  color: var(--muted);
+}
+
+.pr-compare tr.shifted .cpn {
+  font-weight: 650;
+}
+
+/* Direction follows the Hot metaphor: up = closer to #1 = hotter. */
+.pr-compare .dir {
+  font-weight: 800;
+  margin-left: 6px;
+}
+
+.pr-compare .dir.up {
+  color: var(--err-t);
+}
+
+.pr-compare .dir.down {
+  color: var(--info-t);
+}
+
 /* Add-to-Hot dialog */
 .hotsearch {
   width: 100%;

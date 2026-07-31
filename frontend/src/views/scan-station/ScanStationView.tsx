@@ -38,16 +38,27 @@ import {
   stationById,
 } from '../../mocks/scan-station';
 import { catalogPartNumber } from '../../mocks/work-orders';
-import { splitAssignments } from '../area-monitoring';
+import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
 import type {
   MockAreaCard,
   MockCompletedAction,
   MockScanStation,
+  MovementType,
   RequestType,
   RouteMode,
 } from '../view-models';
 import { parseScan, pnKey, SCRAP_BARCODE } from './barcode';
+import {
+  applyAssign,
+  applyDone,
+  applyIntroduce,
+  applyQueueReturn,
+  applyScrap,
+  applyTransferIn,
+  cardBreakdown,
+  completionRequired,
+} from './mock-area-state';
 
 /**
  * One floating scan notification. Success/info notices auto-dismiss
@@ -75,6 +86,16 @@ interface SourceOption {
   card: MockAreaCard;
 }
 
+/**
+ * One confirmed application command: the immutable Movement events it
+ * appends (in order) plus the mock state transition. Undo reverses the
+ * complete command — never one arbitrary event of it.
+ */
+interface Command {
+  action: MockCompletedAction;
+  update: (cards: MockAreaCard[]) => MockAreaCard[];
+}
+
 /** One-shot dialog flows — no persistent context survives a dialog. */
 type Flow =
   | {
@@ -96,6 +117,7 @@ type Flow =
   | { kind: 'repair'; pn: string }
   | { kind: 'scrap'; pn: string }
   | { kind: 'queue-return'; pn: string; machine: string; max: number }
+  | { kind: 'done'; pn: string; machine: string | null; max: number }
   | { kind: 'undo' }
   | { kind: 'manual-pn' };
 
@@ -199,23 +221,39 @@ function StationView({ station }: { station: MockScanStation }) {
   const writeBlocked = status !== 'connected';
 
   const area = areaByKey(station.area);
-  const machines = MOCK_AREA_MACHINES[station.area] ?? [];
+  const machines = useMemo(
+    () => MOCK_AREA_MACHINES[station.area] ?? [],
+    [station.area],
+  );
   const hasMachines = machines.length > 0;
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [worker, setWorker] = useState(MOCK_WORKER.name);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
-  // Completed PN operations, newest first; reversed entries stay for
-  // audit display but are no longer Undo-eligible.
+  // Session-local copy of the mock Area cards (all Areas): confirmed
+  // commands update it so the monitoring surfaces reflect the result.
+  const baseCards = preview === 'long' ? MOCK_AREA_CARDS_LONG : MOCK_AREA_CARDS;
+  const [allCards, setAllCards] = useState<MockAreaCard[]>(() =>
+    structuredClone(baseCards),
+  );
+  // Completed application commands, newest first; reversed entries stay
+  // for audit display but are no longer Undo-eligible. Each entry keeps
+  // the pre-command state so Undo restores the complete command.
   const [history, setHistory] = useState<
-    { action: MockCompletedAction; reversed: boolean }[]
+    { action: MockCompletedAction; reversed: boolean; before: MockAreaCard[] }[]
   >([]);
   // PNs created on first valid use in this session (mock): identity is
   // case-insensitive, the first-entered casing is preserved for display.
   const [createdPns, setCreatedPns] = useState<Map<string, string>>(
     () => new Map(),
   );
+
+  // Reset the session-local mock state when the dev preview changes.
+  useEffect(() => {
+    setAllCards(structuredClone(baseCards));
+    setHistory([]);
+  }, [baseCards]);
 
   // Auto-dismiss the floating notification: ~4 s for success/info,
   // ~8 s for warnings and errors. A replacing notice restarts the
@@ -241,12 +279,13 @@ function StationView({ station }: { station: MockScanStation }) {
     if (!writeBlocked) focusScan();
   }, [writeBlocked, focusScan]);
 
-  const areaCards = useMemo(() => {
-    const all = preview === 'long' ? MOCK_AREA_CARDS_LONG : MOCK_AREA_CARDS;
-    return preview === 'empty'
-      ? []
-      : all.filter((c) => c.area === station.area);
-  }, [preview, station.area]);
+  const areaCards = useMemo(
+    () =>
+      preview === 'empty'
+        ? []
+        : allCards.filter((c) => c.area === station.area),
+    [allCards, preview, station.area],
+  );
   const { assigned } = splitAssignments(areaCards);
 
   const eligible = history.find((h) => !h.reversed);
@@ -266,24 +305,36 @@ function StationView({ station }: { station: MockScanStation }) {
 
   const sourcesFor = useCallback(
     (pn: string): SourceOption[] =>
-      MOCK_AREA_CARDS.filter(
-        (c) =>
-          pnKey(c.pn) === pnKey(pn) &&
-          c.area !== station.area &&
-          c.area !== 'stockroom',
-      ).map((card) => ({
-        areaLabel: areaByKey(card.area)?.name ?? card.area,
-        qty: card.qty,
-        card,
-      })),
-    [station.area],
+      allCards
+        .filter(
+          (c) =>
+            pnKey(c.pn) === pnKey(pn) &&
+            c.area !== station.area &&
+            c.area !== 'stockroom' &&
+            c.qty > 0,
+        )
+        .map((card) => ({
+          areaLabel: areaByKey(card.area)?.name ?? card.area,
+          qty: card.qty,
+          card,
+        })),
+    [allCards, station.area],
   );
 
   const queuedQtyFor = useCallback(
     (pn: string) => {
       const { queued } = splitAssignments(cardsFor(pn));
-      return queued.reduce((s, e) => s + e.qty, 0);
+      return queued
+        .filter((e) => e.state === 'queue')
+        .reduce((s, e) => s + e.qty, 0);
     },
+    [cardsFor],
+  );
+
+  /** Directly processing (not finished) quantity of a no-Machine Area. */
+  const processingQtyFor = useCallback(
+    (pn: string) =>
+      cardsFor(pn).reduce((s, c) => s + cardBreakdown(c).active, 0),
     [cardsFor],
   );
 
@@ -294,9 +345,22 @@ function StationView({ station }: { station: MockScanStation }) {
     return key ? MOCK_REPAIR_SOURCES[key] : [];
   }, []);
 
-  const record = useCallback((action: MockCompletedAction) => {
-    setHistory((current) => [{ action, reversed: false }, ...current]);
-  }, []);
+  /**
+   * Apply one confirmed application command atomically to the mock
+   * state: all of its Movement events take effect together, and the
+   * pre-command snapshot lets Undo reverse the whole command.
+   */
+  const applyCommand = useCallback(
+    (command: Command) => {
+      const before = structuredClone(allCards);
+      setAllCards(command.update(structuredClone(allCards)));
+      setHistory((current) => [
+        { action: command.action, reversed: false, before },
+        ...current,
+      ]);
+    },
+    [allCards],
+  );
 
   const blockedNotice = useCallback(() => {
     setNotice({
@@ -350,7 +414,7 @@ function StationView({ station }: { station: MockScanStation }) {
     [cardsFor, resolvePn, sourcesFor],
   );
 
-  function handleScan() {
+  const handleScan = useCallback(() => {
     const input = inputRef.current;
     if (!input) return;
     if (writeBlocked) {
@@ -452,32 +516,81 @@ function StationView({ station }: { station: MockScanStation }) {
           icon: '✕',
           title: 'Unrecognized barcode',
           detail:
-            'Only PF:-prefixed PartFlow barcodes are accepted — unrelated factory/vendor barcodes and raw PN text are rejected. Nothing recorded.',
+            'Only PartFlow barcodes are accepted here. Unrelated factory or vendor barcodes and plain PN text are rejected — use “Enter PN manually” to type a PN. Nothing recorded.',
         });
         return;
     }
-  }
+  }, [
+    writeBlocked,
+    blockedNotice,
+    focusScan,
+    machines,
+    station.area,
+    openPnFlow,
+  ]);
+
+  // Keyboard-wedge capture at the Scan Station level: when no dialog
+  // is open, a scanned barcode reaches the main input even when the
+  // input is not focused. The first character is captured (never
+  // lost), focus then follows the scan; Enter submits exactly once.
+  // Typing inside any other input/textarea/select/contenteditable, an
+  // active dialog workflow, modifier shortcuts, and normal button
+  // activation are all left alone.
+  useEffect(() => {
+    if (flow || writeBlocked) return;
+    function onKeyDown(event: KeyboardEvent) {
+      const input = inputRef.current;
+      if (!input || event.defaultPrevented) return;
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      const target = event.target;
+      if (target === input) return; // native typing already lands here
+      if (target instanceof HTMLElement) {
+        if (target.isContentEditable) return;
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        // Enter/Space on a button stays button activation.
+        if (tag === 'BUTTON') return;
+      }
+      if (event.key === 'Enter') {
+        if (input.value) {
+          event.preventDefault();
+          handleScan();
+        }
+        return;
+      }
+      if (event.key.length === 1 && event.key !== ' ') {
+        event.preventDefault();
+        input.value += event.key;
+        input.focus();
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [flow, writeBlocked, handleScan]);
 
   function undoTarget(): MockCompletedAction | null {
     return eligible?.action ?? null;
   }
 
   function confirmUndo() {
-    const target = undoTarget();
-    if (!target) return;
-    setHistory((current) => {
-      const index = current.findIndex((h) => !h.reversed);
-      if (index < 0) return current;
-      return current.map((h, i) =>
-        i === index ? { ...h, reversed: true } : h,
-      );
-    });
+    const entryIndex = history.findIndex((h) => !h.reversed);
+    if (entryIndex < 0) return;
+    const entry = history[entryIndex];
+    // Whole-command reversal: the pre-command state returns, covering
+    // every Movement the command appended (e.g. AREA_COMPLETED +
+    // TRANSFERRED together).
+    setAllCards(structuredClone(entry.before));
+    setHistory((current) =>
+      current.map((h, i) => (i === entryIndex ? { ...h, reversed: true } : h)),
+    );
     setFlow(null);
     setNotice({
       kind: 'warn',
       icon: '⟲',
-      title: `Undo recorded as REVERSED — ${target.pn}`,
-      detail: `${target.reversalEffect} The original ${target.movementType} Movement is preserved; a compensating event references it (mock presentation).`,
+      title: `Undo recorded — ${entry.action.pn}`,
+      detail: `${entry.action.reversalEffect} The original ${entry.action.movements.join(
+        ' + ',
+      )} record${entry.action.movements.length > 1 ? 's are' : ' is'} preserved; a compensating REVERSED event references the complete operation.`,
     });
     focusScan();
   }
@@ -513,88 +626,84 @@ function StationView({ station }: { station: MockScanStation }) {
 
   // Row actions: `In this Area now` carries NO row actions (assignment
   // stays available through PN scan, Machine scan and the action
-  // dialog); Machine cards carry only the one-shot QUEUE return.
+  // dialog); Machine-card rows carry the two distinct one-shot
+  // actions — DONE completes Area processing and moves the quantity to
+  // the finished rack; QUEUE returns unfinished or paused quantity to
+  // the Area queue. They are never merged.
   const machineRowAction = (entry: AreaAssignment) => (
-    <button
-      className="rowact"
-      disabled={writeBlocked}
-      onClick={() =>
-        setFlow({
-          kind: 'queue-return',
-          pn: entry.card.pn,
-          machine: entry.context,
-          max: entry.qty,
-        })
-      }
-    >
-      QUEUE
-    </button>
+    <>
+      <button
+        className="rowact done"
+        aria-label="Complete Area processing"
+        title="Complete processing — move this quantity to the finished rack, ready to transfer"
+        disabled={writeBlocked}
+        onClick={() =>
+          setFlow({
+            kind: 'done',
+            pn: entry.card.pn,
+            machine: entry.context,
+            max: entry.qty,
+          })
+        }
+      >
+        <span className="ric" aria-hidden="true">
+          ✓
+        </span>
+        DONE
+      </button>
+      <button
+        className="rowact"
+        aria-label="Return to Area queue"
+        title="Return unfinished or paused quantity to the Area queue"
+        disabled={writeBlocked}
+        onClick={() =>
+          setFlow({
+            kind: 'queue-return',
+            pn: entry.card.pn,
+            machine: entry.context,
+            max: entry.qty,
+          })
+        }
+      >
+        <span className="ric" aria-hidden="true">
+          ⟲
+        </span>
+        QUEUE
+      </button>
+    </>
   );
 
   return (
     <section className="ss" aria-label="Scan Station">
+      {/* Header grid: the left Area identity group and the Worker
+          Session always share the main row; the Area totals sit
+          between them while space allows and drop to a full-width
+          second row (equal cells) when it does not (container query in
+          scan-station.css). The header is the single summary surface
+          for the Area totals — the `In this Area now` card carries no
+          statistics block. */}
       <header className="ss-head">
-        <div>
+        <div className="ss-id">
           <div className="dept">{station.department}</div>
           <div className="area">
             <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={16} />
             {area?.name}
           </div>
           <div className="op">
-            Operations: <b>{area?.operations.join(', ')}</b>
+            Operations:{' '}
+            <span className="opchips">
+              {(area?.operations ?? []).map((op) => (
+                <span className="opchip" key={op}>
+                  {op}
+                </span>
+              ))}
+            </span>
           </div>
         </div>
-        <span className="spacer" />
         <div className="ss-stats" aria-label="Area statistics">
-          {(hasMachines
-            ? [
-                { label: 'Total PNs', value: areaCards.length },
-                {
-                  label: 'Total pcs',
-                  value: areaCards.reduce((s, c) => s + c.qty, 0),
-                },
-                {
-                  label: 'Queued',
-                  value: areaCards.reduce(
-                    (s, c) =>
-                      s +
-                      c.machines
-                        .filter(([m]) => m === 'queue')
-                        .reduce((x, [, q]) => x + q, 0),
-                    0,
-                  ),
-                },
-                {
-                  label: 'On machines',
-                  value: assigned.reduce((s, e) => s + e.qty, 0),
-                },
-                {
-                  label: 'Hot',
-                  value:
-                    areaCards.filter((c) => c.hotRank !== undefined).length ||
-                    '—',
-                },
-              ]
-            : [
-                { label: 'Total PNs', value: areaCards.length },
-                {
-                  label: 'Total pcs',
-                  value: areaCards.reduce((s, c) => s + c.qty, 0),
-                },
-                {
-                  label: 'Processing',
-                  value: areaCards.reduce((s, c) => s + c.qty, 0),
-                },
-                {
-                  label: 'Hot',
-                  value:
-                    areaCards.filter((c) => c.hotRank !== undefined).length ||
-                    '—',
-                },
-              ]
-          ).map((s) => (
+          {(area ? areaStats(area, areaCards, hasMachines) : []).map((s) => (
             <div className="stat" key={s.label}>
-              <div className="n">{s.value}</div>
+              <div className={`n ${s.tone ?? ''}`}>{s.value}</div>
               <div className="l">{s.label}</div>
             </div>
           ))}
@@ -646,8 +755,13 @@ function StationView({ station }: { station: MockScanStation }) {
                 ⌨ Enter PN manually
               </button>
             </div>
+            {/* Development-only demo barcodes: this hint ships only in
+                the dev build (the whole mock view is excluded from
+                production bundles — see app/dev-views.ts and the
+                mock-sentinel build check). */}
             <div className="ss-hint">
-              Demo barcodes — <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
+              Demo barcodes (development build only) —{' '}
+              <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
               <code>PF:PN:2027-60-8114-00</code> in this Area ·{' '}
               <code>PF:PN:118-052</code> elsewhere ·{' '}
               <code>PF:PN:NEW-PART-01</code> unknown → intake) ·{' '}
@@ -664,7 +778,7 @@ function StationView({ station }: { station: MockScanStation }) {
               <span className="p">{lastPn?.pn ?? '—'}</span>
               <span className="d">
                 {lastPn
-                  ? `${lastPn.movementType} · ${lastPn.description}`
+                  ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
                   : 'no completed PN operations yet'}
               </span>
               <button
@@ -686,6 +800,7 @@ function StationView({ station }: { station: MockScanStation }) {
                 cards={areaCards}
                 machines={machines}
                 title="In this Area now"
+                showStats={false}
               />
             ) : null
           }
@@ -718,7 +833,7 @@ function StationView({ station }: { station: MockScanStation }) {
               ? () => setFlow({ kind: 'pn-actions', pn: flow.pn! })
               : undefined
           }
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -730,6 +845,7 @@ function StationView({ station }: { station: MockScanStation }) {
           station={station}
           hasMachines={hasMachines}
           queuedQty={queuedQtyFor(flow.pn)}
+          directQty={hasMachines ? 0 : processingQtyFor(flow.pn)}
           sources={sourcesFor(flow.pn)}
           repairSources={repairSourcesFor(flow.pn)}
           inAreaQty={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
@@ -754,7 +870,7 @@ function StationView({ station }: { station: MockScanStation }) {
           source={flow.source}
           hasMachines={hasMachines}
           worker={worker}
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -776,7 +892,7 @@ function StationView({ station }: { station: MockScanStation }) {
               return next;
             })
           }
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -788,7 +904,7 @@ function StationView({ station }: { station: MockScanStation }) {
           pn={flow.pn}
           hasMachines={hasMachines}
           worker={worker}
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -800,7 +916,7 @@ function StationView({ station }: { station: MockScanStation }) {
           pn={flow.pn}
           sources={repairSourcesFor(flow.pn)}
           worker={worker}
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -812,7 +928,7 @@ function StationView({ station }: { station: MockScanStation }) {
           pn={flow.pn}
           available={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
           worker={worker}
-          onRecord={record}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -825,7 +941,20 @@ function StationView({ station }: { station: MockScanStation }) {
           machine={flow.machine}
           max={flow.max}
           worker={worker}
-          onRecord={record}
+          onApply={applyCommand}
+          onNotice={setNotice}
+          onClose={closeFlow}
+          onCancel={cancelFlow}
+        />
+      )}
+      {flow?.kind === 'done' && (
+        <DoneDialog
+          station={station}
+          pn={flow.pn}
+          machine={flow.machine}
+          max={flow.max}
+          worker={worker}
+          onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
           onCancel={cancelFlow}
@@ -920,7 +1049,8 @@ function FloatingNotice({
 interface ActionDialogProps {
   station: MockScanStation;
   worker: string;
-  onRecord: (action: MockCompletedAction) => void;
+  /** Apply one confirmed application command (atomic in mock state). */
+  onApply: (command: Command) => void;
   onNotice: (n: Notice) => void;
   onClose: (message?: string) => void;
   onCancel: () => void;
@@ -973,12 +1103,13 @@ function StepRecap({ lines }: { lines: ReactNode[] }) {
 /**
  * Wizard navigation row: Back only when a meaningful previous view
  * exists, Cancel (Esc) always abandons the whole one-shot workflow
- * with no write, and the primary button names the actual operation.
+ * with no write (the standard label is exactly `Cancel (Esc)`), and
+ * the primary button names the actual operation.
  */
 function StepButtons({
   onBack,
   onCancel,
-  cancelLabel = 'Cancel (Esc) — nothing recorded',
+  cancelLabel = 'Cancel (Esc)',
   primary,
 }: {
   onBack?: () => void;
@@ -1115,7 +1246,7 @@ function MachineAssignDialog({
   areaCards,
   worker,
   onBack,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -1217,24 +1348,34 @@ function MachineAssignDialog({
 
   function confirm() {
     if (!valid || !machine || !pn) return;
-    onRecord({
-      pn,
-      movementType: 'ASSIGNED_TO_MACHINE',
-      description: `${station.area} queue → ${machine} · qty ${parsedQty}`,
-      qty: parsedQty,
-      source: 'Area queue',
-      destination: machine,
-      machine,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Returns ${parsedQty} pcs from ${machine} to the Area queue.`,
+    const selectedMachine = machine;
+    const selectedPn = pn;
+    onApply({
+      action: {
+        pn: selectedPn,
+        movements: ['ASSIGNED_TO_MACHINE'],
+        description: `${station.area} queue → ${selectedMachine} · qty ${parsedQty}`,
+        qty: parsedQty,
+        source: 'Area queue',
+        destination: selectedMachine,
+        machine: selectedMachine,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Returns ${parsedQty} pcs from ${selectedMachine} to the Area queue.`,
+      },
+      update: (cards) =>
+        applyAssign(cards, {
+          pn: selectedPn,
+          area: station.area,
+          machine: selectedMachine,
+          qty: parsedQty,
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
-      title: `${pn} × ${parsedQty} → ${machine}`,
-      detail:
-        'ASSIGNED_TO_MACHINE (mock presentation only — no production write). One-shot action complete; no Machine context stays armed.',
+      title: `${selectedPn} × ${parsedQty} → ${selectedMachine}`,
+      detail: `${selectedMachine} is now processing this quantity. The assignment is complete — scan the next barcode.`,
     });
     onClose();
   }
@@ -1257,9 +1398,11 @@ function MachineAssignDialog({
       {step === 'select' ? (
         <>
           <div className="sub">
-            Assign queued quantity to a Machine. This is a single action — there
-            is no persistent Machine Session; when this dialog closes, nothing
-            stays armed.
+            Assign queued quantity to a Machine: select the Machine and the
+            queued PN (scan either barcode, or pick below), then enter the
+            quantity and confirm. This is one single assignment — there is no
+            persistent Machine Session; when this dialog closes, nothing stays
+            armed.
           </div>
           <input
             ref={scanRef}
@@ -1426,7 +1569,7 @@ function MachineAssignDialog({
           <div className="sub">Review the assignment, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'ASSIGNED_TO_MACHINE'],
+              ['Action', 'Assign to Machine'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">{parsedQty} pcs</span>],
               ['Source', 'Area queue'],
@@ -1437,6 +1580,7 @@ function MachineAssignDialog({
               ],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'ASSIGNED_TO_MACHINE'],
             ]}
           />
           <StepButtons
@@ -1460,6 +1604,7 @@ function PnActionsDialog({
   station,
   hasMachines,
   queuedQty,
+  directQty,
   sources,
   repairSources,
   inAreaQty,
@@ -1470,6 +1615,8 @@ function PnActionsDialog({
   station: MockScanStation;
   hasMachines: boolean;
   queuedQty: number;
+  /** Directly processing quantity (no-Machine Areas) eligible for DONE. */
+  directQty: number;
   sources: SourceOption[];
   repairSources: {
     areaLabel: string;
@@ -1541,6 +1688,26 @@ function PnActionsDialog({
           </span>
         </button>
       ) : null}
+      {directQty > 0 ? (
+        <button
+          className="choice"
+          onClick={() =>
+            onPick({ kind: 'done', pn, machine: null, max: directQty })
+          }
+        >
+          <span className="cic run" aria-hidden="true">
+            DONE
+          </span>
+          <span>
+            <span className="ct1">Complete processing — DONE</span>
+            <br />
+            <span className="ct2">
+              {directQty} pcs in processing. The finished quantity moves to the
+              finished rack, ready to transfer to another Area.
+            </span>
+          </span>
+        </button>
+      ) : null}
       <button
         className="choice"
         onClick={() => onPick({ kind: 'add-qty', pn })}
@@ -1552,9 +1719,8 @@ function PnActionsDialog({
           <span className="ct1">Add more quantity</span>
           <br />
           <span className="ct2">
-            Intentionally introduces additional physical quantity — reason
-            required, auditable (QUANTITY_ADJUSTED · INCREASE), no Manager
-            approval needed.
+            Add physical quantity that was not received from another Area. Enter
+            a reason so the adjustment can be reviewed later.
           </span>
         </span>
       </button>
@@ -1596,7 +1762,7 @@ function PnActionsDialog({
       ) : null}
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc) — nothing recorded
+          Cancel (Esc)
         </button>
       </div>
     </ModalDialog>
@@ -1645,7 +1811,7 @@ function SourceSelectDialog({
       ))}
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc) — nothing recorded
+          Cancel (Esc)
         </button>
       </div>
     </ModalDialog>
@@ -1658,7 +1824,7 @@ function TransferDialog({
   source,
   hasMachines,
   worker,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -1674,7 +1840,15 @@ function TransferDialog({
   const valid = parsedQty >= 1 && parsedQty <= source.qty;
   const destinationNote = hasMachines
     ? `${areaName} queue (awaiting Machine)`
-    : `${areaName} — direct processing (Machine = NULL)`;
+    : `${areaName} — direct processing`;
+  // Quantity still actively processing at the source is treated as
+  // completed there by this transfer: one atomic command appends
+  // AREA_COMPLETED immediately before TRANSFERRED — no separate manual
+  // DONE is required first. Quantity already finished (or still
+  // queued) at the source transfers with TRANSFERRED alone.
+  const completesQty = valid ? completionRequired(source.card, parsedQty) : 0;
+  const movements: MovementType[] =
+    completesQty > 0 ? ['AREA_COMPLETED', 'TRANSFERRED'] : ['TRANSFERRED'];
 
   function goConfirm() {
     if (valid) setStep('confirm');
@@ -1682,23 +1856,40 @@ function TransferDialog({
 
   function confirm() {
     if (!valid) return;
-    onRecord({
-      pn,
-      movementType: 'TRANSFERRED',
-      description: `${source.areaLabel} → ${destinationNote} · qty ${parsedQty}`,
-      qty: parsedQty,
-      source: source.areaLabel,
-      destination: areaName,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
+    onApply({
+      action: {
+        pn,
+        movements,
+        description: `${source.areaLabel} → ${destinationNote} · qty ${parsedQty}`,
+        qty: parsedQty,
+        source: source.areaLabel,
+        destination: areaName,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect:
+          completesQty > 0
+            ? `Returns ${parsedQty} pcs to ${source.areaLabel} and restores their processing state there.`
+            : `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
+      },
+      update: (cards) =>
+        applyTransferIn(cards, {
+          pn,
+          fromArea: source.card.area,
+          toArea: station.area,
+          qty: parsedQty,
+          destinationHasMachines: hasMachines,
+          destinationOperation:
+            areaByKey(station.area)?.operations[0] ?? areaName,
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} → ${destinationNote}`,
       detail:
-        'TRANSFERRED (mock presentation only — no production write; the real write is server-confirmed).',
+        completesQty > 0
+          ? `Processing at ${source.areaLabel} is completed for ${completesQty} pcs and the quantity moved here in one step.`
+          : `The quantity moved here from ${source.areaLabel}.`,
     });
     onClose();
   }
@@ -1757,17 +1948,29 @@ function TransferDialog({
           <div className="sub">Review the transfer, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'TRANSFERRED'],
+              ['Action', 'Transfer into this Area'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">{parsedQty} pcs</span>],
               ['Source', source.areaLabel],
               ['Destination', destinationNote],
+              [
+                'Source processing',
+                completesQty > 0
+                  ? `Completed by this transfer for ${completesQty} pcs — no separate DONE needed first`
+                  : null,
+              ],
               [
                 'Remaining at source',
                 <span className="mono">{source.qty - parsedQty} pcs</span>,
               ],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              [
+                movements.length > 1 ? 'Recorded events' : 'Recorded event',
+                movements.length > 1
+                  ? `${movements.join(', then ')} — one atomic operation`
+                  : movements[0],
+              ],
             ]}
           />
           <StepButtons
@@ -1792,7 +1995,7 @@ function IntakeDialog({
   hasMachines,
   worker,
   onCreatePn,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -1841,34 +2044,45 @@ function IntakeDialog({
   function confirm() {
     if (!valid) return;
     onCreatePn(pn);
-    onRecord({
-      pn,
-      movementType: 'RECEIVED',
-      description: `intake into ${areaName}${hasMachines ? ' queue' : ''} · qty ${parsedQty} · ${requestType} · ${routeMode}`,
-      qty: parsedQty,
-      source: '—',
-      destination: areaName,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Removes the ${parsedQty} pcs introduced by this intake.`,
+    onApply({
+      action: {
+        pn,
+        movements: ['RECEIVED'],
+        description: `intake into ${areaName}${hasMachines ? ' queue' : ''} · qty ${parsedQty} · ${requestType} · ${routeMode}`,
+        qty: parsedQty,
+        source: '—',
+        destination: areaName,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Removes the ${parsedQty} pcs introduced by this intake.`,
+      },
+      update: (cards) =>
+        applyIntroduce(cards, {
+          pn,
+          area: station.area,
+          qty: parsedQty,
+          hasMachines,
+          workOrder: `WO — · ${operation.split(' — ')[1] ?? operation} · ${requestType}`,
+          job: '— (internal)',
+          due: due || 'No due date',
+          received: '2026-07-31',
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} received into ${areaName}${hasMachines ? ' queue' : ''}`,
-      detail: `Mock presentation of the future intake transaction: ${
-        isKnown ? 'reuses' : 'creates'
-      } the PartNumber, ${
+      detail: `${isKnown ? 'Reuses' : 'Creates'} the PartNumber and ${
         reusableInternalWo
           ? 'reuses the applicable internal MODIFY Work Order (WO —)'
           : requestType === 'MODIFY'
             ? 'creates an internal Work Order without an external number (displays —)'
-            : 'creates/uses the applicable Work Order'
-      }, creates WorkOrderDemand + QuantityFlow (${routeMode}), records RECEIVED, ${
+            : 'creates or uses the applicable Work Order'
+      }; the quantity ${
         hasMachines
-          ? 'places quantity in the Area queue'
-          : 'places quantity directly in Area processing (Machine = NULL)'
-      }. No production write occurred (Phase 2).`,
+          ? 'now waits in the Area queue for a Machine'
+          : 'is now processing in this Area'
+      }.`,
     });
     onClose();
   }
@@ -2028,7 +2242,7 @@ function IntakeDialog({
           <div className="sub">Review the intake, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Receive quantity — intake (RECEIVED)'],
+              ['Action', 'Receive quantity — intake'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">{parsedQty} pcs</span>],
               ['Request Type', requestType],
@@ -2043,11 +2257,12 @@ function IntakeDialog({
                 'Destination',
                 hasMachines
                   ? `${areaName} queue (awaiting Machine)`
-                  : `${areaName} — direct processing (Machine = NULL)`,
+                  : `${areaName} — direct processing`,
               ],
               ['Reason / notes', notes || null],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'RECEIVED'],
             ]}
           />
           <StepButtons
@@ -2071,7 +2286,7 @@ function AddQuantityDialog({
   pn,
   hasMachines,
   worker,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -2089,26 +2304,39 @@ function AddQuantityDialog({
 
   function confirm() {
     if (!valid) return;
-    onRecord({
-      pn,
-      movementType: 'QUANTITY_ADJUSTED',
-      description: `+${parsedQty} pcs at ${areaName} (INCREASE) · reason: ${reason.trim()}`,
-      qty: parsedQty,
-      source: '—',
-      destination: areaName,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Removes the ${parsedQty} added pcs again.`,
+    onApply({
+      action: {
+        pn,
+        movements: ['QUANTITY_ADJUSTED'],
+        description: `+${parsedQty} pcs at ${areaName} (INCREASE) · reason: ${reason.trim()}`,
+        qty: parsedQty,
+        source: '—',
+        destination: areaName,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Removes the ${parsedQty} added pcs again.`,
+      },
+      update: (cards) =>
+        applyIntroduce(cards, {
+          pn,
+          area: station.area,
+          qty: parsedQty,
+          hasMachines,
+          workOrder: 'WO — · Addition',
+          job: '— (internal)',
+          due: 'No due date',
+          received: '2026-07-31',
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} +${parsedQty} pcs at ${areaName}`,
-      detail: `QUANTITY_ADJUSTED · direction INCREASE (auditable; never an ordinary transfer, never changes the WO Demand requested quantity). ${
+      detail: `The addition is recorded with your reason so it can be reviewed later; it never changes the WO Demand requested quantity. ${
         hasMachines
-          ? 'Added quantity enters the Area queue.'
-          : 'Added quantity enters direct Area processing.'
-      } Mock only — no production write.`,
+          ? 'The added quantity waits in the Area queue.'
+          : 'The added quantity is now processing in this Area.'
+      }`,
     });
     onClose();
   }
@@ -2130,9 +2358,8 @@ function AddQuantityDialog({
             {pn}
           </div>
           <div className="sub">
-            Intentionally introduces additional physical quantity at {areaName}.
-            Operators may do this without Manager approval; the reason is
-            mandatory and the event is auditable (QUANTITY_ADJUSTED · INCREASE).
+            Add physical quantity that was not received from another Area. Enter
+            a reason so the adjustment can be reviewed later.
           </div>
           <Guidance>
             There is deliberately no MAX and no default — enter the actual
@@ -2169,7 +2396,7 @@ function AddQuantityDialog({
           <div className="sub">Review the quantity addition, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'QUANTITY_ADJUSTED · INCREASE'],
+              ['Action', 'Add physical quantity'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">+{parsedQty} pcs</span>],
               ['Area', areaName],
@@ -2177,11 +2404,12 @@ function AddQuantityDialog({
                 'Destination',
                 hasMachines
                   ? `${areaName} queue (awaiting Machine)`
-                  : `${areaName} — direct processing (Machine = NULL)`,
+                  : `${areaName} — direct processing`,
               ],
               ['Reason', reason.trim()],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'QUANTITY_ADJUSTED · INCREASE'],
             ]}
           />
           <StepButtons
@@ -2205,7 +2433,7 @@ function RepairDialog({
   pn,
   sources,
   worker,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -2238,26 +2466,38 @@ function RepairDialog({
 
   function confirm() {
     if (!valid || !source) return;
-    onRecord({
-      pn,
-      movementType: 'TRANSFERRED',
-      description: `REPAIR · ${source.areaLabel} → ${areaName} · qty ${parsedQty} · reason: ${reason.trim()}`,
-      qty: parsedQty,
-      source: source.areaLabel,
-      destination: areaName,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
+    const selectedSource = source;
+    onApply({
+      action: {
+        pn,
+        movements: ['TRANSFERRED'],
+        description: `REPAIR · ${selectedSource.areaLabel} → ${areaName} · qty ${parsedQty} · reason: ${reason.trim()}`,
+        qty: parsedQty,
+        source: selectedSource.areaLabel,
+        destination: areaName,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Returns ${parsedQty} pcs to ${selectedSource.areaLabel}.`,
+      },
+      update: (cards) =>
+        applyIntroduce(cards, {
+          pn,
+          area: station.area,
+          qty: parsedQty,
+          hasMachines: (MOCK_AREA_MACHINES[station.area] ?? []).length > 0,
+          workOrder: 'WO — · Repair',
+          job: '— (repair)',
+          due: 'No due date',
+          received: '2026-07-31',
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
-      title: `REPAIR — ${pn} × ${parsedQty} returns to ${areaName}`,
-      detail: `TRANSFERRED with movement_reason REPAIR (${source.flow}${
-        partial
-          ? ' — partial quantity requires a QuantityFlow SPLIT first (Phase 8)'
-          : ''
-      }). Repair creates no new quantity and no new demand; the Movement history stays authoritative. Mock only — no production write.`,
+      title: `Repair — ${pn} × ${parsedQty} returned to ${areaName}`,
+      detail: `The quantity came back from ${selectedSource.areaLabel} to correct earlier work${
+        partial ? '; the partial quantity splits its Quantity Flow first' : ''
+      }. Repair creates no new quantity and no new demand.`,
     });
     onClose();
   }
@@ -2280,12 +2520,11 @@ function RepairDialog({
             {pn}
           </div>
           <div className="sub">
-            An explicit Repair intent: quantity already in production returns to{' '}
-            {areaName} — an Area it previously visited — to correct earlier
-            work. Repair is a movement (TRANSFERRED · movement_reason REPAIR),
-            never a Request Type and never new demand or new quantity. Returning
-            to a previously visited Area is <b>not</b> assumed to be Repair —
-            you chose it here.
+            Return quantity that previously passed {areaName} so earlier work
+            can be corrected. Select where the quantity comes from, enter the
+            repair quantity, and give the reason. Repair creates no new quantity
+            and no new demand — and returning to a previously visited Area is
+            never assumed to be a repair; you choose it here.
           </div>
           <div className="ss-dlgrid">
             <span className="lbl">Source</span>
@@ -2307,8 +2546,8 @@ function RepairDialog({
             <>
               <Guidance tone="warn">
                 Repair quantity — MAX {max} pcs, the default. A partial quantity
-                splits the QuantityFlow (requires SPLIT — Phase 8); the full
-                quantity moves the whole flow.
+                splits off its own Quantity Flow; the full quantity moves the
+                whole flow.
               </Guidance>
               {(() => {
                 const v = quantityValidation(
@@ -2348,7 +2587,7 @@ function RepairDialog({
           <div className="sub">Review the Repair movement, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'TRANSFERRED · movement_reason REPAIR'],
+              ['Action', 'Send quantity here for repair'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">{parsedQty} pcs</span>],
               [
@@ -2359,12 +2598,13 @@ function RepairDialog({
               [
                 'Effect',
                 partial
-                  ? 'Partial quantity — the QuantityFlow splits first (SPLIT, Phase 8)'
+                  ? 'Partial quantity — splits off its own Quantity Flow first'
                   : 'Moves the whole Quantity Flow',
               ],
               ['Reason', reason.trim()],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'TRANSFERRED · movement_reason REPAIR'],
             ]}
           />
           <StepButtons
@@ -2388,7 +2628,7 @@ function ScrapDialog({
   pn,
   available,
   worker,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -2424,23 +2664,27 @@ function ScrapDialog({
 
   function confirm() {
     if (!valid) return;
-    onRecord({
-      pn,
-      movementType: 'SCRAPPED',
-      description: `scrapped ${count} at ${areaName} · reason: ${reason.trim()}`,
-      qty: count,
-      source: areaName,
-      destination: 'scrap',
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Restores the ${count} scrapped pcs to active quantity.`,
+    onApply({
+      action: {
+        pn,
+        movements: ['SCRAPPED'],
+        description: `scrapped ${count} at ${areaName} · reason: ${reason.trim()}`,
+        qty: count,
+        source: areaName,
+        destination: 'scrap',
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Restores the ${count} scrapped pcs to active quantity.`,
+      },
+      update: (cards) =>
+        applyScrap(cards, { pn, area: station.area, qty: count }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
-      title: `SCRAPPED — ${pn} × ${count} at ${areaName}`,
+      title: `Scrapped — ${pn} × ${count} at ${areaName}`,
       detail:
-        'One auditable scrap operation for the counted total. Scrap never reduces the WO Demand requested quantity; reconciliation: introduced = active + stocked + scrapped. Mock only — no production write.',
+        'One scrap record covers the counted total and can be reviewed later. Scrap never reduces the WO Demand requested quantity.',
     });
     onClose();
   }
@@ -2536,7 +2780,6 @@ function ScrapDialog({
           />
           <StepButtons
             onCancel={onCancel}
-            cancelLabel="Cancel (Esc) — discard count, nothing recorded"
             primary={{
               label: 'Next',
               onClick: goConfirm,
@@ -2552,7 +2795,7 @@ function ScrapDialog({
           <div className="sub">Review the scrap operation, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'SCRAPPED'],
+              ['Action', 'Scrap damaged quantity'],
               ['PN', <span className="mono">{pn}</span>],
               ['Area', areaName],
               ['Machine', '—'],
@@ -2565,12 +2808,12 @@ function ScrapDialog({
               ['Reason', reason.trim()],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'SCRAPPED'],
             ]}
           />
           <StepButtons
             onBack={() => setStep('count')}
             onCancel={onCancel}
-            cancelLabel="Cancel (Esc) — discard count, nothing recorded"
             primary={{
               label: 'Confirm scrap',
               onClick: confirm,
@@ -2590,7 +2833,7 @@ function QueueReturnDialog({
   machine,
   max,
   worker,
-  onRecord,
+  onApply,
   onNotice,
   onClose,
   onCancel,
@@ -2607,24 +2850,32 @@ function QueueReturnDialog({
 
   function confirm() {
     if (!valid) return;
-    onRecord({
-      pn,
-      movementType: 'RELEASED_FROM_MACHINE',
-      description: `${machine} → ${areaName} queue · qty ${parsedQty}`,
-      qty: parsedQty,
-      source: machine,
-      destination: 'Area queue',
-      machine,
-      worker,
-      time: MOCK_SCAN_TIME,
-      reversalEffect: `Re-assigns ${parsedQty} pcs to ${machine}.`,
+    onApply({
+      action: {
+        pn,
+        movements: ['RELEASED_FROM_MACHINE'],
+        description: `${machine} → ${areaName} queue · qty ${parsedQty}`,
+        qty: parsedQty,
+        source: machine,
+        destination: 'Area queue',
+        machine,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: `Re-assigns ${parsedQty} pcs to ${machine}.`,
+      },
+      update: (cards) =>
+        applyQueueReturn(cards, {
+          pn,
+          area: station.area,
+          machine,
+          qty: parsedQty,
+        }),
     });
     onNotice({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} returned to the ${areaName} queue`,
-      detail:
-        'RELEASED_FROM_MACHINE (mock presentation only — no production write).',
+      detail: `The unfinished quantity left ${machine} and waits in the Area queue for its next assignment — it is not finished.`,
     });
     onClose();
   }
@@ -2681,7 +2932,7 @@ function QueueReturnDialog({
           <div className="sub">Review the queue return, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'RELEASED_FROM_MACHINE'],
+              ['Action', 'Return to Area queue'],
               ['PN', <span className="mono">{pn}</span>],
               ['Quantity', <span className="mono">{parsedQty} pcs</span>],
               ['Source Machine', machine],
@@ -2692,6 +2943,7 @@ function QueueReturnDialog({
               ],
               ['Worker', worker],
               ['Scan Station', station.stationId],
+              ['Recorded event', 'RELEASED_FROM_MACHINE'],
             ]}
           />
           <StepButtons
@@ -2699,6 +2951,173 @@ function QueueReturnDialog({
             onCancel={onCancel}
             primary={{
               label: 'Confirm queue return',
+              onClick: confirm,
+              disabled: !valid,
+              autoFocus: true,
+            }}
+          />
+        </div>
+      )}
+    </ModalDialog>
+  );
+}
+
+/**
+ * Manual DONE — complete Area processing for a selected quantity. The
+ * quantity leaves its Machine (when one is involved), stays located in
+ * the current Area, and waits on the finished rack for transfer
+ * (`READY_TO_TRANSFER`). DONE never means Work Order completion,
+ * manufacturing completion, stocking, allocation, or QC approval —
+ * manufacturing completion stays `STOCKED` at the terminal Stockroom.
+ */
+function DoneDialog({
+  station,
+  pn,
+  machine,
+  max,
+  worker,
+  onApply,
+  onNotice,
+  onClose,
+  onCancel,
+}: ActionDialogProps & {
+  pn: string;
+  /** Machine currently processing the quantity, or null for direct
+   * Area processing (Areas without Machines). */
+  machine: string | null;
+  max: number;
+}) {
+  const areaName = areaByKey(station.area)?.name ?? station.area;
+  const [step, setStep] = useState<'qty' | 'confirm'>('qty');
+  // MAX defaults to the quantity at the current source position.
+  const [qty, setQty] = useState(String(max));
+  const parsedQty = parseInt(qty || '0', 10);
+  const valid = parsedQty >= 1 && parsedQty <= max;
+
+  function goConfirm() {
+    if (valid) setStep('confirm');
+  }
+
+  function confirm() {
+    if (!valid) return;
+    onApply({
+      action: {
+        pn,
+        movements: ['AREA_COMPLETED'],
+        description: `${machine ? `${machine} · ` : ''}finished at ${areaName} · qty ${parsedQty}`,
+        qty: parsedQty,
+        source: machine ?? `${areaName} processing`,
+        destination: `${areaName} — finished rack`,
+        machine: machine ?? undefined,
+        worker,
+        time: MOCK_SCAN_TIME,
+        reversalEffect: machine
+          ? `Returns ${parsedQty} pcs to ${machine} as active processing.`
+          : `Returns ${parsedQty} pcs to active processing at ${areaName}.`,
+      },
+      update: (cards) =>
+        applyDone(cards, { pn, area: station.area, machine, qty: parsedQty }),
+    });
+    onNotice({
+      kind: 'ok',
+      icon: '✓',
+      title: `${pn} × ${parsedQty} finished at ${areaName}`,
+      detail: `The finished quantity ${
+        machine ? `left ${machine} and ` : ''
+      }now waits on the finished rack, ready to move to another Area. Scan the PN at the next Area to transfer it.`,
+    });
+    onClose();
+  }
+
+  return (
+    <ModalDialog
+      label="Complete processing — DONE"
+      onClose={onCancel}
+      onKeyDown={
+        step === 'qty'
+          ? quantityKeyHandler(qty, setQty, goConfirm)
+          : enterKeyHandler(confirm)
+      }
+    >
+      <h3>Complete processing — DONE</h3>
+      {step === 'qty' ? (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <StepRecap
+            lines={[
+              machine ? (
+                <>
+                  {machine} → {areaName} finished rack
+                </>
+              ) : (
+                <>
+                  {areaName} processing → {areaName} finished rack
+                </>
+              ),
+            ]}
+          />
+          <Guidance tone="info">
+            {machine ? (
+              <>
+                On {machine}: <b>{max} pcs</b>. MAX is selected by default —
+                enter a smaller quantity to finish only part of it.
+              </>
+            ) : (
+              <>
+                In processing: <b>{max} pcs</b>. MAX is selected by default —
+                enter a smaller quantity to finish only part of it.
+              </>
+            )}
+          </Guidance>
+          {(() => {
+            const v = quantityValidation(
+              parsedQty,
+              max,
+              machine
+                ? `Quantity cannot exceed the ${max} pcs currently on ${machine}.`
+                : `Quantity cannot exceed the ${max} pcs currently in processing.`,
+            );
+            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+          })()}
+          <QuantityKeypad value={qty} onChange={setQty} max={max} />
+          <StepButtons
+            onCancel={onCancel}
+            primary={{
+              label: 'Next',
+              onClick: goConfirm,
+              disabled: !valid,
+            }}
+          />
+        </div>
+      ) : (
+        <div>
+          <div className="big mono" title={pn}>
+            {pn}
+          </div>
+          <div className="sub">
+            Review the completion, then confirm. The finished quantity stays in{' '}
+            {areaName} on the finished rack until it is transferred.
+          </div>
+          <ConfirmationSummary
+            rows={[
+              ['Action', 'Complete Area processing'],
+              ['PN', <span className="mono">{pn}</span>],
+              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Area', areaName],
+              ['Machine', machine],
+              ['Result', 'Finished — ready to move'],
+              ['Worker', worker],
+              ['Scan Station', station.stationId],
+              ['Recorded event', 'AREA_COMPLETED'],
+            ]}
+          />
+          <StepButtons
+            onBack={() => setStep('qty')}
+            onCancel={onCancel}
+            primary={{
+              label: 'Confirm DONE',
               onClick: confirm,
               disabled: !valid,
               autoFocus: true,
@@ -2724,12 +3143,13 @@ function UndoConfirmDialog({
       <h3>Undo last PN operation?</h3>
       <div className="big mono">{target.pn}</div>
       <div className="sub">
-        Undo creates a compensating REVERSED Movement — the original action is
-        preserved, never deleted.
+        Undo reverses the complete operation with a compensating REVERSED record
+        — when one action recorded several related events, all of them are
+        reversed together. The original records are preserved, never deleted.
       </div>
       <ConfirmationSummary
         rows={[
-          ['Original action', target.movementType],
+          ['Original action', target.movements.join(' + ')],
           ['Quantity', <span className="mono">{target.qty}</span>],
           ['Source → destination', `${target.source} → ${target.destination}`],
           ['Machine', target.machine ?? null],
@@ -2740,7 +3160,6 @@ function UndoConfirmDialog({
       />
       <StepButtons
         onCancel={onCancel}
-        cancelLabel="Cancel — keep the operation"
         primary={{
           label: 'Confirm Undo',
           onClick: onConfirm,

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
+import { ModalDialog } from '../../components/ModalDialog';
 import { EmptyState } from '../../components/view-states';
 import { formatIsoDate } from '../dates';
 import type { MockWorkOrder, RequestType } from '../view-models';
@@ -28,18 +29,23 @@ import type {
 } from './demand-lines';
 
 /**
- * Detail of one Work Order (GUI_DESIGN §11.2). An OPEN Work Order is
- * editable: demand lines can be added (scanner-first ＋ Add Part),
- * edited, and — while no production quantity has been released for them
- * — removed. Released lines are read-only and can never be removed here
- * (PROJECT_PROFILE §13). All editing is a local draft: Save demand
- * applies it to local mock state only.
+ * Work Order Details as a modal dialog over the Work Order list
+ * (GUI_DESIGN §11.2): the list stays mounted and visible behind it and
+ * the URL never changes. An OPEN Work Order is editable: demand lines
+ * can be added (manual-first ＋ Add Part, scanning secondary), edited,
+ * and — while no production quantity has been released for them —
+ * removed. Released lines are read-only and can never be removed here
+ * (PROJECT_PROFILE §13). All editing is a local draft applied by
+ * `Save demand`; every close request (Cancel, Escape, backdrop) on a
+ * dirty draft asks for explicit discard confirmation first. The Add
+ * Part and confirmation dialogs render as siblings of this dialog so
+ * only the topmost dialog handles Escape, backdrop, and focus.
  */
 export function WorkOrderDetailPanel({
   workOrder,
   releasedLines,
   writeBlocked,
-  onBack,
+  onClose,
   onRelease,
   onSaveDetail,
   onDirtyChange,
@@ -48,13 +54,14 @@ export function WorkOrderDetailPanel({
   workOrder: MockWorkOrder | undefined;
   releasedLines: Set<string>;
   writeBlocked: boolean;
-  onBack: () => void;
+  onClose: () => void;
   onRelease: (pn: string) => void;
   onSaveDetail: (workOrder: MockWorkOrder) => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
   // All hooks run unconditionally; the missing-WO branch renders below.
+  const headingId = useId();
   const editable = workOrder ? workOrder.status === 'Open' : false;
   const [lines, setLines] = useState<DemandLineDraft[]>(() =>
     workOrder
@@ -70,6 +77,7 @@ export function WorkOrderDetailPanel({
   );
   const [confirmMissing, setConfirmMissing] =
     useState<MissingDemandInfo | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const scanRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -93,12 +101,17 @@ export function WorkOrderDetailPanel({
 
   if (!workOrder) {
     return (
-      <div>
-        <button className="wo-back" onClick={onBack}>
-          ‹ All Work Orders
-        </button>
+      <ModalDialog labelledBy={headingId} onClose={onClose}>
+        <h2 id={headingId} className="nwo-title">
+          Work Order Details
+        </h2>
         <EmptyState message="This Work Order is not available in the mock data." />
-      </div>
+        <div className="row">
+          <button className="bigbtn ghost" onClick={onClose}>
+            Cancel (Esc)
+          </button>
+        </div>
+      </ModalDialog>
     );
   }
 
@@ -168,7 +181,7 @@ export function WorkOrderDetailPanel({
     setLines((current) => [...current, line]);
     setDirty(true);
     showNotice(
-      `✓ ${result.pn} added as an unsaved draft line — Request Type NEW · due date from WO due date.`,
+      `✓ ${result.pn} added as an unsaved draft line — Request Type NEW · due date from the WO due date.`,
     );
     setFocusField({ id: line.id, field: 'qty' });
   }
@@ -179,7 +192,7 @@ export function WorkOrderDetailPanel({
     setLines((current) => [...current, line]);
     setDirty(true);
     showNotice(
-      `✓ ${result.pn} added as an unsaved draft line — Save demand applies it to local mock state only.`,
+      `✓ ${result.pn} added as an unsaved draft line — apply it with Save demand.`,
     );
   }
 
@@ -250,373 +263,392 @@ export function WorkOrderDetailPanel({
     saveDetail();
   }
 
-  function handleBack() {
-    if (
-      dirty &&
-      !window.confirm(
-        'This Work Order has unsaved changes. Discard them and return to the Work Order list?',
-      )
-    ) {
-      return;
-    }
-    onBack();
+  // Every close request (Cancel, Escape, backdrop) funnels through
+  // here: a dirty draft is never discarded silently.
+  function requestClose() {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
   }
 
   return (
-    <div>
-      <div className="wo-head">
-        <button className="wo-back" onClick={handleBack}>
-          ‹ All Work Orders
-        </button>
-        <h1 className="mono">{woDisplay}</h1>
-        <span className="spacer" />
-        {editable && dirty ? (
-          <span className="unsaved">● Unsaved changes</span>
-        ) : null}
-      </div>
-      <p className="wo-sub">
-        received <b className="mono">{formatIsoDate(workOrder.received)}</b> ·{' '}
-        {editable ? (
-          <>
-            WO due date{' '}
-            <input
-              type="date"
-              className="mono wo-due-input"
-              value={due}
-              aria-label="WO due date"
-              onChange={(e) => handleDueChange(e.target.value)}
-            />
-            {due === '' ? (
-              <span className="duetxt none"> no due date</span>
-            ) : null}
-          </>
-        ) : (
-          <>
-            WO due date <b className="mono">{formatIsoDate(workOrder.due)}</b>
-          </>
-        )}{' '}
-        · {display.length} demand line{display.length === 1 ? '' : 's'} ·{' '}
-        <span className={`wostat ${workOrder.status.toLowerCase()}`}>
-          {workOrder.status}
-        </span>
-        {workOrder.internal
-          ? ' · internal Work Order — no external number yet (displays —)'
-          : ''}
-      </p>
-      <div className="wo-card">
-        {editable && (
-          <div className="woc-head">
-            <span className="meta">
-              Demand lines — each line's due date defaults to the{' '}
-              <b>WO due date</b> and may be edited per line. Editing is a local
-              draft (development mock) until <b>Save demand</b>.
-            </span>
-            <span className="spacer" />
-            {dirty ? <span className="unsaved">● Unsaved changes</span> : null}
-          </div>
-        )}
-        <div className="wo-lines">
-          <table className="wo-table">
-            <thead>
-              <tr>
-                <th>PN</th>
-                <th>Request Type</th>
-                <th>Qty</th>
-                <th>Due date</th>
-                <th>Job Numbers</th>
-                <th>Status</th>
-                {editable ? <th></th> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {display.map((line) => {
-                const rowEditable = editable && !line.released;
-                const removeRule = lineRemoveRule(line);
-                return (
-                  <tr key={line.id}>
-                    <td className={errorFor(line.id, 'pn') ? 'err-cell' : ''}>
-                      {line.pn ? (
-                        <div className="pn" title={line.pn}>
-                          {line.pn}
-                        </div>
-                      ) : rowEditable ? (
-                        <input
-                          ref={(el) => {
-                            if (el) fieldRefs.current.set(`${line.id}:pn`, el);
-                            else fieldRefs.current.delete(`${line.id}:pn`);
-                          }}
-                          placeholder="type PN — lookup or create"
-                          size={16}
-                          aria-label="PartNumber lookup or create"
-                          aria-invalid={
-                            errorFor(line.id, 'pn') ? true : undefined
-                          }
-                          onBlur={(e) => {
-                            // The entered casing is preserved; identity
-                            // is case-insensitive (never re-cased).
-                            const pn = e.target.value.trim();
-                            if (!pn) return;
-                            const duplicate = display.find(
-                              (l) =>
-                                l.id !== line.id &&
-                                l.pn !== null &&
-                                l.pn.toUpperCase() === pn.toUpperCase(),
-                            );
-                            if (duplicate) {
-                              showNotice(
-                                `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
-                              );
-                              e.target.value = '';
-                              if (!duplicate.released) {
-                                setFocusField({
-                                  id: duplicate.id,
-                                  field: 'qty',
-                                });
-                              }
-                              return;
-                            }
-                            clearLineError(line.id, 'pn');
-                            updateLine(line.id, {
-                              pn,
-                              barcodeNote: `new PN — barcode created with PN master: PF:PN:${pn}`,
-                              isNewPn: true,
-                            });
-                            setFocusField({
-                              id: line.id,
-                              field: 'qty',
-                            });
-                          }}
-                        />
-                      ) : (
-                        <div
-                          className="pn"
-                          style={{
-                            color: 'var(--faint)',
-                          }}
-                        >
-                          —
-                        </div>
-                      )}
-                      <div className={`bc ${line.isNewPn ? 'newpn' : ''}`}>
-                        {line.barcodeNote}
-                      </div>
-                      {line.notes ? (
-                        <div className="bc">notes: {line.notes}</div>
-                      ) : null}
-                      {errorFor(line.id, 'pn') ? (
-                        <div className="rowerr">{errorFor(line.id, 'pn')}</div>
-                      ) : null}
-                    </td>
-                    <td>
-                      {rowEditable && !line.saved ? (
-                        <select
-                          value={line.type}
-                          aria-label={`Request Type for ${line.pn ?? 'new line'}`}
-                          onChange={(e) =>
-                            updateLine(line.id, {
-                              type: e.target.value as RequestType,
-                            })
-                          }
-                        >
-                          <option>NEW</option>
-                          <option>MODIFY</option>
-                        </select>
-                      ) : (
-                        <TypeChip type={line.type} />
-                      )}
-                    </td>
-                    <td className={errorFor(line.id, 'qty') ? 'err-cell' : ''}>
-                      {rowEditable ? (
-                        <>
+    <>
+      <ModalDialog labelledBy={headingId} onClose={requestClose} size="xwide">
+        <div className="wo-head">
+          <h2 id={headingId} className="nwo-title">
+            Work Order Details
+          </h2>
+          <span className="spacer" />
+          {editable && dirty ? (
+            <span className="unsaved">● Unsaved changes</span>
+          ) : null}
+        </div>
+        <div className="big mono">{woDisplay}</div>
+        <p className="wo-sub">
+          received <b className="mono">{formatIsoDate(workOrder.received)}</b> ·{' '}
+          {editable ? (
+            <>
+              WO due date{' '}
+              <input
+                type="date"
+                className="mono wo-due-input"
+                value={due}
+                aria-label="WO due date"
+                onChange={(e) => handleDueChange(e.target.value)}
+              />
+              {due === '' ? (
+                <span className="duetxt none"> no due date</span>
+              ) : null}
+            </>
+          ) : (
+            <>
+              WO due date <b className="mono">{formatIsoDate(workOrder.due)}</b>
+            </>
+          )}{' '}
+          · {display.length} demand line{display.length === 1 ? '' : 's'} ·{' '}
+          <span className={`wostat ${workOrder.status.toLowerCase()}`}>
+            {workOrder.status}
+          </span>
+          {workOrder.internal
+            ? ' · internal Work Order — no external number yet (displays —)'
+            : ''}
+        </p>
+        <div className="wo-card">
+          {editable && (
+            <div className="woc-head">
+              <span className="meta">
+                Demand lines — each line's due date defaults to the{' '}
+                <b>WO due date</b> and may be edited per line. Edits stay an
+                unsaved draft until <b>Save demand</b>.
+              </span>
+              <span className="spacer" />
+              {dirty ? (
+                <span className="unsaved">● Unsaved changes</span>
+              ) : null}
+            </div>
+          )}
+          <div className="wo-lines">
+            <table className="wo-table">
+              <thead>
+                <tr>
+                  <th>PN</th>
+                  <th>Request Type</th>
+                  <th>Qty</th>
+                  <th>Due date</th>
+                  <th>Job Numbers</th>
+                  <th>Status</th>
+                  {editable ? <th></th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {display.map((line) => {
+                  const rowEditable = editable && !line.released;
+                  const removeRule = lineRemoveRule(line);
+                  return (
+                    <tr key={line.id}>
+                      <td className={errorFor(line.id, 'pn') ? 'err-cell' : ''}>
+                        {line.pn ? (
+                          <div className="pn" title={line.pn}>
+                            {line.pn}
+                          </div>
+                        ) : rowEditable ? (
                           <input
                             ref={(el) => {
                               if (el)
-                                fieldRefs.current.set(`${line.id}:qty`, el);
-                              else fieldRefs.current.delete(`${line.id}:qty`);
+                                fieldRefs.current.set(`${line.id}:pn`, el);
+                              else fieldRefs.current.delete(`${line.id}:pn`);
                             }}
-                            className="mono"
-                            size={4}
-                            inputMode="numeric"
-                            placeholder="qty"
-                            value={line.qty}
-                            aria-label={`Quantity for ${line.pn ?? 'new line'}`}
+                            placeholder="type PN — lookup or create"
+                            size={16}
+                            aria-label="PartNumber lookup or create"
                             aria-invalid={
-                              errorFor(line.id, 'qty') ? true : undefined
+                              errorFor(line.id, 'pn') ? true : undefined
                             }
-                            onChange={(e) => {
-                              clearLineError(line.id, 'qty');
-                              updateLine(line.id, {
-                                qty: e.target.value,
-                              });
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key !== 'Enter') return;
-                              if (!isPositiveInteger(e.currentTarget.value)) {
+                            onBlur={(e) => {
+                              // The entered casing is preserved; identity
+                              // is case-insensitive (never re-cased).
+                              const pn = e.target.value.trim();
+                              if (!pn) return;
+                              const duplicate = display.find(
+                                (l) =>
+                                  l.id !== line.id &&
+                                  l.pn !== null &&
+                                  l.pn.toUpperCase() === pn.toUpperCase(),
+                              );
+                              if (duplicate) {
                                 showNotice(
-                                  '✕ Quantity must be a positive whole number',
+                                  `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
                                 );
-                                e.currentTarget.select();
+                                e.target.value = '';
+                                if (!duplicate.released) {
+                                  setFocusField({
+                                    id: duplicate.id,
+                                    field: 'qty',
+                                  });
+                                }
                                 return;
                               }
-                              scanRef.current?.focus();
-                            }}
-                          />
-                          {errorFor(line.id, 'qty') ? (
-                            <div className="rowerr">
-                              {errorFor(line.id, 'qty')}
-                            </div>
-                          ) : null}
-                        </>
-                      ) : (
-                        <span className="mono">{line.qty}</span>
-                      )}
-                    </td>
-                    <td>
-                      {rowEditable ? (
-                        <>
-                          <input
-                            ref={(el) => {
-                              if (el)
-                                fieldRefs.current.set(`${line.id}:due`, el);
-                              else fieldRefs.current.delete(`${line.id}:due`);
-                            }}
-                            type="date"
-                            className="mono"
-                            value={line.due}
-                            aria-label={`Due date for ${line.pn ?? 'new line'}`}
-                            onChange={(e) => {
+                              clearLineError(line.id, 'pn');
                               updateLine(line.id, {
-                                due: e.target.value,
-                                dueTouched: true,
+                                pn,
+                                barcodeNote: `new PN — barcode created with PN master: PF:PN:${pn}`,
+                                isNewPn: true,
+                              });
+                              setFocusField({
+                                id: line.id,
+                                field: 'qty',
                               });
                             }}
                           />
-                          {line.due === '' ? (
-                            <div className="bc">No due date</div>
-                          ) : null}
-                        </>
-                      ) : (
-                        <span className="mono">
-                          {formatIsoDate(line.due || null)}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {rowEditable ? (
-                        <input
-                          className="mono"
-                          size={10}
-                          placeholder="job #…"
-                          value={line.job}
-                          aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
-                          onChange={(e) =>
-                            updateLine(line.id, {
-                              job: e.target.value,
-                            })
-                          }
-                        />
-                      ) : (
-                        <span className="mono">{line.job || '—'}</span>
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        className={`linestat ${
-                          line.released
-                            ? 'released'
-                            : line.saved
-                              ? 'saved'
-                              : 'draft'
-                        }`}
-                      >
-                        {line.statusLabel}
-                      </span>
-                    </td>
-                    {editable ? (
-                      <td>
-                        <div className="wo-rowactions">
-                          {line.saved || line.released ? (
-                            <button
-                              className="rel-btn"
-                              disabled={
-                                writeBlocked ||
-                                !line.releasable ||
-                                line.released
-                              }
-                              onClick={() => line.pn && onRelease(line.pn)}
-                            >
-                              Release to production…
-                            </button>
-                          ) : null}
-                          <button
-                            className="pr-x"
-                            disabled={removeRule === 'blocked'}
-                            title={
-                              removeRule === 'blocked'
-                                ? RELEASED_REMOVE_EXPLANATION
-                                : removeRule === 'confirm'
-                                  ? 'Remove line (asks for confirmation)'
-                                  : 'Remove draft line'
-                            }
-                            aria-label={
-                              line.pn
-                                ? `Remove line ${line.pn}`
-                                : 'Remove draft line'
-                            }
-                            onClick={() => requestRemove(line)}
+                        ) : (
+                          <div
+                            className="pn"
+                            style={{
+                              color: 'var(--faint)',
+                            }}
                           >
-                            ✕
-                          </button>
+                            —
+                          </div>
+                        )}
+                        <div className={`bc ${line.isNewPn ? 'newpn' : ''}`}>
+                          {line.barcodeNote}
                         </div>
-                        {removeRule === 'blocked' ? (
-                          <div className="bc">
-                            {RELEASED_REMOVE_EXPLANATION}
+                        {line.notes ? (
+                          <div className="bc">notes: {line.notes}</div>
+                        ) : null}
+                        {errorFor(line.id, 'pn') ? (
+                          <div className="rowerr">
+                            {errorFor(line.id, 'pn')}
                           </div>
                         ) : null}
                       </td>
-                    ) : null}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        {editable && (
-          <div className="wo-addpart">
-            <div className="nwo-scanrow">
-              <button
-                className="btn primary"
-                disabled={writeBlocked}
-                onClick={() => setAddPartOpen(true)}
-              >
-                ＋ Add Part manually
-              </button>
-              <input
-                ref={scanRef}
-                className="nwo-scan"
-                placeholder="Optional: scan PN barcode (PF:PN:…) — Enter"
-                aria-label="Scan PN barcode"
-                autoComplete="off"
-                disabled={writeBlocked}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleScan(e.currentTarget.value);
-                    e.currentTarget.value = '';
-                  }
-                }}
-              />
-            </div>
-            <div className="nwo-hint">
-              Manual entry is the normal workflow; scanning stays a secondary
-              method for existing PN barcodes. A new line joins this Work Order
-              as an <b>unsaved draft</b> with Request Type NEW and the WO due
-              date default. A PN already on this Work Order focuses its existing
-              line instead of adding a duplicate.
-            </div>
+                      <td>
+                        {rowEditable && !line.saved ? (
+                          <select
+                            value={line.type}
+                            aria-label={`Request Type for ${line.pn ?? 'new line'}`}
+                            onChange={(e) =>
+                              updateLine(line.id, {
+                                type: e.target.value as RequestType,
+                              })
+                            }
+                          >
+                            <option>NEW</option>
+                            <option>MODIFY</option>
+                          </select>
+                        ) : (
+                          <TypeChip type={line.type} />
+                        )}
+                      </td>
+                      <td
+                        className={errorFor(line.id, 'qty') ? 'err-cell' : ''}
+                      >
+                        {rowEditable ? (
+                          <>
+                            <input
+                              ref={(el) => {
+                                if (el)
+                                  fieldRefs.current.set(`${line.id}:qty`, el);
+                                else fieldRefs.current.delete(`${line.id}:qty`);
+                              }}
+                              className="mono"
+                              size={4}
+                              inputMode="numeric"
+                              placeholder="qty"
+                              value={line.qty}
+                              aria-label={`Quantity for ${line.pn ?? 'new line'}`}
+                              aria-invalid={
+                                errorFor(line.id, 'qty') ? true : undefined
+                              }
+                              onChange={(e) => {
+                                clearLineError(line.id, 'qty');
+                                updateLine(line.id, {
+                                  qty: e.target.value,
+                                });
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key !== 'Enter') return;
+                                if (!isPositiveInteger(e.currentTarget.value)) {
+                                  showNotice(
+                                    '✕ Quantity must be a positive whole number',
+                                  );
+                                  e.currentTarget.select();
+                                  return;
+                                }
+                                scanRef.current?.focus();
+                              }}
+                            />
+                            {errorFor(line.id, 'qty') ? (
+                              <div className="rowerr">
+                                {errorFor(line.id, 'qty')}
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="mono">{line.qty}</span>
+                        )}
+                      </td>
+                      <td>
+                        {rowEditable ? (
+                          <>
+                            <input
+                              ref={(el) => {
+                                if (el)
+                                  fieldRefs.current.set(`${line.id}:due`, el);
+                                else fieldRefs.current.delete(`${line.id}:due`);
+                              }}
+                              type="date"
+                              className="mono"
+                              value={line.due}
+                              aria-label={`Due date for ${line.pn ?? 'new line'}`}
+                              onChange={(e) => {
+                                updateLine(line.id, {
+                                  due: e.target.value,
+                                  dueTouched: true,
+                                });
+                              }}
+                            />
+                            {line.due === '' ? (
+                              <div className="bc">No due date</div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="mono">
+                            {formatIsoDate(line.due || null)}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {rowEditable ? (
+                          <input
+                            className="mono"
+                            size={10}
+                            placeholder="job #…"
+                            value={line.job}
+                            aria-label={`Job Numbers for ${line.pn ?? 'new line'}`}
+                            onChange={(e) =>
+                              updateLine(line.id, {
+                                job: e.target.value,
+                              })
+                            }
+                          />
+                        ) : (
+                          <span className="mono">{line.job || '—'}</span>
+                        )}
+                      </td>
+                      <td>
+                        <span
+                          className={`linestat ${
+                            line.released
+                              ? 'released'
+                              : line.saved
+                                ? 'saved'
+                                : 'draft'
+                          }`}
+                        >
+                          {line.statusLabel}
+                        </span>
+                      </td>
+                      {editable ? (
+                        <td>
+                          <div className="wo-rowactions">
+                            {line.saved || line.released ? (
+                              <button
+                                className="rel-btn"
+                                disabled={
+                                  writeBlocked ||
+                                  !line.releasable ||
+                                  line.released
+                                }
+                                onClick={() => line.pn && onRelease(line.pn)}
+                              >
+                                Release to production…
+                              </button>
+                            ) : null}
+                            <button
+                              className="pr-x"
+                              disabled={removeRule === 'blocked'}
+                              title={
+                                removeRule === 'blocked'
+                                  ? RELEASED_REMOVE_EXPLANATION
+                                  : removeRule === 'confirm'
+                                    ? 'Remove line (asks for confirmation)'
+                                    : 'Remove draft line'
+                              }
+                              aria-label={
+                                line.pn
+                                  ? `Remove line ${line.pn}`
+                                  : 'Remove draft line'
+                              }
+                              onClick={() => requestRemove(line)}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          {removeRule === 'blocked' ? (
+                            <div className="bc">
+                              {RELEASED_REMOVE_EXPLANATION}
+                            </div>
+                          ) : null}
+                        </td>
+                      ) : null}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        )}
-        {editable && (
-          <div className="wo-actions">
+          {editable && (
+            <div className="wo-addpart">
+              <div className="nwo-scanrow">
+                <button
+                  className="btn primary"
+                  disabled={writeBlocked}
+                  onClick={() => setAddPartOpen(true)}
+                >
+                  ＋ Add Part manually
+                </button>
+                <input
+                  ref={scanRef}
+                  className="nwo-scan"
+                  placeholder="Optional: scan PN barcode (PF:PN:…) — Enter"
+                  aria-label="Scan PN barcode"
+                  autoComplete="off"
+                  disabled={writeBlocked}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleScan(e.currentTarget.value);
+                      e.currentTarget.value = '';
+                    }
+                  }}
+                />
+              </div>
+              <div className="nwo-hint">
+                Manual entry is the normal workflow; scanning stays a secondary
+                method for existing PN barcodes. A new line joins this Work
+                Order as an <b>unsaved draft</b> with Request Type NEW and the
+                WO due date default. A PN already on this Work Order focuses its
+                existing line instead of adding a duplicate.
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="wo-note">
+          A demand line can be removed only while no production quantity has
+          been released for it: an unsaved draft is removed immediately, a saved
+          unreleased line asks for confirmation, and a released line can no
+          longer be removed here — corrections go through the correction and
+          production workflows (PROJECT_PROFILE §13). Removal never deletes the
+          PartNumber master, Quantity Flows, Movements, release history, or
+          other Work Order Demand for the same PN. An <b>inactive PN</b> is
+          flagged in lookup and cannot be released without reactivation. Closing
+          Work Order Details with unsaved changes asks for confirmation before
+          anything is discarded.
+        </div>
+        <div className="wo-actions nwo-actions">
+          <button className="btn ghost" onClick={requestClose}>
+            Cancel (Esc)
+          </button>
+          {editable ? (
             <button
               className="btn primary"
               disabled={writeBlocked}
@@ -624,26 +656,28 @@ export function WorkOrderDetailPanel({
             >
               Save demand
             </button>
-            <span className="hint">
-              Saving stores <b>business demand only</b> — no Quantity Flow, no
-              Movement, no release. Invalid rows cannot be saved. (Development
-              mock — local state only; nothing is persisted to the backend.)
-            </span>
-          </div>
-        )}
-      </div>
-      <div className="wo-note">
-        A demand line can be removed only while no production quantity has been
-        released for it: an unsaved draft is removed immediately, a saved
-        unreleased line asks for confirmation, and a released line can no longer
-        be removed here — corrections go through the correction and production
-        workflows (PROJECT_PROFILE §13). Removal never deletes the PartNumber
-        master, Quantity Flows, Movements, release history, or other Work Order
-        Demand for the same PN. An <b>inactive PN</b> is flagged in lookup and
-        cannot be released without reactivation. Leaving this Work Order with
-        unsaved changes asks for confirmation.
-      </div>
+          ) : null}
+          <span className="hint">
+            {editable ? (
+              <>
+                Saving stores <b>business demand only</b> — no Quantity Flow, no
+                Movement, no release. Invalid rows cannot be saved and are never
+                dropped silently. (Development mock — changes apply to local
+                state only.)
+              </>
+            ) : (
+              <>
+                This Work Order is <b>{workOrder.status}</b> — demand lines are
+                read-only. Editing is available only while a Work Order is Open.
+              </>
+            )}
+          </span>
+        </div>
+      </ModalDialog>
 
+      {/* Stacked dialogs render as siblings of the details dialog, so
+          each one's Escape / backdrop / focus trap stays its own and a
+          child close never closes Work Order Details. */}
       {addPartOpen ? (
         <AddPartDialog
           workOrderDue={due}
@@ -702,7 +736,7 @@ export function WorkOrderDetailPanel({
             setDirty(true);
             setConfirmRemove(null);
             showNotice(
-              `✕ ${confirmRemove.pn} removed from the draft — Save demand applies it to local mock state only.`,
+              `✕ ${confirmRemove.pn} removed from the draft — apply the removal with Save demand.`,
             );
           }}
           onCancel={() => setConfirmRemove(null)}
@@ -715,6 +749,21 @@ export function WorkOrderDetailPanel({
           <b>local mock state only</b> and is applied by Save demand.
         </ConfirmDialog>
       ) : null}
-    </div>
+
+      {confirmDiscard ? (
+        <ConfirmDialog
+          title="Discard unsaved demand changes?"
+          confirmLabel="Discard changes"
+          cancelLabel="Keep editing"
+          danger
+          onConfirm={onClose}
+          onCancel={() => setConfirmDiscard(false)}
+        >
+          This Work Order has unsaved demand edits. Closing Work Order Details
+          discards them; Keep editing returns with every entered value
+          preserved.
+        </ConfirmDialog>
+      ) : null}
+    </>
   );
 }

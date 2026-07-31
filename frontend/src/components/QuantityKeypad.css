@@ -1,0 +1,56 @@
+/* Quantity entry — a real focusable numeric input + keypad
+   (GUI_DESIGN §4.7). Owned by QuantityKeypad.tsx so every consumer
+   (Scan Station dialogs, Work Orders Add Part) renders identically
+   without depending on another view's CSS having loaded first. */
+.qtydisplay {
+  width: 100%;
+  color: var(--text);
+  font-family: var(--mono), monospace;
+  font-size: 46px;
+  font-weight: 800;
+  text-align: right;
+  background: var(--field-bg);
+  border: 2px solid var(--border2);
+  border-radius: 12px;
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  min-height: 76px;
+  outline: none;
+}
+
+.qtydisplay:focus {
+  border-color: var(--info-t);
+  box-shadow: 0 0 0 4px var(--info-ring);
+}
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.keypad button {
+  height: 62px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.keypad button:hover {
+  background: var(--border);
+}
+
+.keypad button.act {
+  background: var(--info-surface);
+  color: var(--info-t);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+/* MAX shortcut — present only for transfer/assignment flows. */
+.keypad button.keypad-max {
+  grid-column: 1 / -1;
+  height: 48px;
+}

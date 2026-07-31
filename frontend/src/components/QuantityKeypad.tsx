@@ -1,3 +1,5 @@
+import './QuantityKeypad.css';
+
 import { useEffect, useRef } from 'react';
 
 import { sanitizeQuantity } from './quantity-input';

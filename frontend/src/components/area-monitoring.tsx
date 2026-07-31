@@ -6,6 +6,7 @@ import {
   splitAssignments,
   areaStats,
   directGroupLabel,
+  FINISHED_GROUP_LABEL,
 } from '../views/area-monitoring';
 import type { AreaAssignment } from '../views/area-monitoring';
 import type {
@@ -47,15 +48,28 @@ export function QuantityStatus({ qty }: { qty: number }) {
   );
 }
 
-/** Readable in-Area status of one PN presence (row line 3). */
+/** Readable in-Area status of one PN presence portion (row line 3). */
 function inAreaStatusLabel(
-  context: string,
+  entry: AreaAssignment,
   directLabel: string,
 ): string | null {
-  if (context === 'queue') return 'Awaiting Machine';
-  if (context === 'vendor') return 'External processing';
-  if (context === '—') return directLabel;
-  return 'On Machine';
+  switch (entry.state) {
+    case 'queue':
+      return 'Awaiting Machine';
+    case 'vendor':
+      return 'External processing';
+    case 'direct':
+      return directLabel;
+    case 'finished':
+      // The Machine that completed the work is completion context only —
+      // the quantity is no longer assigned to it and stays in the Area
+      // until transferred.
+      return entry.context !== '—'
+        ? `Finished at ${entry.context} — ready to move`
+        : 'Finished — ready to move';
+    default:
+      return 'On Machine';
+  }
 }
 
 /**
@@ -64,28 +78,39 @@ function inAreaStatusLabel(
  * action rail in its own separated right-side cell (Scan Station
  * only — Area Board passes no actions).
  *
- *   line 1: Hot + PN                    Machine/queue · quantity (pcs)
+ *   line 1: Hot + PN               Machine/queue/done · quantity (pcs)
  *   line 2: WO Number (`—` when blank) · Job    due / days remaining
  *   line 3: in-Area status                             time in Area
  *   line 4: `{n} scrapped` — only when scrapped quantity exists
  *
  * WO/Job text may truncate; the full value stays available through the
  * `title` tooltip. Scrapped quantity appears only as readable text —
- * never as a compact `⊘` indicator.
+ * never as a compact `⊘` indicator. Rows inside a specific Machine
+ * card pass `showContext={false}` so the Machine identified by the
+ * card header is never repeated on every row.
  */
 export function AreaPnRow({
   entry,
   action,
   directLabel = 'In processing',
+  showContext = true,
 }: {
   entry: AreaAssignment;
   action?: ReactNode;
   /** Line-3 label for direct (no-Machine) presence, e.g. `Stocked`. */
   directLabel?: string;
+  /** Render the line-1 context chip (off inside a Machine card). */
+  showContext?: boolean;
 }) {
-  const { card, context, qty } = entry;
+  const { card, context, qty, state } = entry;
   const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
-  const status = inAreaStatusLabel(context, directLabel);
+  const status = inAreaStatusLabel(entry, directLabel);
+  const contextChip =
+    state === 'finished' ? (
+      <span className="ctx done">done</span>
+    ) : context !== '—' ? (
+      <span className="ctx">{context}</span>
+    ) : null;
   return (
     <li className={action ? 'has-action' : undefined}>
       <div className="rowmain">
@@ -94,7 +119,7 @@ export function AreaPnRow({
             <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
           </span>
           <span className="r1r">
-            {context !== '—' ? <span className="ctx">{context}</span> : null}
+            {showContext ? contextChip : null}
             <QuantityStatus qty={qty} />
           </span>
         </div>
@@ -106,7 +131,9 @@ export function AreaPnRow({
         </div>
         {status || card.timeInArea !== '—' ? (
           <div className="r3">
-            <span className="st">{status}</span>
+            <span className={`st ${state === 'finished' ? 'done' : ''}`}>
+              {status}
+            </span>
             {card.timeInArea !== '—' ? (
               <span className="mono tia">{card.timeInArea} in Area</span>
             ) : null}
@@ -123,23 +150,105 @@ export function AreaPnRow({
   );
 }
 
+/**
+ * One PN row of the All Areas overview — the same shared row shell and
+ * subcomponents as the detail surfaces, with the card's portions
+ * aggregated into compact context chips (Machine × qty, queue × qty,
+ * processing × qty, done × qty) instead of one row per portion. The
+ * overview and the detail views therefore cannot drift apart.
+ */
+export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
+  const { assigned, queued, finished } = splitAssignments([card]);
+  const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const portions: { key: string; label: string; done?: boolean }[] = [
+    ...assigned.map((e) => ({
+      key: `m-${e.context}`,
+      label: `${e.context} × ${e.qty}`,
+    })),
+    ...queued
+      .filter((e) => e.qty > 0)
+      .map((e) => ({
+        key: `q-${e.context}`,
+        label:
+          e.state === 'queue'
+            ? `queue × ${e.qty}`
+            : e.state === 'vendor'
+              ? `vendor × ${e.qty}`
+              : card.finished?.length
+                ? `processing × ${e.qty}`
+                : '',
+      }))
+      .filter((p) => p.label !== ''),
+    ...finished.map((e) => ({
+      key: `d-${e.context}`,
+      label: `done × ${e.qty}`,
+      done: true,
+    })),
+  ];
+  return (
+    <li>
+      <div className="rowmain">
+        <div className="r1">
+          <span className="pnwrap">
+            <HotPn rank={card.hotRank} pn={card.pn} pnClassName="p" />
+          </span>
+          <span className="r1r">
+            <QuantityStatus qty={card.qty} />
+          </span>
+        </div>
+        <div className="r2">
+          <span className="mono wo" title={woJob}>
+            {woJob}
+          </span>
+          <DueStatus due={card.due} dueClass={card.dueClass} />
+        </div>
+        {portions.length > 0 || card.timeInArea !== '—' ? (
+          <div className="r3">
+            <span className="ctxs">
+              {portions.map((portion) => (
+                <span
+                  key={portion.key}
+                  className={`ctx ${portion.done ? 'done' : ''}`}
+                >
+                  {portion.label}
+                </span>
+              ))}
+            </span>
+            {card.timeInArea !== '—' ? (
+              <span className="mono tia">{card.timeInArea} in Area</span>
+            ) : null}
+          </div>
+        ) : null}
+        {card.scrapped ? (
+          <div className="r4">
+            <span className="scraptxt">{card.scrapped} scrapped</span>
+          </div>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
 export function AreaPnList({
   entries,
   rowAction,
   directLabel,
+  showContext,
 }: {
   entries: AreaAssignment[];
   rowAction?: (entry: AreaAssignment) => ReactNode;
   directLabel?: string;
+  showContext?: boolean;
 }) {
   return (
     <ul className="mc-list">
       {entries.map((entry) => (
         <AreaPnRow
-          key={`${entry.card.pn}-${entry.card.workOrder}-${entry.context}`}
+          key={`${entry.card.pn}-${entry.card.workOrder}-${entry.state}-${entry.context}`}
           entry={entry}
           action={rowAction?.(entry)}
           directLabel={directLabel}
+          showContext={showContext}
         />
       ))}
     </ul>
@@ -147,10 +256,15 @@ export function AreaPnList({
 }
 
 /**
- * The "In this Area now" card: Area color along the top edge, header
- * with Operations, meaningful statistics, and the grouped PN list
- * ("Assigned to Machines" / "Area queue — awaiting Machine" only when
- * the Area has Machines; a direct "In processing" group otherwise).
+ * The "In this Area now" card: Area color along the top edge, a header
+ * with the compact Area description and Operations, optional
+ * statistics (`showStats` — the Scan Station header is the single
+ * summary surface there, so the card omits them), and the grouped PN
+ * list: `On Machines` / `Area queue — awaiting Machine` when the Area
+ * has Machines, a direct `In processing` group otherwise, and
+ * `Finished — ready to move` for quantity waiting on the finished
+ * rack. Machine cards show only actively assigned quantity — finished
+ * quantity belongs to this summary card.
  */
 export function AreaSummaryCard({
   area,
@@ -158,6 +272,7 @@ export function AreaSummaryCard({
   machines,
   title,
   rowAction,
+  showStats = true,
 }: {
   area: MockArea;
   cards: MockAreaCard[];
@@ -165,9 +280,12 @@ export function AreaSummaryCard({
   /** Card heading; defaults to the Area name. */
   title?: string;
   rowAction?: (entry: AreaAssignment) => ReactNode;
+  /** Render the statistics row (Area Board keeps it; Scan Station
+   * omits it — the header carries the Area totals there). */
+  showStats?: boolean;
 }) {
   const hasMachines = machines.length > 0;
-  const { assigned, queued } = splitAssignments(cards);
+  const { assigned, queued, finished } = splitAssignments(cards);
   const stats = areaStats(area, cards, hasMachines);
   const directLabel = area.terminal ? 'Stocked' : 'In processing';
   return (
@@ -188,24 +306,26 @@ export function AreaSummaryCard({
         </span>
       </div>
       <div className="abd-desc">{area.description}</div>
-      <div
-        className="mc-stats"
-        style={{ gridTemplateColumns: `repeat(${stats.length}, 1fr)` }}
-      >
-        {stats.map((stat) => (
-          <div className="stat" key={stat.label}>
-            <div className={`n ${stat.tone ?? ''}`}>{stat.value}</div>
-            <div className="l">{stat.label}</div>
-          </div>
-        ))}
-      </div>
+      {showStats ? (
+        <div
+          className="mc-stats"
+          style={{ gridTemplateColumns: `repeat(${stats.length}, 1fr)` }}
+        >
+          {stats.map((stat) => (
+            <div className="stat" key={stat.label}>
+              <div className={`n ${stat.tone ?? ''}`}>{stat.value}</div>
+              <div className="l">{stat.label}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {cards.length === 0 ? (
         <div className="empty">No production in {area.name}</div>
       ) : (
         <>
           {hasMachines && assigned.length ? (
             <>
-              <div className="abd-grp">Assigned to Machines</div>
+              <div className="abd-grp">On Machines</div>
               <AreaPnList entries={assigned} rowAction={rowAction} />
             </>
           ) : null}
@@ -221,6 +341,12 @@ export function AreaSummaryCard({
               />
             </>
           ) : null}
+          {finished.length ? (
+            <>
+              <div className="abd-grp done">{FINISHED_GROUP_LABEL}</div>
+              <AreaPnList entries={finished} rowAction={rowAction} />
+            </>
+          ) : null}
         </>
       )}
     </div>
@@ -233,7 +359,13 @@ const MACHINE_STATUS_LABEL: Record<MockAreaMachine['status'], string> = {
   maintenance: 'maintenance',
 };
 
-/** One monitoring card per Machine (running / idle / maintenance). */
+/**
+ * One monitoring card per Machine (running / idle / maintenance).
+ * Cards list only actively assigned quantity — after DONE the quantity
+ * leaves the Machine card and appears in the Area summary under
+ * `Finished — ready to move`. Rows never repeat the Machine name; the
+ * card header already identifies it.
+ */
 export function MachineMonitoringCard({
   machine,
   entries,
@@ -257,7 +389,11 @@ export function MachineMonitoringCard({
         {entries.length === 1 ? '' : 's'}
       </div>
       {entries.length ? (
-        <AreaPnList entries={entries} rowAction={rowAction} />
+        <AreaPnList
+          entries={entries}
+          rowAction={rowAction}
+          showContext={false}
+        />
       ) : (
         <div className="mempty">
           {machine.status === 'maintenance'
@@ -272,7 +408,10 @@ export function MachineMonitoringCard({
 /**
  * Shared structural layout: `[ Area summary | Machine cards grid ]`.
  * Machine cards wrap to additional rows inside the right-side grid and
- * never underneath the left card. Without Machines, the summary card
+ * never underneath the left card. When the container is too narrow to
+ * fit one usable Machine card beside the summary, the summary fills
+ * the full row and the Machine cards continue below it (container
+ * query in area-monitoring.css). Without Machines, the summary card
  * spans the full width and no Machine region renders at all.
  */
 export function AreaMachineLayout({

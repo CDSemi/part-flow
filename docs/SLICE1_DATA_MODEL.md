@@ -208,7 +208,7 @@ The QuantityFlow is inserted complete, with its initial `current_area_id` projec
 
 ## 15. Derived Current-Position Projection
 
-- `quantity_flows.current_area_id` (joined by `current_machine_id` in Phase 6) is a maintained projection — a performance measure for hot read paths (Area inventory, boards). It is set by the QuantityFlow INSERT itself at release (in the same transaction as the `RECEIVED` Movement, §13) and updated inside the Movement transaction by later movement types.
+- `quantity_flows.current_area_id` (joined by `current_machine_id` in Phase 6) is a maintained projection — a performance measure for hot read paths (Area inventory, boards). It is set by the QuantityFlow INSERT itself at release (in the same transaction as the `RECEIVED` Movement, §13) and updated inside the Movement transaction by later movement types (for example, the Phase 6+ `AREA_COMPLETED` clears `current_machine_id` and keeps `current_area_id` — the finished quantity waits in its Area as `READY_TO_TRANSFER`, §18).
 - PartMovement history remains the source of truth: the projection value is defined as the `to_area_id` of the flow's latest Movement, and a replay procedure must be able to rebuild (or assert) every projection from Movement history alone.
 - Nothing reads the projection as authority for correctness-critical decisions without holding the flow's row lock inside a transaction.
 
@@ -290,6 +290,7 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 |---|---|---|
 | Scan Station transfer, `TRANSFERRED` | Phase 5 | widen movement-type check; migration adds `scan_stations` + `part_movements.station_id` (canonical name documented, §2) |
 | Machine assignment, sessions, `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` | Phase 6 | migration adds `machines` table plus `quantity_flows.current_machine_id` and Movement machine columns (canonical names documented, §9) |
+| Area completion — `AREA_COMPLETED`, derived `READY_TO_TRANSFER` holding state (PROJECT_PROFILE v10 §7 Area Completion) | Phase 6 (Machine Areas) / Phase 7 (direct processing) | widen movement-type check; `AREA_COMPLETED` clears `quantity_flows.current_machine_id` while `current_area_id` stays; a transfer from actively processing quantity appends `AREA_COMPLETED` + `TRANSFERRED` in ONE transaction (one atomic application command — all Movement records or none); the projection replay derives `READY_TO_TRANSFER` from the latest Movement |
 | Direct Area processing (no Machines) | Phase 7 | migration adds `areas.worker_identification_mode` (canonical name documented, §17); no `machine_assignment_mode` exists — behavior follows from the Area's Machines |
 | SPLIT / MERGED, partial movement | Phase 8 | migration adds `quantity_flows.parent_flow_id` (self-reference; canonical name documented, §9); widen type check |
 | Undo / corrections, `REVERSED`, `reverses_movement_id`; Repair (`movement_reason = REPAIR`), `SCRAPPED`, `QUANTITY_ADJUSTED` additions | Phase 9 | append-only model already assumes it; migration adds `reverses_movement_id` and `movement_reason`; widens the movement-type check |

@@ -1,4 +1,5 @@
-/* Work Orders — WO list · WO detail · scanner-first New Work Order (GUI §11). */
+/* Work Orders — WO list plus the Work Order Details and New Work Order
+   modal dialogs over it (GUI §11). */
 .wo-view {
   background: var(--bg);
   color: var(--text);
@@ -151,22 +152,6 @@
 .wostat.complete {
   background: var(--chip);
   color: var(--muted);
-}
-
-.wo-back {
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 8px 14px;
-  min-height: var(--touch-min);
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--muted);
-  background: var(--panel);
-}
-
-.wo-back:hover {
-  color: var(--info-t);
-  border-color: var(--info-t);
 }
 
 .wo-card {

@@ -19,6 +19,9 @@ export const MOCK_AREA_MACHINES: Partial<Record<AreaKey, MockAreaMachine[]>> = {
   mill: [
     { name: 'Mill 1', status: 'running' },
     { name: 'Mill 2', status: 'running' },
+    // Long Machine name reference case: truncates where constrained,
+    // never pushing quantities or times out of alignment.
+    { name: 'Mill 3 — Horizontal Boring', status: 'idle' },
   ],
 };
 
@@ -56,15 +59,20 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     received: '2026-07-12',
   },
   {
+    // Partially on a Machine and partially DONE: 3 pcs still turning on
+    // Lathe 3, 2 pcs queued, 1 pc finished (completed by Lathe 3) and
+    // waiting on the finished rack — READY_TO_TRANSFER, current
+    // Machine cleared, Area unchanged.
     area: 'lathe',
     pn: '2027-60-8114-00',
     workOrder: 'WO 007001 · Turning',
     job: '18112',
     qty: 6,
     machines: [
-      ['Lathe 3', 4],
+      ['Lathe 3', 3],
       ['queue', 2],
     ],
+    finished: [{ qty: 1, completedBy: 'Lathe 3' }],
     due: '2 days remaining',
     dueClass: 'soon',
     timeInArea: '2h 05m',
@@ -152,12 +160,17 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     received: '2026-07-19',
   },
   {
+    // DONE in an Area without Machines: deburring finished for the
+    // whole quantity — READY_TO_TRANSFER on the finished rack. A
+    // transfer from this source appends only TRANSFERRED (processing
+    // was already completed).
     area: 'deburr',
     pn: '78-04-0031',
     workOrder: 'WO 007002 · Deburring',
     job: '18102',
     qty: 3,
     machines: [],
+    finished: [{ qty: 3 }],
     due: '16 days remaining',
     dueClass: 'ok',
     timeInArea: '30m',

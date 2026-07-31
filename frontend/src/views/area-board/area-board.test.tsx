@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 
 import { AreaBoardView } from './AreaBoardView';
@@ -14,7 +20,10 @@ beforeEach(() => {
 afterEach(cleanup);
 
 function openArea(name: RegExp) {
-  fireEvent.click(screen.getByRole('button', { name }));
+  // Click the Area TAB specifically — the overview column headers are
+  // buttons too and would make an unscoped name query ambiguous.
+  const tabs = document.querySelector<HTMLElement>('.ab-tabs')!;
+  fireEvent.click(within(tabs).getByRole('button', { name }));
 }
 
 test('the Area detail leads with a summary card: stats + grouped PN list', () => {
@@ -27,21 +36,24 @@ test('the Area detail leads with a summary card: stats + grouped PN list', () =>
   expect(summary.className).toContain('abd-summary');
   expect(summary.textContent).toContain('Turning');
 
-  // Statistics: 3 PNs · 12 pcs total · 4 queued · 8 on machines · 1 Hot.
+  // Statistics reconcile: 3 PNs · 12 pcs = 4 queued + 7 on machines +
+  // 1 done (READY_TO_TRANSFER) · 1 Hot.
   const stats = Array.from(
     summary.querySelectorAll('.stat .n'),
     (el) => el.textContent,
   );
-  expect(stats).toEqual(['3', '12', '4', '8', '1']);
+  expect(stats).toEqual(['3', '12', '4', '7', '1', '1']);
 
-  // Grouping: assigned first, then the Area queue.
+  // Grouping: On Machines, then the Area queue, then the finished
+  // (ready to transfer) quantity.
   const groups = Array.from(
     summary.querySelectorAll('.abd-grp'),
     (el) => el.textContent,
   );
   expect(groups).toEqual([
-    'Assigned to Machines',
+    'On Machines',
     'Area queue — awaiting Machine',
+    'Finished — ready to move',
   ]);
 
   // Quantities are neither duplicated nor lost by the grouping.
@@ -63,7 +75,8 @@ test('each Machine gets a monitoring card; inactive Machines stay distinct', () 
   const lathe3 = machineCards[2];
   expect(lathe3.querySelector('.mstat')?.textContent).toBe('running');
   expect(lathe3.textContent).toContain('2027-60-8114-00');
-  expect(lathe3.querySelector('.mtotals')?.textContent).toContain('4');
+  // Only the actively assigned 3 pcs — the finished 1 pc left the card.
+  expect(lathe3.querySelector('.mtotals')?.textContent).toContain('3');
 
   const lathe1 = machineCards[0];
   expect(lathe1.querySelector('.mstat')?.textContent).toBe('idle');
@@ -158,10 +171,13 @@ test('a no-Machine Area renders the full-width single-column layout', () => {
   const layout = document.querySelector('.am');
   expect(layout?.classList.contains('am-single')).toBe(true);
   expect(document.querySelector('.abd-machine')).toBeNull();
-  // Direct processing group — no queue wording for a no-Machine Area.
-  expect(document.querySelector('.abd-summary')?.textContent).toContain(
-    'In processing',
-  );
+  // Deburr's whole quantity is finished (READY_TO_TRANSFER): only the
+  // finished group renders — no queue wording for a no-Machine Area,
+  // and the finished state is never presented as Stocked.
+  const summary = document.querySelector('.abd-summary');
+  expect(summary?.textContent).toContain('Finished — ready to move');
+  expect(summary?.textContent).not.toContain('awaiting Machine');
+  expect(summary?.textContent).not.toContain('Stocked');
 });
 
 test('scrap quantities appear in the PN summaries as text only', () => {
@@ -175,4 +191,60 @@ test('scrap quantities appear in the PN summaries as text only', () => {
   expect(document.querySelector('.mc-list .scrap')).toBeNull();
   // The blank-number internal MODIFY Work Order renders as `—`.
   expect(summary?.textContent).toContain('WO —');
+});
+
+test('finished quantity lives in the Area summary, not in a Machine card', () => {
+  render(<AreaBoardView />);
+  openArea(/^Lathe/);
+
+  const summary = document.querySelector('.abd-summary')!;
+  // The finished portion is a distinct success/ready row that keeps the
+  // completing Machine as context only.
+  expect(summary.querySelector('.ctx.done')).not.toBeNull();
+  expect(summary.textContent).toContain('Finished at Lathe 3 — ready to move');
+  // The finished pc is not presented as Stocked and never inside a
+  // Machine card.
+  for (const card of document.querySelectorAll('.abd-machine')) {
+    expect(card.textContent).not.toContain('ready to move');
+  }
+  expect(summary.textContent).not.toContain('Stocked');
+});
+
+test('the All Areas overview reuses the shared PN row presentation', () => {
+  render(<AreaBoardView />);
+
+  const latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
+  )!;
+  // Shared row shell: rowmain grid lines with the shared subcomponents.
+  const row = latheColumn.querySelector('.mc-list li .rowmain')!;
+  expect(row.querySelector('.r1 .r1r .qtyline')?.textContent).toMatch(
+    /\d+ pcs/,
+  );
+  const wo = row.querySelector<HTMLElement>('.r2 .wo');
+  expect(wo?.getAttribute('title')).toBe(wo?.textContent);
+  // Aggregated portion chips distinguish machine / queue / done.
+  const chips = Array.from(
+    latheColumn.querySelectorAll('.mc-list .ctxs .ctx'),
+    (el) => el.textContent,
+  );
+  expect(chips).toContain('Lathe 3 × 3');
+  expect(chips).toContain('queue × 2');
+  expect(chips).toContain('done × 1');
+  // The overview column shows the Done stat with the success tone.
+  expect(latheColumn.querySelector('.stat .n.d')?.textContent).toBe('1');
+});
+
+test('queued, on-Machine, processing, and finished states stay distinguishable', () => {
+  render(<AreaBoardView />);
+  openArea(/^Lathe/);
+  const summary = document.querySelector('.abd-summary')!;
+  expect(summary.textContent).toContain('On Machine');
+  expect(summary.textContent).toContain('Awaiting Machine');
+  expect(summary.textContent).toContain('ready to move');
+
+  openArea(/^Manual/);
+  expect(document.querySelector('.abd-summary')?.textContent).toContain(
+    'In processing',
+  );
 });
