@@ -11,7 +11,7 @@ import {
 
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { AreaDot, HotPn } from '../../components/indicators';
+import { AreaDot } from '../../components/indicators';
 import {
   EmptyState,
   ErrorState,
@@ -80,13 +80,19 @@ function locationStateLabel(state: MockLocationRow['state']): string {
 
 function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
   const onMachine = loc.state === 'machine' && loc.machine !== undefined;
-  // The completing Machine on a done row is secondary context only —
-  // it appears in the tooltip, never as the current executor.
+  // External activity (`plating`, `vendor`, …) replaces the generic
+  // `processing` label with a light informational chip.
+  const activityChip = loc.state === 'processing' && loc.activity;
+  // The completing Machine (or External activity) on a done row is
+  // secondary context only — it appears in the tooltip, never as the
+  // current executor.
   const doneTitle =
     loc.state === 'done'
       ? loc.machine
         ? `Completed at ${loc.machine} — ready to transfer`
-        : 'Completed — ready to transfer'
+        : loc.activity
+          ? `Completed (${loc.activity}) — ready to transfer`
+          : 'Completed — ready to transfer'
       : undefined;
   return (
     <div className="locrow">
@@ -104,12 +110,18 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
         )}
       </span>
       <span className="lqty">{loc.qty}</span>
-      <span
-        className={`ltag${loc.state === 'done' ? ' done' : ''}`}
-        title={doneTitle}
-      >
-        {locationStateLabel(loc.state)}
-      </span>
+      {activityChip ? (
+        <span className="ltag">
+          <span className="actchip">{loc.activity}</span>
+        </span>
+      ) : (
+        <span
+          className={`ltag${loc.state === 'done' ? ' done' : ''}`}
+          title={doneTitle}
+        >
+          {locationStateLabel(loc.state)}
+        </span>
+      )}
       <span className={`ltime ${loc.timeLong ? 'long' : ''}`}>{loc.time}</span>
     </div>
   );
@@ -120,11 +132,26 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
   return (
     <>
       <td className="cell-no">
-        <div className="no">{no}</div>
+        {/* The Hot flame lives in the No. column — the PN cell carries
+            only the PN and description. */}
+        <div
+          className="no"
+          aria-label={
+            row.hotRank !== undefined ? `Row ${no}, Hot priority` : undefined
+          }
+        >
+          {no}
+          {row.hotRank !== undefined ? (
+            <span className="hotflame" aria-hidden="true">
+              {' '}
+              🔥
+            </span>
+          ) : null}
+        </div>
       </td>
       <td className="pn">
-        <div className="part">
-          <HotPn rank={row.hotRank} pn={row.pn} />
+        <div className="part" title={row.pn}>
+          {row.pn}
         </div>
         <div className="pname">{row.name}</div>
       </td>
@@ -136,22 +163,24 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
               key={`${loc.area}-${loc.machine ?? ''}-${loc.state}`}
             />
           ))}
+          {/* One continuous dashed separator spanning the complete
+              location grid — never per-cell border fragments. */}
+          <div className="locsep" aria-hidden="true" />
           <div className="locrow total">
             <span className="lname">total</span>
             <span className="lqty tot">{row.total}</span>
             <span className="ltag">
               pcs{row.totalStocked ? ' stocked' : ''}
             </span>
-            <span className="ltime" />
+            <span className="ltime">
+              {row.scrapped ? (
+                // Scrap renders on the total line itself, anchored in
+                // the right-hand time position as a quiet error-toned
+                // chip — never an extra row, never a ⊘ symbol.
+                <span className="scrapchip">{row.scrapped} scrapped</span>
+              ) : null}
+            </span>
           </div>
-          {row.scrapped ? (
-            // Scrapped quantity gets its own full-width line under the
-            // dashed total row — it never shares the time column, so
-            // long Area/Machine names cannot collide with it.
-            <div className="locrow scrap">
-              <span className="lscrap">⊘ {row.scrapped} scrapped</span>
-            </div>
-          ) : null}
         </div>
       </td>
       <td className="due">
@@ -285,12 +314,18 @@ export function ProductionBoardView() {
   const pageCount = Math.max(1, breaks.length);
 
   const [page, setPage] = useState(0);
+  // Every manual page change bumps the epoch, which recreates the
+  // rotation interval — manual navigation restarts the auto-rotation
+  // timer instead of racing it.
+  const [rotateEpoch, setRotateEpoch] = useState(0);
   // Clamp the active page whenever the page structure changes.
   useEffect(() => {
     setPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
   // Rotate only while more than one page exists; the previous timer is
-  // cleaned up when pagination changes or the view unmounts.
+  // cleaned up when pagination changes, a manual navigation restarts
+  // it, or the view unmounts. Automatic rotation wraps around; manual
+  // navigation never does.
   useEffect(() => {
     if (pageCount <= 1) return;
     const timer = window.setInterval(
@@ -298,8 +333,36 @@ export function ProductionBoardView() {
       ROTATE_MS,
     );
     return () => window.clearInterval(timer);
-  }, [pageCount]);
+  }, [pageCount, rotateEpoch]);
   const safePage = Math.min(page, pageCount - 1);
+
+  /** Manual page change: clamped, non-wrapping, restarts the timer. */
+  const goToPage = useCallback((target: number, currentPageCount: number) => {
+    if (target < 0 || target >= currentPageCount) return;
+    setPage(target);
+    setRotateEpoch((epoch) => epoch + 1);
+  }, []);
+
+  // Physical-keyboard page navigation: ArrowLeft/ArrowRight work
+  // regardless of focus (the board has no normal text-entry workflow),
+  // never wrap, ignore modifier chords, stay inert while a modal
+  // dialog is active, and restart the rotation timer like the buttons.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+      const target = safePage + (event.key === 'ArrowLeft' ? -1 : 1);
+      if (target < 0 || target >= pageCount) return;
+      // A valid page change consumes the key — no horizontal scroll.
+      event.preventDefault();
+      goToPage(target, pageCount);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [safePage, pageCount, goToPage]);
 
   if (preview === 'loading') {
     return (
@@ -335,7 +398,7 @@ export function ProductionBoardView() {
     <section className="pb" aria-label="Production Board" ref={sectionRef}>
       <div className="pb-head" ref={headRef}>
         <h1>Machine Shop — Production</h1>
-        <span className="live">
+        <span className={`live${status === 'connected' ? '' : ' stale'}`}>
           <span className="ld" aria-hidden="true" />
           {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
         </span>
@@ -396,20 +459,43 @@ export function ProductionBoardView() {
               } s`
             : 'Page 1 / 1'}
         </span>
-        {Array.from({ length: pageCount }, (_, i) => (
-          <span
-            key={i}
-            className={`pgdot ${i === safePage ? 'on' : ''}`}
-            aria-hidden="true"
-          />
-        ))}
+        {/* Manual page navigation: Previous/Next never wrap (automatic
+            rotation still does) and every manual change restarts the
+            rotation timer. ArrowLeft/ArrowRight mirror the buttons. */}
+        <span className="pgnav">
+          <button
+            className="pgbtn"
+            aria-label="Previous page"
+            disabled={safePage === 0}
+            onClick={() => goToPage(safePage - 1, pageCount)}
+          >
+            ‹
+          </button>
+          {Array.from({ length: pageCount }, (_, i) => (
+            <button
+              key={i}
+              className={`pgdot ${i === safePage ? 'on' : ''}`}
+              aria-label={`Go to page ${i + 1}`}
+              aria-current={i === safePage ? 'page' : undefined}
+              onClick={() => goToPage(i, pageCount)}
+            />
+          ))}
+          <button
+            className="pgbtn"
+            aria-label="Next page"
+            disabled={safePage === pageCount - 1}
+            onClick={() => goToPage(safePage + 1, pageCount)}
+          >
+            ›
+          </button>
+        </span>
         <span className="spacer" />
         <span>
-          🔥#n before the PN = Hot priority rank · blinking days count = due
-          soon / overdue (the date and PN stay steady) · — = no due date / no
-          external WO Number · ⊘ = scrapped quantity · {activePns} active PNs ·{' '}
-          {inProduction} pcs in production · {stocked} pcs stocked ·{' '}
-          {scrappedTotal} pcs scrapped
+          🔥 in the No. column = Hot priority (highest first) · blinking days
+          count = due soon / overdue (the date and PN stay steady) · — = no due
+          date / no external WO Number · {activePns} active PNs · {inProduction}{' '}
+          pcs in production · {stocked} pcs stocked · {scrappedTotal} pcs
+          scrapped
         </span>
       </div>
     </section>

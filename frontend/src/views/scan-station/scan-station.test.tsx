@@ -82,11 +82,53 @@ test('/scan-station shows the Station Selector without auto-redirecting', async 
   ).toBeInTheDocument();
   expect(window.location.pathname).toBe('/scan-station');
   // Enough information to distinguish stations: id, Area, Machine mode.
-  const lathe = screen.getByRole('button', { name: /LATHE-ST-01/ });
+  const lathe = screen
+    .getByRole('button', { name: 'Open LATHE-ST-01' })
+    .closest('.ss-stationcard') as HTMLElement;
   expect(lathe).toHaveTextContent('Machine Shop');
   expect(lathe).toHaveTextContent('4 Machines — queue & assign');
-  const deburr = screen.getByRole('button', { name: /DEBURR-ST-01/ });
+  const deburr = screen
+    .getByRole('button', { name: 'Open DEBURR-ST-01' })
+    .closest('.ss-stationcard') as HTMLElement;
   expect(deburr).toHaveTextContent('No Machines — direct Area processing');
+});
+
+test('the Station Selector renders Operations as individual chips', async () => {
+  window.history.replaceState({}, '', '/scan-station');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Select a Scan Station' });
+
+  // Single-Operation station: one chip.
+  const lathe = screen
+    .getByRole('button', { name: 'Open LATHE-ST-01' })
+    .closest('.ss-stationcard') as HTMLElement;
+  expect(
+    Array.from(lathe.querySelectorAll('.opchip'), (el) => el.textContent),
+  ).toEqual(['Turning']);
+
+  // Multi-Operation station: one chip per Operation, never one
+  // comma-joined text run.
+  const external = screen
+    .getByRole('button', { name: 'Open EXT-ST-01' })
+    .closest('.ss-stationcard') as HTMLElement;
+  expect(
+    Array.from(external.querySelectorAll('.opchip'), (el) => el.textContent),
+  ).toEqual(['Plating', 'Painting', 'Testing']);
+  expect(external.textContent).not.toContain('Plating, Painting');
+});
+
+test('each station card offers Open and Open production mode with correct routes', async () => {
+  window.history.replaceState({}, '', '/scan-station');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Select a Scan Station' });
+
+  // Accessible names carry the Station ID for both actions.
+  const prod = screen.getByRole('button', {
+    name: 'Open LATHE-ST-01 in production mode',
+  });
+  fireEvent.click(prod);
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
 });
 
 test('an unknown Station ID is an explicit error, never a fallback', async () => {
@@ -112,6 +154,114 @@ test('the footer Station ID is a subtle switch back to the selector', async () =
   expect(
     await screen.findByRole('heading', { name: 'Select a Scan Station' }),
   ).toBeInTheDocument();
+});
+
+/* ============ Production mode ============ */
+
+test('the standard station keeps the top navigation and the switch affordance', async () => {
+  await renderStation();
+
+  expect(
+    screen.getByRole('navigation', { name: 'Primary' }),
+  ).toBeInTheDocument();
+  // Standard mode documents the production-mode shortcut in the footer.
+  expect(document.querySelector('.ss-stationfoot')?.textContent).toContain(
+    'Ctrl+Shift+K',
+  );
+  expect(document.querySelector('.ss')?.className).not.toContain('production');
+});
+
+test('production mode hides the top navigation and keeps the station working', async () => {
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
+  render(<App />);
+  const input = await screen.findByLabelText('Scan barcode');
+
+  // No top application navigation, no Production Board / Management /
+  // Administration links.
+  expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Production Board' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Management' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Administration' })).toBeNull();
+
+  // The station root carries the production class → full viewport
+  // height (no leftover 53px top-nav offset, scan-station.css).
+  expect(document.querySelector('.ss')?.className).toContain('production');
+
+  // A small non-interactive Production mode label; the Station ID is
+  // visible but NOT a button — no casual station switching.
+  expect(screen.getByText('Production mode')).toBeInTheDocument();
+  expect(screen.getByText('Production mode').tagName).not.toBe('BUTTON');
+  const foot = document.querySelector('.ss-stationfoot') as HTMLElement;
+  expect(foot).toHaveTextContent('LATHE-ST-01');
+  expect(foot.querySelector('button')).toBeNull();
+
+  // Connectivity status stays visible inside the Scan Station header.
+  expect(
+    screen.getByRole('status', { name: /Backend connection/ }),
+  ).toBeInTheDocument();
+
+  // Scanning still works: a PN scan opens its one-shot dialog.
+  fireEvent.change(input, {
+    target: { value: 'PF:PN:2027-60-8114-00' },
+  });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+});
+
+test('the OFFLINE banner stays visible in production mode', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.reject(new Error('offline'))),
+  );
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
+  render(<App />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/OFFLINE/);
+  expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+});
+
+test('Ctrl+Shift+K toggles between standard and production routes only', async () => {
+  await renderStation();
+
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
+  await screen.findByText('Production mode');
+
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+
+  // Without the full chord nothing toggles (K alone is wedge input).
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+});
+
+test('the shortcut works from the barcode input but never from dialogs or other fields', async () => {
+  const input = await renderStation();
+
+  // Focus discipline keeps the main barcode input focused almost
+  // always — the chord stays usable there (it is a scanner target,
+  // not text entry, and the wedge capture ignores modifier chords).
+  fireEvent.keyDown(input, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
+  fireEvent.keyDown(input, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+
+  // Inside an active dialog workflow the chord is inert.
+  scan('PF:PN:2027-60-8114-00');
+  fireEvent.keyDown(activeDialog(), {
+    key: 'K',
+    ctrlKey: true,
+    shiftKey: true,
+  });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+
+  // In any other text field (manual PN entry input) the chord is
+  // inert too.
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+  fireEvent.click(screen.getByRole('button', { name: '⌨ Enter PN manually' }));
+  const manualInput = screen.getByLabelText('Exact PartNumber');
+  fireEvent.keyDown(manualInput, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
 });
 
 /* ============ Area with / without Machines ============ */
@@ -824,7 +974,7 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
 
   // The confirmation explicitly identifies the Repair movement.
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
-  expect(dialog.textContent).toContain('TRANSFERRED · movement_reason REPAIR');
+  expect(dialog.textContent).toContain('TRANSFERRED · REPAIR intent');
   expect(lastPnText()).toBe('—');
   fireEvent.click(screen.getByRole('button', { name: 'Confirm repair' }));
 

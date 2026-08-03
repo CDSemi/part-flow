@@ -105,7 +105,7 @@ export function WorkOrderDetailPanel({
         <h2 id={headingId} className="nwo-title">
           Work Order Details
         </h2>
-        <EmptyState message="This Work Order is not available in the mock data." />
+        <EmptyState message="This Work Order could not be found." />
         <div className="row">
           <button className="bigbtn ghost" onClick={onClose}>
             Cancel (Esc)
@@ -117,10 +117,10 @@ export function WorkOrderDetailPanel({
 
   const woDisplay = workOrder.workOrderNumber ?? '—';
 
-  // A release performed in this session (mock) also freezes its line.
+  // A release performed in this session also freezes its line.
   const display = lines.map((line) =>
     !line.released && line.pn && releasedLines.has(`${workOrder.id}:${line.pn}`)
-      ? { ...line, released: true, statusLabel: 'Released (mock)' }
+      ? { ...line, released: true, statusLabel: 'Released' }
       : line,
   );
 
@@ -660,10 +660,9 @@ export function WorkOrderDetailPanel({
           <span className="hint">
             {editable ? (
               <>
-                Saving stores <b>business demand only</b> — no Quantity Flow, no
-                Movement, no release. Invalid rows cannot be saved and are never
-                dropped silently. (Development mock — changes apply to local
-                state only.)
+                Saving stores <b>business demand only</b> — release to
+                production stays a separate explicit step. Invalid rows cannot
+                be saved and are never dropped silently.
               </>
             ) : (
               <>
@@ -744,9 +743,9 @@ export function WorkOrderDetailPanel({
           No production quantity has been released for this Work Order Demand
           line (<span className="mono">{confirmRemove.pn}</span> · qty{' '}
           {confirmRemove.qty || '—'}). Removing it never deletes the PartNumber
-          master, Quantity Flows, Movements, release history, or other Work
-          Order Demand for the same PN. Phase 2: the removal affects{' '}
-          <b>local mock state only</b> and is applied by Save demand.
+          master, production quantity, movement history, release history, or
+          other Work Order Demand for the same PN. The removal is applied by
+          Save demand.
         </ConfirmDialog>
       ) : null}
 

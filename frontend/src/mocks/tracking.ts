@@ -259,7 +259,7 @@ export const MOCK_TRACKING_DETAIL = {
         { step: 'Cut', state: 'cur', repair: true },
       ],
       routeNote:
-        'Floating Route — no AssignedRoute; the trace above is the actual Movement history (repeated Areas preserved). ⟲ REPAIR marks the explicit Repair return to Cut.',
+        'Floating Route — the trace above is the actual recorded history (repeated Areas preserved). ⟲ REPAIR marks the explicit Repair return to Cut.',
     },
   ],
   movements: [
@@ -285,7 +285,7 @@ export const MOCK_TRACKING_DETAIL = {
       type: 'TRANSFERRED',
       typeClass: 'tra',
       description:
-        'Lathe → Cut · qty 4 · QF-0141 · movement_reason: REPAIR · reason: shoulder cut short — recut required · W: H. Nguyen · LATHE-ST-01',
+        'Lathe → Cut · qty 4 · QF-0141 · Repair — reason: shoulder cut short — recut required · W: H. Nguyen · LATHE-ST-01',
       repair: true,
     },
     {

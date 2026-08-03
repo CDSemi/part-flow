@@ -145,7 +145,7 @@ test('drag and drop asks for confirmation; cancel changes nothing', async () => 
   expect(listedPns()).toEqual(['142-260', '309-127', '2027-60-8114-00']);
 });
 
-test('confirmation compares current and proposed ranks and highlights the moved item', async () => {
+test('confirmation shows Current Position and New Position snapshots', async () => {
   await renderPriority();
   const items = document.querySelectorAll('.pr-item');
 
@@ -162,22 +162,51 @@ test('confirmation compares current and proposed ranks and highlights the moved 
   );
   expect(dialog).toHaveTextContent('2 other demands will shift up.');
 
-  // The directly moved item is distinguishable from indirect shifts.
-  const movedRow = dialog.querySelector('.pr-compare tr.moved');
-  expect(movedRow).not.toBeNull();
-  expect(movedRow).toHaveTextContent('2027-60-8114-00');
-  // Old and new ranks are both visible, with a downward direction.
-  expect(movedRow).toHaveTextContent('#1');
-  expect(movedRow).toHaveTextContent('#3');
-  expect(movedRow).toHaveTextContent('↓');
+  // Two snapshot sections with exactly one transition arrow between.
+  const sections = dialog.querySelectorAll('.pr-snapshot');
+  expect(sections).toHaveLength(2);
+  const [current, proposed] = Array.from(sections);
+  expect(current.querySelector('.pr-snaptitle')?.textContent).toBe(
+    'Current Position',
+  );
+  expect(proposed.querySelector('.pr-snaptitle')?.textContent).toBe(
+    'New Position',
+  );
+  expect(dialog.querySelectorAll('.pr-transition')).toHaveLength(1);
 
-  const shiftedRows = dialog.querySelectorAll('.pr-compare tr.shifted');
-  expect(shiftedRows).toHaveLength(2);
-  for (const row of Array.from(shiftedRows)) {
-    expect(row).toHaveTextContent('↑');
-  }
-  expect(shiftedRows[0]).toHaveTextContent('142-260');
-  expect(shiftedRows[1]).toHaveTextContent('309-127');
+  // Current Position: rows in current rank order, rank first, per-row
+  // direction arrows, the moved item highlighted.
+  const curRows = Array.from(current.querySelectorAll('.pr-snaprow'));
+  expect(curRows).toHaveLength(3);
+  expect(curRows[0].querySelector('.prr')?.textContent).toContain('#1');
+  expect(curRows[0].querySelector('.prpn')?.textContent).toBe(
+    '2027-60-8114-00',
+  );
+  expect(curRows[0].className).toContain('moved');
+  expect(curRows[0].querySelector('.dir.down')?.textContent).toBe('↓');
+  expect(curRows[1].querySelector('.dir.up')?.textContent).toBe('↑');
+  expect(curRows[2].querySelector('.dir.up')?.textContent).toBe('↑');
+  // Rank renders before the PN inside the row.
+  const rowChildren = Array.from(curRows[0].children).map((el) => el.className);
+  expect(rowChildren[0]).toContain('prr');
+  expect(rowChildren[1]).toContain('prpn');
+
+  // PN and WO/Job metadata are visually separate: the chip carries the
+  // explicit Work Order and Job Number fields, the PN element does not.
+  expect(curRows[0].querySelector('.wjchip')?.textContent).toBe(
+    'WO 007001 · Job 18112',
+  );
+  expect(curRows[0].querySelector('.prpn')?.textContent).not.toContain('WO');
+
+  // New Position: proposed rank order, no per-row direction arrows.
+  const newRows = Array.from(proposed.querySelectorAll('.pr-snaprow'));
+  expect(newRows).toHaveLength(3);
+  expect(newRows[0].querySelector('.prpn')?.textContent).toBe('142-260');
+  expect(newRows[2].querySelector('.prpn')?.textContent).toBe(
+    '2027-60-8114-00',
+  );
+  expect(newRows[2].querySelector('.prr')?.textContent).toBe('#3');
+  expect(proposed.querySelector('.dir')).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(listedPns()).toEqual(INITIAL);
@@ -203,8 +232,9 @@ test('Undo and Redo confirm with user-facing titles; cancel preserves both histo
   // and the same rank comparison is shown for the restore.
   expect(dialog).toHaveTextContent('previous confirmed order');
   expect(dialog).toHaveTextContent('Undo');
-  expect(dialog.querySelector('.pr-compare tr.moved')).toBeNull();
-  expect(dialog.querySelectorAll('.pr-compare tr.shifted')).toHaveLength(2);
+  expect(dialog.querySelector('.pr-snaprow.moved')).toBeNull();
+  // Both entries appear in both snapshots, all as indirect shifts.
+  expect(dialog.querySelectorAll('.pr-snaprow.shifted')).toHaveLength(4);
   expect(dialog).toHaveTextContent('#1');
   expect(dialog).toHaveTextContent('#2');
   expect(dialog).toHaveTextContent('↑');
@@ -268,14 +298,36 @@ test('Undo restores an entry removed from the bottom of the list', async () => {
   const dialog = screen.getByRole('dialog', {
     name: 'Restore previous ranking',
   });
-  const row = dialog.querySelector('.pr-compare tbody tr');
-  expect(row).toHaveTextContent('309-127');
-  expect(row).toHaveTextContent('—'); // no current rank while removed
-  expect(row).toHaveTextContent('#3');
+  // The entry does not exist on the current side: a clear `Not listed`
+  // placeholder — never a silent omission; the new side shows #3.
+  const [current, proposed] = Array.from(
+    dialog.querySelectorAll('.pr-snapshot'),
+  );
+  const absent = current.querySelector('.pr-snaprow.absent');
+  expect(absent).toHaveTextContent('Not listed');
+  expect(absent).toHaveTextContent('309-127');
+  expect(proposed).toHaveTextContent('#3');
+  expect(proposed).toHaveTextContent('309-127');
+  expect(proposed.querySelector('.pr-snaprow.absent')).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
   expect(listedPns()).toEqual(INITIAL);
   expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeEnabled();
+
+  // Redo (remove again): the entry leaves the list — the new side shows
+  // the `Not listed` placeholder instead.
+  fireEvent.click(screen.getByRole('button', { name: '⟳ Redo' }));
+  const redoDialog = screen.getByRole('dialog', { name: 'Reapply ranking' });
+  const [redoCurrent, redoProposed] = Array.from(
+    redoDialog.querySelectorAll('.pr-snapshot'),
+  );
+  expect(redoCurrent).toHaveTextContent('#3');
+  expect(redoCurrent.querySelector('.pr-snaprow.absent')).toBeNull();
+  expect(redoProposed.querySelector('.pr-snaprow.absent')).toHaveTextContent(
+    'Not listed',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(listedPns()).toEqual(INITIAL);
 });
 
 test('adding a new Hot entry at the bottom needs no reorder confirmation', async () => {

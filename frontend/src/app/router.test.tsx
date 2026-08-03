@@ -70,10 +70,53 @@ test('/scan-station/:stationId loads the selected station', async () => {
 test('selecting a station from the Station Selector navigates to its URL', async () => {
   renderAt('/scan-station');
 
-  fireEvent.click(await screen.findByRole('button', { name: /DEBURR-ST-01/ }));
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Open DEBURR-ST-01' }),
+  );
 
   expect(window.location.pathname).toBe('/scan-station/DEBURR-ST-01');
   expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+});
+
+test('/scan-station/:stationId resolves to the standard mode with top navigation', async () => {
+  renderAt('/scan-station/LATHE-ST-01');
+
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+  expect(
+    screen.getByRole('navigation', { name: 'Primary' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText('Production mode')).toBeNull();
+});
+
+test('the production route direct-loads with the navigation hidden', async () => {
+  renderAt('/scan-station/LATHE-ST-01/production');
+
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+  expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  expect(screen.getByText('Production mode')).toBeInTheDocument();
+});
+
+test('browser back/forward moves between standard and production modes', async () => {
+  renderAt('/scan-station/LATHE-ST-01');
+  await screen.findByLabelText('Scan barcode');
+
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  await screen.findByText('Production mode');
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
+
+  window.history.back();
+  await waitFor(() =>
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument(),
+  );
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+
+  window.history.forward();
+  await waitFor(() =>
+    expect(screen.getByText('Production mode')).toBeInTheDocument(),
+  );
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
 });
 
 test('an unknown Station ID shows an explicit error — no silent fallback', async () => {

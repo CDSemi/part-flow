@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v10.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v11.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -30,7 +30,8 @@ an application-level not-found state):
 | URL | View |
 |---|---|
 | `/scan-station` | Scan Station — Station Selector (root `/` redirects here; never auto-redirects to a station) |
-| `/scan-station/:stationId` | One Scan Station (e.g. `/scan-station/LATHE-ST-01`); unknown or inactive Station IDs show an explicit error |
+| `/scan-station/:stationId` | One Scan Station in standard mode (e.g. `/scan-station/LATHE-ST-01`); unknown or inactive Station IDs show an explicit error |
+| `/scan-station/:stationId/production` | The same Scan Station in production mode — the top application navigation is hidden so operators stay on the station (presentation only, not a security boundary) |
 | `/production-board` | Production Board (large display, read-only) |
 | `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
 | `/management/tracking` | Management → Tracking (PN-centric) |

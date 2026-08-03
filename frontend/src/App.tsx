@@ -6,6 +6,7 @@ import { Suspense } from 'react';
 
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
+import { ConnectivityChip } from './components/ConnectivityChip';
 import { DEV_MOCK_VIEWS } from './app/dev-views';
 import type { AppViewKey } from './app/dev-views';
 import { Link } from './app/link';
@@ -51,26 +52,6 @@ const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
   { subview: 'work-orders', label: 'Work Orders' },
   { subview: 'priority', label: 'Priority' },
 ];
-
-function ConnectivityChip() {
-  const { status } = useConnectivity();
-  const text =
-    status === 'connected'
-      ? 'ONLINE'
-      : status === 'connecting'
-        ? 'CONNECTING…'
-        : 'OFFLINE';
-  return (
-    <span
-      className={`connchip ${status === 'unavailable' ? 'off' : status === 'connecting' ? 'connecting' : ''}`}
-      role="status"
-      aria-label={`Backend connection: ${text}`}
-    >
-      <span className="cdot" aria-hidden="true" />
-      <span className="ctxt">{text}</span>
-    </span>
-  );
-}
 
 function OfflineBanner() {
   const { status, retry } = useConnectivity();
@@ -130,34 +111,44 @@ function ViewForRoute({ route }: { route: Route }) {
 
 function AppShell() {
   const { route } = useRouter();
+  // Scan Station production mode hides the top application navigation
+  // so an operator cannot casually leave the configured station. It is
+  // a presentation choice only — never an authorization or security
+  // boundary. The persistent Offline banner is NOT navigation and stays.
+  const productionMode =
+    route.view === 'scan-station' &&
+    route.stationId !== null &&
+    route.mode === 'production';
   return (
     <>
-      <nav className="appnav" aria-label="Primary">
-        <span className="logo">
-          <span className="mark" aria-hidden="true">
-            ⇄
+      {productionMode ? null : (
+        <nav className="appnav" aria-label="Primary">
+          <span className="logo">
+            <span className="mark" aria-hidden="true">
+              ⇄
+            </span>
+            Part<span className="pf">Flow</span>
           </span>
-          Part<span className="pf">Flow</span>
-        </span>
-        {TOP_NAV.map((item) => (
-          <Link
-            key={item.to}
-            to={item.to}
-            className={`navbtn ${item.matches(route) ? 'active' : ''}`}
-            aria-current={item.matches(route) ? 'page' : undefined}
-          >
-            {item.label}
-          </Link>
-        ))}
-        <span className="spacer" />
-        <ConnectivityChip />
-        <ThemeToggle />
-        {import.meta.env.DEV ? (
-          <span className="mock-tag">
-            Phase 2 · <b>mock data</b>
-          </span>
-        ) : null}
-      </nav>
+          {TOP_NAV.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              className={`navbtn ${item.matches(route) ? 'active' : ''}`}
+              aria-current={item.matches(route) ? 'page' : undefined}
+            >
+              {item.label}
+            </Link>
+          ))}
+          <span className="spacer" />
+          <ConnectivityChip />
+          <ThemeToggle />
+          {import.meta.env.DEV ? (
+            <span className="mock-tag">
+              Development preview · <b>sample data</b>
+            </span>
+          ) : null}
+        </nav>
+      )}
       {route.view === 'management' && (
         <nav className="mgmtnav" aria-label="Management sub views">
           <span className="subgrp">Management</span>

@@ -522,9 +522,8 @@ export function NewWorkOrderDialog({
               Save demand
             </button>
             <span className="hint">
-              Saving stores <b>business demand only</b> — no Quantity Flow, no
-              Movement, no release. (Development mock — nothing is persisted to
-              the backend.)
+              Saving stores <b>business demand only</b> — release to production
+              stays a separate explicit step.
             </span>
           </div>
         </div>

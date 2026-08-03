@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { DevNotice } from '../../components/DevNotice';
 import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -178,7 +179,7 @@ export function WorkOrdersView() {
               current.map((w) => (w.id === updated.id ? updated : w)),
             );
             showNotice(
-              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated (mock) — business demand only: no Quantity Flow, no Movement, no release; nothing was persisted to the backend.`,
+              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated — business demand only; release to production stays a separate explicit step.`,
             );
           }}
           onDirtyChange={handleDetailDirtyChange}
@@ -207,7 +208,7 @@ export function WorkOrdersView() {
             setWorkOrderList((current) => [workOrder, ...current]);
             closeNewWorkOrder();
             showNotice(
-              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved (mock) — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}), no release. Nothing was persisted to the backend.`,
+              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}); release to production stays a separate explicit step.`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}
@@ -230,7 +231,7 @@ export function WorkOrdersView() {
             );
             setReleaseDialog(null);
             showNotice(
-              `✓ ${releaseDialog.pn} marked released (mock) × ${qty} · Route “${route}” — presentation only, no production write occurred.`,
+              `✓ ${releaseDialog.pn} released to production × ${qty} · Route “${route}”.`,
             );
           }}
         />
@@ -279,6 +280,10 @@ function WorkOrderListPanel({
         <b>＋ New Work Order</b> opens a dialog the same way — the URL never
         changes.
       </p>
+      <DevNotice>
+        Development preview — saves and releases update sample data in this
+        browser session only.
+      </DevNotice>
       <div className="wo-tools">
         <input
           value={search}
@@ -380,8 +385,7 @@ function ReleaseDialog({
       <div className="big mono">{pn}</div>
       <div className="sub">
         WO 007010 demand · requested <b>{data?.requested ?? '—'}</b> — nothing
-        is created until you confirm. (Development mock — confirming updates
-        local presentation state only.)
+        is created until you confirm.
       </div>
       {data?.activeDistribution ? (
         <div className="relwarn">

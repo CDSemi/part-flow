@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Transient notice for development-mock interactions. Every message makes
- * clear that only local presentation state changed — no production write.
+ * Transient toast for confirmed view interactions. Messages use normal
+ * operator wording; the development-only data boundary is stated once
+ * per view by DevNotice, never repeated in every toast.
  */
 export function useMockNotice(): {
   notice: string | null;

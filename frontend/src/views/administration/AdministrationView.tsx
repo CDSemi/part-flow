@@ -3,6 +3,7 @@ import './administration.css';
 import { useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
+import { DevNotice } from '../../components/DevNotice';
 import { useMockNotice } from '../../components/mock-notice';
 import {
   EmptyState,
@@ -84,22 +85,24 @@ export function AdministrationView() {
               className="btn primary"
               onClick={() =>
                 showNotice(
-                  'Configuration editing is presentation-only in Phase 2 — nothing was created or changed.',
+                  'Configuration editing is not available yet — nothing was created or changed.',
                 )
               }
             >
               + New {section.label === 'Areas' ? 'Area' : 'entry'}
             </button>
           </div>
+          <DevNotice>
+            Development preview — configuration values shown are sample data.
+          </DevNotice>
           {section.id === 'areas' ? (
             <AreasTable empty={preview === 'empty'} />
           ) : (
             <div className="ad-placeholder">
-              The <b>{section.label}</b> configuration panel is a Phase 2
-              presentation mock: the table + editor pattern follows the Areas
-              reference table, and real configuration management arrives with
-              Administration (Phase 13). Nothing here reads from or writes to
-              the backend.
+              The <b>{section.label}</b> configuration panel follows the same
+              table + editor pattern as the Areas reference table. Configuration
+              management for this section arrives in a later implementation
+              phase.
             </div>
           )}
         </div>

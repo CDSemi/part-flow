@@ -206,8 +206,12 @@ export function TrackingView() {
         <aside className="tk-right" aria-label="PN detail">
           {selectedPn !== detail.pn ? (
             <EmptyState
-              message="No detail preview for this PN yet."
-              hint={`Development note: detail data exists for ${detail.pn} only.`}
+              message="No detail available for this PN yet."
+              hint={
+                import.meta.env.DEV
+                  ? `Development preview: detail data exists for ${detail.pn} only.`
+                  : undefined
+              }
             />
           ) : (
             <TrackingDetail />
@@ -243,8 +247,7 @@ function TrackingDetail() {
 
       <div className="tk-sec">
         <h4>
-          Active WO Demand{' '}
-          <span className="tag">business demand — separate from Movement</span>
+          Active WO Demand <span className="tag">requested quantity</span>
         </h4>
         <table className="demand">
           <thead>
@@ -283,7 +286,7 @@ function TrackingDetail() {
       <div className="tk-sec">
         <h4>
           Current quantity by Area{' '}
-          <span className="tag">derived from Movement history</span>
+          <span className="tag">current recorded location</span>
         </h4>
         <div className="dist">
           {/* `state` keeps the holding states visually distinct: active
@@ -387,9 +390,7 @@ function TrackingDetail() {
       <div className="tk-sec">
         <h4>
           Movement history{' '}
-          <span className="tag">
-            immutable — corrections append, never edit
-          </span>
+          <span className="tag">complete activity history</span>
         </h4>
         <ul className="mv">
           {d.movements.map((m, i) => (
@@ -420,7 +421,7 @@ function TrackingDetail() {
       <div className="tk-sec">
         <h4>
           Stocked &amp; Allocation history{' '}
-          <span className="tag">WO Allocation — separate from Movement</span>
+          <span className="tag">stocked quantity assigned to demand</span>
         </h4>
         <div className="prognote" style={{ marginTop: 0 }}>
           {d.stockedNote}

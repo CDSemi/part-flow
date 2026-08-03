@@ -5,6 +5,7 @@ import type { DragEvent } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { DevNotice } from '../../components/DevNotice';
 import { TypeChip } from '../../components/indicators';
 import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -41,6 +42,8 @@ interface RankChange {
   key: string;
   pn: string;
   workOrder: string;
+  /** The full demand entry (PN + explicit WO/Job metadata fields). */
+  entry: MockHotEntry;
   /** Current rank; null when the entry is not currently listed. */
   from: number | null;
   /** Proposed rank; null when the entry leaves the list. */
@@ -49,6 +52,8 @@ interface RankChange {
 
 interface PendingReorder {
   action: ReorderAction;
+  /** List order before the pending change (Current Position snapshot). */
+  current: MockHotEntry[];
   next: MockHotEntry[];
   changes: RankChange[];
   /** Entry the user acted on directly; null for Undo/Redo restores. */
@@ -73,6 +78,7 @@ function diffRanks(
         key: hotKey(entry),
         pn: entry.pn,
         workOrder: entry.workOrder,
+        entry,
         from: from === -1 ? null : from + 1,
         to: index + 1,
       });
@@ -84,6 +90,7 @@ function diffRanks(
         key: hotKey(entry),
         pn: entry.pn,
         workOrder: entry.workOrder,
+        entry,
         from: index + 1,
         to: null,
       });
@@ -165,7 +172,7 @@ export function PriorityView() {
   ) {
     const changes = diffRanks(hotList, next);
     if (!changes.length) return;
-    setPending({ action, next, changes, movedKey });
+    setPending({ action, current: hotList, next, changes, movedKey });
   }
 
   function confirmPending() {
@@ -247,9 +254,12 @@ export function PriorityView() {
         entries asks for confirmation before it is applied, and ✕ removes with
         its own confirmation. Confirmed changes can be stepped back and forward
         with Undo/Redo. New Hot entries are added at the bottom. Multiple Work
-        Orders for the same PN may hold different priorities. Phase 2 preview:
-        confirmed changes update local mock data only.
+        Orders for the same PN may hold different priorities.
       </p>
+      <DevNotice>
+        Development preview — confirmed changes update sample data in this
+        browser session only.
+      </DevNotice>
 
       {shownList.length === 0 ? (
         <div className="pr-empty">
@@ -348,12 +358,10 @@ export function PriorityView() {
       </div>
 
       <div className="pr-note">
-        <b>Hot Part</b> is a label on top of{' '}
-        <span className="mono">priority_rank</span> — it never replaces it.
-        Allocation &amp; work ordering: ① Hot rank ② demands with a due date,
-        earliest first ③ demands without a due date, by the Work Order received
-        date (oldest first) — a stable deterministic tie-breaker resolves equal
-        values.
+        <b>Hot</b> demand is always worked first, in rank order. Allocation
+        &amp; work ordering: ① Hot rank ② demands with a due date, earliest
+        first ③ demands without a due date, by the Work Order received date
+        (oldest first).
       </div>
 
       {pending ? (
@@ -422,11 +430,137 @@ export function PriorityView() {
 }
 
 /**
- * Reorder confirmation (GUI change §9.1): a primary summary of the item
- * the user moved, a current-versus-proposed rank comparison limited to the
- * affected entries, and explicit Apply/Cancel actions. Undo/Redo restores
- * have no directly moved item — they lead with what the restore does and
- * show the same comparison.
+ * WO + Job Number metadata as one light informational chip, visually
+ * separate from the PN. Built from the explicit `workOrderNumber` /
+ * `jobNumber` fields — never parsed out of a display string. The full
+ * demand label stays available as a tooltip.
+ */
+function WoJobChip({ entry }: { entry: MockHotEntry }) {
+  const label = `WO ${entry.workOrderNumber ?? '—'}${
+    entry.jobNumber ? ` · Job ${entry.jobNumber}` : ''
+  }`;
+  return (
+    <span className="wjchip" title={entry.workOrder}>
+      {label}
+    </span>
+  );
+}
+
+/** One entry line inside a Current/New Position snapshot. */
+interface SnapshotRow {
+  key: string;
+  entry: MockHotEntry;
+  /** Rank in this snapshot; null renders the `Not listed` placeholder. */
+  rank: number | null;
+  /** `up` moves toward #1, `down` away from it (Current side only). */
+  direction?: 'up' | 'down';
+  moved: boolean;
+}
+
+/**
+ * The rows of one snapshot side, restricted to the affected rank range
+ * [lo..hi]. Entries that do not exist on this side (an Undo/Redo may
+ * restore a removed entry or take back an added one) are appended with
+ * `rank: null` — shown as `Not listed`, never silently omitted.
+ */
+function snapshotRows(
+  list: readonly MockHotEntry[],
+  changes: readonly RankChange[],
+  movedKey: string | null,
+  lo: number,
+  hi: number,
+  withDirections: boolean,
+): SnapshotRow[] {
+  const rows: SnapshotRow[] = list
+    .map((entry, index) => ({ entry, rank: index + 1 }))
+    .filter(({ rank }) => rank >= lo && rank <= hi)
+    .map(({ entry, rank }) => {
+      const change = changes.find((c) => c.key === hotKey(entry));
+      const direction =
+        withDirections && change && change.from !== null && change.to !== null
+          ? change.to < change.from
+            ? ('up' as const)
+            : ('down' as const)
+          : undefined;
+      return {
+        key: hotKey(entry),
+        entry,
+        rank,
+        direction,
+        moved: hotKey(entry) === movedKey,
+      };
+    });
+  for (const change of changes) {
+    if (!list.some((entry) => hotKey(entry) === change.key)) {
+      rows.push({
+        key: change.key,
+        entry: change.entry,
+        rank: null,
+        moved: change.key === movedKey,
+      });
+    }
+  }
+  return rows;
+}
+
+function SnapshotSection({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: SnapshotRow[];
+}) {
+  return (
+    <div className="pr-snapshot">
+      <h4 className="pr-snaptitle">{title}</h4>
+      <ul className="pr-snaplist">
+        {rows.map((row) => (
+          <li
+            key={row.key}
+            className={`pr-snaprow ${row.moved ? 'moved' : 'shifted'}${
+              row.rank === null ? ' absent' : ''
+            }`}
+          >
+            <span className="prr">
+              {row.rank === null ? (
+                <span className="notlisted">Not listed</span>
+              ) : (
+                <>
+                  #{row.rank}
+                  {row.direction ? (
+                    <span
+                      className={`dir ${row.direction}`}
+                      title={
+                        row.direction === 'up'
+                          ? 'Moves toward rank #1'
+                          : 'Moves away from rank #1'
+                      }
+                    >
+                      {row.direction === 'up' ? '↑' : '↓'}
+                    </span>
+                  ) : null}
+                </>
+              )}
+            </span>
+            <span className="prpn mono" title={row.entry.pn}>
+              {row.entry.pn}
+            </span>
+            <WoJobChip entry={row.entry} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Reorder confirmation as two snapshots: `Current Position` (order
+ * before the change, with per-row direction arrows beside the current
+ * rank), one centered transition arrow, and `New Position` (order after
+ * the change, no per-row arrows). Both sections show exactly the
+ * affected rank range. Undo/Redo restores use the same layout and lead
+ * with what the restore does; an entry that exists on only one side
+ * renders a `Not listed` placeholder on the other.
  */
 function ReorderConfirmDialog({
   pending,
@@ -443,6 +577,11 @@ function ReorderConfirmDialog({
     : undefined;
   const others = pending.changes.filter((c) => c !== moved);
   const shifts = moved ? shiftSummary(others) : null;
+  const affectedRanks = pending.changes
+    .flatMap((c) => [c.from, c.to])
+    .filter((rank): rank is number => rank !== null);
+  const lo = Math.min(...affectedRanks);
+  const hi = Math.max(...affectedRanks);
   return (
     <ModalDialog label={title} onClose={onCancel}>
       <h3>{title}</h3>
@@ -450,52 +589,47 @@ function ReorderConfirmDialog({
         <div className="pr-move-summary">
           Move <span className="mono">{moved.pn}</span> ·{' '}
           <span className="mono">{shortWorkOrder(moved.workOrder)}</span> from{' '}
-          <b>#{moved.from}</b> to <b>#{moved.to}</b>
+          <b>{moved.from === null ? 'unlisted' : `#${moved.from}`}</b> to{' '}
+          <b>{moved.to === null ? 'unlisted' : `#${moved.to}`}</b>
         </div>
       ) : (
         <div className="pr-move-summary">
           {RESTORE_SUMMARIES[pending.action]}
         </div>
       )}
+      {/* The action name stays secondary detail only — the title and
+          the moved-item summary lead. */}
       <div className="sub">
         {shifts ? `${shifts} ` : null}
         Action: {pending.action}.
       </div>
-      <table className="pr-compare">
-        <thead>
-          <tr>
-            <th scope="col">Work Order Demand</th>
-            <th scope="col">Current</th>
-            <th scope="col">New</th>
-          </tr>
-        </thead>
-        <tbody>
-          {pending.changes.map((change) => (
-            <tr
-              key={change.key}
-              className={change === moved ? 'moved' : 'shifted'}
-            >
-              <th scope="row">
-                <span className="mono cpn">{change.pn}</span>{' '}
-                <span className="mono cwo">{change.workOrder}</span>
-              </th>
-              <td className="rankcell">
-                {change.from === null ? '—' : `#${change.from}`}
-              </td>
-              <td className="rankcell">
-                {change.to === null ? '—' : `#${change.to}`}
-                {change.from !== null && change.to !== null ? (
-                  <span
-                    className={`dir ${change.to < change.from ? 'up' : 'down'}`}
-                  >
-                    {change.to < change.from ? '↑' : '↓'}
-                  </span>
-                ) : null}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <SnapshotSection
+        title="Current Position"
+        rows={snapshotRows(
+          pending.current,
+          pending.changes,
+          pending.movedKey,
+          lo,
+          hi,
+          true,
+        )}
+      />
+      {/* The single transition arrow: Current Position → New Position.
+          Distinct from the per-row rank direction arrows above. */}
+      <div className="pr-transition" aria-hidden="true">
+        ↓
+      </div>
+      <SnapshotSection
+        title="New Position"
+        rows={snapshotRows(
+          pending.next,
+          pending.changes,
+          pending.movedKey,
+          lo,
+          hi,
+          false,
+        )}
+      />
       <div className="sub">No ranks change until you confirm.</div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
@@ -551,11 +685,15 @@ function HotAddDialog({
           if (list.length === 1) onAdd(list[0]);
         }}
       />
-      <div className="hotadd-hint">
-        Demo barcode: <code>PF:PN:0455-20-0118-03</code> — Enter adds it
-        directly. If a PN has multiple active WO Demands, each is listed
-        separately.
+      <div className="sub">
+        If a PN has multiple active WO Demands, each is listed separately.
       </div>
+      {import.meta.env.DEV ? (
+        <div className="hotadd-hint">
+          Demo barcode (development build only):{' '}
+          <code>PF:PN:0455-20-0118-03</code> — Enter adds it directly.
+        </div>
+      ) : null}
       <div className="hotaddlist">
         {list.length ? (
           list.map((c) => (

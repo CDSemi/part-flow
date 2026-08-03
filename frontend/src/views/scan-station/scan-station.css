@@ -6,6 +6,16 @@
   background: var(--bg);
 }
 
+/* Production mode: the top application navigation is hidden, so the
+   station uses the full viewport height — no leftover nav offset. */
+.ss.production {
+  min-height: 100vh;
+}
+
+.ss.production .ss-head {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
 /* Dark mode adds a subtle radial glow; light mode is a flat surface
    (the theme supplies the value — GUI_DESIGN §2.1). The view root is
    the inline-size container for the header and monitoring layout
@@ -71,13 +81,14 @@
    controls: subtle surface, subtle border, rounded corners, no action
    color, no button-like hover. They wrap cleanly; the Area name above
    stays visually dominant. */
-.ss-head .opchips {
+.ss .opchips {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 5px;
+  vertical-align: middle;
 }
 
-.ss-head .opchip {
+.ss .opchip {
   font-size: 11.5px;
   font-weight: 700;
   color: var(--muted);
@@ -150,6 +161,10 @@
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
+  .ss.production .ss-head {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
   .ss-head .ss-stats {
     grid-column: 1 / -1;
     grid-row: 2;
@@ -163,6 +178,10 @@
   @media (max-width: 1220px) {
     .ss-head {
       grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .ss.production .ss-head {
+      grid-template-columns: minmax(0, 1fr) auto auto;
     }
 
     .ss-head .ss-stats {
@@ -573,30 +592,34 @@
   gap: 10px;
 }
 
-.ss-stationbtn {
-  width: 100%;
-  text-align: left;
+/* One card per station: the information block on the left and the two
+   clearly differentiated actions on the right — the whole card is
+   never one ambiguous click target. */
+.ss-stationcard {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 16px;
   border: 2px solid var(--border);
   background: var(--panel);
   border-radius: 12px;
   padding: 14px 18px;
   box-shadow: var(--shadow);
-  transition: border-color 0.12s;
 }
 
-.ss-stationbtn:hover {
-  border-color: var(--info-t);
+.ss-stationcard .ss-stationinfo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
 }
 
-.ss-stationbtn .sid {
+.ss-stationcard .sid {
   font-size: 18px;
   font-weight: 800;
 }
 
-.ss-stationbtn .smeta {
+.ss-stationcard .smeta {
   font-size: 13px;
   color: var(--muted);
   display: flex;
@@ -605,9 +628,60 @@
   flex-wrap: wrap;
 }
 
-.ss-stationbtn .stype {
+.ss-stationcard .stype {
   font-size: 11.5px;
   color: var(--faint);
+}
+
+.ss-stationcard .ss-stationacts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.ss-openbtn {
+  min-height: var(--touch-min);
+  min-width: 190px;
+  border: 2px solid var(--border2);
+  background: var(--panel2);
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13.5px;
+  font-weight: 750;
+  transition: border-color 0.12s;
+}
+
+.ss-openbtn:hover {
+  border-color: var(--info-t);
+  color: var(--text);
+}
+
+.ss-openbtn.primary {
+  background: var(--info);
+  border-color: var(--info);
+  color: var(--active-nav-text);
+}
+
+.ss-openbtn.primary:hover {
+  filter: brightness(1.07);
+}
+
+@media (max-width: 640px) {
+  .ss-stationcard {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ss-stationcard .ss-stationacts {
+    flex-direction: row;
+  }
+
+  .ss-openbtn {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .ss-select .ss-feedback {
@@ -911,4 +985,22 @@
 
 .ss-stationswitch:hover {
   color: var(--muted);
+}
+
+/* Small non-interactive production-mode marker beside the Station ID. */
+.ss-prodtag {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.ss-head .ss-conn {
+  flex: none;
 }

@@ -18,6 +18,7 @@ import {
   AreaSummaryCard,
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
+import { ConnectivityChip } from '../../components/ConnectivityChip';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
@@ -126,14 +127,43 @@ type Flow =
  * (never auto-redirecting to a station); `/scan-station/:stationId`
  * loads the station; an unknown or inactive Station ID shows an
  * explicit error and never silently falls back to another station.
+ * `/scan-station/:stationId/production` loads the same station in
+ * production mode: the top application navigation is hidden (App shell)
+ * and the footer Station ID stops being a station-switch affordance.
  */
 export function ScanStationView() {
   const { route } = useRouter();
-  const stationId = route.view === 'scan-station' ? route.stationId : null;
-  if (stationId === null) return <StationSelector />;
-  const station = stationById(stationId);
-  if (!station) return <UnknownStation stationId={stationId} />;
-  return <StationView key={station.stationId} station={station} />;
+  if (route.view !== 'scan-station' || route.stationId === null) {
+    return <StationSelector />;
+  }
+  const station = stationById(route.stationId);
+  if (!station) return <UnknownStation stationId={route.stationId} />;
+  return (
+    <StationView
+      key={station.stationId}
+      station={station}
+      productionMode={route.mode === 'production'}
+    />
+  );
+}
+
+/**
+ * Supported Operations as individual light informational chips — the
+ * same presentation the Scan Station header uses (shared `.opchips` /
+ * `.opchip` styling). Labels, not controls: no action color, no
+ * button-like hover, wrapping cleanly for multi-Operation Areas.
+ */
+function OperationChips({ operations }: { operations: readonly string[] }) {
+  if (operations.length === 0) return <>—</>;
+  return (
+    <span className="opchips">
+      {operations.map((op) => (
+        <span className="opchip" key={op}>
+          {op}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function StationSelector() {
@@ -144,20 +174,16 @@ function StationSelector() {
         <h1>Select a Scan Station</h1>
         <p className="ss-select-sub">
           Each Scan Station is bound to one Area. Choose the station you are
-          working at — the station keeps its own URL (
-          <span className="mono">/scan-station/&lt;station-id&gt;</span>
-          ).
+          working at — <b>Open</b> keeps the normal application navigation;{' '}
+          <b>Open production mode</b> hides it so operators stay on the station.
         </p>
         <ul className="ss-stationlist">
           {MOCK_SCAN_STATIONS.filter((s) => s.active).map((s) => {
             const area = areaByKey(s.area);
             const machines = MOCK_AREA_MACHINES[s.area] ?? [];
             return (
-              <li key={s.stationId}>
-                <button
-                  className="ss-stationbtn"
-                  onClick={() => navigate(`/scan-station/${s.stationId}`)}
-                >
+              <li key={s.stationId} className="ss-stationcard">
+                <div className="ss-stationinfo">
                   <span className="sid mono">{s.stationId}</span>
                   <span className="smeta">
                     {s.department} ·{' '}
@@ -166,14 +192,33 @@ function StationSelector() {
                       size={10}
                     />{' '}
                     {area?.name} · Operations:{' '}
-                    {area?.operations.join(', ') ?? '—'}
+                    <OperationChips operations={area?.operations ?? []} />
                   </span>
                   <span className="stype">
                     {machines.length > 0
                       ? `${machines.length} Machines — queue & assign`
                       : 'No Machines — direct Area processing'}
                   </span>
-                </button>
+                </div>
+                <div className="ss-stationacts">
+                  <button
+                    className="ss-openbtn primary"
+                    aria-label={`Open ${s.stationId}`}
+                    onClick={() => navigate(`/scan-station/${s.stationId}`)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    className="ss-openbtn"
+                    aria-label={`Open ${s.stationId} in production mode`}
+                    title="Hides the application navigation — operators stay on this station"
+                    onClick={() =>
+                      navigate(`/scan-station/${s.stationId}/production`)
+                    }
+                  >
+                    Open production mode
+                  </button>
+                </div>
               </li>
             );
           })}
@@ -213,7 +258,13 @@ function UnknownStation({ stationId }: { stationId: string }) {
   );
 }
 
-function StationView({ station }: { station: MockScanStation }) {
+function StationView({
+  station,
+  productionMode,
+}: {
+  station: MockScanStation;
+  productionMode: boolean;
+}) {
   const preview = getViewStatePreview();
   const { navigate } = useRouter();
   const { status } = useConnectivity();
@@ -444,7 +495,7 @@ function StationView({ station }: { station: MockScanStation }) {
             kind: 'err',
             icon: '✕',
             title: 'Unknown Worker barcode',
-            detail: 'Rejected — nothing recorded (mock).',
+            detail: 'Rejected — nothing recorded.',
           });
           return;
         }
@@ -466,7 +517,7 @@ function StationView({ station }: { station: MockScanStation }) {
             kind: 'err',
             icon: '✕',
             title: 'Unknown Machine barcode',
-            detail: 'Rejected — nothing recorded (mock).',
+            detail: 'Rejected — nothing recorded.',
           });
           return;
         }
@@ -567,6 +618,46 @@ function StationView({ station }: { station: MockScanStation }) {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [flow, writeBlocked, handleScan]);
+
+  // Ctrl+Shift+K — convenience toggle between this station's standard
+  // and production routes for authorized users. The dedicated route and
+  // the explicit Station Selector actions stay the primary entry; the
+  // shortcut never fires inside text inputs, selects, or an active
+  // dialog, never conflicts with barcode capture (which ignores
+  // modifier chords), and is never a security mechanism.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+        return;
+      }
+      if (event.key !== 'K' && event.key !== 'k') return;
+      if (flow) return;
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tag = target.tagName;
+        // The main barcode input is a scanner target, not text entry —
+        // the chord stays usable while it holds focus (which it almost
+        // always does, §3.1); every other field keeps the chord inert.
+        if (
+          (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') &&
+          target !== inputRef.current
+        ) {
+          return;
+        }
+        if (target.isContentEditable || target.closest('[role="dialog"]')) {
+          return;
+        }
+      }
+      event.preventDefault();
+      navigate(
+        productionMode
+          ? `/scan-station/${station.stationId}`
+          : `/scan-station/${station.stationId}/production`,
+      );
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [flow, navigate, productionMode, station.stationId]);
 
   function undoTarget(): MockCompletedAction | null {
     return eligible?.action ?? null;
@@ -674,7 +765,10 @@ function StationView({ station }: { station: MockScanStation }) {
   );
 
   return (
-    <section className="ss" aria-label="Scan Station">
+    <section
+      className={`ss${productionMode ? ' production' : ''}`}
+      aria-label="Scan Station"
+    >
       {/* Header grid: the left Area identity group and the Worker
           Session always share the main row; the Area totals sit
           between them while space allows and drop to a full-width
@@ -716,6 +810,14 @@ function StationView({ station }: { station: MockScanStation }) {
           </span>
           <span className="sub">{MOCK_WORKER.note}</span>
         </div>
+        {productionMode ? (
+          // The top application navigation is hidden in production
+          // mode, so the connectivity status chip moves into the
+          // station header — connectivity must stay visible.
+          <div className="ss-conn">
+            <ConnectivityChip />
+          </div>
+        ) : null}
       </header>
 
       <div className="ss-body">
@@ -982,17 +1084,31 @@ function StationView({ station }: { station: MockScanStation }) {
         />
       )}
 
-      {/* Faint diagnostic caption: subtly clickable to switch stations —
-          deliberately unobtrusive, not a normal operator workflow. */}
+      {/* Faint diagnostic caption. Standard mode: subtly clickable to
+          switch stations — deliberately unobtrusive, not a promoted
+          operator workflow. Production mode: the Station ID stays
+          visible for troubleshooting but is plain text — no casual
+          route away from the configured station (the browser itself
+          stays outside PartFlow's control). */}
       <footer className="ss-stationfoot">
-        Station{' '}
-        <button
-          className="ss-stationswitch mono"
-          title="Switch Scan Station"
-          onClick={() => navigate('/scan-station')}
-        >
-          {station.stationId}
-        </button>
+        {productionMode ? (
+          <>
+            Station <span className="mono">{station.stationId}</span>
+            <span className="ss-prodtag">Production mode</span>
+          </>
+        ) : (
+          <>
+            Station{' '}
+            <button
+              className="ss-stationswitch mono"
+              title="Switch Scan Station"
+              onClick={() => navigate('/scan-station')}
+            >
+              {station.stationId}
+            </button>{' '}
+            · Ctrl+Shift+K opens production mode
+          </>
+        )}
       </footer>
     </section>
   );
@@ -2604,7 +2720,7 @@ function RepairDialog({
               ['Reason', reason.trim()],
               ['Worker', worker],
               ['Scan Station', station.stationId],
-              ['Recorded event', 'TRANSFERRED · movement_reason REPAIR'],
+              ['Recorded event', 'TRANSFERRED · REPAIR intent'],
             ]}
           />
           <StepButtons

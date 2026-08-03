@@ -308,7 +308,9 @@ test('a complete save flow (number + due entered) saves without extra confirmati
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(screen.getByText('007482')).toBeInTheDocument();
   expect(window.location.pathname).toBe('/management/work-orders');
-  expect(screen.getByText(/007482 saved \(mock\)/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/007482 saved — business demand only/),
+  ).toBeInTheDocument();
   expect(
     screen.getByText(/Nothing was persisted to the backend/),
   ).toBeInTheDocument();
@@ -736,7 +738,7 @@ test('a released line cannot be removed and explains why', async () => {
   ).toBeGreaterThan(0);
 });
 
-test('saving an edited OPEN Work Order updates local mock state and reports mock-only', async () => {
+test('saving an edited OPEN Work Order reports demand-only saving', async () => {
   await renderWorkOrders();
   await openWorkOrderDetail('007010');
 
@@ -749,7 +751,9 @@ test('saving an edited OPEN Work Order updates local mock state and reports mock
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  expect(screen.getByText(/demand updated \(mock\)/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/demand updated — business demand only/),
+  ).toBeInTheDocument();
   expect(
     screen.getByText(/nothing was persisted to the backend/),
   ).toBeInTheDocument();
@@ -779,11 +783,15 @@ test('clearing the WO due date on an OPEN Work Order asks for explicit confirmat
   fireEvent.click(
     screen.getByRole('button', { name: 'Cancel — keep editing' }),
   );
-  expect(screen.queryByText(/demand updated \(mock\)/)).toBeNull();
+  expect(
+    screen.queryByText(/demand updated — business demand only/),
+  ).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm and save' }));
-  expect(screen.getByText(/demand updated \(mock\)/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/demand updated — business demand only/),
+  ).toBeInTheDocument();
 });
 
 test('saving an OPEN Work Order with an incomplete row is blocked, not filtered', async () => {
@@ -796,7 +804,9 @@ test('saving an OPEN Work Order with an incomplete row is blocked, not filtered'
   expect(
     screen.getByText('PN is required — look up or create the PartNumber'),
   ).toBeInTheDocument();
-  expect(screen.queryByText(/demand updated \(mock\)/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/demand updated — business demand only/),
+  ).not.toBeInTheDocument();
 });
 
 /* ============ Unsaved changes and navigation protection ============ */

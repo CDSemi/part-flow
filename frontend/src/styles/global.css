@@ -289,7 +289,33 @@ textarea {
   margin-top: 6px;
 }
 
-/* ============ Mock-action toast ============ */
+/* ============ Development-only notice (one per surface) ============ */
+.dev-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 7px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 900px;
+}
+
+.dev-notice .dev-notice-tag {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ============ Action toast ============ */
 .toast {
   position: fixed;
   left: 50%;

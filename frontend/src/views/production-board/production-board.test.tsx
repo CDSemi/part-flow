@@ -1,4 +1,10 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ConnectivityProvider } from '../../app/connectivity-provider';
@@ -87,25 +93,57 @@ test('columns render in the approved order with Job Numbers last', async () => {
   expect(visibleTable().querySelector('th[style]')).toBeNull();
 });
 
-test('the PN cell carries the min-width/nowrap hook for the standard 15-char PN', async () => {
+test('the PN cell holds only the PN (15ch intrinsic minimum) and description', async () => {
   await renderBoard();
 
-  // `.pb-table th.pn / td.pn` own the CSS min-width + nowrap that keep
-  // `🔥#1 2027-60-8114-00` on one line; the class/structure is the
-  // regression surface (jsdom cannot measure the pixel width).
+  // `.pb-table .part` owns the 15ch min-width + nowrap that keep a
+  // standard PN such as `2027-60-8114-00` fully displayed; longer PNs
+  // expand the column (jsdom cannot measure the pixel width, so the
+  // class/structure is the regression surface). No Hot indicator is
+  // ever rendered inside the PN cell.
   const th = visibleTable().querySelector('th.pn');
   expect(th?.textContent).toBe('Part Number');
   const cell = rowByPn('2027-60-8114-00')?.querySelector('td.pn');
   expect(cell).toBeDefined();
   const part = cell?.querySelector('.part');
-  expect(part?.textContent).toBe('🔥#1 2027-60-8114-00');
+  expect(part?.textContent).toBe('2027-60-8114-00');
+  expect(cell?.textContent).not.toContain('🔥');
 });
 
-test('Hot Parts render as 🔥#n immediately before the PN, no chip after', async () => {
+test('a longer PN renders fully in the PN cell without ellipsis markup', async () => {
+  await renderBoard('/production-board?state=long');
+
+  const part = rowByPn('0118-40-0022-07-0455-88-REV-C')?.querySelector('.part');
+  expect(part?.textContent).toBe('0118-40-0022-07-0455-88-REV-C');
+});
+
+test('Hot rows carry the flame in the No. column only, with an accessible label', async () => {
   await renderBoard();
 
-  const firstPart = visibleTable().querySelector('tbody .part');
-  expect(firstPart?.textContent).toBe('🔥#1 2027-60-8114-00');
+  const hotRow = rowByPn('2027-60-8114-00');
+  const no = hotRow?.querySelector('.cell-no .no');
+  expect(no?.textContent).toContain('1');
+  expect(no?.textContent).toContain('🔥');
+  expect(no?.getAttribute('aria-label')).toBe('Row 1, Hot priority');
+  // Exactly one flame in the whole row — never a second one elsewhere.
+  const flames = (hotRow?.textContent?.match(/🔥/g) ?? []).length;
+  expect(flames).toBe(1);
+
+  // Non-Hot rows carry no flame and no Hot aria label.
+  const plain = rowByPn('118-052');
+  expect(plain?.textContent).not.toContain('🔥');
+  expect(
+    plain?.querySelector('.cell-no .no')?.getAttribute('aria-label'),
+  ).toBeNull();
+});
+
+test('the footer legend describes the No.-column flame, not 🔥#n before the PN', async () => {
+  await renderBoard();
+
+  const foot = document.querySelector('.pb-foot');
+  expect(foot?.textContent).toContain('🔥 in the No. column = Hot priority');
+  expect(foot?.textContent).not.toContain('before the PN');
+  expect(foot?.textContent).not.toContain('⊘');
 });
 
 test('rows follow canonical order: Hot → dated → undated → stocked', async () => {
@@ -116,14 +154,20 @@ test('rows follow canonical order: Hot → dated → undated → stocked', async
     (el) => el.textContent,
   );
   expect(parts).toEqual([
-    '🔥#1 2027-60-8114-00',
-    '🔥#2 142-260',
+    '2027-60-8114-00',
+    '142-260',
     '0455-20-0118-03',
     '0123-40-0007-22',
     '78-04-0031',
     '118-052',
     '309-127',
   ]);
+  // Row numbering stays continuous in display order.
+  const numbers = Array.from(
+    visibleTable().querySelectorAll('tbody .cell-no .no'),
+    (el) => el.textContent?.replace('🔥', '').trim(),
+  );
+  expect(numbers).toEqual(['1', '2', '3', '4', '5', '6', '7']);
 });
 
 test('a missing due date renders as — / No due date, not as an error', async () => {
@@ -159,9 +203,9 @@ test('Areas & Quantities rows share aligned label/qty/state/time columns', async
 
   const firstLoc = visibleTable().querySelector('tbody .loc');
   expect(firstLoc).not.toBeNull();
-  // The scrap line deliberately spans the grid instead of using the
-  // four aligned columns.
-  const rows = Array.from(firstLoc!.querySelectorAll('.locrow:not(.scrap)'));
+  // Every row — including the total line — uses the same four aligned
+  // columns: Location | Quantity | State/activity | Time.
+  const rows = Array.from(firstLoc!.querySelectorAll('.locrow'));
   expect(rows.length).toBeGreaterThan(1);
   rows.forEach((row) => {
     expect(row.querySelector('.lname')).not.toBeNull();
@@ -169,10 +213,29 @@ test('Areas & Quantities rows share aligned label/qty/state/time columns', async
     expect(row.querySelector('.ltag')).not.toBeNull();
     expect(row.querySelector('.ltime')).not.toBeNull();
   });
-  // The `total … pcs` line uses the same quantity column.
+  // The `total … pcs` line starts at the Location column and its
+  // quantity uses the same quantity column as the rows above.
   const total = firstLoc!.querySelector('.locrow.total');
+  expect(total?.querySelector('.lname')?.textContent).toBe('total');
   expect(total?.querySelector('.lqty')?.textContent).toBe('10');
   expect(total?.querySelector('.ltag')?.textContent).toBe('pcs');
+});
+
+test('one continuous separator element sits between locations and the total row', async () => {
+  await renderBoard();
+
+  const locs = Array.from(visibleTable().querySelectorAll('tbody .loc'));
+  expect(locs.length).toBeGreaterThan(0);
+  for (const loc of locs) {
+    // Exactly one dedicated separator spanning the grid — never
+    // per-cell border fragments on the total row's children.
+    expect(loc.querySelectorAll('.locsep')).toHaveLength(1);
+    const children = Array.from(loc.children).map((el) => el.className);
+    const sepIndex = children.findIndex((c) => c.includes('locsep'));
+    const totalIndex = children.findIndex((c) => c.includes('total'));
+    expect(sepIndex).toBeGreaterThan(-1);
+    expect(totalIndex).toBe(sepIndex + 1);
+  }
 });
 
 test('active Machine rows render dot + machine chip + qty + `on mch.` + time', async () => {
@@ -264,35 +327,102 @@ test('queue and processing rows keep their state labels', async () => {
   expect(processingRow?.querySelector('.lname')?.textContent).toBe('Manual');
 });
 
-test('scrapped quantity renders on its own line, separate from the time column', async () => {
+test('scrap renders as a chip on the total line, right-anchored, no ⊘', async () => {
   await renderBoard();
 
   const loc = rowByPn('2027-60-8114-00')?.querySelector('.loc');
-  const scrap = loc?.querySelector('.locrow.scrap .lscrap');
-  expect(scrap?.textContent).toBe('⊘ 1 scrapped');
-  // The scrap value never sits inside the time track…
-  expect(scrap?.closest('.ltime')).toBeNull();
-  // …and the total row's time cell stays empty of scrap text.
-  const totalTime = loc?.querySelector('.locrow.total .ltime');
-  expect(totalTime?.textContent).toBe('');
-  // A PN without scrap renders no scrap line at all.
+  // The chip lives inside the total row's right-hand time cell — the
+  // same line as `total … pcs`, never an extra row.
+  const chip = loc?.querySelector('.locrow.total .ltime .scrapchip');
+  expect(chip?.textContent).toBe('1 scrapped');
+  expect(loc?.querySelector('.locrow.scrap')).toBeNull();
+  expect(loc?.textContent).not.toContain('⊘');
+
+  // Multi-piece wording comes straight from the value.
+  const platedLoc = rowByPn('142-260')?.querySelector('.loc');
+  expect(
+    platedLoc?.querySelector('.locrow.total .ltime .scrapchip')?.textContent,
+  ).toBe('2 scrapped');
+
+  // Zero scrap renders no chip at all.
   const cleanLoc = rowByPn('118-052')?.querySelector('.loc');
-  expect(cleanLoc?.querySelector('.locrow.scrap')).toBeNull();
+  expect(cleanLoc?.querySelector('.scrapchip')).toBeNull();
 });
 
-test('a long Machine name exposes the full name through the chip title', async () => {
+test('External locations show only `External` plus an activity chip', async () => {
+  await renderBoard();
+
+  // External — Plating became: label `External`, activity chip
+  // `plating` in the state position (replacing `processing`).
+  const platingLoc = rowByPn('142-260')?.querySelector('.loc');
+  const platingRow = platingLoc?.querySelector('.locrow:not(.total)');
+  expect(platingRow?.querySelector('.lname')?.textContent).toBe('External');
+  expect(platingRow?.querySelector('.lname')?.textContent).not.toContain('—');
+  const platingChip = platingRow?.querySelector('.ltag .actchip');
+  expect(platingChip?.textContent).toBe('plating');
+  expect(platingRow?.textContent).not.toContain('processing');
+
+  const vendorLoc = rowByPn('0123-40-0007-22')?.querySelector('.loc');
+  const vendorRow = vendorLoc?.querySelector('.locrow:not(.total)');
+  expect(vendorRow?.querySelector('.lname')?.textContent).toBe('External');
+  expect(vendorRow?.querySelector('.ltag .actchip')?.textContent).toBe(
+    'vendor',
+  );
+
+  // Normal non-External Areas keep their plain state labels.
+  const manualLoc = rowByPn('118-052')?.querySelector('.loc');
+  expect(
+    manualLoc?.querySelector('.locrow:not(.total) .ltag')?.textContent,
+  ).toBe('processing');
+  expect(manualLoc?.querySelector('.actchip')).toBeNull();
+});
+
+test('a long Machine name renders in full — the chip never truncates', async () => {
   await renderBoard('/production-board?state=long');
 
   const chip = Array.from(visibleTable().querySelectorAll('.mchip')).find(
     (el) => el.textContent === 'Mill 3 — Horizontal Boring',
   );
   expect(chip).toBeDefined();
-  // Truncation is CSS-only (ellipsis); the full name must stay
-  // reachable via the tooltip.
-  expect(chip?.getAttribute('title')).toBe('Mill 3 — Horizontal Boring');
   expect(chip?.closest('.locrow')?.querySelector('.ltag')?.textContent).toBe(
     'on mch.',
   );
+  // The chip styling carries no ellipsis truncation — a long Machine
+  // name expands the Areas column minimum width instead (CSS-level
+  // regression checked in the stylesheet test below).
+});
+
+test('the board stylesheet owns its heartbeat and never clips Machine names or PNs', async () => {
+  // jsdom applies no layout, so the CSS contract is checked at the
+  // stylesheet level: a Production Board-owned heartbeat animation
+  // (with a reduced-motion fallback), no Scan Station animation
+  // dependency, and no ellipsis truncation for the Machine chip, the
+  // location label, or the PN.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  expect(css).toContain('@keyframes pb-live-pulse');
+  expect(css).toContain('animation: pb-live-pulse');
+  expect(css).not.toContain('ss-pulse');
+  expect(css).toContain('prefers-reduced-motion');
+  expect(css).toMatch(/\.live\.stale \.ld \{[^}]*animation: none/);
+  expect(css).not.toMatch(/\.mchip \{[^}]*text-overflow/);
+  expect(css).not.toMatch(/\.lname \{[^}]*text-overflow/);
+  // Intrinsic 15ch PN minimum instead of an arbitrary pixel width.
+  expect(css).toMatch(/\.part \{[^}]*min-width: 15ch/);
+  expect(css).not.toContain('min-width: 310px');
+});
+
+test('the Live indicator distinguishes connected and stale states', async () => {
+  await renderBoard();
+  const live = document.querySelector('.pb-head .live');
+  expect(live?.textContent).toBe('Live');
+  expect(live?.className).not.toContain('stale');
+  expect(live?.querySelector('.ld')).not.toBeNull();
 });
 
 test('the hidden measurement table renders the identical row structure', async () => {
@@ -344,6 +474,127 @@ test('long data paginates and rotates automatically; single pages never claim ro
   });
   // Wraps around after the last page.
   expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+});
+
+test('manual Previous/Next and page dots navigate without wrapping', async () => {
+  await renderBoard('/production-board?state=long');
+
+  const prev = screen.getByRole('button', { name: 'Previous page' });
+  const next = screen.getByRole('button', { name: 'Next page' });
+  // First page: Previous disabled, Next enabled.
+  expect(prev).toBeDisabled();
+  expect(next).toBeEnabled();
+
+  fireEvent.click(next);
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  // Last page: Next disables — manual navigation never wraps.
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+
+  // Clickable page dots jump directly; the active dot is marked.
+  const dot1 = screen.getByRole('button', { name: 'Go to page 1' });
+  fireEvent.click(dot1);
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  expect(
+    screen
+      .getByRole('button', { name: 'Go to page 1' })
+      .getAttribute('aria-current'),
+  ).toBe('page');
+  expect(
+    screen
+      .getByRole('button', { name: 'Go to page 2' })
+      .getAttribute('aria-current'),
+  ).toBeNull();
+});
+
+test('manual navigation restarts the auto-rotation timer', async () => {
+  await renderBoard('/production-board?state=long');
+
+  // 8 s into the cycle a manual navigation happens…
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8_000);
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+
+  // …so 8 s later (16 s from the old timer's start) nothing rotates
+  // yet — the timer restarted at the manual change.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8_000);
+  });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+
+  // The full interval after the manual change, rotation resumes.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4_000);
+  });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+});
+
+test('ArrowLeft/ArrowRight navigate pages regardless of focus, without wrapping', async () => {
+  await renderBoard('/production-board?state=long');
+
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  // No wrap at the last page.
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: 'ArrowLeft' });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  fireEvent.keyDown(window, { key: 'ArrowLeft' });
+  fireEvent.keyDown(window, { key: 'ArrowLeft' });
+  // No wrap at the first page.
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+});
+
+test('modifier chords and active modal dialogs never navigate pages', async () => {
+  await renderBoard('/production-board?state=long');
+
+  fireEvent.keyDown(window, { key: 'ArrowRight', ctrlKey: true });
+  fireEvent.keyDown(window, { key: 'ArrowRight', altKey: true });
+  fireEvent.keyDown(window, { key: 'ArrowRight', metaKey: true });
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+
+  // While an application modal dialog is open, the board shortcut is
+  // inert.
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  document.body.appendChild(dialog);
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  dialog.remove();
+
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+});
+
+test('keyboard navigation restarts the rotation timer and cleans up on unmount', async () => {
+  const view = await renderBoard('/production-board?state=long');
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8_000);
+  });
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8_000);
+  });
+  // Timer restarted by the arrow navigation.
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+
+  // After unmount the window listener is removed — no state updates,
+  // no act() warnings, no errors.
+  view.unmount();
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
 });
 
 test('the active page clamps when the page structure changes', async () => {

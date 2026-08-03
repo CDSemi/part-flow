@@ -6,9 +6,11 @@ import type { MockBoardRow } from '../views/view-models';
 // (Hot rank → earliest due date → undated by received date).
 //
 // Location rows use the explicit presentation model: `label` is always
-// the Area name, `machine` is a separate field (executor for
-// `state: 'machine'`, completion context for `state: 'done'`), and
-// `state` is never encoded into the display string. Where a PN also
+// the Area name alone (`External`, never `External — Plating`),
+// `machine` is a separate field (executor for `state: 'machine'`,
+// completion context for `state: 'done'`), `activity` carries the
+// External processing activity for its state chip, and `state` is
+// never encoded into the display string. Where a PN also
 // appears on the Area Board mocks, the distribution mirrors that state.
 export const MOCK_BOARD_ROWS: MockBoardRow[] = [
   {
@@ -64,7 +66,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     locations: [
       {
         area: 'external',
-        label: 'External — Plating',
+        label: 'External',
+        activity: 'plating',
         qty: 20,
         state: 'processing',
         time: '4d 02h',
@@ -86,7 +89,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
     locations: [
       {
         area: 'external',
-        label: 'External — Vendor',
+        label: 'External',
+        activity: 'vendor',
         qty: 12,
         state: 'processing',
         time: '1d 06h',

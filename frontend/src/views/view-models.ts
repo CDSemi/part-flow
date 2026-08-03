@@ -81,9 +81,9 @@ export interface MockAreaMachine {
 }
 
 /**
- * One distributed quantity position on the Production Board. The Area
- * and Machine are explicit presentation data — never one combined
- * display string that would have to be parsed back apart:
+ * One distributed quantity position on the Production Board. The Area,
+ * Machine and External activity are explicit presentation data — never
+ * one combined display string that would have to be parsed back apart:
  * - `state: 'machine'` — actively assigned; `machine` is the executor.
  * - `state: 'done'` — finished at the Area (`READY_TO_TRANSFER`);
  *   `machine` is optional completion context only, never the executor.
@@ -91,10 +91,20 @@ export interface MockAreaMachine {
  */
 export interface MockLocationRow {
   area: AreaKey;
-  /** Area display label (never combined with a Machine name). */
+  /**
+   * Area display label — only the Area name (`External`, never a
+   * composite such as `External — Plating`).
+   */
   label: string;
   /** Machine name — executor for `machine`, context for `done`. */
   machine?: string;
+  /**
+   * External processing activity (`plating`, `vendor`, `painting`, …).
+   * Rendered as a light informational chip in the state position,
+   * replacing the generic `processing` label; for a DONE row it stays
+   * secondary context only.
+   */
+  activity?: string;
   qty: number;
   state: 'machine' | 'queue' | 'processing' | 'done' | 'stocked';
   time: string;
@@ -224,6 +234,14 @@ export interface MockHotEntry {
   pn: string;
   /** Work Order Demand label, e.g. `WO 007001 · Job 18112`. */
   workOrder: string;
+  /**
+   * External Work Order Number, or null for an internal Work Order
+   * without an external number (displays `—`). Explicit field — the
+   * confirmation dialogs never parse it out of the display label.
+   */
+  workOrderNumber: string | null;
+  /** External Job Number, or null when the demand has none. */
+  jobNumber: string | null;
   type: RequestType;
   figures: string[];
   /** ISO `YYYY-MM-DD`, or null when the demand has no due date. */
