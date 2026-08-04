@@ -44,10 +44,19 @@ const FILTERS: { label: string; options: string[] }[] = [
 
 // PN-centric management view: filterable list + read-only detail panel.
 // Movement history is immutable — no edit or delete affordances exist.
+// Selection toggles: clicking an unselected row selects it and opens
+// the details; clicking the selected row again (or the panel's close
+// button) unselects and closes them, and the table expands into the
+// released space.
 export function TrackingView() {
   const preview = getViewStatePreview();
   const [search, setSearch] = useState('');
-  const [selectedPn, setSelectedPn] = useState(MOCK_TRACKING_DETAIL.pn);
+  const [selectedPn, setSelectedPn] = useState<string | null>(
+    MOCK_TRACKING_DETAIL.pn,
+  );
+
+  const toggleSelected = (pn: string) =>
+    setSelectedPn((current) => (current === pn ? null : pn));
 
   if (preview === 'loading') {
     return (
@@ -86,7 +95,7 @@ export function TrackingView() {
 
   return (
     <section className="tk" aria-label="Tracking">
-      <div className="tk-wrap">
+      <div className={`tk-wrap${selectedPn === null ? ' noselect' : ''}`}>
         <div className="tk-left">
           <h1>Tracking</h1>
           <div className="tk-filters">
@@ -137,7 +146,7 @@ export function TrackingView() {
                     <td>
                       <button
                         className="rowbtn"
-                        onClick={() => setSelectedPn(row.pn)}
+                        onClick={() => toggleSelected(row.pn)}
                         aria-pressed={row.pn === selectedPn}
                       >
                         <span className="part">
@@ -203,26 +212,53 @@ export function TrackingView() {
           )}
         </div>
 
-        <aside className="tk-right" aria-label="PN detail">
-          {selectedPn !== detail.pn ? (
-            <EmptyState
-              message="No detail available for this PN yet."
-              hint={
-                import.meta.env.DEV
-                  ? `Development preview: detail data exists for ${detail.pn} only.`
-                  : undefined
-              }
-            />
-          ) : (
-            <TrackingDetail />
-          )}
-        </aside>
+        {/* No selection → no reserved empty column: the panel is not
+            rendered at all and the table takes the full width. */}
+        {selectedPn !== null ? (
+          <aside className="tk-right" aria-label="PN detail">
+            {selectedPn !== detail.pn ? (
+              <>
+                <div className="tk-pnrow">
+                  <div>
+                    <h2>{selectedPn}</h2>
+                  </div>
+                  <span className="spacer" />
+                  <CloseDetailButton onClose={() => setSelectedPn(null)} />
+                </div>
+                <EmptyState
+                  message="No detail available for this PN yet."
+                  hint={
+                    import.meta.env.DEV
+                      ? `Development preview: detail data exists for ${detail.pn} only.`
+                      : undefined
+                  }
+                />
+              </>
+            ) : (
+              <TrackingDetail onClose={() => setSelectedPn(null)} />
+            )}
+          </aside>
+        ) : null}
       </div>
     </section>
   );
 }
 
-function TrackingDetail() {
+/** Accessible detail-panel close control (≥ 48 px touch target). */
+function CloseDetailButton({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      className="tk-close"
+      aria-label="Close details"
+      title="Close details"
+      onClick={onClose}
+    >
+      ✕
+    </button>
+  );
+}
+
+function TrackingDetail({ onClose }: { onClose: () => void }) {
   const d = MOCK_TRACKING_DETAIL;
   return (
     <>
@@ -243,6 +279,8 @@ function TrackingDetail() {
             · barcode <b>{d.barcode}</b> · ERP id <b>{d.erpId}</b>
           </div>
         </div>
+        <span className="spacer" />
+        <CloseDetailButton onClose={onClose} />
       </div>
 
       <div className="tk-sec">

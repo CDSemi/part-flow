@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 
 import { TrackingView } from './TrackingView';
@@ -118,4 +118,71 @@ test('the Movement history section stays read-only', () => {
   // Immutable audit data: no edit, delete, or any other interactive
   // affordance exists anywhere in the history section.
   expect(section.querySelectorAll('button, a, input, select').length).toBe(0);
+});
+
+/* ============ Detail selection toggle and close (GUI v13) ============ */
+
+test('clicking the selected PN row again unselects it and releases the panel column', () => {
+  render(<TrackingView />);
+
+  const row = document.querySelector('.tk-table .rowbtn') as HTMLElement;
+  expect(row.getAttribute('aria-pressed')).toBe('true');
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+  expect(document.querySelector('.tk-wrap')?.className).not.toContain(
+    'noselect',
+  );
+
+  fireEvent.click(row);
+  // Unselected: the detail panel is gone entirely — no reserved empty
+  // column — and the wrapper switches to the full-width layout.
+  expect(row.getAttribute('aria-pressed')).toBe('false');
+  expect(document.querySelector('.tk-right')).toBeNull();
+  expect(document.querySelector('.tk-wrap')?.className).toContain('noselect');
+
+  // Clicking again re-selects and re-opens the details.
+  fireEvent.click(row);
+  expect(row.getAttribute('aria-pressed')).toBe('true');
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+});
+
+test('the detail panel closes through its accessible X button', () => {
+  render(<TrackingView />);
+
+  const close = screen.getByRole('button', { name: 'Close details' });
+  expect(close.closest('.tk-right')).not.toBeNull();
+  fireEvent.click(close);
+
+  expect(document.querySelector('.tk-right')).toBeNull();
+  expect(
+    document.querySelector('.tk-table .rowbtn')?.getAttribute('aria-pressed'),
+  ).toBe('false');
+});
+
+test('selecting a different PN keeps the panel open (with its empty-detail state)', () => {
+  render(<TrackingView />);
+
+  const rows = document.querySelectorAll('.tk-table .rowbtn');
+  expect(rows.length).toBeGreaterThan(1);
+  fireEvent.click(rows[1]);
+
+  expect(rows[1].getAttribute('aria-pressed')).toBe('true');
+  expect(rows[0].getAttribute('aria-pressed')).toBe('false');
+  // The panel stays (this PN has no mock detail data) and still offers
+  // the close control.
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+  expect(
+    screen.getByRole('button', { name: 'Close details' }),
+  ).toBeInTheDocument();
+});
+
+test('the detail panel carries the subtle elevation in the stylesheet', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'tracking.css'),
+    'utf8',
+  );
+  expect(css).toMatch(/\.tk-right \{[^}]*box-shadow: var\(--shadow\)/);
+  expect(css).toMatch(/\.tk-wrap\.noselect \{[^}]*grid-template-columns/);
 });

@@ -117,15 +117,35 @@ test('the Station Selector renders Operations as individual chips', async () => 
   expect(external.textContent).not.toContain('Plating, Painting');
 });
 
-test('each station card offers Open and Open production mode with correct routes', async () => {
+test('the station card main surface opens standard mode; Production mode is a sibling action', async () => {
   window.history.replaceState({}, '', '/scan-station');
   render(<App />);
   await screen.findByRole('heading', { name: 'Select a Scan Station' });
 
-  // Accessible names carry the Station ID for both actions.
+  // The card's main selection surface is ONE full-card button (no
+  // nested interactive controls inside it) and opens standard mode.
+  const main = screen.getByRole('button', { name: 'Open LATHE-ST-01' });
+  expect(main.classList.contains('ss-stationmain')).toBe(true);
+  expect(main.querySelector('button, a, input, select')).toBeNull();
+  // There is no separate `Open` button anymore.
+  expect(screen.queryByRole('button', { name: 'Open' })).toBeNull();
+  fireEvent.click(main);
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+  expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
+});
+
+test('the Production mode card action opens the production route', async () => {
+  window.history.replaceState({}, '', '/scan-station');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Select a Scan Station' });
+
+  // Accessible name carries the Station ID; the visible label is
+  // exactly `Production mode`, a sibling of the full-card button.
   const prod = screen.getByRole('button', {
     name: 'Open LATHE-ST-01 in production mode',
   });
+  expect(prod.textContent).toBe('Production mode');
+  expect(prod.closest('.ss-stationmain')).toBeNull();
   fireEvent.click(prod);
   expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01/production');
   expect(await screen.findByLabelText('Scan barcode')).toBeInTheDocument();
@@ -141,30 +161,30 @@ test('an unknown Station ID is an explicit error, never a fallback', async () =>
   expect(screen.queryByLabelText('Scan barcode')).not.toBeInTheDocument();
 });
 
-test('the footer Station ID is a subtle switch back to the selector', async () => {
+test('one coherent non-interactive footer in standard mode', async () => {
   await renderStation();
 
-  const switchButton = screen.getByRole('button', {
-    name: 'LATHE-ST-01',
-  });
-  expect(switchButton.closest('.ss-stationfoot')).not.toBeNull();
-  fireEvent.click(switchButton);
-
-  expect(window.location.pathname).toBe('/scan-station');
-  expect(
-    await screen.findByRole('heading', { name: 'Select a Scan Station' }),
-  ).toBeInTheDocument();
+  // Faint Station ID, subtle mode label, and the shortcut hint — no
+  // clickable Station ID (the top navigation's Scan Station entry
+  // already returns to the Station Selector; the footer never
+  // duplicates it).
+  const foot = document.querySelector('.ss-stationfoot') as HTMLElement;
+  expect(foot).toHaveTextContent('LATHE-ST-01');
+  expect(foot).toHaveTextContent('Standard mode');
+  expect(foot).toHaveTextContent('Ctrl+Shift+K: switch mode');
+  expect(foot.querySelector('button')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'LATHE-ST-01' })).toBeNull();
 });
 
 /* ============ Production mode ============ */
 
-test('the standard station keeps the top navigation and the switch affordance', async () => {
+test('the standard station keeps the top navigation', async () => {
   await renderStation();
 
   expect(
     screen.getByRole('navigation', { name: 'Primary' }),
   ).toBeInTheDocument();
-  // Standard mode documents the production-mode shortcut in the footer.
+  // Both modes document the mode-switch shortcut in the footer.
   expect(document.querySelector('.ss-stationfoot')?.textContent).toContain(
     'Ctrl+Shift+K',
   );
@@ -231,6 +251,11 @@ test('production mode offers the global theme control in the header actions grou
   ) as HTMLElement;
   expect(actions).not.toBeNull();
   expect(actions.querySelector('.connchip')).not.toBeNull();
+  // Vertical, right-aligned stack: connectivity status first, the
+  // theme control directly beneath it (layout in scan-station.css).
+  const children = Array.from(actions.children, (el) => el.className);
+  expect(children[0]).toContain('connchip');
+  expect(children[1]).toContain('themetoggle');
   const toggle = within(actions).getByRole('button', { name: '🌙 Dark' });
   expect(toggle).toHaveAttribute('aria-pressed', 'false');
 
@@ -1550,6 +1575,14 @@ test('header totals use semantic tones, include Done, and reconcile', async () =
   expect(stats.get('On machines')?.classList.contains('m')).toBe(true);
   expect(stats.get('Done')?.classList.contains('d')).toBe(true);
   expect(stats.get('Hot')?.classList.contains('h')).toBe(true);
+  // The two plain totals stay non-status but visually distinct:
+  // Total PNs keeps the primary neutral tone (no tone class), Total
+  // pcs carries the secondary neutral tone `s` — never a status tone.
+  expect(stats.get('Total PNs')?.className.trim()).toBe('n');
+  expect(stats.get('Total pcs')?.classList.contains('s')).toBe(true);
+  for (const tone of ['q', 'm', 'd', 'h']) {
+    expect(stats.get('Total pcs')?.classList.contains(tone)).toBe(false);
+  }
   // Quantity reconciliation: Total pcs = Queued + On machines + Done.
   const value = (label: string) => Number(stats.get(label)?.textContent);
   expect(value('Total pcs')).toBe(

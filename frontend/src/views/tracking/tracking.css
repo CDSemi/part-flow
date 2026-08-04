@@ -14,6 +14,13 @@
   background: var(--bg);
 }
 
+/* No selected PN → the detail panel is not rendered and no empty
+   column is reserved: the Tracking table expands into the released
+   space. */
+.tk-wrap.noselect {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 @media (max-width: 1200px) {
   .tk-wrap {
     grid-template-columns: 1fr;
@@ -159,6 +166,8 @@
 .tk-right {
   background: var(--panel);
   border-left: 1px solid var(--border);
+  /* Subtle professional elevation lifts the panel off the table. */
+  box-shadow: var(--shadow);
   padding: 22px;
   overflow: auto;
 }
@@ -167,6 +176,31 @@
   display: flex;
   gap: 14px;
   align-items: flex-start;
+}
+
+.tk-pnrow .spacer {
+  flex: 1;
+}
+
+/* Detail-panel close control: accessible name, ≥ 48 px touch target,
+   quiet until hovered/focused. */
+.tk-close {
+  flex: none;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tk-close:hover {
+  color: var(--text);
+  border-color: var(--border2);
+  background: var(--panel2);
 }
 
 .tk-img {

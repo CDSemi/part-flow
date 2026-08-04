@@ -141,6 +141,12 @@
   color: var(--err-t);
 }
 
+/* Secondary neutral total (Total pcs) — visually distinct from the
+   primary Total PNs without becoming a status tone. */
+.ss-stats .stat .n.s {
+  color: var(--muted);
+}
+
 .ss-stats .stat .l {
   font-size: 9.5px;
   font-weight: 800;
@@ -593,23 +599,43 @@
 /* One card per station: the information block on the left and the two
    clearly differentiated actions on the right — the whole card is
    never one ambiguous click target. */
+/* Station card: the whole main surface is ONE full-card button that
+   opens the station in standard mode; the Production mode action is a
+   sibling button in its own separated cell — never nested inside the
+   main selection surface. */
 .ss-stationcard {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  align-items: stretch;
   border: 2px solid var(--border);
   background: var(--panel);
   border-radius: 12px;
-  padding: 14px 18px;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
-.ss-stationcard .ss-stationinfo {
+.ss-stationcard .ss-stationmain {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
   gap: 4px;
   min-width: 0;
   flex: 1;
+  padding: 14px 18px;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+
+.ss-stationcard .ss-stationmain:hover {
+  background: var(--row-hover);
+}
+
+.ss-stationcard .ss-stationmain:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: -2px;
 }
 
 .ss-stationcard .sid {
@@ -634,8 +660,11 @@
 .ss-stationcard .ss-stationacts {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 8px;
   flex: none;
+  padding: 14px 18px;
+  border-left: 1px solid var(--border);
 }
 
 .ss-openbtn {
@@ -656,16 +685,6 @@
   color: var(--text);
 }
 
-.ss-openbtn.primary {
-  background: var(--info);
-  border-color: var(--info);
-  color: var(--active-nav-text);
-}
-
-.ss-openbtn.primary:hover {
-  filter: brightness(1.07);
-}
-
 @media (max-width: 640px) {
   .ss-stationcard {
     flex-direction: column;
@@ -674,6 +693,9 @@
 
   .ss-stationcard .ss-stationacts {
     flex-direction: row;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding: 10px 14px;
   }
 
   .ss-openbtn {
@@ -1057,23 +1079,9 @@
   letter-spacing: 0.6px;
 }
 
-.ss-stationswitch {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--faint);
-  font-size: 11px;
-  letter-spacing: 0.6px;
-  text-decoration: underline dotted;
-  cursor: pointer;
-}
-
-.ss-stationswitch:hover {
-  color: var(--muted);
-}
-
-/* Small non-interactive production-mode marker beside the Station ID. */
-.ss-prodtag {
+/* Small non-interactive mode marker beside the Station ID (Standard
+   mode / Production mode). */
+.ss-modetag {
   margin-left: 10px;
   padding: 2px 8px;
   border: 1px solid var(--border);
@@ -1086,26 +1094,36 @@
   text-transform: uppercase;
 }
 
-/* Production-mode header actions: the connectivity chip and the
-   compact Dark/Light control form one coherent group — they never
-   crowd the Worker Session or force the Area statistics to wrap. */
+/* Concise footer shortcut hint — quiet, non-interactive. */
+.ss-foothint {
+  margin-left: 10px;
+  color: var(--faint);
+}
+
+/* Production-mode header actions: a compact vertical, right-aligned
+   stack — the connectivity status on top with the Dark/Light control
+   directly beneath it. The narrow column never crowds the Worker
+   Session and never forces the Area statistics to wrap poorly at
+   intermediate widths. */
 .ss-head .ss-headactions {
   flex: none;
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
 }
 
 /* Compact theme control (shared ThemeToggle component, production
-   header variant): chip-sized, quiet surface, clear focus state. */
+   header variant): borderless like the top-navigation control — a
+   quiet text button with a clear focus state. */
 .themetoggle.compact {
   display: inline-flex;
   align-items: center;
   min-height: 40px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel2);
+  padding: 6px 10px;
+  border: none;
+  border-radius: 10px;
+  background: none;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
@@ -1115,5 +1133,5 @@
 
 .themetoggle.compact:hover {
   color: var(--text);
-  border-color: var(--border2);
+  background: var(--panel2);
 }

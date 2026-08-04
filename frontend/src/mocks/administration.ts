@@ -92,84 +92,111 @@ export interface MockAdminSection {
   group: 'Organization' | 'Production setup' | 'Access' | 'Policies';
   label: string;
   subtitle: string;
+  /**
+   * When this configuration becomes real (IMPLEMENTATION_ROADMAP):
+   * `minimum` — part of the Minimum Environment Setup prerequisite
+   * configured before the real production workflows run; `full` —
+   * part of the later full Administration phase.
+   */
+  phase: 'minimum' | 'full';
 }
 
 export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
   {
     id: 'departments',
+    phase: 'minimum',
     group: 'Organization',
     label: 'Departments',
     subtitle: 'Organizational production units',
   },
   {
     id: 'areas',
+    phase: 'minimum',
     group: 'Organization',
     label: 'Areas',
     subtitle: 'Physical production locations — Machine Shop',
   },
   {
     id: 'operations',
+    phase: 'minimum',
     group: 'Organization',
     label: 'Operations',
     subtitle: 'Work performed within an Area (§8.5)',
   },
   {
     id: 'machines',
+    phase: 'minimum',
     group: 'Organization',
     label: 'Machines',
     subtitle: 'Machines available per Area',
   },
   {
     id: 'workers',
+    phase: 'full',
     group: 'Organization',
     label: 'Workers',
     subtitle: 'Workers and badge barcodes',
   },
   {
     id: 'part-numbers',
+    phase: 'full',
     group: 'Organization',
     label: 'PartNumbers',
     subtitle:
       'PN master records — archive (soft-delete) junk/test PNs; history keeps the original PN text with an (archived) marker; physical purge is a separate explicit maintenance operation',
   },
   {
+    id: 'scan-stations',
+    phase: 'minimum',
+    group: 'Production setup',
+    label: 'Scan Stations',
+    subtitle: 'Stations bound to one Area — Station ID and active status',
+  },
+  {
     id: 'route-templates',
+    phase: 'full',
     group: 'Production setup',
     label: 'Route Templates',
     subtitle: 'Reusable production routes',
   },
   {
     id: 'barcode-configuration',
+    phase: 'minimum',
     group: 'Production setup',
     label: 'Barcode configuration',
     subtitle: 'PF: prefix scheme and label printing',
   },
   {
     id: 'scan-behavior',
+    phase: 'full',
     group: 'Production setup',
     label: 'Scan behavior',
     subtitle: 'Station scan-resolution policies',
   },
   {
     id: 'users',
+    phase: 'full',
     group: 'Access',
     label: 'Users',
     subtitle: 'Application user accounts',
   },
   {
     id: 'roles',
+    phase: 'full',
     group: 'Access',
     label: 'Roles & permissions',
     subtitle: 'Role-based access (Phase 14)',
   },
   {
     id: 'worker-sessions',
+    phase: 'full',
     group: 'Policies',
     label: 'Worker sessions',
     subtitle: 'Worker session lifetime policies (§19)',
   },
   {
     id: 'machine-assignment',
+    phase: 'full',
     group: 'Policies',
     label: 'Machine assignment',
     subtitle:
@@ -177,12 +204,14 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
   },
   {
     id: 'correction-permissions',
+    phase: 'full',
     group: 'Policies',
     label: 'Correction permissions',
     subtitle: 'Who may correct, with reasons (§16)',
   },
   {
     id: 'data-retention',
+    phase: 'full',
     group: 'Policies',
     label: 'History archival & purge',
     subtitle:
@@ -190,6 +219,7 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
   },
   {
     id: 'settings',
+    phase: 'full',
     group: 'Policies',
     label: 'Settings',
     subtitle: 'General application settings',

@@ -345,7 +345,10 @@ export function WorkOrderDetailPanel({
                   const removeRule = lineRemoveRule(line);
                   return (
                     <tr key={line.id}>
-                      <td className={errorFor(line.id, 'pn') ? 'err-cell' : ''}>
+                      <td
+                        data-label="PN"
+                        className={errorFor(line.id, 'pn') ? 'err-cell' : ''}
+                      >
                         {line.pn ? (
                           <div className="pn" title={line.pn}>
                             {line.pn}
@@ -421,7 +424,7 @@ export function WorkOrderDetailPanel({
                           </div>
                         ) : null}
                       </td>
-                      <td>
+                      <td data-label="Request Type">
                         {rowEditable && !line.saved ? (
                           <select
                             value={line.type}
@@ -440,6 +443,7 @@ export function WorkOrderDetailPanel({
                         )}
                       </td>
                       <td
+                        data-label="Qty"
                         className={errorFor(line.id, 'qty') ? 'err-cell' : ''}
                       >
                         {rowEditable ? (
@@ -487,7 +491,7 @@ export function WorkOrderDetailPanel({
                           <span className="mono">{line.qty}</span>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Due date">
                         {rowEditable ? (
                           <>
                             <input
@@ -517,7 +521,7 @@ export function WorkOrderDetailPanel({
                           </span>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Job Numbers">
                         {rowEditable ? (
                           <input
                             className="mono"
@@ -535,7 +539,7 @@ export function WorkOrderDetailPanel({
                           <span className="mono">{line.job || '—'}</span>
                         )}
                       </td>
-                      <td>
+                      <td data-label="Status">
                         <span
                           className={`linestat ${
                             line.released
@@ -549,7 +553,7 @@ export function WorkOrderDetailPanel({
                         </span>
                       </td>
                       {editable ? (
-                        <td>
+                        <td data-label="" className="wo-cell-actions">
                           <div className="wo-rowactions">
                             {line.saved || line.released ? (
                               <button
@@ -623,26 +627,18 @@ export function WorkOrderDetailPanel({
                 />
               </div>
               <div className="nwo-hint">
-                Manual entry is the normal workflow; scanning stays a secondary
-                method for existing PN barcodes. A new line joins this Work
-                Order as an <b>unsaved draft</b> with Request Type NEW and the
-                WO due date default. A PN already on this Work Order focuses its
-                existing line instead of adding a duplicate.
+                Scanning is optional: a PN barcode adds an <b>unsaved draft</b>{' '}
+                line; a PN already on this Work Order focuses its existing line
+                instead of adding a duplicate.
               </div>
             </div>
           )}
         </div>
         <div className="wo-note">
           A demand line can be removed only while no production quantity has
-          been released for it: an unsaved draft is removed immediately, a saved
-          unreleased line asks for confirmation, and a released line can no
-          longer be removed here — corrections go through the correction and
-          production workflows (PROJECT_PROFILE §13). Removal never deletes the
-          PartNumber master, Quantity Flows, Movements, release history, or
-          other Work Order Demand for the same PN. An <b>inactive PN</b> is
-          flagged in lookup and cannot be released without reactivation. Closing
-          Work Order Details with unsaved changes asks for confirmation before
-          anything is discarded.
+          been released for it — a released line stays; later adjustments go
+          through the correction workflows. Removal never deletes the Part, its
+          production quantity, or its history.
         </div>
         <div className="wo-actions nwo-actions">
           <button className="btn ghost" onClick={requestClose}>

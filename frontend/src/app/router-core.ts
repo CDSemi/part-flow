@@ -25,6 +25,16 @@ export type ManagementSubview = (typeof MANAGEMENT_SUBVIEWS)[number];
  */
 export type ScanStationMode = 'standard' | 'production';
 
+/**
+ * Production Board presentation mode. `standard` keeps the normal
+ * application navigation; `kiosk` hides it for wall displays and
+ * renders the board-owned kiosk header instead. The mode is part of
+ * the pathname (`/production-board/kiosk`) — an addressable route,
+ * never a component-only boolean or query parameter — and it is a
+ * presentation choice only, not an authorization boundary.
+ */
+export type ProductionBoardMode = 'standard' | 'kiosk';
+
 export type Route =
   /**
    * `/scan-station` (stationId null) shows the Station Selector — it
@@ -35,7 +45,7 @@ export type Route =
    * production mode (no top application navigation).
    */
   | { view: 'scan-station'; stationId: string | null; mode: ScanStationMode }
-  | { view: 'production-board' }
+  | { view: 'production-board'; mode: ProductionBoardMode }
   | { view: 'management'; subview: ManagementSubview }
   | { view: 'administration' }
   | { view: 'not-found'; path: string };
@@ -67,7 +77,12 @@ export function resolvePath(
       mode: stationMatch[2] ? 'production' : 'standard',
     };
   }
-  if (path === '/production-board') return { view: 'production-board' };
+  if (path === '/production-board') {
+    return { view: 'production-board', mode: 'standard' };
+  }
+  if (path === '/production-board/kiosk') {
+    return { view: 'production-board', mode: 'kiosk' };
+  }
   if (path === '/administration') return { view: 'administration' };
   if (path === '/management')
     return { redirect: `/management/${lastManagementSubview}` };

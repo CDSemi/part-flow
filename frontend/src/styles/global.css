@@ -18,10 +18,18 @@ body {
    genuinely exceeds the viewport scrolls inside <main> instead, and a
    fitting view shows no scrollbar at all. */
 #root {
+  /* Browsers without dynamic-viewport units keep the 100vh fallback;
+     the @supports block below upgrades it to 100dvh (same intent as
+     the former double declaration, without an overwritten property). */
   height: 100vh;
-  height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+@supports (height: 100dvh) {
+  #root {
+    height: 100dvh;
+  }
 }
 
 body {
@@ -374,6 +382,27 @@ textarea {
 
 .dlg.xwide {
   width: min(980px, 96vw);
+}
+
+/* Narrow viewports: the two large workflow dialog sizes take the whole
+   screen (near-full-screen treatment) so the heading and primary
+   actions stay easy to reach; smaller confirmations keep their compact
+   centered presentation. */
+@media (max-width: 760px) {
+  .dlg.xwide {
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    padding: 18px 16px;
+  }
+
+  .dlg.wide {
+    width: 100vw;
+    max-height: 96dvh;
+  }
 }
 
 .dlg h3 {

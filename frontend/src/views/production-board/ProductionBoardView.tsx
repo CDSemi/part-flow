@@ -10,8 +10,11 @@ import {
 } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
+import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { ConnectivityChip } from '../../components/ConnectivityChip';
 import { AreaDot } from '../../components/indicators';
+import { ThemeToggle } from '../../components/ThemeToggle';
 import {
   EmptyState,
   ErrorState,
@@ -32,6 +35,39 @@ import {
 } from './board-logic';
 
 const ROTATE_MS = 12_000;
+
+/**
+ * Subtle next-rotation indicator: a thin progress track plus a small
+ * seconds-remaining label, rendered only while more than one page
+ * exists. It reads the SAME deadline that drives the actual page
+ * rotation (one timing source — never a second unsynchronized timer)
+ * and owns its own tick, so the complete board never rerenders per
+ * animation frame. Under `prefers-reduced-motion` the track is hidden
+ * by production-board.css while the seconds label remains.
+ */
+function RotationProgress({ deadline }: { deadline: number }) {
+  const [remaining, setRemaining] = useState(() =>
+    Math.max(0, deadline - Date.now()),
+  );
+  useEffect(() => {
+    const tick = () => setRemaining(Math.max(0, deadline - Date.now()));
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [deadline]);
+  const pct = Math.max(0, Math.min(100, (remaining / ROTATE_MS) * 100));
+  return (
+    <span
+      className="pb-rotate"
+      title="Time until the next automatic page rotation"
+    >
+      <span className="pb-rotatetrack" aria-hidden="true">
+        <i style={{ width: `${pct}%` }} />
+      </span>
+      <span className="pb-rotatesec">{Math.ceil(remaining / 1000)} s</span>
+    </span>
+  );
+}
 
 /** Self-contained live clock: only this component rerenders per tick. */
 function LiveClock() {
@@ -60,15 +96,19 @@ function LiveClock() {
 }
 
 /**
- * Concise operator wording for the state column. `on mch.` marks the
- * active-Machine rows; canonical Movement type names never appear in
- * board text. Stocked rows keep their quiet presentation (no tag —
- * the `total … pcs stocked` line already states it).
+ * Full user-facing wording for the state column — `on machine` marks
+ * the active-Machine rows (never an abbreviation); canonical Movement
+ * type names never appear in board text. Stocked rows keep their quiet
+ * presentation (no tag — the `total … pcs stocked` line already states
+ * it). Each state also carries its semantic text tone (production-
+ * board.css), consistent with the Scan Station statistics: queue →
+ * warning, on machine / processing → information, done → success.
+ * Color is never the only distinction — the state text remains.
  */
 function locationStateLabel(state: MockLocationRow['state']): string {
   switch (state) {
     case 'machine':
-      return 'on mch.';
+      return 'on machine';
     case 'queue':
       return 'queue';
     case 'processing':
@@ -113,12 +153,14 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
       </span>
       <span className="lqty">{loc.qty}</span>
       {activityChip ? (
-        <span className="ltag">
+        // External activity stays informational — the chip carries the
+        // information tone like the other in-process states.
+        <span className="ltag st-processing">
           <span className="actchip">{loc.activity}</span>
         </span>
       ) : (
         <span
-          className={`ltag${loc.state === 'done' ? ' done' : ''}`}
+          className={`ltag st-${loc.state}${loc.state === 'done' ? ' done' : ''}`}
           title={doneTitle}
         >
           {locationStateLabel(loc.state)}
@@ -177,9 +219,10 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
             <span className="ltime">
               {row.scrapped ? (
                 // Scrap renders on the total line itself, anchored in
-                // the right-hand time position as a quiet error-toned
-                // chip — never an extra row, never a ⊘ symbol.
-                <span className="scrapchip">{row.scrapped} scrapped</span>
+                // the right-hand time position as clear error-toned
+                // plain text — no pill, no filled background, never an
+                // extra row, never a ⊘ symbol.
+                <span className="scraptext">{row.scrapped} scrapped</span>
               ) : null}
             </span>
           </div>
@@ -241,6 +284,12 @@ function BoardHeadRow() {
 export function ProductionBoardView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
+  const { route, navigate } = useRouter();
+  // Kiosk mode is an addressable route (`/production-board/kiosk`),
+  // explicit in the router model — the top application navigation is
+  // hidden by the App shell and the board renders its own coherent
+  // kiosk header. Presentation only, never an authorization boundary.
+  const kiosk = route.view === 'production-board' && route.mode === 'kiosk';
 
   const allRows: MockBoardRow[] = useMemo(() => {
     const raw =
@@ -316,27 +365,36 @@ export function ProductionBoardView() {
   const pageCount = Math.max(1, breaks.length);
 
   const [page, setPage] = useState(0);
-  // Every manual page change bumps the epoch, which recreates the
-  // rotation interval — manual navigation restarts the auto-rotation
+  // Every manual page change bumps the epoch, which restarts the
+  // rotation deadline — manual navigation restarts the auto-rotation
   // timer instead of racing it.
   const [rotateEpoch, setRotateEpoch] = useState(0);
   // Clamp the active page whenever the page structure changes.
   useEffect(() => {
     setPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
-  // Rotate only while more than one page exists; the previous timer is
-  // cleaned up when pagination changes, a manual navigation restarts
-  // it, or the view unmounts. Automatic rotation wraps around; manual
-  // navigation never does.
+  const safePage = Math.min(page, pageCount - 1);
+  // One timing source for rotation AND its indicator: every displayed
+  // page arms one deadline (now + ROTATE_MS); the timeout that fires
+  // at that deadline advances the page, and RotationProgress renders
+  // the countdown to the same deadline. Manual navigation (buttons,
+  // dots, arrow keys) changes the page / bumps the epoch, which
+  // re-arms the deadline — indicator and rotation can never drift
+  // apart. Rotation exists only while more than one page exists;
+  // automatic rotation wraps around, manual navigation never does.
+  const [rotateDeadline, setRotateDeadline] = useState<number | null>(null);
   useEffect(() => {
-    if (pageCount <= 1) return;
-    const timer = window.setInterval(
+    if (pageCount <= 1) {
+      setRotateDeadline(null);
+      return;
+    }
+    setRotateDeadline(Date.now() + ROTATE_MS);
+    const timer = window.setTimeout(
       () => setPage((current) => (current + 1) % pageCount),
       ROTATE_MS,
     );
-    return () => window.clearInterval(timer);
-  }, [pageCount, rotateEpoch]);
-  const safePage = Math.min(page, pageCount - 1);
+    return () => window.clearTimeout(timer);
+  }, [pageCount, rotateEpoch, safePage]);
 
   /** Manual page change: clamped, non-wrapping, restarts the timer. */
   const goToPage = useCallback((target: number, currentPageCount: number) => {
@@ -365,6 +423,36 @@ export function ProductionBoardView() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [safePage, pageCount, goToPage]);
+
+  // Ctrl+Shift+K toggles between the standard and kiosk routes —
+  // mirroring the Scan Station mode shortcut. Inert inside unrelated
+  // text-entry controls and while a modal dialog is active; never an
+  // authorization mechanism. The board state (current page) lives in
+  // this component, which stays mounted across the toggle, so the
+  // active page is preserved.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+        return;
+      }
+      if (event.key !== 'K' && event.key !== 'k') return;
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (target.isContentEditable || target.closest('[role="dialog"]')) {
+          return;
+        }
+      }
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+      event.preventDefault();
+      navigate(kiosk ? '/production-board' : '/production-board/kiosk');
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [kiosk, navigate]);
 
   if (preview === 'loading') {
     return (
@@ -397,16 +485,43 @@ export function ProductionBoardView() {
   const scrappedTotal = allRows.reduce((s, r) => s + (r.scrapped ?? 0), 0);
 
   return (
-    <section className="pb" aria-label="Production Board" ref={sectionRef}>
-      <div className="pb-head" ref={headRef}>
-        <h1>Machine Shop — Production</h1>
-        <span className={`live${status === 'connected' ? '' : ' stale'}`}>
-          <span className="ld" aria-hidden="true" />
-          {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
-        </span>
-        <span className="spacer" />
-        <LiveClock />
-      </div>
+    <section
+      className={`pb${kiosk ? ' kiosk' : ''}`}
+      aria-label="Production Board"
+      ref={sectionRef}
+    >
+      {kiosk ? (
+        // Kiosk header: one coherent board-owned row — compact brand
+        // mark, board title, ONE shared connectivity status (the same
+        // chip as the top navigation — the separate `Live` indicator
+        // would repeat the same backend connectivity and is not
+        // rendered here), the shared borderless Dark/Light control,
+        // and the clock. Redesigned for a wall display, not pasted
+        // navigation components.
+        <div className="pb-head pbk-head" ref={headRef}>
+          <span className="pbk-brand" aria-hidden="true">
+            <span className="mark">⇄</span>
+            Part<span className="pf">Flow</span>
+          </span>
+          <h1>Machine Shop — Production</h1>
+          <span className="spacer" />
+          <div className="pbk-actions">
+            <ConnectivityChip />
+            <ThemeToggle compact />
+          </div>
+          <LiveClock />
+        </div>
+      ) : (
+        <div className="pb-head" ref={headRef}>
+          <h1>Machine Shop — Production</h1>
+          <span className={`live${status === 'connected' ? '' : ' stale'}`}>
+            <span className="ld" aria-hidden="true" />
+            {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
+          </span>
+          <span className="spacer" />
+          <LiveClock />
+        </div>
+      )}
       {rows.length === 0 ? (
         <EmptyState message="No active production in this Department." />
       ) : (
@@ -463,11 +578,14 @@ export function ProductionBoardView() {
         <div className="pb-footrow">
           <span>
             {pageCount > 1
-              ? `Page ${safePage + 1} / ${pageCount} · rotates every ${
-                  ROTATE_MS / 1000
-                } s`
+              ? `Page ${safePage + 1} / ${pageCount}`
               : 'Page 1 / 1'}
           </span>
+          {/* Rotation countdown: same deadline as the actual page
+              rotation, hidden when only one page exists. */}
+          {pageCount > 1 && rotateDeadline !== null ? (
+            <RotationProgress deadline={rotateDeadline} />
+          ) : null}
           {/* Manual page navigation: Previous/Next never wrap (automatic
               rotation still does) and every manual change restarts the
               rotation timer. ArrowLeft/ArrowRight mirror the buttons. */}
@@ -499,9 +617,23 @@ export function ProductionBoardView() {
             </button>
           </span>
           <span className="spacer" />
-          <span>
-            {activePns} active PNs · {inProduction} pcs in production ·{' '}
-            {stocked} pcs stocked · {scrappedTotal} pcs scrapped
+          {/* Restrained inline aggregate summary: numeric values carry
+              the weight (monospace, subtle semantic tones), the labels
+              stay quiet, separators come from CSS — no pills, clearly
+              subordinate to the production table. */}
+          <span className="pb-agg">
+            <span className="aggitem">
+              <b className="aggnum">{activePns}</b> active PNs
+            </span>
+            <span className="aggitem">
+              <b className="aggnum m">{inProduction}</b> pcs in production
+            </span>
+            <span className="aggitem">
+              <b className="aggnum d">{stocked}</b> pcs stocked
+            </span>
+            <span className="aggitem">
+              <b className="aggnum e">{scrappedTotal}</b> pcs scrapped
+            </span>
           </span>
         </div>
         <div className="pb-footrow legend">
@@ -517,6 +649,9 @@ export function ProductionBoardView() {
             Order: Hot rank first → earliest due date → no due date by oldest
             received date.
           </span>
+          {kiosk ? (
+            <span className="leg">Ctrl+Shift+K: exit kiosk mode</span>
+          ) : null}
         </div>
       </div>
     </section>

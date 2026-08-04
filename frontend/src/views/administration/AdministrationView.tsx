@@ -4,7 +4,6 @@ import { useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
 import { DevNotice } from '../../components/DevNotice';
-import { useMockNotice } from '../../components/mock-notice';
 import {
   EmptyState,
   ErrorState,
@@ -30,7 +29,6 @@ const GROUPS = [
 export function AdministrationView() {
   const preview = getViewStatePreview();
   const [sectionId, setSectionId] = useState('areas');
-  const { showNotice, noticeElement } = useMockNotice();
 
   if (preview === 'loading') {
     return (
@@ -81,33 +79,45 @@ export function AdministrationView() {
               <div className="sub">{section.subtitle}</div>
             </div>
             <span className="spacer" />
+            {/* Honest presentation: configuration editing does not
+                exist yet, so the entry action is disabled instead of
+                pretending to work. */}
             <button
               className="btn primary"
-              onClick={() =>
-                showNotice(
-                  'Configuration editing is not available yet — nothing was created or changed.',
-                )
-              }
+              disabled
+              title="Configuration editing is not available yet"
             >
               + New {section.label === 'Areas' ? 'Area' : 'entry'}
             </button>
           </div>
           <DevNotice>
-            Development preview — configuration values shown are sample data.
+            Development preview — configuration values shown are sample data,
+            and editing is not available yet.
           </DevNotice>
           {section.id === 'areas' ? (
             <AreasTable empty={preview === 'empty'} />
           ) : (
             <div className="ad-placeholder">
-              The <b>{section.label}</b> configuration panel follows the same
-              table + editor pattern as the Areas reference table. Configuration
-              management for this section arrives in a later implementation
-              phase.
+              {section.phase === 'minimum' ? (
+                <>
+                  The <b>{section.label}</b> configuration panel follows the
+                  same table + editor pattern as the Areas reference table. It
+                  is part of the <b>minimum environment setup</b> — the small
+                  configuration set (Departments, Areas, Operations, Scan
+                  Stations, Machines) that is completed before the real
+                  production workflows run.
+                </>
+              ) : (
+                <>
+                  The <b>{section.label}</b> configuration panel follows the
+                  same table + editor pattern as the Areas reference table. It
+                  arrives with the later <b>full Administration</b> phase.
+                </>
+              )}
             </div>
           )}
         </div>
       </div>
-      {noticeElement}
     </section>
   );
 }

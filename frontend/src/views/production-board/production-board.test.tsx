@@ -8,6 +8,8 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ConnectivityProvider } from '../../app/connectivity-provider';
+import { RouterProvider } from '../../app/router-provider';
+import { ThemeProvider } from '../../app/theme-provider';
 import { ProductionBoardView } from './ProductionBoardView';
 
 // Production Board regressions: column order and content-driven sizing
@@ -37,13 +39,21 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+function boardTree() {
+  return (
+    <ThemeProvider>
+      <ConnectivityProvider>
+        <RouterProvider>
+          <ProductionBoardView />
+        </RouterProvider>
+      </ConnectivityProvider>
+    </ThemeProvider>
+  );
+}
+
 async function renderBoard(path = '/production-board') {
   window.history.replaceState({}, '', path);
-  const view = render(
-    <ConnectivityProvider>
-      <ProductionBoardView />
-    </ConnectivityProvider>,
-  );
+  const view = render(boardTree());
   await act(async () => {});
   return view;
 }
@@ -233,7 +243,7 @@ test('location tracks share cross-row minimums in the stylesheet', async () => {
     join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
     'utf8',
   );
-  const loc = css.match(/\.pb-table \.loc \{[^}]*\}/)?.[0] ?? '';
+  const loc = css.match(/\.pb-table \.loc \{[^}]*}/)?.[0] ?? '';
   expect(loc).toContain('grid-template-columns');
   expect(loc.match(/minmax\(\d+ch, max-content\)/g)?.length).toBe(4);
   expect(loc).toMatch(/1fr;/);
@@ -342,7 +352,7 @@ test('one continuous separator element sits between locations and the total row'
   }
 });
 
-test('active Machine rows render dot + machine chip + qty + `on mch.` + time', async () => {
+test('active Machine rows render dot + machine chip + qty + `on machine` + time', async () => {
   await renderBoard();
 
   const loc = rowByPn('2027-60-8114-00')?.querySelector('.loc');
@@ -357,7 +367,7 @@ test('active Machine rows render dot + machine chip + qty + `on mch.` + time', a
     'Lathe 3',
   );
   expect(machineRow?.querySelector('.lqty')?.textContent).toBe('3');
-  expect(machineRow?.querySelector('.ltag')?.textContent).toBe('on mch.');
+  expect(machineRow?.querySelector('.ltag')?.textContent).toBe('on machine');
   expect(machineRow?.querySelector('.ltime')?.textContent).toBe('2h 05m');
 });
 
@@ -385,7 +395,7 @@ test('done rows show the Area label + done state and never imply Machine ownersh
 
   // Done with completion context (Lathe): Area label, success-tone
   // `done`, the completing Machine only as a tooltip — no chip, no
-  // `on mch.`.
+  // `on machine`.
   const latheLoc = rowByPn('2027-60-8114-00')?.querySelector('.loc');
   const doneRow = Array.from(latheLoc?.querySelectorAll('.locrow') ?? []).find(
     (row) => row.querySelector('.ltag.done'),
@@ -399,7 +409,7 @@ test('done rows show the Area label + done state and never imply Machine ownersh
   expect(doneTag?.getAttribute('title')).toBe(
     'Completed at Lathe 3 — ready to transfer',
   );
-  expect(doneRow?.textContent).not.toContain('on mch.');
+  expect(doneRow?.textContent).not.toContain('on machine');
 
   // Done in a no-Machine Area (Deburr): no completion context.
   const deburrLoc = rowByPn('78-04-0031')?.querySelector('.loc');
@@ -431,13 +441,13 @@ test('queue and processing rows keep their state labels', async () => {
   expect(processingRow?.querySelector('.lname')?.textContent).toBe('Manual');
 });
 
-test('scrap renders as a chip on the total line, right-anchored, no ⊘', async () => {
+test('scrap renders as plain error-toned text on the total line, right-anchored, no ⊘', async () => {
   await renderBoard();
 
   const loc = rowByPn('2027-60-8114-00')?.querySelector('.loc');
-  // The chip lives inside the total row's right-hand time cell — the
+  // The text lives inside the total row's right-hand time cell — the
   // same line as `total … pcs`, never an extra row.
-  const chip = loc?.querySelector('.locrow.total .ltime .scrapchip');
+  const chip = loc?.querySelector('.locrow.total .ltime .scraptext');
   expect(chip?.textContent).toBe('1 scrapped');
   expect(loc?.querySelector('.locrow.scrap')).toBeNull();
   expect(loc?.textContent).not.toContain('⊘');
@@ -445,12 +455,12 @@ test('scrap renders as a chip on the total line, right-anchored, no ⊘', async 
   // Multi-piece wording comes straight from the value.
   const platedLoc = rowByPn('142-260')?.querySelector('.loc');
   expect(
-    platedLoc?.querySelector('.locrow.total .ltime .scrapchip')?.textContent,
+    platedLoc?.querySelector('.locrow.total .ltime .scraptext')?.textContent,
   ).toBe('2 scrapped');
 
   // Zero scrap renders no chip at all.
   const cleanLoc = rowByPn('118-052')?.querySelector('.loc');
-  expect(cleanLoc?.querySelector('.scrapchip')).toBeNull();
+  expect(cleanLoc?.querySelector('.scraptext')).toBeNull();
 });
 
 test('External locations show only `External` plus an activity chip', async () => {
@@ -489,7 +499,7 @@ test('a long Machine name renders in full — the chip never truncates', async (
   );
   expect(chip).toBeDefined();
   expect(chip?.closest('.locrow')?.querySelector('.ltag')?.textContent).toBe(
-    'on mch.',
+    'on machine',
   );
   // The chip styling carries no ellipsis truncation — a long Machine
   // name expands the Areas column minimum width instead (CSS-level
@@ -564,9 +574,7 @@ test('long data paginates and rotates automatically; single pages never claim ro
 
   // 25 long rows → 3 pages (fallback page size in DOM environments
   // without layout; real heights drive this in the browser).
-  expect(
-    screen.getByText(/Page 1 \/ 3 · rotates every 12 s/),
-  ).toBeInTheDocument();
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(12_000);
@@ -709,14 +717,181 @@ test('the active page clamps when the page structure changes', async () => {
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
   // The data set shrinks to a single page: the page indicator resets
-  // and no rotation is claimed.
+  // and no rotation (or rotation indicator) is claimed.
   window.history.replaceState({}, '', '/production-board');
-  view.rerender(
-    <ConnectivityProvider>
-      <ProductionBoardView />
-    </ConnectivityProvider>,
-  );
+  view.rerender(boardTree());
   await act(async () => {});
   expect(screen.getByText('Page 1 / 1')).toBeInTheDocument();
-  expect(screen.queryByText(/rotates every/)).toBeNull();
+  expect(document.querySelector('.pb-rotate')).toBeNull();
+});
+
+/* ============ Rotation indicator (GUI v13) ============ */
+
+test('a multi-page board shows the rotation indicator with track and seconds', async () => {
+  await renderBoard('/production-board?state=long');
+
+  const rotate = document.querySelector('.pb-rotate');
+  expect(rotate).not.toBeNull();
+  expect(rotate?.querySelector('.pb-rotatetrack i')).not.toBeNull();
+  expect(rotate?.querySelector('.pb-rotatesec')?.textContent).toBe('12 s');
+});
+
+test('the indicator counts down against the same deadline that rotates the page', async () => {
+  await renderBoard('/production-board?state=long');
+  const sec = () => document.querySelector('.pb-rotatesec')?.textContent;
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4_000);
+  });
+  expect(sec()).toBe('8 s');
+
+  // When the same deadline elapses, the page rotates and the indicator
+  // re-arms — one timing source, never two unsynchronized timers.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(8_000);
+  });
+  expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
+  expect(sec()).toBe('12 s');
+});
+
+test('manual navigation resets the rotation timer AND the indicator together', async () => {
+  await renderBoard('/production-board?state=long');
+  const sec = () => document.querySelector('.pb-rotatesec')?.textContent;
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4_000);
+  });
+  expect(sec()).toBe('8 s');
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  await act(async () => {});
+  expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
+  expect(sec()).toBe('12 s');
+
+  // Arrow-key navigation resets the shared deadline the same way.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(sec()).toBe('7 s');
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  await act(async () => {});
+  expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
+  expect(sec()).toBe('12 s');
+
+  // Full interval later the automatic rotation continues (wrapping).
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(12_000);
+  });
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+});
+
+test('the indicator stylesheet supports reduced motion without losing the label', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  // Under prefers-reduced-motion the moving track hides; the seconds
+  // label (outside that rule) remains.
+  expect(css).toMatch(
+    /prefers-reduced-motion[^{]*\{\s*\.pb-foot \.pb-rotatetrack \{\s*display: none/,
+  );
+});
+
+/* ============ Footer aggregate summary (GUI v13) ============ */
+
+test('the aggregate summary emphasizes values with tones and keeps labels quiet — no pills', async () => {
+  await renderBoard();
+
+  const agg = document.querySelector('.pb-foot .pb-agg');
+  expect(agg).not.toBeNull();
+  const items = Array.from(agg!.querySelectorAll('.aggitem'), (el) =>
+    el.textContent?.trim(),
+  );
+  expect(items).toEqual([
+    '6 active PNs',
+    '64 pcs in production',
+    '50 pcs stocked',
+    '3 pcs scrapped',
+  ]);
+  // Values are emphasized elements with semantic tone classes; labels
+  // stay plain text (no pill/chip markup anywhere in the summary).
+  const nums = agg!.querySelectorAll('.aggnum');
+  expect(nums).toHaveLength(4);
+  expect(nums[0].className).toBe('aggnum');
+  expect(nums[1].classList.contains('m')).toBe(true);
+  expect(nums[2].classList.contains('d')).toBe(true);
+  expect(nums[3].classList.contains('e')).toBe(true);
+});
+
+/* ============ Kiosk mode (GUI v13) ============ */
+
+test('the kiosk route renders the coherent board-owned kiosk header', async () => {
+  await renderBoard('/production-board/kiosk');
+
+  expect(document.querySelector('.pb')?.className).toContain('kiosk');
+  const head = document.querySelector('.pb-head.pbk-head');
+  expect(head).not.toBeNull();
+  // Compact brand mark, board title, ONE shared connectivity status,
+  // the shared compact (borderless) theme control, and the clock.
+  expect(head?.querySelector('.pbk-brand')).not.toBeNull();
+  expect(head?.querySelector('h1')?.textContent).toBe(
+    'Machine Shop — Production',
+  );
+  expect(head?.querySelector('.connchip')).not.toBeNull();
+  expect(head?.querySelector('.themetoggle.compact')).not.toBeNull();
+  expect(head?.querySelector('.clock')).not.toBeNull();
+  // `Live` and `ONLINE` communicate the same backend connectivity —
+  // the kiosk header keeps only the shared chip.
+  expect(head?.querySelector('.live')).toBeNull();
+  // Subtle exit hint in the footer legend.
+  expect(document.querySelector('.pb-foot')?.textContent).toContain(
+    'Ctrl+Shift+K: exit kiosk mode',
+  );
+});
+
+test('the standard route keeps the normal header and no kiosk chrome', async () => {
+  await renderBoard();
+
+  expect(document.querySelector('.pbk-head')).toBeNull();
+  expect(document.querySelector('.pb')?.className).not.toContain('kiosk');
+  expect(document.querySelector('.pb-head .live')).not.toBeNull();
+  expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
+    'exit kiosk mode',
+  );
+});
+
+test('Ctrl+Shift+K toggles the kiosk route but stays inert in fields and dialogs', async () => {
+  await renderBoard();
+
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  await act(async () => {});
+  expect(window.location.pathname).toBe('/production-board/kiosk');
+  expect(document.querySelector('.pbk-head')).not.toBeNull();
+
+  fireEvent.keyDown(window, { key: 'k', ctrlKey: true, shiftKey: true });
+  await act(async () => {});
+  expect(window.location.pathname).toBe('/production-board');
+  expect(document.querySelector('.pbk-head')).toBeNull();
+
+  // Inert while an application modal dialog is active.
+  const dialog = document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  document.body.appendChild(dialog);
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/production-board');
+  dialog.remove();
+
+  // Inert inside an unrelated text-entry control.
+  const input = document.createElement('input');
+  document.body.appendChild(input);
+  fireEvent.keyDown(input, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/production-board');
+  input.remove();
+
+  // Without the full chord nothing toggles.
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true });
+  expect(window.location.pathname).toBe('/production-board');
 });

@@ -179,7 +179,7 @@ export function WorkOrdersView() {
               current.map((w) => (w.id === updated.id ? updated : w)),
             );
             showNotice(
-              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated — business demand only; release to production stays a separate explicit step.`,
+              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated — business demand only.`,
             );
           }}
           onDirtyChange={handleDetailDirtyChange}
@@ -208,7 +208,7 @@ export function WorkOrdersView() {
             setWorkOrderList((current) => [workOrder, ...current]);
             closeNewWorkOrder();
             showNotice(
-              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}); release to production stays a separate explicit step.`,
+              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}).`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}
@@ -275,10 +275,8 @@ function WorkOrderListPanel({
         Manual Work Order entry and explicit production release.{' '}
         <b>Saving demand never creates production quantity</b> — physical
         quantity enters production only through the explicit{' '}
-        <b>Release to production</b> action on a demand line. Selecting a Work
-        Order opens its details in a dialog over this list, and{' '}
-        <b>＋ New Work Order</b> opens a dialog the same way — the URL never
-        changes.
+        <b>Release to production</b> action on a demand line. Select a Work
+        Order to open its details.
       </p>
       <DevNotice>
         Development preview — saves and releases update sample data in this
@@ -288,7 +286,7 @@ function WorkOrderListPanel({
         <input
           value={search}
           onChange={(e) => onSearch(e.target.value)}
-          placeholder="Search WO Number… (an existing WO Number is opened — duplicates are never created)"
+          placeholder="Search WO Number…"
           aria-label="Search WO Number"
         />
       </div>
@@ -350,13 +348,10 @@ function WorkOrderListPanel({
         </table>
       )}
       <div className="wo-note">
-        Completed Work Orders (every Work Order Demand fully allocated) move out
-        of the active list but remain permanently available in history. Internal
-        Work Orders without an external number (e.g. Scan Station MODIFY intake)
-        display <span className="mono">—</span> and may receive the real
-        external number later through an audited edit. Work Orders handles
-        business demand only — it is not customer, pricing, invoicing, shipping,
-        purchasing, or accounting functionality.
+        Completed Work Orders move out of the active list but stay permanently
+        available in history. An internal Work Order without an external number
+        displays <span className="mono">—</span>; the real number can be added
+        later through an audited edit.
       </div>
     </div>
   );
@@ -423,10 +418,10 @@ function ReleaseDialog({
         </select>
       </div>
       <div className="relsum">
-        Release summary — would create: Quantity Flow <b>× {qty || '0'}</b> ·
-        independent Route snapshot <b>“{route}”</b> · <b>RECEIVED</b> into{' '}
-        <b>Material</b> (Operation <b>Receiving</b>) · current position derived
-        atomically. Existing flows are never merged.
+        Release summary: <b>× {qty || '0'}</b> pcs as a new, separate Quantity
+        Flow · Route <b>“{route}”</b> · starts in <b>Material</b> (Operation{' '}
+        <b>Receiving</b>) with a recorded <b>RECEIVED</b> event. Existing
+        quantity of this PN is never merged.
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>

@@ -1,6 +1,6 @@
 import './QuantityKeypad.css';
 
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import {
   deleteQuantityBackward,
@@ -8,6 +8,7 @@ import {
   sanitizeQuantity,
 } from './quantity-input';
 import type { QuantityEdit, QuantitySelection } from './quantity-input';
+import { isTouchPrimaryDevice, useSoftKeyboardOpen } from './quantity-touch';
 
 /**
  * Shared quantity entry: a REAL focusable numeric text input (focused
@@ -28,6 +29,16 @@ import type { QuantityEdit, QuantitySelection } from './quantity-input';
  * re-activate a previously clicked button.
  * `max` renders a MAX shortcut (transfer/assignment flows); flows
  * without a MAX (Add More Quantity) simply omit it.
+ *
+ * Touch devices (GUI_DESIGN §4.8): on a touch-primary device the
+ * input renders `inputMode="none"` so the native soft keyboard stays
+ * closed — the custom NumPad, selection/caret behavior, and physical
+ * keyboards (which fire real key events regardless of inputMode) all
+ * keep working. Where a mobile browser opens the soft keyboard
+ * anyway, the `window.visualViewport` fallback detects the height
+ * loss and collapses the on-screen NumPad so the input, guidance,
+ * validation and dialog actions stay visible; the NumPad returns with
+ * the viewport (quantity-touch.ts — isolated, reversible detection).
  */
 export function QuantityKeypad({
   value,
@@ -40,6 +51,10 @@ export function QuantityKeypad({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingCaret = useRef<number | null>(null);
+  // Decided once per dialog lifecycle — pointer capabilities do not
+  // change while a quantity step is open.
+  const [touchPrimary] = useState(isTouchPrimaryDevice);
+  const softKeyboardOpen = useSoftKeyboardOpen();
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
@@ -117,70 +132,74 @@ export function QuantityKeypad({
       <input
         ref={inputRef}
         className="qtydisplay"
-        inputMode="numeric"
+        inputMode={touchPrimary ? 'none' : 'numeric'}
         autoComplete="off"
         aria-label={`Quantity: ${value || 'none'}`}
         value={value}
         onKeyDown={handleKeyDown}
         onChange={(e) => onChange(sanitizeQuantity(e.target.value))}
       />
-      <div className="keypad">
-        {['7', '8', '9', '4', '5', '6', '1', '2', '3'].map((k) => (
+      {softKeyboardOpen ? null : (
+        <div className="keypad">
+          {['7', '8', '9', '4', '5', '6', '1', '2', '3'].map((k) => (
+            <button
+              key={k}
+              type="button"
+              tabIndex={-1}
+              onMouseDown={keep}
+              onClick={() =>
+                applyEdit(insertQuantityDigit(value, k, selection()))
+              }
+            >
+              {k}
+            </button>
+          ))}
           <button
-            key={k}
+            type="button"
+            tabIndex={-1}
+            className="act"
+            onMouseDown={keep}
+            onClick={() => applyEdit({ value: '', caret: 0 })}
+          >
+            CLEAR
+          </button>
+          <button
             type="button"
             tabIndex={-1}
             onMouseDown={keep}
             onClick={() =>
-              applyEdit(insertQuantityDigit(value, k, selection()))
+              applyEdit(insertQuantityDigit(value, '0', selection()))
             }
           >
-            {k}
+            0
           </button>
-        ))}
-        <button
-          type="button"
-          tabIndex={-1}
-          className="act"
-          onMouseDown={keep}
-          onClick={() => applyEdit({ value: '', caret: 0 })}
-        >
-          CLEAR
-        </button>
-        <button
-          type="button"
-          tabIndex={-1}
-          onMouseDown={keep}
-          onClick={() =>
-            applyEdit(insertQuantityDigit(value, '0', selection()))
-          }
-        >
-          0
-        </button>
-        <button
-          type="button"
-          tabIndex={-1}
-          className="act"
-          onMouseDown={keep}
-          onClick={() => applyEdit(deleteQuantityBackward(value, selection()))}
-          aria-label="Backspace"
-        >
-          ⌫
-        </button>
-        {max !== undefined ? (
           <button
             type="button"
             tabIndex={-1}
-            className="act keypad-max"
+            className="act"
             onMouseDown={keep}
             onClick={() =>
-              applyEdit({ value: String(max), caret: String(max).length })
+              applyEdit(deleteQuantityBackward(value, selection()))
             }
+            aria-label="Backspace"
           >
-            MAX {max}
+            ⌫
           </button>
-        ) : null}
-      </div>
+          {max !== undefined ? (
+            <button
+              type="button"
+              tabIndex={-1}
+              className="act keypad-max"
+              onMouseDown={keep}
+              onClick={() =>
+                applyEdit({ value: String(max), caret: String(max).length })
+              }
+            >
+              MAX {max}
+            </button>
+          ) : null}
+        </div>
+      )}
     </>
   );
 }

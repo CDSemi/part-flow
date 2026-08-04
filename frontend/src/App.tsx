@@ -97,17 +97,20 @@ function ViewForRoute({ route }: { route: Route }) {
 
 function AppShell() {
   const { route } = useRouter();
-  // Scan Station production mode hides the top application navigation
-  // so an operator cannot casually leave the configured station. It is
-  // a presentation choice only — never an authorization or security
-  // boundary. The persistent Offline banner is NOT navigation and stays.
-  const productionMode =
-    route.view === 'scan-station' &&
-    route.stationId !== null &&
-    route.mode === 'production';
+  // Scan Station production mode and Production Board kiosk mode hide
+  // the top application navigation: production mode keeps operators on
+  // the configured station, kiosk mode keeps a wall display clean.
+  // Both are presentation choices only — never an authorization or
+  // security boundary. The persistent Offline banner is NOT navigation
+  // and stays.
+  const chromeHidden =
+    (route.view === 'scan-station' &&
+      route.stationId !== null &&
+      route.mode === 'production') ||
+    (route.view === 'production-board' && route.mode === 'kiosk');
   return (
     <>
-      {productionMode ? null : (
+      {chromeHidden ? null : (
         <nav className="appnav" aria-label="Primary">
           <span className="logo">
             <span className="mark" aria-hidden="true">

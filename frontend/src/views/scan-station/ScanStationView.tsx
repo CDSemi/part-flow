@@ -129,8 +129,9 @@ type Flow =
  * loads the station; an unknown or inactive Station ID shows an
  * explicit error and never silently falls back to another station.
  * `/scan-station/:stationId/production` loads the same station in
- * production mode: the top application navigation is hidden (App shell)
- * and the footer Station ID stops being a station-switch affordance.
+ * production mode: the top application navigation is hidden (App
+ * shell). The footer is identical in both modes — a non-interactive
+ * Station ID, mode label, and shortcut hint.
  */
 export function ScanStationView() {
   const { route } = useRouter();
@@ -174,17 +175,25 @@ function StationSelector() {
       <div className="ss-select">
         <h1>Select a Scan Station</h1>
         <p className="ss-select-sub">
-          Each Scan Station is bound to one Area. Choose the station you are
-          working at — <b>Open</b> keeps the normal application navigation;{' '}
-          <b>Open production mode</b> hides it so operators stay on the station.
+          Each Scan Station is bound to one Area. Select the station you are
+          working at to open it — <b>Production mode</b> opens the same station
+          with the application navigation hidden, so operators stay on the
+          station.
         </p>
         <ul className="ss-stationlist">
           {MOCK_SCAN_STATIONS.filter((s) => s.active).map((s) => {
             const area = areaByKey(s.area);
             const machines = MOCK_AREA_MACHINES[s.area] ?? [];
             return (
+              // No nested interactive controls: the card's main surface
+              // is ONE button (standard mode) with the Production mode
+              // action as its sibling in a separate cell.
               <li key={s.stationId} className="ss-stationcard">
-                <div className="ss-stationinfo">
+                <button
+                  className="ss-stationmain"
+                  aria-label={`Open ${s.stationId}`}
+                  onClick={() => navigate(`/scan-station/${s.stationId}`)}
+                >
                   <span className="sid mono">{s.stationId}</span>
                   <span className="smeta">
                     {s.department} ·{' '}
@@ -200,24 +209,17 @@ function StationSelector() {
                       ? `${machines.length} Machines — queue & assign`
                       : 'No Machines — direct Area processing'}
                   </span>
-                </div>
+                </button>
                 <div className="ss-stationacts">
-                  <button
-                    className="ss-openbtn primary"
-                    aria-label={`Open ${s.stationId}`}
-                    onClick={() => navigate(`/scan-station/${s.stationId}`)}
-                  >
-                    Open
-                  </button>
                   <button
                     className="ss-openbtn"
                     aria-label={`Open ${s.stationId} in production mode`}
-                    title="Hides the application navigation — operators stay on this station"
+                    title="Opens this station with the application navigation hidden"
                     onClick={() =>
                       navigate(`/scan-station/${s.stationId}/production`)
                     }
                   >
-                    Open production mode
+                    Production mode
                   </button>
                 </div>
               </li>
@@ -1089,31 +1091,19 @@ function StationView({
         />
       )}
 
-      {/* Faint diagnostic caption. Standard mode: subtly clickable to
-          switch stations — deliberately unobtrusive, not a promoted
-          operator workflow. Production mode: the Station ID stays
-          visible for troubleshooting but is plain text — no casual
-          route away from the configured station (the browser itself
-          stays outside PartFlow's control). */}
+      {/* One coherent non-interactive footer for both modes: the faint
+          Station ID, a subtle mode label, and the mode-switch shortcut
+          hint. Returning to the Station Selector is the top
+          navigation's Scan Station entry — the footer never duplicates
+          it, and there is no casual route away from a configured
+          station (the browser itself stays outside PartFlow's
+          control). */}
       <footer className="ss-stationfoot">
-        {productionMode ? (
-          <>
-            Station <span className="mono">{station.stationId}</span>
-            <span className="ss-prodtag">Production mode</span>
-          </>
-        ) : (
-          <>
-            Station{' '}
-            <button
-              className="ss-stationswitch mono"
-              title="Switch Scan Station"
-              onClick={() => navigate('/scan-station')}
-            >
-              {station.stationId}
-            </button>{' '}
-            · Ctrl+Shift+K opens production mode
-          </>
-        )}
+        Station <span className="mono">{station.stationId}</span>
+        <span className="ss-modetag">
+          {productionMode ? 'Production mode' : 'Standard mode'}
+        </span>
+        <span className="ss-foothint">Ctrl+Shift+K: switch mode</span>
       </footer>
     </section>
   );

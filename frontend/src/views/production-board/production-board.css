@@ -293,6 +293,20 @@
   white-space: nowrap;
 }
 
+/* Semantic state-text tones, consistent with the Scan Station
+   statistics (GUI_DESIGN §4.3): queue → warning, on machine and
+   processing / External activity → information, done → success
+   (below). Color is never the only distinction — the state text
+   itself remains. */
+.pb-table .ltag.st-queue {
+  color: var(--warn-t);
+}
+
+.pb-table .ltag.st-machine,
+.pb-table .ltag.st-processing {
+  color: var(--info-t);
+}
+
 /* External activity (`plating`, `vendor`, …): a light informational
    chip in the state position — a label, never a control. */
 .pb-table .ltag .actchip {
@@ -579,17 +593,133 @@ tr.hotrow2 td:first-child {
   flex: 1;
 }
 
-/* Scrapped quantity: a quiet error-toned chip on the total line
-   itself, anchored in the right-hand time position — never an extra
-   row and never overlapping `pcs`. */
-.pb-table .scrapchip {
+/* Scrapped quantity: clear error-toned plain text on the total line
+   itself, anchored in the right-hand time position — no filled
+   background, no border, no pill radius; never an extra row and never
+   overlapping `pcs`. */
+.pb-table .scraptext {
   display: inline-block;
-  background: var(--error-surface);
-  border: 1px solid var(--error-border);
-  border-radius: 6px;
-  padding: 1px 8px;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 750;
   color: var(--err-t);
   white-space: nowrap;
+}
+
+/* Next-rotation indicator: a thin progress track with a small
+   seconds-remaining label, visually subordinate to the production
+   rows. Hidden entirely when only one page exists (component level);
+   the moving track is disabled under prefers-reduced-motion while the
+   seconds label remains. */
+.pb-foot .pb-rotate {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pb-foot .pb-rotatetrack {
+  display: inline-block;
+  width: 72px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--track-bar);
+  overflow: hidden;
+}
+
+.pb-foot .pb-rotatetrack i {
+  display: block;
+  height: 100%;
+  background: var(--border2);
+  border-radius: 2px;
+}
+
+.pb-foot .pb-rotatesec {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  color: var(--faint);
+  min-width: 32px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pb-foot .pb-rotatetrack {
+    display: none;
+  }
+}
+
+/* Footer aggregate summary: restrained inline groups — emphasized
+   monospace values with subtle semantic tones, quiet labels, and
+   soft separators. No pills; clearly subordinate to the table. */
+.pb-foot .pb-agg {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 14px;
+  row-gap: 2px;
+}
+
+.pb-foot .aggitem {
+  white-space: nowrap;
+}
+
+.pb-foot .aggitem + .aggitem::before {
+  content: '·';
+  margin-right: 14px;
+  color: var(--border2);
+}
+
+.pb-foot .aggnum {
+  font-family: var(--mono), monospace;
+  font-size: 14.5px;
+  font-weight: 800;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.pb-foot .aggnum.m {
+  color: var(--info-t);
+}
+
+.pb-foot .aggnum.d {
+  color: var(--ok-t);
+}
+
+.pb-foot .aggnum.e {
+  color: var(--err-t);
+}
+
+/* ============ Kiosk mode (route /production-board/kiosk) ============ */
+
+/* Kiosk header: one coherent board-owned row — compact brand mark,
+   title, shared connectivity chip + borderless theme control, clock.
+   Sized for a wall display; wraps cleanly at narrower widths. */
+.pb-head.pbk-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.pbk-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 19px;
+  font-weight: 850;
+  letter-spacing: 0.4px;
+  color: var(--text);
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
+}
+
+.pbk-brand .mark {
+  color: var(--info);
+}
+
+.pbk-brand .pf {
+  color: var(--info-t);
+}
+
+.pbk-actions {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin-right: 14px;
 }

@@ -358,3 +358,43 @@ test('adding a new Hot entry at the bottom needs no reorder confirmation', async
   ).toBeNull();
   expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
 });
+
+/* ============ Snapshot alignment and impact/action block (GUI v13) ============ */
+
+test('both snapshot sections share one grid-track definition so the PN never shifts', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'priority.css'),
+    'utf8',
+  );
+  // ONE shared .pr-snaprow grid definition covers both sections, with
+  // a common rank/transition track wide enough for `#2 → #4`; the
+  // former per-section `.trans` track override no longer exists (the
+  // only other definition is the narrow-screen stacking fallback).
+  expect(css).toMatch(/\.pr-snaprow \{[^}]*grid-template-columns: 150px/);
+  expect(css).not.toMatch(/\.pr-snaprow\.trans \{[^}]*grid-template-columns/);
+});
+
+test('the impact/action block separates the Action label from its emphasized value', async () => {
+  await renderPriority();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Confirm Hot ranking change',
+  });
+  const impact = dialog.querySelector('.pr-impact');
+  expect(impact).not.toBeNull();
+  // Readable shift sentence…
+  expect(impact?.querySelector('.pr-shifts')?.textContent).toBe(
+    '1 other demand will shift up.',
+  );
+  // …and a separated Action label + value; the value is emphasized
+  // text only — no pill markup.
+  expect(impact?.querySelector('.pr-actionlbl')?.textContent).toBe('Action');
+  expect(impact?.querySelector('.pr-actionval')?.textContent).toBe('Move Down');
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+});

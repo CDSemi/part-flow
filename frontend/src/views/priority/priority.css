@@ -229,6 +229,40 @@
   font-family: var(--mono), monospace;
 }
 
+/* Impact/action block beneath the moved-PN summary: the shift impact
+   as a quiet sentence, then the Action label clearly separated from
+   its emphasized value — weight and semantic text only, no pill, and
+   never louder than the summary above. */
+.pr-impact {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 4px;
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+.pr-action {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.pr-actionlbl {
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--faint);
+}
+
+.pr-actionval {
+  font-weight: 800;
+  color: var(--info-t);
+}
+
 .pr-snapshot {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -257,12 +291,20 @@
 
 /* One snapshot row: rank (+ direction on the Current side) | PN |
    WO/Job chip — rank, identifier and metadata never blur together. */
+/* ONE shared grid-track definition for BOTH snapshot sections: the
+   common rank/transition track is sized for the widest value it can
+   hold (`#12 → #14`, `Not listed → #n`), so the PN and metadata
+   positions align exactly between Current Position and New Position —
+   the PN never shifts between the sections. */
 .pr-snaprow {
   display: grid;
-  grid-template-columns: 64px minmax(0, max-content) auto;
+  grid-template-columns: 150px minmax(0, max-content) auto;
   align-items: center;
   gap: 12px;
   padding: 6px 8px;
+  /* Transparent border keeps every row's tracks at identical offsets —
+     the moved row's visible border never shifts the aligned PN. */
+  border: 1px solid transparent;
   border-radius: 8px;
 }
 
@@ -270,13 +312,6 @@
   font-family: var(--mono), monospace;
   font-weight: 750;
   white-space: nowrap;
-}
-
-/* New Position rows carry the complete rank transition `#old → #new`
-   (with `Not listed` on a missing side): a wider rank column, the old
-   rank and arrow quiet, the new rank strongest. */
-.pr-snaprow.trans {
-  grid-template-columns: 150px minmax(0, max-content) auto;
 }
 
 .pr-snaprow .prr .prfrom,
@@ -299,7 +334,7 @@
 
 .pr-snaprow.moved {
   background: var(--info-surface-weak);
-  border: 1px solid var(--info-border);
+  border-color: var(--info-border);
 }
 
 .pr-snaprow.shifted {
@@ -337,6 +372,16 @@
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--faint);
+}
+
+/* Narrow-screen fallback: each row stacks rank/transition above
+   PN + metadata. Every row stacks the same way in both sections, so
+   the rank–PN–metadata relationship stays readable and aligned. */
+@media (max-width: 560px) {
+  .pr-snaprow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
 }
 
 /* The single Current → New transition arrow between the sections —

@@ -670,3 +670,93 @@
   font-size: 14px;
   padding: 9px 12px;
 }
+
+/* ================================================================
+   Responsive demand-line layout (GUI_DESIGN §11): the editable table
+   stays the efficient desktop presentation; at tablet/mobile widths
+   every demand line becomes a labeled card-style block instead of a
+   horizontally scrolled desktop table. Labels come from the cells'
+   data-label attributes; the PN and the row actions span the full
+   card width. The inner line-list scroll region is removed at these
+   widths so only the dialog itself scrolls.
+   ================================================================ */
+@media (max-width: 880px) {
+  .wo-lines {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .wo-table,
+  .wo-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .wo-table thead {
+    display: none;
+  }
+
+  .wo-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+    padding: 13px 15px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .wo-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .wo-table td {
+    display: block;
+    padding: 0;
+    border-bottom: none;
+    min-width: 0;
+  }
+
+  .wo-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 10.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--faint);
+    margin-bottom: 3px;
+  }
+
+  .wo-table td:not([data-label])::before,
+  .wo-table td[data-label='']::before {
+    content: none;
+  }
+
+  /* PN (long values readable) and the action cell span the card. */
+  .wo-table td[data-label='PN'],
+  .wo-table td.wo-cell-actions {
+    grid-column: 1 / -1;
+  }
+
+  .wo-table .pn {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .wo-table input,
+  .wo-table select {
+    width: 100%;
+    max-width: none;
+    min-height: 42px;
+  }
+
+  /* Primary dialog actions stay reachable while long line lists
+     scroll: sticky at the dialog's bottom edge, on a solid surface so
+     they stay readable — content scrolls beneath and nothing is
+     hidden once scrolled to the end. */
+  .wo-actions.nwo-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--panel);
+    z-index: 1;
+  }
+}

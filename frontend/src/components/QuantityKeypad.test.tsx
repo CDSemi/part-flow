@@ -1,6 +1,12 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from '@testing-library/react';
 import { useState } from 'react';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 
 import { QuantityKeypad } from './QuantityKeypad';
 
@@ -179,4 +185,101 @@ test('Space and other printable characters are consumed and ignored', () => {
   fireEvent.keyDown(input, { key: ' ' });
   fireEvent.keyDown(input, { key: 'x' });
   expect(input.value).toBe('42');
+});
+
+/* ============ Touch-primary devices and the soft-keyboard fallback ============ */
+
+test('a non-touch device keeps inputMode="numeric" and the full NumPad', () => {
+  render(<Harness initial="4" max={4} />);
+  expect(qtyInput().getAttribute('inputmode')).toBe('numeric');
+  expect(document.querySelector('.keypad')).not.toBeNull();
+});
+
+test('a touch-primary device renders inputMode="none" while keeping the NumPad and editing', () => {
+  const original = window.matchMedia;
+  vi.stubGlobal(
+    'matchMedia',
+    (query: string) =>
+      ({
+        matches: query === '(pointer: coarse)' || query === '(hover: none)',
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList,
+  );
+  Object.defineProperty(window.navigator, 'maxTouchPoints', {
+    value: 5,
+    configurable: true,
+  });
+  try {
+    render(<Harness initial="4" max={4} />);
+    const input = qtyInput();
+    // The native soft keyboard is suppressed…
+    expect(input.getAttribute('inputmode')).toBe('none');
+    // …while the custom NumPad, MAX, and the shared cursor-aware
+    // editing (physical keyboards still fire key events) keep working.
+    expect(document.querySelector('.keypad')).not.toBeNull();
+    pressKeypad(keypadDigit('2'));
+    expect(input.value).toBe('2');
+    fireEvent.keyDown(input, { key: '3' });
+    expect(input.value).toBe('23');
+    const maxButton = screen.getByRole('button', { name: 'MAX 4' });
+    fireEvent.mouseDown(maxButton);
+    fireEvent.click(maxButton);
+    expect(input.value).toBe('4');
+  } finally {
+    vi.unstubAllGlobals();
+    window.matchMedia = original;
+    Object.defineProperty(window.navigator, 'maxTouchPoints', {
+      value: 0,
+      configurable: true,
+    });
+  }
+});
+
+test('the visualViewport fallback collapses the NumPad while a soft keyboard is open', () => {
+  // jsdom has no visualViewport — install a minimal stub whose height
+  // can shrink and grow, dispatching its resize listener.
+  let height = 800;
+  const listeners = new Set<() => void>();
+  const viewport = {
+    get height() {
+      return height;
+    },
+    addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+    removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+  };
+  Object.defineProperty(window, 'visualViewport', {
+    value: viewport,
+    configurable: true,
+  });
+  try {
+    render(<Harness initial="4" max={4} />);
+    const input = qtyInput();
+    expect(document.querySelector('.keypad')).not.toBeNull();
+
+    // A meaningful height loss (soft keyboard) collapses the NumPad —
+    // the input itself stays for editing and validation.
+    height = 420;
+    act(() => listeners.forEach((fn) => fn()));
+    expect(document.querySelector('.keypad')).toBeNull();
+    expect(qtyInput()).not.toBeNull();
+    fireEvent.keyDown(input, { key: '2' });
+    expect(input.value).toBe('2');
+
+    // The viewport returns → the NumPad is restored.
+    height = 800;
+    act(() => listeners.forEach((fn) => fn()));
+    expect(document.querySelector('.keypad')).not.toBeNull();
+
+    // A small height change (browser chrome) never collapses it.
+    height = 720;
+    act(() => listeners.forEach((fn) => fn()));
+    expect(document.querySelector('.keypad')).not.toBeNull();
+  } finally {
+    Object.defineProperty(window, 'visualViewport', {
+      value: undefined,
+      configurable: true,
+    });
+  }
 });

@@ -257,15 +257,10 @@ export function NewWorkOrderDialog({
             New Work Order
           </h2>
           <p className="wo-sub">
-            The header is optional: leave <b>WO Number</b> blank and the Work
-            Order is saved as an{' '}
-            <b>internal Work Order without an external number</b> — it displays
-            as <span className="mono">—</span> and the real number can be added
-            later through an audited edit; leave <b>WO due date</b> blank and
-            the Work Order is saved without one — due dates can be added later.
-            Add Parts manually with <b>＋ Add Part manually</b>; every line
-            defaults to Request Type <TypeChip type="NEW" /> and to the WO due
-            date, and both can be changed per line.
+            WO Number and due date are optional and can be added later. Add
+            Parts with <b>＋ Add Part manually</b>; every line defaults to
+            Request Type <TypeChip type="NEW" /> and to the WO due date, and
+            both can be changed per line.
           </p>
 
           <div className="nwo-form">
@@ -341,12 +336,9 @@ export function NewWorkOrderDialog({
             />
           </div>
           <div className="nwo-hint">
-            Manual entry is the normal workflow. Scanning stays available as a
-            secondary method: a PN barcode carries the PN itself (
-            <code>PF:PN:&lt;part-number&gt;</code>, e.g.{' '}
-            <code>PF:PN:78-04-0031</code>); a PN not in the catalog is created
-            on first use, non-PN barcodes are rejected, and a PN already on this
-            Work Order focuses its existing line instead of adding a duplicate.
+            Scanning is optional: a PN barcode adds a demand line, a new PN is
+            created on first use, and a PN already on this Work Order focuses
+            its existing line instead of adding a duplicate.
           </div>
 
           <div className="wo-lines nwo-lines">
@@ -373,7 +365,10 @@ export function NewWorkOrderDialog({
                 ) : (
                   lines.map((line) => (
                     <tr key={line.id}>
-                      <td className={errorFor(line.id, 'pn') ? 'err-cell' : ''}>
+                      <td
+                        data-label="PN"
+                        className={errorFor(line.id, 'pn') ? 'err-cell' : ''}
+                      >
                         {/* Lines always carry a PN here: they come from
                             the Add Part flow or a valid PN barcode. */}
                         <div className="pn" title={line.pn ?? ''}>
@@ -388,7 +383,7 @@ export function NewWorkOrderDialog({
                           </div>
                         ) : null}
                       </td>
-                      <td>
+                      <td data-label="Request Type">
                         <select
                           value={line.type}
                           aria-label={`Request Type for ${line.pn ?? 'new line'}`}
@@ -403,6 +398,7 @@ export function NewWorkOrderDialog({
                         </select>
                       </td>
                       <td
+                        data-label="Qty"
                         className={errorFor(line.id, 'qty') ? 'err-cell' : ''}
                       >
                         <input
@@ -441,7 +437,7 @@ export function NewWorkOrderDialog({
                           </div>
                         ) : null}
                       </td>
-                      <td>
+                      <td data-label="Due date">
                         <input
                           ref={(el) => {
                             if (el) fieldRefs.current.set(`${line.id}:due`, el);
@@ -462,7 +458,7 @@ export function NewWorkOrderDialog({
                           <div className="bc">No due date</div>
                         ) : null}
                       </td>
-                      <td>
+                      <td data-label="Job Numbers">
                         <input
                           className="mono"
                           size={10}
@@ -474,7 +470,7 @@ export function NewWorkOrderDialog({
                           }
                         />
                       </td>
-                      <td>
+                      <td data-label="Notes">
                         <input
                           size={10}
                           placeholder="notes…"
@@ -485,7 +481,7 @@ export function NewWorkOrderDialog({
                           }
                         />
                       </td>
-                      <td>
+                      <td data-label="" className="wo-cell-actions">
                         <button
                           className="pr-x"
                           title="Remove draft line"

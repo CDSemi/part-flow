@@ -131,6 +131,29 @@ test('an unknown Station ID shows an explicit error — no silent fallback', asy
   ).toBeInTheDocument();
 });
 
+test('/production-board/kiosk hides the navigation; the standard route keeps it', async () => {
+  renderAt('/production-board/kiosk');
+
+  expect(
+    await screen.findByRole('heading', { name: 'Machine Shop — Production' }),
+  ).toBeInTheDocument();
+  // Kiosk mode: no top application navigation, board-owned header
+  // with one shared connectivity status instead.
+  expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
+  expect(document.querySelector('.pb-head.pbk-head')).not.toBeNull();
+
+  // Ctrl+Shift+K returns to the standard route with the normal
+  // application navigation.
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  await waitFor(() =>
+    expect(
+      screen.getByRole('navigation', { name: 'Primary' }),
+    ).toBeInTheDocument(),
+  );
+  expect(window.location.pathname).toBe('/production-board');
+  expect(document.querySelector('.pb-head.pbk-head')).toBeNull();
+});
+
 test('top-level navigation switches views and updates the URL', async () => {
   renderAt('/scan-station');
 

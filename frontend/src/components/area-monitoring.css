@@ -213,6 +213,12 @@
   color: var(--err-t);
 }
 
+/* Secondary neutral total (Total pcs) — quieter than Total PNs but
+   never a status tone. */
+.am .stat .n.s {
+  color: var(--muted);
+}
+
 .am .stat .l {
   font-size: 9.5px;
   font-weight: 800;
