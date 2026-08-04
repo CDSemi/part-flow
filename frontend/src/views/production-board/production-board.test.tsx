@@ -146,6 +146,110 @@ test('the footer legend describes the No.-column flame, not 🔥#n before the PN
   expect(foot?.textContent).not.toContain('⊘');
 });
 
+test('the footer states the sorting rule in user language', async () => {
+  await renderBoard();
+
+  const foot = document.querySelector('.pb-foot');
+  expect(foot?.textContent).toContain(
+    'Order: Hot rank first → earliest due date → no due date by oldest received date.',
+  );
+  // No deterministic tie-breakers and no implementation field names.
+  expect(foot?.textContent).not.toMatch(/tie-break|hotRank|received:/);
+});
+
+test('the footer is separated into readable control and legend rows', async () => {
+  await renderBoard();
+
+  const rows = document.querySelectorAll('.pb-foot .pb-footrow');
+  expect(rows).toHaveLength(2);
+  // Controls + aggregate totals in the first row…
+  expect(rows[0].querySelector('.pgnav')).not.toBeNull();
+  expect(rows[0].textContent).toContain('pcs in production');
+  // …legend items (flame, blink, dashes, sorting) in the second.
+  const legends = Array.from(rows[1].querySelectorAll('.leg'), (el) =>
+    el.textContent?.trim(),
+  );
+  expect(legends).toHaveLength(4);
+  expect(legends[0]).toContain('🔥 in the No. column');
+  expect(legends[3]).toContain('Order: Hot rank first');
+});
+
+test('the footer anchors through flex layout — never position: fixed', async () => {
+  // jsdom applies no layout, so the anchoring contract is checked at
+  // the stylesheet level: the board is a flex column, the footer is a
+  // normal flex child pushed down with margin-top: auto, and nothing
+  // uses position: fixed (a fixed footer would cover table content and
+  // fall out of the pagination measurement).
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  expect(css).toMatch(/\.pb \{[^}]*flex-direction: column/);
+  expect(css).toMatch(/\.pb-foot \{[^}]*margin-top: auto/);
+  expect(css).not.toContain('position: fixed');
+  // No view-root viewport calculation survives (shell flex layout).
+  expect(css).not.toContain('100vh');
+});
+
+test('only the flame pulses: subtle animation with a reduced-motion fallback', async () => {
+  await renderBoard();
+
+  // The flame markup lives in the No. column…
+  const hotNo = document.querySelector('tr.hotrow1 .no');
+  expect(hotNo?.querySelector('.hotflame')).not.toBeNull();
+
+  // …and the animation contract lives in the stylesheet: a dedicated
+  // flame keyframe applied to the flame only (never the row, the row
+  // number element, or the PN), disabled under prefers-reduced-motion
+  // while the flame and Hot styling stay.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  expect(css).toContain('@keyframes pb-flame-pulse');
+  expect(css).toMatch(/\.no \.hotflame \{[^}]*animation: pb-flame-pulse/);
+  expect(css).toMatch(
+    /prefers-reduced-motion[^{]*\{\s*\.pb-table \.no \.hotflame \{[^}]*animation: none/,
+  );
+  expect(css).not.toMatch(/tr\.hotrow1[^{]*\{[^}]*animation/);
+  expect(css).not.toMatch(/\.part \{[^}]*animation/);
+});
+
+test('location tracks share cross-row minimums in the stylesheet', async () => {
+  // Cross-row alignment cannot be measured in jsdom; the CSS contract
+  // is: shared minimum track widths (minmax + max-content growth) for
+  // Location | Quantity | State | Time, with a trailing 1fr spacer so
+  // time stays near its location data instead of the far cell edge.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  const loc = css.match(/\.pb-table \.loc \{[^}]*\}/)?.[0] ?? '';
+  expect(loc).toContain('grid-template-columns');
+  expect(loc.match(/minmax\(\d+ch, max-content\)/g)?.length).toBe(4);
+  expect(loc).toMatch(/1fr;/);
+  // Explicit track assignment keeps every row inside the shared tracks.
+  expect(css).toMatch(/\.locrow \.lname \{[^}]*grid-column: 1/);
+  expect(css).toMatch(/\.locrow \.ltime \{[^}]*grid-column: 4/);
+});
+
+test('the clock reads time-first with the date as its secondary line', async () => {
+  await renderBoard();
+
+  const wrap = document.querySelector('.pb-head .clockwrap');
+  const children = Array.from(wrap?.children ?? [], (el) => el.className);
+  expect(children).toEqual(['clock', 'clockdate']);
+});
+
 test('rows follow canonical order: Hot → dated → undated → stocked', async () => {
   await renderBoard();
 

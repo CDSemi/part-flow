@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v11.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v12.html`)
 for the approved target UI.
 
 ## Phase 2 frontend

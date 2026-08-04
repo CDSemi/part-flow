@@ -23,6 +23,7 @@ import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
+import { ThemeToggle } from '../../components/ThemeToggle';
 import { LoadingState } from '../../components/view-states';
 import {
   MOCK_AREA_CARDS,
@@ -812,10 +813,14 @@ function StationView({
         </div>
         {productionMode ? (
           // The top application navigation is hidden in production
-          // mode, so the connectivity status chip moves into the
-          // station header — connectivity must stay visible.
-          <div className="ss-conn">
+          // mode, so the connectivity status chip and the global
+          // Dark/Light mode control move into one coherent
+          // header-actions group — connectivity must stay visible and
+          // the theme must stay reachable. Standard mode keeps both in
+          // the top navigation.
+          <div className="ss-headactions">
             <ConnectivityChip />
+            <ThemeToggle compact />
           </div>
         ) : null}
       </header>
@@ -1172,35 +1177,83 @@ interface ActionDialogProps {
   onCancel: () => void;
 }
 
+/** Optional row emphasis for the shared confirmation summary. */
+type SummaryEmphasis = 'primary' | 'secondary';
+
+type SummaryRow = [string, ReactNode] | [string, ReactNode, SummaryEmphasis];
+
 /**
  * Structured confirmation summary — the dedicated final view of every
  * production wizard. Two columns (term / value); rows without a value
  * are omitted. Never a single interpolated sentence.
+ *
+ * A small optional row-emphasis mechanism keeps the primary
+ * operational values (PN, Quantity, Action, Source, Destination,
+ * Machine, Area, Operation, Reason) easy to scan and quiets the
+ * secondary audit/context rows (Worker, Scan Station, recorded event
+ * names, explanatory notes) — nothing is hidden, labels never look
+ * like buttons, and the distinction never relies on color alone
+ * (weight and size carry it in both themes).
  */
-function ConfirmationSummary({ rows }: { rows: [string, ReactNode][] }) {
+function ConfirmationSummary({ rows }: { rows: SummaryRow[] }) {
   return (
     <dl className="ss-confirm">
       {rows
-        .filter(([, value]) => value !== null && value !== undefined)
-        .map(([label, value]) => (
+        .filter((row) => row[1] !== null && row[1] !== undefined)
+        .map(([label, value, emphasis]) => (
           <Fragment key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
+            <dt className={emphasis ?? ''}>{label}</dt>
+            <dd className={emphasis ?? ''}>{value}</dd>
           </Fragment>
         ))}
     </dl>
   );
 }
 
-/** Semantic quantity/step guidance directly above the related input. */
+/**
+ * Subtle non-interactive chip for a selected entity (Machine, Area,
+ * Operation, source, Route Mode) inside recaps and confirmation
+ * summaries — a label, never a control.
+ */
+function EntityChip({ children }: { children: ReactNode }) {
+  return <span className="dlgchip">{children}</span>;
+}
+
+/** Markers keep the guidance kinds apart without relying on color. */
+const GUIDE_MARKERS: Partial<Record<string, string>> = {
+  info: 'ℹ',
+  warn: '⚠',
+  action: '›',
+  error: '✕',
+};
+
+/**
+ * Semantic quantity/step guidance directly above the related input or
+ * choice. The kinds stay visually distinct (§3.10): neutral guidance
+ * is plain muted text; information, important constraints, required
+ * actions and validation errors each carry a small marker plus an
+ * accent edge — color is never the only distinction, and validation
+ * reads stronger than any instruction. Deliberately light: never a
+ * large framed card.
+ */
 function Guidance({
   tone = 'neutral',
   children,
 }: {
-  tone?: 'neutral' | 'info' | 'warn' | 'error';
+  tone?: 'neutral' | 'info' | 'warn' | 'action' | 'error';
   children: ReactNode;
 }) {
-  return <div className={`ss-guide ${tone}`}>{children}</div>;
+  const marker = GUIDE_MARKERS[tone];
+  return (
+    <div className={`ss-guide ${tone}`}>
+      {marker ? (
+        <span className="gmark" aria-hidden="true">
+          {marker}
+        </span>
+      ) : null}
+      <span className="gtext">{children}</span>
+    </div>
+  );
 }
 
 /** Concise recap of the selections carried into the current step. */
@@ -1267,11 +1320,16 @@ function StepButtons({
 }
 
 /**
- * Central physical-key handling for quantity steps: 0–9 append,
- * Backspace removes, Delete clears, Enter advances (to the next step —
- * never directly to a write), Escape cancels (ModalDialog), Space is
- * ignored. Keys typed into other text fields (reason, notes,
- * scan-within-dialog) are left alone.
+ * Central physical-key handling for quantity steps: Enter advances (to
+ * the next step — never directly to a write), Escape cancels
+ * (ModalDialog), and while the quantity input itself is NOT focused
+ * the editing keys fall back to end-of-value editing (digits append,
+ * Backspace removes the last digit, Delete clears, Space is ignored).
+ * While the quantity input IS focused, the shared QuantityKeypad owns
+ * cursor-aware editing (selection replacement / caret insertion — the
+ * same transitions, see components/quantity-input.ts) and consumes
+ * those keys before they reach this handler. Keys typed into other
+ * text fields (reason, notes, scan-within-dialog) are left alone.
  */
 function quantityKeyHandler(
   value: string,
@@ -1298,6 +1356,15 @@ function quantityKeyHandler(
       target instanceof HTMLTextAreaElement ||
       target instanceof HTMLSelectElement;
     if (inOtherField) return;
+    if (
+      target instanceof HTMLInputElement &&
+      target.classList.contains('qtydisplay')
+    ) {
+      // The focused quantity input already handled (and consumed) its
+      // cursor-aware editing keys; anything still bubbling from it is
+      // intentionally left alone.
+      return;
+    }
     if (event.key === ' ') {
       event.preventDefault(); // Space is ignored
       return;
@@ -1333,16 +1400,18 @@ function enterKeyHandler(onEnter: () => void) {
   };
 }
 
-/** Standard quantity validation message for a 1..max range. */
+/** Standard quantity validation message for a 1..max range: the range
+ *  prompt is a required action; exceeding the limit is a validation
+ *  error and reads visually stronger. */
 function quantityValidation(
   parsed: number,
   max: number,
   overMessage: string,
-): { tone: 'neutral' | 'error'; text: string } | null {
+): { tone: 'action' | 'error'; text: string } | null {
   if (parsed > max) return { tone: 'error', text: overMessage };
   if (parsed < 1) {
     return {
-      tone: 'neutral',
+      tone: 'action',
       text: `Enter a quantity between 1 and ${max}.`,
     };
   }
@@ -1647,10 +1716,13 @@ function MachineAssignDialog({
           <StepRecap
             lines={[
               <>
-                Assigning to <b>{machine}</b>. Queued quantity: <b>{max} pcs</b>
-                .
+                Assigning to <EntityChip>{machine}</EntityChip>. Queued
+                quantity: <b>{max} pcs</b>.
               </>,
-              <>Source: Area queue → Destination: {machine}</>,
+              <>
+                Source: <EntityChip>Area queue</EntityChip> → Destination:{' '}
+                <EntityChip>{machine}</EntityChip>
+              </>,
             ]}
           />
           <Guidance tone="info">
@@ -1685,18 +1757,26 @@ function MachineAssignDialog({
           <div className="sub">Review the assignment, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Assign to Machine'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
-              ['Source', 'Area queue'],
-              ['Destination Machine', machine],
+              ['Action', 'Assign to Machine', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
+              ['Source', <EntityChip>Area queue</EntityChip>, 'primary'],
+              [
+                'Destination Machine',
+                <EntityChip>{machine}</EntityChip>,
+                'primary',
+              ],
               [
                 'Remaining queued after assignment',
                 <span className="mono">{max - parsedQty} pcs</span>,
               ],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'ASSIGNED_TO_MACHINE'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'ASSIGNED_TO_MACHINE', 'secondary'],
             ]}
           />
           <StepButtons
@@ -2029,7 +2109,8 @@ function TransferDialog({
           <StepRecap
             lines={[
               <>
-                Transfer {source.areaLabel} → {destinationNote}
+                Transfer <EntityChip>{source.areaLabel}</EntityChip> →{' '}
+                <EntityChip>{destinationNote}</EntityChip>
               </>,
               <>{source.card.workOrder}</>,
             ]}
@@ -2064,11 +2145,23 @@ function TransferDialog({
           <div className="sub">Review the transfer, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Transfer into this Area'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
-              ['Source', source.areaLabel],
-              ['Destination', destinationNote],
+              ['Action', 'Transfer into this Area', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
+              [
+                'Source',
+                <EntityChip>{source.areaLabel}</EntityChip>,
+                'primary',
+              ],
+              [
+                'Destination',
+                <EntityChip>{destinationNote}</EntityChip>,
+                'primary',
+              ],
               [
                 'Source processing',
                 completesQty > 0
@@ -2079,13 +2172,14 @@ function TransferDialog({
                 'Remaining at source',
                 <span className="mono">{source.qty - parsedQty} pcs</span>,
               ],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
               [
                 movements.length > 1 ? 'Recorded events' : 'Recorded event',
                 movements.length > 1
                   ? `${movements.join(', then ')} — one atomic operation`
                   : movements[0],
+                'secondary',
               ],
             ]}
           />
@@ -2318,10 +2412,13 @@ function IntakeDialog({
           <StepRecap
             lines={[
               <>
-                {requestType} · {routeMode}
+                <EntityChip>{requestType}</EntityChip>{' '}
+                <EntityChip>{routeMode}</EntityChip>
                 {routeMode === 'PLANNED' ? <> · “{plannedRoute}”</> : null}
               </>,
-              <>{operation}</>,
+              <>
+                <EntityChip>{operation}</EntityChip>
+              </>,
               <>Due: {due || '—'}</>,
               <>
                 {reusableInternalWo || requestType === 'MODIFY'
@@ -2336,7 +2433,7 @@ function IntakeDialog({
             assumed.
           </Guidance>
           {parsedQty < 1 ? (
-            <Guidance>Enter a positive quantity.</Guidance>
+            <Guidance tone="action">Enter a positive quantity.</Guidance>
           ) : null}
           <QuantityKeypad value={qty} onChange={setQty} />
           <StepButtons
@@ -2358,27 +2455,38 @@ function IntakeDialog({
           <div className="sub">Review the intake, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Receive quantity — intake'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
-              ['Request Type', requestType],
-              ['Route Mode', routeMode],
+              ['Action', 'Receive quantity — intake', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
+              ['Request Type', <EntityChip>{requestType}</EntityChip>],
+              ['Route Mode', <EntityChip>{routeMode}</EntityChip>],
               routeMode === 'PLANNED'
                 ? ['Planned Route', plannedRoute]
                 : ['Planned Route', null],
               ['Work Order', woBehavior],
               ['Due date', due || '—'],
-              ['Starting Area · Operation', operation],
+              [
+                'Starting Area · Operation',
+                <EntityChip>{operation}</EntityChip>,
+                'primary',
+              ],
               [
                 'Destination',
-                hasMachines
-                  ? `${areaName} queue (awaiting Machine)`
-                  : `${areaName} — direct processing`,
+                <EntityChip>
+                  {hasMachines
+                    ? `${areaName} queue (awaiting Machine)`
+                    : `${areaName} — direct processing`}
+                </EntityChip>,
+                'primary',
               ],
               ['Reason / notes', notes || null],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'RECEIVED'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'RECEIVED', 'secondary'],
             ]}
           />
           <StepButtons
@@ -2478,16 +2586,19 @@ function AddQuantityDialog({
             a reason so the adjustment can be reviewed later.
           </div>
           <Guidance>
-            There is deliberately no MAX and no default — enter the actual
-            physical count.
+            There is no MAX and no assumed default — enter the actual physical
+            count.
           </Guidance>
           {parsedQty < 1 ? (
-            <Guidance>Enter a positive quantity.</Guidance>
+            <Guidance tone="action">A positive quantity is required.</Guidance>
           ) : null}
           <QuantityKeypad value={qty} onChange={setQty} />
           <label className="ss-reasonlbl" htmlFor="addq-reason">
             Reason (required)
           </label>
+          <div className="ss-fieldhint">
+            Stored with the adjustment for later review.
+          </div>
           <input
             id="addq-reason"
             className="field"
@@ -2512,20 +2623,27 @@ function AddQuantityDialog({
           <div className="sub">Review the quantity addition, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Add physical quantity'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">+{parsedQty} pcs</span>],
-              ['Area', areaName],
+              ['Action', 'Add physical quantity', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">+{parsedQty} pcs</span>,
+                'primary',
+              ],
+              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
               [
                 'Destination',
-                hasMachines
-                  ? `${areaName} queue (awaiting Machine)`
-                  : `${areaName} — direct processing`,
+                <EntityChip>
+                  {hasMachines
+                    ? `${areaName} queue (awaiting Machine)`
+                    : `${areaName} — direct processing`}
+                </EntityChip>,
+                'primary',
               ],
-              ['Reason', reason.trim()],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'QUANTITY_ADJUSTED · INCREASE'],
+              ['Reason', reason.trim(), 'primary'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'QUANTITY_ADJUSTED · INCREASE', 'secondary'],
             ]}
           />
           <StepButtons
@@ -2703,24 +2821,33 @@ function RepairDialog({
           <div className="sub">Review the Repair movement, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Send quantity here for repair'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
+              ['Action', 'Send quantity here for repair', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
               [
                 'Source',
-                source ? `${source.areaLabel} · ${source.flow}` : null,
+                source ? (
+                  <>
+                    <EntityChip>{source.areaLabel}</EntityChip> · {source.flow}
+                  </>
+                ) : null,
+                'primary',
               ],
-              ['Destination', areaName],
+              ['Destination', <EntityChip>{areaName}</EntityChip>, 'primary'],
               [
                 'Effect',
                 partial
                   ? 'Partial quantity — splits off its own Quantity Flow first'
                   : 'Moves the whole Quantity Flow',
               ],
-              ['Reason', reason.trim()],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'TRANSFERRED · REPAIR intent'],
+              ['Reason', reason.trim(), 'primary'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'TRANSFERRED · REPAIR intent', 'secondary'],
             ]}
           />
           <StepButtons
@@ -2911,20 +3038,24 @@ function ScrapDialog({
           <div className="sub">Review the scrap operation, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Scrap damaged quantity'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Area', areaName],
+              ['Action', 'Scrap damaged quantity', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
               ['Machine', '—'],
               ['Available', <span className="mono">{available} pcs</span>],
-              ['Scrap quantity', <span className="mono">{count} pcs</span>],
+              [
+                'Scrap quantity',
+                <span className="mono">{count} pcs</span>,
+                'primary',
+              ],
               [
                 'Remaining active quantity',
                 <span className="mono">{available - count} pcs</span>,
               ],
-              ['Reason', reason.trim()],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'SCRAPPED'],
+              ['Reason', reason.trim(), 'primary'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'SCRAPPED', 'secondary'],
             ]}
           />
           <StepButtons
@@ -3015,7 +3146,8 @@ function QueueReturnDialog({
           <StepRecap
             lines={[
               <>
-                {machine} → {areaName} queue
+                <EntityChip>{machine}</EntityChip> →{' '}
+                <EntityChip>{areaName} queue</EntityChip>
               </>,
             ]}
           />
@@ -3048,18 +3180,26 @@ function QueueReturnDialog({
           <div className="sub">Review the queue return, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Return to Area queue'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
-              ['Source Machine', machine],
-              ['Destination', `${areaName} queue`],
+              ['Action', 'Return to Area queue', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
+              ['Source Machine', <EntityChip>{machine}</EntityChip>, 'primary'],
+              [
+                'Destination',
+                <EntityChip>{`${areaName} queue`}</EntityChip>,
+                'primary',
+              ],
               [
                 'Remaining on Machine',
                 <span className="mono">{max - parsedQty} pcs</span>,
               ],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'RELEASED_FROM_MACHINE'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'RELEASED_FROM_MACHINE', 'secondary'],
             ]}
           />
           <StepButtons
@@ -3165,11 +3305,13 @@ function DoneDialog({
             lines={[
               machine ? (
                 <>
-                  {machine} → {areaName} finished rack
+                  <EntityChip>{machine}</EntityChip> →{' '}
+                  <EntityChip>{areaName} finished rack</EntityChip>
                 </>
               ) : (
                 <>
-                  {areaName} processing → {areaName} finished rack
+                  <EntityChip>{areaName} processing</EntityChip> →{' '}
+                  <EntityChip>{areaName} finished rack</EntityChip>
                 </>
               ),
             ]}
@@ -3218,15 +3360,23 @@ function DoneDialog({
           </div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Complete Area processing'],
-              ['PN', <span className="mono">{pn}</span>],
-              ['Quantity', <span className="mono">{parsedQty} pcs</span>],
-              ['Area', areaName],
-              ['Machine', machine],
-              ['Result', 'Finished — ready to move'],
-              ['Worker', worker],
-              ['Scan Station', station.stationId],
-              ['Recorded event', 'AREA_COMPLETED'],
+              ['Action', 'Complete Area processing', 'primary'],
+              ['PN', <span className="mono">{pn}</span>, 'primary'],
+              [
+                'Quantity',
+                <span className="mono">{parsedQty} pcs</span>,
+                'primary',
+              ],
+              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
+              [
+                'Machine',
+                machine ? <EntityChip>{machine}</EntityChip> : null,
+                'primary',
+              ],
+              ['Result', 'Finished — ready to move', 'primary'],
+              ['Worker', worker, 'secondary'],
+              ['Scan Station', station.stationId, 'secondary'],
+              ['Recorded event', 'AREA_COMPLETED', 'secondary'],
             ]}
           />
           <StepButtons
@@ -3265,13 +3415,23 @@ function UndoConfirmDialog({
       </div>
       <ConfirmationSummary
         rows={[
-          ['Original action', target.movements.join(' + ')],
-          ['Quantity', <span className="mono">{target.qty}</span>],
-          ['Source → destination', `${target.source} → ${target.destination}`],
-          ['Machine', target.machine ?? null],
-          ['Worker', target.worker],
-          ['Time', <span className="mono">{target.time}</span>],
-          ['Effect of the reversal', target.reversalEffect],
+          ['Original action', target.movements.join(' + '), 'primary'],
+          ['Quantity', <span className="mono">{target.qty}</span>, 'primary'],
+          [
+            'Source → destination',
+            <>
+              <EntityChip>{target.source}</EntityChip> →{' '}
+              <EntityChip>{target.destination}</EntityChip>
+            </>,
+            'primary',
+          ],
+          [
+            'Machine',
+            target.machine ? <EntityChip>{target.machine}</EntityChip> : null,
+          ],
+          ['Worker', target.worker, 'secondary'],
+          ['Time', <span className="mono">{target.time}</span>, 'secondary'],
+          ['Effect of the reversal', target.reversalEffect, 'primary'],
         ]}
       />
       <StepButtons

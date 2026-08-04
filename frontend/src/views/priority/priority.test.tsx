@@ -72,6 +72,13 @@ test('Move Down asks for confirmation; Cancel and Escape change nothing', async 
   );
   expect(dialog).toHaveTextContent('1 other demand will shift up.');
   expect(dialog).toHaveTextContent('Move Down');
+  // New Position rows read as complete `#old → #new` transitions.
+  const newSide = dialog.querySelectorAll('.pr-snapshot')[1];
+  const transitions = Array.from(
+    newSide.querySelectorAll('.pr-snaprow .prr'),
+    (el) => el.textContent,
+  );
+  expect(transitions).toEqual(['#2 → #1', '#1 → #2']);
   // The visible list is not renumbered before confirmation.
   expect(listedPns()).toEqual(INITIAL);
 
@@ -198,15 +205,20 @@ test('confirmation shows Current Position and New Position snapshots', async () 
   );
   expect(curRows[0].querySelector('.prpn')?.textContent).not.toContain('WO');
 
-  // New Position: proposed rank order, no per-row direction arrows.
+  // New Position: proposed rank order, no per-row direction arrows —
+  // every row shows its complete rank transition `#old → #new`.
   const newRows = Array.from(proposed.querySelectorAll('.pr-snaprow'));
   expect(newRows).toHaveLength(3);
   expect(newRows[0].querySelector('.prpn')?.textContent).toBe('142-260');
+  expect(newRows[0].querySelector('.prr')?.textContent).toBe('#2 → #1');
+  expect(newRows[1].querySelector('.prr')?.textContent).toBe('#3 → #2');
   expect(newRows[2].querySelector('.prpn')?.textContent).toBe(
     '2027-60-8114-00',
   );
-  expect(newRows[2].querySelector('.prr')?.textContent).toBe('#3');
+  expect(newRows[2].querySelector('.prr')?.textContent).toBe('#1 → #3');
   expect(proposed.querySelector('.dir')).toBeNull();
+  // The Current Position side keeps plain ranks (no transitions).
+  expect(curRows[0].querySelector('.prr')?.textContent).not.toContain('→');
 
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(listedPns()).toEqual(INITIAL);
@@ -306,8 +318,11 @@ test('Undo restores an entry removed from the bottom of the list', async () => {
   const absent = current.querySelector('.pr-snaprow.absent');
   expect(absent).toHaveTextContent('Not listed');
   expect(absent).toHaveTextContent('309-127');
-  expect(proposed).toHaveTextContent('#3');
-  expect(proposed).toHaveTextContent('309-127');
+  // The restored entry's transition names both sides explicitly.
+  const restored = Array.from(proposed.querySelectorAll('.pr-snaprow')).find(
+    (row) => row.textContent?.includes('309-127'),
+  );
+  expect(restored?.querySelector('.prr')?.textContent).toBe('Not listed → #3');
   expect(proposed.querySelector('.pr-snaprow.absent')).toBeNull();
 
   fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
@@ -323,9 +338,10 @@ test('Undo restores an entry removed from the bottom of the list', async () => {
   );
   expect(redoCurrent).toHaveTextContent('#3');
   expect(redoCurrent.querySelector('.pr-snaprow.absent')).toBeNull();
-  expect(redoProposed.querySelector('.pr-snaprow.absent')).toHaveTextContent(
-    'Not listed',
-  );
+  // The removed entry keeps its origin rank: `#3 → Not listed`.
+  expect(
+    redoProposed.querySelector('.pr-snaprow.absent .prr')?.textContent,
+  ).toBe('#3 → Not listed');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(listedPns()).toEqual(INITIAL);
 });

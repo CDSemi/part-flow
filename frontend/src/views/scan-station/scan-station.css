@@ -1,15 +1,13 @@
-/* Scan Station — dark-first shop-floor view (GUI_DESIGN §4). */
+/* Scan Station — dark-first shop-floor view (GUI_DESIGN §4). The view
+   fills the shell's content area through flex layout (no viewport
+   calculation); in production mode the hidden top navigation simply
+   leaves the whole viewport to <main>, so no separate height rule is
+   needed. */
 .ss {
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 53px);
+  flex: 1 0 auto;
   background: var(--bg);
-}
-
-/* Production mode: the top application navigation is hidden, so the
-   station uses the full viewport height — no leftover nav offset. */
-.ss.production {
-  min-height: 100vh;
 }
 
 .ss.production .ss-head {
@@ -774,18 +772,44 @@
   color: var(--muted);
 }
 
-/* Step guidance — semantic text directly above the related input:
-   neutral instruction, info/warn context, error validation. Plain
-   text, never a framed or dashed summary box. */
+/* Step guidance — semantic text directly above the related input.
+   The kinds must not look identical (§3.10): neutral instructions stay
+   plain muted text, while information, important constraints, required
+   actions and validation errors each carry a small marker plus a thin
+   accent edge in their semantic tone. Color is never the only
+   distinction (marker + weight differ per kind), and validation reads
+   stronger than any instruction. Deliberately light — never a large
+   framed card, never a dashed summary box. */
 .ss-guide {
   margin: 10px 0 8px;
   font-size: 13.5px;
   line-height: 1.55;
   color: var(--muted);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ss-guide .gmark {
+  flex: none;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ss-guide .gtext {
+  min-width: 0;
 }
 
 .ss-guide b {
   color: var(--text);
+}
+
+.ss-guide.info,
+.ss-guide.warn,
+.ss-guide.action,
+.ss-guide.error {
+  padding-left: 9px;
+  border-left: 3px solid currentcolor;
 }
 
 .ss-guide.info {
@@ -794,14 +818,25 @@
 
 .ss-guide.warn {
   color: var(--warn-t);
+  font-weight: 650;
 }
 
+/* Required action: what must be entered before Next enables. */
+.ss-guide.action {
+  color: var(--text);
+  font-weight: 650;
+  border-left-color: var(--border2);
+}
+
+/* Validation error: visually the strongest guidance kind. */
 .ss-guide.error {
   color: var(--err-t);
-  font-weight: 700;
+  font-weight: 750;
 }
 
-/* Concise recap of the selections carried into the current step. */
+/* Concise recap of the selections carried into the current step —
+   secondary and compact, visually separate from the dialog
+   description and from the guidance above the input. */
 .ss-recap {
   margin: 8px 0 4px;
   display: flex;
@@ -809,11 +844,36 @@
   gap: 3px;
   font-size: 13px;
   color: var(--muted);
-  line-height: 1.5;
+  line-height: 1.7;
 }
 
 .ss-recap b {
   color: var(--text);
+}
+
+/* Subtle non-interactive chip for selected entities (Machine, Area,
+   Operation, source, Route Mode) in recaps and confirmation
+   summaries — a label, never a control: no action color, no hover. */
+.dlgchip {
+  display: inline-block;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* Compact explanatory hint directly under a field label (e.g. why the
+   reason is required) — quieter than guidance, never a card. */
+.ss-fieldhint {
+  margin: 2px 0 6px;
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
 }
 
 /* Back stays visible but never competes with Cancel/Confirm width. */
@@ -879,6 +939,31 @@
   color: var(--text);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* Optional row emphasis: primary operational values (PN, Quantity,
+   Action, Source, Destination, Machine, Area, Reason) scan first;
+   secondary audit/context rows (Worker, Scan Station, recorded event
+   names) stay present but quiet. Weight and size carry the
+   distinction — never color alone — and both themes keep readable
+   contrast through the semantic text tokens. */
+.ss-confirm dd.primary {
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.ss-confirm dt.primary {
+  color: var(--muted);
+}
+
+.ss-confirm dt.secondary,
+.ss-confirm dd.secondary {
+  font-size: 12.5px;
+}
+
+.ss-confirm dd.secondary {
+  color: var(--muted);
+  font-weight: 450;
 }
 
 @media (max-width: 560px) {
@@ -1001,6 +1086,34 @@
   text-transform: uppercase;
 }
 
-.ss-head .ss-conn {
+/* Production-mode header actions: the connectivity chip and the
+   compact Dark/Light control form one coherent group — they never
+   crowd the Worker Session or force the Area statistics to wrap. */
+.ss-head .ss-headactions {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact theme control (shared ThemeToggle component, production
+   header variant): chip-sized, quiet surface, clear focus state. */
+.themetoggle.compact {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.themetoggle.compact:hover {
+  color: var(--text);
+  border-color: var(--border2);
 }

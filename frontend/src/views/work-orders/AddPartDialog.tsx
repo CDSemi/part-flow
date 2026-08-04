@@ -140,6 +140,14 @@ export function AddPartDialog({
       }
       return;
     }
+    if (
+      event.target instanceof HTMLInputElement &&
+      event.target.classList.contains('qtydisplay')
+    ) {
+      // The focused quantity input owns cursor-aware editing (shared
+      // QuantityKeypad transitions) and consumes those keys itself.
+      return;
+    }
     const next = applyQuantityKey(qty, event.key);
     if (next !== null) {
       event.preventDefault();

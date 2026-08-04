@@ -1,8 +1,16 @@
-/* Tracking — PN-centric master–detail management view (GUI_DESIGN §7). */
+/* Tracking — PN-centric master–detail management view (GUI_DESIGN §7).
+   The view root fills the shell content area through flex layout — no
+   viewport-height calculation. */
+.tk {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+}
+
 .tk-wrap {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 520px;
-  min-height: calc(100vh - 105px);
+  flex: 1 0 auto;
   background: var(--bg);
 }
 

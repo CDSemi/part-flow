@@ -1,7 +1,15 @@
-/* Production Board — read-only large-display view (GUI_DESIGN §5). */
+/* Production Board — read-only large-display view (GUI_DESIGN §5).
+   The board fills the shell's content area through flex layout (no
+   viewport calculation); the footer is a normal flex child pushed to
+   the bottom edge (margin-top: auto), so short pages keep it at the
+   bottom of the board viewport while it stays part of layout — never
+   a fixed-position overlay, never covering table content, and its
+   real height stays included in the dynamic pagination measurement. */
 .pb {
   background: var(--bg2);
-  min-height: calc(100vh - 53px);
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
   /* anchors the hidden measurement copy (.pb-measure) */
   position: relative;
 }
@@ -66,23 +74,32 @@
   flex: 1;
 }
 
-/* Live local date + time (self-updating clock component). */
+/* Live local date + time (self-updating clock component): one
+   coherent clock block — the time is the strongest element, the date
+   sits directly beneath it as its secondary line. Plain text on the
+   header surface: no border, no background, nothing resembling an
+   editable control. */
 .pb-head .clockwrap {
   display: inline-flex;
-  align-items: baseline;
-  gap: 14px;
-}
-
-.pb-head .clockdate {
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--muted);
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  line-height: 1.05;
 }
 
 .pb-head .clock {
   font-family: var(--mono), monospace;
-  font-size: 27px;
-  font-weight: 750;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+
+.pb-head .clockdate {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -99,19 +116,25 @@
 }
 
 .pb-table col.col-pn {
-  width: 25%;
+  width: 21%;
 }
 
 .pb-table col.col-areas {
-  width: 38%;
+  width: 31%;
 }
 
 .pb-table col.col-due {
-  width: 14%;
+  width: 12%;
+}
+
+/* Total Days gets a real share (heading width + breathing room), so
+   the column never looks glued to Job Numbers. */
+.pb-table col.col-days {
+  width: 8%;
 }
 
 .pb-table col.col-jobs {
-  width: 23%;
+  width: 28%;
 }
 
 .pb-table th {
@@ -123,7 +146,7 @@
   padding: 12px 14px;
   border-bottom: 2px solid var(--border);
   position: sticky;
-  top: 53px;
+  top: 0;
   background: var(--bg2);
   z-index: 5;
   white-space: nowrap;
@@ -181,14 +204,23 @@
 }
 
 /* Areas & Quantities: one grid per row block — every row follows
-   `Location | Quantity | State/activity | Time`. Location, quantity
-   and state size to their widest content (long Area or Machine names
-   expand the column minimum instead of truncating); the time column
-   takes the remaining width so times stay anchored to the right edge.
-   Nothing overlaps and nothing is clipped. */
+   `Location | Quantity | State/activity | Time`. The four logical
+   tracks use SHARED minimum widths so the location, quantity, state
+   and time positions line up across all visible PN rows (the total
+   label and total quantity included); max-content growth means an
+   exceptionally long Area or Machine label expands its own block
+   instead of truncating — never an ellipsis. The trailing 1fr keeps
+   the leftover cell width in one place, so the time track stays close
+   to its location data instead of drifting to the far cell edge, and
+   the continuous separator still spans the complete cell. */
 .pb-table .loc {
   display: grid;
-  grid-template-columns: max-content max-content max-content minmax(6ch, 1fr);
+  grid-template-columns:
+    minmax(13ch, max-content)
+    minmax(4ch, max-content)
+    minmax(11ch, max-content)
+    minmax(10ch, max-content)
+    1fr;
   column-gap: 0;
   row-gap: 6px;
   align-items: baseline;
@@ -196,6 +228,24 @@
 
 .pb-table .locrow {
   display: contents;
+}
+
+/* Explicit track assignment: each row places its four fields into the
+   shared tracks (auto-placement would leak into the spacer track). */
+.pb-table .locrow .lname {
+  grid-column: 1;
+}
+
+.pb-table .locrow .lqty {
+  grid-column: 2;
+}
+
+.pb-table .locrow .ltag {
+  grid-column: 3;
+}
+
+.pb-table .locrow .ltime {
+  grid-column: 4;
 }
 
 .pb-table .lname {
@@ -359,6 +409,34 @@
   white-space: nowrap;
 }
 
+/* Hot flame pulse — the 🔥 icon only: the row, the row number and the
+   PN never animate, and the flame never blinks hard (due-date urgency
+   keeps the hard blink). */
+@keyframes pb-flame-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+}
+
+.pb-table .no .hotflame {
+  display: inline-block;
+  animation: pb-flame-pulse 1.8s ease-in-out infinite;
+}
+
+/* Reduced motion: the flame and the Hot styling stay — only the
+   animation stops. */
+@media (prefers-reduced-motion: reduce) {
+  .pb-table .no .hotflame {
+    animation: none;
+  }
+}
+
 tr.hotrow1 td {
   background: var(--hot1-row-surface);
 }
@@ -414,13 +492,41 @@ tr.hotrow2 td:first-child {
 }
 
 .pb-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 13px 30px 15px;
+  color: var(--faint);
+  font-size: 13.5px;
+}
+
+.pb-foot .pb-footrow {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 15px 30px;
-  color: var(--faint);
-  font-size: 13.5px;
   flex-wrap: wrap;
+}
+
+/* Legend row: separated short items instead of one long sentence. */
+.pb-foot .pb-footrow.legend {
+  row-gap: 3px;
+}
+
+.pb-foot .leg {
+  white-space: nowrap;
+}
+
+.pb-foot .leg + .leg::before {
+  content: '·';
+  margin-right: 12px;
+  color: var(--border2);
+}
+
+/* The user-facing sorting rule reads as its own legend item. */
+.pb-foot .leg.sort {
+  color: var(--muted);
+  white-space: normal;
 }
 
 /* Manual page navigation: quiet controls, keyboard accessible. */

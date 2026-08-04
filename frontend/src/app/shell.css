@@ -1,4 +1,18 @@
 /* ============ Application chrome: top navigation + subnav ============ */
+
+/* The content area derives from normal flex layout (#root is the
+   shell column, styles/global.css): the navigation rows keep their
+   natural height and stay visible while <main> scrolls internally —
+   no view duplicates a fixed navigation-height calculation, and no
+   false document scrollbar appears when a view fits. */
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
 .appnav {
   display: flex;
   align-items: center;
@@ -7,8 +21,6 @@
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
   padding: 6px 16px;
-  position: sticky;
-  top: 0;
   z-index: 100;
   flex-wrap: wrap;
 }
@@ -124,8 +136,6 @@
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   padding: 4px 16px;
-  position: sticky;
-  top: 53px;
   z-index: 99;
   box-shadow: var(--subnav-shadow);
 }

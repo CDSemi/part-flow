@@ -14,8 +14,8 @@ import { NotFoundView } from './app/NotFoundView';
 import { useRouter } from './app/router-context';
 import type { ManagementSubview, Route } from './app/router-core';
 import { RouterProvider } from './app/router-provider';
-import { useTheme } from './app/theme-context';
 import { ThemeProvider } from './app/theme-provider';
+import { ThemeToggle } from './components/ThemeToggle';
 import { UnconnectedView } from './app/UnconnectedView';
 import { LoadingState } from './components/view-states';
 
@@ -67,20 +67,6 @@ function OfflineBanner() {
         Retry connection
       </button>
     </div>
-  );
-}
-
-function ThemeToggle() {
-  const { theme, toggleTheme } = useTheme();
-  return (
-    <button
-      className="navbtn"
-      onClick={toggleTheme}
-      aria-pressed={theme === 'light'}
-      title="Switch between Dark and Light mode — every view follows"
-    >
-      {theme === 'dark' ? '🌙 Dark' : '☀️ Light'}
-    </button>
   );
 }
 

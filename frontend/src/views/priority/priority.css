@@ -3,7 +3,7 @@
   background: var(--bg);
   color: var(--text);
   padding: 24px 28px;
-  min-height: calc(100vh - 105px);
+  flex: 1 0 auto;
 }
 
 .pr-head {
@@ -270,6 +270,23 @@
   font-family: var(--mono), monospace;
   font-weight: 750;
   white-space: nowrap;
+}
+
+/* New Position rows carry the complete rank transition `#old → #new`
+   (with `Not listed` on a missing side): a wider rank column, the old
+   rank and arrow quiet, the new rank strongest. */
+.pr-snaprow.trans {
+  grid-template-columns: 150px minmax(0, max-content) auto;
+}
+
+.pr-snaprow .prr .prfrom,
+.pr-snaprow .prr .prarrow {
+  color: var(--faint);
+  font-weight: 650;
+}
+
+.pr-snaprow .prr .prto {
+  font-weight: 800;
 }
 
 .pr-snaprow .prpn {

@@ -40,8 +40,13 @@ function LiveClock() {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+  // One coherent clock block: the time leads, the date sits directly
+  // beneath it as the secondary line (production-board.css).
   return (
     <span className="clockwrap">
+      <span className="clock">
+        {now.toLocaleTimeString(undefined, { hour12: false })}
+      </span>
       <span className="clockdate">
         {now.toLocaleDateString(undefined, {
           weekday: 'short',
@@ -49,9 +54,6 @@ function LiveClock() {
           day: 'numeric',
           year: 'numeric',
         })}
-      </span>
-      <span className="clock">
-        {now.toLocaleTimeString(undefined, { hour12: false })}
       </span>
     </span>
   );
@@ -451,52 +453,71 @@ export function ProductionBoardView() {
           </table>
         </div>
       ) : null}
+      {/* Footer: a normal flex child anchored to the bottom of the
+          board viewport (margin-top: auto — never position: fixed), so
+          it stays part of layout, never covers table content, and its
+          height stays inside the pagination measurement. Two readable
+          rows: pagination controls + aggregate totals, then the
+          legends including the user-facing sorting rule. */}
       <div className="pb-foot" ref={footRef}>
-        <span>
-          {pageCount > 1
-            ? `Page ${safePage + 1} / ${pageCount} · rotates every ${
-                ROTATE_MS / 1000
-              } s`
-            : 'Page 1 / 1'}
-        </span>
-        {/* Manual page navigation: Previous/Next never wrap (automatic
-            rotation still does) and every manual change restarts the
-            rotation timer. ArrowLeft/ArrowRight mirror the buttons. */}
-        <span className="pgnav">
-          <button
-            className="pgbtn"
-            aria-label="Previous page"
-            disabled={safePage === 0}
-            onClick={() => goToPage(safePage - 1, pageCount)}
-          >
-            ‹
-          </button>
-          {Array.from({ length: pageCount }, (_, i) => (
+        <div className="pb-footrow">
+          <span>
+            {pageCount > 1
+              ? `Page ${safePage + 1} / ${pageCount} · rotates every ${
+                  ROTATE_MS / 1000
+                } s`
+              : 'Page 1 / 1'}
+          </span>
+          {/* Manual page navigation: Previous/Next never wrap (automatic
+              rotation still does) and every manual change restarts the
+              rotation timer. ArrowLeft/ArrowRight mirror the buttons. */}
+          <span className="pgnav">
             <button
-              key={i}
-              className={`pgdot ${i === safePage ? 'on' : ''}`}
-              aria-label={`Go to page ${i + 1}`}
-              aria-current={i === safePage ? 'page' : undefined}
-              onClick={() => goToPage(i, pageCount)}
-            />
-          ))}
-          <button
-            className="pgbtn"
-            aria-label="Next page"
-            disabled={safePage === pageCount - 1}
-            onClick={() => goToPage(safePage + 1, pageCount)}
-          >
-            ›
-          </button>
-        </span>
-        <span className="spacer" />
-        <span>
-          🔥 in the No. column = Hot priority (highest first) · blinking days
-          count = due soon / overdue (the date and PN stay steady) · — = no due
-          date / no external WO Number · {activePns} active PNs · {inProduction}{' '}
-          pcs in production · {stocked} pcs stocked · {scrappedTotal} pcs
-          scrapped
-        </span>
+              className="pgbtn"
+              aria-label="Previous page"
+              disabled={safePage === 0}
+              onClick={() => goToPage(safePage - 1, pageCount)}
+            >
+              ‹
+            </button>
+            {Array.from({ length: pageCount }, (_, i) => (
+              <button
+                key={i}
+                className={`pgdot ${i === safePage ? 'on' : ''}`}
+                aria-label={`Go to page ${i + 1}`}
+                aria-current={i === safePage ? 'page' : undefined}
+                onClick={() => goToPage(i, pageCount)}
+              />
+            ))}
+            <button
+              className="pgbtn"
+              aria-label="Next page"
+              disabled={safePage === pageCount - 1}
+              onClick={() => goToPage(safePage + 1, pageCount)}
+            >
+              ›
+            </button>
+          </span>
+          <span className="spacer" />
+          <span>
+            {activePns} active PNs · {inProduction} pcs in production ·{' '}
+            {stocked} pcs stocked · {scrappedTotal} pcs scrapped
+          </span>
+        </div>
+        <div className="pb-footrow legend">
+          <span className="leg">
+            🔥 in the No. column = Hot priority (highest first)
+          </span>
+          <span className="leg">
+            blinking days count = due soon / overdue (the date and PN stay
+            steady)
+          </span>
+          <span className="leg">— = no due date / no external WO Number</span>
+          <span className="leg sort">
+            Order: Hot rank first → earliest due date → no due date by oldest
+            received date.
+          </span>
+        </div>
       </div>
     </section>
   );

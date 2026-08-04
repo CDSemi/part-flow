@@ -1,8 +1,16 @@
-/* Administration — sidebar + configuration panels (GUI_DESIGN §9). */
+/* Administration — sidebar + configuration panels (GUI_DESIGN §9).
+   The view root fills the shell content area through flex layout — no
+   viewport-height calculation. */
+.ad {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+}
+
 .ad-wrap {
   display: grid;
   grid-template-columns: 242px 1fr;
-  min-height: calc(100vh - 53px);
+  flex: 1 0 auto;
   background: var(--bg);
   color: var(--text);
 }

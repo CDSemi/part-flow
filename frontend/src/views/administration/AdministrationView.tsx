@@ -34,14 +34,14 @@ export function AdministrationView() {
 
   if (preview === 'loading') {
     return (
-      <section aria-label="Administration">
+      <section className="ad" aria-label="Administration">
         <LoadingState label="Loading Administration" />
       </section>
     );
   }
   if (preview === 'error') {
     return (
-      <section aria-label="Administration">
+      <section className="ad" aria-label="Administration">
         <ErrorState
           message="Administration data could not be loaded."
           detail="Check the backend connection, then retry from the offline banner."
@@ -55,7 +55,7 @@ export function AdministrationView() {
     MOCK_ADMIN_SECTIONS[1];
 
   return (
-    <section aria-label="Administration">
+    <section className="ad" aria-label="Administration">
       <div className="ad-wrap">
         <nav className="ad-nav" aria-label="Administration sections">
           {GROUPS.map((group) => (

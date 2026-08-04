@@ -51,14 +51,14 @@ export function TrackingView() {
 
   if (preview === 'loading') {
     return (
-      <section aria-label="Tracking">
+      <section className="tk" aria-label="Tracking">
         <LoadingState label="Loading Tracking" />
       </section>
     );
   }
   if (preview === 'error') {
     return (
-      <section aria-label="Tracking">
+      <section className="tk" aria-label="Tracking">
         <ErrorState
           message="Tracking data could not be loaded."
           detail="Check the backend connection, then retry from the offline banner."
@@ -85,7 +85,7 @@ export function TrackingView() {
   const detail = MOCK_TRACKING_DETAIL;
 
   return (
-    <section aria-label="Tracking">
+    <section className="tk" aria-label="Tracking">
       <div className="tk-wrap">
         <div className="tk-left">
           <h1>Tracking</h1>

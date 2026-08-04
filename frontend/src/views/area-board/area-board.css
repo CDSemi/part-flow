@@ -5,7 +5,7 @@
   background: var(--bg);
   color: var(--text);
   padding: 20px 26px;
-  min-height: calc(100vh - 105px);
+  flex: 1 0 auto;
   container-type: inline-size;
 }
 

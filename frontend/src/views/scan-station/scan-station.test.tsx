@@ -220,6 +220,40 @@ test('the OFFLINE banner stays visible in production mode', async () => {
   expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
 });
 
+test('production mode offers the global theme control in the header actions group', async () => {
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
+  render(<App />);
+  await screen.findByLabelText('Scan barcode');
+
+  // Connectivity chip and Dark/Light control form one header group.
+  const actions = document.querySelector(
+    '.ss-head .ss-headactions',
+  ) as HTMLElement;
+  expect(actions).not.toBeNull();
+  expect(actions.querySelector('.connchip')).not.toBeNull();
+  const toggle = within(actions).getByRole('button', { name: '🌙 Dark' });
+  expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+  // Same global ThemeProvider state: toggling updates the whole
+  // application instantly (the theme class lives on <body>).
+  fireEvent.click(toggle);
+  expect(document.body.classList.contains('light')).toBe(true);
+  expect(
+    within(actions).getByRole('button', { name: '☀️ Light' }),
+  ).toHaveAttribute('aria-pressed', 'true');
+
+  // The choice survives switching to the standard route, where the
+  // header control disappears and the top-navigation control returns.
+  fireEvent.keyDown(window, { key: 'K', ctrlKey: true, shiftKey: true });
+  expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
+  expect(document.body.classList.contains('light')).toBe(true);
+  expect(document.querySelector('.ss-headactions')).toBeNull();
+  const nav = screen.getByRole('navigation', { name: 'Primary' });
+  expect(
+    within(nav).getByRole('button', { name: '☀️ Light' }),
+  ).toBeInTheDocument();
+});
+
 test('Ctrl+Shift+K toggles between standard and production routes only', async () => {
   await renderStation();
 
@@ -1143,9 +1177,8 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   expect(dialog).toHaveTextContent('Effect of the reversal');
   // Undo shares the structured confirmation presentation.
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Cancel — keep the operation' }),
-  );
+  // The Undo dialog keeps the standard wizard Cancel label (§3.10).
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(lastPnText()).toBe('78-04-0031');
 
   // Confirmed Undo reverses and advances to the next eligible action.
@@ -1237,6 +1270,132 @@ test('virtual keypad buttons cannot capture Space or Enter afterwards', async ()
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(screen.getByText(/118-052 × 3 → Lathe queue/)).toBeInTheDocument();
+});
+
+test('quantity editing is cursor-aware: selection replace, caret insert, fallback append', async () => {
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+
+  // The MAX default mounts focused with its value selected — a typed
+  // digit REPLACES it (2, not 42).
+  const qty = screen.getByLabelText('Quantity: 4') as HTMLInputElement;
+  expect(qty).toHaveFocus();
+  expect(qty.selectionStart).toBe(0);
+  expect(qty.selectionEnd).toBe(1);
+  fireEvent.keyDown(qty, { key: '2' });
+  expect(qty.value).toBe('2');
+  expect(qty.selectionStart).toBe(1);
+
+  // A digit inserts at the caret position — 243, not 234 (validation
+  // marks it over the limit; editing itself stays cursor-aware).
+  fireEvent.keyDown(qty, { key: '3' });
+  expect(qty.value).toBe('23');
+  qty.setSelectionRange(1, 1);
+  fireEvent.keyDown(qty, { key: '4' });
+  expect(qty.value).toBe('243');
+  expect(qty.selectionStart).toBe(2);
+  expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+
+  // The on-screen keypad applies the identical transitions: replace a
+  // selection at its exact position…
+  qty.setSelectionRange(0, 2); // "24" selected
+  const one = Array.from(
+    dialog.querySelectorAll<HTMLButtonElement>('.keypad button'),
+  ).find((b) => b.textContent === '1')!;
+  fireEvent.mouseDown(one);
+  fireEvent.click(one);
+  expect(qty.value).toBe('13');
+  expect(qty).toHaveFocus();
+  expect(qty.selectionStart).toBe(1);
+
+  // …and the dialog-level fallback (focus outside the input) appends
+  // to the end exactly as before.
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '3' });
+  expect(qty.value).toBe('3');
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+});
+
+test('guidance kinds are distinct and summaries emphasize operational values', async () => {
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Transfer into this Area',
+  });
+
+  // Info guidance carries its marker; the required-action prompt and
+  // the validation error are separate, progressively stronger kinds.
+  const info = dialog.querySelector('.ss-guide.info');
+  expect(info?.querySelector('.gmark')?.textContent).toBe('ℹ');
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  const action = dialog.querySelector('.ss-guide.action');
+  expect(action?.textContent).toContain('Enter a quantity between 1 and 4.');
+  expect(action?.querySelector('.gmark')?.textContent).toBe('›');
+  fireEvent.keyDown(dialog, { key: '9' });
+  fireEvent.keyDown(dialog, { key: '9' });
+  const error = dialog.querySelector('.ss-guide.error');
+  expect(error?.textContent).toContain('cannot exceed');
+  expect(error?.querySelector('.gmark')?.textContent).toBe('✕');
+  // Validation preserves the entered value.
+  expect((dialog.querySelector('.qtydisplay') as HTMLInputElement).value).toBe(
+    '99',
+  );
+
+  // Confirmation summary: primary operational values scan first,
+  // audit rows stay quiet, and entity chips are labels — never
+  // buttons.
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '2' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  const summary = dialog.querySelector('.ss-confirm')!;
+  const primary = Array.from(
+    summary.querySelectorAll('dd.primary'),
+    (el) => el.textContent ?? '',
+  );
+  expect(primary.some((t) => t.includes('118-052'))).toBe(true);
+  expect(primary.some((t) => t.includes('2 pcs'))).toBe(true);
+  const chips = summary.querySelectorAll('.dlgchip');
+  expect(chips.length).toBeGreaterThan(0);
+  chips.forEach((chip) => expect(chip.tagName).toBe('SPAN'));
+  const secondary = Array.from(
+    summary.querySelectorAll('dd.secondary'),
+    (el) => el.textContent ?? '',
+  );
+  expect(secondary.some((t) => t.includes('TRANSFERRED'))).toBe(true);
+  expect(secondary.some((t) => t.includes('LATHE-ST-01'))).toBe(true);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+});
+
+test('Add more quantity separates description, guidance, validation and reason hint', async () => {
+  await renderStation();
+
+  scan('PF:PN:2027-60-8114-00');
+  fireEvent.click(screen.getByRole('button', { name: /Add more quantity/ }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Add more quantity',
+  });
+
+  // Description: purpose and operational consequence.
+  expect(dialog.querySelector('.sub')?.textContent).toContain(
+    'Add physical quantity that was not received from another Area.',
+  );
+  // Quantity guidance: no MAX and no assumed default.
+  expect(dialog.textContent).toContain('no MAX and no assumed default');
+  expect(dialog.querySelector('.keypad-max')).toBeNull();
+  // Validation: a positive quantity is required (action kind).
+  expect(dialog.querySelector('.ss-guide.action')?.textContent).toContain(
+    'A positive quantity is required.',
+  );
+  // Reason requirement: explained at the field, not repeated verbatim.
+  expect(dialog.querySelector('.ss-fieldhint')?.textContent).toContain(
+    'later review',
+  );
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 });
 
 test('MAX exists for transfers; Escape always cancels with no write', async () => {

@@ -7,9 +7,21 @@
 }
 
 html,
-body,
-#root {
+body {
   height: 100%;
+}
+
+/* The shell column: navigation rows take their natural height and
+   <main> receives the rest (app/shell.css). The root is sized to the
+   dynamic viewport (`100dvh` where supported, `100vh` fallback), so
+   the document itself never gains a scrollbar — content that
+   genuinely exceeds the viewport scrolls inside <main> instead, and a
+   fitting view shows no scrollbar at all. */
+#root {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 body {
