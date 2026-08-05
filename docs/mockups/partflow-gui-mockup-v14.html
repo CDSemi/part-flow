@@ -513,7 +513,11 @@ body.prodmode #ssthemebtn:hover{background:var(--chip)}
    growth still lets an exceptionally long Machine name expand its own
    block instead of truncating. The trailing 1fr keeps leftover width
    in one place so time stays near its location data. */
-.pb-table .loc{display:grid;grid-template-columns:minmax(10ch,max-content) minmax(3ch,max-content) minmax(9ch,max-content) minmax(8ch,max-content) 1fr;
+.pb-table .loc{display:grid;
+  /* content-driven tracks SHARED across all rows: alignBoardLoc()
+     measures the widest real value per field and publishes --loc-*;
+     the ch values are only the pre-measurement fallback */
+  grid-template-columns:minmax(var(--loc-lname,10ch),max-content) minmax(var(--loc-lqty,3ch),max-content) minmax(var(--loc-ltag,9ch),max-content) minmax(var(--loc-ltime,8ch),max-content) 1fr;
   column-gap:0;row-gap:6px;align-items:baseline}
 .pb-table .locrow{display:contents}
 .pb-table .locrow .lname{grid-column:1}
@@ -1028,9 +1032,22 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
   grid-template-columns:max-content minmax(0,max-content) auto;column-gap:12px;row-gap:4px}
 .pr-snaprow{grid-column:1/-1;display:grid;grid-template-columns:max-content minmax(0,max-content) auto;
   align-items:center;gap:12px;padding:6px 8px;border:1px solid transparent;border-radius:8px}
-@supports (grid-template-columns: subgrid){.pr-snaprow{grid-template-columns:subgrid}}
-@media (max-width:560px){.pr-snaprow{grid-template-columns:minmax(0,1fr);gap:2px}}
-.pr-snaprow .prr{font-family:var(--mono);font-weight:750;white-space:nowrap}
+/* Subgrid chain: .pr-snapwrap owns ONE grid around BOTH sections, so
+   the content-sized position track (widest value of either side) is
+   common and the PN column aligns across Current and New Position. */
+@supports (grid-template-columns: subgrid){
+  .pr-snapwrap{display:grid;grid-template-columns:max-content minmax(0,max-content) auto;column-gap:12px}
+  .pr-snapwrap>*{grid-column:1/-1}
+  .pr-snapwrap .pr-snapshot{display:grid;grid-template-columns:subgrid}
+  .pr-snapwrap .pr-snapshot>*{grid-column:1/-1}
+  .pr-snapwrap .pr-snaplist{grid-template-columns:subgrid}
+  .pr-snapwrap .pr-snaprow{grid-template-columns:subgrid}
+}
+@media (max-width:560px){.pr-snaprow,.pr-snapwrap .pr-snaprow{grid-template-columns:minmax(0,1fr);gap:2px}}
+.pr-snaprow .prr{font-family:var(--mono);font-weight:750;white-space:nowrap;
+  /* extra breathing room before the PN (12px gap + 6px = 18px), inside
+     the shared position track so cross-row/section alignment holds */
+  padding-right:6px}
 /* v12: New Position rows carry the complete `#old → #new` transition —
    old rank/arrow quiet, new rank strongest (shared track, v13). */
 .pr-snaprow .prr .prfrom,.pr-snaprow .prr .prarrow{color:var(--faint);font-weight:650}
@@ -1985,9 +2002,13 @@ body.light{color-scheme:light}
          the Action label separated from its emphasized value (no pill,
          never louder than the moved-PN summary above) -->
     <div class="pr-impact" id="prc-shift"></div>
-    <div class="pr-snapshot"><h4 class="pr-snaptitle">Current Position</h4><ul class="pr-snaplist" id="prc-current"></ul></div>
-    <div class="pr-transition" aria-hidden="true">↓</div>
-    <div class="pr-snapshot"><h4 class="pr-snaptitle">New Position</h4><ul class="pr-snaplist" id="prc-new"></ul></div>
+    <!-- one shared wrapper grid: the position track is common to both
+         sections (subgrid chain), so the PN column aligns across them -->
+    <div class="pr-snapwrap">
+      <div class="pr-snapshot"><h4 class="pr-snaptitle">Current Position</h4><ul class="pr-snaplist" id="prc-current"></ul></div>
+      <div class="pr-transition" aria-hidden="true">↓</div>
+      <div class="pr-snapshot"><h4 class="pr-snaptitle">New Position</h4><ul class="pr-snaplist" id="prc-new"></ul></div>
+    </div>
     <div class="sub">No ranks change until you confirm.</div>
     <div class="row">
       <button class="bigbtn ghost" onclick="prConfirmCancel()">Cancel (Esc)</button>
@@ -2122,11 +2143,38 @@ function showView(v){
   if(v==='machines') renderMachines();
   if(v==='routes') renderRoutes();
   if(v==='wo') renderWOList();
+  if(v==='board') alignBoardLoc();
 }
+/* Shared content-driven location tracks (v14): each board row lays its
+   location fields out in its own grid, so cross-row alignment needs a
+   shared track width. Clear the shared widths, measure the widest real
+   value per field across all rows at pure content sizing, then publish
+   them as --loc-* custom properties consumed by every row. */
+function alignBoardLoc(){
+  const root=document.getElementById('view-board'); if(!root) return;
+  const fields=['lname','lqty','ltag','ltime'];
+  fields.forEach(f=>root.style.removeProperty('--loc-'+f));
+  const widest={};
+  fields.forEach(f=>{ widest[f]=0;
+    root.querySelectorAll('.pb-table .loc .'+f).forEach(el=>{
+      /* a compressed narrow board can squeeze the track below the
+         nowrap content — measure overflowing fields by their scroll
+         width (plus the trailing padding the overflow drops) so the
+         published track always fits the content */
+      let w=el.offsetWidth;
+      if(el.scrollWidth>el.clientWidth)
+        w=Math.max(w,el.scrollWidth+parseFloat(getComputedStyle(el).paddingRight||'0'));
+      widest[f]=Math.max(widest[f],w); }); });
+  fields.forEach(f=>{ if(widest[f]>0)
+    root.style.setProperty('--loc-'+f,Math.ceil(widest[f])+'px'); });
+}
+window.addEventListener('resize',()=>{
+  if(document.getElementById('view-board').classList.contains('active')) alignBoardLoc();
+});
 /* ================= Theme mode (v5) =================
    Global user-switchable Dark/Light mode — every view follows.
    Session-only in the mockup; persistence (per user / per station) is an
-   open decision (GUI_DESIGN §14). */
+   open decision (GUI_DESIGN §16). */
 function toggleTheme(){
   const dark=!document.body.classList.contains('dark');
   document.body.classList.toggle('dark',dark);

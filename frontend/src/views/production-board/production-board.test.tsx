@@ -531,6 +531,14 @@ test('the board stylesheet owns its heartbeat and never clips Machine names or P
   // Intrinsic 15ch PN minimum instead of an arbitrary pixel width.
   expect(css).toMatch(/\.part \{[^}]*min-width: 15ch/);
   expect(css).not.toContain('min-width: 310px');
+  // Shared content-driven location tracks: the visible rows consume
+  // the measured `--loc-*` widths (small ch fallbacks only), while the
+  // measurement copy keeps pure content sizing so the measurement has
+  // no feedback loop.
+  for (const field of ['lname', 'lqty', 'ltag', 'ltime']) {
+    expect(css).toContain(`var(--loc-${field}`);
+  }
+  expect(css).toMatch(/\.pb-measure \.pb-table \.loc \{/);
 });
 
 test('the Live indicator distinguishes connected and stale states', async () => {

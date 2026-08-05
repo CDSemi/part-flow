@@ -280,12 +280,14 @@
   margin: 0 0 8px;
 }
 
-/* Each snapshot list is one grid whose position/rank track sizes from
-   its CONTENT (max-content) — never a wide fixed label column that
-   pushes the PN away from its position value. The rows join it via
-   subgrid, so every row of a section still shares the same track
-   widths and the PN column stays aligned within the section (the
-   widest real value — e.g. `Not listed → #3` — sets the track). */
+/* The position/rank track sizes from CONTENT (max-content) — never a
+   wide fixed label column that pushes the PN away from its position
+   value — and it is SHARED by both snapshot sections: `.pr-snapwrap`
+   owns one grid around Current Position and New Position, and the
+   section boxes, lists, and rows all join its tracks through a subgrid
+   chain. The widest real position value of EITHER side (e.g.
+   `Not listed → #3`) sets the common track, so the PN column sits at
+   the same offset in both sections with no overlap. */
 .pr-snaplist {
   list-style: none;
   margin: 0;
@@ -298,9 +300,9 @@
 
 /* One snapshot row: rank (+ direction on the Current side) | PN |
    WO/Job chip — rank, identifier and metadata never blur together.
-   The base rule is the no-subgrid fallback (own content-sized grid:
-   the gap fix holds, only cross-row alignment relaxes); supporting
-   browsers upgrade to subgrid below. */
+   The base rule is the no-subgrid fallback (each row its own
+   content-sized grid: the gap fix holds, only cross-row alignment
+   relaxes); supporting browsers upgrade to the shared tracks below. */
 .pr-snaprow {
   grid-column: 1 / -1;
   display: grid;
@@ -314,10 +316,36 @@
   border-radius: 8px;
 }
 
-/* Rows join the section list's tracks, so every row of a section
-   shares the same content-sized track widths. */
+/* Subgrid chain: wrapper grid → section box → list → row. Every level
+   spans the full track set and passes it down, so all rows of BOTH
+   sections share the same three content-sized columns. The identical
+   inline padding on the two section boxes keeps their track edges at
+   identical offsets. */
 @supports (grid-template-columns: subgrid) {
-  .pr-snaprow {
+  .pr-snapwrap {
+    display: grid;
+    grid-template-columns: max-content minmax(0, max-content) auto;
+    column-gap: 12px;
+  }
+
+  .pr-snapwrap > * {
+    grid-column: 1 / -1;
+  }
+
+  .pr-snapwrap .pr-snapshot {
+    display: grid;
+    grid-template-columns: subgrid;
+  }
+
+  .pr-snapwrap .pr-snapshot > * {
+    grid-column: 1 / -1;
+  }
+
+  .pr-snapwrap .pr-snaplist {
+    grid-template-columns: subgrid;
+  }
+
+  .pr-snapwrap .pr-snaprow {
     grid-template-columns: subgrid;
   }
 }
@@ -326,6 +354,11 @@
   font-family: var(--mono), monospace;
   font-weight: 750;
   white-space: nowrap;
+  /* A little extra breathing room between the position value and the
+     PN on top of the 12px column gap (18px total). Padding — not a
+     wider gap — so it lives inside the shared position track and the
+     PN alignment across rows and sections is unaffected. */
+  padding-right: 6px;
 }
 
 .pr-snaprow .prr .prfrom,
@@ -390,9 +423,12 @@
 
 /* Narrow-screen fallback: each row stacks rank/transition above
    PN + metadata. Every row stacks the same way in both sections, so
-   the rank–PN–metadata relationship stays readable and aligned. */
+   the rank–PN–metadata relationship stays readable and aligned. The
+   `.pr-snapwrap` selector keeps this override stronger than the
+   subgrid chain above. */
 @media (max-width: 560px) {
-  .pr-snaprow {
+  .pr-snaprow,
+  .pr-snapwrap .pr-snaprow {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
   }

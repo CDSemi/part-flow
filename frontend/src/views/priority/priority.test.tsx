@@ -369,17 +369,49 @@ test('the snapshot position track sizes from content — no wide fixed label col
     join(dirname(fileURLToPath(import.meta.url)), 'priority.css'),
     'utf8',
   );
-  // The position/rank track is content-sized (max-content on the list
-  // grid, rows joining via subgrid) — the former fixed 150px track that
-  // opened a large gap between the position value and the PN is gone,
-  // and no per-section `.trans` override exists (the only other
-  // definition is the narrow-screen stacking fallback).
+  // The position/rank track is content-sized (max-content) and SHARED
+  // by both sections: `.pr-snapwrap` owns one grid and the section →
+  // list → row subgrid chain joins its tracks, so the PN column sits
+  // at the same offset in Current Position and New Position. The
+  // former fixed 150px track that opened a large gap between the
+  // position value and the PN is gone, and no per-section `.trans`
+  // override exists (the only other definition is the narrow-screen
+  // stacking fallback, which outranks the subgrid chain).
   expect(css).toMatch(
     /\.pr-snaplist \{[^}]*grid-template-columns: max-content/,
   );
-  expect(css).toMatch(/\.pr-snaprow \{[^}]*grid-template-columns: subgrid/);
+  expect(css).toMatch(
+    /\.pr-snapwrap \{[^}]*grid-template-columns: max-content/,
+  );
+  expect(css).toMatch(
+    /\.pr-snapwrap \.pr-snapshot \{[^}]*grid-template-columns: subgrid/,
+  );
+  expect(css).toMatch(
+    /\.pr-snapwrap \.pr-snaplist \{[^}]*grid-template-columns: subgrid/,
+  );
+  expect(css).toMatch(
+    /\.pr-snapwrap \.pr-snaprow \{[^}]*grid-template-columns: subgrid/,
+  );
   expect(css).not.toContain('grid-template-columns: 150px');
   expect(css).not.toMatch(/\.pr-snaprow\.trans \{[^}]*grid-template-columns/);
+});
+
+test('both snapshot sections share one wrapper grid for the common position track', async () => {
+  await renderPriority();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Confirm Hot ranking change',
+  });
+  const wrap = dialog.querySelector('.pr-snapwrap');
+  expect(wrap).not.toBeNull();
+  // Current Position, the transition arrow, and New Position are all
+  // direct children of the shared wrapper grid.
+  expect(wrap?.querySelectorAll(':scope > .pr-snapshot')).toHaveLength(2);
+  expect(wrap?.querySelector(':scope > .pr-transition')).not.toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
 });
 
 test('the impact/action block separates the Action label from its emphasized value', async () => {

@@ -332,6 +332,38 @@ export function ProductionBoardView() {
     const body = measureBodyRef.current;
     const table = measureTableRef.current;
     if (!section || !body || !table) return;
+    // Shared content-driven location tracks: each PN row lays its
+    // location fields out in its OWN grid, so cross-row alignment
+    // needs a shared track width. The widest real value of each field
+    // is measured in the measurement copy (which covers ALL rows and
+    // always sizes from pure content — production-board.css) and
+    // published as `--loc-*` custom properties consumed by every
+    // visible row: identical tracks everywhere, sized by content, and
+    // stable across page rotation. Skipped in environments without
+    // real layout (all widths 0), where the CSS fallbacks apply.
+    for (const field of ['lname', 'lqty', 'ltag', 'ltime'] as const) {
+      let widest = 0;
+      for (const el of table.querySelectorAll<HTMLElement>(`.loc .${field}`)) {
+        // On a narrow board the measurement grid itself is compressed
+        // toward its ch minimums, so the track width (offsetWidth) can
+        // be SMALLER than the nowrap content — exactly the overlap the
+        // shared widths must prevent. An overflowing field is measured
+        // by its scroll width plus the trailing padding the overflow
+        // drops, so the published track always fits the content.
+        let width = el.offsetWidth;
+        if (el.scrollWidth > el.clientWidth) {
+          width = Math.max(
+            width,
+            el.scrollWidth +
+              parseFloat(window.getComputedStyle(el).paddingRight || '0'),
+          );
+        }
+        widest = Math.max(widest, width);
+      }
+      if (widest > 0) {
+        section.style.setProperty(`--loc-${field}`, `${Math.ceil(widest)}px`);
+      }
+    }
     const rowHeights = Array.from(body.rows, (row) => row.offsetHeight);
     const headHeight = headRef.current?.offsetHeight ?? 0;
     const theadHeight = table.tHead?.offsetHeight ?? 0;

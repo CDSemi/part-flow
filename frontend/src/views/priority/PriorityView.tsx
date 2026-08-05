@@ -650,34 +650,43 @@ function ReorderConfirmDialog({
           <span className="pr-actionval">{pending.action}</span>
         </span>
       </div>
-      <SnapshotSection
-        title="Current Position"
-        rows={snapshotRows(
-          pending.current,
-          pending.changes,
-          pending.movedKey,
-          lo,
-          hi,
-          true,
-        )}
-      />
-      {/* The single transition arrow: Current Position → New Position.
-          Distinct from the per-row rank direction arrows above. */}
-      <div className="pr-transition" aria-hidden="true">
-        ↓
+      {/* One shared grid wrapper around BOTH snapshot sections: the
+          content-sized position track is common to Current Position
+          and New Position (subgrid chain in priority.css), so the PN
+          column sits at the same offset in both sections — sized by
+          the widest real position value of either side, with no
+          overlap and no wide fixed label column. */}
+      <div className="pr-snapwrap">
+        <SnapshotSection
+          title="Current Position"
+          rows={snapshotRows(
+            pending.current,
+            pending.changes,
+            pending.movedKey,
+            lo,
+            hi,
+            true,
+          )}
+        />
+        {/* The single transition arrow: Current Position → New
+            Position. Distinct from the per-row rank direction arrows
+            above. */}
+        <div className="pr-transition" aria-hidden="true">
+          ↓
+        </div>
+        <SnapshotSection
+          title="New Position"
+          rows={snapshotRows(
+            pending.next,
+            pending.changes,
+            pending.movedKey,
+            lo,
+            hi,
+            false,
+            currentRanks,
+          )}
+        />
       </div>
-      <SnapshotSection
-        title="New Position"
-        rows={snapshotRows(
-          pending.next,
-          pending.changes,
-          pending.movedKey,
-          lo,
-          hi,
-          false,
-          currentRanks,
-        )}
-      />
       <div className="sub">No ranks change until you confirm.</div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
