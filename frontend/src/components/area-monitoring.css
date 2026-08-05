@@ -129,6 +129,14 @@
   color: var(--warn-t);
 }
 
+/* Time in the current state (derived from stateChangedAt): part of the
+   status pill, slightly quieter than the state word itself. */
+.am .abd-machine .mstat .mage {
+  font-family: var(--mono), monospace;
+  font-weight: 650;
+  opacity: 0.85;
+}
+
 .am .abd-machine .mtotals {
   padding: 9px 16px;
   font-size: 13px;

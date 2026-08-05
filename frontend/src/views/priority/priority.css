@@ -280,25 +280,31 @@
   margin: 0 0 8px;
 }
 
+/* Each snapshot list is one grid whose position/rank track sizes from
+   its CONTENT (max-content) — never a wide fixed label column that
+   pushes the PN away from its position value. The rows join it via
+   subgrid, so every row of a section still shares the same track
+   widths and the PN column stays aligned within the section (the
+   widest real value — e.g. `Not listed → #3` — sets the track). */
 .pr-snaplist {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, max-content) auto;
+  column-gap: 12px;
+  row-gap: 4px;
 }
 
 /* One snapshot row: rank (+ direction on the Current side) | PN |
-   WO/Job chip — rank, identifier and metadata never blur together. */
-/* ONE shared grid-track definition for BOTH snapshot sections: the
-   common rank/transition track is sized for the widest value it can
-   hold (`#12 → #14`, `Not listed → #n`), so the PN and metadata
-   positions align exactly between Current Position and New Position —
-   the PN never shifts between the sections. */
+   WO/Job chip — rank, identifier and metadata never blur together.
+   The base rule is the no-subgrid fallback (own content-sized grid:
+   the gap fix holds, only cross-row alignment relaxes); supporting
+   browsers upgrade to subgrid below. */
 .pr-snaprow {
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 150px minmax(0, max-content) auto;
+  grid-template-columns: max-content minmax(0, max-content) auto;
   align-items: center;
   gap: 12px;
   padding: 6px 8px;
@@ -306,6 +312,14 @@
      the moved row's visible border never shifts the aligned PN. */
   border: 1px solid transparent;
   border-radius: 8px;
+}
+
+/* Rows join the section list's tracks, so every row of a section
+   shares the same content-sized track widths. */
+@supports (grid-template-columns: subgrid) {
+  .pr-snaprow {
+    grid-template-columns: subgrid;
+  }
 }
 
 .pr-snaprow .prr {

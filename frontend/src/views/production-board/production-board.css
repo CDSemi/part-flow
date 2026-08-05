@@ -41,26 +41,15 @@
   height: 9px;
   border-radius: 50%;
   background: var(--ok);
-  /* Board-owned heartbeat — never depends on Scan Station CSS. */
-  animation: pb-live-pulse 2s infinite;
+  /* The shared connected heartbeat (styles/global.css) — the same
+     "alive" behavior as the connectivity chip's ONLINE dot. */
+  animation: pf-heartbeat 2s infinite;
 }
 
 /* Stale / reconnecting: solid warning dot, no heartbeat. */
 .pb-head .live.stale .ld {
   background: var(--warn);
   animation: none;
-}
-
-@keyframes pb-live-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.35;
-    transform: scale(0.72);
-  }
 }
 
 /* Reduced motion: a solid semantic dot without animation. */
@@ -209,17 +198,20 @@
    and time positions line up across all visible PN rows (the total
    label and total quantity included); max-content growth means an
    exceptionally long Area or Machine label expands its own block
-   instead of truncating — never an ellipsis. The trailing 1fr keeps
-   the leftover cell width in one place, so the time track stays close
-   to its location data instead of drifting to the far cell edge, and
-   the continuous separator still spans the complete cell. */
+   instead of truncating — never an ellipsis. The minimums stay small
+   on purpose: they only guarantee alignment for typical values, and
+   real content sizes the tracks — never generous hard-coded widths
+   that push the fields apart. The trailing 1fr keeps the leftover
+   cell width in one place, so the time track stays close to its
+   location data instead of drifting to the far cell edge, and the
+   continuous separator still spans the complete cell. */
 .pb-table .loc {
   display: grid;
   grid-template-columns:
-    minmax(13ch, max-content)
-    minmax(4ch, max-content)
-    minmax(11ch, max-content)
     minmax(10ch, max-content)
+    minmax(3ch, max-content)
+    minmax(9ch, max-content)
+    minmax(8ch, max-content)
     1fr;
   column-gap: 0;
   row-gap: 6px;
@@ -253,7 +245,7 @@
   align-items: center;
   gap: 8px;
   font-size: 16.5px;
-  padding-right: 16px;
+  padding-right: 12px;
   white-space: nowrap;
 }
 
@@ -289,7 +281,7 @@
   font-size: 11px;
   color: var(--faint);
   font-weight: 650;
-  padding-left: 10px;
+  padding-left: 8px;
   white-space: nowrap;
 }
 
@@ -331,7 +323,7 @@
   font-size: 13px;
   color: var(--faint);
   font-weight: 600;
-  padding-left: 16px;
+  padding-left: 12px;
   text-align: right;
   white-space: nowrap;
 }
@@ -722,4 +714,23 @@ tr.hotrow2 td:first-child {
   align-items: flex-end;
   gap: 2px;
   margin-right: 14px;
+}
+
+/* Explicit kiosk exit action: quiet, touch-friendly, never louder
+   than the board content. Ctrl+Shift+K stays the keyboard path. */
+.pbk-exit {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 12px;
+  min-height: 36px;
+}
+
+.pbk-exit:hover {
+  color: var(--text);
+  border-color: var(--border2);
+  background: var(--panel2);
 }

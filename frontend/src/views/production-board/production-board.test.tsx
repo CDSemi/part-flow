@@ -519,8 +519,10 @@ test('the board stylesheet owns its heartbeat and never clips Machine names or P
     join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
     'utf8',
   );
-  expect(css).toContain('@keyframes pb-live-pulse');
-  expect(css).toContain('animation: pb-live-pulse');
+  // The Live dot uses the ONE shared connected heartbeat defined in
+  // styles/global.css — no board-local duplicate keyframes.
+  expect(css).toContain('animation: pf-heartbeat');
+  expect(css).not.toContain('@keyframes pb-live-pulse');
   expect(css).not.toContain('ss-pulse');
   expect(css).toContain('prefers-reduced-motion');
   expect(css).toMatch(/\.live\.stale \.ld \{[^}]*animation: none/);
@@ -839,16 +841,31 @@ test('the kiosk route renders the coherent board-owned kiosk header', async () =
   expect(head?.querySelector('h1')?.textContent).toBe(
     'Machine Shop — Production',
   );
-  expect(head?.querySelector('.connchip')).not.toBeNull();
+  // The SAME `Live` operational status as the standard header (shared
+  // meaning, shared heartbeat) — never a second `ONLINE` chip
+  // repeating the same connectivity in the board header.
+  expect(head?.querySelector('.live')?.textContent).toBe('Live');
+  expect(head?.querySelector('.live .ld')).not.toBeNull();
+  expect(head?.querySelector('.connchip')).toBeNull();
   expect(head?.querySelector('.themetoggle.compact')).not.toBeNull();
   expect(head?.querySelector('.clock')).not.toBeNull();
-  // `Live` and `ONLINE` communicate the same backend connectivity —
-  // the kiosk header keeps only the shared chip.
-  expect(head?.querySelector('.live')).toBeNull();
+  // Explicit exit action beside the keyboard shortcut.
+  expect(
+    screen.getByRole('button', { name: 'Exit kiosk mode' }),
+  ).toBeInTheDocument();
   // Subtle exit hint in the footer legend.
   expect(document.querySelector('.pb-foot')?.textContent).toContain(
     'Ctrl+Shift+K: exit kiosk mode',
   );
+});
+
+test('the kiosk exit button returns to the standard route', async () => {
+  await renderBoard('/production-board/kiosk');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Exit kiosk mode' }));
+  await act(async () => {});
+  expect(window.location.pathname).toBe('/production-board');
+  expect(document.querySelector('.pbk-head')).toBeNull();
 });
 
 test('the standard route keeps the normal header and no kiosk chrome', async () => {
@@ -857,6 +874,7 @@ test('the standard route keeps the normal header and no kiosk chrome', async () 
   expect(document.querySelector('.pbk-head')).toBeNull();
   expect(document.querySelector('.pb')?.className).not.toContain('kiosk');
   expect(document.querySelector('.pb-head .live')).not.toBeNull();
+  expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
   expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
     'exit kiosk mode',
   );

@@ -1,0 +1,353 @@
+/* Management → Planned Routes — reusable route definitions (internal
+   name: RouteTemplate; GUI_DESIGN §13). Editing affects future
+   assignments only; released Quantity Flows keep their Assigned Route
+   snapshots, and actual Movement history stays authoritative. */
+.rt {
+  padding: 22px 24px;
+  flex: 1 0 auto;
+}
+
+.rt h1 {
+  font-size: 21px;
+}
+
+.rt .rt-sub {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 3px;
+  max-width: 900px;
+  line-height: 1.55;
+}
+
+.rt-toolbar {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 14px 0;
+}
+
+.rt-toolbar input[type='search'] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13.5px;
+  padding: 9px 12px;
+  color: var(--text);
+  outline: none;
+  min-height: 42px;
+  min-width: 280px;
+}
+
+.rt-toolbar input[type='search']:focus {
+  border-color: var(--info-t);
+}
+
+.rt-toolbar .spacer {
+  flex: 1;
+}
+
+.rt-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.rt-table th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.rt-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 14px;
+  vertical-align: top;
+}
+
+.rt-table tr:last-child td {
+  border-bottom: none;
+}
+
+.rt-table .rtname {
+  font-weight: 750;
+}
+
+.rt-table .rtdesc {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  max-width: 40ch;
+}
+
+/* Compact step trace: Area steps joined by arrows — the same reading
+   direction as the Tracking route visualization, without step cards. */
+.rt-steps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 5px;
+  row-gap: 4px;
+  font-size: 12.5px;
+}
+
+.rt-steps .stp {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.rt-steps .arw {
+  color: var(--faint);
+}
+
+.rt-status {
+  font-weight: 800;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.rt-status.active {
+  color: var(--ok-t);
+}
+
+.rt-status.archived {
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.rt-statusdate {
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-top: 3px;
+}
+
+.rt-usage {
+  font-size: 13px;
+}
+
+.rt-usage button {
+  font: inherit;
+  font-weight: 700;
+  color: var(--info-t);
+  background: none;
+  padding: 4px 0;
+  min-height: 40px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.rt-usage .never {
+  color: var(--faint);
+}
+
+.rt-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rt-actions button {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 12px;
+  min-height: 40px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--panel2);
+  white-space: nowrap;
+}
+
+.rt-actions button:hover {
+  border-color: var(--info-t);
+  color: var(--info-t);
+}
+
+.rt-actions button.danger:hover {
+  border-color: var(--err-t);
+  color: var(--err-t);
+}
+
+/* Archived rows stay readable but visually quiet. */
+.rt-table tr.archived td {
+  color: var(--muted);
+}
+
+.rt-table tr.archived .rt-steps .stp {
+  color: var(--muted);
+  font-weight: 550;
+}
+
+/* Route editor dialog */
+.rt-form label {
+  display: block;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.rt-form .err {
+  color: var(--err-t);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin: 2px 0 8px;
+}
+
+.rt-editnote {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 12px 0 4px;
+}
+
+.rt-steplist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.rt-steprow {
+  display: grid;
+  grid-template-columns:
+    24px minmax(120px, 1fr) minmax(110px, 1fr) 84px minmax(110px, 1fr)
+    auto;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Optional step instructions: a quiet second line under the step's
+   main fields, aligned with them. */
+.rt-steprow .instr {
+  grid-column: 2 / -1;
+  font-size: 12.5px;
+  min-height: 36px;
+}
+
+.rt-steprow .idx {
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  color: var(--faint);
+  text-align: right;
+}
+
+.rt-steprow select,
+.rt-steprow input {
+  background: var(--field-bg);
+  border: 1.5px solid var(--border2);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 13.5px;
+  padding: 8px 10px;
+  min-height: 40px;
+  outline: none;
+  width: 100%;
+}
+
+.rt-steprow select:focus,
+.rt-steprow input:focus {
+  border-color: var(--info-t);
+}
+
+.rt-steprow .steppbtns {
+  display: flex;
+  gap: 4px;
+}
+
+.rt-steprow .steppbtns button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+  color: var(--muted);
+  min-width: 36px;
+  min-height: 40px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.rt-steprow .steppbtns button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border2);
+}
+
+.rt-steprow .steppbtns button:disabled {
+  opacity: 0.35;
+}
+
+.rt-addstep {
+  margin-top: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  background: none;
+  color: var(--muted);
+  padding: 9px 14px;
+  min-height: 42px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rt-addstep:hover {
+  color: var(--info-t);
+  border-color: var(--info-t);
+}
+
+@media (max-width: 760px) {
+  .rt-steprow {
+    grid-template-columns: 24px 1fr 1fr;
+  }
+
+  .rt-steprow .steppbtns {
+    grid-column: 2 / -1;
+  }
+}
+
+/* Usage dialog list */
+.rt-usagelist {
+  list-style: none;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13.5px;
+}
+
+.rt-usagelist li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  border-bottom: 1px dashed var(--hair);
+  padding-bottom: 7px;
+}
+
+.rt-usagelist .mono {
+  font-weight: 700;
+}
+
+.rt-usagelist .when {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 12.5px;
+}

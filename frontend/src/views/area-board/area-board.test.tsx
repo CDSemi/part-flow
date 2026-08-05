@@ -72,21 +72,34 @@ test('each Machine gets a monitoring card; inactive Machines stay distinct', () 
     machineCards.map((card) => card.querySelector('.mname')?.textContent),
   ).toEqual(['Lathe 1', 'Lathe 2', 'Lathe 3', 'Lathe 4']);
 
+  // Operational states are DERIVED from the assigned quantity of the
+  // Machine registry projection (maintenance stays an explicit
+  // override), and each status carries the time in its current state
+  // derived from the shared stateChangedAt timestamp.
   const lathe3 = machineCards[2];
-  expect(lathe3.querySelector('.mstat')?.textContent).toBe('running');
+  expect(lathe3.querySelector('.mstat')?.textContent).toMatch(
+    /^running · \d+[a-z]/,
+  );
   expect(lathe3.textContent).toContain('2027-60-8114-00');
   // Only the actively assigned 3 pcs — the finished 1 pc left the card.
   expect(lathe3.querySelector('.mtotals')?.textContent).toContain('3');
 
   const lathe1 = machineCards[0];
-  expect(lathe1.querySelector('.mstat')?.textContent).toBe('idle');
+  expect(lathe1.querySelector('.mstat')?.textContent).toMatch(/^idle · /);
+  expect(lathe1.querySelector('.mstat .mage')).not.toBeNull();
   expect(lathe1.textContent).toContain('No production assigned');
 
   const lathe4 = machineCards[3];
   expect(lathe4.className).toContain('maintenance');
+  expect(lathe4.querySelector('.mstat')?.textContent).toMatch(
+    /^maintenance · /,
+  );
+  // Maintenance context from the registry: note + expected return date.
   expect(lathe4.textContent).toContain(
     'Under maintenance — accepts no production',
   );
+  expect(lathe4.textContent).toContain('Spindle bearing replacement');
+  expect(lathe4.textContent).toContain('expected back 2026-08-06');
 });
 
 test('Areas without Machines render only the summary card — no placeholders', () => {

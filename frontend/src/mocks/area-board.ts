@@ -1,29 +1,10 @@
+import { machineAssignedQty, toAreaMachine } from '../views/machine-state';
 import type {
   AreaKey,
   MockAreaCard,
   MockAreaMachine,
 } from '../views/view-models';
-
-// Machines belonging to each Area — shared by the Area Board detail and
-// the Scan Station monitoring layout. Areas without Machines (Material,
-// Manual, Deburr, External, Stockroom) render only the full-width Area
-// summary card — no placeholder Machine cards, no queue statistics.
-export const MOCK_AREA_MACHINES: Partial<Record<AreaKey, MockAreaMachine[]>> = {
-  cut: [{ name: 'Saw 1', status: 'running' }],
-  lathe: [
-    { name: 'Lathe 1', status: 'idle' },
-    { name: 'Lathe 2', status: 'running' },
-    { name: 'Lathe 3', status: 'running' },
-    { name: 'Lathe 4', status: 'maintenance' },
-  ],
-  mill: [
-    { name: 'Mill 1', status: 'running' },
-    { name: 'Mill 2', status: 'running' },
-    // Long Machine name reference case: truncates where constrained,
-    // never pushing quantities or times out of alignment.
-    { name: 'Mill 3 — Horizontal Boring', status: 'idle' },
-  ],
-};
+import { activeMachines } from './machines';
 
 // `dueDays: null` marks a WO Demand without a due date (valid data);
 // `received` (parent WO received date) orders undated demands and
@@ -209,6 +190,29 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     received: '2026-06-18',
   },
 ];
+
+// Machines belonging to each Area — shared by the Area Board detail and
+// the Scan Station monitoring layout, projected from the Machine
+// registry (mocks/machines.ts): retired Machines never appear, and the
+// running/idle states are DERIVED from the assigned quantity above
+// (maintenance stays an explicit override). Areas without Machines
+// (Material, Manual, Deburr, External, Stockroom) render only the
+// full-width Area summary card — no placeholder Machine cards, no
+// queue statistics. `Mill 3 — Horizontal Boring` stays the long-name
+// reference case: it truncates where constrained, never pushing
+// quantities or times out of alignment.
+export const MOCK_AREA_MACHINES: Partial<Record<AreaKey, MockAreaMachine[]>> =
+  activeMachines().reduce<Partial<Record<AreaKey, MockAreaMachine[]>>>(
+    (byArea, machine) => {
+      const projected = toAreaMachine(
+        machine,
+        machineAssignedQty(MOCK_AREA_CARDS, machine),
+      );
+      (byArea[machine.area] ??= []).push(projected);
+      return byArea;
+    },
+    {},
+  );
 
 // Long-data preview: over-long PNs and many cards in one Area.
 export const MOCK_AREA_CARDS_LONG: MockAreaCard[] = [

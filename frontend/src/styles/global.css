@@ -222,6 +222,24 @@ textarea {
   color: var(--faint);
 }
 
+/* ============ Shared connected heartbeat ============ */
+/* The ONE subtle heartbeat behind every healthy connected-status dot:
+   the app/Scan Station connectivity chip (`ONLINE`) and the Production
+   Board operational status (`Live`) share this animation so "alive"
+   looks the same everywhere. Connecting and offline states must stay
+   clearly distinct: they never pulse — a solid semantic dot only. */
+@keyframes pf-heartbeat {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.72);
+  }
+}
+
 /* ============ Shared buttons ============ */
 .btn {
   border-radius: 10px;

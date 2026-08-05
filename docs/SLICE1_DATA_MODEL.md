@@ -2,7 +2,7 @@
 
 > **Status:** Analysis and design only. No migrations or application code.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.
-> **Basis:** `docs/PROJECT_PROFILE.md` (v9, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3–4), `docs/GUI_DESIGN.md` §12, `CLAUDE.md`.
+> **Basis:** `docs/PROJECT_PROFILE.md` (v11, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3–4), `docs/GUI_DESIGN.md` §14, `CLAUDE.md`.
 
 ---
 
@@ -264,7 +264,7 @@ Rules:
 
 **`work_order_demands`** — PK `id`; FKs `work_order_id`, `part_number_id` NOT NULL; `request_type NOT NULL CHECK (request_type IN ('NEW','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (a missing due date is valid data per §5 — never required by validation rule or constraint; undated demand orders after dated demand per the canonical demand ordering key, §5); `priority_rank` nullable; `job_numbers text[] NOT NULL DEFAULT '{}'` (arbitrary external strings preserved verbatim; empty list valid; metadata only — no `Job` aggregate, no FK, and no GIN index in this slice because Slice 1 includes no Job Number search); `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(work_order_id)`, index `(part_number_id)`.
 
-**`route_templates`** — PK `id`; `name NOT NULL`; `version int NOT NULL CHECK (version > 0)` (simple positive integer — no semantic-version parsing, no route-version framework); `UNIQUE (name, version)`; `is_active`; `created_at`, `updated_at`.
+**`route_templates`** — PK `id`; `name NOT NULL`; `description` nullable; `archived_at timestamptz` nullable (`NULL` = active; an archived template is never offered for new route assignments). There is **no `version` column and no template-versioning framework** (PROJECT_PROFILE v11 §8.8): existing `assigned_routes` snapshots preserve historical route definitions. A template ever referenced by an `assigned_routes` row is archived instead of deleted; hard `DELETE` is legitimate only for a never-referenced template. `created_at`, `updated_at`.
 
 **`route_steps`** — PK `id`; `route_template_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (route_template_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable.
 

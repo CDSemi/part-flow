@@ -104,8 +104,9 @@ export function AdministrationView() {
                   same table + editor pattern as the Areas reference table. It
                   is part of the <b>minimum environment setup</b> — the small
                   configuration set (Departments, Areas, Operations, Scan
-                  Stations, Machines) that is completed before the real
-                  production workflows run.
+                  Stations, barcode configuration) that is completed before the
+                  real production workflows run. Machines and Planned Routes are
+                  managed in <b>Management</b> by authorized production roles.
                 </>
               ) : (
                 <>

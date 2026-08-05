@@ -8,6 +8,7 @@ import {
   directGroupLabel,
   FINISHED_GROUP_LABEL,
 } from '../views/area-monitoring';
+import { formatStateAge } from '../views/machine-state';
 import type { AreaAssignment } from '../views/area-monitoring';
 import type {
   DueClass,
@@ -364,7 +365,9 @@ const MACHINE_STATUS_LABEL: Record<MockAreaMachine['status'], string> = {
  * Cards list only actively assigned quantity — after DONE the quantity
  * leaves the Machine card and appears in the Area summary under
  * `Finished — ready to move`. Rows never repeat the Machine name; the
- * card header already identifies it.
+ * card header already identifies it. The header status carries the
+ * time in the current state (`running · 1h 24m`), derived from the
+ * shared `stateChangedAt` timestamp so every view shows the same age.
  */
 export function MachineMonitoringCard({
   machine,
@@ -382,6 +385,10 @@ export function MachineMonitoringCard({
         <span className="mname">{machine.name}</span>
         <span className={`mstat ${machine.status}`}>
           {MACHINE_STATUS_LABEL[machine.status]}
+          <span className="mage">
+            {' '}
+            · {formatStateAge(machine.stateChangedAt)}
+          </span>
         </span>
       </div>
       <div className="mtotals">
@@ -396,9 +403,19 @@ export function MachineMonitoringCard({
         />
       ) : (
         <div className="mempty">
-          {machine.status === 'maintenance'
-            ? 'Under maintenance — accepts no production'
-            : 'No production assigned'}
+          {machine.status === 'maintenance' ? (
+            <>
+              Under maintenance — accepts no production
+              {machine.maintenanceNote ? (
+                <> · {machine.maintenanceNote}</>
+              ) : null}
+              {machine.expectedReturn ? (
+                <> · expected back {machine.expectedReturn}</>
+              ) : null}
+            </>
+          ) : (
+            'No production assigned'
+          )}
         </div>
       )}
     </div>

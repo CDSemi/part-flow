@@ -110,16 +110,29 @@ main {
   border-radius: 50%;
   background: var(--ok);
   box-shadow: 0 0 10px var(--ok);
+  /* Healthy connection reads as alive: the shared heartbeat
+     (styles/global.css) — identical to the Production Board `Live`
+     dot. Connecting/offline override it to a solid dot below. */
+  animation: pf-heartbeat 2s infinite;
 }
 
 .connchip.off .cdot {
   background: var(--err);
   box-shadow: 0 0 10px var(--err);
+  animation: none;
 }
 
 .connchip.connecting .cdot {
   background: var(--warn);
   box-shadow: 0 0 10px var(--warn);
+  animation: none;
+}
+
+/* Reduced motion: a solid semantic dot without animation. */
+@media (prefers-reduced-motion: reduce) {
+  .connchip .cdot {
+    animation: none;
+  }
 }
 
 .connchip .ctxt {

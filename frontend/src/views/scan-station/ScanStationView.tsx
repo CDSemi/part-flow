@@ -24,6 +24,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { ThemeToggle } from '../../components/ThemeToggle';
+import { isTouchPrimaryDevice } from '../../components/touch-device';
 import { LoadingState } from '../../components/view-states';
 import {
   MOCK_AREA_CARDS,
@@ -282,6 +283,9 @@ function StationView({
   const hasMachines = machines.length > 0;
 
   const inputRef = useRef<HTMLInputElement>(null);
+  // Decided once per station lifecycle — pointer capabilities do not
+  // change while the station is open (same pattern as QuantityKeypad).
+  const [touchPrimary] = useState(isTouchPrimaryDevice);
   const [worker, setWorker] = useState(MOCK_WORKER.name);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
@@ -833,8 +837,8 @@ function StationView({
             Scan barcode
             <span className="spacer" />
             <span className="note">
-              PN and Worker barcodes; a Machine barcode is a one-shot assignment
-              shortcut — nothing stays armed
+              PN and Worker barcodes; a Machine barcode opens Assign to Machine
+              for a single assignment
             </span>
           </div>
           <div className="ss-scanwrap">
@@ -843,6 +847,14 @@ function StationView({
                 ref={inputRef}
                 className="ss-scaninput"
                 autoComplete="off"
+                // Touch-primary devices suppress the native soft
+                // keyboard for this scanner-driven input (GUI_DESIGN
+                // §4.8, shared touch-device detection): keyboard-wedge
+                // scanners and physical keyboards fire real key events
+                // regardless of inputMode. Ordinary text inputs — the
+                // manual PN entry dialog, reasons, notes — keep their
+                // normal soft keyboard.
+                inputMode={touchPrimary ? 'none' : undefined}
                 disabled={writeBlocked}
                 placeholder={
                   disconnected
@@ -874,7 +886,7 @@ function StationView({
               <code>PF:PN:2027-60-8114-00</code> in this Area ·{' '}
               <code>PF:PN:118-052</code> elsewhere ·{' '}
               <code>PF:PN:NEW-PART-01</code> unknown → intake) ·{' '}
-              <code>PF:MACHINE:L2</code> one-shot assign ·{' '}
+              <code>PF:MACHINE:L2</code> assign to Machine ·{' '}
               <code>PF:WORKER:88</code> worker
             </div>
             <div className="ss-manualcap">
@@ -1563,21 +1575,22 @@ function MachineAssignDialog({
         : enterKeyHandler(goQty);
 
   return (
+    // User-facing name is `Assign to Machine`; internally this stays the
+    // one-shot assignment wizard — no Machine context survives it.
     <ModalDialog
-      label="One-shot Machine assignment"
+      label="Assign to Machine"
       onClose={onCancel}
       size="wide"
       onKeyDown={keys}
     >
-      <h3>One-shot Machine assignment</h3>
+      <h3>Assign to Machine</h3>
       {step === 'select' ? (
         <>
           <div className="sub">
             Assign queued quantity to a Machine: select the Machine and the
             queued PN (scan either barcode, or pick below), then enter the
-            quantity and confirm. This is one single assignment — there is no
-            persistent Machine Session; when this dialog closes, nothing stays
-            armed.
+            quantity and confirm. The assignment applies once — the next scan
+            starts fresh.
           </div>
           <input
             ref={scanRef}
@@ -1842,8 +1855,8 @@ function PnActionsDialog({
             <span className="ct1">Assign queued quantity to a Machine</span>
             <br />
             <span className="ct2">
-              {queuedQty} pcs waiting in the {areaName} queue — one-shot
-              assignment, MAX defaults to the queued quantity.
+              {queuedQty} pcs waiting in the {areaName} queue — applies to one
+              assignment; MAX defaults to the queued quantity.
             </span>
           </span>
         </button>
@@ -2272,7 +2285,7 @@ function IntakeDialog({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} received into ${areaName}${hasMachines ? ' queue' : ''}`,
-      detail: `${isKnown ? 'Reuses' : 'Creates'} the PartNumber and ${
+      detail: `${isKnown ? 'Uses the known PN' : 'Registers the new PN exactly as entered'} and ${
         reusableInternalWo
           ? 'reuses the applicable internal MODIFY Work Order (WO —)'
           : requestType === 'MODIFY'
@@ -2307,20 +2320,24 @@ function IntakeDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
+          {/* Operator wording only. Engineering behavior behind it: the
+              PartNumber record is created on first valid use (no
+              preloaded catalog required); PN identity is
+              case-insensitive and the first-entered casing is kept for
+              display; received_date defaults to the scan timestamp; the
+              optional due date is stored on the WorkOrderDemand. */}
           <div className="sub">
             {isKnown ? (
               <>This PN has no active Work Order Demand.</>
             ) : (
               <>
-                New PN — the internal PartNumber record is created on first
-                valid use (no preloaded catalog required; identity is
-                case-insensitive, this exact text is preserved).
+                New PN — not registered yet. Check the value carefully:
+                confirming this intake registers the PN exactly as shown.
               </>
             )}{' '}
             Defaults: Request Type <b>MODIFY</b>, Route Mode <b>FLOATING</b> —
-            both editable. Received date defaults to the scan timestamp; the due
-            date belongs to the WorkOrderDemand and may stay empty. Quantity
-            follows on the next step.
+            both editable. The received date is taken from this scan; the due
+            date is optional. The quantity to receive follows on the next step.
           </div>
           <div className="ss-dlgrid">
             <label htmlFor="in-type">Request Type</label>
@@ -3450,11 +3467,13 @@ function ManualEntryDialog({
   return (
     <ModalDialog label="Manual PN entry — explicit fallback" onClose={onCancel}>
       <h3>Manual PN entry — explicit fallback</h3>
+      {/* Operator wording only — engineering detail: PN identity is
+          case-insensitive; an unknown PN opens the intake wizard, where
+          the PartNumber record is created on first valid use. */}
       <div className="sub">
-        Type the <b>exact PartNumber</b> (not a barcode). Any non-empty value is
-        accepted — PN identity is case-insensitive, and a PN not seen before
-        opens the intake flow (created on first valid use). Nothing is recorded
-        by this step.
+        Type the <b>exact PartNumber</b> (not a barcode). Capitalization does
+        not matter. A PN that is not known here yet opens the receive workflow,
+        where you review and confirm it first. Nothing is recorded by this step.
       </div>
       <input
         aria-label="Exact PartNumber"

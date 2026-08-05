@@ -548,14 +548,14 @@ test('In this Area now has no row actions; Machine-card rows offer DONE and QUEU
 
 /* ============ No Machine Session — one-shot Machine scan ============ */
 
-test('a Machine scan opens a one-shot assignment dialog and leaves nothing armed', async () => {
+test('a Machine scan opens the Assign to Machine dialog and leaves nothing armed', async () => {
   await renderStation();
 
   scan('PF:MACHINE:L2');
   const dialog = await screen.findByRole('dialog', {
-    name: 'One-shot Machine assignment',
+    name: 'Assign to Machine',
   });
-  expect(dialog).toHaveTextContent('no persistent Machine Session');
+  expect(dialog).toHaveTextContent('The assignment applies once');
 
   // Cancel: no write, no sticky Machine context anywhere.
   fireEvent.keyDown(dialog, { key: 'Escape' });
@@ -564,6 +564,27 @@ test('a Machine scan opens a one-shot assignment dialog and leaves nothing armed
   expect(document.querySelector('.ss-head')?.textContent).not.toContain(
     'Lathe 2',
   );
+});
+
+test('the assignment dialog renders "Assign to Machine" in operator language only', async () => {
+  await renderStation();
+
+  scan('PF:MACHINE:L2');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Assign to Machine',
+  });
+  expect(
+    within(dialog as HTMLElement).getByRole('heading', {
+      name: 'Assign to Machine',
+    }),
+  ).toBeInTheDocument();
+  // The temporary behavior is explained naturally; implementation
+  // wording (one-shot, armed context, session mechanics) never renders.
+  expect(dialog.textContent).toContain('the next scan starts fresh');
+  expect(dialog.textContent).not.toMatch(/one-shot/i);
+  expect(dialog.textContent).not.toMatch(/armed/i);
+  expect(dialog.textContent).not.toMatch(/Machine Session/i);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 });
 
 test('the Machine-first wizard: PN pick → MAX quantity → confirmation → record once', async () => {
@@ -613,7 +634,7 @@ test('the PN-first assignment wizard preselects the PN and can go Back', async (
     screen.getByRole('button', { name: /Assign queued quantity/ }),
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'One-shot Machine assignment',
+    name: 'Assign to Machine',
   });
   // PN preselected, Machine still open — Next stays disabled.
   expect(
@@ -655,7 +676,7 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
       name: /2027-60-8114-00/,
     }),
   ).toHaveClass('sel');
-  expect(dialog.textContent).toContain('One-shot Machine assignment');
+  expect(dialog.textContent).toContain('Assign to Machine');
   expect(lastPnText()).toBe('—');
 
   // Invalid scans: inline error, no selection change, nothing recorded.
@@ -854,7 +875,14 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
   const dialog = await screen.findByRole('dialog', {
     name: 'Receive quantity — intake',
   });
-  expect(dialog).toHaveTextContent('created on first valid use');
+  // Operator-facing guidance: what was scanned and what confirmation
+  // does — never internal record/persistence wording.
+  expect(dialog).toHaveTextContent('New PN — not registered yet');
+  expect(dialog).toHaveTextContent(
+    'confirming this intake registers the PN exactly as shown',
+  );
+  expect(dialog.textContent).not.toMatch(/record is created/i);
+  expect(dialog.textContent).not.toMatch(/case-insensitive/i);
   // Step 1 — settings only, no quantity input yet.
   expect(dialog.querySelector('.qtydisplay')).toBeNull();
   expect(screen.getByLabelText('Request Type')).toHaveValue('MODIFY');
@@ -867,9 +895,12 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
     target: { value: 'MODIFY' },
   });
 
-  // Step 2 — recap + guidance directly above the quantity input.
+  // Step 2 — recap (Request Type and Route Mode chips) + guidance
+  // directly above the quantity input.
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-  expect(dialog.textContent).toContain('MODIFY · FLOATING');
+  const recap = dialog.querySelector('.ss-recap')!;
+  expect(recap.textContent).toContain('MODIFY');
+  expect(recap.textContent).toContain('FLOATING');
   expect(dialog.textContent).toContain(
     'Enter the physical quantity received. No default quantity is assumed.',
   );
@@ -878,7 +909,8 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
   // Step 3 — structured confirmation; only Confirm intake records.
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
-  expect(dialog.textContent).toContain('Receive quantity — intake (RECEIVED)');
+  expect(dialog.textContent).toContain('Receive quantity — intake');
+  expect(dialog.textContent).toContain('RECEIVED');
   expect(dialog.textContent).toContain(
     'Creates an internal Work Order without an external number',
   );
@@ -907,7 +939,9 @@ test('intake Back preserves settings and quantity; Cancel records nothing', asyn
     target: { value: 'first article' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-  expect(dialog.textContent).toContain('NEW · FLOATING');
+  const recap = dialog.querySelector('.ss-recap')!;
+  expect(recap.textContent).toContain('NEW');
+  expect(recap.textContent).toContain('FLOATING');
   fireEvent.keyDown(dialog, { key: '3' });
 
   // Back to settings — everything entered is preserved.
@@ -994,6 +1028,50 @@ test('Add more quantity requires a reason, has no MAX/default, and confirms sepa
   expect(document.querySelector('.ss-toast .t2')?.textContent).toContain(
     'never changes the WO Demand requested quantity',
   );
+});
+
+test('quantity dialogs keep a dedicated review step separate from quantity entry', async () => {
+  await renderStation();
+
+  scan('PF:PN:0455-20-0118-03');
+  fireEvent.click(screen.getByRole('button', { name: /Add more quantity/ }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Add more quantity',
+  });
+
+  // Step 1 — quantity entry only: no confirmation summary on this step.
+  expect(dialog.querySelector('.ss-confirm')).toBeNull();
+  fireEvent.keyDown(dialog, { key: '2' });
+  fireEvent.change(screen.getByLabelText('Reason (required)'), {
+    target: { value: 'found 2 extra blanks' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+  // Step 2 — the dedicated review step: the quantity input is gone,
+  // the structured summary stands alone, and the confirm action holds
+  // focus so Enter performs the final confirmation.
+  expect(dialog.querySelector('.qtydisplay')).toBeNull();
+  expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
+  expect(dialog.textContent).toContain(
+    'Review the quantity addition, then confirm.',
+  );
+  expect(
+    screen.getByRole('button', { name: 'Confirm addition' }),
+  ).toHaveFocus();
+  expect(lastPnText()).toBe('—'); // reviewing is never a write
+
+  // Back returns to entry with everything preserved; Escape cancels
+  // the whole workflow from the review step with no write.
+  fireEvent.click(screen.getByRole('button', { name: '‹ Back' }));
+  expect(screen.getByLabelText('Quantity: 2')).toBeInTheDocument();
+  expect(screen.getByLabelText('Reason (required)')).toHaveValue(
+    'found 2 extra blanks',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(lastPnText()).toBe('—');
 });
 
 /* ============ Repair ============ */
@@ -1528,6 +1606,59 @@ test('wedge capture never interferes with dialogs, other fields, or buttons', as
   fireEvent.keyDown(manual, { key: 'Enter' });
   expect(screen.queryByText('Worker session: V. Tran')).toBeNull();
   expect(input.value).toBe('PF:WORKER:88');
+});
+
+/* ============ Touch-primary devices — main barcode input ============ */
+
+test('a non-touch device leaves the main barcode input without inputMode', async () => {
+  const input = await renderStation();
+  expect(input).not.toHaveAttribute('inputmode');
+});
+
+test('a touch-primary device suppresses the soft keyboard on the main barcode input only', async () => {
+  const original = window.matchMedia;
+  vi.stubGlobal(
+    'matchMedia',
+    (query: string) =>
+      ({
+        matches: query === '(pointer: coarse)' || query === '(hover: none)',
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList,
+  );
+  Object.defineProperty(window.navigator, 'maxTouchPoints', {
+    value: 5,
+    configurable: true,
+  });
+  try {
+    const input = await renderStation();
+    // The native soft keyboard stays closed for the scanner-driven
+    // main input…
+    expect(input).toHaveAttribute('inputmode', 'none');
+
+    // …while scanner/physical-keyboard input keeps working unchanged.
+    scan('PF:PN:2027-60-8114-00');
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Choose the action for this PN',
+    });
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    // Manual PN entry is typed text: its input KEEPS the normal soft
+    // keyboard (no inputMode suppression on ordinary text fields).
+    fireEvent.click(
+      screen.getByRole('button', { name: '⌨ Enter PN manually' }),
+    );
+    expect(screen.getByLabelText('Exact PartNumber')).not.toHaveAttribute(
+      'inputmode',
+    );
+  } finally {
+    window.matchMedia = original;
+    Object.defineProperty(window.navigator, 'maxTouchPoints', {
+      value: 0,
+      configurable: true,
+    });
+  }
 });
 
 /* ============ Header structure, Operations chips, and totals ============ */

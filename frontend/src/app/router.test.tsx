@@ -221,6 +221,42 @@ test('a Management sub view renders directly from its URL', async () => {
   ).toBeInTheDocument();
 });
 
+test('Management exposes the six sub views in the approved order', async () => {
+  renderAt('/management/area-board');
+
+  const nav = await screen.findByRole('navigation', {
+    name: 'Management sub views',
+  });
+  expect(Array.from(nav.querySelectorAll('a'), (a) => a.textContent)).toEqual([
+    'Area Board',
+    'Machines',
+    'Tracking',
+    'Work Orders',
+    'Planned Routes',
+    'Priority',
+  ]);
+});
+
+test('the Machines management view renders from its URL', async () => {
+  renderAt('/management/machines');
+
+  expect(
+    await screen.findByRole('region', { name: 'Machines' }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Machines' })).toBeInTheDocument();
+});
+
+test('the Planned Routes management view renders from its URL', async () => {
+  renderAt('/management/planned-routes');
+
+  expect(
+    await screen.findByRole('region', { name: 'Planned Routes' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('heading', { name: 'Planned Routes' }),
+  ).toBeInTheDocument();
+});
+
 test('browser back and forward navigation works', async () => {
   renderAt('/scan-station');
 

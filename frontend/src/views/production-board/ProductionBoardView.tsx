@@ -12,7 +12,6 @@ import {
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { ConnectivityChip } from '../../components/ConnectivityChip';
 import { AreaDot } from '../../components/indicators';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import {
@@ -65,6 +64,24 @@ function RotationProgress({ deadline }: { deadline: number }) {
         <i style={{ width: `${pct}%` }} />
       </span>
       <span className="pb-rotatesec">{Math.ceil(remaining / 1000)} s</span>
+    </span>
+  );
+}
+
+/**
+ * Board operational status — the same meaning in the standard and
+ * kiosk presentations: `Live` with the shared connected heartbeat
+ * (styles/global.css — identical to the ONLINE connectivity dot) while
+ * the shared connectivity state is healthy, an explicit non-pulsing
+ * warning while it is not. The label is `Live` (board feed running),
+ * never a second `ONLINE` chip — one status per header.
+ */
+function BoardLiveStatus() {
+  const { status } = useConnectivity();
+  return (
+    <span className={`live${status === 'connected' ? '' : ' stale'}`}>
+      <span className="ld" aria-hidden="true" />
+      {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
     </span>
   );
 }
@@ -283,7 +300,6 @@ function BoardHeadRow() {
 // changes and theme/font-metric changes.
 export function ProductionBoardView() {
   const preview = getViewStatePreview();
-  const { status } = useConnectivity();
   const { route, navigate } = useRouter();
   // Kiosk mode is an addressable route (`/production-board/kiosk`),
   // explicit in the router model — the top application navigation is
@@ -492,32 +508,38 @@ export function ProductionBoardView() {
     >
       {kiosk ? (
         // Kiosk header: one coherent board-owned row — compact brand
-        // mark, board title, ONE shared connectivity status (the same
-        // chip as the top navigation — the separate `Live` indicator
-        // would repeat the same backend connectivity and is not
-        // rendered here), the shared borderless Dark/Light control,
-        // and the clock. Redesigned for a wall display, not pasted
-        // navigation components.
+        // mark, board title, and the SAME `Live` operational status as
+        // the standard header (BoardLiveStatus, shared heartbeat and
+        // shared connectivity state — never a second `ONLINE` chip
+        // repeating the same connectivity), plus what the hidden
+        // navigation would otherwise provide: the shared borderless
+        // Dark/Light control and an explicit exit action beside the
+        // clock. Two presentations of one board, not two boards.
         <div className="pb-head pbk-head" ref={headRef}>
           <span className="pbk-brand" aria-hidden="true">
             <span className="mark">⇄</span>
             Part<span className="pf">Flow</span>
           </span>
           <h1>Machine Shop — Production</h1>
+          <BoardLiveStatus />
           <span className="spacer" />
           <div className="pbk-actions">
-            <ConnectivityChip />
             <ThemeToggle compact />
+            <button
+              className="pbk-exit"
+              aria-label="Exit kiosk mode"
+              title="Exit kiosk mode (Ctrl+Shift+K)"
+              onClick={() => navigate('/production-board')}
+            >
+              Exit kiosk
+            </button>
           </div>
           <LiveClock />
         </div>
       ) : (
         <div className="pb-head" ref={headRef}>
           <h1>Machine Shop — Production</h1>
-          <span className={`live${status === 'connected' ? '' : ' stale'}`}>
-            <span className="ld" aria-hidden="true" />
-            {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
-          </span>
+          <BoardLiveStatus />
           <span className="spacer" />
           <LiveClock />
         </div>

@@ -8,7 +8,7 @@ import {
   sanitizeQuantity,
 } from './quantity-input';
 import type { QuantityEdit, QuantitySelection } from './quantity-input';
-import { isTouchPrimaryDevice, useSoftKeyboardOpen } from './quantity-touch';
+import { isTouchPrimaryDevice, useSoftKeyboardOpen } from './touch-device';
 
 /**
  * Shared quantity entry: a REAL focusable numeric text input (focused
@@ -38,7 +38,7 @@ import { isTouchPrimaryDevice, useSoftKeyboardOpen } from './quantity-touch';
  * anyway, the `window.visualViewport` fallback detects the height
  * loss and collapses the on-screen NumPad so the input, guidance,
  * validation and dialog actions stay visible; the NumPad returns with
- * the viewport (quantity-touch.ts — isolated, reversible detection).
+ * the viewport (touch-device.ts — isolated, reversible detection).
  */
 export function QuantityKeypad({
   value,

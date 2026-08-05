@@ -8,7 +8,7 @@ and the **Phase 2 Frontend Design System and Application Shell**:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
-  seven approved GUI views with development-only mock data, and the real
+  nine approved GUI views with development-only mock data, and the real
   `/api/health` connectivity integration
 - `backend/` — FastAPI with one operational health endpoint (`GET /api/health`)
 - PostgreSQL 16 with Alembic migration wiring (no-op baseline revision)
@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v13.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v14.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -33,9 +33,12 @@ an application-level not-found state):
 | `/scan-station/:stationId` | One Scan Station in standard mode (e.g. `/scan-station/LATHE-ST-01`); unknown or inactive Station IDs show an explicit error |
 | `/scan-station/:stationId/production` | The same Scan Station in production mode — the top application navigation is hidden so operators stay on the station (presentation only, not a security boundary) |
 | `/production-board` | Production Board (large display, read-only) |
+| `/production-board/kiosk` | Production Board in kiosk mode — the top application navigation is hidden and the board renders its own wall-display header (presentation only) |
 | `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
+| `/management/machines` | Management → Machines (Machine lifecycle and maintenance — permission-based production master data) |
 | `/management/tracking` | Management → Tracking (PN-centric) |
 | `/management/work-orders` | Management → Work Orders |
+| `/management/planned-routes` | Management → Planned Routes (reusable route definitions — permission-based production master data) |
 | `/management/priority` | Management → Priority (Hot WO Demand ranking) |
 | `/administration` | Administration |
 

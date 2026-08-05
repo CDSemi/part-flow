@@ -6,7 +6,7 @@ import type { Theme } from './theme-context';
 
 // Dark is the default: PartFlow is shop-floor first (GUI_DESIGN §2.1).
 // The choice is session-only — persistence (per user / per station) is an
-// open decision (GUI_DESIGN §14) and is intentionally not invented here.
+// open decision (GUI_DESIGN §16) and is intentionally not invented here.
 const DEFAULT_THEME: Theme = 'dark';
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

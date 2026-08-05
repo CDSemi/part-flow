@@ -939,10 +939,13 @@
 
 /* Structured confirmation summary — the dedicated final wizard view
    (also the Undo confirmation): a two-column definition list, never a
-   single interpolated sentence in a dashed note box. */
+   single interpolated sentence in a dashed note box. The label column
+   sizes from its content (capped so an unusually long label wraps
+   instead of pushing every value away) — no fixed-width gap between
+   label and value. */
 .ss-confirm {
   display: grid;
-  grid-template-columns: 210px 1fr;
+  grid-template-columns: fit-content(230px) 1fr;
   gap: 7px 14px;
   margin: 14px 0;
   font-size: 13.5px;
@@ -961,6 +964,21 @@
   color: var(--text);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* Inside a confirmation summary, values must read as verification
+   text, never as interactive badges: entity chips flatten to plain
+   text inheriting the row's size and weight (PN keeps its mono
+   distinction). Recaps and selection steps keep the chip look. */
+.ss-confirm .dlgchip {
+  display: inline;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
 }
 
 /* Optional row emphasis: primary operational values (PN, Quantity,
@@ -1100,22 +1118,44 @@
   color: var(--faint);
 }
 
-/* Production-mode header actions: a compact vertical, right-aligned
-   stack — the connectivity status on top with the Dark/Light control
-   directly beneath it. The narrow column never crowds the Worker
-   Session and never forces the Area statistics to wrap poorly at
-   intermediate widths. */
+/* Production-mode header actions: ONE coherent compact group sharing
+   the header's card language (the same surface as the Area totals and
+   the Worker Session pill), not unrelated stacked controls — the
+   connectivity status on top with the Dark/Light control directly
+   beneath it, separated by a hairline. The group stretches to the
+   header row height so it aligns cleanly with the neighboring cells,
+   and its narrow column never crowds the Worker Session or forces the
+   Area statistics to wrap poorly at intermediate widths. */
 .ss-head .ss-headactions {
   flex: none;
-  display: inline-flex;
+  align-self: stretch;
+  display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
+  align-items: stretch;
+  justify-content: center;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* The chip drops its standalone frame inside the group — one unit,
+   never a chip nested in a chip. Its ONLINE/OFFLINE text and the
+   shared heartbeat dot (app/shell.css) stay untouched. */
+.ss-headactions .connchip {
+  flex: 1;
+  justify-content: center;
+  margin-right: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  border-bottom: 1px solid var(--border);
 }
 
 /* Compact theme control (shared ThemeToggle component, production
    header variant): borderless like the top-navigation control — a
-   quiet text button with a clear focus state. */
+   quiet text button with a clear focus state. Inside the header
+   actions group it fills the group width and centers its label. */
 .themetoggle.compact {
   display: inline-flex;
   align-items: center;
@@ -1134,4 +1174,14 @@
 .themetoggle.compact:hover {
   color: var(--text);
   background: var(--panel2);
+}
+
+.ss-headactions .themetoggle.compact {
+  flex: 1;
+  justify-content: center;
+  border-radius: 0;
+}
+
+.ss-headactions .themetoggle.compact:hover {
+  background: var(--row-hover);
 }

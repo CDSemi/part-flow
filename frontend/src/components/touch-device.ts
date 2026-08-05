@@ -1,8 +1,11 @@
-// Touch-device soft-keyboard handling for the shared quantity input
-// (GUI_DESIGN §4.8). Isolated and reversible: this module only decides
-// (a) whether the native soft keyboard should be suppressed for the
-// quantity input (`inputMode="none"` on touch-primary devices) and
-// (b) whether a soft keyboard is currently covering the viewport (the
+// Shared touch-device soft-keyboard handling (GUI_DESIGN §4.8): the
+// ONE capability-detection module for every input that suppresses the
+// native soft keyboard on touch-primary devices (the shared quantity
+// input and the Scan Station main barcode field — scanner/physical-
+// keyboard driven inputs, never ordinary text fields). It decides
+// (a) whether the native soft keyboard should be suppressed
+// (`inputMode="none"` on touch-primary devices) and (b) whether a soft
+// keyboard is currently covering the viewport (the
 // `window.visualViewport` fallback that collapses the on-screen
 // NumPad). It never touches the shared cursor-aware quantity editing
 // semantics in quantity-input.ts.

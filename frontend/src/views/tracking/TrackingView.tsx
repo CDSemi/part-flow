@@ -1,6 +1,6 @@
 import './tracking.css';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
 import { AreaDot, HotPn, TypeChip } from '../../components/indicators';
@@ -44,19 +44,49 @@ const FILTERS: { label: string; options: string[] }[] = [
 
 // PN-centric management view: filterable list + read-only detail panel.
 // Movement history is immutable — no edit or delete affordances exist.
-// Selection toggles: clicking an unselected row selects it and opens
-// the details; clicking the selected row again (or the panel's close
-// button) unselects and closes them, and the table expands into the
-// released space.
+// The detail panel is a MODELESS floating overlay above the results:
+// opening and closing it never resizes or reflows the table, and the
+// list behind it stays visible and scrollable for comparison — never a
+// blocking modal. Selection toggles: the whole result row selects (the
+// PN cell button carries keyboard focus and the accessible name);
+// clicking the selected row again, the panel's close button, or Escape
+// closes the panel and returns focus to the originating row.
 export function TrackingView() {
   const preview = getViewStatePreview();
   const [search, setSearch] = useState('');
   const [selectedPn, setSelectedPn] = useState<string | null>(
     MOCK_TRACKING_DETAIL.pn,
   );
+  /** Per-PN row buttons, for restoring focus after the panel closes. */
+  const rowButtons = useRef(new Map<string, HTMLButtonElement>());
+
+  const close = useCallback(
+    (restoreFocus: boolean) => {
+      if (restoreFocus && selectedPn !== null) {
+        rowButtons.current.get(selectedPn)?.focus();
+      }
+      setSelectedPn(null);
+    },
+    [selectedPn],
+  );
 
   const toggleSelected = (pn: string) =>
     setSelectedPn((current) => (current === pn ? null : pn));
+
+  // Escape closes the modeless panel (a dialog on top of it — none in
+  // Tracking today — would own Escape through its own focus scope).
+  useEffect(() => {
+    if (selectedPn === null) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+      close(true);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedPn, close]);
 
   if (preview === 'loading') {
     return (
@@ -95,7 +125,7 @@ export function TrackingView() {
 
   return (
     <section className="tk" aria-label="Tracking">
-      <div className={`tk-wrap${selectedPn === null ? ' noselect' : ''}`}>
+      <div className="tk-wrap">
         <div className="tk-left">
           <h1>Tracking</h1>
           <div className="tk-filters">
@@ -139,14 +169,23 @@ export function TrackingView() {
               </thead>
               <tbody>
                 {rows.map((row) => (
+                  // The COMPLETE row is the click target (no other
+                  // interactive control lives inside it, so nothing
+                  // nests); the PN-cell button stays the keyboard and
+                  // screen-reader entry point — its activation bubbles
+                  // to this same row handler, one toggle either way.
                   <tr
                     key={row.pn}
-                    className={row.pn === selectedPn ? 'sel' : ''}
+                    className={`selrow ${row.pn === selectedPn ? 'sel' : ''}`}
+                    onClick={() => toggleSelected(row.pn)}
                   >
                     <td>
                       <button
                         className="rowbtn"
-                        onClick={() => toggleSelected(row.pn)}
+                        ref={(el) => {
+                          if (el) rowButtons.current.set(row.pn, el);
+                          else rowButtons.current.delete(row.pn);
+                        }}
                         aria-pressed={row.pn === selectedPn}
                       >
                         <span className="part">
@@ -212,8 +251,9 @@ export function TrackingView() {
           )}
         </div>
 
-        {/* No selection → no reserved empty column: the panel is not
-            rendered at all and the table takes the full width. */}
+        {/* Modeless floating detail overlay: rendered above the table
+            (its own scroll area), so the results list never resizes or
+            reflows and stays available for comparison behind it. */}
         {selectedPn !== null ? (
           <aside className="tk-right" aria-label="PN detail">
             {selectedPn !== detail.pn ? (
@@ -223,7 +263,7 @@ export function TrackingView() {
                     <h2>{selectedPn}</h2>
                   </div>
                   <span className="spacer" />
-                  <CloseDetailButton onClose={() => setSelectedPn(null)} />
+                  <CloseDetailButton onClose={() => close(true)} />
                 </div>
                 <EmptyState
                   message="No detail available for this PN yet."
@@ -235,7 +275,7 @@ export function TrackingView() {
                 />
               </>
             ) : (
-              <TrackingDetail onClose={() => setSelectedPn(null)} />
+              <TrackingDetail onClose={() => close(true)} />
             )}
           </aside>
         ) : null}

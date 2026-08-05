@@ -72,12 +72,115 @@ export interface MockArea {
   terminal?: boolean;
 }
 
+/**
+ * Effective operational state of an active Machine. Maintenance is an
+ * explicit override; otherwise a Machine with assigned active quantity
+ * is `running` and an unassigned active Machine is `idle` — running
+ * and idle are always derived, never chosen by a user.
+ */
 export type MachineStatus = 'running' | 'idle' | 'maintenance';
 
 /** One Machine belonging to an Area (Area/Machine monitoring cards). */
 export interface MockAreaMachine {
   name: string;
   status: MachineStatus;
+  /**
+   * ISO timestamp of the moment the Machine entered its current
+   * operational state. Every surface derives the visible elapsed time
+   * (`running · 1h 24m`) from this shared timestamp — a formatted
+   * duration is never stored, so no two views can disagree.
+   */
+  stateChangedAt: string;
+  /** Maintenance context (status `maintenance` only): optional note. */
+  maintenanceNote?: string;
+  /** Expected return date (ISO `YYYY-MM-DD`), when one was given. */
+  expectedReturn?: string;
+}
+
+/**
+ * One physical Machine record (Management → Machines). A Machine is a
+ * specific physical production resource with a stable internal
+ * identity and its own barcode. A replacement Machine is a NEW record
+ * (new identity, new barcode) that may reuse the operator-facing
+ * display name of a familiar floor position (`Lathe 1`) — the retired
+ * record is never renamed or mutated, so history keeps pointing at the
+ * Machine that really did the work.
+ */
+export interface MockMachine {
+  /** Stable internal identity — never reused by a replacement. */
+  id: string;
+  area: AreaKey;
+  /** Operator-facing display name; reusable across replacements. */
+  name: string;
+  /** Machine barcode value (`PF:MACHINE:<value>`); unique, stable. */
+  barcode: string;
+  /**
+   * Explicit maintenance override. Entering maintenance never moves,
+   * releases, completes, or transfers assigned quantity.
+   */
+  maintenance?: {
+    /** ISO timestamp when maintenance started. */
+    since: string;
+    /** Optional expected return date (ISO `YYYY-MM-DD`). */
+    expectedReturn?: string;
+    /** Optional reason shown on monitoring surfaces. */
+    note?: string;
+  };
+  /**
+   * Set when the Machine is retired: it stays visible in historical
+   * context and reporting but never receives new assignments or scans.
+   * Retirement requires the assigned quantity to be handled through
+   * the normal production workflow first.
+   */
+  retiredOn?: string;
+  /** ISO timestamp of the last operational state change. */
+  stateChangedAt: string;
+  /* Optional asset metadata — identification of the physical asset
+     (the Asset Tag stays unique even when display names are reused).
+     Production tracking never depends on these fields. */
+  manufacturer?: string;
+  model?: string;
+  assetTag?: string;
+  serialNumber?: string;
+  installedOn?: string;
+  notes?: string;
+}
+
+/** One expected step of a Planned Route (Route Template). */
+export interface MockRouteStep {
+  area: AreaKey;
+  operation: string;
+  /** Advisory expected duration, e.g. `4h` — never blocks production. */
+  expectedDuration?: string;
+  instructions?: string;
+  /** Preferred (not mandatory) Machine display name. */
+  preferredMachine?: string;
+}
+
+/**
+ * One reusable Planned Route definition (internal name: RouteTemplate).
+ * Editing a template affects FUTURE assignments only — a released
+ * Quantity Flow keeps its independent Assigned Route snapshot. A
+ * template that has ever been used is archived instead of deleted;
+ * archived templates stay visible in historical context but never
+ * appear as normal choices for new assignments.
+ */
+export interface MockRouteTemplate {
+  /** Stable internal identity. */
+  id: string;
+  name: string;
+  description?: string;
+  steps: MockRouteStep[];
+  /** ISO date the template was archived; absent = active. */
+  archivedOn?: string;
+  /**
+   * Where the template has been used: Quantity Flows released with an
+   * Assigned Route snapshot copied from it. Empty = never used (such a
+   * template may be deleted outright).
+   */
+  usedBy: { flow: string; pn: string; releasedOn: string }[];
+  createdOn: string;
+  updatedOn: string;
 }
 
 /**

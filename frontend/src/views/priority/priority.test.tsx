@@ -359,9 +359,9 @@ test('adding a new Hot entry at the bottom needs no reorder confirmation', async
   expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
 });
 
-/* ============ Snapshot alignment and impact/action block (GUI v13) ============ */
+/* ============ Snapshot alignment and impact/action block (GUI v14) ============ */
 
-test('both snapshot sections share one grid-track definition so the PN never shifts', async () => {
+test('the snapshot position track sizes from content — no wide fixed label column', async () => {
   const { readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const { dirname, join } = await import('node:path');
@@ -369,11 +369,16 @@ test('both snapshot sections share one grid-track definition so the PN never shi
     join(dirname(fileURLToPath(import.meta.url)), 'priority.css'),
     'utf8',
   );
-  // ONE shared .pr-snaprow grid definition covers both sections, with
-  // a common rank/transition track wide enough for `#2 → #4`; the
-  // former per-section `.trans` track override no longer exists (the
-  // only other definition is the narrow-screen stacking fallback).
-  expect(css).toMatch(/\.pr-snaprow \{[^}]*grid-template-columns: 150px/);
+  // The position/rank track is content-sized (max-content on the list
+  // grid, rows joining via subgrid) — the former fixed 150px track that
+  // opened a large gap between the position value and the PN is gone,
+  // and no per-section `.trans` override exists (the only other
+  // definition is the narrow-screen stacking fallback).
+  expect(css).toMatch(
+    /\.pr-snaplist \{[^}]*grid-template-columns: max-content/,
+  );
+  expect(css).toMatch(/\.pr-snaprow \{[^}]*grid-template-columns: subgrid/);
+  expect(css).not.toContain('grid-template-columns: 150px');
   expect(css).not.toMatch(/\.pr-snaprow\.trans \{[^}]*grid-template-columns/);
 });
 

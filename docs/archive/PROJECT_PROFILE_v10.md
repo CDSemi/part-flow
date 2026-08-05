@@ -1,4 +1,4 @@
-# PartFlow Project Profile v11
+# PartFlow Project Profile v10
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -426,10 +426,6 @@ A Machine:
 - becomes the current executor when quantity is assigned to it,
 - also identifies the physical processing location while assigned.
 
-A Machine has a lifecycle: it is active until it is **retired**. A Machine that was ever referenced by Movement history is never hard-deleted — it is retired instead, stays visible for historical display and reporting, never appears in assignment choices, and accepts no new scans.
-
-A Machine keeps a stable internal identity; the operator-facing display name is separate and may be reused. Replacing a physical Machine means retiring the old record and creating a **new** record with its own stable identity and its own new barcode. The new Machine may reuse the familiar floor-position display name (for example `Lathe 1`); the old record is never renamed or mutated, and the two remain distinguishable through internal identity and asset metadata. There is no MachineSlot or WorkCenter abstraction — the display name alone carries the floor-position familiarity.
-
 ---
 
 ## Quantity Flow (Internal Tracking Concept)
@@ -692,31 +688,15 @@ Typical attributes (illustrative only):
 - `name`
 - `barcode_value`
 - `description`
-- `manufacturer`
-- `model`
-- `asset_tag`
-- `serial_number`
-- `installed_on`
-- `notes`
-- `maintenance` (explicit override: started timestamp, optional note, optional expected return date)
-- `state_changed_at`
-- `retired_on`
-
-Asset metadata (manufacturer, model, asset tag, serial number, installed date, notes) is optional — production tracking never depends on it. The Asset Tag identifies the physical asset even when display names are reused across replacements.
+- `is_active`
 
 Rules:
 
 - Every Machine barcode must be unique.
-- A Machine belongs to exactly one Area. The Area of an existing Machine is fixed — moving production capacity to another Area is a replacement (retire + new record), never an edit that would make history ambiguous.
+- A Machine belongs to exactly one Area.
 - Machine assignment identifies the current executor.
 - An Area without Machines involves no Machine assignment at all.
-- Assignment behavior follows from the Area's Machines (§12): with Machines, quantity queues and is assigned through the explicit one-shot workflow (UI label `Assign to Machine`) — never by configuration and never by Machine count.
-- The operational state is **derived**, never chosen by users: (1) an explicit Maintenance override wins; (2) otherwise assigned active quantity means Running; (3) otherwise the Machine is Idle.
-- A `state_changed_at` timestamp records when the operational state last changed; every surface derives the visible elapsed time in state from it (compact formats such as `18m`, `1h 24m`, `2d 03h`, `<1m`). No formatted duration is ever stored.
-- Maintenance may start while quantity remains assigned. Starting maintenance never moves, releases, completes, or transfers quantity and never rewrites history; it may carry an optional note and an optional expected return date. Clearing maintenance returns the Machine to Running when quantity is still assigned, otherwise to Idle.
-- Retirement is blocked while active quantity is assigned — the quantity must first complete or transfer through the normal production workflow. A Machine ever referenced by Movement history is never hard-deleted; it is retired (operator wording: `Retired`, `Retire Machine`, `Retired on …`) and remains available for historical display and reporting only.
-- A retired Machine never appears in assignment choices and accepts no new scans.
-- Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and new barcode; the display name may be reused, the old record is never mutated.
+- Assignment behavior follows from the Area's Machines (§12): with Machines, quantity queues and is assigned through the explicit one-shot workflow — never by configuration and never by Machine count.
 
 ---
 
@@ -750,26 +730,21 @@ Rules:
 
 ## 8.8 RouteTemplate
 
-Represents a reusable production route definition. The user-facing name is **Planned Routes** (managed in Management → Planned Routes, §21) — clearly distinct from the Floating actual route traces derived from Movement history; the internal domain name stays `RouteTemplate`.
+Represents a reusable production route definition.
 
 Typical attributes (illustrative only):
 
 - `id`
 - `name`
 - `description`
-- `archived_at`
+- `version`
+- `is_active`
 
 A Route Template contains ordered Route Steps.
 
 A Route may visit the same Area more than once.
 
-Changing a Route Template must never retroactively alter active assigned Routes — edits apply to future assignments only; already released Quantity Flows keep their Assigned Route snapshots, and an in-production Assigned Route is changed separately in its own audited workflow with a reason (§8.10).
-
-Lifecycle rules:
-
-- A Route Template that has never been referenced by a released Quantity Flow may be deleted outright.
-- A Route Template that has ever been used is archived instead of deleted: it stays visible in historical context but is never offered for new route assignments.
-- There is **no separate template-versioning system**: existing Assigned Route snapshots preserve the historical route definitions, and actual immutable Movement history stays authoritative.
+Changing a Route Template must never retroactively alter active assigned Routes.
 
 ---
 
@@ -1338,7 +1313,7 @@ A transfer whose source quantity is still actively processing implicitly complet
 
 Scan Station actions are **one-shot**:
 
-- **Machine-first:** scanning a Machine barcode opens a one-shot assignment dialog (UI label `Assign to Machine`) with the Machine preselected; the operator selects or scans the PN, enters the quantity (MAX default), reviews the summary, and confirms. The assignment applies once — the next scan starts fresh; it never creates a sticky Machine Session.
+- **Machine-first:** scanning a Machine barcode opens a one-shot assignment dialog with the Machine preselected; the operator selects or scans the PN, enters the quantity (MAX default), reviews the summary, and confirms. It never creates a sticky Machine Session.
 - **PN-first:** scanning a PN barcode opens the applicable one-shot dialog — intake when the PN has no active demand (§14), source-explicit transfer when the quantity is elsewhere, or an action dialog with only the currently valid choices (assign queued quantity, receive more, add quantity, complete processing — DONE in a direct-processing Area, Repair, Scrap) when the PN already has quantity in the Area. Machine-assigned quantity is completed through the Machine-card row's `DONE` action (§12).
 - Completing or cancelling a dialog clears the pending context; Cancel always means no write.
 
@@ -1414,7 +1389,7 @@ They do not override actual Movement history.
 
 ## Route Template
 
-A Route Template is a reusable sequence of Route Steps, presented to users as a **Planned Route** and managed in Management → Planned Routes (§21). Ever-used templates are archived rather than deleted; archived templates remain visible in historical context but are never offered for new route assignments (§8.8).
+A Route Template is a reusable sequence of Route Steps.
 
 Example:
 
@@ -1590,8 +1565,6 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 PartFlow uses role-based authorization.
 
-Machines and Route Templates (Planned Routes) are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines and Route Templates without being an Administrator. Administrators retain these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines or Route Templates screens (§21).
-
 ## Administrator
 
 Administrator capabilities include:
@@ -1599,12 +1572,11 @@ Administrator capabilities include:
 - manage Departments,
 - manage Areas,
 - manage Operations,
-- manage Machines (shared with authorized production roles — managed through Management → Machines, §21),
+- manage Machines,
 - manage Workers,
 - manage users and roles,
-- manage Scan Stations,
 - manage barcode configuration,
-- manage Route Templates (shared with authorized production roles — managed through Management → Planned Routes, §21),
+- manage Route Templates,
 - manage scan behavior,
 - manage Worker session policies,
 - manage correction permissions,
@@ -1655,7 +1627,7 @@ Operators must never directly rewrite historical data.
 
 ## Scan Station
 
-The Scan Station is a fixed production interface assigned to one Area. Stations are addressed per URL: the bare Scan Station route shows a Station Selector (Station ID, Department, Area, supported Operations, whether the Area has Machines) and never auto-redirects; an unknown or inactive Station ID is an explicit error, never a silent fallback. The Station ID stays a faint non-interactive footer caption (alongside the mode label and the `Ctrl+Shift+K: switch mode` hint); switching stations goes through the Station Selector URL, never through the footer.
+The Scan Station is a fixed production interface assigned to one Area. Stations are addressed per URL: the bare Scan Station route shows a Station Selector (Station ID, Department, Area, supported Operations, whether the Area has Machines) and never auto-redirects; an unknown or inactive Station ID is an explicit error, never a silent fallback. The Station ID stays a faint footer caption that is subtly clickable for switching stations (an unobtrusive maintenance affordance, not a promoted operator workflow).
 
 Requirements:
 
@@ -1669,7 +1641,7 @@ Requirements:
 - visible active Worker,
 - visible last scanned PN inside the scan card, with the Undo action anchored at its right edge (only completed PN operations become the last scanned PN; Worker scans and cancelled dialogs never replace it),
 - quantity entry only when required,
-- current Area quantity in the shared Area/Machine monitoring layout (§ Area Board) — the `In this Area now` card left, Machine cards in a right-side grid that wraps within itself; no Machine region for Areas without Machines; Machine cards show the derived operational state with its elapsed time in state (`running · 1h 24m`, derived from the state-change timestamp — §8.6) and, under maintenance, the maintenance note and expected return date,
+- current Area quantity in the shared Area/Machine monitoring layout (§ Area Board) — the `In this Area now` card left, Machine cards in a right-side grid that wraps within itself; no Machine region for Areas without Machines,
 - separate on-Machine, queued, and finished (`Finished — ready to move`) quantity (Areas with Machines) or direct processing and finished groups (Areas without Machines) — finished quantity belongs to the Area summary and Machine cards show only actively assigned quantity,
 - Machine-card PN rows with the two distinct actions `DONE` and `QUEUE` (§12),
 - authorized Undo with a summary confirmation (§16),
@@ -1695,7 +1667,7 @@ Requirements:
 - distributed PN quantity display,
 - time in current Area or Machine shown per distributed quantity,
 - clear scrapped/damaged quantity visibility without making the board unreadable (scrapped quantity has its own layout space and never overlaps other fields),
-- explicit Area and Machine presentation data: actively Machine-assigned quantity shows the Machine as a compact chip with the full state wording `on machine`; finished quantity shows the current Area with a `done`/`ready` state, never `on machine` and never the Machine as current executor,
+- explicit Area and Machine presentation data: actively Machine-assigned quantity shows the Machine as a compact chip with the concise state `on mch.`; finished quantity shows the current Area with a `done`/`ready` state, never `on mch.` and never the Machine as current executor,
 - a blank external Work Order Number rendered as `—`,
 - Part Number rendered on a single line.
 
@@ -1755,23 +1727,6 @@ Each Area should show:
 - search and sorting.
 
 The layout may scroll horizontally when all Areas do not fit.
-
----
-
-## Machines
-
-Machines is the management view for Machine lifecycle, maintenance, and asset identification — production master data managed by authorized production roles (§20), grouped under Management alongside Area Board, Tracking, Work Orders, Planned Routes, and Priority. Running and idle are derived from assigned quantity; maintenance is the only state set by hand (§8.6).
-
-It must provide:
-
-- a table of active Machines: identity (display name and Area), derived operational state with the elapsed time in state, currently assigned PN portions with quantities, and asset metadata (asset tag, manufacturer, model),
-- per-Machine actions: start maintenance (optional note, optional expected return date), clear maintenance, edit, and retire,
-- a separate Retired Machines table: name, `Retired on YYYY-MM-DD`, asset metadata, notes — historical display and reporting only, with no actions,
-- a New Machine / Edit Machine dialog: display name and barcode value (both required; barcode unique), Area (selectable for a new Machine, fixed for an existing one — §8.6), and optional manufacturer, model, asset tag, serial number, installed date, and notes,
-- retirement blocked while active quantity is assigned, with the quantity completing or transferring through the normal production workflow first,
-- replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and new barcode; the display name may be reused.
-
-Machine management stays focused on lifecycle, maintenance, and asset identification. PartFlow is not a CMMS: no spare parts, maintenance schedules, service contracts, or cost accounting.
 
 ---
 
@@ -1848,23 +1803,6 @@ Work Order Intake must not grow into ERP-style customer, pricing, invoicing, shi
 
 ---
 
-## Planned Routes
-
-Planned Routes is the management view for reusable route definitions (`RouteTemplate`, §8.8) — production master data managed by authorized production roles (§20) within the Management grouping. The name keeps templates clearly apart from the Floating actual route traces shown in Tracking.
-
-It must provide:
-
-- a searchable list of route templates: name and description, the compact ordered Area step sequence, status — Active (with updated date) or Archived (with archived date, visually quiet),
-- usage per template: the Quantity Flows released with it (flow id, PN, released date), or `Never used`,
-- actions: edit, duplicate, and archive for ever-used templates; delete only for never-used templates; archived templates offer only duplicate,
-- a create/edit dialog: name, description, and ordered steps (Area, Operation, advisory expected duration, optional preferred Machine, optional instructions) with explicit reordering and step add/remove,
-- an explicit note when editing a used template: changes apply to future assignments only; already released Quantity Flows keep their Assigned Route snapshots, and an in-production Assigned Route is changed separately in its own audited workflow with a reason (Tracking → Edit assigned Route),
-- archived templates visible in historical context but never offered for new route assignments.
-
-There is no separate template-versioning system — Assigned Route snapshots preserve historical definitions, and Planned Routes guide production without ever replacing or rewriting actual Movement history.
-
----
-
 ## Priority Management
 
 Priority belongs to Work Order Demand.
@@ -1888,24 +1826,23 @@ Multiple Work Orders requesting the same PN may have different priorities.
 
 ## Administration
 
-Administration stays focused on system administration:
+Administration includes:
 
 - Departments,
 - Areas,
 - Operations,
-- Scan Stations,
+- Machines,
 - Workers,
 - PartNumber maintenance (archive/soft-delete, separate explicit purge — §28 Administrative Archival and Purge),
 - users,
 - roles,
 - permissions,
+- Route Templates,
 - barcode configuration,
 - scan behavior,
 - Worker policies,
 - history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
 - application settings.
-
-Machines and Route Templates are not Administration screens: they are production master data managed permission-based in Management → Machines and Management → Planned Routes (§20) with no duplicate Administration screens. Machines remain part of the minimum environment setup prerequisite — configured through Management → Machines before real production runs.
 
 Administrative workflows must remain separate from normal production scanning; retention settings belong in Administration/configuration, never in production workflow logic.
 
@@ -2163,8 +2100,6 @@ The initial release should support:
 - Area Board,
 - Manager Summary,
 - Tracking,
-- Machines management,
-- Planned Routes management,
 - immutable Movement history,
 - Undo,
 - role-based authorization.

@@ -123,13 +123,11 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     label: 'Operations',
     subtitle: 'Work performed within an Area (§8.5)',
   },
-  {
-    id: 'machines',
-    phase: 'minimum',
-    group: 'Organization',
-    label: 'Machines',
-    subtitle: 'Machines available per Area',
-  },
+  // Machines and Planned Routes (Route Templates) are production
+  // master data owned by authorized production roles — they live in
+  // Management → Machines / Planned Routes, never as a duplicate
+  // Administration screen. Administration stays focused on system
+  // administration (users, roles, Scan Stations, policies).
   {
     id: 'workers',
     phase: 'full',
@@ -151,13 +149,6 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     group: 'Production setup',
     label: 'Scan Stations',
     subtitle: 'Stations bound to one Area — Station ID and active status',
-  },
-  {
-    id: 'route-templates',
-    phase: 'full',
-    group: 'Production setup',
-    label: 'Route Templates',
-    subtitle: 'Reusable production routes',
   },
   {
     id: 'barcode-configuration',

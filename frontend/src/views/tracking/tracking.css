@@ -7,24 +7,14 @@
   flex: 1 0 auto;
 }
 
+/* The results table always owns the full view width — the detail
+   panel floats above it (below), so opening/closing a selection never
+   resizes or reflows the table. */
 .tk-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 520px;
+  grid-template-columns: minmax(0, 1fr);
   flex: 1 0 auto;
   background: var(--bg);
-}
-
-/* No selected PN → the detail panel is not rendered and no empty
-   column is reserved: the Tracking table expands into the released
-   space. */
-.tk-wrap.noselect {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-@media (max-width: 1200px) {
-  .tk-wrap {
-    grid-template-columns: 1fr;
-  }
 }
 
 .tk-left {
@@ -98,12 +88,26 @@
   border-bottom: none;
 }
 
+/* The whole result row is the pointer target for selection. */
+.tk-table tbody tr.selrow {
+  cursor: pointer;
+}
+
 .tk-table tr.sel td {
   background: var(--info-surface-weak);
 }
 
 .tk-table tbody tr:hover td {
   background: var(--row-hover);
+}
+
+/* Keyboard selection stays on the PN-cell button: give its focus a
+   clearly visible row-scoped treatment instead of the browser default
+   outline hugging only the PN text. */
+.tk-table .rowbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 3px;
+  border-radius: 6px;
 }
 
 /* PN never wraps; the column sizes to fit it (§2.3) */
@@ -163,13 +167,41 @@
   font-family: var(--mono), monospace;
 }
 
+/* Modeless floating detail overlay: anchored to the lower right of
+   the viewport with its own scroll area, so long detail content
+   scrolls without disturbing the results list and the list stays
+   visible beside/behind it for comparison. Deliberately NOT a modal:
+   no backdrop, no focus trap — Escape and the close button dismiss
+   it, and it stacks below the navigation (z-index 100), dialogs (200)
+   and toasts (400). */
 .tk-right {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  width: min(520px, calc(100vw - 36px));
+  max-height: calc(100dvh - 150px);
   background: var(--panel);
-  border-left: 1px solid var(--border);
-  /* Subtle professional elevation lifts the panel off the table. */
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  /* Real elevation — the panel floats above the table. */
   box-shadow: var(--shadow);
   padding: 22px;
   overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* Narrower screens: the overlay spans the viewport width and keeps a
+   bounded height, still floating above the list instead of pushing
+   it aside. */
+@media (max-width: 900px) {
+  .tk-right {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    max-height: min(72dvh, calc(100dvh - 120px));
+  }
 }
 
 .tk-pnrow {

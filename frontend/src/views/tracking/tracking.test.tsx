@@ -120,24 +120,20 @@ test('the Movement history section stays read-only', () => {
   expect(section.querySelectorAll('button, a, input, select').length).toBe(0);
 });
 
-/* ============ Detail selection toggle and close (GUI v13) ============ */
+/* ==== Detail selection toggle and floating overlay (GUI v14) ==== */
 
-test('clicking the selected PN row again unselects it and releases the panel column', () => {
+test('clicking the selected PN row again unselects it and closes the overlay', () => {
   render(<TrackingView />);
 
   const row = document.querySelector('.tk-table .rowbtn') as HTMLElement;
   expect(row.getAttribute('aria-pressed')).toBe('true');
   expect(document.querySelector('.tk-right')).not.toBeNull();
-  expect(document.querySelector('.tk-wrap')?.className).not.toContain(
-    'noselect',
-  );
 
   fireEvent.click(row);
-  // Unselected: the detail panel is gone entirely — no reserved empty
-  // column — and the wrapper switches to the full-width layout.
+  // Unselected: the floating overlay is gone; the table itself never
+  // changed width (single-column layout in both states).
   expect(row.getAttribute('aria-pressed')).toBe('false');
   expect(document.querySelector('.tk-right')).toBeNull();
-  expect(document.querySelector('.tk-wrap')?.className).toContain('noselect');
 
   // Clicking again re-selects and re-opens the details.
   fireEvent.click(row);
@@ -145,7 +141,31 @@ test('clicking the selected PN row again unselects it and releases the panel col
   expect(document.querySelector('.tk-right')).not.toBeNull();
 });
 
-test('the detail panel closes through its accessible X button', () => {
+test('the whole result row is the click target — not only the PN text', () => {
+  render(<TrackingView />);
+
+  const firstRow = document.querySelector('.tk-table tbody tr') as HTMLElement;
+  const button = firstRow.querySelector('.rowbtn') as HTMLElement;
+  expect(firstRow.classList.contains('selrow')).toBe(true);
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+
+  // A click on a plain data cell (e.g. the quantity cell) toggles the
+  // same selection the keyboard-focusable PN button controls.
+  const qtyCell = firstRow.querySelectorAll('td')[3] as HTMLElement;
+  fireEvent.click(qtyCell);
+  expect(button.getAttribute('aria-pressed')).toBe('false');
+  expect(document.querySelector('.tk-right')).toBeNull();
+
+  fireEvent.click(qtyCell);
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+
+  // No nested interactive controls inside a result row besides the one
+  // selection button — row clicks can never fight another control.
+  expect(firstRow.querySelectorAll('button, a, input, select').length).toBe(1);
+});
+
+test('the detail panel closes through its accessible X button and restores focus', () => {
   render(<TrackingView />);
 
   const close = screen.getByRole('button', { name: 'Close details' });
@@ -153,9 +173,24 @@ test('the detail panel closes through its accessible X button', () => {
   fireEvent.click(close);
 
   expect(document.querySelector('.tk-right')).toBeNull();
-  expect(
-    document.querySelector('.tk-table .rowbtn')?.getAttribute('aria-pressed'),
-  ).toBe('false');
+  const row = document.querySelector('.tk-table .rowbtn') as HTMLElement;
+  expect(row.getAttribute('aria-pressed')).toBe('false');
+  // Focus returns to the originating result row.
+  expect(row).toHaveFocus();
+});
+
+test('Escape closes the modeless overlay and restores focus to the row', () => {
+  render(<TrackingView />);
+
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+  fireEvent.keyDown(window, { key: 'Escape' });
+
+  expect(document.querySelector('.tk-right')).toBeNull();
+  expect(document.querySelector('.tk-table .rowbtn')).toHaveFocus();
+
+  // With nothing selected, Escape is inert.
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(document.querySelector('.tk-right')).toBeNull();
 });
 
 test('selecting a different PN keeps the panel open (with its empty-detail state)', () => {
@@ -175,7 +210,7 @@ test('selecting a different PN keeps the panel open (with its empty-detail state
   ).toBeInTheDocument();
 });
 
-test('the detail panel carries the subtle elevation in the stylesheet', async () => {
+test('the overlay panel floats above a fixed-width results layout', async () => {
   const { readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const { dirname, join } = await import('node:path');
@@ -183,6 +218,14 @@ test('the detail panel carries the subtle elevation in the stylesheet', async ()
     join(dirname(fileURLToPath(import.meta.url)), 'tracking.css'),
     'utf8',
   );
+  // Modeless floating overlay: fixed positioning, own scrolling,
+  // elevation — and the wrapper keeps ONE grid column in every state,
+  // so opening/closing the panel can never reflow the results table.
+  expect(css).toMatch(/\.tk-right \{[^}]*position: fixed/);
+  expect(css).toMatch(/\.tk-right \{[^}]*overflow: auto/);
   expect(css).toMatch(/\.tk-right \{[^}]*box-shadow: var\(--shadow\)/);
-  expect(css).toMatch(/\.tk-wrap\.noselect \{[^}]*grid-template-columns/);
+  expect(css).toMatch(
+    /\.tk-wrap \{[^}]*grid-template-columns: minmax\(0, 1fr\);/,
+  );
+  expect(css).not.toContain('noselect');
 });
