@@ -246,8 +246,14 @@ export interface MockLocationRow {
   activity?: string;
   qty: number;
   state: 'machine' | 'queue' | 'processing' | 'done' | 'stocked';
-  time: string;
-  timeLong?: boolean;
+  /**
+   * ISO timestamp when this quantity portion entered its current
+   * position, or null when elapsed time does not apply (Stockroom).
+   * The board derives the displayed duration at render from this fixed
+   * timestamp plus the shared UI clock — a formatted duration is never
+   * stored, so no two views can disagree.
+   */
+  since: string | null;
 }
 
 export interface MockBoardRow {
@@ -263,12 +269,12 @@ export interface MockBoardRow {
   /**
    * ISO `YYYY-MM-DD` due date of the WO Demand, or null when the demand
    * has no due date — a missing due date is valid data, not an error.
+   * The countdown text and urgency class are DERIVED at render
+   * (views/dates `dueCountdown` + the shared UI clock), never stored.
    */
   due: string | null;
-  dueNote: string;
-  dueClass: DueClass | 'none';
-  totalDays: string;
-  /** Parent Work Order received date (ISO) — orders undated demands. */
+  /** Parent Work Order received date (ISO) — orders undated demands and
+   * backs the derived `Total Days` column. */
   received: string;
 }
 
@@ -288,14 +294,24 @@ export interface MockAreaCard {
   job: string;
   qty: number;
   machines: [string, number][];
-  due: string;
-  dueClass: DueClass | 'none';
-  timeInArea: string;
+  /**
+   * ISO `YYYY-MM-DD` due date of the WO Demand, or null when it has no
+   * due date. The countdown text and urgency class are DERIVED at
+   * render (views/dates `dueCountdown` + the shared UI clock).
+   */
+  due: string | null;
+  /**
+   * Verbatim status text replacing the derived due countdown where a
+   * countdown does not apply (e.g. the Stockroom `allocated 50/50`).
+   */
+  dueText?: string;
+  /**
+   * ISO timestamp when this PN presence entered the Area, or null when
+   * elapsed time does not apply (Stockroom). `Time in Area` and its
+   * sort order are DERIVED from it at render — never stored.
+   */
+  enteredAreaAt: string | null;
   hotRank?: number;
-  /** Days until due; null when the WO Demand has no due date. */
-  dueDays: number | null;
-  /** Sortable duration for `Sort: Time in Area` (mock-derived). */
-  timeInAreaMinutes: number;
   /** Parent Work Order received date (ISO) — orders undated demands. */
   received: string;
   /** Damaged quantity scrapped from this PN in this Area (mock). */
@@ -361,7 +377,6 @@ export interface MockWorkOrder {
    * a Work Order may be saved without a due date.
    */
   due: string | null;
-  dueClass: DueClass | '';
   status: 'Open' | 'Released' | 'Complete';
   /** True for internal Work Orders without an external number. */
   internal?: boolean;
@@ -383,10 +398,12 @@ export interface MockHotEntry {
   jobNumber: string | null;
   type: RequestType;
   figures: string[];
-  /** ISO `YYYY-MM-DD`, or null when the demand has no due date. */
+  /**
+   * ISO `YYYY-MM-DD`, or null when the demand has no due date. The
+   * countdown text and urgency class are DERIVED at render
+   * (views/dates `dueCountdown` + the shared UI clock), never stored.
+   */
   due: string | null;
-  dueNote: string;
-  dueClass: DueClass | 'none';
   /** PN barcode accepted by the add-to-Hot search field (mock only). */
   barcode?: string;
 }

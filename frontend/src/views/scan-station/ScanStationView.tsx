@@ -19,7 +19,8 @@ import {
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
 import { ConnectivityChip } from '../../components/ConnectivityChip';
-import { AreaDot } from '../../components/indicators';
+import { DevNotice } from '../../components/DevNotice';
+import { AreaDot, RouteModeChip, TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
@@ -43,6 +44,7 @@ import {
 import { catalogPartNumber } from '../../mocks/work-orders';
 import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
+import { formatIsoDate, todayIso } from '../dates';
 import type {
   MockAreaCard,
   MockCompletedAction,
@@ -329,8 +331,13 @@ function StationView({
 
   const focusScan = useCallback(() => {
     // §3.1 focus discipline: the barcode input regains focus after every
-    // completed operation and dialog close.
-    setTimeout(() => inputRef.current?.focus(), 30);
+    // completed operation and dialog close. The delayed refocus must
+    // never pull focus out of a dialog that opened in the meantime —
+    // the dialog owns ENTER/ESC/TAB until it closes.
+    setTimeout(() => {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      inputRef.current?.focus();
+    }, 30);
   }, []);
 
   useEffect(() => {
@@ -481,12 +488,16 @@ function StationView({
     }
     const raw = input.value;
     input.value = '';
-    focusScan();
+    // Refocus only in the branches that stay on the scan surface — the
+    // branches that open a dialog must leave focus to the dialog (the
+    // input regains focus through closeFlow/cancelFlow afterwards).
     const parsed = parseScan(raw);
     switch (parsed.kind) {
       case 'empty':
+        focusScan();
         return;
       case 'scrap':
+        focusScan();
         setNotice({
           kind: 'err',
           icon: '✕',
@@ -496,6 +507,7 @@ function StationView({
         });
         return;
       case 'worker': {
+        focusScan();
         const name = MOCK_WORKER_BARCODES[parsed.id];
         if (!name) {
           setNotice({
@@ -520,6 +532,7 @@ function StationView({
       case 'machine': {
         const machine = MOCK_MACHINE_BARCODES[parsed.id];
         if (!machine) {
+          focusScan();
           setNotice({
             kind: 'err',
             icon: '✕',
@@ -529,6 +542,7 @@ function StationView({
           return;
         }
         if (machine.area !== station.area) {
+          focusScan();
           setNotice({
             kind: 'err',
             icon: '✕',
@@ -540,6 +554,7 @@ function StationView({
         }
         const status = machines.find((m) => m.name === machine.machine)?.status;
         if (status === 'maintenance') {
+          focusScan();
           setNotice({
             kind: 'err',
             icon: '✕',
@@ -558,6 +573,7 @@ function StationView({
         return;
       }
       case 'area':
+        focusScan();
         setNotice({
           kind: 'err',
           icon: '✕',
@@ -566,9 +582,11 @@ function StationView({
         });
         return;
       case 'pn':
+        // Every PN resolution opens a dialog — no refocus here.
         openPnFlow(parsed.pn);
         return;
       case 'unknown':
+        focusScan();
         setNotice({
           kind: 'err',
           icon: '✕',
@@ -814,10 +832,12 @@ function StationView({
             Dark/Light mode control move next to the Worker Session
             pill — connectivity must stay visible and the theme must
             stay reachable. Standard mode keeps both in the top
-            navigation. The shared `.ss-headgroup` wrapper stretches
-            both children to one height (v15): the ONLINE chip's top
-            edge aligns with the pill's top border and the theme
-            control never sits below the pill's bottom border — no
+            navigation. Inside the shared `.ss-headgroup` wrapper the
+            Worker Session pill keeps its NATURAL height and drives the
+            group height; the actions column stretches to that height
+            and distributes its two compact controls inside it — the
+            ONLINE chip's top aligns with the pill's top edge, the
+            theme control's bottom with the pill's bottom edge. No
             enclosing frame and no separator around the actions. */}
         {productionMode ? (
           <div className="ss-headgroup">
@@ -877,11 +897,11 @@ function StationView({
                 ⌨ Enter PN manually
               </button>
             </div>
-            {/* Development-only demo barcodes: this hint ships only in
-                the dev build (the whole mock view is excluded from
-                production bundles — see app/dev-views.ts and the
-                mock-sentinel build check). */}
-            <div className="ss-hint">
+            {/* Development-only demo barcodes: the shared DevNotice
+                renders only in the dev build (the whole mock view is
+                also excluded from production bundles — see
+                app/dev-views.ts and the mock-sentinel build check). */}
+            <DevNotice>
               Demo barcodes (development build only) —{' '}
               <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
               <code>PF:PN:2027-60-8114-00</code> in this Area ·{' '}
@@ -889,7 +909,7 @@ function StationView({
               <code>PF:PN:NEW-PART-01</code> unknown → intake) ·{' '}
               <code>PF:MACHINE:L2</code> assign to Machine ·{' '}
               <code>PF:WORKER:88</code> worker
-            </div>
+            </DevNotice>
             <div className="ss-manualcap">
               Manual PN entry is the fallback when the scanner is unavailable —
               any non-empty PN value is validated exactly like a scan; raw PN
@@ -1575,7 +1595,7 @@ function MachineAssignDialog({
       return;
     }
     setScanError(
-      'Only a Machine barcode of this Area or a queued PN barcode selects here — selection unchanged, nothing recorded.',
+      'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
     );
   }
 
@@ -1653,13 +1673,24 @@ function MachineAssignDialog({
             placeholder="Scan Machine or queued PN barcode… (ENTER)"
             aria-label="Scan Machine or queued PN barcode"
             onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                handleSelectScan(e.currentTarget.value);
+              if (e.key !== 'Enter') return;
+              // One Enter has exactly one meaning: a filled input is a
+              // selection scan, an empty input advances once the
+              // Machine + PN pair is selected. Consuming the event in
+              // every case keeps the dialog-level handler from acting
+              // on the same keypress (never scan AND advance at once).
+              e.preventDefault();
+              e.stopPropagation();
+              const value = e.currentTarget.value;
+              if (value) {
+                handleSelectScan(value);
                 e.currentTarget.value = '';
+                return;
               }
+              if (pairSelected) goQty();
             }}
           />
-          {scanError ? <div className="ss-scannote">{scanError}</div> : null}
+          {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
           <div className="ss-dlgrid">
             <span className="lbl" id="ma-machine-lbl">
               Machine
@@ -2327,13 +2358,13 @@ function IntakeDialog({
       action: {
         pn,
         movements: ['RECEIVED'],
-        description: `intake into ${areaName}${hasMachines ? ' queue' : ''} · qty ${parsedQty} · ${requestType} · ${routeMode}`,
+        description: `received into ${areaName}${hasMachines ? ' queue' : ''} · qty ${parsedQty} · ${requestType} · ${routeMode}`,
         qty: parsedQty,
         source: '—',
         destination: areaName,
         worker,
         time: MOCK_SCAN_TIME,
-        reversalEffect: `Removes the ${parsedQty} pcs introduced by this intake.`,
+        reversalEffect: `Removes the ${parsedQty} received pcs again.`,
       },
       update: (cards) =>
         applyIntroduce(cards, {
@@ -2343,8 +2374,8 @@ function IntakeDialog({
           hasMachines,
           workOrder: `WO — · ${operation.split(' — ')[1] ?? operation} · ${requestType}`,
           job: '— (internal)',
-          due: due || 'No due date',
-          received: '2026-07-31',
+          due: due || null,
+          received: todayIso(),
         }),
     });
     onNotice({
@@ -2375,12 +2406,12 @@ function IntakeDialog({
 
   return (
     <ModalDialog
-      label="Receive quantity — intake"
+      label="Receive Quantity"
       onClose={onCancel}
       size="wide"
       onKeyDown={keys}
     >
-      <h3>Receive quantity — intake</h3>
+      <h3>Receive Quantity</h3>
       {step === 'settings' ? (
         <div>
           <div className="big mono" title={pn}>
@@ -2396,23 +2427,30 @@ function IntakeDialog({
               then the intake settings — never one merged paragraph. */}
           <div className="sub">
             {isKnown ? (
-              <>This PN has no active Work Order Demand.</>
+              <>
+                This PN has no active Work Order Demand. Review the production
+                details below before continuing.
+              </>
             ) : (
               <>
-                New PN — not registered yet. Check the value carefully:
-                confirming this intake registers the PN exactly as shown.
+                New PN — not registered yet. Verify the Part Number carefully.
+                It will be registered when the receipt is confirmed.
               </>
             )}
           </div>
           <StepRecap
             lines={[
-              <>Work Order: {woBehavior}.</>,
-              <>Received date: taken from this scan · Due date: optional.</>,
+              <>
+                MODIFY and FLOATING are selected by default and can be changed.
+              </>,
+              <>
+                The received date is recorded from this scan; the due date is
+                optional. Enter the received quantity in the next step.
+              </>,
             ]}
           />
           <Guidance>
-            The quantity to receive is entered on the next step — nothing is
-            recorded until the final confirmation.
+            No changes are recorded until you review and confirm the final step.
           </Guidance>
           <div className="ss-dlgrid">
             <label htmlFor="in-type">Request Type</label>
@@ -2469,7 +2507,7 @@ function IntakeDialog({
             <input
               id="in-notes"
               value={notes}
-              placeholder="optional for MODIFY intake"
+              placeholder="optional for a MODIFY receipt"
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
@@ -2488,23 +2526,28 @@ function IntakeDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
-          {/* v15: the same compact two-line recap shape as the
-              Transfer / Assign to Machine quantity steps — selections
-              on one line, demand context on the other. */}
+          {/* Compact two-line recap: the shared Request Type and Route
+              Mode chips (the route name lives inside the Route Mode
+              chip) on one line, the Work Order context on the other.
+              WO/Due values carry text emphasis only (.rval) — the WO
+              Number is `—` in every case here: MODIFY stays internal
+              (new or reused) and a NEW request has no external number
+              known at this step. */}
           <StepRecap
             lines={[
               <>
-                <EntityChip>{requestType}</EntityChip>{' '}
-                <EntityChip>{routeMode}</EntityChip>
-                {routeMode === 'PLANNED' ? (
-                  <> · “{plannedRoute}”</>
-                ) : null} · <EntityChip>{operation}</EntityChip>
+                <TypeChip type={requestType} />{' '}
+                <RouteModeChip
+                  mode={routeMode}
+                  detail={
+                    routeMode === 'PLANNED' ? plannedRoute : 'actual trace'
+                  }
+                />{' '}
+                · <EntityChip>{operation}</EntityChip>
               </>,
               <>
-                {reusableInternalWo || requestType === 'MODIFY'
-                  ? 'Internal WO —'
-                  : 'Work Order to be created/selected'}{' '}
-                · Due: {due || '—'}
+                WO <b className="rval">—</b> · Due:{' '}
+                <b className="rval">{formatIsoDate(due || null)}</b>
                 {notes ? <> · Notes: {notes}</> : null}
               </>,
             ]}
@@ -2533,23 +2576,30 @@ function IntakeDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
-          <div className="sub">Review the intake, then confirm.</div>
+          <div className="sub">Review the receipt, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Receive quantity — intake', 'primary'],
+              ['Action', 'Receive Quantity', 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
                 <span className="mono">{parsedQty} pcs</span>,
                 'primary',
               ],
-              ['Request Type', <EntityChip>{requestType}</EntityChip>],
-              ['Route Mode', <EntityChip>{routeMode}</EntityChip>],
-              routeMode === 'PLANNED'
-                ? ['Planned Route', plannedRoute]
-                : ['Planned Route', null],
+              ['Request Type', <TypeChip type={requestType} />],
+              [
+                'Route Mode',
+                // The route name lives inside the chip — no separate
+                // Planned Route row.
+                <RouteModeChip
+                  mode={routeMode}
+                  detail={
+                    routeMode === 'PLANNED' ? plannedRoute : 'actual trace'
+                  }
+                />,
+              ],
               ['Work Order', woBehavior],
-              ['Due date', due || '—'],
+              ['Due date', formatIsoDate(due || null)],
               [
                 'Starting Area · Operation',
                 <EntityChip>{operation}</EntityChip>,
@@ -2574,7 +2624,7 @@ function IntakeDialog({
             onBack={() => setStep('qty')}
             onCancel={onCancel}
             primary={{
-              label: 'Confirm intake',
+              label: 'Confirm receipt',
               onClick: confirm,
               disabled: !valid,
               autoFocus: true,
@@ -2629,8 +2679,8 @@ function AddQuantityDialog({
           hasMachines,
           workOrder: 'WO — · Addition',
           job: '— (internal)',
-          due: 'No due date',
-          received: '2026-07-31',
+          due: null,
+          received: todayIso(),
         }),
     });
     onNotice({
@@ -2815,8 +2865,8 @@ function RepairDialog({
           hasMachines: (MOCK_AREA_MACHINES[station.area] ?? []).length > 0,
           workOrder: 'WO — · Repair',
           job: '— (repair)',
-          due: 'No due date',
-          received: '2026-07-31',
+          due: null,
+          received: todayIso(),
         }),
     });
     onNotice({
@@ -3124,7 +3174,7 @@ function ScrapDialog({
               }
             }}
           />
-          {scanNote ? <div className="ss-scannote">{scanNote}</div> : null}
+          {scanNote ? <Guidance tone="error">{scanNote}</Guidance> : null}
           <label className="ss-reasonlbl" htmlFor="scrap-reason">
             Common scrap reason (required)
           </label>

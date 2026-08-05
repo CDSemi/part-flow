@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
+import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
@@ -443,6 +444,9 @@ function ActiveMachineRow({
 }) {
   const qty = assignments.reduce((s, a) => s + a.qty, 0);
   const status = effectiveMachineStatus(machine, qty);
+  // Shared minute clock: the state age keeps ticking while the table
+  // stays open and matches the monitoring cards on every other view.
+  const now = useUiClock('minute');
   return (
     // The COMPLETE row opens Edit Machine (v15): the name-cell button
     // is the keyboard (Enter/Space) and screen-reader entry point and
@@ -459,7 +463,7 @@ function ActiveMachineRow({
         <span className={`mg-state ${status}`}>
           {MACHINE_STATE_LABEL[status]}{' '}
           <span className="age">
-            · {formatStateAge(machine.stateChangedAt)}
+            · {formatStateAge(machine.stateChangedAt, now)}
           </span>
         </span>
         {machine.maintenance ? (

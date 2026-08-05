@@ -1,7 +1,11 @@
 import type { MockHotEntry } from '../views/view-models';
+import { isoDateIn } from './mock-time';
 
 // Due dates are ISO `YYYY-MM-DD` or null (a Hot WO Demand may have no
 // due date — Hot rank stays the highest ordering criterion regardless).
+// Authored as relative offsets (mock-time.ts) resolved once at load;
+// the countdown text and urgency class are DERIVED at render through
+// the shared UI clock — never stored.
 export const MOCK_HOT_LIST: MockHotEntry[] = [
   {
     pn: '2027-60-8114-00',
@@ -15,9 +19,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
       'shortage 10',
       'at Cut 4 · Lathe 6',
     ],
-    due: '2026-07-24',
-    dueNote: '2 days left',
-    dueClass: 'soon',
+    due: isoDateIn(2),
   },
   {
     pn: '142-260',
@@ -26,9 +28,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
     jobNumber: '18031',
     type: 'NEW',
     figures: ['requested 20', 'allocated 0', 'shortage 20', 'at External 20'],
-    due: '2026-07-16',
-    dueNote: 'overdue 6 days',
-    dueClass: 'late',
+    due: isoDateIn(-6),
   },
   {
     pn: '309-127',
@@ -37,9 +37,7 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
     jobNumber: '18355',
     type: 'MODIFY',
     figures: ['requested 12', 'allocated 0', 'shortage 12', 'not yet released'],
-    due: '2026-07-25',
-    dueNote: '3 days left',
-    dueClass: 'soon',
+    due: isoDateIn(3),
   },
 ];
 
@@ -56,9 +54,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
       'shortage 12',
       'at Material 8 · Lathe 4',
     ],
-    due: '2026-07-31',
-    dueNote: '9 days left',
-    dueClass: 'ok',
+    due: isoDateIn(9),
     barcode: 'PF:PN:0455-20-0118-03',
   },
   {
@@ -73,9 +69,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
       'shortage 6',
       'at Mill 3 · Deburr 3',
     ],
-    due: '2026-08-07',
-    dueNote: '16 days left',
-    dueClass: 'ok',
+    due: isoDateIn(16),
     barcode: 'PF:PN:78-04-0031',
   },
   {
@@ -88,8 +82,6 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     type: 'NEW',
     figures: ['requested 4', 'allocated 0', 'shortage 4', 'at Manual 4'],
     due: null,
-    dueNote: 'No due date',
-    dueClass: 'none',
     barcode: 'PF:PN:118-052',
   },
   {
@@ -101,9 +93,7 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
     jobNumber: null,
     type: 'MODIFY',
     figures: ['requested 2', 'allocated 0', 'shortage 2', 'at Lathe queue 2'],
-    due: '2026-07-21',
-    dueNote: 'overdue 1 day',
-    dueClass: 'late',
+    due: isoDateIn(-1),
     barcode: 'PF:PN:214-406',
   },
 ];

@@ -1,9 +1,14 @@
 import type { MockBoardRow } from '../views/view-models';
+import { isoDateIn, minutesAgoIso } from './mock-time';
 
 // Due dates are ISO `YYYY-MM-DD` or null (a WO Demand may have no due
 // date); `received` is the parent Work Order received date that orders
 // undated demands. The view sorts rows with the canonical demand order
-// (Hot rank → earliest due date → undated by received date).
+// (Hot rank → earliest due date → undated by received date). Dates and
+// position-entry timestamps are authored as relative offsets
+// (mock-time.ts) resolved once at load into fixed data; the countdown
+// text, `Total Days`, and per-location durations are DERIVED at render
+// through the shared UI clock — never stored.
 //
 // Location rows use the explicit presentation model: `label` is always
 // the Area name alone (`External`, never `External — Plating`),
@@ -24,7 +29,7 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         machine: 'Saw 1',
         qty: 4,
         state: 'machine',
-        time: '3h 40m',
+        since: minutesAgoIso(220),
       },
       // Lathe mirror of the Area Board card: 3 pcs turning on Lathe 3,
       // 2 pcs queued, 1 pc finished at the Area (completed by Lathe 3,
@@ -35,16 +40,22 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         machine: 'Lathe 3',
         qty: 3,
         state: 'machine',
-        time: '2h 05m',
+        since: minutesAgoIso(125),
       },
-      { area: 'lathe', label: 'Lathe', qty: 2, state: 'queue', time: '1h 10m' },
+      {
+        area: 'lathe',
+        label: 'Lathe',
+        qty: 2,
+        state: 'queue',
+        since: minutesAgoIso(70),
+      },
       {
         area: 'lathe',
         label: 'Lathe',
         machine: 'Lathe 3',
         qty: 1,
         state: 'done',
-        time: '25m',
+        since: minutesAgoIso(25),
       },
     ],
     total: 10,
@@ -53,11 +64,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       { job: '18112', meta: '· WO 007001 · 10 pcs' },
       { job: '18240', meta: '· WO 007008 · 5 pcs queued' },
     ],
-    due: '2026-07-24',
-    dueNote: '2 days left',
-    dueClass: 'soon',
-    totalDays: '10 d',
-    received: '2026-07-12',
+    due: isoDateIn(2),
+    received: isoDateIn(-10),
   },
   {
     pn: '142-260',
@@ -70,18 +78,14 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         activity: 'plating',
         qty: 20,
         state: 'processing',
-        time: '4d 02h',
-        timeLong: true,
+        since: minutesAgoIso(5880),
       },
     ],
     total: 20,
     scrapped: 2,
     jobs: [{ job: '18031', meta: '· WO 007005 · 20 pcs' }],
-    due: '2026-07-16',
-    dueNote: 'overdue 6 days',
-    dueClass: 'late',
-    totalDays: '18 d',
-    received: '2026-07-06',
+    due: isoDateIn(-6),
+    received: isoDateIn(-18),
   },
   {
     pn: '0123-40-0007-22',
@@ -93,16 +97,13 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         activity: 'vendor',
         qty: 12,
         state: 'processing',
-        time: '1d 06h',
+        since: minutesAgoIso(1800),
       },
     ],
     total: 12,
     jobs: [{ job: '18377', meta: '· WO 007007 · 12 pcs' }],
-    due: '2026-08-03',
-    dueNote: '9 days left',
-    dueClass: 'ok',
-    totalDays: '3 d',
-    received: '2026-07-18',
+    due: isoDateIn(9),
+    received: isoDateIn(-3),
   },
   {
     pn: '0455-20-0118-03',
@@ -113,7 +114,7 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         label: 'Material',
         qty: 8,
         state: 'processing',
-        time: '2d 01h',
+        since: minutesAgoIso(2941),
       },
       {
         area: 'lathe',
@@ -121,16 +122,13 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         machine: 'Lathe 2',
         qty: 4,
         state: 'machine',
-        time: '1h 05m',
+        since: minutesAgoIso(65),
       },
     ],
     total: 12,
     jobs: [{ job: '18190', meta: '· WO 007003 · 12 pcs' }],
-    due: '2026-07-31',
-    dueNote: '9 days left',
-    dueClass: 'ok',
-    totalDays: '6 d',
-    received: '2026-07-12',
+    due: isoDateIn(9),
+    received: isoDateIn(-6),
   },
   {
     pn: '78-04-0031',
@@ -142,11 +140,17 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         machine: 'Mill 1',
         qty: 3,
         state: 'machine',
-        time: '45m',
+        since: minutesAgoIso(45),
       },
       // Finished in a no-Machine Area: deburring completed for the
       // whole portion — waiting on the finished rack, no `machine`.
-      { area: 'deburr', label: 'Deburr', qty: 3, state: 'done', time: '30m' },
+      {
+        area: 'deburr',
+        label: 'Deburr',
+        qty: 3,
+        state: 'done',
+        since: minutesAgoIso(30),
+      },
     ],
     total: 6,
     jobs: [
@@ -154,11 +158,8 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
       // Internal MODIFY demand without an external WO Number → `—`.
       { job: '—', meta: '· WO — · MODIFY · 1 pc' },
     ],
-    due: '2026-08-07',
-    dueNote: '16 days left',
-    dueClass: 'ok',
-    totalDays: '4 d',
-    received: '2026-07-14',
+    due: isoDateIn(16),
+    received: isoDateIn(-4),
   },
   {
     // WO Demand without a due date: valid data — sorts after all dated
@@ -171,16 +172,13 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         label: 'Manual',
         qty: 4,
         state: 'processing',
-        time: '5h 20m',
+        since: minutesAgoIso(320),
       },
     ],
     total: 4,
     jobs: [{ job: '18520', meta: '· WO 007011 · 4 pcs' }],
     due: null,
-    dueNote: 'No due date',
-    dueClass: 'none',
-    totalDays: '2 d',
-    received: '2026-07-19',
+    received: isoDateIn(-2),
   },
   {
     pn: '309-127',
@@ -191,17 +189,14 @@ export const MOCK_BOARD_ROWS: MockBoardRow[] = [
         label: 'Stockroom',
         qty: 50,
         state: 'stocked',
-        time: '—',
+        since: null,
       },
     ],
     total: 50,
     totalStocked: true,
     jobs: [{ job: '17740', meta: '· WO 006996 · allocated 50/50' }],
-    due: '2026-07-10',
-    dueNote: '✓ stocked',
-    dueClass: 'none',
-    totalDays: '12 d',
-    received: '2026-06-18',
+    due: isoDateIn(-12),
+    received: isoDateIn(-34),
   },
 ];
 
@@ -222,15 +217,14 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
         machine: 'Mill 3 — Horizontal Boring',
         qty: 2,
         state: 'machine',
-        time: '1h 20m',
+        since: minutesAgoIso(80),
       },
       {
         area: 'deburr',
         label: 'Deburr',
         qty: 6,
         state: 'processing',
-        time: '5d 11h',
-        timeLong: true,
+        since: minutesAgoIso(7860),
       },
     ],
     total: 8,
@@ -240,11 +234,8 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
         meta: '· WO 007008-SUPPLEMENTAL-B · 8 pcs',
       },
     ],
-    due: '2026-07-25',
-    dueNote: '1 day left',
-    dueClass: 'soon',
-    totalDays: '21 d',
-    received: '2026-07-04',
+    due: isoDateIn(1),
+    received: isoDateIn(-21),
   },
   ...Array.from({ length: 24 }, (_, i): MockBoardRow => {
     const n = i + 1;
@@ -257,7 +248,7 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
           label: n % 2 === 0 ? 'Lathe' : 'Mill',
           qty: (n % 7) + 1,
           state: 'queue',
-          time: `${(n % 9) + 1}h 0${n % 6}m`,
+          since: minutesAgoIso(((n % 9) + 1) * 60 + (n % 6)),
         },
       ],
       total: (n % 7) + 1,
@@ -269,14 +260,8 @@ export const MOCK_BOARD_ROWS_LONG: MockBoardRow[] = [
       ],
       // Every fourth generated demand has no due date so the long list
       // also exercises the dated-first / undated-by-received ordering.
-      due:
-        n % 4 === 0
-          ? null
-          : `2026-08-${String((n % 14) + 15).padStart(2, '0')}`,
-      dueNote: n % 4 === 0 ? 'No due date' : `${(n % 20) + 4} days left`,
-      dueClass: n % 4 === 0 ? 'none' : 'ok',
-      totalDays: `${(n % 12) + 1} d`,
-      received: `2026-07-${String((n % 20) + 1).padStart(2, '0')}`,
+      due: n % 4 === 0 ? null : isoDateIn((n % 20) + 4),
+      received: isoDateIn(-((n % 12) + 1 + (n % 20))),
     };
   }),
 ];

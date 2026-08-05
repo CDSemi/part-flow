@@ -572,21 +572,11 @@
   margin-top: 5px;
 }
 
-/* Route mode badge: PLANNED snapshot vs FLOATING actual trace */
-.qflow .qf-mode {
-  font-family: var(--mono), monospace;
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 0.4px;
-  border-radius: 6px;
-  padding: 2px 8px;
-  background: var(--chip);
-  color: var(--muted);
-}
-
-.qflow .qf-mode.floating {
-  background: var(--info-surface);
-  color: var(--info-t);
+/* Route mode badge: the shared RouteModeChip (styles/global.css)
+   carries the surface; here it only stays a non-shrinking flex item
+   inside the flow head. */
+.qflow .routechip {
+  flex: none;
 }
 
 /* Explicit Repair marker on a route-trace step */

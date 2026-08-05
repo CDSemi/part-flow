@@ -1,4 +1,5 @@
 import type { MockMachine } from '../views/view-models';
+import { minutesAgoIso } from './mock-time';
 
 // Machine registry (development mock): the single source for Machine
 // identity, lifecycle, maintenance overrides, and asset metadata.
@@ -13,8 +14,9 @@ import type { MockMachine } from '../views/view-models';
 // the replacement is a NEW record with its own identity and barcode
 // that reuses the familiar floor-position display name.
 
-const minutesAgo = (minutes: number): string =>
-  new Date(Date.now() - minutes * 60_000).toISOString();
+// Anchored through the shared mock time source (mock-time.ts) so every
+// mock module resolves its relative offsets against ONE load anchor.
+const minutesAgo = minutesAgoIso;
 
 /**
  * Mock actor for management lifecycle changes (retire / reactivate).

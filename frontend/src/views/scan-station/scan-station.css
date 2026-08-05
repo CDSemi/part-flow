@@ -278,21 +278,8 @@
   opacity: 0.45;
 }
 
-.ss-hint {
-  margin-top: 11px;
-  font-size: 12.5px;
-  color: var(--faint);
-  line-height: 1.7;
-}
-
-.ss-hint code {
-  color: var(--muted);
-  font-family: var(--mono), monospace;
-  font-weight: 600;
-  background: var(--panel2);
-  border-radius: 5px;
-  padding: 1px 6px;
-}
+/* The demo-barcodes hint is the shared DevNotice component — styled
+   globally (.dev-notice in styles/global.css), no local rules. */
 
 /* Manual PN entry — the secondary action inside the scan row itself:
    visibly secondary to scanning (panel surface, no accent fill) but
@@ -861,6 +848,14 @@
   color: var(--text);
 }
 
+/* Emphasized VALUE inside a recap line (e.g. the WO Number and due
+   date in the receive wizard): text emphasis only — slightly stronger
+   weight and tone, never a badge and never an action color. */
+.ss-recap .rval {
+  font-weight: 750;
+  color: var(--text);
+}
+
 /* Subtle non-interactive chip for selected entities (Machine, Area,
    Operation, source, Route Mode) in recaps and confirmation
    summaries — a label, never a control: no action color, no hover. */
@@ -918,12 +913,9 @@
   color: var(--warn-t);
 }
 
-.ss-scannote {
-  margin-top: 8px;
-  font-size: 12.5px;
-  color: var(--err-t);
-  font-weight: 700;
-}
+/* In-dialog scan errors (Assign to Machine selection, Scrap counting)
+   share the Guidance error presentation (.ss-guide.error) — no
+   separate scan-note style. */
 
 /* Structured confirmation summary — the dedicated final wizard view
    (also the Undo confirmation): a two-column definition list, never a
@@ -1135,25 +1127,24 @@
    the header's card language (the same surface as the Area totals and
    the Worker Session pill), not unrelated stacked controls — the
    connectivity status on top with the Dark/Light control directly
-   beneath it (v15): the `.ss-headgroup` wrapper stretches the Worker
-   Session pill and the actions column to ONE shared height, so the
-   ONLINE chip's top edge aligns with the pill's top border and the
-   theme control never sits below the pill's bottom border. The
-   actions column itself carries no frame and no separator — the
-   ONLINE status keeps its own chip surface, the theme control stays a
-   quiet borderless button. */
+   beneath it (v16). Height contract: the Worker Session pill renders
+   at its NATURAL height (exactly like standard mode — it is never
+   stretched) and drives the group height; the actions column
+   stretches to the pill's height and space-between distributes its
+   two controls inside it, so the ONLINE chip's top aligns with the
+   pill's top edge and the theme control's bottom with the pill's
+   bottom edge. The actions column itself carries no frame and no
+   separator — the ONLINE status keeps its own chip surface, the
+   theme control stays a quiet borderless button. */
 .ss-head .ss-headgroup {
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   gap: 12px;
-}
-
-.ss-head .ss-headgroup .ss-pill {
-  align-self: stretch;
 }
 
 .ss-head .ss-headactions {
   flex: none;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1163,10 +1154,15 @@
 
 /* The chip keeps its own frame (app/shell.css) — one status chip, no
    surrounding group card. Its ONLINE/OFFLINE text and the shared
-   heartbeat dot stay untouched. */
+   heartbeat dot stay untouched. Reduced vertical padding (with the
+   theme control below) keeps the actions' combined natural height
+   BELOW the pill's natural height (~70px), so the actions can never
+   become the group's height driver. */
 .ss-headactions .connchip {
   justify-content: center;
   margin-right: 0;
+  min-height: 0;
+  padding: 4px 12px;
 }
 
 /* Compact theme control (shared ThemeToggle component, production
@@ -1193,14 +1189,14 @@
   background: var(--panel2);
 }
 
-/* Inside the header actions the theme control aligns its icon and
-   text with the ONLINE chip content (same horizontal padding) and
-   never extends below the Worker Session pill's bottom border (the
-   stretched group guarantees the shared height). */
+/* Inside the header actions the theme control centers its label and
+   keeps a compact vertical padding, so the chip + toggle pair always
+   fits within the Worker Session pill's natural height (the pill is
+   the height driver — see the group contract above). */
 .ss-headactions .themetoggle.compact {
   justify-content: center;
-  min-height: 34px;
-  padding: 6px 14px;
+  min-height: 0;
+  padding: 3px 12px;
   border-radius: 10px;
 }
 

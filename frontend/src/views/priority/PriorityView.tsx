@@ -11,7 +11,8 @@ import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
-import { formatIsoDateShort } from '../dates';
+import { useUiClock } from '../../components/ui-clock';
+import { dueCountdown, formatIsoDateShort } from '../dates';
 import type { MockHotEntry } from '../view-models';
 
 const hotKey = (h: MockHotEntry) => `${h.pn}|${h.workOrder}`;
@@ -136,6 +137,9 @@ export function PriorityView() {
   const [removeIndex, setRemoveIndex] = useState<number | null>(null);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingReorder | null>(null);
+  // Shared minute clock: due countdowns are derived at render from the
+  // fixed due dates and keep updating while the view stays open.
+  const now = useUiClock('minute');
 
   if (preview === 'loading') {
     return (
@@ -303,12 +307,17 @@ export function PriorityView() {
               </span>
               <span className="due">
                 <span>{formatIsoDateShort(entry.due)}</span>
-                <span
-                  className={`d2 ${entry.dueClass}`}
-                  style={{ display: 'block' }}
-                >
-                  {entry.dueNote}
-                </span>
+                {(() => {
+                  const dueInfo = dueCountdown(entry.due, now);
+                  return (
+                    <span
+                      className={`d2 ${dueInfo.dueClass}`}
+                      style={{ display: 'block' }}
+                    >
+                      {dueInfo.note}
+                    </span>
+                  );
+                })()}
               </span>
               <span className="movebtns">
                 <button
@@ -728,6 +737,7 @@ function HotAddDialog({
   onAdd: (candidate: MockHotEntry) => void;
 }) {
   const [query, setQuery] = useState('');
+  const now = useUiClock('minute');
   const q = query.trim().toLowerCase();
   const list = candidates.filter(
     (c) =>
@@ -780,11 +790,18 @@ function HotAddDialog({
               <span className="hpn">{c.pn}</span>
               <span className="hwo">{c.workOrder}</span>
               <TypeChip type={c.type} />
-              <span className={`hdue ${c.dueClass === 'late' ? 'late' : ''}`}>
-                {c.due
-                  ? `${formatIsoDateShort(c.due)} · ${c.dueNote}`
-                  : c.dueNote}
-              </span>
+              {(() => {
+                const dueInfo = dueCountdown(c.due, now);
+                return (
+                  <span
+                    className={`hdue ${dueInfo.dueClass === 'late' ? 'late' : ''}`}
+                  >
+                    {c.due
+                      ? `${formatIsoDateShort(c.due)} · ${dueInfo.note}`
+                      : dueInfo.note}
+                  </span>
+                );
+              })()}
             </button>
           ))
         ) : (

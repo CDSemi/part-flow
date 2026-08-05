@@ -8,6 +8,7 @@ import {
   directGroupLabel,
   FINISHED_GROUP_LABEL,
 } from '../views/area-monitoring';
+import { dueCountdown, formatElapsedSince } from '../views/dates';
 import { formatStateAge } from '../views/machine-state';
 import type { AreaAssignment } from '../views/area-monitoring';
 import type {
@@ -17,6 +18,7 @@ import type {
   MockAreaMachine,
 } from '../views/view-models';
 import { AreaDot, HotPn } from './indicators';
+import { useUiClock } from './ui-clock';
 
 // Shared Area / Machine monitoring components used by BOTH the Area
 // Board per-Area detail (read-only) and the Scan Station "In this Area
@@ -38,6 +40,24 @@ export function DueStatus({
   return (
     <span className={`mono ${dueClass === 'ok' ? '' : dueClass}`}>{due}</span>
   );
+}
+
+/**
+ * Derived due status of one Area presence card: the countdown text and
+ * urgency class come from the fixed due date plus the shared UI clock
+ * (views/dates `dueCountdown`); a card-level `dueText` (e.g. the
+ * Stockroom `allocated 50/50`) renders verbatim and neutral instead.
+ */
+function CardDueStatus({ card, now }: { card: MockAreaCard; now: number }) {
+  if (card.dueText) return <DueStatus due={card.dueText} dueClass="ok" />;
+  const { note, dueClass } = dueCountdown(card.due, now);
+  return <DueStatus due={note} dueClass={dueClass} />;
+}
+
+/** Derived `… in Area` text (null without an Area-entry timestamp). */
+function timeInArea(card: MockAreaCard, now: number): string | null {
+  if (!card.enteredAreaAt) return null;
+  return formatElapsedSince(card.enteredAreaAt, now);
 }
 
 /** Quantity with its `pcs` unit; the number stays its own element. */
@@ -103,9 +123,11 @@ export function AreaPnRow({
   /** Render the line-1 context chip (off inside a Machine card). */
   showContext?: boolean;
 }) {
+  const now = useUiClock('minute');
   const { card, context, qty, state } = entry;
   const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
   const status = inAreaStatusLabel(entry, directLabel);
+  const tia = timeInArea(card, now);
   const contextChip =
     state === 'finished' ? (
       <span className="ctx done">done</span>
@@ -128,15 +150,15 @@ export function AreaPnRow({
           <span className="mono wo" title={woJob}>
             {woJob}
           </span>
-          <DueStatus due={card.due} dueClass={card.dueClass} />
+          <CardDueStatus card={card} now={now} />
         </div>
-        {status || card.timeInArea !== '—' ? (
+        {status || tia !== null ? (
           <div className="r3">
             <span className={`st ${state === 'finished' ? 'done' : ''}`}>
               {status}
             </span>
-            {card.timeInArea !== '—' ? (
-              <span className="mono tia">{card.timeInArea} in Area</span>
+            {tia !== null ? (
+              <span className="mono tia">{tia} in Area</span>
             ) : null}
           </div>
         ) : null}
@@ -159,8 +181,10 @@ export function AreaPnRow({
  * overview and the detail views therefore cannot drift apart.
  */
 export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
+  const now = useUiClock('minute');
   const { assigned, queued, finished } = splitAssignments([card]);
   const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const tia = timeInArea(card, now);
   const portions: { key: string; label: string; done?: boolean }[] = [
     ...assigned.map((e) => ({
       key: `m-${e.context}`,
@@ -201,9 +225,9 @@ export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
           <span className="mono wo" title={woJob}>
             {woJob}
           </span>
-          <DueStatus due={card.due} dueClass={card.dueClass} />
+          <CardDueStatus card={card} now={now} />
         </div>
-        {portions.length > 0 || card.timeInArea !== '—' ? (
+        {portions.length > 0 || tia !== null ? (
           <div className="r3">
             <span className="ctxs">
               {portions.map((portion) => (
@@ -215,8 +239,8 @@ export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
                 </span>
               ))}
             </span>
-            {card.timeInArea !== '—' ? (
-              <span className="mono tia">{card.timeInArea} in Area</span>
+            {tia !== null ? (
+              <span className="mono tia">{tia} in Area</span>
             ) : null}
           </div>
         ) : null}
@@ -378,6 +402,7 @@ export function MachineMonitoringCard({
   entries: AreaAssignment[];
   rowAction?: (entry: AreaAssignment) => ReactNode;
 }) {
+  const now = useUiClock('minute');
   const totalQty = entries.reduce((s, e) => s + e.qty, 0);
   return (
     <div className={`abd-card abd-machine ${machine.status}`}>
@@ -387,7 +412,7 @@ export function MachineMonitoringCard({
           {MACHINE_STATUS_LABEL[machine.status]}
           <span className="mage">
             {' '}
-            · {formatStateAge(machine.stateChangedAt)}
+            · {formatStateAge(machine.stateChangedAt, now)}
           </span>
         </span>
       </div>

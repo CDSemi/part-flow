@@ -200,7 +200,6 @@ export function NewWorkOrderDialog({
       workOrderNumber: entered || null,
       received,
       due: due || null,
-      dueClass: '',
       status: 'Open',
       internal: entered ? undefined : true,
       preview: linesPreview(savedLines),

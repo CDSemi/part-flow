@@ -1,4 +1,4 @@
-import type { RequestType } from '../views/view-models';
+import type { RequestType, RouteMode } from '../views/view-models';
 
 /** Stable Area identity color dot (same color in both themes). */
 export function AreaDot({
@@ -49,4 +49,28 @@ export function HotPn({
 /** Request Type chip: NEW / MODIFY (canonical vocabulary). */
 export function TypeChip({ type }: { type: RequestType }) {
   return <span className={`typechip ${type.toLowerCase()}`}>{type}</span>;
+}
+
+/**
+ * Route Mode chip — the ONE presentation of a Quantity Flow's route
+ * mode everywhere it appears (Tracking flows, Scan Station receive
+ * recap/confirmation, …). Mode and route information live in the same
+ * chip, separated by an em dash: `FLOATING — actual trace`,
+ * `PLANNED — <route name>` (Tracking's flow history uses
+ * `PLANNED — snapshot`). The color follows the mode (styles/global.css)
+ * and the mode word stays in the text — color is never the only
+ * distinction.
+ */
+export function RouteModeChip({
+  mode,
+  detail,
+}: {
+  mode: RouteMode;
+  detail: string;
+}) {
+  return (
+    <span className={`routechip ${mode.toLowerCase()}`}>
+      {mode} — {detail}
+    </span>
+  );
 }

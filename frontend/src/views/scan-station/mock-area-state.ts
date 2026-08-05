@@ -208,11 +208,10 @@ export function applyTransferIn(
       qty: args.qty,
       machines: args.destinationHasMachines ? [['queue', args.qty]] : [],
       due: source.due,
-      dueClass: source.dueClass,
-      timeInArea: '0m',
+      // A transfer opens a NEW presence in the destination Area: its
+      // `Time in Area` starts now, derived from this fixed timestamp.
+      enteredAreaAt: new Date().toISOString(),
       hotRank: source.hotRank,
-      dueDays: source.dueDays,
-      timeInAreaMinutes: 0,
       received: source.received,
     });
   }
@@ -233,7 +232,8 @@ export function applyIntroduce(
     /** Row labels for a card created by an intake of a new PN. */
     workOrder: string;
     job: string;
-    due: string;
+    /** ISO `YYYY-MM-DD` due date, or null when none was given. */
+    due: string | null;
     received: string;
   },
 ): MockAreaCard[] {
@@ -251,10 +251,9 @@ export function applyIntroduce(
     qty: args.qty,
     machines: args.hasMachines ? [['queue', args.qty]] : [],
     due: args.due,
-    dueClass: args.due === 'No due date' ? 'none' : 'ok',
-    timeInArea: '0m',
-    dueDays: null,
-    timeInAreaMinutes: 0,
+    // Introduced quantity enters the Area now — the displayed
+    // `Time in Area` derives from this fixed timestamp.
+    enteredAreaAt: new Date().toISOString(),
     received: args.received,
   });
   return cards;

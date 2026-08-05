@@ -3,7 +3,12 @@ import './tracking.css';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
-import { AreaDot, HotPn, TypeChip } from '../../components/indicators';
+import {
+  AreaDot,
+  HotPn,
+  RouteModeChip,
+  TypeChip,
+} from '../../components/indicators';
 import {
   EmptyState,
   ErrorState,
@@ -413,11 +418,12 @@ function TrackingDetail({ onClose }: { onClose: () => void }) {
             <div className="qf-head">
               <span className="qf-id">{flow.id}</span>
               <span className="qf-q">{flow.qty} pcs</span>
-              <span className={`qf-mode ${flow.routeMode.toLowerCase()}`}>
-                {flow.routeMode === 'FLOATING'
-                  ? 'FLOATING — actual trace'
-                  : 'PLANNED — snapshot'}
-              </span>
+              <RouteModeChip
+                mode={flow.routeMode}
+                detail={
+                  flow.routeMode === 'FLOATING' ? 'actual trace' : 'snapshot'
+                }
+              />
               <span className="qf-pos">{flow.position}</span>
             </div>
             <div className="route">

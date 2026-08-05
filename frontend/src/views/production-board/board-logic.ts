@@ -21,6 +21,13 @@ export const FALLBACK_PAGE_SIZE = 10;
  * Department display settings (see GUI_DESIGN §5 / §9); the board
  * consumes only `rotationDurationMs`.
  */
+/**
+ * A location dwell of at least this long (3 days) is flagged as an
+ * unusually long stay (`ltime.long` warning tone) — derived at render
+ * from the fixed entry timestamp, never stored.
+ */
+export const LONG_DWELL_MINUTES = 3 * 24 * 60;
+
 export const ROTATE_MS_PER_ROW = 3_000;
 export const ROTATE_MS_MIN = 6_000;
 

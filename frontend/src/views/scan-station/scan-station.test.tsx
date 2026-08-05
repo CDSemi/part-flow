@@ -413,6 +413,13 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(document.querySelector('.ss-manual')).toBeNull();
   expect(document.querySelector('.ss-manualcap')).not.toBeNull();
 
+  // The demo-barcodes hint is the shared dev-only notice (v16) — the
+  // old .ss-hint block is gone, the barcode values stay code chips.
+  expect(document.querySelector('.ss-hint')).toBeNull();
+  const hint = document.querySelector('.dev-notice');
+  expect(hint?.textContent).toContain('Demo barcodes (development build only)');
+  expect(hint?.querySelectorAll('code').length).toBe(6);
+
   // No permanently reserved feedback block below Last scanned PN.
   expect(document.querySelector('.ss .ss-feedback')).toBeNull();
   expect(document.querySelector('.ss-lastpn')).not.toBeNull();
@@ -718,7 +725,14 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   scanInside('PF:PN:118-052');
   expect(dialog.textContent).toContain('no queued quantity in this Area');
   scanInside('PF:WORKER:88');
-  expect(dialog.textContent).toContain('selection unchanged');
+  expect(dialog.textContent).toContain(
+    'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
+  );
+  // Selection errors share the Guidance error presentation (v16).
+  expect(dialog.querySelector('.ss-guide.error')?.textContent).toContain(
+    'Barcode not valid for this step',
+  );
+  expect(dialog.querySelector('.ss-scannote')).toBeNull();
   expect(
     within(dialog as HTMLElement).getByRole('button', { name: /Lathe 1/ }),
   ).toHaveClass('sel');
@@ -895,20 +909,20 @@ test('multiple sources require explicit selection — never combined silently', 
   expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
 });
 
-/* ============ Intake wizard (no active WO Demand) ============ */
+/* ============ Receive wizard (no active WO Demand) ============ */
 
-test('an unknown PN opens the three-step intake wizard with editable defaults', async () => {
+test('an unknown PN opens the three-step receive wizard with editable defaults', async () => {
   await renderStation();
 
   scan('PF:PN:NEW-PART-01');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Receive quantity — intake',
+    name: 'Receive Quantity',
   });
   // Operator-facing guidance: what was scanned and what confirmation
   // does — never internal record/persistence wording.
   expect(dialog).toHaveTextContent('New PN — not registered yet');
   expect(dialog).toHaveTextContent(
-    'confirming this intake registers the PN exactly as shown',
+    'It will be registered when the receipt is confirmed',
   );
   expect(dialog.textContent).not.toMatch(/record is created/i);
   expect(dialog.textContent).not.toMatch(/case-insensitive/i);
@@ -924,30 +938,48 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
     target: { value: 'MODIFY' },
   });
 
-  // Step 2 — compact two-line recap (v15): selection chips on one
-  // line, the WO/due context on the other, then the instruction
-  // guidance directly above the quantity input.
+  // Step 2 — compact two-line recap (v16): the SHARED Request Type and
+  // Route Mode chips on one line (the route name lives inside the
+  // Route Mode chip), the WO/due context with emphasized values on
+  // the other, then the instruction guidance above the quantity input.
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   const recap = dialog.querySelector('.ss-recap')!;
-  expect(recap.textContent).toContain('MODIFY');
-  expect(recap.textContent).toContain('FLOATING');
-  expect(recap.textContent).toContain('Internal WO —');
+  expect(recap.querySelector('.typechip')?.textContent).toBe('MODIFY');
+  expect(recap.querySelector('.routechip')?.textContent).toBe(
+    'FLOATING — actual trace',
+  );
+  expect(recap.textContent).toContain('WO —');
   expect(recap.textContent).toContain('Due: —');
+  // Value emphasis is text-only: the WO Number and due values render
+  // in the .rval emphasis, labels keep normal weight.
+  const rvals = Array.from(
+    recap.querySelectorAll('.rval'),
+    (el) => el.textContent,
+  );
+  expect(rvals).toEqual(['—', '—']);
   expect(dialog.textContent).toContain(
     'Enter the physical quantity received. No default quantity is assumed.',
   );
   fireEvent.keyDown(dialog, { key: '6' });
 
-  // Step 3 — structured confirmation; only Confirm intake records.
+  // Step 3 — structured confirmation; only Confirm receipt records.
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
-  expect(dialog.textContent).toContain('Receive quantity — intake');
+  expect(dialog.textContent).toContain('Receive Quantity');
   expect(dialog.textContent).toContain('RECEIVED');
   expect(dialog.textContent).toContain(
     'Creates an internal Work Order without an external number',
   );
+  // The confirmation carries the shared chips too, and no separate
+  // Planned Route row (the chip holds the route name).
+  const summary = dialog.querySelector('.ss-confirm')!;
+  expect(summary.querySelector('.typechip')?.textContent).toBe('MODIFY');
+  expect(summary.querySelector('.routechip')?.textContent).toBe(
+    'FLOATING — actual trace',
+  );
+  expect(summary.textContent).not.toContain('Planned Route');
   expect(lastPnText()).toBe('—');
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm intake' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm receipt' }));
 
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(
@@ -959,40 +991,39 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
   expect(detail).not.toMatch(/TMP-/);
 });
 
-test('the intake settings step separates PN identity, WO recap, and quantity guidance', async () => {
+test('the receive settings step separates PN identity, defaults recap, and confirmation guidance', async () => {
   await renderStation();
 
   scan('PF:PN:NEW-PART-01');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Receive quantity — intake',
+    name: 'Receive Quantity',
   });
 
-  // v15: the description carries PN identity only; the Work Order
-  // behavior and date handling form a separate recap block.
+  // v16: the description carries PN identity only; the editable
+  // defaults and date handling form a separate general recap block.
   expect(dialog.querySelector('.sub')?.textContent).toContain(
-    'New PN — not registered yet',
+    'New PN — not registered yet. Verify the Part Number carefully.',
   );
   const recap = dialog.querySelector('.ss-recap')!;
   expect(recap.textContent).toContain(
-    'Work Order: Creates an internal Work Order without an external number (displays —).',
+    'MODIFY and FLOATING are selected by default and can be changed.',
   );
   expect(recap.textContent).toContain(
-    'Received date: taken from this scan · Due date: optional.',
+    'The received date is recorded from this scan; the due date is optional. Enter the received quantity in the next step.',
   );
 
-  // ℹ info guidance: the quantity comes on the next step and nothing
-  // is recorded before the final confirmation.
+  // ℹ info guidance: nothing is recorded before the final step.
   const guide = dialog.querySelector('.ss-guide.info')!;
   expect(guide.querySelector('.gmark')?.textContent).toBe('ℹ');
   expect(guide.textContent).toContain(
-    'The quantity to receive is entered on the next step — nothing is recorded until the final confirmation.',
+    'No changes are recorded until you review and confirm the final step.',
   );
   // v15: the marker-less `neutral` guidance kind no longer exists.
   expect(dialog.querySelector('.ss-guide.neutral')).toBeNull();
   fireEvent.keyDown(dialog, { key: 'Escape' });
 });
 
-test('intake Back preserves settings and quantity; Cancel records nothing', async () => {
+test('receive Back preserves settings and quantity; Cancel records nothing', async () => {
   await renderStation();
 
   scan('PF:PN:NEW-PART-01');
@@ -1035,19 +1066,19 @@ test('PN identity is case-insensitive and keeps the first-entered casing', async
 
   scan('PF:PN:abc-part');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Receive quantity — intake',
+    name: 'Receive Quantity',
   });
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   fireEvent.keyDown(dialog, { key: '1' });
   fireEvent.keyDown(dialog, { key: 'Enter' });
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm intake' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm receipt' }));
   expect(screen.getByText(/abc-part × 1/)).toBeInTheDocument();
 
   // Scanning the same PN in a different casing resolves to the SAME
   // PartNumber and shows the preserved original casing.
   scan('PF:PN:ABC-PART');
   const dialog2 = await screen.findByRole('dialog', {
-    name: 'Receive quantity — intake',
+    name: 'Receive Quantity',
   });
   expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
   expect(
@@ -1216,6 +1247,10 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   fireEvent.change(scrapInput, { target: { value: 'PF:PN:1' } });
   fireEvent.keyDown(scrapInput, { key: 'Enter' });
   expect(screen.getByText(/only PF:SCRAP counts here/)).toBeInTheDocument();
+  // The rejection renders in the shared Guidance error style (v16).
+  expect(dialog.querySelector('.ss-guide.error')?.textContent).toContain(
+    'only PF:SCRAP counts here',
+  );
   expect(dialog.querySelector('.ss-scrapcount .cnt')?.textContent).toBe('3');
 
   // The count can be corrected before confirmation.
@@ -1751,6 +1786,117 @@ test('wedge capture never interferes with dialogs, other fields, or buttons', as
   fireEvent.keyDown(manual, { key: 'Enter' });
   expect(screen.queryByText('Worker session: V. Tran')).toBeNull();
   expect(input.value).toBe('PF:WORKER:88');
+});
+
+/* ============ Scan → dialog focus and Enter routing (v16) ============ */
+
+test('a scan that opens a dialog leaves focus inside the dialog after the refocus window', async () => {
+  await renderStation();
+  vi.useFakeTimers();
+
+  // A Worker scan queues the delayed input refocus; the PN scan opens
+  // its dialog before that timer fires. After flushing the delayed
+  // refocus window, focus must sit INSIDE the dialog — a pending
+  // refocus never pulls focus back out of an open dialog.
+  scan('PF:WORKER:88');
+  scan('PF:PN:2027-60-8114-00');
+  const dialog = activeDialog();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+  expect(screen.getByRole('dialog')).toBe(dialog);
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  expect(screen.getByLabelText('Scan barcode')).not.toHaveFocus();
+});
+
+test('a Machine scan opens Assign to Machine with focus on the in-dialog scan field', async () => {
+  await renderStation();
+  vi.useFakeTimers();
+
+  scan('PF:MACHINE:L2');
+  const dialog = activeDialog();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  expect(
+    screen.getByLabelText('Scan Machine or queued PN barcode'),
+  ).toHaveFocus();
+});
+
+test('Enter acts inside the open dialog and Escape closes it — the main input never swallows them', async () => {
+  await renderStation();
+
+  scan('PF:MACHINE:L1');
+  const scanField = screen.getByLabelText('Scan Machine or queued PN barcode');
+  fireEvent.change(scanField, { target: { value: 'PF:PN:2027-60-8114-00' } });
+  fireEvent.keyDown(scanField, { key: 'Enter' });
+  // Machine + PN selected; the empty-input Enter advances to quantity.
+  fireEvent.keyDown(scanField, { key: 'Enter' });
+  expect(screen.getByLabelText('Quantity: 2')).toBeInTheDocument();
+
+  // Escape closes the whole wizard — no write.
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(lastPnText()).toBe('—');
+});
+
+test('focus returns to the main barcode input after the dialog closes', async () => {
+  const input = await renderStation();
+
+  scan('PF:PN:2027-60-8114-00');
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() => expect(input).toHaveFocus());
+});
+
+test('wedge capture keeps working after a dialog cycle: a full barcode lands intact', async () => {
+  const input = (await renderStation()) as HTMLInputElement;
+
+  // Open and cancel a dialog first — the capture must re-attach.
+  scan('PF:PN:2027-60-8114-00');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // No dialog open, the main input NOT focused: every character of
+  // the wedge burst is captured, then Enter processes the scan once.
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  wedgeType('PF:WORKER:88');
+  expect(input.value).toBe('PF:WORKER:88');
+  fireEvent.keyDown(document.body, { key: 'Enter' });
+  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(input.value).toBe('');
+});
+
+test('Assign to Machine Enter rules: filled scans once, empty advances only when complete', async () => {
+  await renderStation();
+
+  scan('PF:MACHINE:L1');
+  const dialog = activeDialog();
+  const scanField = screen.getByLabelText(
+    'Scan Machine or queued PN barcode',
+  ) as HTMLInputElement;
+
+  // Empty input + incomplete pair (no PN yet): Enter does nothing.
+  fireEvent.keyDown(scanField, { key: 'Enter' });
+  expect(dialog.querySelector('.qtydisplay')).toBeNull();
+
+  // Filled input: Enter is ONE selection scan — it completes the pair
+  // but never also advances from the same keypress.
+  fireEvent.change(scanField, { target: { value: 'PF:PN:2027-60-8114-00' } });
+  fireEvent.keyDown(scanField, { key: 'Enter' });
+  expect(scanField.value).toBe('');
+  expect(
+    within(dialog as HTMLElement).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  ).toHaveClass('sel');
+  expect(dialog.querySelector('.qtydisplay')).toBeNull(); // still Step 1
+
+  // Empty input + complete pair: Enter advances to the quantity step.
+  fireEvent.keyDown(scanField, { key: 'Enter' });
+  expect(screen.getByLabelText('Quantity: 2')).toBeInTheDocument();
 });
 
 /* ============ Touch-primary devices — main barcode input ============ */

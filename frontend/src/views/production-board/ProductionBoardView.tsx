@@ -24,11 +24,19 @@ import {
   MOCK_BOARD_ROWS,
   MOCK_BOARD_ROWS_LONG,
 } from '../../mocks/production-board';
-import { formatIsoDateShort } from '../dates';
+import { useUiClock } from '../../components/ui-clock';
+import {
+  dueCountdown,
+  daysInProductionNote,
+  elapsedMinutesSince,
+  formatElapsedSince,
+  formatIsoDateShort,
+} from '../dates';
 import type { MockBoardRow, MockLocationRow } from '../view-models';
 import {
   FALLBACK_PAGE_SIZE,
   fallbackPageBreaks,
+  LONG_DWELL_MINUTES,
   pageBreaksByHeight,
   rotationDurationMs,
   sortBoardRows,
@@ -93,13 +101,9 @@ function BoardLiveStatus() {
   );
 }
 
-/** Self-contained live clock: only this component rerenders per tick. */
+/** Live clock on the shared second-precision UI clock (ui-clock.ts). */
 function LiveClock() {
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const now = new Date(useUiClock('second'));
   // One coherent clock block: the time leads, the date sits directly
   // beneath it as the secondary line (production-board.css).
   return (
@@ -145,6 +149,13 @@ function locationStateLabel(state: MockLocationRow['state']): string {
 }
 
 function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
+  // Derived per-location dwell time: fixed entry timestamp + shared
+  // minute clock; `long` flags an unusually long dwell (≥ 3 days).
+  const now = useUiClock('minute');
+  const dwell = loc.since ? formatElapsedSince(loc.since, now) : '—';
+  const dwellLong =
+    loc.since !== null &&
+    elapsedMinutesSince(loc.since, now) >= LONG_DWELL_MINUTES;
   const onMachine = loc.state === 'machine' && loc.machine !== undefined;
   // External activity (`plating`, `vendor`, …) replaces the generic
   // `processing` label with a light informational chip.
@@ -190,13 +201,19 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
           {locationStateLabel(loc.state)}
         </span>
       )}
-      <span className={`ltime ${loc.timeLong ? 'long' : ''}`}>{loc.time}</span>
+      <span className={`ltime ${dwellLong ? 'long' : ''}`}>{dwell}</span>
     </div>
   );
 }
 
 function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
-  const urgent = row.dueClass === 'soon' || row.dueClass === 'late';
+  // Countdown, urgency and Total Days are DERIVED from the fixed due /
+  // received dates and the shared minute clock — never stored.
+  const now = useUiClock('minute');
+  const dueInfo = row.totalStocked
+    ? { note: '✓ stocked', dueClass: 'none' as const }
+    : dueCountdown(row.due, now);
+  const urgent = dueInfo.dueClass === 'soon' || dueInfo.dueClass === 'late';
   return (
     <>
       <td className="cell-no">
@@ -256,12 +273,12 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
         <div className="d1">{formatIsoDateShort(row.due)}</div>
         {/* Only the urgency text blinks — never the PN, and the date
             itself stays steady. */}
-        <div className={`d2 ${row.dueClass} ${urgent ? 'blink' : ''}`}>
-          {row.dueNote}
+        <div className={`d2 ${dueInfo.dueClass} ${urgent ? 'blink' : ''}`}>
+          {dueInfo.note}
         </div>
       </td>
       <td className="cell-days">
-        <div className="dtotal">{row.totalDays}</div>
+        <div className="dtotal">{daysInProductionNote(row.received, now)}</div>
       </td>
       <td className="jobs">
         {row.jobs.map((job) => (
@@ -396,6 +413,12 @@ export function ProductionBoardView() {
     );
   }, []);
 
+  // Derived row content (dwell times, countdowns) changes on the
+  // shared minute tick, which can change measured widths/heights — the
+  // layout effect below depends on the same tick, so the measurement
+  // table is re-read after each derived-content update.
+  const nowMinute = useUiClock('minute');
+
   // Kiosk mode is read inside the layout effect indirectly: toggling
   // it swaps the header and footer structure, so their measured
   // heights change — the effect depends on `kiosk` so pagination
@@ -405,7 +428,7 @@ export function ProductionBoardView() {
   // the same commit, so useLayoutEffect reads fresh heights.
   useLayoutEffect(() => {
     recalc();
-  }, [recalc, allRows, kiosk]);
+  }, [recalc, allRows, kiosk, nowMinute]);
 
   useEffect(() => {
     window.addEventListener('resize', recalc);

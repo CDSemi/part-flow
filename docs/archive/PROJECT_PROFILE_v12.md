@@ -1,4 +1,4 @@
-# PartFlow Project Profile v13
+# PartFlow Project Profile v12
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -1290,8 +1290,6 @@ Removing a Work Order Demand must never delete the PartNumber master, any Quanti
 ## Modify Intake
 
 `MODIFY` introduces physical quantity of a PN for modification work. A MODIFY intake may have no external Work Order Number, no predefined Route, and no existing active Work Order Demand — PartFlow still creates the minimum internal records needed for quantity integrity and traceability: an internal `WorkOrder` (`work_order_number = NULL`), one `WorkOrderDemand`, a `QuantityFlow`, and immutable Movement history.
-
-The operator-facing dialog is titled **Receive Quantity**, with **Confirm receipt** as the final confirming action; `intake` remains the internal workflow name (identifiers, comments) and never renders to operators.
 
 When a scan opens the intake flow (PN has no active Work Order Demand):
 

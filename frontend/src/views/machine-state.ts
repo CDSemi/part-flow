@@ -10,6 +10,7 @@
 //   `running` (assigned active quantity) or `idle` is DERIVED — users
 //   never choose running/idle by hand.
 
+import { formatDuration } from './dates';
 import type {
   MachineStatus,
   MockAreaCard,
@@ -68,25 +69,17 @@ export function machineAssignments(
 /**
  * Elapsed time in the current state, derived from the shared
  * `stateChangedAt` timestamp (never a stored formatted duration), in
- * the compact duration language used across the monitoring surfaces:
+ * the one compact duration language of `formatDuration` (views/dates):
  * `18m`, `1h 24m`, `2d 03h`. Sub-minute ages render as `<1m`; a
  * timestamp in the future (clock skew) clamps to `<1m` instead of
- * producing a negative age.
+ * producing a negative age. Callers pass the shared UI clock value as
+ * `now` so the age keeps ticking while a view stays open.
  */
 export function formatStateAge(
   stateChangedAt: string,
   now: number = Date.now(),
 ): string {
-  const elapsedMs = now - new Date(stateChangedAt).getTime();
-  const minutes = Math.floor(elapsedMs / 60_000);
-  if (!Number.isFinite(minutes) || minutes < 1) return '<1m';
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours}h ${String(minutes % 60).padStart(2, '0')}m`;
-  }
-  const days = Math.floor(hours / 24);
-  return `${days}d ${String(hours % 24).padStart(2, '0')}h`;
+  return formatDuration(now - new Date(stateChangedAt).getTime());
 }
 
 /** Operator-facing label of one operational state. */

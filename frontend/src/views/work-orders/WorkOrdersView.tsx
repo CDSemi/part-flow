@@ -17,7 +17,8 @@ import {
   MOCK_RELEASE_DATA,
   MOCK_WORK_ORDER_LIST,
 } from '../../mocks/work-orders';
-import { formatIsoDate } from '../dates';
+import { useUiClock } from '../../components/ui-clock';
+import { dueCountdown, formatIsoDate } from '../dates';
 import type { MockWorkOrder } from '../view-models';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
@@ -37,7 +38,6 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
       received: '2026-07-01',
       // Every fifth long-preview Work Order has no due date (valid).
       due: n % 5 === 0 ? null : '2026-09-30',
-      dueClass: '',
       status: 'Open',
       preview: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
       lines: [],
@@ -48,7 +48,6 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
     workOrderNumber: '007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
     received: '2026-07-20',
     due: '2026-10-15',
-    dueClass: '',
     status: 'Open',
     preview: '0118-40-0022-07-0455-88-REV-C',
     lines: [],
@@ -254,6 +253,15 @@ function WorkOrderListPanel({
   onOpen: (id: string) => void;
   onNew: () => void;
 }) {
+  // Due-date lateness is DERIVED from the fixed due date and the
+  // shared UI clock (a completed Work Order is never flagged late) —
+  // the urgency keeps updating while the view stays open.
+  const now = useUiClock('minute');
+  const dueTone = (w: MockWorkOrder): string => {
+    if (!w.due) return 'none';
+    if (w.status === 'Complete') return '';
+    return dueCountdown(w.due, now).dueClass === 'late' ? 'late' : '';
+  };
   const query = search.trim().toLowerCase();
   const rows = list.filter(
     (w) =>
@@ -339,7 +347,7 @@ function WorkOrderListPanel({
                   </td>
                   <td className="mono-sm">{formatIsoDate(w.received)}</td>
                   <td className="mono-sm">
-                    <span className={`duetxt ${w.due ? w.dueClass : 'none'}`}>
+                    <span className={`duetxt ${dueTone(w)}`}>
                       {formatIsoDate(w.due)}
                     </span>
                   </td>

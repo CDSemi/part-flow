@@ -161,6 +161,27 @@ textarea {
   color: var(--a-mill);
 }
 
+/* Route Mode chip (components/indicators RouteModeChip) — the ONE
+   presentation of a Quantity Flow's route mode everywhere it appears:
+   mode word + route information in a single chip (`FLOATING — actual
+   trace`, `PLANNED — <route name>`). The surface follows the mode;
+   the mode word stays in the text — never color alone. */
+.routechip {
+  font-family: var(--mono), monospace;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.routechip.floating {
+  background: var(--info-surface);
+  color: var(--info-t);
+}
+
 .status {
   font-size: 11.5px;
   font-weight: 750;
@@ -349,6 +370,17 @@ textarea {
   letter-spacing: 1.2px;
   color: var(--muted);
   border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* Inline code values inside a DEV notice (e.g. the Scan Station demo
+   barcodes) — the same quiet chip language on every surface. */
+.dev-notice code {
+  color: var(--muted);
+  font-family: var(--mono), monospace;
+  font-weight: 600;
+  background: var(--panel2);
   border-radius: 5px;
   padding: 1px 6px;
 }

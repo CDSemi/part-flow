@@ -17,13 +17,19 @@ import {
   MOCK_AREA_MACHINES,
 } from '../../mocks/area-board';
 import { MOCK_AREAS } from '../../mocks/areas';
+import { useUiClock } from '../../components/ui-clock';
 import { splitAssignments } from '../area-monitoring';
+import { elapsedMinutesSince } from '../dates';
 import { compareDemandOrder } from '../demand-order';
 import type { MockArea, MockAreaCard } from '../view-models';
 
 type SortKey = 'due' | 'prio' | 'tia' | 'qty';
 
-function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
+function sortCards(
+  cards: MockAreaCard[],
+  sort: SortKey,
+  now: number,
+): MockAreaCard[] {
   const keyed = cards.map((card, seq) => ({ card, seq }));
   keyed.sort((a, b) => {
     switch (sort) {
@@ -33,8 +39,10 @@ function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
         return (a.card.hotRank ?? 9) - (b.card.hotRank ?? 9) || a.seq - b.seq;
       case 'tia':
         // Longest time in Area first — the most-waiting work surfaces.
+        // Derived from the fixed Area-entry timestamps and the shared
+        // UI clock (a card without one — Stockroom — sorts last).
         return (
-          b.card.timeInAreaMinutes - a.card.timeInAreaMinutes || a.seq - b.seq
+          tiaMinutes(b.card, now) - tiaMinutes(a.card, now) || a.seq - b.seq
         );
       default:
         // Canonical demand order: Hot rank → earliest due date → undated
@@ -42,13 +50,13 @@ function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
         return compareDemandOrder(
           {
             hotRank: a.card.hotRank,
-            due: dueIso(a.card),
+            due: a.card.due,
             received: a.card.received,
             seq: a.seq,
           },
           {
             hotRank: b.card.hotRank,
-            due: dueIso(b.card),
+            due: b.card.due,
             received: b.card.received,
             seq: b.seq,
           },
@@ -58,11 +66,8 @@ function sortCards(cards: MockAreaCard[], sort: SortKey): MockAreaCard[] {
   return keyed.map((entry) => entry.card);
 }
 
-// The mock cards carry relative day counts instead of ISO dates; an
-// artificial-but-ordered ISO key keeps the shared comparator applicable.
-function dueIso(card: MockAreaCard): string | null {
-  if (card.dueDays === null) return null;
-  return `D${String(card.dueDays + 1000).padStart(5, '0')}`;
+function tiaMinutes(card: MockAreaCard, now: number): number {
+  return card.enteredAreaAt ? elapsedMinutesSince(card.enteredAreaAt, now) : -1;
 }
 
 function matches(card: MockAreaCard, query: string): boolean {
@@ -78,6 +83,10 @@ export function AreaBoardView() {
   const [activeTab, setActiveTab] = useState<'all' | string>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('due');
+  // Shared minute clock: `Time in Area` sorting and every derived time
+  // display stay current (and identical across views) while the board
+  // stays open.
+  const now = useUiClock('minute');
 
   if (preview === 'loading') {
     return (
@@ -107,6 +116,7 @@ export function AreaBoardView() {
   const visible = sortCards(
     allCards.filter((c) => matches(c, query)),
     sort,
+    now,
   );
 
   return (

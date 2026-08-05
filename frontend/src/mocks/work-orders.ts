@@ -64,7 +64,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: '007010',
     received: '2026-07-22',
     due: '2026-08-12',
-    dueClass: '',
     status: 'Open',
     preview: '0455-20-0118-03 · 52-09-0114 · 2 more',
     lines: [
@@ -121,7 +120,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: '007003',
     received: '2026-07-12',
     due: '2026-07-31',
-    dueClass: '',
     status: 'Released',
     preview: '0455-20-0118-03',
     lines: [
@@ -142,7 +140,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: '007005',
     received: '2026-07-06',
     due: '2026-07-16',
-    dueClass: 'late',
     status: 'Released',
     preview: '142-260',
     lines: [
@@ -165,7 +162,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: '007011',
     received: '2026-07-19',
     due: null,
-    dueClass: '',
     status: 'Released',
     preview: '118-052',
     lines: [
@@ -190,7 +186,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: null,
     received: '2026-07-21',
     due: '2026-07-21',
-    dueClass: 'late',
     status: 'Released',
     internal: true,
     preview: '214-406',
@@ -212,7 +207,6 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
     workOrderNumber: '006996',
     received: '2026-06-18',
     due: '2026-07-10',
-    dueClass: '',
     status: 'Complete',
     preview: '309-127',
     lines: [

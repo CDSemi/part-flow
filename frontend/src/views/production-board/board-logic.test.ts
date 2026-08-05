@@ -68,9 +68,6 @@ const row = (
   total: 1,
   jobs: [],
   due: null,
-  dueNote: '',
-  dueClass: 'none',
-  totalDays: '',
   received: '2026-07-01',
   ...partial,
 });
