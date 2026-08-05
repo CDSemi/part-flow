@@ -98,6 +98,33 @@ test('clicking a Work Order row opens the Work Order Details dialog over the lis
   ).toBeInTheDocument();
 });
 
+test('the toolbar hosts ＋ New Work Order and the whole row opens the details dialog', async () => {
+  await renderWorkOrders();
+
+  // The primary action sits in the toolbar row beside the search field
+  // (v15) — same layout as Machines.
+  const newButton = screen.getByRole('button', { name: '＋ New Work Order' });
+  expect(newButton.closest('.wo-tools')).not.toBeNull();
+
+  // The name-cell button keeps the accessible entry point while the
+  // COMPLETE row is clickable.
+  const rowButton = screen.getByRole('button', {
+    name: 'Open Work Order 007010',
+  });
+  const row = rowButton.closest('tr') as HTMLTableRowElement;
+  expect(row.className).toContain('selrow');
+
+  // Clicking outside the name button — the Status cell — opens the
+  // details dialog too.
+  fireEvent.click(row.cells[row.cells.length - 1]);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  expect(dialog).toHaveTextContent('007010');
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
 test('a clean Work Order Details dialog closes directly and focus returns to its row', async () => {
   await renderWorkOrders();
 

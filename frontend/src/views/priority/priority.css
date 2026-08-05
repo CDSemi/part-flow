@@ -316,6 +316,14 @@
   border-radius: 8px;
 }
 
+/* The position ↔ PN divider (v15): hidden by default — in the
+   no-subgrid fallback the list's own tracks collapse (rows are
+   full-width items), so a track-attached divider would land at the
+   wrong offset. The subgrid block below enables it. */
+.pr-snapdivider {
+  display: none;
+}
+
 /* Subgrid chain: wrapper grid → section box → list → row. Every level
    spans the full track set and passes it down, so all rows of BOTH
    sections share the same three content-sized columns. The identical
@@ -347,6 +355,24 @@
 
   .pr-snapwrap .pr-snaprow {
     grid-template-columns: subgrid;
+  }
+
+  /* One continuous vertical rule per section between the shared
+     position track and the PN track: a grid item pinned to the PN
+     track's start edge (grid-row span set inline from the row count),
+     pulled into the 12px column gutter. It draws on the shared track
+     edge — never a per-row border — so the PN alignment across rows
+     and sections is untouched, and spanning the rows lets it cover
+     the row gaps for one unbroken line. */
+  .pr-snapwrap .pr-snapdivider {
+    display: block;
+    grid-column: 2;
+    justify-self: start;
+    align-self: stretch;
+    width: 0;
+    margin-left: -6px;
+    border-left: 1px solid var(--border);
+    pointer-events: none;
   }
 }
 
@@ -431,6 +457,13 @@
   .pr-snapwrap .pr-snaprow {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
+  }
+
+  /* Stacked one-column rows have no shared position track — no
+     divider (the selector outweighs the subgrid enablement above). */
+  .pr-snapdivider,
+  .pr-snapwrap .pr-snapdivider {
+    display: none;
   }
 }
 

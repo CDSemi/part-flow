@@ -61,9 +61,10 @@ function OfflineBanner() {
   return (
     <div className="offbanner" role="alert">
       <span>
-        ⚠ OFFLINE — the backend is unavailable. Production writes are blocked;
-        nothing is recorded or queued while disconnected. Already loaded
-        read-only information stays visible.
+        ⚠ OFFLINE — Connection to the PartFlow server has been lost. Production
+        actions are disabled, and scans will not be recorded or queued until the
+        connection is restored. Previously loaded read-only information remains
+        available.
       </span>
       <button className="retry" onClick={retry}>
         Retry connection

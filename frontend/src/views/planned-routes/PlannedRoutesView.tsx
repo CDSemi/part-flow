@@ -1,18 +1,22 @@
 import './planned-routes.css';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
+import type { CSSProperties, DragEvent } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
+import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
 import { MOCK_AREAS, areaByKey } from '../../mocks/areas';
+import { MOCK_MACHINES, activeMachines } from '../../mocks/machines';
 import { MOCK_ROUTE_TEMPLATES } from '../../mocks/planned-routes';
 import type { AreaKey, MockRouteStep, MockRouteTemplate } from '../view-models';
 
@@ -25,17 +29,65 @@ import type { AreaKey, MockRouteStep, MockRouteTemplate } from '../view-models';
 // snapshot, and any intentional change to an in-production Assigned
 // Route happens in its own audited workflow (Tracking → Edit assigned
 // Route), never here. A route that has ever been used is archived
-// instead of deleted; existing snapshots preserve historical route
-// definitions, so no separate template-versioning system exists.
+// instead of deleted (a never-used route may still be deleted
+// outright); existing snapshots preserve historical route definitions,
+// so no separate template-versioning system exists.
 
 type PendingDialog =
   | { kind: 'new' }
   | { kind: 'edit'; template: MockRouteTemplate }
-  | { kind: 'usage'; template: MockRouteTemplate }
-  | { kind: 'archive'; template: MockRouteTemplate }
-  | { kind: 'delete'; template: MockRouteTemplate };
+  | { kind: 'usage'; template: MockRouteTemplate };
 
 const today = (): string => new Date().toISOString().slice(0, 10);
+
+/** Editor-facing route data — what Save/Duplicate carry back out. */
+interface RouteDraft {
+  name: string;
+  description: string;
+  steps: MockRouteStep[];
+}
+
+/** Resolve a Machine id to its display presentation (v15: preferred
+ * Machines are referenced by id — display names are reusable across
+ * physical replacements and cannot identify the preference). */
+function machineLabel(id: string): string {
+  const machine = MOCK_MACHINES.find((m) => m.id === id);
+  if (!machine) return `${id} (unknown)`;
+  return machine.retiredOn !== undefined
+    ? `${machine.name} — retired`
+    : machine.name;
+}
+
+/** Area-colored step chips — the same reading direction as the
+ * Tracking route visualization, each block tinted with its Area color
+ * (tinted surface + Area dot; the text keeps the normal color). */
+function StepChips({ steps }: { steps: MockRouteStep[] }) {
+  return (
+    <div className="rt-steps">
+      {steps.map((step, i) => {
+        const area = areaByKey(step.area);
+        const colorVar = area?.colorVar ?? 'var(--faint)';
+        return (
+          <Fragment key={`${step.area}-${i}`}>
+            {i > 0 ? (
+              <span className="arw" aria-hidden="true">
+                →
+              </span>
+            ) : null}
+            <span
+              className="rt-stepchip"
+              style={{ '--acol': colorVar } as CSSProperties}
+              title={`${area?.name ?? step.area} — ${step.operation}`}
+            >
+              <AreaDot colorVar={colorVar} size={8} />
+              {area?.name ?? step.area}
+            </span>
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
 
 export function PlannedRoutesView() {
   const preview = getViewStatePreview();
@@ -82,13 +134,13 @@ export function PlannedRoutesView() {
       current.map((t) => (t.id === id ? change(t) : t)),
     );
 
-  const duplicate = (template: MockRouteTemplate) => {
+  /** Create an active copy from route data and open it for editing. */
+  const duplicateFrom = (draft: RouteDraft) => {
     const copy: MockRouteTemplate = {
-      ...template,
       id: `RT-${String(Date.now()).slice(-4)}`,
-      name: `${template.name} (variant)`,
-      steps: template.steps.map((s) => ({ ...s })),
-      archivedOn: undefined,
+      name: `${draft.name} (variant)`,
+      description: draft.description || undefined,
+      steps: draft.steps.map((s) => ({ ...s })),
       usedBy: [],
       createdOn: today(),
       updatedOn: today(),
@@ -135,7 +187,9 @@ export function PlannedRoutesView() {
               : 'No Planned Routes defined yet.'
           }
         />
-      ) : (
+      ) : null}
+
+      {activeTemplates.length > 0 ? (
         <table className="rt-table">
           <thead>
             <tr>
@@ -143,41 +197,143 @@ export function PlannedRoutesView() {
               <th>Steps</th>
               <th>Status</th>
               <th>Used by</th>
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {[...activeTemplates, ...archivedTemplates].map((template) => (
-              <TemplateRow
+            {activeTemplates.map((template) => (
+              // The COMPLETE row opens Edit Planned Route (v15): the
+              // name-cell button is the keyboard and screen-reader
+              // entry point; the usage cell is the one interactive
+              // island and stops propagation.
+              <tr
                 key={template.id}
-                template={template}
-                onAction={(kind) => {
-                  if (kind === 'duplicate') duplicate(template);
-                  else setDialog({ kind, template });
-                }}
-              />
+                className="selrow"
+                onClick={() => setDialog({ kind: 'edit', template })}
+              >
+                <td>
+                  <button
+                    className="rowbtn"
+                    aria-label={`Edit ${template.name}`}
+                  >
+                    <div className="rtname">{template.name}</div>
+                    {template.description ? (
+                      <div className="rtdesc">{template.description}</div>
+                    ) : null}
+                  </button>
+                </td>
+                <td>
+                  <StepChips steps={template.steps} />
+                </td>
+                <td>
+                  <span className="rt-status active">Active</span>
+                  <div className="rt-statusdate">
+                    updated {template.updatedOn}
+                  </div>
+                </td>
+                <td
+                  className="rt-usage"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {template.usedBy.length > 0 ? (
+                    <button
+                      onClick={() => setDialog({ kind: 'usage', template })}
+                    >
+                      {template.usedBy.length} Quantity Flow
+                      {template.usedBy.length === 1 ? '' : 's'}…
+                    </button>
+                  ) : (
+                    <span className="never">Never used</span>
+                  )}
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
-      )}
+      ) : null}
+
       {archivedTemplates.length > 0 ? (
-        <p className="rt-sub">
-          Archived routes stay here for historical context — they are never
-          offered when a new Quantity Flow is released.
-        </p>
+        <div className="rt-archived">
+          <h2>Archived Routes</h2>
+          <table className="rt-table">
+            <thead>
+              <tr>
+                <th>Planned Route</th>
+                <th>Steps</th>
+                <th>Archived</th>
+                <th>Used by</th>
+                <th>
+                  <span className="rt-visuallyquiet">Duplicate</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {archivedTemplates.map((template) => (
+                <tr key={template.id} className="archived">
+                  <td>
+                    <div className="rtname">{template.name}</div>
+                    {template.description ? (
+                      <div className="rtdesc">{template.description}</div>
+                    ) : null}
+                  </td>
+                  <td>
+                    <StepChips steps={template.steps} />
+                  </td>
+                  <td>
+                    <span className="rt-status archived">Archived</span>
+                    <div className="rt-statusdate">
+                      since {template.archivedOn}
+                    </div>
+                  </td>
+                  <td className="rt-usage">
+                    {template.usedBy.length > 0 ? (
+                      <button
+                        onClick={() => setDialog({ kind: 'usage', template })}
+                      >
+                        {template.usedBy.length} Quantity Flow
+                        {template.usedBy.length === 1 ? '' : 's'}…
+                      </button>
+                    ) : (
+                      <span className="never">Never used</span>
+                    )}
+                  </td>
+                  <td>
+                    <button
+                      className="rt-duplicate"
+                      onClick={() =>
+                        duplicateFrom({
+                          name: template.name,
+                          description: template.description ?? '',
+                          steps: template.steps,
+                        })
+                      }
+                    >
+                      Duplicate
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="rt-sub">
+            Archived routes stay here for historical context — they are never
+            offered when a new Quantity Flow is released. Duplicate creates a
+            new active route from one.
+          </p>
+        </div>
       ) : null}
 
       {dialog?.kind === 'new' ? (
         <RouteEditDialog
+          key="new"
           onCancel={() => setDialog(null)}
-          onSave={(name, description, steps) => {
+          onSave={(draft) => {
             setTemplates((current) => [
               ...current,
               {
                 id: `RT-${String(Date.now()).slice(-4)}`,
-                name,
-                description: description || undefined,
-                steps,
+                name: draft.name,
+                description: draft.description || undefined,
+                steps: draft.steps,
                 usedBy: [],
                 createdOn: today(),
                 updatedOn: today(),
@@ -189,16 +345,41 @@ export function PlannedRoutesView() {
       ) : null}
       {dialog?.kind === 'edit' ? (
         <RouteEditDialog
+          key={dialog.template.id}
           template={dialog.template}
           onCancel={() => setDialog(null)}
-          onSave={(name, description, steps) => {
+          onSave={(draft) => {
             update(dialog.template.id, (t) => ({
               ...t,
-              name,
-              description: description || undefined,
-              steps,
+              name: draft.name,
+              description: draft.description || undefined,
+              steps: draft.steps,
               updatedOn: today(),
             }));
+            setDialog(null);
+          }}
+          onApplyChanges={(draft) => {
+            update(dialog.template.id, (t) => ({
+              ...t,
+              name: draft.name,
+              description: draft.description || undefined,
+              steps: draft.steps,
+              updatedOn: today(),
+            }));
+          }}
+          onDuplicate={duplicateFrom}
+          onArchive={() => {
+            update(dialog.template.id, (t) => ({
+              ...t,
+              archivedOn: today(),
+              updatedOn: today(),
+            }));
+            setDialog(null);
+          }}
+          onDelete={() => {
+            setTemplates((current) =>
+              current.filter((t) => t.id !== dialog.template.id),
+            );
             setDialog(null);
           }}
         />
@@ -209,131 +390,7 @@ export function PlannedRoutesView() {
           onClose={() => setDialog(null)}
         />
       ) : null}
-      {dialog?.kind === 'archive' ? (
-        <ConfirmDialog
-          title="Archive Planned Route"
-          confirmLabel="Archive route"
-          cancelLabel="Cancel"
-          onCancel={() => setDialog(null)}
-          onConfirm={() => {
-            update(dialog.template.id, (t) => ({
-              ...t,
-              archivedOn: today(),
-              updatedOn: today(),
-            }));
-            setDialog(null);
-          }}
-        >
-          <b>{dialog.template.name}</b> stops appearing as a choice for new
-          route assignments. The {dialog.template.usedBy.length} Quantity Flow
-          {dialog.template.usedBy.length === 1 ? '' : 's'} released with it keep
-          {dialog.template.usedBy.length === 1 ? 's' : ''} the assigned route
-          unchanged, and the route stays visible here for historical context.
-        </ConfirmDialog>
-      ) : null}
-      {dialog?.kind === 'delete' ? (
-        <ConfirmDialog
-          title="Delete Planned Route"
-          confirmLabel="Delete route"
-          cancelLabel="Cancel"
-          danger
-          onCancel={() => setDialog(null)}
-          onConfirm={() => {
-            setTemplates((current) =>
-              current.filter((t) => t.id !== dialog.template.id),
-            );
-            setDialog(null);
-          }}
-        >
-          <b>{dialog.template.name}</b> has never been used by a released
-          Quantity Flow, so it can be removed completely. A route that has been
-          used is archived instead.
-        </ConfirmDialog>
-      ) : null}
     </section>
-  );
-}
-
-function TemplateRow({
-  template,
-  onAction,
-}: {
-  template: MockRouteTemplate;
-  onAction: (
-    kind: 'edit' | 'duplicate' | 'usage' | 'archive' | 'delete',
-  ) => void;
-}) {
-  const archived = template.archivedOn !== undefined;
-  const used = template.usedBy.length > 0;
-  return (
-    <tr className={archived ? 'archived' : undefined}>
-      <td>
-        <div className="rtname">{template.name}</div>
-        {template.description ? (
-          <div className="rtdesc">{template.description}</div>
-        ) : null}
-      </td>
-      <td>
-        <div className="rt-steps">
-          {template.steps.map((step, i) => (
-            <span key={`${step.area}-${i}`} className="stp">
-              {i > 0 ? (
-                <span className="arw" aria-hidden="true">
-                  →
-                </span>
-              ) : null}
-              <AreaDot
-                colorVar={areaByKey(step.area)?.colorVar ?? 'var(--faint)'}
-                size={9}
-              />
-              {areaByKey(step.area)?.name ?? step.area}
-            </span>
-          ))}
-        </div>
-      </td>
-      <td>
-        {archived ? (
-          <>
-            <span className="rt-status archived">Archived</span>
-            <div className="rt-statusdate">since {template.archivedOn}</div>
-          </>
-        ) : (
-          <>
-            <span className="rt-status active">Active</span>
-            <div className="rt-statusdate">updated {template.updatedOn}</div>
-          </>
-        )}
-      </td>
-      <td className="rt-usage">
-        {used ? (
-          <button onClick={() => onAction('usage')}>
-            {template.usedBy.length} Quantity Flow
-            {template.usedBy.length === 1 ? '' : 's'}…
-          </button>
-        ) : (
-          <span className="never">Never used</span>
-        )}
-      </td>
-      <td>
-        <div className="rt-actions">
-          {!archived ? (
-            <>
-              <button onClick={() => onAction('edit')}>Edit…</button>
-              <button onClick={() => onAction('duplicate')}>Duplicate</button>
-              {used ? (
-                <button onClick={() => onAction('archive')}>Archive…</button>
-              ) : (
-                <button className="danger" onClick={() => onAction('delete')}>
-                  Delete…
-                </button>
-              )}
-            </>
-          ) : (
-            <button onClick={() => onAction('duplicate')}>Duplicate</button>
-          )}
-        </div>
-      </td>
-    </tr>
   );
 }
 
@@ -380,176 +437,367 @@ interface EditableStep extends MockRouteStep {
   key: number;
 }
 
+/** Normalize editor steps back to MockRouteStep (drops editor keys). */
+function projectSteps(steps: EditableStep[]): MockRouteStep[] {
+  return steps.map((step) => ({
+    area: step.area,
+    operation: step.operation.trim(),
+    expectedDuration: step.expectedDuration?.trim() || undefined,
+    preferredMachineId: step.preferredMachineId || undefined,
+    instructions: step.instructions?.trim() || undefined,
+  }));
+}
+
 /**
  * Create or edit one Planned Route: name, description, and the ordered
- * steps (Area, Operation, advisory expected duration, optional
- * preferred Machine, optional instructions). Steps reorder with
- * explicit up/down controls — no drag requirement for shop-office use.
+ * steps (Area, Operation from the Area's Operations, advisory expected
+ * duration, optional preferred Machine from the Area's active
+ * Machines, optional instructions). Steps reorder by drag-and-drop
+ * (v15) with the explicit up/down controls kept as the keyboard and
+ * touch path — drag is never the only way. Duplicate and Archive /
+ * Delete live in this dialog; starting Archive or Duplicate with
+ * unsaved edits never saves them silently — an explicit Save / Discard
+ * / Cancel decision comes first, and archiving requires typing the
+ * exact route name.
  */
 function RouteEditDialog({
   template,
   onCancel,
   onSave,
+  onApplyChanges,
+  onDuplicate,
+  onArchive,
+  onDelete,
 }: {
   template?: MockRouteTemplate;
   onCancel: () => void;
-  onSave: (name: string, description: string, steps: MockRouteStep[]) => void;
+  onSave: (draft: RouteDraft) => void;
+  /** Persist edits without closing (Save inside Archive/Duplicate). */
+  onApplyChanges?: (draft: RouteDraft) => void;
+  onDuplicate?: (draft: RouteDraft) => void;
+  onArchive?: () => void;
+  onDelete?: () => void;
 }) {
+  const initialSteps = (
+    template?.steps ?? [{ area: 'material' as AreaKey, operation: 'Receiving' }]
+  ).map((step, i) => ({ ...step, key: i }));
   const [name, setName] = useState(template?.name ?? '');
   const [description, setDescription] = useState(template?.description ?? '');
-  const [steps, setSteps] = useState<EditableStep[]>(() =>
-    (
-      template?.steps ?? [
-        { area: 'material' as AreaKey, operation: 'Receiving' },
-      ]
-    ).map((step, i) => ({ ...step, key: i })),
-  );
+  const [steps, setSteps] = useState<EditableStep[]>(initialSteps);
   const [error, setError] = useState<string | null>(null);
+  const [dragKey, setDragKey] = useState<number | null>(null);
+  const [baseline, setBaseline] = useState<RouteDraft>({
+    name: template?.name ?? '',
+    description: template?.description ?? '',
+    steps: projectSteps(initialSteps),
+  });
+  const [stage, setStage] = useState<
+    | null
+    | 'close-discard'
+    | 'dup-unsaved'
+    | 'archive-unsaved'
+    | 'archive-confirm'
+    | 'delete-confirm'
+  >(null);
+
+  const used = (template?.usedBy.length ?? 0) > 0;
+  const draft: RouteDraft = {
+    name: name.trim(),
+    description: description.trim(),
+    steps: projectSteps(steps),
+  };
+  const dirty =
+    JSON.stringify(draft) !==
+    JSON.stringify({
+      name: baseline.name.trim(),
+      description: baseline.description.trim(),
+      steps: baseline.steps,
+    });
+
+  /** Pure validation (no state changes). */
+  const validate = (): string | null => {
+    if (!draft.name) return 'A route name is required.';
+    if (draft.steps.length === 0) {
+      return 'A Planned Route needs at least one step.';
+    }
+    if (draft.steps.some((s) => !s.operation)) {
+      return 'Every step needs an Operation.';
+    }
+    return null;
+  };
 
   const setStep = (key: number, change: Partial<MockRouteStep>) =>
     setSteps((current) =>
       current.map((s) => (s.key === key ? { ...s, ...change } : s)),
     );
+
+  /** Area change resets/revalidates Operation and preferred Machine. */
+  const changeArea = (key: number, areaKey: AreaKey) =>
+    setSteps((current) =>
+      current.map((s) => {
+        if (s.key !== key) return s;
+        const ops = areaByKey(areaKey)?.operations ?? [];
+        const machineStillValid =
+          s.preferredMachineId !== undefined &&
+          activeMachines().some(
+            (m) => m.id === s.preferredMachineId && m.area === areaKey,
+          );
+        return {
+          ...s,
+          area: areaKey,
+          operation: ops.includes(s.operation) ? s.operation : (ops[0] ?? ''),
+          preferredMachineId: machineStillValid
+            ? s.preferredMachineId
+            : undefined,
+        };
+      }),
+    );
+
   const move = (index: number, delta: -1 | 1) =>
     setSteps((current) => {
+      const target = index + delta;
+      if (target < 0 || target >= current.length) return current;
       const next = [...current];
       const [step] = next.splice(index, 1);
-      next.splice(index + delta, 0, step);
+      next.splice(target, 0, step);
       return next;
     });
 
-  const save = () => {
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setError('A route name is required.');
-      return;
-    }
-    if (steps.length === 0) {
-      setError('A Planned Route needs at least one step.');
-      return;
-    }
-    if (steps.some((s) => !s.operation.trim())) {
-      setError('Every step needs an Operation.');
-      return;
-    }
-    onSave(
-      trimmedName,
-      description.trim(),
-      // Explicit projection back to MockRouteStep — the editor-only
-      // `key` never leaves the dialog.
-      steps.map((step) => ({
-        area: step.area,
-        operation: step.operation.trim(),
-        expectedDuration: step.expectedDuration?.trim() || undefined,
-        preferredMachine: step.preferredMachine?.trim() || undefined,
-        instructions: step.instructions?.trim() || undefined,
-      })),
-    );
+  const handleDrop = (targetKey: number) => {
+    if (dragKey === null || dragKey === targetKey) return;
+    setSteps((current) => {
+      const from = current.findIndex((s) => s.key === dragKey);
+      const to = current.findIndex((s) => s.key === targetKey);
+      if (from < 0 || to < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
   };
+
+  const save = () => {
+    const problem = validate();
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    onSave(draft);
+  };
+
+  /** Save-then-continue used by the unsaved-changes decision. */
+  const applyAndContinue = (next: 'archive-confirm' | 'duplicate') => {
+    const problem = validate();
+    if (problem) return;
+    onApplyChanges?.(draft);
+    setBaseline(draft);
+    if (next === 'duplicate') {
+      onDuplicate?.(draft);
+    } else {
+      setStage(next);
+    }
+  };
+
+  /** Discard-then-continue: reset the form to the saved baseline. */
+  const discardAndContinue = (next: 'archive-confirm' | 'duplicate') => {
+    setName(baseline.name);
+    setDescription(baseline.description);
+    setSteps(baseline.steps.map((step, i) => ({ ...step, key: i })));
+    setError(null);
+    if (next === 'duplicate') {
+      onDuplicate?.(baseline);
+    } else {
+      setStage(next);
+    }
+  };
+
+  const requestClose = () => {
+    if (dirty) setStage('close-discard');
+    else onCancel();
+  };
+
+  const validationProblem = validate();
 
   return (
     <ModalDialog
       label={template ? 'Edit Planned Route' : 'New Planned Route'}
-      onClose={onCancel}
+      onClose={requestClose}
       size="xwide"
     >
       <h3>{template ? 'Edit Planned Route' : 'New Planned Route'}</h3>
+      {dirty ? <div className="rt-dirty">● Unsaved changes</div> : null}
       <div className="rt-form">
-        <label>Route name</label>
+        <label htmlFor="rt-name">Route name</label>
         <input
+          id="rt-name"
           className="field"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Bracket std v4"
         />
-        <label>Description (optional)</label>
+        <label htmlFor="rt-desc">Description (optional)</label>
         <input
+          id="rt-desc"
           className="field"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
         />
-        <label>
-          Steps — Area · Operation · expected duration · preferred Machine
-        </label>
+        <label>Steps</label>
+        {/* Column labels for the step fields — the bottom-border-only
+            instruction/duration inputs stay labelled (v15). */}
+        <div className="rt-stephead" aria-hidden="true">
+          <span />
+          <span />
+          <span>Area</span>
+          <span>Operation</span>
+          <span>Est. time</span>
+          <span>Preferred Machine</span>
+          <span />
+        </div>
         <div className="rt-steplist">
-          {steps.map((step, index) => (
-            <div className="rt-steprow" key={step.key}>
-              <span className="idx">{index + 1}</span>
-              <select
-                aria-label={`Step ${index + 1} Area`}
-                value={step.area}
-                onChange={(e) =>
-                  setStep(step.key, { area: e.target.value as AreaKey })
-                }
+          {steps.map((step, index) => {
+            const ops = areaByKey(step.area)?.operations ?? [];
+            const opUnavailable =
+              step.operation !== '' && !ops.includes(step.operation);
+            const areaMachines = activeMachines().filter(
+              (m) => m.area === step.area,
+            );
+            const machineUnavailable =
+              step.preferredMachineId !== undefined &&
+              !areaMachines.some((m) => m.id === step.preferredMachineId);
+            return (
+              // Drag-and-drop reorder (HTML5 DnD, same pattern as the
+              // Priority list) with ↑/↓ as the keyboard/touch path —
+              // drag is never the only way to reorder.
+              <div
+                className={`rt-steprow${dragKey === step.key ? ' dragging' : ''}`}
+                key={step.key}
+                draggable
+                onDragStart={() => setDragKey(step.key)}
+                onDragEnd={() => setDragKey(null)}
+                onDragOver={(event: DragEvent) => event.preventDefault()}
+                onDrop={(event: DragEvent) => {
+                  event.preventDefault();
+                  handleDrop(step.key);
+                }}
               >
-                {MOCK_AREAS.map((a) => (
-                  <option key={a.key} value={a.key}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-              <input
-                aria-label={`Step ${index + 1} Operation`}
-                placeholder="Operation"
-                value={step.operation}
-                onChange={(e) =>
-                  setStep(step.key, { operation: e.target.value })
-                }
-              />
-              <input
-                aria-label={`Step ${index + 1} expected duration`}
-                placeholder="e.g. 4h"
-                value={step.expectedDuration ?? ''}
-                onChange={(e) =>
-                  setStep(step.key, { expectedDuration: e.target.value })
-                }
-              />
-              <input
-                aria-label={`Step ${index + 1} preferred Machine`}
-                placeholder="Preferred Machine"
-                value={step.preferredMachine ?? ''}
-                onChange={(e) =>
-                  setStep(step.key, { preferredMachine: e.target.value })
-                }
-              />
-              <span className="steppbtns">
-                <button
-                  aria-label={`Move step ${index + 1} up`}
-                  disabled={index === 0}
-                  onClick={() => move(index, -1)}
-                >
-                  ↑
-                </button>
-                <button
-                  aria-label={`Move step ${index + 1} down`}
-                  disabled={index === steps.length - 1}
-                  onClick={() => move(index, 1)}
-                >
-                  ↓
-                </button>
-                <button
-                  aria-label={`Remove step ${index + 1}`}
-                  disabled={steps.length === 1}
-                  onClick={() =>
-                    setSteps((current) =>
-                      current.filter((s) => s.key !== step.key),
-                    )
+                <span className="grip" aria-hidden="true">
+                  ⠿
+                </span>
+                <span className="idx">{index + 1}</span>
+                <select
+                  aria-label={`Step ${index + 1} Area`}
+                  value={step.area}
+                  onChange={(e) =>
+                    changeArea(step.key, e.target.value as AreaKey)
                   }
                 >
-                  ✕
-                </button>
-              </span>
-              <input
-                className="instr"
-                aria-label={`Step ${index + 1} instructions`}
-                placeholder="Instructions (optional)"
-                value={step.instructions ?? ''}
-                onChange={(e) =>
-                  setStep(step.key, { instructions: e.target.value })
-                }
-              />
-            </div>
-          ))}
+                  {MOCK_AREAS.map((a) => (
+                    <option key={a.key} value={a.key}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label={`Step ${index + 1} Operation`}
+                  value={step.operation}
+                  onChange={(e) =>
+                    setStep(step.key, { operation: e.target.value })
+                  }
+                >
+                  {step.operation === '' ? (
+                    <option value="" disabled>
+                      Select an Operation…
+                    </option>
+                  ) : null}
+                  {opUnavailable ? (
+                    // An off-list Operation stays visible as an
+                    // explicit unavailable value — never silently
+                    // cleared.
+                    <option value={step.operation}>
+                      {step.operation} (unavailable)
+                    </option>
+                  ) : null}
+                  {ops.map((op) => (
+                    <option key={op} value={op}>
+                      {op}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="uline"
+                  aria-label={`Step ${index + 1} expected duration`}
+                  placeholder="e.g. 4h"
+                  value={step.expectedDuration ?? ''}
+                  onChange={(e) =>
+                    setStep(step.key, { expectedDuration: e.target.value })
+                  }
+                />
+                <select
+                  aria-label={`Step ${index + 1} preferred Machine`}
+                  value={step.preferredMachineId ?? ''}
+                  onChange={(e) =>
+                    setStep(step.key, {
+                      preferredMachineId: e.target.value || undefined,
+                    })
+                  }
+                >
+                  <option value="">— no preferred Machine</option>
+                  {machineUnavailable && step.preferredMachineId ? (
+                    // A retired/missing Machine stays visible as an
+                    // explicit unavailable value — never silently
+                    // cleared; choosing another value replaces it.
+                    <option value={step.preferredMachineId}>
+                      {machineLabel(step.preferredMachineId)} (unavailable)
+                    </option>
+                  ) : null}
+                  {areaMachines.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="steppbtns">
+                  <button
+                    aria-label={`Move step ${index + 1} up`}
+                    disabled={index === 0}
+                    onClick={() => move(index, -1)}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    aria-label={`Move step ${index + 1} down`}
+                    disabled={index === steps.length - 1}
+                    onClick={() => move(index, 1)}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    aria-label={`Remove step ${index + 1}`}
+                    disabled={steps.length === 1}
+                    onClick={() =>
+                      setSteps((current) =>
+                        current.filter((s) => s.key !== step.key),
+                      )
+                    }
+                  >
+                    ✕
+                  </button>
+                </span>
+                <label className="instrwrap">
+                  <span className="flbl">Instructions</span>
+                  <input
+                    className="instr uline"
+                    placeholder="optional"
+                    value={step.instructions ?? ''}
+                    onChange={(e) =>
+                      setStep(step.key, { instructions: e.target.value })
+                    }
+                  />
+                </label>
+              </div>
+            );
+          })}
         </div>
         <button
           className="rt-addstep"
@@ -558,7 +806,7 @@ function RouteEditDialog({
               ...current,
               {
                 area: 'lathe',
-                operation: '',
+                operation: areaByKey('lathe')?.operations[0] ?? '',
                 key: 1 + Math.max(0, ...current.map((s) => s.key)),
               },
             ])
@@ -571,7 +819,7 @@ function RouteEditDialog({
             {error}
           </div>
         ) : null}
-        {template && template.usedBy.length > 0 ? (
+        {template && used ? (
           <div className="rt-editnote">
             Changes apply to <b>future assignments only</b>. The{' '}
             {template.usedBy.length} Quantity Flow
@@ -582,14 +830,131 @@ function RouteEditDialog({
           </div>
         ) : null}
       </div>
+      {template ? (
+        <div className="rt-dlgactions">
+          <button
+            className="rt-dlgbtn"
+            onClick={() => {
+              if (dirty) setStage('dup-unsaved');
+              else onDuplicate?.(draft);
+            }}
+          >
+            Duplicate
+          </button>
+          {used ? (
+            <button
+              className="rt-dlgbtn warn"
+              onClick={() => {
+                setStage(dirty ? 'archive-unsaved' : 'archive-confirm');
+              }}
+            >
+              Archive…
+            </button>
+          ) : (
+            <button
+              className="rt-dlgbtn danger"
+              onClick={() => setStage('delete-confirm')}
+            >
+              Delete…
+            </button>
+          )}
+        </div>
+      ) : null}
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel
+        <button className="bigbtn ghost" onClick={requestClose}>
+          Cancel (Esc)
         </button>
         <button className="bigbtn primary" onClick={save}>
           {template ? 'Save route' : 'Create route'}
         </button>
       </div>
+      {stage === 'close-discard' ? (
+        <ConfirmDialog
+          title="Discard unsaved route changes?"
+          confirmLabel="Discard changes"
+          cancelLabel="Keep editing"
+          danger
+          onCancel={() => setStage(null)}
+          onConfirm={onCancel}
+        >
+          The changes to this route have not been saved and will be lost.
+        </ConfirmDialog>
+      ) : null}
+      {stage === 'dup-unsaved' ? (
+        <UnsavedChoiceDialog
+          title="Unsaved changes"
+          saveLabel="Save, then duplicate"
+          discardLabel="Duplicate the saved route"
+          saveDisabledReason={
+            validationProblem
+              ? `The edits cannot be saved yet: ${validationProblem}`
+              : undefined
+          }
+          onCancel={() => setStage(null)}
+          onSave={() => applyAndContinue('duplicate')}
+          onDiscard={() => discardAndContinue('duplicate')}
+        >
+          This route still has unsaved edits. Duplicating never saves them
+          silently — choose what the duplicate is based on.
+        </UnsavedChoiceDialog>
+      ) : null}
+      {stage === 'archive-unsaved' ? (
+        <UnsavedChoiceDialog
+          title="Unsaved changes"
+          saveLabel="Save changes, then archive"
+          discardLabel="Discard changes"
+          saveDisabledReason={
+            validationProblem
+              ? `The edits cannot be saved yet: ${validationProblem}`
+              : undefined
+          }
+          onCancel={() => setStage(null)}
+          onSave={() => applyAndContinue('archive-confirm')}
+          onDiscard={() => discardAndContinue('archive-confirm')}
+        >
+          This route still has unsaved edits. Archiving never saves them
+          silently — choose what happens to the edits before the archive
+          confirmation opens.
+        </UnsavedChoiceDialog>
+      ) : null}
+      {stage === 'archive-confirm' && template ? (
+        <TypedConfirmDialog
+          title="Archive Planned Route"
+          expectedValue={baseline.name || template.name}
+          valueLabel="route name"
+          confirmLabel="Archive route"
+          onCancel={() => setStage(null)}
+          onConfirm={() => onArchive?.()}
+        >
+          Archiving <b>{baseline.name || template.name}</b>:
+          <ul className="rt-consequences">
+            <li>
+              The route no longer appears as a choice for future assignments.
+            </li>
+            <li>
+              Quantity Flows already released with it keep their Assigned Route
+              snapshot unchanged.
+            </li>
+            <li>Actual Movement history is not changed.</li>
+            <li>The route stays visible for historical context.</li>
+          </ul>
+        </TypedConfirmDialog>
+      ) : null}
+      {stage === 'delete-confirm' && template ? (
+        <ConfirmDialog
+          title="Delete Planned Route"
+          confirmLabel="Delete route"
+          cancelLabel="Cancel (Esc)"
+          danger
+          onCancel={() => setStage(null)}
+          onConfirm={() => onDelete?.()}
+        >
+          <b>{template.name}</b> has never been used by a released Quantity
+          Flow, so it can be removed completely
+          {dirty ? ' (unsaved edits are discarded with it)' : ''}. A route that
+          has been used is archived instead.
+        </ConfirmDialog>
+      ) : null}
     </ModalDialog>
   );
 }

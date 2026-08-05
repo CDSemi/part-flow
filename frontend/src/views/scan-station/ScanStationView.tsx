@@ -424,9 +424,9 @@ function StationView({
     setNotice({
       kind: 'err',
       icon: '✕',
-      title: 'Disconnected — production writes are blocked',
+      title: 'Disconnected — production actions are disabled',
       detail:
-        'No scan is recorded or queued while offline. Restore the connection to resume scanning.',
+        'Scans will not be recorded or queued until the connection to the PartFlow server is restored.',
     });
   }, []);
 
@@ -809,26 +809,27 @@ function StationView({
             </div>
           ))}
         </div>
-        <div className="ss-pill">
-          <span className="lbl">Worker session</span>
-          <span className="val">
-            <span className="sdot" aria-hidden="true" />
-            {worker}
-          </span>
-          <span className="sub">{MOCK_WORKER.note}</span>
-        </div>
+        {/* The top application navigation is hidden in production
+            mode, so the connectivity status chip and the global
+            Dark/Light mode control move next to the Worker Session
+            pill — connectivity must stay visible and the theme must
+            stay reachable. Standard mode keeps both in the top
+            navigation. The shared `.ss-headgroup` wrapper stretches
+            both children to one height (v15): the ONLINE chip's top
+            edge aligns with the pill's top border and the theme
+            control never sits below the pill's bottom border — no
+            enclosing frame and no separator around the actions. */}
         {productionMode ? (
-          // The top application navigation is hidden in production
-          // mode, so the connectivity status chip and the global
-          // Dark/Light mode control move into one coherent
-          // header-actions group — connectivity must stay visible and
-          // the theme must stay reachable. Standard mode keeps both in
-          // the top navigation.
-          <div className="ss-headactions">
-            <ConnectivityChip />
-            <ThemeToggle compact />
+          <div className="ss-headgroup">
+            <WorkerPill worker={worker} />
+            <div className="ss-headactions">
+              <ConnectivityChip />
+              <ThemeToggle compact />
+            </div>
           </div>
-        ) : null}
+        ) : (
+          <WorkerPill worker={worker} />
+        )}
       </header>
 
       <div className="ss-body">
@@ -858,7 +859,7 @@ function StationView({
                 disabled={writeBlocked}
                 placeholder={
                   disconnected
-                    ? 'Disconnected — scanning blocked'
+                    ? 'Disconnected — scanning disabled'
                     : status === 'connecting'
                       ? 'Connecting…'
                       : 'Scan PN / Worker / Machine barcode… (ENTER)'
@@ -1182,7 +1183,24 @@ interface ActionDialogProps {
 /** Optional row emphasis for the shared confirmation summary. */
 type SummaryEmphasis = 'primary' | 'secondary';
 
-type SummaryRow = [string, ReactNode] | [string, ReactNode, SummaryEmphasis];
+/**
+ * Controlled semantic tone for a summary VALUE (v15). Additive only:
+ * emphasis (weight/size) still carries the hierarchy, so tone is never
+ * the only distinction. `ok` marks a successful/recorded result,
+ * `warn` a deviation worth noticing, `err` a destructive result.
+ * Audit context (Worker, Scan Station, timestamps) stays `secondary`
+ * muted; Area identity is shown with an AreaDot beside plain text, not
+ * by recoloring the text (area hues are not readable as body text in
+ * both themes).
+ */
+type SummaryTone = 'ok' | 'warn' | 'err';
+
+type SummaryRow = [
+  string,
+  ReactNode,
+  (SummaryEmphasis | undefined)?,
+  (SummaryTone | undefined)?,
+];
 
 /**
  * Structured confirmation summary — the dedicated final view of every
@@ -1195,17 +1213,20 @@ type SummaryRow = [string, ReactNode] | [string, ReactNode, SummaryEmphasis];
  * secondary audit/context rows (Worker, Scan Station, recorded event
  * names, explanatory notes) — nothing is hidden, labels never look
  * like buttons, and the distinction never relies on color alone
- * (weight and size carry it in both themes).
+ * (weight and size carry it in both themes; the optional value tone is
+ * additive on top).
  */
 function ConfirmationSummary({ rows }: { rows: SummaryRow[] }) {
   return (
     <dl className="ss-confirm">
       {rows
         .filter((row) => row[1] !== null && row[1] !== undefined)
-        .map(([label, value, emphasis]) => (
+        .map(([label, value, emphasis, tone]) => (
           <Fragment key={label}>
             <dt className={emphasis ?? ''}>{label}</dt>
-            <dd className={emphasis ?? ''}>{value}</dd>
+            <dd className={`${emphasis ?? ''}${tone ? ` tone-${tone}` : ''}`}>
+              {value}
+            </dd>
           </Fragment>
         ))}
     </dl>
@@ -1221,8 +1242,43 @@ function EntityChip({ children }: { children: ReactNode }) {
   return <span className="dlgchip">{children}</span>;
 }
 
+/**
+ * Area entity inside recaps and confirmation summaries: the stable
+ * Area identity dot beside plain text (v15). The dot carries the Area
+ * color; the text keeps the normal value color so Area identity never
+ * depends on recoloring body text.
+ */
+function AreaChip({
+  areaKey,
+  children,
+}: {
+  areaKey: string;
+  children: ReactNode;
+}) {
+  return (
+    <EntityChip>
+      <AreaDot colorVar={areaByKey(areaKey)?.colorVar ?? 'var(--faint)'} />
+      {children}
+    </EntityChip>
+  );
+}
+
+/** Worker Session pill — shared by both header layouts. */
+function WorkerPill({ worker }: { worker: string }) {
+  return (
+    <div className="ss-pill">
+      <span className="lbl">Worker session</span>
+      <span className="val">
+        <span className="sdot" aria-hidden="true" />
+        {worker}
+      </span>
+      <span className="sub">{MOCK_WORKER.note}</span>
+    </div>
+  );
+}
+
 /** Markers keep the guidance kinds apart without relying on color. */
-const GUIDE_MARKERS: Partial<Record<string, string>> = {
+const GUIDE_MARKERS: Record<'info' | 'warn' | 'action' | 'error', string> = {
   info: 'ℹ',
   warn: '⚠',
   action: '›',
@@ -1231,28 +1287,26 @@ const GUIDE_MARKERS: Partial<Record<string, string>> = {
 
 /**
  * Semantic quantity/step guidance directly above the related input or
- * choice. The kinds stay visually distinct (§3.10): neutral guidance
- * is plain muted text; information, important constraints, required
- * actions and validation errors each carry a small marker plus an
- * accent edge — color is never the only distinction, and validation
- * reads stronger than any instruction. Deliberately light: never a
- * large framed card.
+ * choice. Four kinds only (§3.10, v15 — the former marker-less
+ * `neutral` kind is retired): instructions and information are `info`,
+ * important constraints and deviations are `warn`, required next
+ * actions are `action`, and validation errors are `error`. Every kind
+ * carries a small marker plus an accent edge — color is never the
+ * only distinction, and validation reads stronger than any
+ * instruction. Deliberately light: never a large framed card.
  */
 function Guidance({
-  tone = 'neutral',
+  tone = 'info',
   children,
 }: {
-  tone?: 'neutral' | 'info' | 'warn' | 'action' | 'error';
+  tone?: 'info' | 'warn' | 'action' | 'error';
   children: ReactNode;
 }) {
-  const marker = GUIDE_MARKERS[tone];
   return (
     <div className={`ss-guide ${tone}`}>
-      {marker ? (
-        <span className="gmark" aria-hidden="true">
-          {marker}
-        </span>
-      ) : null}
+      <span className="gmark" aria-hidden="true">
+        {GUIDE_MARKERS[tone]}
+      </span>
       <span className="gtext">{children}</span>
     </div>
   );
@@ -1767,7 +1821,11 @@ function MachineAssignDialog({
                 <span className="mono">{parsedQty} pcs</span>,
                 'primary',
               ],
-              ['Source', <EntityChip>Area queue</EntityChip>, 'primary'],
+              [
+                'Source',
+                <AreaChip areaKey={station.area}>Area queue</AreaChip>,
+                'primary',
+              ],
               [
                 'Destination Machine',
                 <EntityChip>{machine}</EntityChip>,
@@ -1953,8 +2011,9 @@ function PnActionsDialog({
             <span className="ct1">Scrap damaged quantity</span>
             <br />
             <span className="ct2">
-              Count damaged pieces with the {SCRAP_BARCODE} barcode, give a
-              common reason, confirm one auditable SCRAPPED operation.
+              Scan {SCRAP_BARCODE} once for each damaged piece, then enter one
+              reason for the entire quantity. Nothing changes until you review
+              and confirm the scrap.
             </span>
           </span>
         </button>
@@ -2112,8 +2171,11 @@ function TransferDialog({
           <StepRecap
             lines={[
               <>
-                Transfer <EntityChip>{source.areaLabel}</EntityChip> →{' '}
-                <EntityChip>{destinationNote}</EntityChip>
+                Transfer{' '}
+                <AreaChip areaKey={source.card.area}>
+                  {source.areaLabel}
+                </AreaChip>{' '}
+                → <AreaChip areaKey={station.area}>{destinationNote}</AreaChip>
               </>,
               <>{source.card.workOrder}</>,
             ]}
@@ -2157,12 +2219,14 @@ function TransferDialog({
               ],
               [
                 'Source',
-                <EntityChip>{source.areaLabel}</EntityChip>,
+                <AreaChip areaKey={source.card.area}>
+                  {source.areaLabel}
+                </AreaChip>,
                 'primary',
               ],
               [
                 'Destination',
-                <EntityChip>{destinationNote}</EntityChip>,
+                <AreaChip areaKey={station.area}>{destinationNote}</AreaChip>,
                 'primary',
               ],
               [
@@ -2170,6 +2234,8 @@ function TransferDialog({
                 completesQty > 0
                   ? `Completed by this transfer for ${completesQty} pcs — no separate DONE needed first`
                   : null,
+                undefined,
+                'warn',
               ],
               [
                 'Remaining at source',
@@ -2326,6 +2392,8 @@ function IntakeDialog({
               case-insensitive and the first-entered casing is kept for
               display; received_date defaults to the scan timestamp; the
               optional due date is stored on the WorkOrderDemand. */}
+          {/* v15 layout: PN identity recap first, one short info line,
+              then the intake settings — never one merged paragraph. */}
           <div className="sub">
             {isKnown ? (
               <>This PN has no active Work Order Demand.</>
@@ -2334,11 +2402,18 @@ function IntakeDialog({
                 New PN — not registered yet. Check the value carefully:
                 confirming this intake registers the PN exactly as shown.
               </>
-            )}{' '}
-            Defaults: Request Type <b>MODIFY</b>, Route Mode <b>FLOATING</b> —
-            both editable. The received date is taken from this scan; the due
-            date is optional. The quantity to receive follows on the next step.
+            )}
           </div>
+          <StepRecap
+            lines={[
+              <>Work Order: {woBehavior}.</>,
+              <>Received date: taken from this scan · Due date: optional.</>,
+            ]}
+          />
+          <Guidance>
+            The quantity to receive is entered on the next step — nothing is
+            recorded until the final confirmation.
+          </Guidance>
           <div className="ss-dlgrid">
             <label htmlFor="in-type">Request Type</label>
             <select
@@ -2398,9 +2473,6 @@ function IntakeDialog({
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
-          <div className="ss-recap">
-            <div className="ss-recapline">Work Order: {woBehavior}.</div>
-          </div>
           <StepButtons
             onCancel={onCancel}
             primary={{
@@ -2416,23 +2488,25 @@ function IntakeDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
+          {/* v15: the same compact two-line recap shape as the
+              Transfer / Assign to Machine quantity steps — selections
+              on one line, demand context on the other. */}
           <StepRecap
             lines={[
               <>
                 <EntityChip>{requestType}</EntityChip>{' '}
                 <EntityChip>{routeMode}</EntityChip>
-                {routeMode === 'PLANNED' ? <> · “{plannedRoute}”</> : null}
+                {routeMode === 'PLANNED' ? (
+                  <> · “{plannedRoute}”</>
+                ) : null} · <EntityChip>{operation}</EntityChip>
               </>,
-              <>
-                <EntityChip>{operation}</EntityChip>
-              </>,
-              <>Due: {due || '—'}</>,
               <>
                 {reusableInternalWo || requestType === 'MODIFY'
                   ? 'Internal WO —'
-                  : 'Work Order to be created/selected'}
+                  : 'Work Order to be created/selected'}{' '}
+                · Due: {due || '—'}
+                {notes ? <> · Notes: {notes}</> : null}
               </>,
-              notes ? <>Notes: {notes}</> : null,
             ]}
           />
           <Guidance>
@@ -2483,11 +2557,11 @@ function IntakeDialog({
               ],
               [
                 'Destination',
-                <EntityChip>
+                <AreaChip areaKey={station.area}>
                   {hasMachines
                     ? `${areaName} queue (awaiting Machine)`
                     : `${areaName} — direct processing`}
-                </EntityChip>,
+                </AreaChip>,
                 'primary',
               ],
               ['Reason / notes', notes || null],
@@ -2592,6 +2666,19 @@ function AddQuantityDialog({
             Add physical quantity that was not received from another Area. Enter
             a reason so the adjustment can be reviewed later.
           </div>
+          <StepRecap
+            lines={[
+              <>
+                Adding at <AreaChip areaKey={station.area}>{areaName}</AreaChip>{' '}
+                →{' '}
+                <AreaChip areaKey={station.area}>
+                  {hasMachines
+                    ? `${areaName} queue (awaiting Machine)`
+                    : `${areaName} — direct processing`}
+                </AreaChip>
+              </>,
+            ]}
+          />
           <Guidance>
             There is no MAX and no assumed default — enter the actual physical
             count.
@@ -2637,14 +2724,14 @@ function AddQuantityDialog({
                 <span className="mono">+{parsedQty} pcs</span>,
                 'primary',
               ],
-              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
+              ['Area', <AreaChip areaKey={station.area}>{areaName}</AreaChip>],
               [
                 'Destination',
-                <EntityChip>
+                <AreaChip areaKey={station.area}>
                   {hasMachines
                     ? `${areaName} queue (awaiting Machine)`
                     : `${areaName} — direct processing`}
-                </EntityChip>,
+                </AreaChip>,
                 'primary',
               ],
               ['Reason', reason.trim(), 'primary'],
@@ -2767,6 +2854,14 @@ function RepairDialog({
             and no new demand — and returning to a previously visited Area is
             never assumed to be a repair; you choose it here.
           </div>
+          <StepRecap
+            lines={[
+              <>
+                Repair destination:{' '}
+                <AreaChip areaKey={station.area}>{areaName}</AreaChip>
+              </>,
+            ]}
+          />
           <div className="ss-dlgrid">
             <span className="lbl">Source</span>
             <div className="ss-choicerow">
@@ -2785,7 +2880,9 @@ function RepairDialog({
           </div>
           {source ? (
             <>
-              <Guidance tone="warn">
+              {/* MAX/default statement is an instruction, not a hazard
+                  — `info` (v15); genuine deviations keep `warn`. */}
+              <Guidance>
                 Repair quantity — MAX {max} pcs, the default. A partial quantity
                 splits off its own Quantity Flow; the full quantity moves the
                 whole flow.
@@ -2844,12 +2941,18 @@ function RepairDialog({
                 ) : null,
                 'primary',
               ],
-              ['Destination', <EntityChip>{areaName}</EntityChip>, 'primary'],
+              [
+                'Destination',
+                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
+                'primary',
+              ],
               [
                 'Effect',
                 partial
                   ? 'Partial quantity — splits off its own Quantity Flow first'
                   : 'Moves the whole Quantity Flow',
+                undefined,
+                partial ? 'warn' : undefined,
               ],
               ['Reason', reason.trim(), 'primary'],
               ['Worker', worker, 'secondary'],
@@ -2967,13 +3070,17 @@ function ScrapDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
+          {/* Operator wording only (v15): the scrap barcode counts only
+              inside this workflow, and the single SCRAPPED operation is
+              created on the final confirmation — the canonical event
+              name appears in the confirmation summary and history
+              surfaces, never in this instruction. */}
           <div className="sub">
-            Scan <code>{SCRAP_BARCODE}</code> once per damaged piece — the
-            barcode is context-sensitive and counts only inside this workflow.
-            Counting changes no production state; one auditable SCRAPPED
-            operation is created only on the final confirmation.
+            Scan <code>{SCRAP_BARCODE}</code> once for each damaged piece, then
+            enter one reason for the entire quantity. Nothing changes until you
+            review and confirm the scrap.
           </div>
-          <Guidance tone="warn">
+          <Guidance>
             Available at {areaName}: <b>{available} pcs</b> · pending scrap{' '}
             <b>{count}</b> · remaining after scrap{' '}
             <b>{Math.max(0, available - count)} pcs</b>.
@@ -3047,13 +3154,18 @@ function ScrapDialog({
             rows={[
               ['Action', 'Scrap damaged quantity', 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
-              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
+              [
+                'Area',
+                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
+                'primary',
+              ],
               ['Machine', '—'],
               ['Available', <span className="mono">{available} pcs</span>],
               [
                 'Scrap quantity',
                 <span className="mono">{count} pcs</span>,
                 'primary',
+                'err',
               ],
               [
                 'Remaining active quantity',
@@ -3197,7 +3309,9 @@ function QueueReturnDialog({
               ['Source Machine', <EntityChip>{machine}</EntityChip>, 'primary'],
               [
                 'Destination',
-                <EntityChip>{`${areaName} queue`}</EntityChip>,
+                <AreaChip
+                  areaKey={station.area}
+                >{`${areaName} queue`}</AreaChip>,
                 'primary',
               ],
               [
@@ -3374,13 +3488,17 @@ function DoneDialog({
                 <span className="mono">{parsedQty} pcs</span>,
                 'primary',
               ],
-              ['Area', <EntityChip>{areaName}</EntityChip>, 'primary'],
+              [
+                'Area',
+                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
+                'primary',
+              ],
               [
                 'Machine',
                 machine ? <EntityChip>{machine}</EntityChip> : null,
                 'primary',
               ],
-              ['Result', 'Finished — ready to move', 'primary'],
+              ['Result', 'Finished — ready to move', 'primary', 'ok'],
               ['Worker', worker, 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'AREA_COMPLETED', 'secondary'],
@@ -3438,7 +3556,7 @@ function UndoConfirmDialog({
           ],
           ['Worker', target.worker, 'secondary'],
           ['Time', <span className="mono">{target.time}</span>, 'secondary'],
-          ['Effect of the reversal', target.reversalEffect, 'primary'],
+          ['Effect of the reversal', target.reversalEffect, 'primary', 'warn'],
         ]}
       />
       <StepButtons
@@ -3485,17 +3603,13 @@ function ManualEntryDialog({
           if (e.key === 'Enter') onConfirm(e.currentTarget.value);
         }}
       />
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc)
-        </button>
-        <button
-          className="bigbtn primary"
-          onClick={() => onConfirm(fieldRef.current?.value ?? '')}
-        >
-          Look up PN
-        </button>
-      </div>
+      <StepButtons
+        onCancel={onCancel}
+        primary={{
+          label: 'Look up PN',
+          onClick: () => onConfirm(fieldRef.current?.value ?? ''),
+        }}
+      />
     </ModalDialog>
   );
 }

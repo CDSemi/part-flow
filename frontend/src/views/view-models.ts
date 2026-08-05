@@ -98,13 +98,37 @@ export interface MockAreaMachine {
 }
 
 /**
+ * One append-only Machine lifecycle event (v15). The lifecycle audit
+ * distinguishes RETIRED and REACTIVATED (return-to-service of the SAME
+ * physical machine — never a replacement, which is always a new
+ * record); activation at creation stays implicit. Events are never
+ * edited or removed: the record of when a Machine was out of service
+ * survives a reactivation.
+ */
+export interface MachineLifecycleEvent {
+  event: 'RETIRED' | 'REACTIVATED';
+  /** ISO timestamp of the lifecycle change. */
+  at: string;
+  /** Who performed the change (mock actor in Phase 2). */
+  by: string;
+  reason?: string;
+  /** Set on REACTIVATED when the physical machine moved while retired
+   * — applies forward only; historical Movements keep their Areas. */
+  fromArea?: AreaKey;
+  toArea?: AreaKey;
+}
+
+/**
  * One physical Machine record (Management → Machines). A Machine is a
  * specific physical production resource with a stable internal
  * identity and its own barcode. A replacement Machine is a NEW record
  * (new identity, new barcode) that may reuse the operator-facing
  * display name of a familiar floor position (`Lathe 1`) — the retired
  * record is never renamed or mutated, so history keeps pointing at the
- * Machine that really did the work.
+ * Machine that really did the work. Return to service of the SAME
+ * physical machine is the one exception (v15): reactivation clears
+ * `retiredOn` on the same record and appends a lifecycle event —
+ * identity, barcode, asset metadata and history stay untouched.
  */
 export interface MockMachine {
   /** Stable internal identity — never reused by a replacement. */
@@ -135,6 +159,11 @@ export interface MockMachine {
   retiredOn?: string;
   /** ISO timestamp of the last operational state change. */
   stateChangedAt: string;
+  /**
+   * Append-only lifecycle audit (v15): RETIRED / REACTIVATED events in
+   * chronological order. Absent or empty = never retired.
+   */
+  lifecycle?: MachineLifecycleEvent[];
   /* Optional asset metadata — identification of the physical asset
      (the Asset Tag stays unique even when display names are reused).
      Production tracking never depends on these fields. */
@@ -153,8 +182,15 @@ export interface MockRouteStep {
   /** Advisory expected duration, e.g. `4h` — never blocks production. */
   expectedDuration?: string;
   instructions?: string;
-  /** Preferred (not mandatory) Machine display name. */
-  preferredMachine?: string;
+  /**
+   * Preferred (not mandatory) Machine — the stable Machine id (v15,
+   * matching `preferred_machine_id`), never the reusable display name:
+   * `Lathe 1` may mean two different physical machines across a
+   * replacement, so a name cannot identify the preference. A retired
+   * or missing Machine renders as an explicit unavailable value —
+   * never silently cleared.
+   */
+  preferredMachineId?: string;
 }
 
 /**

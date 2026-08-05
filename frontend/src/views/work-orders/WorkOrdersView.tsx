@@ -266,10 +266,6 @@ function WorkOrderListPanel({
     <div>
       <div className="wo-head">
         <h1>Work Orders</h1>
-        <span className="spacer" />
-        <button className="btn primary" onClick={onNew}>
-          ＋ New Work Order
-        </button>
       </div>
       <p className="wo-sub">
         Manual Work Order entry and explicit production release.{' '}
@@ -282,6 +278,9 @@ function WorkOrderListPanel({
         Development preview — saves and releases update sample data in this
         browser session only.
       </DevNotice>
+      {/* Toolbar (v15): search + primary action on one row, the action
+          right-aligned with the full-width list — the same layout as
+          the Machines page. */}
       <div className="wo-tools">
         <input
           value={search}
@@ -289,6 +288,10 @@ function WorkOrderListPanel({
           placeholder="Search WO Number…"
           aria-label="Search WO Number"
         />
+        <span className="spacer" />
+        <button className="btn primary" onClick={onNew}>
+          ＋ New Work Order
+        </button>
       </div>
       {list.length === 0 ? (
         <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
@@ -313,9 +316,17 @@ function WorkOrderListPanel({
               </tr>
             ) : (
               rows.map((w) => (
-                <tr key={w.id}>
+                // The COMPLETE row opens the Work Order Details dialog
+                // (v15): the WO-cell button stays the keyboard
+                // (Enter/Space) and screen-reader entry point — its
+                // activation bubbles to this row handler; no other
+                // interactive control lives inside the row.
+                <tr key={w.id} className="selrow" onClick={() => onOpen(w.id)}>
                   <td>
-                    <button className="rowbtn" onClick={() => onOpen(w.id)}>
+                    <button
+                      className="rowbtn"
+                      aria-label={`Open Work Order ${woDisplay(w.workOrderNumber)}`}
+                    >
                       <span className="wo" title={woDisplay(w.workOrderNumber)}>
                         {woDisplay(w.workOrderNumber)}
                       </span>

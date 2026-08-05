@@ -1,4 +1,4 @@
-# PartFlow Project Profile v12
+# PartFlow Project Profile v11
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -428,9 +428,7 @@ A Machine:
 
 A Machine has a lifecycle: it is active until it is **retired**. A Machine that was ever referenced by Movement history is never hard-deleted — it is retired instead, stays visible for historical display and reporting, never appears in assignment choices, and accepts no new scans.
 
-A retired Machine may later **return to service** — but only as the **same physical machine** on the **same record**: reactivation keeps the stable identity, barcode, asset metadata, and complete history, and clears the retirement date. Retirement and reactivation are recorded as append-only lifecycle audit events (§8.6). A **different** physical machine is always a new record, never a reactivation.
-
-A Machine keeps a stable internal identity; the operator-facing display name is separate and may be reused **across time and replacements** — but display names must be **unique among the active Machines of one Area**. Replacing a physical Machine means retiring the old record and creating a **new** record with its own stable identity and its own new barcode. The new Machine may reuse the familiar floor-position display name (for example `Lathe 1`); the old record is never renamed or mutated, and the two remain distinguishable through internal identity and asset metadata. There is no MachineSlot or WorkCenter abstraction — the display name alone carries the floor-position familiarity.
+A Machine keeps a stable internal identity; the operator-facing display name is separate and may be reused. Replacing a physical Machine means retiring the old record and creating a **new** record with its own stable identity and its own new barcode. The new Machine may reuse the familiar floor-position display name (for example `Lathe 1`); the old record is never renamed or mutated, and the two remain distinguishable through internal identity and asset metadata. There is no MachineSlot or WorkCenter abstraction — the display name alone carries the floor-position familiarity.
 
 ---
 
@@ -709,8 +707,7 @@ Asset metadata (manufacturer, model, asset tag, serial number, installed date, n
 Rules:
 
 - Every Machine barcode must be unique.
-- A Machine belongs to exactly one Area. The Area of an existing **active** Machine is fixed — moving production capacity to another Area is a replacement (retire + new record), never an edit that would make history ambiguous. The only exception is reactivation of the same physical machine that was physically moved while retired (below) — a forward-looking Area change that never touches history.
-- Display names must be **unique among the active Machines of one Area**. Reuse across time and across replacements stays allowed — the uniqueness rule constrains only simultaneously active Machines of the same Area.
+- A Machine belongs to exactly one Area. The Area of an existing Machine is fixed — moving production capacity to another Area is a replacement (retire + new record), never an edit that would make history ambiguous.
 - Machine assignment identifies the current executor.
 - An Area without Machines involves no Machine assignment at all.
 - Assignment behavior follows from the Area's Machines (§12): with Machines, quantity queues and is assigned through the explicit one-shot workflow (UI label `Assign to Machine`) — never by configuration and never by Machine count.
@@ -719,10 +716,7 @@ Rules:
 - Maintenance may start while quantity remains assigned. Starting maintenance never moves, releases, completes, or transfers quantity and never rewrites history; it may carry an optional note and an optional expected return date. Clearing maintenance returns the Machine to Running when quantity is still assigned, otherwise to Idle.
 - Retirement is blocked while active quantity is assigned — the quantity must first complete or transfer through the normal production workflow. A Machine ever referenced by Movement history is never hard-deleted; it is retired (operator wording: `Retired`, `Retire Machine`, `Retired on …`) and remains available for historical display and reporting only.
 - A retired Machine never appears in assignment choices and accepts no new scans.
-- A retired Machine may **return to service (reactivation: RETIRED → ACTIVE)** — for the **same physical machine only**, on the **same record**: identity, barcode, asset metadata, and history are unchanged, and `retired_on` clears. During reactivation a new active Area may be chosen when the physical machine moved while it was retired; the change is forward-looking only — historical Movements keep their recorded Areas. The reactivated Machine returns as Idle (the operational state stays derived — assigned quantity, not reactivation, makes it Running).
-- Reactivation is blocked when the barcode, asset tag, or serial number has meanwhile been reissued to another active Machine, when the target Area is not active and no replacement Area is chosen, or when the display name would collide with an active Machine of the target Area.
-- Retirement and reactivation are recorded as **append-only lifecycle audit events** (`RETIRED`, `REACTIVATED`): who, when, reason, the before/after state, and the previous and current Area when the Machine moved. (Phase 2 mocks these events; persistence arrives with the relevant backend phase.)
-- Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and new barcode; the display name may be reused, the old record is never mutated. A **different physical machine is always a new record** — never a reactivation.
+- Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and new barcode; the display name may be reused, the old record is never mutated.
 
 ---
 
@@ -1693,7 +1687,7 @@ Requirements:
 
 - readable from a distance,
 - automatic pagination,
-- automatic page rotation with a dwell time **proportional to the rows displayed on the current page** (default 3 seconds per displayed row, with a 6-second minimum page dwell); the rotation countdown indicator uses the same deadline and the same per-page duration; the values are configuration (future Administration → Department display settings, §22) — never hard-coded UI constants,
+- automatic page rotation,
 - dynamic rows per page,
 - priority and due-date sorting following the canonical demand ordering (§18),
 - overdue highlighting,
@@ -1770,14 +1764,12 @@ Machines is the management view for Machine lifecycle, maintenance, and asset id
 
 It must provide:
 
-- a table of active Machines: identity (display name and Area), derived operational state with the elapsed time in state, currently assigned PN portions with quantities, asset metadata (asset tag, manufacturer, model), and a per-row **Maintenance On/Off switch** that opens the existing start-maintenance (optional note, optional expected return date) and clear-maintenance dialogs — there is no separate actions column,
-- whole-row activation: selecting a Machine row opens the Edit Machine dialog,
-- a separate Retired Machines table: name, `Retired on YYYY-MM-DD`, asset metadata, notes — historical display and reporting plus a per-row **Reactivate** action (§8.6 return to service); retired Machines still never appear in assignment choices and accept no new scans,
-- a New Machine / Edit Machine dialog: display name and barcode value (both required; barcode unique), Area (selectable for a new Machine, fixed for an existing one — §8.6), optional manufacturer, model, asset tag, serial number, installed date, and notes, and the Machine's append-only lifecycle audit events (`RETIRED` / `REACTIVATED` — §8.6),
-- retirement as the Edit dialog's **Danger Zone** action: `Retire…` requires a typed identifier confirmation — the Asset Tag, or the Machine barcode when no asset tag exists, never the reusable display name — after an explicit consequences warning,
+- a table of active Machines: identity (display name and Area), derived operational state with the elapsed time in state, currently assigned PN portions with quantities, and asset metadata (asset tag, manufacturer, model),
+- per-Machine actions: start maintenance (optional note, optional expected return date), clear maintenance, edit, and retire,
+- a separate Retired Machines table: name, `Retired on YYYY-MM-DD`, asset metadata, notes — historical display and reporting only, with no actions,
+- a New Machine / Edit Machine dialog: display name and barcode value (both required; barcode unique), Area (selectable for a new Machine, fixed for an existing one — §8.6), and optional manufacturer, model, asset tag, serial number, installed date, and notes,
 - retirement blocked while active quantity is assigned, with the quantity completing or transferring through the normal production workflow first,
-- reactivation of a retired Machine per §8.6: same physical machine on the same record, required reason, an optional new active Area applied forward only, blocked on reissued identity (barcode / asset tag / serial number) and on active-name collisions in the target Area, returning the Machine as Idle,
-- replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and new barcode; the display name may be reused (unique among active Machines of one Area).
+- replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and new barcode; the display name may be reused.
 
 Machine management stays focused on lifecycle, maintenance, and asset identification. PartFlow is not a CMMS: no spare parts, maintenance schedules, service contracts, or cost accounting.
 
@@ -1836,7 +1828,7 @@ It must not imply that the entire PN is at one Route Step.
 
 ## Work Orders
 
-Work Orders is the management view for manual Work Order entry (the Work Order Intake workflow, §12). It is a light-theme management view. The Work Order list spans the full view width, its search and the New Work Order action share one toolbar row, and selecting a Work Order row opens the Work Order Details dialog.
+Work Orders is the management view for manual Work Order entry (the Work Order Intake workflow, §12). It is a light-theme management view.
 
 The view must support the minimum confirmed workflow:
 
@@ -1862,11 +1854,10 @@ Planned Routes is the management view for reusable route definitions (`RouteTemp
 
 It must provide:
 
-- a searchable list of active route templates — name and description, the compact ordered Area step sequence presented as Area-colored chips, status (Active with its updated date), and usage — plus a separate table of archived templates (with their archived dates),
+- a searchable list of route templates: name and description, the compact ordered Area step sequence, status — Active (with updated date) or Archived (with archived date, visually quiet),
 - usage per template: the Quantity Flows released with it (flow id, PN, released date), or `Never used`,
-- whole-row activation: selecting an active template row opens the create/edit dialog; duplicate, and archive (ever-used) or delete (never-used only), live inside that dialog — archived templates offer only duplicate from their table,
-- a create/edit dialog: name, description, and ordered steps (Area, Operation, advisory expected duration, optional preferred Machine, optional instructions) with explicit reordering (drag-and-drop plus Up/Down controls) and step add/remove; the Operation select is scoped to the chosen Area's Operations, and the preferred Machine select offers the Area's active Machines referenced by stable Machine id (`preferred_machine_id`, §8.9) — never by the reusable display name,
-- archiving an ever-used template guarded by a typed confirmation (the exact route name) after an explicit consequences warning; deleting a never-used template stays a plain confirmation,
+- actions: edit, duplicate, and archive for ever-used templates; delete only for never-used templates; archived templates offer only duplicate,
+- a create/edit dialog: name, description, and ordered steps (Area, Operation, advisory expected duration, optional preferred Machine, optional instructions) with explicit reordering and step add/remove,
 - an explicit note when editing a used template: changes apply to future assignments only; already released Quantity Flows keep their Assigned Route snapshots, and an in-production Assigned Route is changed separately in its own audited workflow with a reason (Tracking → Edit assigned Route),
 - archived templates visible in historical context but never offered for new route assignments.
 

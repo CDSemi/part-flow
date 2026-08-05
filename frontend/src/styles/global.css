@@ -477,6 +477,10 @@ textarea {
   color: var(--on-accent);
 }
 
+.bigbtn.danger:disabled {
+  opacity: 0.35;
+}
+
 .bigbtn.ghost {
   background: var(--panel2);
   border: 1px solid var(--border);
@@ -528,4 +532,44 @@ textarea {
   gap: 7px;
   font-size: 14px;
   line-height: 1.5;
+}
+
+/* ============ Typed destructive confirmation ============ */
+.dlg .typedconfirm {
+  margin-top: 14px;
+}
+
+.dlg .typedconfirm label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.dlg .typedconfirm label b {
+  color: var(--text);
+  font-family: var(--mono), monospace;
+}
+
+.dlg .typedconfirm input {
+  width: 100%;
+  background: var(--field-bg);
+  border: 2px solid var(--border2);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 16px;
+  font-family: var(--mono), monospace;
+  padding: 10px 14px;
+  outline: none;
+}
+
+.dlg .typedconfirm input:focus {
+  border-color: var(--err-t);
+}
+
+/* Save is blocked (invalid form) inside the unsaved-changes decision */
+.dlg .sub.disabled-reason {
+  color: var(--warn-t);
+  font-weight: 650;
+  margin-top: -8px;
 }

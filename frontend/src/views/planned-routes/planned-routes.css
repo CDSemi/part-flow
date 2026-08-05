@@ -91,8 +91,13 @@
   max-width: 40ch;
 }
 
-/* Compact step trace: Area steps joined by arrows — the same reading
-   direction as the Tracking route visualization, without step cards. */
+/* Step blocks (v15): the same reading direction as the Tracking route
+   visualization, presented as chips like the PN Details route — but
+   each block is tinted with its Area identity color (tinted surface +
+   Area-colored border + Area dot; the text keeps the normal text
+   color, so Area hue is never the only signal and never carries the
+   text contrast). Steps and arrows are separate flex siblings so an
+   arrow can never overlap a chip when the trace wraps. */
 .rt-steps {
   display: flex;
   align-items: center;
@@ -102,13 +107,27 @@
   font-size: 12.5px;
 }
 
-.rt-steps .stp {
+.rt-steps .rt-stepchip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
+  padding: 3px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--acol, var(--faint)) 16%, var(--panel));
+  border: 1px solid
+    color-mix(in srgb, var(--acol, var(--faint)) 55%, var(--border));
   color: var(--text);
   font-weight: 650;
+}
+
+/* Without color-mix support, the chips fall back to the neutral chip
+   surface — the Area dot alone still carries the Area identity. */
+@supports not (background: color-mix(in srgb, red 10%, blue)) {
+  .rt-steps .rt-stepchip {
+    background: var(--panel2);
+    border-color: var(--border);
+  }
 }
 
 .rt-steps .arw {
@@ -159,13 +178,34 @@
   color: var(--faint);
 }
 
-.rt-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+/* Whole-row activation (v15): the complete active row opens Edit
+   Planned Route; the name-cell button is the keyboard and
+   screen-reader entry point (Enter/Space bubble to the row handler).
+   The usage cell is the one interactive island and stops
+   propagation. */
+.rt-table tr.selrow {
+  cursor: pointer;
 }
 
-.rt-actions button {
+.rt-table tr.selrow:hover td {
+  background: var(--row-hover);
+}
+
+.rt-table .rowbtn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0;
+}
+
+.rt-table .rowbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+/* Duplicate action inside the Archived Routes rows (v15). */
+.rt-duplicate {
   border: 1px solid var(--border);
   border-radius: 9px;
   padding: 7px 12px;
@@ -177,22 +217,34 @@
   white-space: nowrap;
 }
 
-.rt-actions button:hover {
+.rt-duplicate:hover {
   border-color: var(--info-t);
   color: var(--info-t);
 }
 
-.rt-actions button.danger:hover {
-  border-color: var(--err-t);
-  color: var(--err-t);
+.rt-visuallyquiet {
+  color: var(--faint);
 }
 
-/* Archived rows stay readable but visually quiet. */
+/* Archived Routes section (v15): a separate table like the Machines
+   page — historical context, visually quiet. */
+.rt-archived {
+  margin-top: 26px;
+}
+
+.rt-archived h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
 .rt-table tr.archived td {
   color: var(--muted);
 }
 
-.rt-table tr.archived .rt-steps .stp {
+.rt-table tr.archived .rt-steps .rt-stepchip {
   color: var(--muted);
   font-weight: 550;
 }
@@ -230,21 +282,70 @@
   margin-top: 6px;
 }
 
+/* Step editor rows (v15): presented like the Priority list items —
+   grip + index + fields on one card surface, reordered by
+   drag-and-drop with the ↑/↓ buttons kept as the keyboard/touch
+   fallback (drag is never the only way). */
+.rt-stephead,
 .rt-steprow {
   display: grid;
   grid-template-columns:
-    24px minmax(120px, 1fr) minmax(110px, 1fr) 84px minmax(110px, 1fr)
-    auto;
-  gap: 8px;
+    18px 24px max-content minmax(110px, max-content) 90px
+    minmax(110px, max-content) auto;
+  gap: 6px 10px;
   align-items: center;
 }
 
-/* Optional step instructions: a quiet second line under the step's
-   main fields, aligned with them. */
+.rt-stephead {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.rt-steprow {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel2);
+  padding: 9px 12px;
+}
+
+.rt-steprow.dragging {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
+.rt-steprow .grip {
+  color: var(--faint);
+  cursor: grab;
+  font-size: 14px;
+  text-align: center;
+}
+
+/* Optional step instructions: a quiet labelled second line under the
+   step's main fields, aligned with them. */
+.rt-steprow .instrwrap {
+  grid-column: 3 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.rt-steprow .flbl {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
 .rt-steprow .instr {
-  grid-column: 2 / -1;
+  flex: 1;
   font-size: 12.5px;
-  min-height: 36px;
+  min-height: 34px;
 }
 
 .rt-steprow .idx {
@@ -264,7 +365,10 @@
   padding: 8px 10px;
   min-height: 40px;
   outline: none;
-  width: 100%;
+  /* Comboboxes size to their content and never overflow their card
+     (full width at the phone breakpoint below). */
+  width: max-content;
+  max-width: 100%;
 }
 
 .rt-steprow select:focus,
@@ -272,9 +376,29 @@
   border-color: var(--info-t);
 }
 
+/* Bottom-border-only fields (expected duration, instructions): still
+   labelled (column header / inline label) and still with a visible
+   focus state. */
+.rt-steprow input.uline {
+  background: none;
+  border: none;
+  border-bottom: 1.5px solid var(--border2);
+  border-radius: 0;
+  min-height: 34px;
+  padding: 4px 2px;
+  width: 100%;
+}
+
+.rt-steprow input.uline:focus-visible {
+  outline: none;
+  border-bottom-color: var(--info-t);
+  box-shadow: 0 1px 0 0 var(--info-t);
+}
+
 .rt-steprow .steppbtns {
   display: flex;
   gap: 4px;
+  justify-content: flex-end;
 }
 
 .rt-steprow .steppbtns button {
@@ -314,13 +438,88 @@
   border-color: var(--info-t);
 }
 
+/* Unsaved-changes badge in the dialog heading area. */
+.rt-dirty {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--warn-t);
+  margin-bottom: 6px;
+}
+
+/* In-dialog secondary actions (v15): Duplicate and Archive/Delete
+   moved out of the table rows into the edit dialog. */
+.rt-dlgactions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.rt-dlgbtn {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  padding: 9px 16px;
+  min-height: 42px;
+}
+
+.rt-dlgbtn:hover {
+  border-color: var(--info-t);
+  color: var(--info-t);
+}
+
+.rt-dlgbtn.warn {
+  color: var(--warn-t);
+  border-color: var(--warning-border);
+}
+
+.rt-dlgbtn.warn:hover {
+  background: var(--warning-surface-weak);
+  color: var(--warn-t);
+  border-color: var(--warn-t);
+}
+
+.rt-dlgbtn.danger {
+  color: var(--err-t);
+  border-color: var(--error-border);
+}
+
+.rt-dlgbtn.danger:hover {
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+  border-color: var(--err-t);
+}
+
+/* Archive consequences list inside the typed confirmation. */
+.rt-consequences {
+  margin: 8px 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 @media (max-width: 760px) {
-  .rt-steprow {
-    grid-template-columns: 24px 1fr 1fr;
+  .rt-stephead {
+    display: none;
   }
 
-  .rt-steprow .steppbtns {
-    grid-column: 2 / -1;
+  .rt-steprow {
+    grid-template-columns: 18px 24px minmax(0, 1fr);
+  }
+
+  .rt-steprow select,
+  .rt-steprow input {
+    grid-column: 3;
+    width: 100%;
+  }
+
+  .rt-steprow .steppbtns,
+  .rt-steprow .instrwrap {
+    grid-column: 3;
   }
 }
 

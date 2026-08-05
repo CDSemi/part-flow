@@ -279,6 +279,35 @@ test('production mode offers the global theme control in the header actions grou
   ).toBeInTheDocument();
 });
 
+test('the production header wraps the Worker pill and header actions in one group', async () => {
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
+  render(<App />);
+  await screen.findByLabelText('Scan barcode');
+  await screen.findByText('ONLINE');
+
+  // v15: one shared `.ss-headgroup` cell holds the Worker pill and the
+  // header actions — the production header keeps three cells like
+  // standard mode, with no separate bordered actions column.
+  const head = document.querySelector('.ss-head')!;
+  expect(Array.from(head.children, (el) => el.className)).toEqual([
+    'ss-id',
+    'ss-stats',
+    'ss-headgroup',
+  ]);
+  const group = head.querySelector('.ss-headgroup')!;
+  expect(Array.from(group.children, (el) => el.className)).toEqual([
+    'ss-pill',
+    'ss-headactions',
+  ]);
+  // The actions hold the connectivity chip (its own chip frame) and
+  // the compact theme control.
+  const actions = group.querySelector('.ss-headactions') as HTMLElement;
+  expect(actions.querySelector('.connchip')?.textContent).toContain('ONLINE');
+  expect(
+    within(actions).getByRole('button', { name: '🌙 Dark' }),
+  ).toBeInTheDocument();
+});
+
 test('Ctrl+Shift+K toggles between standard and production routes only', async () => {
   await renderStation();
 
@@ -895,12 +924,15 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
     target: { value: 'MODIFY' },
   });
 
-  // Step 2 — recap (Request Type and Route Mode chips) + guidance
-  // directly above the quantity input.
+  // Step 2 — compact two-line recap (v15): selection chips on one
+  // line, the WO/due context on the other, then the instruction
+  // guidance directly above the quantity input.
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   const recap = dialog.querySelector('.ss-recap')!;
   expect(recap.textContent).toContain('MODIFY');
   expect(recap.textContent).toContain('FLOATING');
+  expect(recap.textContent).toContain('Internal WO —');
+  expect(recap.textContent).toContain('Due: —');
   expect(dialog.textContent).toContain(
     'Enter the physical quantity received. No default quantity is assumed.',
   );
@@ -925,6 +957,39 @@ test('an unknown PN opens the three-step intake wizard with editable defaults', 
   const detail = document.querySelector('.ss-toast .t2')?.textContent ?? '';
   expect(detail).toContain('without an external number (displays —)');
   expect(detail).not.toMatch(/TMP-/);
+});
+
+test('the intake settings step separates PN identity, WO recap, and quantity guidance', async () => {
+  await renderStation();
+
+  scan('PF:PN:NEW-PART-01');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Receive quantity — intake',
+  });
+
+  // v15: the description carries PN identity only; the Work Order
+  // behavior and date handling form a separate recap block.
+  expect(dialog.querySelector('.sub')?.textContent).toContain(
+    'New PN — not registered yet',
+  );
+  const recap = dialog.querySelector('.ss-recap')!;
+  expect(recap.textContent).toContain(
+    'Work Order: Creates an internal Work Order without an external number (displays —).',
+  );
+  expect(recap.textContent).toContain(
+    'Received date: taken from this scan · Due date: optional.',
+  );
+
+  // ℹ info guidance: the quantity comes on the next step and nothing
+  // is recorded before the final confirmation.
+  const guide = dialog.querySelector('.ss-guide.info')!;
+  expect(guide.querySelector('.gmark')?.textContent).toBe('ℹ');
+  expect(guide.textContent).toContain(
+    'The quantity to receive is entered on the next step — nothing is recorded until the final confirmation.',
+  );
+  // v15: the marker-less `neutral` guidance kind no longer exists.
+  expect(dialog.querySelector('.ss-guide.neutral')).toBeNull();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 });
 
 test('intake Back preserves settings and quantity; Cancel records nothing', async () => {
@@ -1098,8 +1163,16 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
   expect(dialog).toHaveTextContent('never assumed to be a repair');
   expect(dialog).toHaveTextContent('no new quantity and no new demand');
 
+  // v15 entry recap names the repair destination.
+  expect(dialog.querySelector('.ss-recap')?.textContent).toContain(
+    'Repair destination: Lathe',
+  );
+
   // The single known source is preselected; quantity defaults to MAX.
+  // The MAX/default statement is an ℹ instruction (v15), not a warning.
   expect(screen.getByLabelText('Quantity: 4')).toBeInTheDocument();
+  const maxGuide = dialog.querySelector('.ss-guide.info')!;
+  expect(maxGuide.textContent).toContain('MAX 4 pcs, the default');
   const next = screen.getByRole('button', { name: 'Next' });
   expect(next).toBeDisabled(); // reason is required
 
@@ -1149,8 +1222,11 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   fireEvent.click(screen.getByRole('button', { name: '−1 correct' }));
   expect(dialog.querySelector('.ss-scrapcount .cnt')?.textContent).toBe('2');
 
-  // Available / pending / remaining stay visible while counting.
-  expect(dialog.textContent).toContain('Available at Lathe');
+  // Available / pending / remaining stay visible while counting — a
+  // plain ℹ status line (v15), not a warning.
+  const statusLine = dialog.querySelector('.ss-guide.info')!;
+  expect(statusLine.textContent).toContain('Available at Lathe');
+  expect(statusLine.querySelector('.gmark')?.textContent).toBe('ℹ');
 
   // Next stays blocked until the common reason exists.
   const next = screen.getByRole('button', { name: 'Next' });
@@ -1167,6 +1243,10 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   expect(dialog.textContent).toContain('6 pcs'); // available
   expect(dialog.textContent).toContain('2 pcs'); // scrap quantity
   expect(dialog.textContent).toContain('4 pcs'); // remaining
+  // The destructive scrap quantity carries the error value tone (v15).
+  expect(dialog.querySelector('.ss-confirm dd.tone-err')?.textContent).toBe(
+    '2 pcs',
+  );
   expect(lastPnText()).toBe('—');
 
   // Cancel (standard label) discards the pending count with no write.
@@ -1201,6 +1281,36 @@ test('confirming Scrap records one auditable SCRAPPED operation', async () => {
   expect(document.querySelector('.ss-toast .t2')?.textContent).toContain(
     'never reduces the WO Demand requested quantity',
   );
+});
+
+test('scrap instructions describe the workflow without the SCRAPPED event name', async () => {
+  await renderStation();
+
+  scan('PF:PN:2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Choose the action for this PN',
+  });
+  // The action-choice explanation uses operator wording (v15) — the
+  // canonical event name never appears in instructions.
+  const choice = within(actions as HTMLElement).getByRole('button', {
+    name: /Scrap damaged quantity/,
+  });
+  expect(choice.textContent).toContain(
+    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.',
+  );
+  expect(choice.textContent).not.toContain('SCRAPPED');
+
+  fireEvent.click(choice);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Scrap damaged quantity',
+  });
+  expect(dialog.querySelector('.sub')?.textContent).toContain(
+    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.',
+  );
+  // SCRAPPED appears only in the confirmation summary's Recorded
+  // event row and in history surfaces — never on the counting step.
+  expect(dialog.textContent).not.toContain('SCRAPPED');
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 });
 
 test('PF:SCRAP in the main scan input is rejected outside the workflow', async () => {
@@ -1278,6 +1388,10 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   expect(dialog).toHaveTextContent('TRANSFERRED');
   expect(dialog).toHaveTextContent('Mill → Lathe');
   expect(dialog).toHaveTextContent('Effect of the reversal');
+  // The reversal effect carries the warning value tone (v15).
+  expect(
+    dialog.querySelector('.ss-confirm dd.tone-warn')?.textContent,
+  ).toContain('Returns');
   // Undo shares the structured confirmation presentation.
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
   // The Undo dialog keeps the standard wizard Cancel label (§3.10).
@@ -1465,6 +1579,9 @@ test('guidance kinds are distinct and summaries emphasize operational values', a
   const chips = summary.querySelectorAll('.dlgchip');
   expect(chips.length).toBeGreaterThan(0);
   chips.forEach((chip) => expect(chip.tagName).toBe('SPAN'));
+  // Area values (Source, Destination) carry the stable Area identity
+  // dot inside their chip (v15) — never recolored body text.
+  expect(summary.querySelectorAll('.dlgchip .areadot').length).toBe(2);
   const secondary = Array.from(
     summary.querySelectorAll('dd.secondary'),
     (el) => el.textContent ?? '',
@@ -1487,8 +1604,15 @@ test('Add more quantity separates description, guidance, validation and reason h
   expect(dialog.querySelector('.sub')?.textContent).toContain(
     'Add physical quantity that was not received from another Area.',
   );
-  // Quantity guidance: no MAX and no assumed default.
-  expect(dialog.textContent).toContain('no MAX and no assumed default');
+  // v15 entry recap: where the quantity is added and where it lands.
+  expect(dialog.querySelector('.ss-recap')?.textContent).toContain(
+    'Adding at Lathe',
+  );
+  // Quantity guidance: no MAX and no assumed default — an ℹ info
+  // instruction (v15), with its marker.
+  const guide = dialog.querySelector('.ss-guide.info')!;
+  expect(guide.textContent).toContain('no MAX and no assumed default');
+  expect(guide.querySelector('.gmark')?.textContent).toBe('ℹ');
   expect(dialog.querySelector('.keypad-max')).toBeNull();
   // Validation: a positive quantity is required (action kind).
   expect(dialog.querySelector('.ss-guide.action')?.textContent).toContain(
@@ -1531,12 +1655,33 @@ test('recovery re-enables and refocuses the scan input', async () => {
   await screen.findByText('OFFLINE');
   const input = await screen.findByLabelText('Scan barcode');
   expect(input).toBeDisabled();
+  // v15 disconnected copy: the placeholder states that scanning is
+  // disabled while the connection is lost.
+  expect(input).toHaveAttribute(
+    'placeholder',
+    'Disconnected — scanning disabled',
+  );
+
+  // A scan attempt while write-blocked never writes — it surfaces the
+  // blocked notice with the v15 wording.
+  fireEvent.keyDown(input, { key: 'Enter' });
+  const blocked = document.querySelector('.ss-toast.err')!;
+  expect(blocked.textContent).toContain(
+    'Disconnected — production actions are disabled',
+  );
+  expect(blocked.textContent).toContain(
+    'Scans will not be recorded or queued until the connection to the PartFlow server is restored.',
+  );
 
   failing = false;
   fireEvent(window, new Event('online'));
 
   await waitFor(() => expect(input).toBeEnabled());
   await waitFor(() => expect(input).toHaveFocus());
+  expect(input).toHaveAttribute(
+    'placeholder',
+    'Scan PN / Worker / Machine barcode… (ENTER)',
+  );
 });
 
 /* ============ Keyboard-wedge capture (main input must not lose scans) ============ */
@@ -1779,6 +1924,10 @@ test('manual DONE moves the selected quantity to Finished — ready to move', as
   expect(dialog.textContent).toContain('Complete Area processing');
   expect(dialog.textContent).toContain('Lathe 3');
   expect(dialog.textContent).toContain('Finished — ready to move');
+  // The successful result carries the ok value tone (v15).
+  expect(dialog.querySelector('.ss-confirm dd.tone-ok')?.textContent).toBe(
+    'Finished — ready to move',
+  );
   expect(dialog.textContent).toContain('AREA_COMPLETED');
   expect(lastPnText()).toBe('—');
 
@@ -1903,6 +2052,10 @@ test('a transfer from actively processing quantity appends AREA_COMPLETED, then 
   // One atomic command: completion of source processing + transfer.
   expect(dialog.textContent).toContain('Source processing');
   expect(dialog.textContent).toContain('Completed by this transfer');
+  // The source-processing deviation carries the warning value tone.
+  expect(
+    dialog.querySelector('.ss-confirm dd.tone-warn')?.textContent,
+  ).toContain('Completed by this transfer');
   expect(dialog.textContent).toContain(
     'AREA_COMPLETED, then TRANSFERRED — one atomic operation',
   );
@@ -2010,4 +2163,20 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
   });
   expect(cancel.textContent).toBe('Cancel (Esc)'); // no long suffixes
   fireEvent.keyDown(dialog, { key: 'Escape' });
+
+  // The manual PN entry dialog shares the standard wizard buttons
+  // (v15): the same Cancel label plus a primary `Look up PN` action.
+  fireEvent.click(screen.getByRole('button', { name: '⌨ Enter PN manually' }));
+  const manual = await screen.findByRole('dialog', {
+    name: 'Manual PN entry — explicit fallback',
+  });
+  expect(
+    within(manual as HTMLElement).getByRole('button', {
+      name: 'Cancel (Esc)',
+    }).textContent,
+  ).toBe('Cancel (Esc)');
+  expect(
+    within(manual as HTMLElement).getByRole('button', { name: 'Look up PN' }),
+  ).toHaveClass('primary');
+  fireEvent.keyDown(manual, { key: 'Escape' });
 });

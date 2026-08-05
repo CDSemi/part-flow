@@ -12,6 +12,24 @@ import type { MockBoardRow } from '../view-models';
 export const FALLBACK_PAGE_SIZE = 10;
 
 /**
+ * Automatic page rotation timing (v15): the dwell time of a page is
+ * proportional to the number of rows it actually displays — a page
+ * with 7 rows stays 7 × ROTATE_MS_PER_ROW, never one fixed constant
+ * for every page — with a floor so a near-empty last page never
+ * flashes past. These named defaults are deliberately NOT inlined in
+ * the component: a future Administration page exposes them as
+ * Department display settings (see GUI_DESIGN §5 / §9); the board
+ * consumes only `rotationDurationMs`.
+ */
+export const ROTATE_MS_PER_ROW = 3_000;
+export const ROTATE_MS_MIN = 6_000;
+
+/** Rotation dwell time for a page showing `rowCount` rows. */
+export function rotationDurationMs(rowCount: number): number {
+  return Math.max(ROTATE_MS_MIN, rowCount * ROTATE_MS_PER_ROW);
+}
+
+/**
  * Board row order: canonical demand order (Hot rank → earliest due date
  * → undated by WO received date → stable creation order). Stocked rows
  * are completed demand and stay after every active row regardless of

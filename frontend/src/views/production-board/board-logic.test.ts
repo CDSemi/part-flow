@@ -2,8 +2,11 @@ import { expect, test } from 'vitest';
 
 import type { MockBoardRow } from '../view-models';
 import {
+  ROTATE_MS_MIN,
+  ROTATE_MS_PER_ROW,
   fallbackPageBreaks,
   pageBreaksByHeight,
+  rotationDurationMs,
   sortBoardRows,
 } from './board-logic';
 
@@ -34,6 +37,25 @@ test('fallback chunking when measurements are unavailable', () => {
   expect(fallbackPageBreaks(25, 10)).toEqual([0, 10, 20]);
   expect(fallbackPageBreaks(10, 10)).toEqual([0]);
   expect(fallbackPageBreaks(0, 10)).toEqual([]);
+});
+
+/* ============ Per-page rotation timing (v15) ============ */
+
+test('rotation dwell time is proportional to the displayed rows — 3 s per row', () => {
+  expect(rotationDurationMs(3)).toBe(3 * ROTATE_MS_PER_ROW);
+  expect(rotationDurationMs(3)).toBe(9_000);
+  expect(rotationDurationMs(7)).toBe(21_000);
+  // A full fallback page (10 rows) dwells 30 s.
+  expect(rotationDurationMs(10)).toBe(30_000);
+});
+
+test('a near-empty page never flashes past — the 6 s floor applies', () => {
+  expect(rotationDurationMs(0)).toBe(ROTATE_MS_MIN);
+  expect(rotationDurationMs(1)).toBe(ROTATE_MS_MIN);
+  // 2 rows × 3 s meets the floor exactly; from 3 rows the
+  // proportional duration takes over.
+  expect(rotationDurationMs(2)).toBe(6_000);
+  expect(rotationDurationMs(3)).toBeGreaterThan(ROTATE_MS_MIN);
 });
 
 /* ============ Board row ordering ============ */

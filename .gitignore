@@ -1,6 +1,7 @@
 XOA/
 _to_delete/
 _claude_prompts/
+_staging/
 
 # Environment variables and secrets
 .env

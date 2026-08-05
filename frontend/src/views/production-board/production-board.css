@@ -12,19 +12,46 @@
   flex-direction: column;
   /* anchors the hidden measurement copy (.pb-measure) */
   position: relative;
+  /* Shared location-track widths, measured at runtime: the board's
+     recalc publishes pixel values for these custom properties on this
+     element's inline style (which overrides the declarations below).
+     Declared as `initial` here so the properties have a static
+     definition (tooling can resolve them) while staying
+     guaranteed-invalid — `var(--loc-*, Xch)` keeps using its `ch`
+     fallback until the first real measurement arrives. */
+  --loc-lname: initial;
+  --loc-lqty: initial;
+  --loc-ltag: initial;
+  --loc-ltime: initial;
 }
 
+/* Header (restructured v15): one balanced three-zone row shared by
+   both presentations — the identity group (kiosk brand · title ·
+   Live) on the left, a flexible center, and the clock zone (kiosk
+   adds the compact theme control beside it) on the right. Everything
+   center-aligned on one axis: no baseline-aligned column stacks, no
+   per-element separators. */
 .pb-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 18px;
-  padding: 20px 30px 10px;
+  padding: 18px 30px 10px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.pb-head .pb-headid {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 
 .pb-head h1 {
   font-size: 30px;
   font-weight: 800;
   letter-spacing: 0.4px;
+  line-height: 1.1;
 }
 
 .pb-head .live {
@@ -286,11 +313,15 @@
   white-space: nowrap;
 }
 
+/* Per-location quantities are subtotals (v15): neutral secondary tone
+   so the main total below carries the emphasis — weight and size stay,
+   color recedes. */
 .pb-table .lqty {
   font-family: var(--mono), monospace;
   font-weight: 800;
   font-size: 16.5px;
   text-align: right;
+  color: var(--muted);
 }
 
 .pb-table .ltag {
@@ -364,9 +395,11 @@
   color: var(--muted);
 }
 
+/* Main total (v15): the primary text color — the strongest number in
+   the column; the `pcs` unit and the `total` label stay muted. */
 .pb-table .locrow.total .lqty {
   font-size: 18px;
-  color: var(--info-t);
+  color: var(--text);
 }
 
 .pb-table .locrow.total .ltag {
@@ -696,14 +729,9 @@ tr.hotrow2 td:first-child {
 
 /* ============ Kiosk mode (route /production-board/kiosk) ============ */
 
-/* Kiosk header: one coherent board-owned row — compact brand mark,
-   title, shared connectivity chip + borderless theme control, clock.
-   Sized for a wall display; wraps cleanly at narrower widths. */
-.pb-head.pbk-head {
-  flex-wrap: wrap;
-  row-gap: 4px;
-}
-
+/* Kiosk brand (v15): a quiet identity mark inside the header identity
+   group — no separator line; the shared header gap carries the
+   spacing, matching the rest of the row. */
 .pbk-brand {
   display: inline-flex;
   align-items: baseline;
@@ -712,8 +740,6 @@ tr.hotrow2 td:first-child {
   font-weight: 850;
   letter-spacing: 0.4px;
   color: var(--text);
-  padding-right: 14px;
-  border-right: 1px solid var(--border);
 }
 
 .pbk-brand .mark {
@@ -724,29 +750,23 @@ tr.hotrow2 td:first-child {
   color: var(--info-t);
 }
 
-.pbk-actions {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  margin-right: 14px;
-}
-
-/* Explicit kiosk exit action: quiet, touch-friendly, never louder
-   than the board content. Ctrl+Shift+K stays the keyboard path. */
-.pbk-exit {
+/* Explicit kiosk exit action (footer controls row, v15): sized like
+   the page-navigation family so the footer keeps one control height —
+   its height stays inside the pagination measurement. Quiet, never
+   louder than the board content; Ctrl+Shift+K stays the keyboard
+   path (tooltip). */
+.pb-foot .pbk-exit {
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: none;
+  background: var(--panel2);
   color: var(--muted);
   font-size: 12px;
-  font-weight: 700;
-  padding: 6px 12px;
-  min-height: 36px;
+  font-weight: 750;
+  padding: 4px 12px;
+  min-height: 30px;
 }
 
-.pbk-exit:hover {
+.pb-foot .pbk-exit:hover {
   color: var(--text);
   border-color: var(--border2);
-  background: var(--panel2);
 }

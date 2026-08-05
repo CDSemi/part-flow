@@ -59,9 +59,14 @@
   border-color: var(--info-t);
 }
 
+.wo-tools .spacer {
+  flex: 1;
+}
+
+/* Full-width list (v15) — the toolbar's right-aligned primary action
+   lines up with the list edge, like the Machines page. */
 .wolist {
   width: 100%;
-  max-width: 1060px;
   border-collapse: separate;
   border-spacing: 0;
   background: var(--panel);
@@ -95,6 +100,19 @@
 
 .wolist tbody tr:hover td {
   background: var(--row-hover);
+}
+
+/* Whole-row activation (v15): the complete row opens the details
+   dialog; the WO-cell button is the keyboard and screen-reader entry
+   point (Enter/Space bubble to the row handler). */
+.wolist tbody tr.selrow {
+  cursor: pointer;
+}
+
+.wolist .rowbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 3px;
+  border-radius: 6px;
 }
 
 .wolist .wo {
@@ -439,9 +457,38 @@
 }
 
 /* New Work Order modal dialog (over the WO list — GUI §11.3) */
+/* Dialog heading hierarchy (refined v15): a quiet uppercase dialog
+   name (matching the shared `.dlg h3` eyebrow used across the app),
+   then the strong WO identity, then the meta line. One consistent
+   heading language for Work Order Details, New Work Order and the
+   Release dialog. */
+.dlg .wo-head .nwo-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--muted);
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
 .nwo-title {
   font-size: 20px;
   margin-bottom: 4px;
+}
+
+.dlg .wo-head {
+  margin-bottom: 0;
+}
+
+.dlg .wo-sub {
+  margin: 4px 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hair);
+  max-width: none;
+}
+
+.dlg .wo-card {
+  max-width: none;
 }
 
 .nwo .nwo-form {

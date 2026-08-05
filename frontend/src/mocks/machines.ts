@@ -16,6 +16,13 @@ import type { MockMachine } from '../views/view-models';
 const minutesAgo = (minutes: number): string =>
   new Date(Date.now() - minutes * 60_000).toISOString();
 
+/**
+ * Mock actor for management lifecycle changes (retire / reactivate).
+ * Phase 2 has no signed-in management user yet — the audit shape is
+ * exercised with one fixed development actor.
+ */
+export const MOCK_MACHINE_ACTOR = 'M. Chen (Production Manager)';
+
 export const MOCK_MACHINES: MockMachine[] = [
   {
     id: 'MC-201',
@@ -132,6 +139,14 @@ export const MOCK_MACHINES: MockMachine[] = [
     barcode: 'M-0104',
     retiredOn: '2026-02-14',
     stateChangedAt: '2026-02-14T16:00:00.000Z',
+    lifecycle: [
+      {
+        event: 'RETIRED',
+        at: '2026-02-14T16:00:00.000Z',
+        by: MOCK_MACHINE_ACTOR,
+        reason: 'Replaced by asset CD-0512',
+      },
+    ],
     manufacturer: 'Mazak',
     model: 'QT-10',
     assetTag: 'CD-0104',
@@ -139,6 +154,29 @@ export const MOCK_MACHINES: MockMachine[] = [
     installedOn: '2012-06-01',
     notes:
       'Replaced by asset CD-0512 — display name reused for the floor position.',
+  },
+  {
+    // Retired Machine WITHOUT an asset tag: the typed retirement /
+    // reactivation confirmation falls back to the Machine barcode for
+    // records like this one (barcode is always present).
+    id: 'MC-202',
+    area: 'cut',
+    name: 'Saw 2',
+    barcode: 'S2',
+    retiredOn: '2025-11-03',
+    stateChangedAt: '2025-11-03T09:30:00.000Z',
+    lifecycle: [
+      {
+        event: 'RETIRED',
+        at: '2025-11-03T09:30:00.000Z',
+        by: MOCK_MACHINE_ACTOR,
+        reason: 'Gearbox failure — not economical to repair',
+      },
+    ],
+    manufacturer: 'Behringer',
+    model: 'HBP-263A',
+    installedOn: '2011-04-08',
+    notes: 'Kept in storage — may return to service after overhaul.',
   },
 ];
 

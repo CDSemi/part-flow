@@ -80,6 +80,60 @@
   border-bottom: none;
 }
 
+/* Whole-row activation (v15): the complete active row opens Edit
+   Machine; the name-cell button is the keyboard and screen-reader
+   entry point (Enter/Space bubble to the row handler). Same pattern
+   as Tracking rows. */
+.mg-table tr.selrow {
+  cursor: pointer;
+}
+
+.mg-table tr.selrow:hover td {
+  background: var(--row-hover);
+}
+
+.mg-table .rowbtn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0;
+}
+
+.mg-table .rowbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+/* State column (v15): sized by its own content — the state line never
+   wraps (widest `<state> · <age>` defines the column), while a
+   maintenance note wraps in its own block below. */
+.mg-table th.mg-statecol,
+.mg-table td.mg-statecol {
+  width: 1%;
+}
+
+/* Asset column: the `Asset <tag>` line never wraps and defines the
+   minimum width; manufacturer and model use two distinct neutral
+   tones. */
+.mg-table th.mg-metacol,
+.mg-table td.mg-metacol {
+  width: 1%;
+}
+
+.mg-meta .mg-assetline {
+  white-space: nowrap;
+}
+
+.mg-meta .mfr {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.mg-meta .mdl {
+  color: var(--faint);
+}
+
 .mg-table .mgname {
   font-weight: 750;
   white-space: nowrap;
@@ -135,8 +189,26 @@
   white-space: nowrap;
 }
 
+/* Assigned-now line (v15): separator and unit recede so the PN reads
+   first; the quantity carries the state tone (information while
+   Running, warning while Maintenance) IN ADDITION to its weight — the
+   State column keeps the redundant non-color signal. */
+.mg-assign .sep,
+.mg-assign .unit {
+  color: var(--faint);
+  font-weight: 450;
+}
+
 .mg-assign .q {
   font-weight: 750;
+}
+
+.mg-assign .q.running {
+  color: var(--info-t);
+}
+
+.mg-assign .q.maintenance {
+  color: var(--warn-t);
 }
 
 .mg-meta {
@@ -151,13 +223,67 @@
   color: var(--text);
 }
 
-.mg-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+/* Maintenance switch (v15): an On/Off slide control that STARTS the
+   existing dialogs — aria-checked mirrors the real state only, so a
+   cancelled dialog leaves it untouched. The cell stops click
+   propagation so the switch never also opens Edit Machine. */
+.mg-table th.mg-maintcol,
+.mg-table td.mg-maintcol {
+  width: 1%;
+  white-space: nowrap;
 }
 
-.mg-actions button {
+.mg-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  min-height: 40px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.mg-switch .track {
+  display: inline-flex;
+  align-items: center;
+  width: 40px;
+  height: 22px;
+  border-radius: 12px;
+  border: 1px solid var(--border2);
+  background: var(--panel2);
+  padding: 2px;
+  transition: background 0.15s;
+}
+
+.mg-switch .knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--thumb);
+  transition: transform 0.15s;
+}
+
+.mg-switch.on .track {
+  background: var(--warning-surface);
+  border-color: var(--warning-border);
+}
+
+.mg-switch.on .knob {
+  background: var(--warn);
+  transform: translateX(18px);
+}
+
+.mg-switch.on {
+  color: var(--warn-t);
+}
+
+.mg-switch:hover .track {
+  border-color: var(--border2);
+}
+
+/* Reactivate action inside the Retired Machines rows (v15). */
+.mg-reactivate {
   border: 1px solid var(--border);
   border-radius: 9px;
   padding: 7px 12px;
@@ -169,19 +295,13 @@
   white-space: nowrap;
 }
 
-.mg-actions button:hover {
+.mg-reactivate:hover {
   border-color: var(--info-t);
   color: var(--info-t);
 }
 
-.mg-actions button.warn:hover {
-  border-color: var(--warn-t);
-  color: var(--warn-t);
-}
-
-.mg-actions button.danger:hover {
-  border-color: var(--err-t);
-  color: var(--err-t);
+.mg-visuallyquiet {
+  color: var(--faint);
 }
 
 /* Retired Machines — historical display only, visually quiet. */
@@ -245,6 +365,176 @@
 .mg-fixed {
   font-size: 14px;
   padding: 6px 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Area select with the selected-Area color preview beside it — a
+   native select, never a custom control just for a color (v15). */
+.mg-areapick {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.mg-areapick .areadot {
+  flex: none;
+}
+
+.mg-areapick select {
+  flex: 1;
+}
+
+/* Unsaved-changes badge in the dialog heading area. */
+.mg-dirty {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--warn-t);
+  margin-bottom: 6px;
+}
+
+/* Quiet append-only lifecycle audit list. */
+.mg-lifecycle {
+  margin-top: 14px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+
+.mg-lifetitle {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+
+.mg-lifeevent {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.mg-lifeevent .ev {
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.mg-lifeevent .at {
+  font-family: var(--mono), monospace;
+}
+
+/* Danger Zone (v15): visually separated destructive area at the end
+   of Edit Machine — never adjacent to Save. */
+.mg-dangerzone {
+  margin-top: 20px;
+  border: 1px solid var(--error-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.mg-dangerzone .dz-title {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--err-t);
+  background: var(--error-surface-weak);
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--error-border);
+}
+
+.mg-dangerzone .dz-body {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+}
+
+.mg-dangerzone .dz-body p {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.mg-dangerzone .dz-retire {
+  flex: none;
+  border: 1px solid var(--err-t);
+  border-radius: 10px;
+  background: var(--err);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 800;
+  padding: 9px 16px;
+  min-height: 42px;
+}
+
+.mg-dangerzone .dz-retire:hover {
+  background: var(--err-d);
+}
+
+@media (max-width: 640px) {
+  .mg-dangerzone .dz-body {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* Retire consequences list inside the typed confirmation. */
+.mg-consequences {
+  margin: 8px 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Reactivate dialog helpers. */
+.mg-blockers {
+  border: 1px solid var(--error-border);
+  background: var(--error-surface-weak);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--err-t);
+}
+
+.mg-blockers .bt {
+  font-weight: 800;
+}
+
+.mg-blockers ul {
+  margin: 6px 0 6px 18px;
+}
+
+.mg-blockers p {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.mg-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  margin: 12px 0 4px;
+  line-height: 1.5;
+}
+
+.mg-recap {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
 }
 
 .mg-note {

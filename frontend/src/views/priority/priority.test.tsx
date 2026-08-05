@@ -414,6 +414,65 @@ test('both snapshot sections share one wrapper grid for the common position trac
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
 });
 
+test('the snapshot divider spans every row and rows pin to explicit grid lines', async () => {
+  await renderPriority();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Confirm Hot ranking change',
+  });
+  const lists = dialog.querySelectorAll('.pr-snaplist');
+  expect(lists).toHaveLength(2);
+  for (const list of Array.from(lists)) {
+    // The divider is the decorative first child of each section list
+    // (v15): one grid item spanning all rows for one unbroken vertical
+    // rule between the shared position track and the PN column.
+    const divider = list.firstElementChild as HTMLElement;
+    expect(divider.className).toContain('pr-snapdivider');
+    expect(divider).toHaveAttribute('aria-hidden', 'true');
+    expect(divider.style.gridRow).toBe('1 / span 3');
+    // Every content row pins to its own explicit grid line so the
+    // divider's occupied cells never push auto-placed rows below it.
+    const rows = Array.from(
+      list.querySelectorAll<HTMLElement>(':scope > li.pr-snaprow'),
+    );
+    expect(rows).toHaveLength(3);
+    rows.forEach((row, index) => {
+      expect(row.style.gridRow).toBe(String(index + 1));
+    });
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+});
+
+test('the snapshot divider enables only with subgrid and hides in the fallbacks', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'priority.css'),
+    'utf8',
+  );
+  // Base rule: hidden — in the no-subgrid fallback the list's tracks
+  // collapse, so a track-attached divider would land at the wrong
+  // offset.
+  expect(css).toMatch(/^\.pr-snapdivider \{\s*display: none;\s*}/m);
+  // Enabled only inside the subgrid chain: attached to the PN track's
+  // start edge, pulled into the column gutter, drawn as a border.
+  expect(css).toMatch(/\.pr-snapwrap \.pr-snapdivider \{[^}]*display: block/);
+  expect(css).toMatch(/\.pr-snapwrap \.pr-snapdivider \{[^}]*grid-column: 2/);
+  expect(css).toMatch(
+    /\.pr-snapwrap \.pr-snapdivider \{[^}]*justify-self: start/,
+  );
+  expect(css).toMatch(/\.pr-snapwrap \.pr-snapdivider \{[^}]*border-left/);
+  // The narrow-screen stacking fallback hides it again (no shared
+  // position track exists in one-column rows).
+  expect(css).toMatch(
+    /\.pr-snapdivider,\s*\.pr-snapwrap \.pr-snapdivider \{\s*display: none/,
+  );
+});
+
 test('the impact/action block separates the Action label from its emphasized value', async () => {
   await renderPriority();
 

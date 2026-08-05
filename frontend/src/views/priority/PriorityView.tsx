@@ -535,9 +535,27 @@ function SnapshotSection({
     <div className="pr-snapshot">
       <h4 className="pr-snaptitle">{title}</h4>
       <ul className="pr-snaplist">
-        {rows.map((row) => (
+        {/* Vertical divider between the shared position track and the
+            PN column (v15): one grid item spanning every row of this
+            section — attached to the shared track edge, never a
+            per-content-row border that could disturb the subgrid
+            alignment. Rendered only where the subgrid chain is active
+            (priority.css); the row count places it without creating
+            implicit rows. */}
+        <span
+          className="pr-snapdivider"
+          aria-hidden="true"
+          style={{ gridRow: `1 / span ${Math.max(1, rows.length)}` }}
+        />
+        {rows.map((row, index) => (
+          // Explicit row placement (v15): the divider above occupies
+          // column 2 across these rows, and auto-placed full-width
+          // items would be pushed BELOW a definite-position item —
+          // pinning each row to its own line keeps the deliberate
+          // overlap and the original order.
           <li
             key={row.key}
+            style={{ gridRow: index + 1 }}
             className={`pr-snaprow ${row.moved ? 'moved' : 'shifted'}${
               row.rank === null ? ' absent' : ''
             }${row.fromRank !== undefined ? ' trans' : ''}`}

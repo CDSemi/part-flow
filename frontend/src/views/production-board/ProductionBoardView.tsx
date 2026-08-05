@@ -30,21 +30,28 @@ import {
   FALLBACK_PAGE_SIZE,
   fallbackPageBreaks,
   pageBreaksByHeight,
+  rotationDurationMs,
   sortBoardRows,
 } from './board-logic';
-
-const ROTATE_MS = 12_000;
 
 /**
  * Subtle next-rotation indicator: a thin progress track plus a small
  * seconds-remaining label, rendered only while more than one page
- * exists. It reads the SAME deadline that drives the actual page
- * rotation (one timing source — never a second unsynchronized timer)
- * and owns its own tick, so the complete board never rerenders per
- * animation frame. Under `prefers-reduced-motion` the track is hidden
- * by production-board.css while the seconds label remains.
+ * exists. It reads the SAME deadline AND duration that drive the
+ * actual page rotation (one timing source — never a second
+ * unsynchronized timer; the duration varies per page with its row
+ * count, so the track must scale from the same value) and owns its
+ * own tick, so the complete board never rerenders per animation
+ * frame. Under `prefers-reduced-motion` the track is hidden by
+ * production-board.css while the seconds label remains.
  */
-function RotationProgress({ deadline }: { deadline: number }) {
+function RotationProgress({
+  deadline,
+  durationMs,
+}: {
+  deadline: number;
+  durationMs: number;
+}) {
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, deadline - Date.now()),
   );
@@ -54,11 +61,11 @@ function RotationProgress({ deadline }: { deadline: number }) {
     const timer = window.setInterval(tick, 250);
     return () => window.clearInterval(timer);
   }, [deadline]);
-  const pct = Math.max(0, Math.min(100, (remaining / ROTATE_MS) * 100));
+  const pct = Math.max(0, Math.min(100, (remaining / durationMs) * 100));
   return (
     <span
       className="pb-rotate"
-      title="Time until the next automatic page rotation"
+      title="Time until the next automatic page rotation (3 s per displayed row)"
     >
       <span className="pb-rotatetrack" aria-hidden="true">
         <i style={{ width: `${pct}%` }} />
@@ -389,12 +396,16 @@ export function ProductionBoardView() {
     );
   }, []);
 
+  // Kiosk mode is read inside the layout effect indirectly: toggling
+  // it swaps the header and footer structure, so their measured
+  // heights change — the effect depends on `kiosk` so pagination
+  // recalculates on the mode switch (v15).
   // Recalculate after every commit that can change row heights (data,
   // theme class, font metrics) — the measurement table re-renders in
   // the same commit, so useLayoutEffect reads fresh heights.
   useLayoutEffect(() => {
     recalc();
-  }, [recalc, allRows]);
+  }, [recalc, allRows, kiosk]);
 
   useEffect(() => {
     window.addEventListener('resize', recalc);
@@ -422,27 +433,39 @@ export function ProductionBoardView() {
     setPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
   const safePage = Math.min(page, pageCount - 1);
+  // Rows displayed on the CURRENT page — the rotation duration derives
+  // from it (v15): 3 s per displayed row with a 6 s floor
+  // (board-logic.ts), recomputed per page instead of one constant for
+  // all pages. A plain number, so the rotation effect below re-arms
+  // only when the actual count changes.
+  const rowsOnPage = Math.max(
+    0,
+    (breaks[safePage + 1] ?? allRows.length) - (breaks[safePage] ?? 0),
+  );
+  const rotateMs = rotationDurationMs(rowsOnPage);
   // One timing source for rotation AND its indicator: every displayed
-  // page arms one deadline (now + ROTATE_MS); the timeout that fires
-  // at that deadline advances the page, and RotationProgress renders
-  // the countdown to the same deadline. Manual navigation (buttons,
-  // dots, arrow keys) changes the page / bumps the epoch, which
-  // re-arms the deadline — indicator and rotation can never drift
-  // apart. Rotation exists only while more than one page exists;
-  // automatic rotation wraps around, manual navigation never does.
+  // page arms one deadline (now + the page's own duration); the
+  // timeout that fires at that deadline advances the page, and
+  // RotationProgress renders the countdown to the same deadline and
+  // scales its track from the same duration. Manual navigation
+  // (buttons, dots, arrow keys) changes the page / bumps the epoch,
+  // which re-arms the deadline — indicator and rotation can never
+  // drift apart. Rotation exists only while more than one page
+  // exists; automatic rotation wraps around, manual navigation never
+  // does.
   const [rotateDeadline, setRotateDeadline] = useState<number | null>(null);
   useEffect(() => {
     if (pageCount <= 1) {
       setRotateDeadline(null);
       return;
     }
-    setRotateDeadline(Date.now() + ROTATE_MS);
+    setRotateDeadline(Date.now() + rotateMs);
     const timer = window.setTimeout(
       () => setPage((current) => (current + 1) % pageCount),
-      ROTATE_MS,
+      rotateMs,
     );
     return () => window.clearTimeout(timer);
-  }, [pageCount, rotateEpoch, safePage]);
+  }, [pageCount, rotateEpoch, safePage, rotateMs]);
 
   /** Manual page change: clamped, non-wrapping, restarts the timer. */
   const goToPage = useCallback((target: number, currentPageCount: number) => {
@@ -538,44 +561,30 @@ export function ProductionBoardView() {
       aria-label="Production Board"
       ref={sectionRef}
     >
-      {kiosk ? (
-        // Kiosk header: one coherent board-owned row — compact brand
-        // mark, board title, and the SAME `Live` operational status as
-        // the standard header (BoardLiveStatus, shared heartbeat and
-        // shared connectivity state — never a second `ONLINE` chip
-        // repeating the same connectivity), plus what the hidden
-        // navigation would otherwise provide: the shared borderless
-        // Dark/Light control and an explicit exit action beside the
-        // clock. Two presentations of one board, not two boards.
-        <div className="pb-head pbk-head" ref={headRef}>
-          <span className="pbk-brand" aria-hidden="true">
-            <span className="mark">⇄</span>
-            Part<span className="pf">Flow</span>
-          </span>
+      {/* Header (restructured v15): one three-zone layout shared by
+          both presentations — identity (kiosk brand + title + the
+          SAME `Live` operational status; BoardLiveStatus with the
+          shared heartbeat, never a second `ONLINE` chip), a flexible
+          center, and the clock zone. Kiosk mode adds the shared
+          borderless Dark/Light control beside the clock (what the
+          hidden navigation would otherwise provide); the explicit
+          exit action lives in the footer controls row (v15). Two
+          presentations of one board, not two boards. */}
+      <div className={`pb-head${kiosk ? ' pbk-head' : ''}`} ref={headRef}>
+        <div className="pb-headid">
+          {kiosk ? (
+            <span className="pbk-brand" aria-hidden="true">
+              <span className="mark">⇄</span>
+              Part<span className="pf">Flow</span>
+            </span>
+          ) : null}
           <h1>Machine Shop — Production</h1>
           <BoardLiveStatus />
-          <span className="spacer" />
-          <div className="pbk-actions">
-            <ThemeToggle compact />
-            <button
-              className="pbk-exit"
-              aria-label="Exit kiosk mode"
-              title="Exit kiosk mode (Ctrl+Shift+K)"
-              onClick={() => navigate('/production-board')}
-            >
-              Exit kiosk
-            </button>
-          </div>
-          <LiveClock />
         </div>
-      ) : (
-        <div className="pb-head" ref={headRef}>
-          <h1>Machine Shop — Production</h1>
-          <BoardLiveStatus />
-          <span className="spacer" />
-          <LiveClock />
-        </div>
-      )}
+        <span className="spacer" />
+        {kiosk ? <ThemeToggle compact /> : null}
+        <LiveClock />
+      </div>
       {rows.length === 0 ? (
         <EmptyState message="No active production in this Department." />
       ) : (
@@ -638,7 +647,7 @@ export function ProductionBoardView() {
           {/* Rotation countdown: same deadline as the actual page
               rotation, hidden when only one page exists. */}
           {pageCount > 1 && rotateDeadline !== null ? (
-            <RotationProgress deadline={rotateDeadline} />
+            <RotationProgress deadline={rotateDeadline} durationMs={rotateMs} />
           ) : null}
           {/* Manual page navigation: Previous/Next never wrap (automatic
               rotation still does) and every manual change restarts the
@@ -689,6 +698,21 @@ export function ProductionBoardView() {
               <b className="aggnum e">{scrappedTotal}</b> pcs scrapped
             </span>
           </span>
+          {kiosk ? (
+            // Exit kiosk lives in the footer controls row (v15) — a
+            // normal layout child sized like the page-navigation
+            // family, so the footer height stays inside the
+            // pagination measurement; the shortcut moves into the
+            // tooltip instead of a legend line.
+            <button
+              className="pbk-exit"
+              aria-label="Exit kiosk mode"
+              title="Exit kiosk mode (Ctrl+Shift+K)"
+              onClick={() => navigate('/production-board')}
+            >
+              Exit kiosk
+            </button>
+          ) : null}
         </div>
         <div className="pb-footrow legend">
           <span className="leg">
@@ -703,9 +727,6 @@ export function ProductionBoardView() {
             Order: Hot rank first → earliest due date → no due date by oldest
             received date.
           </span>
-          {kiosk ? (
-            <span className="leg">Ctrl+Shift+K: exit kiosk mode</span>
-          ) : null}
         </div>
       </div>
     </section>

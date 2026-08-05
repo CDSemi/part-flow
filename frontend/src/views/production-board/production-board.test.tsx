@@ -233,7 +233,8 @@ test('only the flame pulses: subtle animation with a reduced-motion fallback', a
 
 test('location tracks share cross-row minimums in the stylesheet', async () => {
   // Cross-row alignment cannot be measured in jsdom; the CSS contract
-  // is: shared minimum track widths (minmax + max-content growth) for
+  // is: shared measured track widths (the --loc-* custom properties
+  // with small ch fallbacks + max-content growth) for
   // Location | Quantity | State | Time, with a trailing 1fr spacer so
   // time stays near its location data instead of the far cell edge.
   const { readFileSync } = await import('node:fs');
@@ -245,7 +246,9 @@ test('location tracks share cross-row minimums in the stylesheet', async () => {
   );
   const loc = css.match(/\.pb-table \.loc \{[^}]*}/)?.[0] ?? '';
   expect(loc).toContain('grid-template-columns');
-  expect(loc.match(/minmax\(\d+ch, max-content\)/g)?.length).toBe(4);
+  expect(
+    loc.match(/minmax\(var\(--loc-\w+, \d+ch\), max-content\)/g)?.length,
+  ).toBe(4);
   expect(loc).toMatch(/1fr;/);
   // Explicit track assignment keeps every row inside the shared tracks.
   expect(css).toMatch(/\.locrow \.lname \{[^}]*grid-column: 1/);
@@ -586,15 +589,46 @@ test('long data paginates and rotates automatically; single pages never claim ro
   // without layout; real heights drive this in the browser).
   expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
 
+  // Per-page rotation (v15): page 1 shows 10 rows → 10 × 3 s = 30 s.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(30_000);
   });
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
+  // Page 2 dwells another 30 s (10 rows); the 5-row last page only
+  // 15 s — then rotation wraps around after the last page.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(24_000);
+    await vi.advanceTimersByTimeAsync(45_000);
   });
-  // Wraps around after the last page.
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+});
+
+test('rotation fires exactly at the current page’s computed duration — never before', async () => {
+  await renderBoard('/production-board?state=long');
+
+  // 10 rows on page 1 → rotationDurationMs(10) = 30 s. One
+  // millisecond before the deadline nothing rotates…
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(29_999);
+  });
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  // …and the deadline itself advances the page.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+
+  // The 5-row last page dwells only 5 × 3 s = 15 s (still above the
+  // 6 s floor) — shorter than a full page, and again never earlier.
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(14_999);
+  });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
   expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
 });
 
@@ -637,23 +671,25 @@ test('manual Previous/Next and page dots navigate without wrapping', async () =>
 test('manual navigation restarts the auto-rotation timer', async () => {
   await renderBoard('/production-board?state=long');
 
-  // 8 s into the cycle a manual navigation happens…
+  // 25 s into the 30 s page-1 cycle a manual navigation happens…
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(25_000);
   });
   fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
-  // …so 8 s later (16 s from the old timer's start) nothing rotates
-  // yet — the timer restarted at the manual change.
+  // …so 25 s later (50 s from the old timer's start — well past its
+  // 30 s deadline) nothing rotates yet: the timer restarted at the
+  // manual change.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(25_000);
   });
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
-  // The full interval after the manual change, rotation resumes.
+  // The full 30 s page-2 interval after the manual change, rotation
+  // resumes.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.advanceTimersByTimeAsync(5_000);
   });
   expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
 });
@@ -703,14 +739,15 @@ test('keyboard navigation restarts the rotation timer and cleans up on unmount',
   const view = await renderBoard('/production-board?state=long');
 
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(25_000);
   });
   fireEvent.keyDown(window, { key: 'ArrowRight' });
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(25_000);
   });
-  // Timer restarted by the arrow navigation.
+  // 50 s from mount — past the old 30 s deadline, still inside the
+  // restarted one: the timer restarted at the arrow navigation.
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
   // After unmount the window listener is removed — no state updates,
@@ -722,7 +759,7 @@ test('keyboard navigation restarts the rotation timer and cleans up on unmount',
 test('the active page clamps when the page structure changes', async () => {
   const view = await renderBoard('/production-board?state=long');
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(30_000);
   });
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
@@ -743,7 +780,12 @@ test('a multi-page board shows the rotation indicator with track and seconds', a
   const rotate = document.querySelector('.pb-rotate');
   expect(rotate).not.toBeNull();
   expect(rotate?.querySelector('.pb-rotatetrack i')).not.toBeNull();
-  expect(rotate?.querySelector('.pb-rotatesec')?.textContent).toBe('12 s');
+  // Full countdown for the current page: 10 rows × 3 s (v15).
+  expect(rotate?.querySelector('.pb-rotatesec')?.textContent).toBe('30 s');
+  // The tooltip states the per-row rule instead of a fixed interval.
+  expect(rotate?.getAttribute('title')).toBe(
+    'Time until the next automatic page rotation (3 s per displayed row)',
+  );
 });
 
 test('the indicator counts down against the same deadline that rotates the page', async () => {
@@ -753,15 +795,16 @@ test('the indicator counts down against the same deadline that rotates the page'
   await act(async () => {
     await vi.advanceTimersByTimeAsync(4_000);
   });
-  expect(sec()).toBe('8 s');
+  expect(sec()).toBe('26 s');
 
   // When the same deadline elapses, the page rotates and the indicator
-  // re-arms — one timing source, never two unsynchronized timers.
+  // re-arms with the next page's own duration — one timing source,
+  // never two unsynchronized timers.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(26_000);
   });
   expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
-  expect(sec()).toBe('12 s');
+  expect(sec()).toBe('30 s');
 });
 
 test('manual navigation resets the rotation timer AND the indicator together', async () => {
@@ -771,25 +814,27 @@ test('manual navigation resets the rotation timer AND the indicator together', a
   await act(async () => {
     await vi.advanceTimersByTimeAsync(4_000);
   });
-  expect(sec()).toBe('8 s');
+  expect(sec()).toBe('26 s');
   fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
   await act(async () => {});
   expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
-  expect(sec()).toBe('12 s');
+  expect(sec()).toBe('30 s');
 
-  // Arrow-key navigation resets the shared deadline the same way.
+  // Arrow-key navigation resets the shared deadline the same way —
+  // and the 5-row last page arms its own shorter 15 s duration.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5_000);
   });
-  expect(sec()).toBe('7 s');
+  expect(sec()).toBe('25 s');
   fireEvent.keyDown(window, { key: 'ArrowRight' });
   await act(async () => {});
   expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
-  expect(sec()).toBe('12 s');
+  expect(sec()).toBe('15 s');
 
-  // Full interval later the automatic rotation continues (wrapping).
+  // The last page's full interval later the automatic rotation
+  // continues (wrapping).
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(15_000);
   });
   expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
 });
@@ -841,30 +886,63 @@ test('the kiosk route renders the coherent board-owned kiosk header', async () =
   await renderBoard('/production-board/kiosk');
 
   expect(document.querySelector('.pb')?.className).toContain('kiosk');
+  // ONE shared header (v15): the standard .pb-head with the kiosk
+  // class added — never a separate kiosk-only actions column stack.
   const head = document.querySelector('.pb-head.pbk-head');
   expect(head).not.toBeNull();
-  // Compact brand mark, board title, ONE shared connectivity status,
-  // the shared compact (borderless) theme control, and the clock.
-  expect(head?.querySelector('.pbk-brand')).not.toBeNull();
-  expect(head?.querySelector('h1')?.textContent).toBe(
+  expect(head?.querySelector('.pbk-actions')).toBeNull();
+  // Identity group: compact brand mark, board title, ONE shared
+  // connectivity status — together inside .pb-headid.
+  const headid = head?.querySelector('.pb-headid');
+  expect(headid?.querySelector('.pbk-brand')).not.toBeNull();
+  expect(headid?.querySelector('h1')?.textContent).toBe(
     'Machine Shop — Production',
   );
   // The SAME `Live` operational status as the standard header (shared
   // meaning, shared heartbeat) — never a second `ONLINE` chip
   // repeating the same connectivity in the board header.
-  expect(head?.querySelector('.live')?.textContent).toBe('Live');
-  expect(head?.querySelector('.live .ld')).not.toBeNull();
+  expect(headid?.querySelector('.live')?.textContent).toBe('Live');
+  expect(headid?.querySelector('.live .ld')).not.toBeNull();
   expect(head?.querySelector('.connchip')).toBeNull();
+  // Clock zone: the shared compact (borderless) theme control sits
+  // beside the clock in the header row.
   expect(head?.querySelector('.themetoggle.compact')).not.toBeNull();
   expect(head?.querySelector('.clock')).not.toBeNull();
-  // Explicit exit action beside the keyboard shortcut.
+  // The explicit exit action exists but lives in the footer controls
+  // row (v15) — its shortcut moved into the tooltip; no legend line
+  // repeats it.
   expect(
     screen.getByRole('button', { name: 'Exit kiosk mode' }),
   ).toBeInTheDocument();
-  // Subtle exit hint in the footer legend.
-  expect(document.querySelector('.pb-foot')?.textContent).toContain(
+  expect(head?.querySelector('.pbk-exit')).toBeNull();
+  expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
     'Ctrl+Shift+K: exit kiosk mode',
   );
+});
+
+test('Exit kiosk sits in the footer controls row after the aggregate summary — kiosk only', async () => {
+  const view = await renderBoard('/production-board/kiosk');
+
+  // Inside the FIRST .pb-footrow (controls), directly after .pb-agg —
+  // a normal layout child measured by pagination, never in the header
+  // and never in the legend row.
+  const controls = document.querySelector('.pb-foot .pb-footrow');
+  const exit = controls?.querySelector('.pbk-exit');
+  expect(exit).not.toBeNull();
+  expect(exit?.textContent).toBe('Exit kiosk');
+  expect(exit?.getAttribute('aria-label')).toBe('Exit kiosk mode');
+  // The keyboard shortcut lives in the tooltip instead of a legend
+  // line.
+  expect(exit?.getAttribute('title')).toBe('Exit kiosk mode (Ctrl+Shift+K)');
+  expect(exit?.previousElementSibling?.className).toBe('pb-agg');
+  expect(document.querySelector('.pb-head .pbk-exit')).toBeNull();
+  expect(document.querySelector('.pb-footrow.legend .pbk-exit')).toBeNull();
+  view.unmount();
+
+  // Standard mode renders no exit control anywhere.
+  await renderBoard('/production-board');
+  expect(document.querySelector('.pbk-exit')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
 });
 
 test('the kiosk exit button returns to the standard route', async () => {

@@ -65,8 +65,13 @@ test('shows OFFLINE with the persistent banner when the health request fails', a
 
   expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
   const banner = screen.getByRole('alert');
-  expect(banner).toHaveTextContent('OFFLINE — the backend is unavailable');
-  expect(banner).toHaveTextContent('nothing is recorded or queued');
+  expect(banner).toHaveTextContent(
+    'OFFLINE — Connection to the PartFlow server has been lost',
+  );
+  expect(banner).toHaveTextContent('scans will not be recorded or queued');
+  expect(banner).toHaveTextContent(
+    'Previously loaded read-only information remains available.',
+  );
   expect(
     screen.getByRole('button', { name: 'Retry connection' }),
   ).toBeInTheDocument();
@@ -111,7 +116,9 @@ test('disables production-write controls while disconnected but keeps read-only 
 
   // Write-oriented controls are disabled.
   expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'ENTER' })).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '⌨ Enter PN manually' }),
+  ).toBeDisabled();
   expect(screen.getByRole('button', { name: '⟲ UNDO' })).toBeDisabled();
 
   // Already displayed read-only mock information stays visible.

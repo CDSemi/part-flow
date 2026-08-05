@@ -10,10 +10,6 @@
   background: var(--bg);
 }
 
-.ss.production .ss-head {
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-}
-
 /* Dark mode adds a subtle radial glow; light mode is a flat surface
    (the theme supplies the value — GUI_DESIGN §2.1). The view root is
    the inline-size container for the header and monitoring layout
@@ -165,10 +161,6 @@
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .ss.production .ss-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-  }
-
   .ss-head .ss-stats {
     grid-column: 1 / -1;
     grid-row: 2;
@@ -182,10 +174,6 @@
   @media (max-width: 1220px) {
     .ss-head {
       grid-template-columns: minmax(0, 1fr) auto;
-    }
-
-    .ss.production .ss-head {
-      grid-template-columns: minmax(0, 1fr) auto auto;
     }
 
     .ss-head .ss-stats {
@@ -795,8 +783,8 @@
 }
 
 /* Step guidance — semantic text directly above the related input.
-   The kinds must not look identical (§3.10): neutral instructions stay
-   plain muted text, while information, important constraints, required
+   Four kinds only (§3.10, v15 — the marker-less neutral kind is
+   retired): information/instructions, important constraints, required
    actions and validation errors each carry a small marker plus a thin
    accent edge in their semantic tone. Color is never the only
    distinction (marker + weight differ per kind), and validation reads
@@ -1006,6 +994,31 @@
   font-weight: 450;
 }
 
+/* Controlled semantic value tones (v15) — additive on top of the
+   weight/size emphasis, never the only distinction: success/recorded
+   results, deviations worth noticing, and destructive results. Area
+   identity uses the AreaDot beside plain text instead of a text tone
+   (area hues are not body-text safe in both themes). */
+.ss-confirm dd.tone-ok {
+  color: var(--ok-t);
+}
+
+.ss-confirm dd.tone-warn {
+  color: var(--warn-t);
+}
+
+.ss-confirm dd.tone-err {
+  color: var(--err-t);
+}
+
+/* Area identity dot inside summary/recap chips: aligned to the text
+   baseline with a small gap, in the flattened summary presentation
+   as well as in the chip-styled recap presentation. */
+.dlgchip .areadot {
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
 @media (max-width: 560px) {
   .ss-confirm {
     grid-template-columns: 1fr;
@@ -1122,34 +1135,38 @@
    the header's card language (the same surface as the Area totals and
    the Worker Session pill), not unrelated stacked controls — the
    connectivity status on top with the Dark/Light control directly
-   beneath it, separated by a hairline. The group stretches to the
-   header row height so it aligns cleanly with the neighboring cells,
-   and its narrow column never crowds the Worker Session or forces the
-   Area statistics to wrap poorly at intermediate widths. */
+   beneath it (v15): the `.ss-headgroup` wrapper stretches the Worker
+   Session pill and the actions column to ONE shared height, so the
+   ONLINE chip's top edge aligns with the pill's top border and the
+   theme control never sits below the pill's bottom border. The
+   actions column itself carries no frame and no separator — the
+   ONLINE status keeps its own chip surface, the theme control stays a
+   quiet borderless button. */
+.ss-head .ss-headgroup {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.ss-head .ss-headgroup .ss-pill {
+  align-self: stretch;
+}
+
 .ss-head .ss-headactions {
   flex: none;
-  align-self: stretch;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  justify-content: center;
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
+  justify-content: space-between;
+  gap: 6px;
 }
 
-/* The chip drops its standalone frame inside the group — one unit,
-   never a chip nested in a chip. Its ONLINE/OFFLINE text and the
-   shared heartbeat dot (app/shell.css) stay untouched. */
+/* The chip keeps its own frame (app/shell.css) — one status chip, no
+   surrounding group card. Its ONLINE/OFFLINE text and the shared
+   heartbeat dot stay untouched. */
 .ss-headactions .connchip {
-  flex: 1;
   justify-content: center;
   margin-right: 0;
-  border: none;
-  border-radius: 0;
-  background: none;
-  border-bottom: 1px solid var(--border);
 }
 
 /* Compact theme control (shared ThemeToggle component, production
@@ -1176,10 +1193,15 @@
   background: var(--panel2);
 }
 
+/* Inside the header actions the theme control aligns its icon and
+   text with the ONLINE chip content (same horizontal padding) and
+   never extends below the Worker Session pill's bottom border (the
+   stretched group guarantees the shared height). */
 .ss-headactions .themetoggle.compact {
-  flex: 1;
   justify-content: center;
-  border-radius: 0;
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: 10px;
 }
 
 .ss-headactions .themetoggle.compact:hover {
