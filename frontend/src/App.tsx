@@ -58,17 +58,18 @@ const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
 function OfflineBanner() {
   const { status, retry } = useConnectivity();
   if (status !== 'unavailable') return null;
-  // One compact line: the exact offline statement, a standalone
-  // separator, and a quiet text action — no button chrome, no extra
-  // explanatory sentences (the write-blocked behavior itself is the
-  // explanation on every surface).
+  // Two explicit regions — the same division as the Scan Station Undo
+  // block: the message region fills the remaining space; the Retry
+  // ACTION RAIL is the banner's complete right edge (the button
+  // itself), divided by its own stronger border-left — no separator
+  // element. No extra explanatory sentences (the write-blocked
+  // behavior itself is the explanation on every surface).
   return (
     <div className="offbanner" role="alert">
       <span className="msg">
         ⚠ OFFLINE — Connection to the PartFlow server has been lost. Production
         actions are disabled
       </span>
-      <span className="sep" aria-hidden="true" />
       <button className="retry zone-action" onClick={retry}>
         Retry connection
       </button>

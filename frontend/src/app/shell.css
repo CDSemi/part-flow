@@ -188,52 +188,48 @@ main {
 }
 
 /* ============ Offline banner — persistent, actionable ============
-   One compact row: message | Retry connection. The separator is its
-   own aria-hidden element (never a button border), the action is a
-   quiet text action (no button chrome), and the row wraps naturally
-   on narrow screens without horizontal overflow. */
+   Two explicit regions — the same division as the Scan Station Undo
+   block: the message region fills the remaining space (its text wraps
+   naturally on narrow screens — never horizontal overflow); the Retry
+   ACTION RAIL is the banner's complete right edge and full height,
+   divided by its own stronger border-left (the Station Selector card
+   divider pattern — no separator element, no `|`). The banner itself
+   carries no padding: the regions carry their own, so no gap or
+   leftover background sits right of the rail. */
 .offbanner {
   display: flex;
   align-items: stretch;
-  flex-wrap: wrap;
-  gap: 4px 12px;
   background: var(--error-surface);
   border-bottom: 1px solid var(--error-border);
   color: var(--err-t);
-  /* No right padding: the Retry zone runs to the banner's right edge. */
-  padding: 5px 0 5px 22px;
+  padding: 0;
   font-size: 14px;
   font-weight: 650;
 }
 
 .offbanner .msg {
+  flex: 1 1 auto;
   min-width: 0;
   align-self: center;
+  padding: 5px 16px 5px 22px;
 }
 
-.offbanner .sep {
-  flex: none;
-  width: 1px;
-  align-self: center;
-  height: 16px;
-  background: currentColor;
-  opacity: 0.45;
-}
-
-/* Retry is a shared action ZONE (.zone-action, styles/global.css —
-   same presentation as the Scan Station Undo zone): the complete
-   region from after the separator to the banner's right edge and full
-   banner height is the click target — never just the text. Layout
-   only here; surface/hover/focus-visible/active come from the shared
-   class. */
+/* Retry rail: the WHOLE right region is the button — full banner
+   height, flush right edge, text centered vertically. Surface and the
+   shared hover / focus-visible / active presentation come from
+   .zone-action; the higher-specificity border-left always wins over
+   the shared border reset. Never a small text button after the
+   message. */
 .offbanner .retry {
   flex: none;
   align-self: stretch;
-  margin: -5px 0;
+  display: inline-flex;
+  align-items: center;
   padding: 0 22px;
   min-height: 0;
-  font-size: 13px;
+  border-left: 2px solid var(--error-border);
   border-radius: 0;
+  font-size: 13px;
 }
 
 /* ============ Production not-connected state ============ */

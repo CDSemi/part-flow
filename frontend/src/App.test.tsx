@@ -76,16 +76,18 @@ test('shows OFFLINE with the persistent banner when the health request fails', a
   expect(banner.textContent).not.toContain('scans will not be recorded');
   expect(banner.textContent).not.toContain('read-only information');
   expect(banner.textContent).not.toContain('until the connection is restored');
-  // Message | action: the separator is its OWN aria-hidden element
-  // (never a button border) and Retry stays a real focusable button.
-  const sep = banner.querySelector('.sep')!;
-  expect(sep.getAttribute('aria-hidden')).toBe('true');
-  expect(sep.tagName).not.toBe('BUTTON');
-  // Retry is the shared action-zone pattern (same as the Scan Station
-  // Undo): the whole region after the separator is the click target.
-  expect(screen.getByRole('button', { name: 'Retry connection' })).toHaveClass(
-    'zone-action',
-  );
+  // Two explicit regions, no separator element and no `|`: the
+  // message region fills the remaining space; the WHOLE right rail is
+  // the Retry button itself (divided by its own border-left), flush
+  // with the banner's right edge — the shared action-zone pattern
+  // (same as the Scan Station Undo region).
+  expect(banner.querySelector('.sep')).toBeNull();
+  expect(banner.textContent).not.toContain('|');
+  const retryButton = screen.getByRole('button', {
+    name: 'Retry connection',
+  });
+  expect(retryButton).toHaveClass('zone-action');
+  expect(banner.lastElementChild).toBe(retryButton);
   expect(fetchMock).toHaveBeenCalledWith(
     '/api/health',
     expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -155,24 +157,29 @@ test('retry re-runs the health check and recovers to ONLINE', async () => {
 
 /* ============ Offline banner presentation contract ============ */
 
-test('the Retry action is a shared full-height zone to the banner edge', () => {
+test('the Retry action rail is a full-height region at the banner edge', () => {
   // Presentation contract on the stylesheet itself (jsdom applies no
-  // CSS): the retry action is the shared .zone-action pattern (surface
-  // and hover/focus-visible/active come from styles/global.css — the
-  // same treatment as the Scan Station Undo zone); locally it
-  // stretches to the full banner height and runs to the right edge
-  // (the banner drops its right padding), and the banner remains a
-  // compact wrapping row that cannot overflow horizontally.
+  // CSS): the banner is two regions — the message fills the remaining
+  // space and may wrap its text; the Retry rail is the shared
+  // .zone-action pattern (surface and hover/focus-visible/active from
+  // styles/global.css — the same treatment as the Scan Station Undo
+  // region), stretched to the full banner height at the right edge,
+  // divided by its own stronger border-left, with the text centered
+  // vertically. The banner carries no own padding, so no leftover
+  // background sits right of the rail.
   const css = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), 'app', 'shell.css'),
     'utf8',
   );
   const retry = /\.offbanner \.retry \{[^}]*}/s.exec(css)![0];
   expect(retry).toContain('align-self: stretch');
-  expect(retry).toContain('margin: -5px 0');
+  expect(retry).toContain('border-left: 2px solid');
+  expect(retry).toContain('align-items: center');
   expect(retry).not.toContain('min-height: 40px');
-  expect(retry).not.toContain('border:');
+  expect(css).not.toMatch(/\.offbanner \.sep/);
   const banner = /\.offbanner \{[^}]*}/s.exec(css)![0];
-  expect(banner).toContain('flex-wrap: wrap');
-  expect(banner).toContain('padding: 5px 0 5px 22px');
+  expect(banner).toContain('padding: 0');
+  const msg = /\.offbanner \.msg \{[^}]*}/s.exec(css)![0];
+  expect(msg).toContain('flex: 1 1 auto');
+  expect(msg).toContain('min-width: 0');
 });
