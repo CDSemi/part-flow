@@ -928,15 +928,21 @@ function StationView({
                 CSS), then one quiet row: PN + movement summary, a
                 standalone separator, and the borderless Undo text
                 action. */}
+            {/* Two explicit regions — the same division as a Station
+                Selector card: the information region fills the
+                remaining space, the Undo ACTION REGION is the block's
+                complete right edge (the button itself), separated by
+                its own stronger border-left — no separator element. */}
             <div className="ss-lastpnlabel">Last scanned PN</div>
             <div className="ss-lastpn">
-              <span className="p">{lastPn?.pn ?? '—'}</span>
-              <span className="d">
-                {lastPn
-                  ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
-                  : 'no completed PN operations yet'}
-              </span>
-              <span className="ss-undosep" aria-hidden="true" />
+              <div className="ss-lastpninfo">
+                <span className="p">{lastPn?.pn ?? '—'}</span>
+                <span className="d">
+                  {lastPn
+                    ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
+                    : 'no completed PN operations yet'}
+                </span>
+              </div>
               <button
                 className="ss-undo zone-action"
                 disabled={writeBlocked || !eligible}

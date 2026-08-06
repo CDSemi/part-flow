@@ -321,22 +321,35 @@
   text-align: left;
 }
 
-/* One compact row on explicit tracks: PN (no arbitrary wrapping), the
-   movement summary beside it, then a standalone separator and the
-   borderless Undo text action (both content-sized). The parent
-   .ss-scanwrap bottom padding is the ONLY outer spacing below — the
-   block itself keeps no bottom margin (no double spacing). */
+/* Two explicit regions — the same division as a Station Selector
+   card: the information region (left) fills the remaining space, the
+   Undo action region (right) IS the block's right edge. The block
+   clips its children (overflow: hidden), so the action region meets
+   the rounded corners with no leftover background, spacer, or gap.
+   The parent .ss-scanwrap bottom padding is the ONLY outer spacing
+   below — the block itself keeps no bottom margin (no double
+   spacing). */
 .ss-lastpn {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 4px 14px;
+  display: flex;
+  align-items: stretch;
   margin: 0;
-  /* No right padding: the Undo zone runs to the block's right edge. */
-  padding: 7px 0 7px 16px;
+  padding: 0;
   border-radius: 12px;
   background: var(--panel2);
   border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Information region: PN + movement summary on one row while space
+   allows; the summary drops to its own second row when narrow. */
+.ss-lastpninfo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 14px;
+  padding: 7px 16px;
 }
 
 .ss-lastpn .p {
@@ -352,57 +365,44 @@
   min-width: 0;
 }
 
-/* Standalone separator — its own aria-hidden element, never a button
-   border. */
-.ss-undosep {
-  width: 1px;
-  height: 18px;
-  background: var(--border2);
-  justify-self: end;
-}
-
-/* Undo is a shared action ZONE (.zone-action, styles/global.css):
-   the complete region from after the separator to the block's right
-   edge and full block height is the click target — the same
-   interaction pattern as a Station Selector card's main surface. The
-   negative vertical margins swallow the block padding so the zone
-   reaches the top/bottom edges; the radius follows the block's right
-   corners. Layout only here; the light error surface and the shared
-   hover / focus-visible / active / disabled presentation come from
-   .zone-action. The disabled state dims only the zone, never the
-   whole block. */
-.ss-undo {
+/* Undo action region: the WHOLE right region is the button — flush
+   with the block's right edge and full height, its icon and text
+   centered both ways. A stronger border-left on the region itself
+   divides it from the information region (the Station Selector card
+   divider pattern — no separator element). Surface and the shared
+   hover / focus-visible / active presentation come from .zone-action;
+   a disabled region keeps its layout, border and surface (opacity
+   dims icon, text and surface together) and never dims the
+   information region. */
+.ss-lastpn .ss-undo {
+  flex: none;
   align-self: stretch;
-  margin: -7px 0;
-  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 20px;
   min-height: 0;
-  border-radius: 0 11px 11px 0;
+  /* Higher specificity than the shared .zone-action border reset, so
+     the dividing border-left always wins regardless of stylesheet
+     order. */
+  border-left: 2px solid var(--border2);
+  border-radius: 0;
   font-size: 14px;
   letter-spacing: 0.3px;
 }
 
-/* Narrow: the PN keeps the first row (Undo stays at its right edge);
-   the movement summary moves to its own full-width second row and may
-   wrap there — never horizontal overflow. */
+/* Narrow: the PN keeps the first row; the movement summary moves to
+   its own full-width second row inside the information region — the
+   action region keeps covering the full block height at the right
+   edge. Never horizontal overflow. */
 @container (max-width: 700px) {
-  .ss-lastpn {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+  .ss-lastpninfo {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .ss-lastpn .d {
+  .ss-lastpninfo .d {
     grid-column: 1;
     grid-row: 2;
-  }
-
-  /* The separator and the Undo zone span both rows: the zone keeps
-     covering the full block height beside the two content lines. */
-  .ss-undosep {
-    grid-row: 1 / -1;
-    align-self: center;
-  }
-
-  .ss-undo {
-    grid-row: 1 / -1;
   }
 }
 

@@ -441,11 +441,18 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(lastPn.contains(label)).toBe(false);
   expect(lastPn.textContent).not.toContain('Last scanned PN');
 
-  // Undo is a shared action zone beside its own standalone separator —
-  // the whole region after the separator is the click target.
-  const sep = lastPn.querySelector('.ss-undosep')!;
-  expect(sep.getAttribute('aria-hidden')).toBe('true');
-  expect(lastPn.querySelector('button.ss-undo.zone-action')).not.toBeNull();
+  // Two explicit regions, no separator element: the information
+  // region fills the remaining space; the WHOLE right region is the
+  // Undo button itself (divided by its own border-left), flush with
+  // the block's right edge.
+  expect(lastPn.querySelector('.ss-undosep')).toBeNull();
+  expect(lastPn.textContent).not.toContain('|');
+  const info = lastPn.querySelector('.ss-lastpninfo')!;
+  expect(info.querySelector('.p')).not.toBeNull();
+  expect(info.querySelector('.d')).not.toBeNull();
+  const undoRegion = lastPn.querySelector('button.ss-undo.zone-action')!;
+  expect(lastPn.lastElementChild).toBe(undoRegion);
+  expect(undoRegion.textContent).toContain('⟲ UNDO');
 
   // Worker session window: `from <badge-scan time> to <shift end>`.
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
@@ -2421,20 +2428,25 @@ test('Undo is a shared full-height action zone beside its separator; the shared 
   expect(globalCss).toMatch(/\.zone-action:focus-visible \{[^}]*outline/s);
   expect(globalCss).toMatch(/\.zone-action:disabled \{[^}]*opacity/s);
 
-  // Undo layout: the zone stretches to the full block height and runs
-  // to the block's right edge (the block drops its right padding);
-  // no forced button height.
-  const undo = /\.ss-undo \{[^}]*}/s.exec(css)![0];
+  // Undo action region: the whole right region is the button — full
+  // block height, flush right edge, centered content, divided from
+  // the information region by its own stronger border-left (the
+  // Station Selector card divider pattern; no separator element).
+  const undo = /\.ss-lastpn \.ss-undo \{[^}]*}/s.exec(css)![0];
   expect(undo).toContain('align-self: stretch');
-  expect(undo).toContain('margin: -7px 0');
-  expect(undo).toContain('border-radius: 0 11px 11px 0');
+  expect(undo).toContain('border-left: 2px solid');
+  expect(undo).toContain('align-items: center');
+  expect(undo).toContain('justify-content: center');
   expect(undo).not.toContain('min-height: 44px');
-  // The label lives OUTSIDE the block; the block keeps no bottom
-  // margin (the parent padding is the only outer spacing below) and
-  // no right padding (the Undo zone owns that edge).
+  expect(css).not.toContain('.ss-undosep');
+  // The label lives OUTSIDE the block; the block clips its children
+  // (no leftover background right of the action region), keeps no
+  // bottom margin (the parent padding is the only outer spacing) and
+  // no own padding — the regions carry their own.
   const block = /\.ss-lastpn \{[^}]*}/s.exec(css)![0];
   expect(block).toContain('margin: 0');
-  expect(block).toContain('padding: 7px 0 7px 16px');
+  expect(block).toContain('padding: 0');
+  expect(block).toContain('overflow: hidden');
   // Equal-height contract for the shared chips inside dialog recaps —
   // and the DEFAULT RouteModeChip matches the TypeChip metrics while
   // Tracking's flow header keeps its compact variant.

@@ -326,22 +326,22 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .zone-action:active:not(:disabled){background:rgba(255,97,102,.13);filter:brightness(.96)}
 .zone-action:focus-visible{outline:2px solid var(--err-t);outline-offset:-2px}
 .zone-action:disabled{opacity:.4;cursor:not-allowed}
-#lastpn{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:4px 14px;margin:0;padding:7px 0 7px 16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
+#lastpn{display:flex;align-items:stretch;margin:0;padding:0;border-radius:12px;background:var(--panel2);border:1px solid var(--border);overflow:hidden}
+.ss-lastpninfo{flex:1 1 auto;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:4px 14px;padding:7px 16px}
 #lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800;white-space:nowrap}
 #lastpn .d{font-size:12.5px;color:var(--muted);min-width:0}
 /* Standalone separator — its own aria-hidden element, never a button border */
-.ss-undosep{width:1px;height:18px;background:var(--border2);justify-self:end}
 /* Quiet text action: no border, no button surface; disabled dims only the action */
-/* Undo zone: stretches to the full block height and runs to the
-   block's right edge (surface + states from .zone-action) */
-#ssundo{align-self:stretch;margin:-7px 0;padding:0 16px;min-height:0;border-radius:0 11px 11px 0;font-size:14px;letter-spacing:.3px}
+/* Undo action region: the WHOLE right region is the button — full
+   block height, flush right edge, centered content, divided by its
+   own stronger border-left (station-card divider pattern); surface +
+   states from .zone-action */
+#lastpn #ssundo{flex:none;align-self:stretch;display:inline-flex;align-items:center;justify-content:center;padding:0 20px;min-height:0;border-left:2px solid var(--border2);border-radius:0;font-size:14px;letter-spacing:.3px}
 /* Narrow: PN keeps the first row (Undo at its right edge); the movement
    summary drops to its own full-width second row */
 @media (max-width:700px){
-  #lastpn{grid-template-columns:minmax(0,1fr) auto auto}
-  #lastpn .d{grid-column:1;grid-row:2}
-  #lastpn .ss-undosep{grid-row:1 / -1;align-self:center}
-  #ssundo{grid-row:1 / -1}
+  .ss-lastpninfo{grid-template-columns:minmax(0,1fr)}
+  .ss-lastpninfo .d{grid-column:1;grid-row:2}
 }
 
 /* Floating scan notification (v9) — no reserved layout space; only the
@@ -1470,10 +1470,14 @@ body.light{color-scheme:light}
             value is validated exactly like a scan; raw PN text is never treated as barcode input.</div>
           <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span><span class="dev-notice-content">Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>PF:WORKER:88</code> worker</span></p>
           <div class="ss-lastpnlabel">Last scanned PN</div>
+          <!-- Two explicit regions (station-card division): info left,
+               the Undo ACTION REGION is the block's right edge — its own
+               stronger border-left divides it, no separator element -->
           <div id="lastpn">
-            <span class="p mono" id="lastpn-p">—</span>
-            <span class="d" id="lastpn-d">no completed PN operations yet</span>
-            <span class="ss-undosep" aria-hidden="true"></span>
+            <div class="ss-lastpninfo">
+              <span class="p mono" id="lastpn-p">—</span>
+              <span class="d" id="lastpn-d">no completed PN operations yet</span>
+            </div>
             <button id="ssundo" class="zone-action" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
           </div>
         </div>
