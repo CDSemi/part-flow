@@ -1825,17 +1825,16 @@ function MachineAssignDialog({
       {step === 'select' ? (
         <>
           <div className="sub">
-            Assign queued quantity to a Machine: select the Machine and the
-            queued PN (scan either barcode, or pick below), then enter the
-            quantity and confirm. The assignment applies once — the next scan
-            starts fresh.
+            Select a machine and a queued part number. Scan either barcode or
+            choose from the options below, then enter the quantity to assign.
+            Selections reset after confirmation.
           </div>
           <input
             ref={scanRef}
             className="field mono"
             autoComplete="off"
-            placeholder="Scan Machine or queued PN barcode… (ENTER)"
-            aria-label="Scan Machine or queued PN barcode"
+            placeholder="Scan machine or queued part barcode… (ENTER)"
+            aria-label="Scan machine or queued part barcode"
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return;
               // One Enter has exactly one meaning: a filled input is a
@@ -2598,13 +2597,14 @@ function IntakeDialog({
           <div className="sub">
             {isKnown ? (
               <>
-                This PN has no active Work Order Demand. Review the production
-                details below before continuing.
+                This part number has no active Work Order Demand. Review the
+                production details below before continuing.
               </>
             ) : (
               <>
-                New PN — not registered yet. Verify the Part Number carefully.
-                It will be registered when the receipt is confirmed.
+                This part number is not registered and has no active work order
+                demand. It will be created when the receipt is confirmed. Review
+                the production details before continuing.
               </>
             )}
           </div>
@@ -2612,7 +2612,7 @@ function IntakeDialog({
               are visible directly in the fields below — the header
               stays the PN message plus one guidance line. */}
           <Guidance>
-            No changes are recorded until you review and confirm the final step.
+            No changes are saved until you confirm the final step.
           </Guidance>
           <div className="ss-dlgrid">
             <label htmlFor="in-type">Request Type</label>
@@ -2671,7 +2671,7 @@ function IntakeDialog({
             <input
               id="in-notes"
               value={notes}
-              placeholder="optional for a MODIFY receipt"
+              placeholder="Enter a reason or note"
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
@@ -3487,7 +3487,8 @@ function QueueReturnDialog({
             ]}
           />
           <Guidance tone="info">
-            Assigned on {machine}: <b>{max} pcs</b>. MAX is selected by default.
+            <b>{max} pcs</b> are assigned to {machine}. Enter
+            a lower quantity to return only part of them.
           </Guidance>
           {(() => {
             const v = quantityValidation(
@@ -3656,13 +3657,13 @@ function DoneDialog({
           <Guidance tone="info">
             {machine ? (
               <>
-                On {machine}: <b>{max} pcs</b>. MAX is selected by default —
-                enter a smaller quantity to finish only part of it.
+                <b>{max} pcs</b> are available on {machine}. Adjust the quantity
+                for partial completion.
               </>
             ) : (
               <>
-                In processing: <b>{max} pcs</b>. MAX is selected by default —
-                enter a smaller quantity to finish only part of it.
+                <b>{max} pcs</b> in process. Adjust the quantity for partial
+                completion.
               </>
             )}
           </Guidance>
@@ -3799,22 +3800,22 @@ function ManualEntryDialog({
     fieldRef.current?.focus();
   }, []);
   return (
-    <ModalDialog label="Manual PN entry — explicit fallback" onClose={onCancel}>
-      <h3>Manual PN entry — explicit fallback</h3>
+    <ModalDialog label="Manual Part Number Entry" onClose={onCancel}>
+      <h3>Manual Part Number Entry</h3>
       {/* Operator wording only — engineering detail: PN identity is
           case-insensitive; an unknown PN opens the intake wizard, where
           the PartNumber record is created on first valid use. */}
       <div className="sub">
-        Type the <b>exact PartNumber</b> (not a barcode). Capitalization does
-        not matter. A PN that is not known here yet opens the receive workflow,
-        where you review and confirm it first. Nothing is recorded by this step.
+        Enter the <b>exact Part Number</b>, not a barcode. Matching is not
+        case-sensitive. If the part number is not recognized, you’ll be taken to
+        Receiving to review and confirm it. No changes are saved at this step.
       </div>
       <input
-        aria-label="Exact PartNumber"
+        aria-label="Part number"
         ref={fieldRef}
         className="field mono"
         autoComplete="off"
-        placeholder="Exact PartNumber, e.g. 0455-20-0118-03"
+        placeholder="Part number, e.g. 0455-20-0118-03"
         onKeyDown={(e) => {
           if (e.key === 'Enter') onConfirm(e.currentTarget.value);
         }}
@@ -3822,7 +3823,7 @@ function ManualEntryDialog({
       <StepButtons
         onCancel={onCancel}
         primary={{
-          label: 'Look up PN',
+          label: 'Look Up Part',
           onClick: () => onConfirm(fieldRef.current?.value ?? ''),
         }}
       />
