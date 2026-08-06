@@ -360,11 +360,12 @@ function StationView({
   // Header fit measurement (§4.3): the Area totals drop to their
   // full-width second row only when the single-row layout genuinely
   // cannot hold the three header cells — never at a hard-coded
-  // breakpoint. The probe pass applies the `measuring` class (natural
-  // single-row column widths: identity at its minimum with the Area
-  // name on one line, totals and Worker Session at content width),
-  // reads the widths, and reverts — all synchronously before paint,
-  // so the probe layout is never visible.
+  // breakpoint. The probe pass applies the `measuring` class (full
+  // natural single-row column widths: identity with Department, Area
+  // name AND Operations chips each on one line — chips never wrap
+  // before the totals drop — totals and Worker Session at content
+  // width), reads the widths, and reverts — all synchronously before
+  // paint, so the probe layout is never visible.
   const headRef = useRef<HTMLElement>(null);
   const [headWrapped, setHeadWrapped] = useState(false);
   const measureHead = useCallback(() => {

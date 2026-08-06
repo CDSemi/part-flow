@@ -170,14 +170,15 @@
 }
 
 /* Fit probe — applied by the measurement pass only, synchronously
-   before paint (never visible). One row on natural column widths: the
-   identity column at its minimum (the Area name stays on one line;
-   Operations chips may wrap, §4.3), totals and Worker Session at
-   their natural content widths. The totals drop to the second row
-   exactly when this probe row overflows the header. Declared after
-   the `wrapped` rules so the probe wins while both classes apply. */
+   before paint (never visible). One row on full natural column
+   widths: the identity column at max-content (Department, Area name,
+   AND the Operations chips each on one line — chips never wrap
+   before the totals drop), totals and Worker Session at their
+   natural content widths. The totals drop to the second row exactly
+   when this probe row overflows the header. Declared after the
+   `wrapped` rules so the probe wins while both classes apply. */
 .ss-head.measuring {
-  grid-template-columns: min-content max-content max-content;
+  grid-template-columns: max-content max-content max-content;
 }
 
 .ss-head.measuring .ss-stats {
@@ -186,8 +187,11 @@
   display: flex;
 }
 
-.ss-head.measuring .area {
-  white-space: nowrap;
+/* max-content already lays text and chips on one line; the explicit
+   nowrap pins that intent for the wrap-enabled chip rows. */
+.ss-head.measuring .op,
+.ss-head.measuring .opchips {
+  flex-wrap: nowrap;
 }
 
 /* Content-sized pill: no fixed or minimum width — the grid column /

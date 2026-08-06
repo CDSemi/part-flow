@@ -2688,8 +2688,16 @@ test('the header wrap is measurement-driven and the Worker pill is content-sized
   expect(wrapped).toContain('grid-row: 2');
   // The probe state restores single-row placement for the measurement
   // pass (declared after the wrapped rules so it wins while both
-  // classes apply).
-  expect(css).toMatch(/\.ss-head\.measuring \{[^}]*max-content/s);
+  // classes apply) on FULL natural column widths — the identity floor
+  // keeps the Operations chips unwrapped, so chips never wrap before
+  // the totals drop.
+  const probeCols = /\.ss-head\.measuring \{[^}]*}/s.exec(css)![0];
+  expect(probeCols).toContain(
+    'grid-template-columns: max-content max-content max-content',
+  );
+  expect(css).toMatch(
+    /\.ss-head\.measuring \.op,\s*\.ss-head\.measuring \.opchips \{[^}]*flex-wrap: nowrap/s,
+  );
   const probe = /\.ss-head\.measuring \.ss-stats \{[^}]*}/s.exec(css)![0];
   expect(probe).toContain('grid-column: auto');
   expect(css.indexOf('.ss-head.measuring')).toBeGreaterThan(
