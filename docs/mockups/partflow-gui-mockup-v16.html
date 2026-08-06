@@ -227,12 +227,13 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .ss-stats{display:flex;border:1px solid var(--border);border-radius:12px;background:var(--panel2);overflow:hidden}
 .ss-stats .stat{padding:8px 14px;text-align:center;border-right:1px solid var(--border);min-width:68px}
 .ss-stats .stat:last-child{border-right:none}
-.ss-stats .stat .n{font-family:var(--mono);font-size:20px;font-weight:800}
+/* Plain totals (Total PNs / Total pcs) share ONE muted neutral — the
+   same color as the Machine-card totals line text */
+.ss-stats .stat .n{font-family:var(--mono);font-size:20px;font-weight:800;color:var(--muted)}
 .ss-stats .stat .n.q{color:var(--warn-t)}
 .ss-stats .stat .n.m{color:var(--info-t)}
 .ss-stats .stat .n.d{color:var(--ok-t)}
 .ss-stats .stat .n.h{color:var(--err-t)}
-.ss-stats .stat .n.s{color:var(--muted)}
 .ss-stats .stat .l{font-size:9px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-top:1px}
 /* v10: totals drop to a full-width second row whose cells divide the
    width evenly; identity and Worker session keep the main row — the
@@ -260,14 +261,14 @@ body.prodmode #ssthemebtn{display:inline-flex}
   animation:pf-heartbeat 2s infinite}
 #conn.off .cdot{background:var(--err);box-shadow:0 0 10px var(--err);animation:none}
 #conn .ctxt{font-size:13px;font-weight:800;letter-spacing:.5px}
-#offbanner{display:none;align-items:center;flex-wrap:wrap;gap:4px 12px;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err-t);
-  padding:5px 22px;font-size:14px;font-weight:650}
+#offbanner{display:none;align-items:stretch;flex-wrap:wrap;gap:4px 12px;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err-t);
+  padding:5px 0 5px 22px;font-size:14px;font-weight:650}
 #offbanner.show{display:flex}
-#offbanner .msg{min-width:0}
-#offbanner .sep{flex:none;width:1px;height:16px;background:currentColor;opacity:.45}
-#offbanner .retry{border:none;background:none;border-radius:6px;padding:2px 4px;min-height:0;font-size:13px;font-weight:750;color:var(--err-t);flex:none}
-#offbanner .retry:hover{text-decoration:underline}
-#offbanner .retry:focus-visible{outline:2px solid var(--err-t);outline-offset:2px}
+#offbanner .msg{min-width:0;align-self:center}
+#offbanner .sep{flex:none;width:1px;align-self:center;height:16px;background:currentColor;opacity:.45}
+/* Retry zone: full banner height to the right edge (surface + states
+   from .zone-action — same pattern as the Scan Station Undo zone) */
+#offbanner .retry{flex:none;align-self:stretch;margin:-5px 0;padding:0 22px;min-height:0;font-size:13px;border-radius:0}
 #scaninput:disabled{opacity:.45;cursor:not-allowed}
 .manualbtn:disabled{opacity:.45;cursor:not-allowed}
 
@@ -316,20 +317,31 @@ body.prodmode #ssthemebtn{display:inline-flex}
    the borderless Undo text action. No separate Undo card and no Recent
    Scans list. */
 .ss-lastpnlabel{margin:12px 0 6px;font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);text-align:left}
-#lastpn{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:4px 14px;margin:0;padding:7px 16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
+/* Shared clickable action ZONE (Undo / offline Retry): the whole
+   region from after the standalone separator to the owner's edge is
+   the click target — always-visible light error surface, one shared
+   hover / focus-visible / active treatment */
+.zone-action{border:none;background:rgba(255,97,102,.08);color:var(--err-t);font-weight:800}
+.zone-action:hover:not(:disabled){background:rgba(255,97,102,.13)}
+.zone-action:active:not(:disabled){background:rgba(255,97,102,.13);filter:brightness(.96)}
+.zone-action:focus-visible{outline:2px solid var(--err-t);outline-offset:-2px}
+.zone-action:disabled{opacity:.4;cursor:not-allowed}
+#lastpn{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:4px 14px;margin:0;padding:7px 0 7px 16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
 #lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800;white-space:nowrap}
 #lastpn .d{font-size:12.5px;color:var(--muted);min-width:0}
 /* Standalone separator — its own aria-hidden element, never a button border */
 .ss-undosep{width:1px;height:18px;background:var(--border2);justify-self:end}
 /* Quiet text action: no border, no button surface; disabled dims only the action */
-#ssundo{border:none;background:none;border-radius:8px;padding:4px 6px;min-height:0;color:var(--err-t);font-size:14px;font-weight:800;letter-spacing:.3px}
-#ssundo:hover:not(:disabled){background:rgba(255,97,102,.13)}
-#ssundo:disabled{opacity:.4;cursor:not-allowed}
+/* Undo zone: stretches to the full block height and runs to the
+   block's right edge (surface + states from .zone-action) */
+#ssundo{align-self:stretch;margin:-7px 0;padding:0 16px;min-height:0;border-radius:0 11px 11px 0;font-size:14px;letter-spacing:.3px}
 /* Narrow: PN keeps the first row (Undo at its right edge); the movement
    summary drops to its own full-width second row */
 @media (max-width:700px){
   #lastpn{grid-template-columns:minmax(0,1fr) auto auto}
-  #lastpn .d{grid-column:1 / -1;grid-row:2}
+  #lastpn .d{grid-column:1;grid-row:2}
+  #lastpn .ss-undosep{grid-row:1 / -1;align-self:center}
+  #ssundo{grid-row:1 / -1}
 }
 
 /* Floating scan notification (v9) — no reserved layout space; only the
@@ -506,7 +518,10 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .prognote.donenote{color:var(--ok-t)}
 /* v16: ONE shared Route Mode chip (Tracking + Scan Station receive
    dialog) — planned stays neutral, floating carries the info tone */
-.routechip{font-size:10px;font-weight:800;letter-spacing:.4px;border-radius:5px;padding:2px 7px;flex:none;font-family:var(--mono),monospace;background:var(--chip);color:var(--muted)}
+/* Default RouteModeChip metrics match the other chips (TypeChip);
+   the Tracking flow header keeps its compact variant below */
+.routechip{display:inline-flex;align-items:center;font-size:11px;font-weight:800;letter-spacing:.4px;border-radius:5px;padding:2px 7px;flex:none;font-family:var(--mono),monospace;background:var(--chip);color:var(--muted)}
+.qf-head .routechip{font-size:10px}
 .routechip.planned{background:var(--chip);color:var(--muted)}
 .routechip.floating{background:rgba(79,140,255,.12);color:var(--info-t)}
 .rstep .repmark{color:var(--warn-t);font-weight:800;font-size:11px;margin-left:4px}
@@ -732,7 +747,7 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .ms-col .mc-stats{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid var(--border)}
 .ms-col .stat{padding:10px 8px;text-align:center;border-right:1px solid var(--border)}
 .ms-col .stat:last-child{border-right:none}
-.ms-col .stat .n{font-family:var(--mono);font-size:21px;font-weight:800}
+.ms-col .stat .n{font-family:var(--mono);font-size:21px;font-weight:800;color:var(--muted)}
 .ms-col .stat .n.q{color:var(--warn-t)}
 .ms-col .stat .n.m{color:var(--info-t)}
 .ms-col .stat .n.d{color:var(--ok-t)}
@@ -776,11 +791,10 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .abd-card .mc-stats{display:grid;border-bottom:1px solid var(--border)}
 .abd-card .stat{padding:10px 6px;text-align:center;border-right:1px solid var(--border)}
 .abd-card .stat:last-child{border-right:none}
-.abd-card .stat .n{font-family:var(--mono);font-size:21px;font-weight:800}
+.abd-card .stat .n{font-family:var(--mono);font-size:21px;font-weight:800;color:var(--muted)}
 .abd-card .stat .n.q{color:var(--warn-t)}
 .abd-card .stat .n.m{color:var(--info-t)}
 .abd-card .stat .n.h{color:var(--err-t)}
-.abd-card .stat .n.s{color:var(--muted)}
 .abd-card .stat .l{font-size:9.5px;font-weight:800;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-top:2px}
 .abd-grp{padding:10px 16px 4px;font-size:10.5px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);border-top:1px solid var(--border)}
 /* v10: success-toned `Finished — ready to move` group heading */
@@ -828,11 +842,11 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .abd-machine .mstat.idle{background:var(--chip);color:var(--muted)}
 .abd-machine .mstat.maintenance{background:rgba(255,178,36,.16);color:var(--warn-t)}
 .abd-machine .mtotals{padding:9px 16px;font-size:13px;color:var(--muted);border-bottom:1px solid var(--border)}
-/* Totals values carry the same shared tones as the header statistics:
-   pcs = secondary neutral, PN count = primary neutral — semantic
-   classes, never positional selectors */
-.abd-machine .mtotals .machine-total-pcs{font-family:var(--mono);color:var(--muted)}
-.abd-machine .mtotals .machine-total-pns{font-family:var(--mono);color:var(--text)}
+/* Totals values share ONE muted neutral with the surrounding line
+   text and the header totals — semantic classes, never positional
+   selectors, no per-meaning color split */
+.abd-machine .mtotals .machine-total-pcs,
+.abd-machine .mtotals .machine-total-pns{font-family:var(--mono);color:var(--muted)}
 /* an inactive / maintenance Machine stays visually distinct */
 .abd-machine.maintenance{border-style:dashed;border-color:var(--warn-t);opacity:.85}
 .abd-machine.idle .mtotals{color:var(--faint)}
@@ -1425,7 +1439,7 @@ body.light{color-scheme:light}
         <div class="ss-pill">
           <span class="lbl">Worker session</span>
           <span class="val" id="pill-worker"><span class="sdot"></span>H. Nguyen</span>
-          <span class="sub">expires 18:00 · scan badge to switch</span>
+          <span class="sub" id="pill-workersub">from 06:12 to 18:00</span>
         </div>
         <div class="ss-headactions">
           <button id="conn" onclick="toggleOffline()" title="Click to simulate offline">
@@ -1436,7 +1450,7 @@ body.light{color-scheme:light}
         </div>
       </div>
     </div>
-    <div id="offbanner"><span class="msg">⚠ OFFLINE — Connection to the PartFlow server has been lost. Production actions are disabled</span><span class="sep" aria-hidden="true"></span><button class="retry" onclick="toggleOffline()">Retry connection</button></div>
+    <div id="offbanner"><span class="msg">⚠ OFFLINE — Connection to the PartFlow server has been lost. Production actions are disabled</span><span class="sep" aria-hidden="true"></span><button class="retry zone-action" onclick="toggleOffline()">Retry connection</button></div>
 
     <div class="ss-body">
       <!-- Scan barcode card — full width directly under the header (v8) -->
@@ -1460,7 +1474,7 @@ body.light{color-scheme:light}
             <span class="p mono" id="lastpn-p">—</span>
             <span class="d" id="lastpn-d">no completed PN operations yet</span>
             <span class="ss-undosep" aria-hidden="true"></span>
-            <button id="ssundo" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
+            <button id="ssundo" class="zone-action" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
           </div>
         </div>
       </div>
@@ -2577,6 +2591,8 @@ function doScan(){
       if(!name){ feedback('err','Unknown Worker barcode','Rejected — nothing recorded.','✕'); return; }
       ssWorker=name;
       document.getElementById('pill-worker').innerHTML='<span class="sdot"></span>'+name;
+      /* New badge scan opens a new session window: from <scan time> to <shift end>. */
+      document.getElementById('pill-workersub').textContent='from '+new Date().toTimeString().slice(0,5)+' to 18:00';
       /* A Worker scan never replaces the Last Scanned PN. */
       feedback('ok','Worker session: '+name,
         'Previous Worker signed out. Worker identity is accountability metadata — it never determines business correctness.','✓');

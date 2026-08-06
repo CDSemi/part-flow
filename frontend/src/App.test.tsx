@@ -81,9 +81,11 @@ test('shows OFFLINE with the persistent banner when the health request fails', a
   const sep = banner.querySelector('.sep')!;
   expect(sep.getAttribute('aria-hidden')).toBe('true');
   expect(sep.tagName).not.toBe('BUTTON');
-  expect(
-    screen.getByRole('button', { name: 'Retry connection' }),
-  ).toBeInTheDocument();
+  // Retry is the shared action-zone pattern (same as the Scan Station
+  // Undo): the whole region after the separator is the click target.
+  expect(screen.getByRole('button', { name: 'Retry connection' })).toHaveClass(
+    'zone-action',
+  );
   expect(fetchMock).toHaveBeenCalledWith(
     '/api/health',
     expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -153,20 +155,24 @@ test('retry re-runs the health check and recovers to ONLINE', async () => {
 
 /* ============ Offline banner presentation contract ============ */
 
-test('the Retry action is a quiet text action — no button chrome', () => {
+test('the Retry action is a shared full-height zone to the banner edge', () => {
   // Presentation contract on the stylesheet itself (jsdom applies no
-  // CSS): the retry action carries no border and no button surface,
-  // keeps a visible keyboard focus state, and the banner is a compact
-  // wrapping row that cannot overflow horizontally.
+  // CSS): the retry action is the shared .zone-action pattern (surface
+  // and hover/focus-visible/active come from styles/global.css — the
+  // same treatment as the Scan Station Undo zone); locally it
+  // stretches to the full banner height and runs to the right edge
+  // (the banner drops its right padding), and the banner remains a
+  // compact wrapping row that cannot overflow horizontally.
   const css = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), 'app', 'shell.css'),
     'utf8',
   );
   const retry = /\.offbanner \.retry \{[^}]*}/s.exec(css)![0];
-  expect(retry).toContain('border: none');
-  expect(retry).toContain('background: none');
+  expect(retry).toContain('align-self: stretch');
+  expect(retry).toContain('margin: -5px 0');
   expect(retry).not.toContain('min-height: 40px');
-  expect(css).toMatch(/\.offbanner \.retry:focus-visible \{[^}]*outline/s);
+  expect(retry).not.toContain('border:');
   const banner = /\.offbanner \{[^}]*}/s.exec(css)![0];
   expect(banner).toContain('flex-wrap: wrap');
+  expect(banner).toContain('padding: 5px 0 5px 22px');
 });

@@ -76,6 +76,14 @@ export function formatDuration(elapsedMs: number): string {
   return `${days}d ${String(hours % 24).padStart(2, '0')}h`;
 }
 
+/** Wall-clock time of an ISO timestamp as `HH:MM` (24-hour). */
+export function formatTimeOfDay(iso: string): string {
+  const date = new Date(iso);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
 /** Elapsed duration since an ISO timestamp, in the shared language. */
 export function formatElapsedSince(sinceIso: string, nowMs: number): string {
   return formatDuration(nowMs - new Date(sinceIso).getTime());

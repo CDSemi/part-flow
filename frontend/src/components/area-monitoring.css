@@ -144,19 +144,13 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* Totals values carry the SAME shared tones as the header statistics
-   (scan-station header / Area summary stats): the assigned-pcs value
-   uses the secondary neutral tone of `Total pcs` (.n.s), the PN count
-   the primary neutral tone of `Total PNs` (.n) — semantic classes,
-   never positional selectors. */
-.am .abd-machine .mtotals .machine-total-pcs {
-  font-family: var(--mono), monospace;
-  color: var(--muted);
-}
-
+/* Totals values share ONE muted neutral with the surrounding line
+   text and the header `Total pcs` / `Total PNs` statistics — semantic
+   classes, never positional selectors, no per-meaning color split. */
+.am .abd-machine .mtotals .machine-total-pcs,
 .am .abd-machine .mtotals .machine-total-pns {
   font-family: var(--mono), monospace;
-  color: var(--text);
+  color: var(--muted);
 }
 
 /* An inactive/maintenance Machine stays visually distinct. */
@@ -209,10 +203,13 @@
   border-right: none;
 }
 
+/* Neutral statistic values (Total PNs / Total pcs) share ONE muted
+   neutral — the same color as the Machine-card totals line text. */
 .am .stat .n {
   font-family: var(--mono), monospace;
   font-size: 21px;
   font-weight: 800;
+  color: var(--muted);
 }
 
 .am .stat .n.q {
@@ -229,12 +226,6 @@
 
 .am .stat .n.h {
   color: var(--err-t);
-}
-
-/* Secondary neutral total (Total pcs) — quieter than Total PNs but
-   never a status tone. */
-.am .stat .n.s {
-  color: var(--muted);
 }
 
 .am .stat .l {

@@ -229,3 +229,18 @@ test('the overlay panel floats above a fixed-width results layout', async () => 
   );
   expect(css).not.toContain('noselect');
 });
+
+test('the Tracking flow-header RouteModeChip keeps its compact variant', async () => {
+  // The DEFAULT RouteModeChip matches the TypeChip metrics
+  // (styles/global.css); the Tracking Details panel deliberately keeps
+  // the smaller compact chip.
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'tracking.css'),
+    'utf8',
+  );
+  const compact = /\.qflow \.routechip \{[^}]*}/s.exec(css)![0];
+  expect(compact).toContain('font-size: 10.5px');
+});

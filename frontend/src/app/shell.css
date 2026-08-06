@@ -194,48 +194,46 @@ main {
    on narrow screens without horizontal overflow. */
 .offbanner {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   flex-wrap: wrap;
   gap: 4px 12px;
   background: var(--error-surface);
   border-bottom: 1px solid var(--error-border);
   color: var(--err-t);
-  padding: 5px 22px;
+  /* No right padding: the Retry zone runs to the banner's right edge. */
+  padding: 5px 0 5px 22px;
   font-size: 14px;
   font-weight: 650;
 }
 
 .offbanner .msg {
   min-width: 0;
+  align-self: center;
 }
 
 .offbanner .sep {
   flex: none;
   width: 1px;
+  align-self: center;
   height: 16px;
   background: currentColor;
   opacity: 0.45;
 }
 
+/* Retry is a shared action ZONE (.zone-action, styles/global.css —
+   same presentation as the Scan Station Undo zone): the complete
+   region from after the separator to the banner's right edge and full
+   banner height is the click target — never just the text. Layout
+   only here; surface/hover/focus-visible/active come from the shared
+   class. */
 .offbanner .retry {
-  border: none;
-  border-radius: 6px;
-  padding: 2px 4px;
+  flex: none;
+  align-self: stretch;
+  margin: -5px 0;
+  padding: 0 22px;
   min-height: 0;
   font-size: 13px;
-  font-weight: 750;
-  color: var(--err-t);
-  background: none;
-  flex: none;
-}
-
-.offbanner .retry:hover {
-  text-decoration: underline;
-}
-
-.offbanner .retry:focus-visible {
-  outline: 2px solid var(--err-t);
-  outline-offset: 2px;
+  border-radius: 0;
 }
 
 /* ============ Production not-connected state ============ */

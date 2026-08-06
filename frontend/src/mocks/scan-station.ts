@@ -1,4 +1,5 @@
 import type { MockScanStation } from '../views/view-models';
+import { minutesAgoIso } from './mock-time';
 
 // Scan Station mock registry: the station selector at /scan-station
 // lists these; /scan-station/:stationId loads one. LATHE-ST-01 is bound
@@ -37,9 +38,13 @@ export function stationById(stationId: string): MockScanStation | undefined {
   return MOCK_SCAN_STATIONS.find((s) => s.stationId === stationId && s.active);
 }
 
+// The Worker session shows `from <badge-scan time> to <shift end>`:
+// `since` is the fixed timestamp of the badge scan (mock: anchored
+// relative to load), `shiftEnd` the wall-clock end of the shift.
 export const MOCK_WORKER = {
   name: 'H. Nguyen',
-  note: 'expires 18:00 · scan badge to switch',
+  since: minutesAgoIso(154),
+  shiftEnd: '18:00',
 };
 
 // Machine barcode ids of the Lathe Area (mock): PF:MACHINE:<id>.

@@ -44,7 +44,7 @@ import {
 import { catalogPartNumber } from '../../mocks/work-orders';
 import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
-import { formatIsoDate, todayIso } from '../dates';
+import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
 import type {
   MockAreaCard,
   MockCompletedAction,
@@ -289,6 +289,9 @@ function StationView({
   // change while the station is open (same pattern as QuantityKeypad).
   const [touchPrimary] = useState(isTouchPrimaryDevice);
   const [worker, setWorker] = useState(MOCK_WORKER.name);
+  // Fixed timestamp of the badge scan that opened the current Worker
+  // session — the pill shows `from <scan time> to <shift end>`.
+  const [workerSince, setWorkerSince] = useState(MOCK_WORKER.since);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   // Session-local copy of the mock Area cards (all Areas): confirmed
@@ -519,6 +522,7 @@ function StationView({
           return;
         }
         setWorker(name);
+        setWorkerSince(new Date().toISOString());
         // A Worker scan never replaces the Last Scanned PN.
         setNotice({
           kind: 'ok',
@@ -841,14 +845,14 @@ function StationView({
             enclosing frame and no separator around the actions. */}
         {productionMode ? (
           <div className="ss-headgroup">
-            <WorkerPill worker={worker} />
+            <WorkerPill worker={worker} since={workerSince} />
             <div className="ss-headactions">
               <ConnectivityChip />
               <ThemeToggle compact />
             </div>
           </div>
         ) : (
-          <WorkerPill worker={worker} />
+          <WorkerPill worker={worker} since={workerSince} />
         )}
       </header>
 
@@ -934,7 +938,7 @@ function StationView({
               </span>
               <span className="ss-undosep" aria-hidden="true" />
               <button
-                className="ss-undo"
+                className="ss-undo zone-action"
                 disabled={writeBlocked || !eligible}
                 onClick={() => setFlow({ kind: 'undo' })}
               >
@@ -1293,8 +1297,13 @@ function AreaChip({
   );
 }
 
-/** Worker Session pill — shared by both header layouts. */
-function WorkerPill({ worker }: { worker: string }) {
+/**
+ * Worker Session pill — shared by both header layouts. The sub line is
+ * the session window: `from <badge-scan time> to <shift end>` — the
+ * from-time is the fixed timestamp of the Worker's badge scan, the
+ * to-time the shift end.
+ */
+function WorkerPill({ worker, since }: { worker: string; since: string }) {
   return (
     <div className="ss-pill">
       <span className="lbl">Worker session</span>
@@ -1302,7 +1311,9 @@ function WorkerPill({ worker }: { worker: string }) {
         <span className="sdot" aria-hidden="true" />
         {worker}
       </span>
-      <span className="sub">{MOCK_WORKER.note}</span>
+      <span className="sub">
+        from {formatTimeOfDay(since)} to {MOCK_WORKER.shiftEnd}
+      </span>
     </div>
   );
 }

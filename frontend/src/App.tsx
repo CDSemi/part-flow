@@ -17,7 +17,6 @@ import { RouterProvider } from './app/router-provider';
 import { ThemeProvider } from './app/theme-provider';
 import { ThemeToggle } from './components/ThemeToggle';
 import { UnconnectedView } from './app/UnconnectedView';
-import { ViewErrorBoundary } from './app/ViewErrorBoundary';
 import { LoadingState } from './components/view-states';
 
 const TOP_NAV: {
@@ -70,7 +69,7 @@ function OfflineBanner() {
         actions are disabled
       </span>
       <span className="sep" aria-hidden="true" />
-      <button className="retry" onClick={retry}>
+      <button className="retry zone-action" onClick={retry}>
         Retry connection
       </button>
     </div>
@@ -104,14 +103,8 @@ function ViewForRoute({ route }: { route: Route }) {
   return <DevView />;
 }
 
-/** Resolved view key for logging/registry lookup — 'not-found' aside. */
-function viewKeyForRoute(route: Route): string {
-  if (route.view === 'not-found') return 'not-found';
-  return route.view === 'management' ? route.subview : route.view;
-}
-
 function AppShell() {
-  const { route, path } = useRouter();
+  const { route } = useRouter();
   // Scan Station production mode and Production Board kiosk mode hide
   // the top application navigation: production mode keeps operators on
   // the configured station, kiosk mode keeps a wall display clean.
@@ -170,15 +163,9 @@ function AppShell() {
       )}
       <OfflineBanner />
       <main>
-        {/* The boundary wraps Suspense so a failed lazy chunk load is
-            caught the same way as a runtime error inside the view. No
-            remount key: route changes reset the boundary in place and
-            keep the view's own mounted state (see ViewErrorBoundary). */}
-        <ViewErrorBoundary route={path} viewKey={viewKeyForRoute(route)}>
-          <Suspense fallback={<LoadingState label="Loading view" />}>
-            <ViewForRoute route={route} />
-          </Suspense>
-        </ViewErrorBoundary>
+        <Suspense fallback={<LoadingState label="Loading view" />}>
+          <ViewForRoute route={route} />
+        </Suspense>
       </main>
     </>
   );

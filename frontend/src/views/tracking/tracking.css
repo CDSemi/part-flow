@@ -573,10 +573,12 @@
 }
 
 /* Route mode badge: the shared RouteModeChip (styles/global.css)
-   carries the surface; here it only stays a non-shrinking flex item
-   inside the flow head. */
+   carries the surface; the Tracking flow header keeps the COMPACT
+   variant (smaller type than the default chip height used in dialog
+   recaps) and stays a non-shrinking flex item. */
 .qflow .routechip {
   flex: none;
+  font-size: 10.5px;
 }
 
 /* Explicit Repair marker on a route-trace step */

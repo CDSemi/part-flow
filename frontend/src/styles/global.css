@@ -167,8 +167,13 @@ textarea {
    trace`, `PLANNED — <route name>`). The surface follows the mode;
    the mode word stays in the text — never color alone. */
 .routechip {
+  /* Default metrics match the other chips/pills (TypeChip): same font
+     size, centered inline-flex content — one visual chip height.
+     Tracking's flow header keeps its compact variant (tracking.css). */
+  display: inline-flex;
+  align-items: center;
   font-family: var(--mono), monospace;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.4px;
   border-radius: 6px;
@@ -360,7 +365,7 @@ textarea {
   color: var(--faint);
   font-size: 12px;
   line-height: 1.5;
-  /* Fills the parent block's available width (never capped) and
+  /* Fills the parent block's available width (no max-width cap) and
      shrinks correctly inside flex/grid parents. */
   width: 100%;
   box-sizing: border-box;
@@ -405,6 +410,39 @@ textarea {
 .field-optional {
   color: var(--faint);
   font-weight: 450;
+}
+
+/* Shared clickable action ZONE (Scan Station Undo, offline-banner
+   Retry): the complete region from after the standalone separator to
+   the edge of the owning surface is the click target — an
+   always-visible light error surface with ONE shared hover /
+   focus-visible / active presentation. The translucent surfaces stack
+   over the owner's background, so the zone stays distinguishable on
+   any host surface. Layout (tracks, margins, radius) belongs to the
+   owning stylesheet. */
+.zone-action {
+  border: none;
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+  font-weight: 800;
+}
+
+.zone-action:hover:not(:disabled) {
+  background: var(--error-surface);
+}
+
+.zone-action:active:not(:disabled) {
+  background: var(--error-surface);
+  filter: brightness(0.96);
+}
+
+.zone-action:focus-visible {
+  outline: 2px solid var(--err-t);
+  outline-offset: -2px;
+}
+
+.zone-action:disabled {
+  opacity: 0.4;
 }
 
 /* ============ Action toast ============ */

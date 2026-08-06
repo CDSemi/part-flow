@@ -80,15 +80,15 @@ export function splitAssignments(cards: readonly MockAreaCard[]): {
 export interface AreaStat {
   value: number | string;
   label: string;
-  tone?: 'q' | 'm' | 'd' | 'h' | 's';
+  tone?: 'q' | 'm' | 'd' | 'h';
 }
 
 /**
  * Shared Area statistics with the shared semantic tone mapping
- * (`q` warning · `m` information · `d` success · `h` error). The two
- * plain totals are visually distinguished without becoming statuses:
- * Total PNs keeps the primary neutral text tone and Total pcs uses the
- * secondary neutral tone (`s`). The quantity statistics reconcile —
+ * (`q` warning · `m` information · `d` success · `h` error). The
+ * plain totals (Total PNs, Total pcs) carry no tone: they share ONE
+ * muted neutral — the same color as the Machine-card totals line —
+ * with no per-meaning color split. The quantity statistics reconcile —
  * Areas with Machines: `Total pcs = Queued + On machines + Done`;
  * Areas without Machines: `Total pcs = Processing + Done`; the
  * terminal Stockroom shows stocked totals instead. Hot renders `—`
@@ -115,7 +115,7 @@ export function areaStats(
   if (!hasMachines) {
     return [
       { value: cards.length, label: 'Total PNs' },
-      { value: totalQty, label: 'Total pcs', tone: 's' },
+      { value: totalQty, label: 'Total pcs' },
       { value: queuedQty, label: 'Processing', tone: 'm' },
       { value: finishedQty, label: 'Done', tone: 'd' },
       { value: hotCount || '—', label: 'Hot', tone: 'h' },
@@ -123,7 +123,7 @@ export function areaStats(
   }
   return [
     { value: cards.length, label: 'Total PNs' },
-    { value: totalQty, label: 'Total pcs', tone: 's' },
+    { value: totalQty, label: 'Total pcs' },
     { value: queuedQty, label: 'Queued', tone: 'q' },
     { value: machineQty, label: 'On machines', tone: 'm' },
     { value: finishedQty, label: 'Done', tone: 'd' },

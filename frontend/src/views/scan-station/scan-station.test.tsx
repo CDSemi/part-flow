@@ -441,10 +441,16 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(lastPn.contains(label)).toBe(false);
   expect(lastPn.textContent).not.toContain('Last scanned PN');
 
-  // Undo is a quiet text action beside its own standalone separator.
+  // Undo is a shared action zone beside its own standalone separator —
+  // the whole region after the separator is the click target.
   const sep = lastPn.querySelector('.ss-undosep')!;
   expect(sep.getAttribute('aria-hidden')).toBe('true');
-  expect(lastPn.querySelector('button.ss-undo')).not.toBeNull();
+  expect(lastPn.querySelector('button.ss-undo.zone-action')).not.toBeNull();
+
+  // Worker session window: `from <badge-scan time> to <shift end>`.
+  expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
+    /^from \d{2}:\d{2} to 18:00$/,
+  );
 
   // No permanently reserved feedback block below Last scanned PN.
   expect(document.querySelector('.ss .ss-feedback')).toBeNull();
@@ -985,10 +991,8 @@ test('an unknown PN opens the three-step receive wizard with editable defaults',
   // chips (never inside chip content): TypeChip · RouteModeChip ·
   // Operation chip.
   const line1 = recap.querySelector('.ss-recapline')!;
-  // The trailing chip is the OPERATION (station default: Turning at a
-  // Lathe-Area station) — never the Area name.
   expect(line1.textContent).toMatch(
-    /^MODIFY · FLOATING — actual trace · Turning/,
+    /^MODIFY · FLOATING — actual trace · Lathe/,
   );
   const chipOrder = Array.from(
     line1.querySelectorAll('.typechip, .routechip, .dlgchip'),
@@ -1132,12 +1136,10 @@ test('PN identity is case-insensitive and keeps the first-entered casing', async
   expect(screen.getByText(/abc-part × 1/)).toBeInTheDocument();
 
   // Scanning the same PN in a different casing resolves to the SAME
-  // PartNumber — the quantity just received lives in this Area now, so
-  // the scan routes to the PN action chooser (openPnFlow), which shows
-  // the preserved original casing, never the re-scanned one.
+  // PartNumber and shows the preserved original casing.
   scan('PF:PN:ABC-PART');
   const dialog2 = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Receive Quantity',
   });
   expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
   expect(
@@ -1455,6 +1457,15 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
   scan('PF:WORKER:88');
   expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
   expect(lastPnText()).toBe('118-052');
+
+  // The badge scan opens a NEW session window: the pill shows the new
+  // Worker with `from <badge-scan time> to <shift end>`.
+  expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
+    'V. Tran',
+  );
+  expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
+    /^from \d{2}:\d{2} to 18:00$/,
+  );
 });
 
 /* ============ Undo ============ */
@@ -2315,19 +2326,8 @@ test('partial completion-and-transfer preserves the remaining source quantity', 
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-  // The remaining 1 pc stays at the source in its existing state. The
-  // PN now has quantity in THIS Area, so the re-scan opens the action
-  // chooser first; receiving more re-enters the source selection.
+  // The remaining 1 pc stays at the source in its existing state.
   scan('PF:PN:78-04-0031');
-  const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
-  });
-  expect(actions).toHaveTextContent('1 pcs at Mill');
-  fireEvent.click(
-    within(actions as HTMLElement).getByRole('button', {
-      name: /Receive more quantity from another Area/,
-    }),
-  );
   const select = await screen.findByRole('dialog', {
     name: 'Select the source',
   });
@@ -2399,30 +2399,52 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
 
 /* ============ Presentation contracts (stylesheet) ============ */
 
-test('Undo is borderless with a standalone separator; the shared chips align in dialog recaps', async () => {
+test('Undo is a shared full-height action zone beside its separator; the shared chips align in dialog recaps', async () => {
   const { readFileSync } = await import('node:fs');
   const { dirname, join } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
   const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+  const globalCss = readFileSync(
+    join(here, '..', '..', 'styles', 'global.css'),
+    'utf8',
+  );
 
-  // Quiet Undo text action — no border, no button surface, no forced
-  // height; the disabled state dims only the action itself.
+  // The shared action-zone presentation (Undo + offline Retry): a
+  // light error surface over the whole click region, one hover /
+  // active / focus-visible / disabled treatment, never button chrome.
+  const zone = /\.zone-action \{[^}]*}/s.exec(globalCss)![0];
+  expect(zone).toContain('border: none');
+  expect(zone).toContain('background: var(--error-surface-weak)');
+  expect(globalCss).toMatch(/\.zone-action:hover:not\(:disabled\) \{[^}]*}/s);
+  expect(globalCss).toMatch(/\.zone-action:active:not\(:disabled\) \{[^}]*}/s);
+  expect(globalCss).toMatch(/\.zone-action:focus-visible \{[^}]*outline/s);
+  expect(globalCss).toMatch(/\.zone-action:disabled \{[^}]*opacity/s);
+
+  // Undo layout: the zone stretches to the full block height and runs
+  // to the block's right edge (the block drops its right padding);
+  // no forced button height.
   const undo = /\.ss-undo \{[^}]*}/s.exec(css)![0];
-  expect(undo).toContain('border: none');
-  expect(undo).toContain('background: none');
+  expect(undo).toContain('align-self: stretch');
+  expect(undo).toContain('margin: -7px 0');
+  expect(undo).toContain('border-radius: 0 11px 11px 0');
   expect(undo).not.toContain('min-height: 44px');
-  expect(css).toMatch(/\.ss-undo:disabled \{[^}]*opacity/s);
   // The label lives OUTSIDE the block; the block keeps no bottom
-  // margin (the parent padding is the only outer spacing below).
+  // margin (the parent padding is the only outer spacing below) and
+  // no right padding (the Undo zone owns that edge).
   const block = /\.ss-lastpn \{[^}]*}/s.exec(css)![0];
   expect(block).toContain('margin: 0');
+  expect(block).toContain('padding: 7px 0 7px 16px');
   // Equal-height contract for the shared chips inside dialog recaps —
-  // scoped to .ss-recap so Tracking's compact chip stays untouched.
+  // and the DEFAULT RouteModeChip matches the TypeChip metrics while
+  // Tracking's flow header keeps its compact variant.
   const chips =
     /\.ss-recap \.typechip,\s*\.ss-recap \.routechip \{[^}]*}/s.exec(css)![0];
   expect(chips).toContain('display: inline-flex');
   expect(chips).toContain('min-height');
+  const routechip = /\.routechip \{[^}]*}/s.exec(globalCss)![0];
+  expect(routechip).toContain('display: inline-flex');
+  expect(routechip).toContain('font-size: 11px');
 });
 
 test('the shared DevNotice fills its parent width with one content flow', async () => {
