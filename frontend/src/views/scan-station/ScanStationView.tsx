@@ -744,33 +744,39 @@ function StationView({
         }
       : notice;
 
-  // Row actions: `In this Area now` carries NO row actions (assignment
-  // stays available through PN scan, Machine scan and the action
-  // dialog); Machine-card rows carry the two distinct one-shot
+  // Row actions. Machine-card rows carry the two distinct one-shot
   // actions — DONE completes Area processing and moves the quantity to
   // the finished rack; QUEUE returns unfinished or paused quantity to
-  // the Area queue. They are never merged.
+  // the Area queue. They are never merged. The shared DONE button is
+  // one presentation for both surfaces (success tone, icon above the
+  // label, accessible name `Complete Area processing`); while writes
+  // are blocked it stays disabled in place — the rail keeps its layout
+  // and no workflow that could record a false state can open.
+  const doneRowAction = (entry: AreaAssignment, machine: string | null) => (
+    <button
+      className="rowact done"
+      aria-label="Complete Area processing"
+      title="Complete processing — move this quantity to the finished rack, ready to transfer"
+      disabled={writeBlocked}
+      onClick={() =>
+        setFlow({
+          kind: 'done',
+          pn: entry.card.pn,
+          machine,
+          max: entry.qty,
+        })
+      }
+    >
+      <span className="ric" aria-hidden="true">
+        ✓
+      </span>
+      DONE
+    </button>
+  );
+
   const machineRowAction = (entry: AreaAssignment) => (
     <>
-      <button
-        className="rowact done"
-        aria-label="Complete Area processing"
-        title="Complete processing — move this quantity to the finished rack, ready to transfer"
-        disabled={writeBlocked}
-        onClick={() =>
-          setFlow({
-            kind: 'done',
-            pn: entry.card.pn,
-            machine: entry.context,
-            max: entry.qty,
-          })
-        }
-      >
-        <span className="ric" aria-hidden="true">
-          ✓
-        </span>
-        DONE
-      </button>
+      {doneRowAction(entry, entry.context)}
       <button
         className="rowact"
         aria-label="Return to Area queue"
@@ -792,6 +798,30 @@ function StationView({
       </button>
     </>
   );
+
+  // `In this Area now` row actions. In an Area WITH Machines the card
+  // carries NO row actions (assignment stays available through PN
+  // scan, Machine scan and the action dialog; DONE / QUEUE live in the
+  // Machine cards). A direct-processing Area (no Machines) is the
+  // deliberate exception: its actively processing quantity has no
+  // Machine card to act from, so exactly those rows carry the single
+  // DONE action — the same manual DONE wizard with Machine = NULL.
+  // There is no QUEUE here: a direct-processing Area has no Machine
+  // queue to return quantity to. Visibility is decided by explicit
+  // semantic data — the Area's Machine-less non-terminal mode plus the
+  // portion's actively processing state (`direct`, or `vendor` for
+  // External processing) — never by CSS selectors or Area names;
+  // finished (`READY_TO_TRANSFER`) portions and quantity no longer in
+  // the Area never carry the action. Management → Area Board renders
+  // the same shared card without any rowAction and stays read-only.
+  const directRowAction =
+    hasMachines || area?.terminal
+      ? undefined
+      : (entry: AreaAssignment) =>
+          (entry.state === 'direct' || entry.state === 'vendor') &&
+          entry.qty > 0
+            ? doneRowAction(entry, null)
+            : null;
 
   return (
     <section
@@ -962,6 +992,7 @@ function StationView({
                 cards={areaCards}
                 machines={machines}
                 title="In this Area now"
+                rowAction={directRowAction}
                 showStats={false}
               />
             ) : null
@@ -2390,7 +2421,13 @@ function IntakeDialog({
   const [plannedRoute, setPlannedRoute] = useState('Bracket std v3');
   const [due, setDue] = useState('');
   const [notes, setNotes] = useState('');
-  const [operation, setOperation] = useState(operations[0] ?? '');
+  // The stored value uses the option format `<Area> — <Operation>` from
+  // the first render on — the select's options and the recap/summary
+  // chips always agree (the initial value is never a bare Operation
+  // that matches no option).
+  const [operation, setOperation] = useState(
+    operations[0] ? `${areaName} — ${operations[0]}` : '',
+  );
   const firstFieldRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
     if (step === 'settings') firstFieldRef.current?.focus();

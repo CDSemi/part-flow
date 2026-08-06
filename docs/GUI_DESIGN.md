@@ -1,9 +1,9 @@
-# PartFlow GUI Design v16
+# PartFlow GUI Design v17
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v13).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
-> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v16.html` (previous versions are archived under `docs/archive/`).
-> Supersedes GUI Design v15; the differences are listed in §14.1. Differences from v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2 and v1 remain listed in §14.2–§14.15.
+> An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v17.html` (previous versions are archived under `docs/archive/`).
+> Supersedes GUI Design v16; the differences are listed in §14.1. Differences from v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2 and v1 remain listed in §14.2–§14.16.
 
 ---
 
@@ -201,12 +201,12 @@ Wizard rules (all workflows):
 
 **PN-first.** Scanning a PN opens the applicable one-shot wizard (§4.7); entering Machine assignment from the PN action dialog preselects the PN, and Step 1's Back returns to that action dialog. Worker scans switch the Worker Session (visible in the header); Worker identity never determines business correctness.
 
-**Monitoring row actions.** The `In this Area now` card shows **no row actions**; assignment stays available through PN scan, Machine scan and the action dialog. Machine-card PN rows carry **two distinct actions**, compact, icon-above-label (the icon is never the only source of meaning), each with a clear accessible name, and never merged:
+**Monitoring row actions.** In an Area **with Machines** the `In this Area now` card shows **no row actions**; assignment stays available through PN scan, Machine scan and the action dialog, and Machine-card PN rows carry **two distinct actions**, compact, icon-above-label (the icon is never the only source of meaning), each with a clear accessible name, and never merged:
 
 - `DONE` (accessible name `Complete Area processing`, success tone) — complete processing and move the quantity to the finished state: the manual DONE wizard (quantity with MAX defaulting to the quantity at the current source position → dedicated confirmation view with Action `Complete Area processing`, PN, Quantity, Area, Machine when applicable, Result `Finished — ready to move`, Worker, Scan Station and the `AREA_COMPLETED` recorded event → `Confirm DONE`). On confirmation the quantity leaves the Machine card, appears under `Finished — ready to move` in the Area summary, the current Machine is cleared and the current Area stays the physical location. Other quantity of the same PN is untouched.
 - `QUEUE` (accessible name `Return to Area queue`, neutral tone) — return unfinished or paused quantity to the Area queue (`RELEASED_FROM_MACHINE`, quantity MAX-defaulted, then a dedicated confirmation view). QUEUE never marks quantity DONE.
 
-A direct-processing Area (no Machines) completes quantity through the PN action dialog's `Complete processing — DONE` choice — the same wizard without a Machine field. The Area Board remains completely read-only.
+**Direct-processing exception (v17).** In an Area **without Machines** the actively processing quantity has no Machine card to act from, so exactly the `In this Area now` rows whose portion is actively processing (`In processing`, or `External processing` at an outside vendor) carry the **single `DONE` row action** — the same shared button presentation as the Machine-card `DONE` (accessible name `Complete Area processing`, success tone, icon above the `DONE` label) in the shared separated action rail (§4.10); the PN row itself never becomes clickable and the shop-floor touch target is preserved. Clicking `DONE` records nothing — it opens the **same manual DONE wizard**, which renders no Machine field: the quantity step's MAX defaults to the actively processing quantity of the selected PN portion (a smaller quantity completes only part of it), and the unchanged confirmation view (Action `Complete Area processing`, PN, Quantity, Area, Result `Finished — ready to move`, Worker, Scan Station, Recorded event `AREA_COMPLETED`, primary `Confirm DONE`) stays the only write point. On confirmation exactly one immutable `AREA_COMPLETED` Movement is recorded: the selected quantity moves from `In processing` to `Finished — ready to move`, the current Area stays the physical location, no Machine is assigned or cleared, a partial DONE leaves the remainder actively processing, other QuantityFlows of the same PN are untouched, and Last Scanned PN and Undo follow the manual DONE behavior. There is **no `QUEUE`** — a direct-processing Area has no Machine queue to return quantity to. Visibility is decided by **explicit semantic data** (Machine-less non-terminal Area + actively processing portion state) — never CSS selectors or Area names: finished (`READY_TO_TRANSFER`) portions, quantity no longer in the Area, and Areas with Machines never show the row action. While the application is offline or write actions are blocked, `DONE` is disabled in place — the action rail keeps its layout and no workflow that could lead to a falsely recorded state can open. The PN action dialog's `Complete processing — DONE` choice (§4.7 item 3) remains the scan-driven path to the same wizard. Management → Area Board renders the same shared card **without any row actions** and remains completely read-only.
 
 ## 4.7 PN scan resolution
 
@@ -215,7 +215,7 @@ A direct-processing Area (no Machines) completes quantity through the PN action 
 3. **PN already has quantity in the Area**: an action dialog shows only the currently valid choices (a selection view — not a confirmation step):
    - **Assign queued quantity to a Machine** (only when queued quantity exists) — the assignment wizard (§4.6) with the PN preselected.
    - **Receive more quantity from another Area** (only when transferable quantity exists elsewhere; explicit source selection when several).
-   - **Complete processing — DONE** (direct-processing Areas only, when actively processing quantity exists) — the manual DONE wizard of §4.6 without a Machine field.
+   - **Complete processing — DONE** (direct-processing Areas only, when actively processing quantity exists) — the manual DONE wizard of §4.6 without a Machine field; the same wizard is reachable directly from the `DONE` row action on the actively processing `In this Area now` rows (§4.6, direct-processing exception).
    - **Add more quantity** — operator guidance reads: “Add physical quantity that was not received from another Area. Enter a reason so the adjustment can be reviewed later.” Operator-allowed, no Manager approval, mandatory reason, mandatory quantity with **no MAX button and no default value**, then a dedicated confirmation view whose `Recorded event` row states `QUANTITY_ADJUSTED · INCREASE` (never hidden as an ordinary transfer, never changing the WO Demand requested quantity); `Confirm addition` is the only write point. Added quantity enters the Area queue (Areas with Machines) or direct processing (Areas without Machines).
    - **Send quantity here for repair** (label wording — never “Create REPAIR demand”; only when quantity elsewhere may deliberately return to this previously visited Area): choose the Repair intent → select source Area/QuantityFlow, repair quantity and required reason → a dedicated confirmation view that explicitly identifies `movement_reason = REPAIR` → `Confirm repair`. Repair is never converted into a Request Type, and never auto-selected merely because the Area appears earlier in history — a normal transfer to a previously visited Area stays possible. Partial quantity requires a QuantityFlow SPLIT.
    - **Scrap damaged quantity** (§4.9).
@@ -283,7 +283,7 @@ The shared layout (also used by the Area Board detail, §6.3):
   ```
 
   Line 1: Hot indicator and PN left; Machine/queue/done context and quantity (formatted with `pcs`) right. Line 2: Work Order Number (`—` when blank) and external Job Number left (may truncate with an ellipsis; the complete value stays available through a `title` tooltip); the derived due countdown right (§3.12 — `N days left`, `due today`, `overdue N days`, `No due date`). Line 3, when meaningful: in-Area status left (`Awaiting Machine`, `On Machine`, `In processing`, `External processing`, `Finished … — ready to move`); time in Area right. Line 4, only when scrapped quantity exists: `{n} scrapped`. Scrapped quantity appears **only** as this readable text — the compact `⊘n` indicator no longer exists and scrap is never displayed twice. Rows inside an Area summary show their Machine/queue/completion context chip; rows inside a specific Machine card pass the explicit `showContext={false}` presentation option so the Machine already identified by the card header is never repeated per row (never hidden through fragile CSS selectors).
-- **Action rail.** When a row has actions, they sit in a dedicated right-side action cell — separated by spacing and a subtle vertical border, vertically centered, with a predictable minimum width — never immediately beside the PN, context or quantity. Machine-card rows stack `DONE` above `QUEUE` inside that cell (§4.6). At very narrow widths the actions may stack below the content but stay visually separated. PN rows are never clickable as a whole. Action visibility: `In this Area now` shows no row actions; Machine-card rows show `DONE` and `QUEUE`; the Area Board passes no actions at all (read-only).
+- **Action rail.** When a row has actions, they sit in a dedicated right-side action cell — separated by spacing and a subtle vertical border, vertically centered, with a predictable minimum width — never immediately beside the PN, context or quantity. Machine-card rows stack `DONE` above `QUEUE` inside that cell (§4.6). At very narrow widths the actions may stack below the content but stay visually separated. PN rows are never clickable as a whole. Action visibility: in an Area with Machines, `In this Area now` shows no row actions and Machine-card rows show `DONE` and `QUEUE`; in a direct-processing Area (no Machines) the actively processing `In this Area now` rows show the single `DONE` (§4.6 direct-processing exception — never `QUEUE`, never on finished rows); the Area Board passes no actions at all (read-only).
 - **Machine-card operational state with age (v14, ticking v16).** Every Machine monitoring card's header status pill carries the derived operational state **with the elapsed time in that state** (`running · 1h 24m`), derived at render from the Machine's shared `stateChangedAt` timestamp plus the shared minute-precision UI clock (§3.12; PROJECT_PROFILE §8.6 — `formatStateAge` delegates to the shared duration language `18m`, `1h 24m`, `2d 03h`, `<1m`; never a stored formatted duration), so every surface shows the same age and the age **keeps ticking while the view stays open** (Machines table, monitoring cards). A maintenance card's empty text carries the maintenance context: `Under maintenance — accepts no production`, followed by the note and `expected back YYYY-MM-DD` when present. The card's totals line `N pcs assigned · M PN(s)` carries two semantic value classes — `machine-total-pcs` and `machine-total-pns` — sharing **one muted neutral with the surrounding line text and the header `Total pcs` / `Total PNs` totals** (§4.3; no per-meaning color split); semantic classes, never positional `<b>`/nth-child selectors.
 - **Derived Time in Area and due countdown (v16).** A row stores only fixed timestamps — the Area-entry timestamp (`enteredAreaAt`, null where elapsed time does not apply) and the due date (`due`, ISO or null); the `Time in Area` text, its sort order, and the due countdown are all derived at render from them plus the shared minute-precision UI clock (§3.12), in the one shared duration and countdown language. A card where a countdown does not apply (the Stockroom `allocated 50/50`) shows its verbatim status through the optional `dueText` instead. Stored formatted strings (`timeInArea`, `timeInAreaMinutes`, `dueDays`, `dueClass`) no longer exist in the row model.
 - The presentation is built from shared components (`AreaPnRow`, `AreaSummaryCard`, `MachineMonitoringCard`, `DueStatus`, `QuantityStatus` — domain-named, no vague helpers) so Scan Station and Area Board never drift apart; changing the shared row affects both surfaces and both must be verified.
@@ -451,7 +451,7 @@ The Stockroom station reuses the Scan Station shell with one additional step: af
 
 # 11. Work Orders
 
-Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §14.11). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §14.12). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 The view lives on one route (`/management/work-orders`): the **WO list** is the entry screen, and selecting a Work Order opens **Work Order Details as a modal dialog over the list** (v10) — the list stays mounted and visible behind the overlay and the URL never changes. **New Work Order** is likewise a **modal dialog over the WO list** (v6). There is no separate detail panel/view and no detail route.
 
@@ -612,9 +612,18 @@ Loading, error and empty states follow the standard view-state presentation (`No
 
 # 14. Changes from previous versions
 
-> Historical entries in §14.10–§14.15 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§14.11 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history.
+> Historical entries in §14.11–§14.16 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§14.12 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history.
 
-## 14.1 Changes from GUI Design v15
+## 14.1 Changes from GUI Design v16
+
+The v16→v17 change adds the **direct-processing row-level `DONE` action** to the Scan Station. No other view behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
+
+1. **Row-level `DONE` for direct-processing Areas** (§4.6, §4.10): in an Area without Machines, exactly the actively processing `In this Area now` rows (`In processing` / `External processing`) carry the single `DONE` action in the shared separated action rail — a deliberate exception to the no-row-actions rule, because those portions have no Machine card to act from. The action reuses the shared row/action presentation (`AreaPnRow` action rail; success tone, icon above the label, accessible name `Complete Area processing`) and opens the **existing manual DONE wizard** (no new workflow, no duplicated quantity validation, confirmation logic or mock Movement mutation) with no Machine field and MAX defaulting to the row's actively processing quantity; confirmation records exactly one immutable `AREA_COMPLETED` Movement moving the selected quantity to `Finished — ready to move` (partial DONE keeps the remainder processing; the current Area, other QuantityFlows, Last Scanned PN and Undo behave exactly like the manual DONE workflow). There is no `QUEUE` in a direct-processing Area; visibility is decided by explicit semantic data (Machine-less non-terminal Area + actively processing portion state), never CSS selectors or Area names; offline/write-blocked disables `DONE` in place without changing the rail layout. Areas with Machines keep the previous behavior unchanged, and Management → Area Board stays completely read-only.
+2. **Direct-processing sample data** (mocks): a second Deburr presence (`81-1042`, 6 pcs actively processing) demonstrates the row action beside the fully finished `78-04-0031` card, so the direct-processing Area shows both groups out of the box.
+3. **Receive wizard starting-Operation default** (§4.7 item 1): the stored starting Area/Operation value uses the option format `<Area> — <Operation>` from the first render on — previously the initial value was the bare Operation, which matched no select option and rendered an inconsistent Step-2 recap chip.
+4. **Mockup v17** (header note): `mockups/partflow-gui-mockup-v17.html` mirrors the row action, the no-Machine wizard variant, the PN action dialog's direct `DONE` choice and the new sample data.
+
+## 14.2 Changes from GUI Design v15
 
 The v15→v16 changes introduce the shared UI clock — every derived time-dependent display value now derives at render from fixed source timestamps plus one shared tick — and refine the Scan Station's receive/assignment copy, chips, header and focus behavior. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -640,7 +649,7 @@ Post-v16 refinements (same round, updated in place — no version bump):
 10. **One muted neutral for the plain totals** (§4.3, §4.10): `Total PNs` and `Total pcs` (and the Machine-card `machine-total-pcs` / `machine-total-pns` values) drop the primary/secondary neutral split and share one muted neutral — the status tones (Queued / On machines / Processing / Done / Hot) are unchanged.
 11. **Default `RouteModeChip` height matches the other chips** (§4.7, §7.2): the default chip metrics align with `TypeChip` (inline-flex, same font size); only Tracking's Details-panel flow header keeps its deliberate compact variant.
 
-## 14.2 Changes from GUI Design v14
+## 14.3 Changes from GUI Design v14
 
 The v14→v15 changes add the Machine return-to-service (reactivation) lifecycle — canonical in PROJECT_PROFILE v12 (§7 Machine, §8.6), together with the new invariant that display names are unique among the **active** Machines of one Area — and refine Phase 2 presentation and interaction across the views. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -659,7 +668,7 @@ The v14→v15 changes add the Machine return-to-service (reactivation) lifecycle
 13. **Priority snapshot divider** (§8): each ranking snapshot section draws one row-spanning vertical rule between the shared position track and the PN column (rows pinned to their grid lines); subgrid environments only — hidden in the no-subgrid fallback and the ≤ 560 px stacked layout.
 14. **Administration policies note and open question** (§9, §16): the future Department display settings name the Production Board rotation timing (seconds per displayed row, minimum page dwell); whether those settings are per-Department or global joins the open questions.
 
-## 14.3 Changes from GUI Design v13
+## 14.4 Changes from GUI Design v13
 
 The v13→v14 changes add the two Management production-master-data views and refine Phase 2 presentation and interaction. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -676,7 +685,7 @@ The v13→v14 changes add the two Management production-master-data views and re
 11. **Scan Station refinements** (§4.4, §4.1, §4.6, §4.7): the main barcode input renders `inputMode="none"` on touch-primary devices through the shared, generalized detection module `src/components/touch-device.ts` (renamed from `quantity-touch.ts`) — wedge scanners, physical keyboards, focus behavior and the manual-entry dialog input unaffected; the production-mode header actions group (connectivity chip + compact theme toggle) shares the header card language as one coherent aligned group; confirmation summaries content-size their label column (`fit-content(230px)`) and flatten entity chips to plain verification text (PN keeps mono; recaps/selection steps keep chips) across all confirmation dialogs including Undo; intake/unknown-PN/manual-entry copy is rewritten operator-facing (`New PN — not registered yet. …`) with no record-creation/database wording; and the assignment dialog is titled **`Assign to Machine`** (formerly "One-shot Machine assignment") with its temporary behavior explained naturally — no "persistent Machine Session"/"armed" wording renders.
 12. **Administration focused on system administration** (§9): the sidebar loses the Machines and Route Templates sections (no duplicates of the Management views); the phased-honesty copy names Departments, Areas, Operations, Scan Stations and barcode configuration as the minimum environment setup and points Machines & Planned Routes to Management. Machines remain part of the roadmap's minimum-setup prerequisite, now configured through Management → Machines.
 
-## 14.4 Changes from GUI Design v12
+## 14.5 Changes from GUI Design v12
 
 The v12→v13 changes are Phase 2 presentation, interaction and responsive-layout refinements plus one roadmap clarification. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -695,7 +704,7 @@ The v12→v13 changes are Phase 2 presentation, interaction and responsive-layou
 13. **Priority confirmation alignment + impact block** (§8): both ranking snapshots share one grid-track definition with a common rank/transition track wide enough for `#2 → #4` (the PN never shifts between sections; a stacking narrow-screen fallback keeps the relationships), and the impact/action line becomes a compact block — shift impact as a sentence, the `Action` label separated from its emphasized value, no decorative pill.
 14. **Administration honesty + roadmap prerequisite** (§9; IMPLEMENTATION_ROADMAP): Phase 2 Administration stays a development-only visual shell with disabled (never fake-functional) entry actions, a `Scan Stations` section joins Production setup, and each placeholder states whether it belongs to the new named **Phase 3.5 — Minimum Environment Setup** prerequisite (Departments, Areas, Operations, Scan Stations, Machines, required active/barcode fields — before real production workflows) or to the later full Administration phase; later phases are not renumbered.
 
-## 14.5 Changes from GUI Design v11
+## 14.6 Changes from GUI Design v11
 
 The v11→v12 changes are Phase 2 presentation, interaction-detail and layout refinements. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -711,7 +720,7 @@ The v11→v12 changes are Phase 2 presentation, interaction-detail and layout re
 10. **Anchored footer with the sorting legend** (§5): the footer is a normal flex child pushed to the bottom of the board viewport (never `position: fixed`, never covering content, height still inside the pagination measurement), reorganized into a controls/totals row and a legend row that now states the user-facing sorting rule: `Order: Hot rank first → earliest due date → no due date by oldest received date.` (no tie-breakers, no implementation names).
 11. **Priority rank transitions** (§8): every `New Position` row shows its complete rank transition `#current → #new` (old rank and arrow quiet, new rank strongest), with the add/remove edge cases explicit — `Not listed → #n` for a restored/newly listed entry and `#n → Not listed` for a removed one; rows stay sorted by new rank, the PN/metadata separation, moved-row emphasis and the `Current Position` snapshot are unchanged.
 
-## 14.6 Changes from GUI Design v10
+## 14.7 Changes from GUI Design v10
 
 The v10→v11 changes are Phase 2 presentation, navigation-chrome and copy refinements. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -726,7 +735,7 @@ The v10→v11 changes are Phase 2 presentation, navigation-chrome and copy refin
 9. **Priority two-snapshot confirmation** (§8): the reorder confirmation replaced the Current/New comparison table with `Current Position` → transition arrow → `New Position` snapshots restricted to the affected rank range; rank first, per-row ↑/↓ arrows only on the current side, PN visually separated from a `WO … · Job …` metadata chip built from explicit fields, and `Not listed` placeholders for entries that exist on only one side (Undo/Redo of add/remove); `MockHotEntry` gained the explicit `workOrderNumber` and `jobNumber` fields.
 10. **Exhaustive professional copy + rendered-copy guard** (§3.10): all rendered strings were audited against the operator / audit-history / development-only classification; developer wording (`(mock)`, `nothing persisted`, `priority_rank`, `movement_reason`, `derived from Movement history`, `separate from Movement`, …) was rewritten in user language or moved behind the single per-view `DevNotice`; `src/rendered-copy.test.ts` now guards the renderable sources and the current mockup against regressions while keeping canonical Movement names legitimate in audit surfaces.
 
-## 14.7 Changes from GUI Design v9
+## 14.8 Changes from GUI Design v9
 
 The v9→v10 changes introduce the Area-level processing completion state — user-facing **DONE**, canonical immutable Movement `AREA_COMPLETED`, derived holding state `READY_TO_TRANSFER` (canonical in PROJECT_PROFILE v10 §7 *Area Completion*, §8.11, §12) — plus Phase 2 presentation refinements across the views. Everything is implemented in the Phase 2 frontend against development-only mock state; no backend persistence and no database migrations exist yet.
 
@@ -743,7 +752,7 @@ The v9→v10 changes introduce the Area-level processing completion state — us
 11. **Priority reorder confirmation** (§8): redesigned around a primary moved-item summary, a current-versus-proposed rank comparison with moved/shifted emphasis and ↑/↓ indicators, `Apply ranking` / `Cancel (Esc)`, and user-facing Undo/Redo titles (`Restore previous ranking` / `Reapply ranking`).
 12. **Professional operator copy** (§3.10): operator guidance stopped exposing raw enum combinations (canonical types remain as audit data and in the confirmation summaries' `Recorded event(s)` row); Cancel buttons standardized to exactly `Cancel (Esc)`; repetitive mock/persistence phrasing reduced to concise development-only notices; demo barcode hints marked development-only and guarded out of production builds.
 
-## 14.8 Changes from GUI Design v8
+## 14.9 Changes from GUI Design v8
 
 All v8→v9 changes are Scan Station interaction and presentation refinements, implemented in the Phase 2 frontend against development-only mock state. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; the one-shot rule is preserved — every multi-step workflow remains one temporary dialog with no armed state.
 
@@ -756,12 +765,12 @@ All v8→v9 changes are Scan Station interaction and presentation refinements, i
 7. **PN row grid layout** (§4.10): four content lines (Hot+PN | context · quantity `pcs`; WO·Job — truncating with a `title` tooltip | due status; in-Area status | time in Area; `{n} scrapped`), with the action in a dedicated, visually separated right-side action rail (stacking below only at very narrow widths); the compact `⊘n` scrap indicator is removed — scrapped quantity renders only as `{n} scrapped` text; rows are never clickable as a whole.
 8. **Row-action visibility** (§4.6, §4.10): `In this Area now` shows no `ASSIGN`/`QUEUE` row buttons; Machine cards show only `QUEUE`; Machine assignment stays available through PN scan, Machine scan and the action dialog; the Area Board remains completely read-only. The underlying one-shot assignment capability is unchanged.
 
-## 14.9 Changes from GUI Design v7
+## 14.10 Changes from GUI Design v7
 
 All v7→v8 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v9.
 
 1. **PN-centric one-shot Scan Station, no Machine Session** (§4): the Machine session pill, Machine status strip, persistent active-Machine state, armed Action barcodes (`PF:ACTION:…`) and the Recent Scans list are removed. Scanning a Machine barcode is only a one-shot assignment shortcut; scanning a PN opens the applicable one-shot dialog (intake / source-explicit transfer / action dialog with only currently valid choices); completing or cancelling a dialog clears every temporary context. The header carries Area statistics instead of Machine-session state; the Scan Barcode card spans the full width directly under the header; the Last Scanned PN surface carries the Undo action at its right edge with a summary confirmation before every reversal.
-2. **Scan Station routing** (§4.1): `/scan-station` becomes a Station Selector (never auto-redirecting); `/scan-station/:stationId` loads one station; unknown/inactive Station IDs show an explicit error; the faint footer Station ID was made clickable for switching (historical — the footer has been fully non-interactive since v13, §14.4 item 2).
+2. **Scan Station routing** (§4.1): `/scan-station` becomes a Station Selector (never auto-redirecting); `/scan-station/:stationId` loads one station; unknown/inactive Station IDs show an explicit error; the faint footer Station ID was made clickable for switching (historical — the footer has been fully non-interactive since v13, §14.5 item 2).
 3. **Request Types reduce to `NEW` / `MODIFY`; Repair becomes a movement intent** (PROJECT_PROFILE §7, §14): REWORK is removed everywhere; MODIFY intake creates/reuses an internal blank-number Work Order (`work_order_number = NULL`, displayed `—`); Repair is an explicit `TRANSFERRED · movement_reason REPAIR` chosen by the user (“Send quantity here for repair”), never inferred from route history and never new demand.
 4. **Floating Routes by default** (PROJECT_PROFILE §7, §17): every Quantity Flow carries `route_mode` (`FLOATING` default / `PLANNED`); AssignedRoute snapshots exist only for Planned flows; Tracking shows the route-mode badge and derives Floating actual traces from Movement history with repeated Areas and explicit `⟲ REPAIR` markers (§7.2).
 5. **Temporary Work Order Numbers removed** (§11; PROJECT_PROFILE §7): a blank WO Number saves `NULL`, renders `—` (never persisted as a placeholder), non-null numbers stay unique, and the real number can be added later through an audited edit.
@@ -773,7 +782,7 @@ All v7→v8 changes are implemented in the Phase 2 frontend against development-
 11. **Quantity keypad keyboard fix** (§4.8): a real focusable numeric input opens focused (`inputMode="numeric"`); keys are handled centrally (0–9, Backspace, Delete, Enter=Confirm, Escape=Cancel, Space ignored); keypad buttons are `type="button"`, non-focusable, and never re-activate on Space/Enter; MAX exists (and is the default) only for transfer/assignment.
 12. **Administrative archival/purge specified** (§9; PROJECT_PROFILE §28): PN archive (soft-delete) with `(archived)` markers and preserved historical text; Admin-only history archival & purge maintenance with preview, reason, and audit; archive preferred over purge; retention settings in Administration. Phase 2 carries these as specification placeholders only.
 
-## 14.10 Changes from GUI Design v6
+## 14.11 Changes from GUI Design v6
 
 All v6→v7 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v8.
 
@@ -785,7 +794,7 @@ All v6→v7 changes are implemented in the Phase 2 frontend against development-
 6. **Area Board per-Area detail redesigned** (§6.3): the "one card per PN" grid is replaced by an Area summary card (name, description, Operations, stats, grouped compact PN list — Assigned to Machines / Area queue / Stocked for terminal Stockroom) followed by one monitoring card per Machine (running / idle / maintenance with distinct empty and maintenance presentations, from the `MOCK_AREA_MACHINES` mock model); Areas without Machines render only the summary card; "Sort: Time in Area" works via the sortable `timeInAreaMinutes` duration field, longest first.
 7. **Priority reordering requires confirmation** (§8; PROJECT_PROFILE v8 §21): drag-and-drop, Move Up, Move Down, Undo and Redo confirm before applying — showing affected PN + Work Order Demand, previous rank, proposed new rank and action type; Cancel leaves the list and both histories unchanged and the visible list is never renumbered early; adding at the bottom stays direct; the existing remove confirmation is unchanged.
 
-## 14.11 Changes from GUI Design v5
+## 14.12 Changes from GUI Design v5
 
 All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabulary; Phase 2 implements them against development-only local mock state.
 
@@ -799,12 +808,12 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 8. **Realistic data shapes** (§2.3): mock datasets and the mockup use representative synthetic identifiers — multi-segment hyphenated numeric PNs, manufacturing-style descriptions, numeric-looking opaque Work Order Numbers (`007482`), numeric-looking external Job Numbers (`18427`), and optional Revision values (populated and blank) — instead of demo-style `PF-…` / `PO-…` / `ERP-…` identifiers; §2.3 documents the identifier/description shapes, search, and wrapping constraints.
 9. **Canonical vocabulary migration: Purchase Order → Work Order** (PROJECT_PROFILE v7 §7). The business container previously called Purchase Order is a Work Order on the actual shop floor. The view is renamed **Work Orders**, its route is `/management/work-orders` (no legacy `/management/purchase-orders` alias — the application is not deployed yet), UI labels use Work Order / WO, and code names use the full `WorkOrder` / `WorkOrderDemand` / `WorkOrderAllocation` forms. Work Order Number and external Job Number remain separate identifiers; Job Number keeps its informational display/search/sort/report role.
 
-## 14.12 Changes from GUI Design v4
+## 14.13 Changes from GUI Design v4
 
 1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§16). This removes "dark/light user toggle" from the deferred list (§15).
 2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
 
-## 14.13 Changes from GUI Design v3
+## 14.14 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -812,14 +821,14 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 14.14 Changes from GUI Design v2
+## 14.15 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 14.15 Changes from GUI Design v1
+## 14.16 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 

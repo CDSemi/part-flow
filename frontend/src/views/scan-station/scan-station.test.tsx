@@ -387,8 +387,11 @@ test('an Area without Machines renders a full-width card and no Machine region',
   const layout = document.querySelector('.am');
   expect(layout?.classList.contains('am-single')).toBe(true);
   expect(document.querySelector('.abd-machine')).toBeNull();
-  // Deburr's whole mock quantity is finished — READY_TO_TRANSFER.
+  // Both direct-processing groups render: actively processing quantity
+  // under `In processing`, finished (READY_TO_TRANSFER) quantity under
+  // `Finished — ready to move` — and never any queue wording.
   const summary = document.querySelector('.abd-summary');
+  expect(summary?.textContent).toContain('In processing');
   expect(summary?.textContent).toContain('Finished — ready to move');
   expect(summary?.textContent).not.toContain('awaiting Machine');
 });
@@ -575,7 +578,7 @@ test('PN rows use the grid layout: context+quantity right, status line, tooltip 
   expect(machineCard.textContent).not.toContain('Awaiting Machine');
 });
 
-test('In this Area now has no row actions; Machine-card rows offer DONE and QUEUE', async () => {
+test('Machine Area: In this Area now has no row actions; Machine-card rows offer DONE and QUEUE', async () => {
   await renderStation();
 
   const summary = document.querySelector('.abd-summary')! as HTMLElement;
@@ -618,6 +621,171 @@ test('In this Area now has no row actions; Machine-card rows offer DONE and QUEU
   expect(
     queueButtons[0].closest('li')?.querySelector('.rowmain'),
   ).not.toBeNull();
+});
+
+/* ============ Direct-processing Areas — row-level DONE ============ */
+
+test('direct-processing Area: actively processing rows carry DONE — and only those rows', async () => {
+  await renderStation('DEBURR-ST-01');
+
+  const summary = document.querySelector('.abd-summary')! as HTMLElement;
+  // Exactly the actively processing row carries the single DONE
+  // action, in the shared separated action rail with the shared
+  // presentation: success tone, icon above the label, accessible name.
+  const done = within(summary).getAllByRole('button', {
+    name: 'Complete Area processing',
+  });
+  expect(done.length).toBe(1);
+  expect(done[0]).toHaveTextContent('DONE');
+  expect(done[0].classList.contains('done')).toBe(true);
+  expect(done[0].querySelector('.ric')).not.toBeNull();
+  expect(done[0].closest('.actcell')).not.toBeNull();
+  const row = done[0].closest('li')!;
+  expect(row.classList.contains('has-action')).toBe(true);
+  expect(row.querySelector('.rowmain')?.textContent).toContain('81-1042');
+  expect(row.querySelector('.rowmain')?.textContent).toContain('In processing');
+  // No QUEUE anywhere — a direct-processing Area has no Machine queue
+  // to return quantity to.
+  expect(
+    within(summary).queryByRole('button', { name: 'Return to Area queue' }),
+  ).toBeNull();
+  // The finished (READY_TO_TRANSFER) row never carries the action.
+  const finishedRow = Array.from(summary.querySelectorAll('.mc-list li')).find(
+    (li) => li.textContent?.includes('Finished — ready to move'),
+  )! as HTMLElement;
+  expect(finishedRow.classList.contains('has-action')).toBe(false);
+  expect(within(finishedRow).queryByRole('button')).toBeNull();
+});
+
+test('row DONE opens the existing DONE wizard without a Machine field; partial DONE moves only the confirmed quantity', async () => {
+  await renderStation('DEBURR-ST-01');
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Complete Area processing' }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Complete processing — DONE',
+  });
+  // The existing manual DONE wizard: MAX defaults to the actively
+  // processing quantity of the selected row; the direct-processing
+  // guidance wording; no Machine field or wording anywhere.
+  expect(screen.getByLabelText('Quantity: 6')).toBeInTheDocument();
+  expect(dialog.textContent).toContain('In processing: 6 pcs');
+  expect(dialog.textContent).not.toContain('Machine');
+
+  // Partial DONE: finish only 2 of the 6 pcs.
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '2' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  // Dedicated confirmation view — the fixed rows WITHOUT a Machine row.
+  const labels = Array.from(
+    dialog.querySelectorAll('.ss-confirm dt'),
+    (el) => el.textContent,
+  );
+  expect(labels).toEqual([
+    'Action',
+    'PN',
+    'Quantity',
+    'Area',
+    'Result',
+    'Worker',
+    'Scan Station',
+    'Recorded event',
+  ]);
+  expect(dialog.textContent).toContain('Complete Area processing');
+  expect(dialog.textContent).toContain('Finished — ready to move');
+  expect(dialog.textContent).toContain('AREA_COMPLETED');
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+
+  // Only the confirmed 2 pcs moved to `Finished — ready to move`; the
+  // remaining 4 pcs keep processing and keep their DONE action. The
+  // current Area never changes — both portions stay in this card.
+  const summary = document.querySelector('.abd-summary')! as HTMLElement;
+  const rows = Array.from(summary.querySelectorAll('.mc-list li'));
+  const processing = rows.find(
+    (li) =>
+      li.textContent?.includes('81-1042') &&
+      li.textContent?.includes('In processing'),
+  )! as HTMLElement;
+  expect(processing.querySelector('.qtyline')?.textContent).toContain('4');
+  expect(
+    within(processing).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toBeInTheDocument();
+  const finished = rows.find(
+    (li) =>
+      li.textContent?.includes('81-1042') &&
+      li.textContent?.includes('Finished — ready to move'),
+  )! as HTMLElement;
+  expect(finished.querySelector('.qtyline')?.textContent).toContain('2');
+  expect(within(finished).queryByRole('button')).toBeNull();
+  // The other PN's portions are untouched.
+  expect(summary.textContent).toContain('78-04-0031');
+  // Header totals reconcile after the partial DONE: 4 processing,
+  // 3 + 2 finished.
+  const stats = new Map(
+    Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
+      el.querySelector('.l')?.textContent,
+      el.querySelector('.n')?.textContent,
+    ]),
+  );
+  expect(stats.get('Processing')).toBe('4');
+  expect(stats.get('Done')).toBe('5');
+
+  // Last Scanned PN and Undo follow the manual DONE behavior.
+  expect(lastPnText()).toBe('81-1042');
+  expect(document.querySelector('.ss-lastpn .d')?.textContent).toContain(
+    'AREA_COMPLETED',
+  );
+  expect(screen.getByRole('button', { name: '⟲ UNDO' })).toBeEnabled();
+});
+
+test('a fully completed row leaves In processing and shows no DONE anywhere', async () => {
+  await renderStation('DEBURR-ST-01');
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Complete Area processing' }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Complete processing — DONE',
+  });
+  // MAX (6) is the default — Enter advances, Enter confirms.
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+  const summary = document.querySelector('.abd-summary')! as HTMLElement;
+  expect(summary.textContent).not.toContain('In processing');
+  expect(
+    within(summary).queryByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toBeNull();
+  // The whole quantity waits on the finished rack.
+  const finished = Array.from(summary.querySelectorAll('.mc-list li')).find(
+    (li) =>
+      li.textContent?.includes('81-1042') &&
+      li.textContent?.includes('Finished — ready to move'),
+  )! as HTMLElement;
+  expect(finished.querySelector('.qtyline')?.textContent).toContain('6');
+});
+
+test('disconnected: the direct-processing DONE stays in the rail but is disabled and opens nothing', async () => {
+  failing = true;
+  window.history.replaceState({}, '', '/scan-station/DEBURR-ST-01');
+  render(<App />);
+  await screen.findByText('OFFLINE');
+
+  const done = await screen.findByRole('button', {
+    name: 'Complete Area processing',
+  });
+  // Disabled in place — the action rail keeps its layout, and no
+  // workflow that could record a false state can open.
+  expect(done).toBeDisabled();
+  expect(done.closest('.actcell')).not.toBeNull();
+  fireEvent.click(done);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 /* ============ No Machine Session — one-shot Machine scan ============ */
@@ -1143,10 +1311,11 @@ test('PN identity is case-insensitive and keeps the first-entered casing', async
   expect(screen.getByText(/abc-part × 1/)).toBeInTheDocument();
 
   // Scanning the same PN in a different casing resolves to the SAME
-  // PartNumber and shows the preserved original casing.
+  // PartNumber — the received quantity is now in the Area, so the PN
+  // action dialog opens — and shows the preserved original casing.
   scan('PF:PN:ABC-PART');
   const dialog2 = await screen.findByRole('dialog', {
-    name: 'Receive Quantity',
+    name: 'Choose the action for this PN',
   });
   expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
   expect(
@@ -2074,12 +2243,11 @@ test('header totals use semantic tones, include Done, and reconcile', async () =
   expect(stats.get('On machines')?.classList.contains('m')).toBe(true);
   expect(stats.get('Done')?.classList.contains('d')).toBe(true);
   expect(stats.get('Hot')?.classList.contains('h')).toBe(true);
-  // The two plain totals stay non-status but visually distinct:
-  // Total PNs keeps the primary neutral tone (no tone class), Total
-  // pcs carries the secondary neutral tone `s` — never a status tone.
+  // The two plain totals share ONE muted neutral (v16c): no tone class
+  // on either — never a status tone and no per-meaning color split.
   expect(stats.get('Total PNs')?.className.trim()).toBe('n');
-  expect(stats.get('Total pcs')?.classList.contains('s')).toBe(true);
-  for (const tone of ['q', 'm', 'd', 'h']) {
+  expect(stats.get('Total pcs')?.className.trim()).toBe('n');
+  for (const tone of ['s', 'q', 'm', 'd', 'h']) {
     expect(stats.get('Total pcs')?.classList.contains(tone)).toBe(false);
   }
   // Quantity reconciliation: Total pcs = Queued + On machines + Done.
@@ -2333,13 +2501,15 @@ test('partial completion-and-transfer preserves the remaining source quantity', 
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-  // The remaining 1 pc stays at the source in its existing state.
+  // The remaining 1 pc stays at the source in its existing state. The
+  // transferred quantity is now IN this Area, so the next scan opens
+  // the PN action dialog; its receive choice lists the sources.
   scan('PF:PN:78-04-0031');
-  const select = await screen.findByRole('dialog', {
-    name: 'Select the source',
+  const actions = await screen.findByRole('dialog', {
+    name: 'Choose the action for this PN',
   });
-  expect(select).toHaveTextContent('Mill — 1 pcs available');
-  expect(select).toHaveTextContent('Deburr — 3 pcs available');
+  expect(actions).toHaveTextContent('1 pcs at Mill');
+  expect(actions).toHaveTextContent('3 pcs at Deburr');
 });
 
 test('whole-command Undo reverses completion-plus-transfer together', async () => {
@@ -2469,7 +2639,8 @@ test('the shared DevNotice fills its parent width with one content flow', async 
     'utf8',
   );
   const notice = /\.dev-notice \{[^}]*}/s.exec(css)![0];
-  expect(notice).not.toContain('max-width');
+  // No max-width DECLARATION caps the notice (comments may mention it).
+  expect(notice).not.toMatch(/max-width\s*:/);
   expect(notice).toContain('width: 100%');
   expect(notice).toContain('box-sizing: border-box');
   expect(notice).toContain('min-width: 0');

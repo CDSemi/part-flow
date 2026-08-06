@@ -137,6 +137,22 @@ export const MOCK_AREA_CARDS: MockAreaCard[] = [
     received: '2026-07-14',
   },
   {
+    // Actively processing quantity in an Area WITHOUT Machines (direct
+    // processing): at the Scan Station exactly this row carries the
+    // DONE action — the direct-processing exception to the no-row-
+    // actions rule (GUI_DESIGN §4.10); partial DONE moves only the
+    // confirmed portion to the finished rack.
+    area: 'deburr',
+    pn: '81-1042',
+    workOrder: 'WO 007021 · Deburring',
+    job: '18615',
+    qty: 6,
+    machines: [],
+    due: isoDateIn(7),
+    enteredAreaAt: minutesAgoIso(140),
+    received: '2026-07-22',
+  },
+  {
     area: 'external',
     pn: '142-260',
     workOrder: 'WO 007005 · Plating',

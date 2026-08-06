@@ -192,13 +192,22 @@ test('a no-Machine Area renders the full-width single-column layout', () => {
   const layout = document.querySelector('.am');
   expect(layout?.classList.contains('am-single')).toBe(true);
   expect(document.querySelector('.abd-machine')).toBeNull();
-  // Deburr's whole quantity is finished (READY_TO_TRANSFER): only the
-  // finished group renders — no queue wording for a no-Machine Area,
-  // and the finished state is never presented as Stocked.
+  // Direct processing renders its two groups — actively processing
+  // quantity under `In processing`, finished (READY_TO_TRANSFER)
+  // quantity under `Finished — ready to move` — with no queue wording
+  // for a no-Machine Area, and never presented as Stocked.
   const summary = document.querySelector('.abd-summary');
+  expect(summary?.textContent).toContain('In processing');
   expect(summary?.textContent).toContain('Finished — ready to move');
   expect(summary?.textContent).not.toContain('awaiting Machine');
   expect(summary?.textContent).not.toContain('Stocked');
+  // The Area Board stays completely read-only: the Scan Station's
+  // direct-processing DONE row action never renders here — no action
+  // rail cells at all.
+  expect(
+    screen.queryByRole('button', { name: 'Complete Area processing' }),
+  ).toBeNull();
+  expect(document.querySelector('.mc-list .actcell')).toBeNull();
 });
 
 test('scrap quantities appear in the PN summaries as text only', () => {
