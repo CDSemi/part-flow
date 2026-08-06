@@ -2221,6 +2221,48 @@ test('the header groups Area identity with the Worker Session and renders Operat
   }
 });
 
+test('the Area totals drop to the second row only when the measured row cannot fit', async () => {
+  await renderStation();
+  const head = document.querySelector('.ss-head') as HTMLElement;
+
+  // jsdom performs no layout: install explicit widths — the header's
+  // available width against the three cells' natural single-row
+  // widths — and let the resize listener re-run the fit measurement.
+  const setWidths = (available: number, cells: number[]) => {
+    Object.defineProperty(head, 'clientWidth', {
+      value: available,
+      configurable: true,
+    });
+    Array.from(head.children).forEach((cell, i) => {
+      (cell as HTMLElement).getBoundingClientRect = () =>
+        ({ width: cells[i] }) as DOMRect;
+    });
+  };
+
+  // Zero-layout default (mount): the totals stay on the main row.
+  expect(head.classList.contains('wrapped')).toBe(false);
+
+  // Plenty of space: identity, totals, and Worker Session share the
+  // main row — no premature wrap at any hard-coded width.
+  setWidths(1000, [300, 400, 200]);
+  fireEvent(window, new Event('resize'));
+  expect(head.classList.contains('wrapped')).toBe(false);
+
+  // The same content in a genuinely insufficient header: the totals
+  // move to the full-width second row.
+  setWidths(880, [300, 400, 200]);
+  fireEvent(window, new Event('resize'));
+  expect(head.classList.contains('wrapped')).toBe(true);
+
+  // Space returns: the totals rejoin the main row (no sticky state).
+  setWidths(1200, [300, 400, 200]);
+  fireEvent(window, new Event('resize'));
+  expect(head.classList.contains('wrapped')).toBe(false);
+
+  // The probe class never leaks out of the synchronous measurement.
+  expect(head.classList.contains('measuring')).toBe(false);
+});
+
 test('header totals use semantic tones, include Done, and reconcile', async () => {
   await renderStation();
 
@@ -2627,6 +2669,39 @@ test('Undo is a shared full-height action zone beside its separator; the shared 
   const routechip = /\.routechip \{[^}]*}/s.exec(globalCss)![0];
   expect(routechip).toContain('display: inline-flex');
   expect(routechip).toContain('font-size: 11px');
+});
+
+test('the header wrap is measurement-driven and the Worker pill is content-sized', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+
+  // No hard-coded header breakpoint: the wrapped state is a class set
+  // by the fit measurement in ScanStationView, never a fixed-width
+  // container or media query.
+  expect(css).not.toContain('1179px');
+  expect(css).not.toContain('1220px');
+  const wrapped = /\.ss-head\.wrapped \.ss-stats \{[^}]*}/s.exec(css)![0];
+  expect(wrapped).toContain('grid-column: 1 / -1');
+  expect(wrapped).toContain('grid-row: 2');
+  // The probe state restores single-row placement for the measurement
+  // pass (declared after the wrapped rules so it wins while both
+  // classes apply).
+  expect(css).toMatch(/\.ss-head\.measuring \{[^}]*max-content/s);
+  const probe = /\.ss-head\.measuring \.ss-stats \{[^}]*}/s.exec(css)![0];
+  expect(probe).toContain('grid-column: auto');
+  expect(css.indexOf('.ss-head.measuring')).toBeGreaterThan(
+    css.indexOf('.ss-head.wrapped'),
+  );
+
+  // Content-sized Worker Session pill: no fixed or minimum width, and
+  // nowrap keeps its label / name / session-window lines intact.
+  const pill = /\.ss-pill \{[^}]*}/s.exec(css)![0];
+  expect(pill).not.toMatch(/min-width\s*:/);
+  expect(pill).not.toMatch(/(^|[^-])width\s*:/m);
+  expect(pill).toContain('white-space: nowrap');
 });
 
 test('the shared DevNotice fills its parent width with one content flow', async () => {

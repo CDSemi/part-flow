@@ -4,6 +4,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -355,6 +356,66 @@ function StationView({
     [allCards, preview, station.area],
   );
   const { assigned } = splitAssignments(areaCards);
+
+  // Header fit measurement (§4.3): the Area totals drop to their
+  // full-width second row only when the single-row layout genuinely
+  // cannot hold the three header cells — never at a hard-coded
+  // breakpoint. The probe pass applies the `measuring` class (natural
+  // single-row column widths: identity at its minimum with the Area
+  // name on one line, totals and Worker Session at content width),
+  // reads the widths, and reverts — all synchronously before paint,
+  // so the probe layout is never visible.
+  const headRef = useRef<HTMLElement>(null);
+  const [headWrapped, setHeadWrapped] = useState(false);
+  const measureHead = useCallback(() => {
+    const head = headRef.current;
+    if (!head) return;
+    head.classList.add('measuring');
+    const styles = getComputedStyle(head);
+    const available =
+      head.clientWidth -
+      (Number.parseFloat(styles.paddingLeft) || 0) -
+      (Number.parseFloat(styles.paddingRight) || 0);
+    const gap = Number.parseFloat(styles.columnGap) || 0;
+    const cells = Array.from(head.children) as HTMLElement[];
+    const required =
+      cells.reduce((sum, cell) => sum + cell.getBoundingClientRect().width, 0) +
+      gap * Math.max(0, cells.length - 1);
+    head.classList.remove('measuring');
+    // Half-pixel tolerance so subpixel rounding never flips the state.
+    setHeadWrapped(required > available + 0.5);
+  }, []);
+
+  // Re-measure after every commit that can change a header cell's
+  // natural width: Area identity, totals values, Worker session, and
+  // the production-mode actions (the connectivity chip text follows
+  // the connection status). The measurement is deterministic per
+  // container width, so repeated runs are stable.
+  useLayoutEffect(() => {
+    measureHead();
+  }, [
+    measureHead,
+    area,
+    areaCards,
+    hasMachines,
+    worker,
+    workerSince,
+    productionMode,
+    status,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener('resize', measureHead);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => measureHead());
+      if (headRef.current) observer.observe(headRef.current);
+    }
+    return () => {
+      window.removeEventListener('resize', measureHead);
+      observer?.disconnect();
+    };
+  }, [measureHead]);
 
   const eligible = history.find((h) => !h.reversed);
   const lastPn = eligible?.action ?? null;
@@ -831,11 +892,15 @@ function StationView({
       {/* Header grid: the left Area identity group and the Worker
           Session always share the main row; the Area totals sit
           between them while space allows and drop to a full-width
-          second row (equal cells) when it does not (container query in
-          scan-station.css). The header is the single summary surface
-          for the Area totals — the `In this Area now` card carries no
-          statistics block. */}
-      <header className="ss-head">
+          second row (equal cells) only when the measured single-row
+          layout genuinely cannot fit (`wrapped` class from the fit
+          measurement above — no hard-coded breakpoint). The header is
+          the single summary surface for the Area totals — the `In
+          this Area now` card carries no statistics block. */}
+      <header
+        ref={headRef}
+        className={headWrapped ? 'ss-head wrapped' : 'ss-head'}
+      >
         <div className="ss-id">
           <div className="dept">{station.department}</div>
           <div className="area">

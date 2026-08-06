@@ -7,7 +7,7 @@ If any repository instruction conflicts with this file, this file takes preceden
 
 ### Communication
 
-- Communicate with the user in Vietnamese unless the user explicitly requests another language.
+- Communicate with the user in Vietnamese (xưng "mình" với "bạn") unless the user explicitly requests another language.
 - Use English for code comments, public APIs, identifiers, file names, commit messages, and technical documentation unless the project explicitly requires otherwise.
 - Be direct, practical, and architecture-aware. Account for PartFlow domain constraints and the shop-floor operating environment.
 - Never over-explain obvious details.

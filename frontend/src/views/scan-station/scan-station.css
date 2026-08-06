@@ -12,8 +12,8 @@
 
 /* Dark mode adds a subtle radial glow; light mode is a flat surface
    (the theme supplies the value — GUI_DESIGN §2.1). The view root is
-   the inline-size container for the header and monitoring layout
-   container queries. */
+   the inline-size container for the monitoring layout and scan-row
+   container queries (the header wraps by measurement instead). */
 .ss {
   background: var(--scan-backdrop);
   container-type: inline-size;
@@ -153,37 +153,46 @@
 /* When the header row cannot hold the identity group, the totals and
    the Worker Session together, the totals move to a full-width second
    row and its cells divide that width evenly. The identity group and
-   the Worker Session stay together on the main row. */
-@container (max-width: 1179px) {
-  .ss-head {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .ss-head .ss-stats {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 1fr;
-  }
+   the Worker Session stay together on the main row. The `wrapped`
+   class is driven by a real fit measurement in ScanStationView (no
+   hard-coded breakpoint — the drop point follows the actual content
+   widths of the three header cells). */
+.ss-head.wrapped {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
-@supports not (container-type: inline-size) {
-  @media (max-width: 1220px) {
-    .ss-head {
-      grid-template-columns: minmax(0, 1fr) auto;
-    }
-
-    .ss-head .ss-stats {
-      grid-column: 1 / -1;
-      grid-row: 2;
-      display: grid;
-      grid-auto-flow: column;
-      grid-auto-columns: 1fr;
-    }
-  }
+.ss-head.wrapped .ss-stats {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
 }
 
+/* Fit probe — applied by the measurement pass only, synchronously
+   before paint (never visible). One row on natural column widths: the
+   identity column at its minimum (the Area name stays on one line;
+   Operations chips may wrap, §4.3), totals and Worker Session at
+   their natural content widths. The totals drop to the second row
+   exactly when this probe row overflows the header. Declared after
+   the `wrapped` rules so the probe wins while both classes apply. */
+.ss-head.measuring {
+  grid-template-columns: min-content max-content max-content;
+}
+
+.ss-head.measuring .ss-stats {
+  grid-column: auto;
+  grid-row: auto;
+  display: flex;
+}
+
+.ss-head.measuring .area {
+  white-space: nowrap;
+}
+
+/* Content-sized pill: no fixed or minimum width — the grid column /
+   head-group row is auto-sized, and nowrap keeps the label, Worker
+   name, and session-window lines from wrapping inside the pill. */
 .ss-pill {
   display: flex;
   flex-direction: column;
@@ -192,7 +201,7 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 9px 14px;
-  min-width: 150px;
+  white-space: nowrap;
 }
 
 .ss-pill .lbl {
