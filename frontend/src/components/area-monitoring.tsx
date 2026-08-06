@@ -416,8 +416,13 @@ export function MachineMonitoringCard({
           </span>
         </span>
       </div>
+      {/* Semantic totals classes — the same shared tones as the Scan
+          Station header statistics: pcs = secondary neutral (`Total
+          pcs`), PN count = primary neutral (`Total PNs`). Never
+          selected by position. */}
       <div className="mtotals">
-        <b>{totalQty}</b> pcs assigned · <b>{entries.length}</b> PN
+        <b className="machine-total-pcs">{totalQty}</b> pcs assigned ·{' '}
+        <b className="machine-total-pns">{entries.length}</b> PN
         {entries.length === 1 ? '' : 's'}
       </div>
       {entries.length ? (

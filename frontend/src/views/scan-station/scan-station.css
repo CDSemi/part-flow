@@ -309,27 +309,35 @@
   line-height: 1.5;
 }
 
-/* Last scanned PN — carries the Undo action at its right edge (§4.4).
-   Only completed PN operations land here; Worker scans and cancelled
-   dialogs never replace it. */
-.ss-lastpn {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 14px 0 16px;
-  padding: 10px 16px;
-  border-radius: 12px;
-  background: var(--panel2);
-  border: 1px solid var(--border);
-}
-
-.ss-lastpn .l {
+/* Last scanned PN — the compact section label sits OUTSIDE the block
+   (§4.5): left-aligned, uppercase via CSS, never inside the bordered
+   surface. Only completed PN operations land here; Worker scans and
+   cancelled dialogs never replace it. */
+.ss-lastpnlabel {
+  margin: 12px 0 6px;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 1.2px;
   text-transform: uppercase;
   color: var(--faint);
-  flex: none;
+  text-align: left;
+}
+
+/* One compact row on explicit tracks: PN (no arbitrary wrapping), the
+   movement summary beside it, then a standalone separator and the
+   borderless Undo text action (both content-sized). The parent
+   .ss-scanwrap bottom padding is the ONLY outer spacing below — the
+   block itself keeps no bottom margin (no double spacing). */
+.ss-lastpn {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 7px 16px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
 }
 
 .ss-lastpn .p {
@@ -342,18 +350,26 @@
 .ss-lastpn .d {
   font-size: 12.5px;
   color: var(--muted);
-  flex: 1;
   min-width: 0;
 }
 
+/* Standalone separator — its own aria-hidden element, never a button
+   border. */
+.ss-undosep {
+  width: 1px;
+  height: 18px;
+  background: var(--border2);
+  justify-self: end;
+}
+
+/* Quiet text action: no border, no button surface; the disabled state
+   dims only the action, never the whole block. */
 .ss-undo {
-  margin-left: auto;
-  flex: none;
-  min-height: 44px;
-  padding: 0 18px;
-  border-radius: 10px;
-  border: 1px solid var(--error-border);
-  background: var(--error-surface-weak);
+  border: none;
+  background: none;
+  border-radius: 8px;
+  padding: 4px 6px;
+  min-height: 0;
   color: var(--err-t);
   font-size: 14px;
   font-weight: 800;
@@ -365,7 +381,21 @@
 }
 
 .ss-undo:disabled {
-  opacity: 0.3;
+  opacity: 0.4;
+}
+
+/* Narrow: the PN keeps the first row (Undo stays at its right edge);
+   the movement summary moves to its own full-width second row and may
+   wrap there — never horizontal overflow. */
+@container (max-width: 700px) {
+  .ss-lastpn {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .ss-lastpn .d {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
 }
 
 /* Persistent inline error surface — used by the Station Selector /
@@ -916,6 +946,19 @@
 /* In-dialog scan errors (Assign to Machine selection, Scrap counting)
    share the Guidance error presentation (.ss-guide.error) — no
    separate scan-note style. */
+
+/* Equal-height chip row inside dialog step recaps (Receive Quantity /
+   Transfer): the shared Request Type and Route Mode chips align to one
+   visual height without touching their semantic colors — and without
+   changing the compact RouteModeChip inside Tracking's flow header. */
+.ss-recap .typechip,
+.ss-recap .routechip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  line-height: 1;
+  vertical-align: middle;
+}
 
 /* Structured confirmation summary — the dedicated final wizard view
    (also the Undo confirmation): a two-column definition list, never a

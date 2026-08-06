@@ -1,4 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from './App';
@@ -65,13 +68,19 @@ test('shows OFFLINE with the persistent banner when the health request fails', a
 
   expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
   const banner = screen.getByRole('alert');
-  expect(banner).toHaveTextContent(
-    'OFFLINE — Connection to the PartFlow server has been lost',
+  // The one compact statement — exact copy, no extra explanatory
+  // sentences about scan queues, read-only data or recovery.
+  expect(banner.querySelector('.msg')?.textContent?.trim()).toBe(
+    '⚠ OFFLINE — Connection to the PartFlow server has been lost. Production actions are disabled',
   );
-  expect(banner).toHaveTextContent('scans will not be recorded or queued');
-  expect(banner).toHaveTextContent(
-    'Previously loaded read-only information remains available.',
-  );
+  expect(banner.textContent).not.toContain('scans will not be recorded');
+  expect(banner.textContent).not.toContain('read-only information');
+  expect(banner.textContent).not.toContain('until the connection is restored');
+  // Message | action: the separator is its OWN aria-hidden element
+  // (never a button border) and Retry stays a real focusable button.
+  const sep = banner.querySelector('.sep')!;
+  expect(sep.getAttribute('aria-hidden')).toBe('true');
+  expect(sep.tagName).not.toBe('BUTTON');
   expect(
     screen.getByRole('button', { name: 'Retry connection' }),
   ).toBeInTheDocument();
@@ -140,4 +149,24 @@ test('retry re-runs the health check and recovers to ONLINE', async () => {
   expect(await screen.findByText('ONLINE')).toBeInTheDocument();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(await screen.findByLabelText('Scan barcode')).toBeEnabled();
+});
+
+/* ============ Offline banner presentation contract ============ */
+
+test('the Retry action is a quiet text action — no button chrome', () => {
+  // Presentation contract on the stylesheet itself (jsdom applies no
+  // CSS): the retry action carries no border and no button surface,
+  // keeps a visible keyboard focus state, and the banner is a compact
+  // wrapping row that cannot overflow horizontally.
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'app', 'shell.css'),
+    'utf8',
+  );
+  const retry = /\.offbanner \.retry \{[^}]*}/s.exec(css)![0];
+  expect(retry).toContain('border: none');
+  expect(retry).toContain('background: none');
+  expect(retry).not.toContain('min-height: 40px');
+  expect(css).toMatch(/\.offbanner \.retry:focus-visible \{[^}]*outline/s);
+  const banner = /\.offbanner \{[^}]*}/s.exec(css)![0];
+  expect(banner).toContain('flex-wrap: wrap');
 });

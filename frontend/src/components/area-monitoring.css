@@ -144,7 +144,17 @@
   border-bottom: 1px solid var(--border);
 }
 
-.am .abd-machine .mtotals b {
+/* Totals values carry the SAME shared tones as the header statistics
+   (scan-station header / Area summary stats): the assigned-pcs value
+   uses the secondary neutral tone of `Total pcs` (.n.s), the PN count
+   the primary neutral tone of `Total PNs` (.n) — semantic classes,
+   never positional selectors. */
+.am .abd-machine .mtotals .machine-total-pcs {
+  font-family: var(--mono), monospace;
+  color: var(--muted);
+}
+
+.am .abd-machine .mtotals .machine-total-pns {
   font-family: var(--mono), monospace;
   color: var(--text);
 }

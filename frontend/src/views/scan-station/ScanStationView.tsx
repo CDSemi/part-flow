@@ -897,6 +897,16 @@ function StationView({
                 ⌨ Enter PN manually
               </button>
             </div>
+            {/* Fixed content order — DOM order = visual = keyboard =
+                screen-reader order (never reordered by CSS): scan row,
+                the manual-entry fallback explanation directly beneath
+                it, the development demo barcodes, then Last scanned
+                PN / Undo. */}
+            <div className="ss-manualcap">
+              Manual PN entry is the fallback when the scanner is unavailable —
+              any non-empty PN value is validated exactly like a scan; raw PN
+              text is never treated as barcode input.
+            </div>
             {/* Development-only demo barcodes: the shared DevNotice
                 renders only in the dev build (the whole mock view is
                 also excluded from production bundles — see
@@ -910,19 +920,19 @@ function StationView({
               <code>PF:MACHINE:L2</code> assign to Machine ·{' '}
               <code>PF:WORKER:88</code> worker
             </DevNotice>
-            <div className="ss-manualcap">
-              Manual PN entry is the fallback when the scanner is unavailable —
-              any non-empty PN value is validated exactly like a scan; raw PN
-              text is never treated as barcode input.
-            </div>
+            {/* Compact section label OUTSIDE the block (uppercase via
+                CSS), then one quiet row: PN + movement summary, a
+                standalone separator, and the borderless Undo text
+                action. */}
+            <div className="ss-lastpnlabel">Last scanned PN</div>
             <div className="ss-lastpn">
-              <span className="l">Last scanned PN</span>
               <span className="p">{lastPn?.pn ?? '—'}</span>
               <span className="d">
                 {lastPn
                   ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
                   : 'no completed PN operations yet'}
               </span>
+              <span className="ss-undosep" aria-hidden="true" />
               <button
                 className="ss-undo"
                 disabled={writeBlocked || !eligible}
@@ -1329,6 +1339,46 @@ function Guidance({
       </span>
       <span className="gtext">{children}</span>
     </div>
+  );
+}
+
+/**
+ * Split a mock Work Order context label (`WO 007003 · Turning`,
+ * `WO — · Turning · MODIFY`) into the WO Number value and its trailing
+ * context segments — the ONE place this display string is taken apart,
+ * so recaps can emphasize the number and chip the Operation instead of
+ * echoing the raw string.
+ */
+function parseWorkOrderLabel(label: string): {
+  number: string;
+  segments: string[];
+} {
+  const [head, ...segments] = label.split(' · ');
+  return { number: head.replace(/^WO\s*/, '') || '—', segments };
+}
+
+/**
+ * Work Order context line for recaps: `WO` stays a plain label, the
+ * WO Number value carries the shared `.rval` emphasis (`—` for an
+ * internal blank number), the Operation renders as the shared entity
+ * chip, and a NEW/MODIFY segment stays the shared Request Type chip.
+ */
+function WorkOrderRecapLine({ workOrder }: { workOrder: string }) {
+  const { number, segments } = parseWorkOrderLabel(workOrder);
+  return (
+    <>
+      WO <b className="rval">{number}</b>
+      {segments.map((segment, index) => (
+        <Fragment key={`${segment}-${index}`}>
+          {' · '}
+          {segment === 'NEW' || segment === 'MODIFY' ? (
+            <TypeChip type={segment} />
+          ) : (
+            <EntityChip>{segment}</EntityChip>
+          )}
+        </Fragment>
+      ))}
+    </>
   );
 }
 
@@ -2208,7 +2258,7 @@ function TransferDialog({
                 </AreaChip>{' '}
                 → <AreaChip areaKey={station.area}>{destinationNote}</AreaChip>
               </>,
-              <>{source.card.workOrder}</>,
+              <WorkOrderRecapLine workOrder={source.card.workOrder} />,
             ]}
           />
           <Guidance tone="info">
@@ -2438,17 +2488,9 @@ function IntakeDialog({
               </>
             )}
           </div>
-          <StepRecap
-            lines={[
-              <>
-                MODIFY and FLOATING are selected by default and can be changed.
-              </>,
-              <>
-                The received date is recorded from this scan; the due date is
-                optional. Enter the received quantity in the next step.
-              </>,
-            ]}
-          />
+          {/* No default-selection recap here: the defaults and dates
+              are visible directly in the fields below — the header
+              stays the PN message plus one guidance line. */}
           <Guidance>
             No changes are recorded until you review and confirm the final step.
           </Guidance>
@@ -2485,7 +2527,9 @@ function IntakeDialog({
                 </select>
               </>
             ) : null}
-            <label htmlFor="in-due">Due date (optional)</label>
+            <label htmlFor="in-due">
+              Due date <span className="field-optional">(optional)</span>
+            </label>
             <input
               id="in-due"
               type="date"
@@ -2536,14 +2580,16 @@ function IntakeDialog({
           <StepRecap
             lines={[
               <>
-                <TypeChip type={requestType} />{' '}
+                <TypeChip type={requestType} />
+                {' · '}
                 <RouteModeChip
                   mode={routeMode}
                   detail={
                     routeMode === 'PLANNED' ? plannedRoute : 'actual trace'
                   }
-                />{' '}
-                · <EntityChip>{operation}</EntityChip>
+                />
+                {' · '}
+                <EntityChip>{operation}</EntityChip>
               </>,
               <>
                 WO <b className="rval">—</b> · Due:{' '}

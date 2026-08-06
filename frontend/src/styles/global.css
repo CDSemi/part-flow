@@ -360,7 +360,19 @@ textarea {
   color: var(--faint);
   font-size: 12px;
   line-height: 1.5;
-  max-width: 900px;
+  /* Fills the parent block's available width (no max-width cap) and
+     shrinks correctly inside flex/grid parents. */
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+/* The complete notice copy is ONE inline text flow: it wraps only at
+   natural word boundaries when the content exceeds the notice width —
+   never distributed as separate flex/grid items. */
+.dev-notice .dev-notice-content {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .dev-notice .dev-notice-tag {
@@ -375,7 +387,9 @@ textarea {
 }
 
 /* Inline code values inside a DEV notice (e.g. the Scan Station demo
-   barcodes) — the same quiet chip language on every surface. */
+   barcodes) — the same quiet chip language on every surface. A single
+   barcode never breaks mid-value; the sentence around it still wraps
+   at spaces and separators. */
 .dev-notice code {
   color: var(--muted);
   font-family: var(--mono), monospace;
@@ -383,6 +397,14 @@ textarea {
   background: var(--panel2);
   border-radius: 5px;
   padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* Shared quiet marker for an optional form field inside its label,
+   e.g. `Due date (optional)` — reusable by any form. */
+.field-optional {
+  color: var(--faint);
+  font-weight: 450;
 }
 
 /* ============ Action toast ============ */

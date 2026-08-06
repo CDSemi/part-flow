@@ -414,15 +414,40 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(document.querySelector('.ss-manualcap')).not.toBeNull();
 
   // The demo-barcodes hint is the shared dev-only notice (v16) — the
-  // old .ss-hint block is gone, the barcode values stay code chips.
+  // old .ss-hint block is gone, the barcode values stay code chips,
+  // and the complete copy lives inside ONE .dev-notice-content flow.
   expect(document.querySelector('.ss-hint')).toBeNull();
   const hint = document.querySelector('.dev-notice');
   expect(hint?.textContent).toContain('Demo barcodes (development build only)');
   expect(hint?.querySelectorAll('code').length).toBe(6);
+  const content = hint?.querySelector('.dev-notice-content');
+  expect(content?.textContent).toContain('Demo barcodes');
+  expect(content?.querySelectorAll('code').length).toBe(6);
+
+  // Fixed DOM order (visual = keyboard = screen reader — no CSS
+  // reordering): scan row, manual fallback explanation, DEV notice,
+  // then the Last scanned PN section with its label OUTSIDE the block.
+  const manualCap = document.querySelector('.ss-manualcap')!;
+  const scanRow = document.querySelector('.ss-scanrow')!;
+  const label = document.querySelector('.ss-lastpnlabel')!;
+  const lastPn = document.querySelector('.ss-lastpn')!;
+  const follows = (a: Element, b: Element) =>
+    Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(follows(scanRow, manualCap)).toBe(true);
+  expect(follows(manualCap, hint!)).toBe(true);
+  expect(follows(hint!, label)).toBe(true);
+  expect(follows(label, lastPn)).toBe(true);
+  expect(label.textContent).toBe('Last scanned PN');
+  expect(lastPn.contains(label)).toBe(false);
+  expect(lastPn.textContent).not.toContain('Last scanned PN');
+
+  // Undo is a quiet text action beside its own standalone separator.
+  const sep = lastPn.querySelector('.ss-undosep')!;
+  expect(sep.getAttribute('aria-hidden')).toBe('true');
+  expect(lastPn.querySelector('button.ss-undo')).not.toBeNull();
 
   // No permanently reserved feedback block below Last scanned PN.
   expect(document.querySelector('.ss .ss-feedback')).toBeNull();
-  expect(document.querySelector('.ss-lastpn')).not.toBeNull();
 });
 
 test('scan feedback floats as a single closable notification', async () => {
@@ -854,6 +879,14 @@ test('a PN elsewhere with one source goes to quantity, then a confirmation view'
     name: 'Transfer into this Area',
   });
   expect(dialog).toHaveTextContent('Transfer Manual → Lathe');
+  // The Work Order context is no longer one raw string: `WO` stays a
+  // plain label, the WO Number carries the shared .rval emphasis, and
+  // the Operation renders as the shared entity chip.
+  const woLine = Array.from(dialog.querySelectorAll('.ss-recapline')).find(
+    (el) => el.textContent?.startsWith('WO '),
+  )!;
+  expect(woLine.querySelector('.rval')?.textContent).toBe('007011');
+  expect(woLine.querySelector('.dlgchip')?.textContent).toBe('Manual work');
   // Guidance sits with the input; MAX defaults to the source quantity.
   expect(dialog).toHaveTextContent('Available at Manual: 4 pcs');
   expect(screen.getByLabelText('Quantity: 4')).toBeInTheDocument();
@@ -948,6 +981,18 @@ test('an unknown PN opens the three-step receive wizard with editable defaults',
   expect(recap.querySelector('.routechip')?.textContent).toBe(
     'FLOATING — actual trace',
   );
+  // Fixed recap order with standalone `·` separators BETWEEN the
+  // chips (never inside chip content): TypeChip · RouteModeChip ·
+  // Operation chip.
+  const line1 = recap.querySelector('.ss-recapline')!;
+  expect(line1.textContent).toMatch(
+    /^MODIFY · FLOATING — actual trace · Lathe/,
+  );
+  const chipOrder = Array.from(
+    line1.querySelectorAll('.typechip, .routechip, .dlgchip'),
+    (el) => el.className.split(' ')[0],
+  );
+  expect(chipOrder).toEqual(['typechip', 'routechip', 'dlgchip']);
   expect(recap.textContent).toContain('WO —');
   expect(recap.textContent).toContain('Due: —');
   // Value emphasis is text-only: the WO Number and due values render
@@ -999,17 +1044,27 @@ test('the receive settings step separates PN identity, defaults recap, and confi
     name: 'Receive Quantity',
   });
 
-  // v16: the description carries PN identity only; the editable
-  // defaults and date handling form a separate general recap block.
+  // The description carries PN identity only; the former
+  // default-selection recap sentences are gone — the defaults are
+  // visible directly in the fields, so the settings page has NO
+  // recap block at all.
   expect(dialog.querySelector('.sub')?.textContent).toContain(
     'New PN — not registered yet. Verify the Part Number carefully.',
   );
-  const recap = dialog.querySelector('.ss-recap')!;
-  expect(recap.textContent).toContain(
-    'MODIFY and FLOATING are selected by default and can be changed.',
+  expect(dialog.querySelector('.ss-recap')).toBeNull();
+  expect(dialog.textContent).not.toContain(
+    'MODIFY and FLOATING are selected by default',
   );
-  expect(recap.textContent).toContain(
-    'The received date is recorded from this scan; the due date is optional. Enter the received quantity in the next step.',
+  expect(dialog.textContent).not.toContain(
+    'The received date is recorded from this scan',
+  );
+  // The optional due date is marked inside its label with the shared
+  // quiet optional element.
+  const dueLabel = Array.from(dialog.querySelectorAll('label')).find((l) =>
+    l.textContent?.startsWith('Due date'),
+  )!;
+  expect(dueLabel.querySelector('.field-optional')?.textContent).toBe(
+    '(optional)',
   );
 
   // ℹ info guidance: nothing is recorded before the final step.
@@ -2325,4 +2380,53 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
     within(manual as HTMLElement).getByRole('button', { name: 'Look up PN' }),
   ).toHaveClass('primary');
   fireEvent.keyDown(manual, { key: 'Escape' });
+});
+
+/* ============ Presentation contracts (stylesheet) ============ */
+
+test('Undo is borderless with a standalone separator; the shared chips align in dialog recaps', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+
+  // Quiet Undo text action — no border, no button surface, no forced
+  // height; the disabled state dims only the action itself.
+  const undo = /\.ss-undo \{[^}]*}/s.exec(css)![0];
+  expect(undo).toContain('border: none');
+  expect(undo).toContain('background: none');
+  expect(undo).not.toContain('min-height: 44px');
+  expect(css).toMatch(/\.ss-undo:disabled \{[^}]*opacity/s);
+  // The label lives OUTSIDE the block; the block keeps no bottom
+  // margin (the parent padding is the only outer spacing below).
+  const block = /\.ss-lastpn \{[^}]*}/s.exec(css)![0];
+  expect(block).toContain('margin: 0');
+  // Equal-height contract for the shared chips inside dialog recaps —
+  // scoped to .ss-recap so Tracking's compact chip stays untouched.
+  const chips =
+    /\.ss-recap \.typechip,\s*\.ss-recap \.routechip \{[^}]*}/s.exec(css)![0];
+  expect(chips).toContain('display: inline-flex');
+  expect(chips).toContain('min-height');
+});
+
+test('the shared DevNotice fills its parent width with one content flow', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(
+    join(here, '..', '..', 'styles', 'global.css'),
+    'utf8',
+  );
+  const notice = /\.dev-notice \{[^}]*}/s.exec(css)![0];
+  expect(notice).not.toContain('max-width');
+  expect(notice).toContain('width: 100%');
+  expect(notice).toContain('box-sizing: border-box');
+  expect(notice).toContain('min-width: 0');
+  // One inline content flow; only the individual barcode values are
+  // kept unbreakable.
+  expect(css).toMatch(/\.dev-notice \.dev-notice-content \{[^}]*min-width: 0/s);
+  const code = /\.dev-notice code \{[^}]*}/s.exec(css)![0];
+  expect(code).toContain('white-space: nowrap');
 });

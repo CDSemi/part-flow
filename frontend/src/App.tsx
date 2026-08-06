@@ -58,14 +58,17 @@ const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
 function OfflineBanner() {
   const { status, retry } = useConnectivity();
   if (status !== 'unavailable') return null;
+  // One compact line: the exact offline statement, a standalone
+  // separator, and a quiet text action — no button chrome, no extra
+  // explanatory sentences (the write-blocked behavior itself is the
+  // explanation on every surface).
   return (
     <div className="offbanner" role="alert">
-      <span>
+      <span className="msg">
         ⚠ OFFLINE — Connection to the PartFlow server has been lost. Production
-        actions are disabled, and scans will not be recorded or queued until the
-        connection is restored. Previously loaded read-only information remains
-        available.
+        actions are disabled
       </span>
+      <span className="sep" aria-hidden="true" />
       <button className="retry" onClick={retry}>
         Retry connection
       </button>

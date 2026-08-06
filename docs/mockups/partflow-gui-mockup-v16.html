@@ -260,9 +260,14 @@ body.prodmode #ssthemebtn{display:inline-flex}
   animation:pf-heartbeat 2s infinite}
 #conn.off .cdot{background:var(--err);box-shadow:0 0 10px var(--err);animation:none}
 #conn .ctxt{font-size:13px;font-weight:800;letter-spacing:.5px}
-#offbanner{display:none;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err-t);
-  padding:9px 22px;font-size:14px;font-weight:650}
-#offbanner.show{display:block}
+#offbanner{display:none;align-items:center;flex-wrap:wrap;gap:4px 12px;background:rgba(255,97,102,.12);border-bottom:1px solid rgba(255,97,102,.4);color:var(--err-t);
+  padding:5px 22px;font-size:14px;font-weight:650}
+#offbanner.show{display:flex}
+#offbanner .msg{min-width:0}
+#offbanner .sep{flex:none;width:1px;height:16px;background:currentColor;opacity:.45}
+#offbanner .retry{border:none;background:none;border-radius:6px;padding:2px 4px;min-height:0;font-size:13px;font-weight:750;color:var(--err-t);flex:none}
+#offbanner .retry:hover{text-decoration:underline}
+#offbanner .retry:focus-visible{outline:2px solid var(--err-t);outline-offset:2px}
 #scaninput:disabled{opacity:.45;cursor:not-allowed}
 .manualbtn:disabled{opacity:.45;cursor:not-allowed}
 
@@ -285,9 +290,10 @@ body.prodmode #ssthemebtn{display:inline-flex}
 /* v9: no dedicated ENTER button — the scanner submits with Enter */
 /* v16: shared DEV notice (dashed-border development-only block) — the
    demo-barcodes hint uses the same presentation as Management → Priority */
-.dev-notice{display:flex;align-items:baseline;gap:8px;margin:10px 0;padding:7px 12px;border:1px dashed var(--border);border-radius:9px;color:var(--faint);font-size:12px;line-height:1.5;max-width:900px}
+.dev-notice{display:flex;align-items:baseline;gap:8px;margin:10px 0;padding:7px 12px;border:1px dashed var(--border);border-radius:9px;color:var(--faint);font-size:12px;line-height:1.5;width:100%;box-sizing:border-box;min-width:0}
+.dev-notice .dev-notice-content{flex:1 1 auto;min-width:0}
 .dev-notice .dev-notice-tag{flex:none;font-size:9.5px;font-weight:800;letter-spacing:1.2px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
-.dev-notice code{color:var(--muted);font-family:var(--mono),monospace;font-weight:600;background:var(--panel2);border-radius:5px;padding:1px 6px}
+.dev-notice code{color:var(--muted);font-family:var(--mono),monospace;font-weight:600;background:var(--panel2);border-radius:5px;padding:1px 6px;white-space:nowrap}
 /* v9: manual PN entry sits in the scan row itself — secondary to scanning */
 #scanrow .manualbtn{flex:none;border:2px solid var(--border2);background:var(--panel2);color:var(--info-t);
   border-radius:12px;padding:0 18px;font-size:15px;font-weight:750;min-height:56px}
@@ -305,16 +311,26 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .ss-stationfoot{margin-top:2px;padding:6px 22px 12px;text-align:center;font-size:11px;color:var(--faint);letter-spacing:.6px}
 .ss-foothint{margin-left:10px;color:var(--faint)}
 
-/* Last scanned PN — Undo anchored at the right edge (v8); no separate
-   Undo card and no Recent Scans list */
-#lastpn{display:flex;align-items:center;gap:14px;margin:0 18px 16px;padding:10px 16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
-#lastpn .l{font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);flex:none}
-#lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800}
-#lastpn .d{font-size:12.5px;color:var(--muted);flex:1;min-width:0}
-#ssundo{flex:none;min-height:48px;padding:0 18px;border-radius:10px;border:1px solid rgba(255,97,102,.45);
-  background:rgba(255,97,102,.07);color:var(--err-t);font-size:14px;font-weight:800;letter-spacing:.3px}
+/* Last scanned PN — the compact section label sits OUTSIDE the block;
+   one quiet grid row: PN, movement summary, standalone separator, and
+   the borderless Undo text action. No separate Undo card and no Recent
+   Scans list. */
+.ss-lastpnlabel{margin:12px 0 6px;font-size:10px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);text-align:left}
+#lastpn{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:4px 14px;margin:0;padding:7px 16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
+#lastpn .p{font-family:var(--mono);font-size:19px;font-weight:800;white-space:nowrap}
+#lastpn .d{font-size:12.5px;color:var(--muted);min-width:0}
+/* Standalone separator — its own aria-hidden element, never a button border */
+.ss-undosep{width:1px;height:18px;background:var(--border2);justify-self:end}
+/* Quiet text action: no border, no button surface; disabled dims only the action */
+#ssundo{border:none;background:none;border-radius:8px;padding:4px 6px;min-height:0;color:var(--err-t);font-size:14px;font-weight:800;letter-spacing:.3px}
 #ssundo:hover:not(:disabled){background:rgba(255,97,102,.13)}
-#ssundo:disabled{opacity:.3;cursor:not-allowed}
+#ssundo:disabled{opacity:.4;cursor:not-allowed}
+/* Narrow: PN keeps the first row (Undo at its right edge); the movement
+   summary drops to its own full-width second row */
+@media (max-width:700px){
+  #lastpn{grid-template-columns:minmax(0,1fr) auto auto}
+  #lastpn .d{grid-column:1 / -1;grid-row:2}
+}
 
 /* Floating scan notification (v9) — no reserved layout space; only the
    most recent notice; closable; success/info ~4 s, warning/error ~8 s.
@@ -412,6 +428,11 @@ body.prodmode #ssthemebtn{display:inline-flex}
 /* v16: recap value emphasis — labels keep the normal weight, values
    read bold in the primary text color (WO / Due in the receive recap) */
 .ss-recap .rval{font-weight:750;color:var(--text)}
+/* Equal-height chip row inside dialog step recaps (Receive Quantity /
+   Transfer) — never changes the compact chips in Tracking's flow header */
+.ss-recap .typechip,.ss-recap .routechip{display:inline-flex;align-items:center;min-height:22px;line-height:1;vertical-align:middle}
+/* Shared quiet marker for an optional form field inside its label */
+.field-optional{color:var(--faint);font-weight:450}
 /* Back never competes with Cancel/Confirm width */
 .dlg .row .ss-back{flex:0 0 auto;padding:0 22px}
 /* long PNs truncate inside selection buttons; quantity stays put */
@@ -807,7 +828,11 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .abd-machine .mstat.idle{background:var(--chip);color:var(--muted)}
 .abd-machine .mstat.maintenance{background:rgba(255,178,36,.16);color:var(--warn-t)}
 .abd-machine .mtotals{padding:9px 16px;font-size:13px;color:var(--muted);border-bottom:1px solid var(--border)}
-.abd-machine .mtotals b{font-family:var(--mono);color:var(--text)}
+/* Totals values carry the same shared tones as the header statistics:
+   pcs = secondary neutral, PN count = primary neutral — semantic
+   classes, never positional selectors */
+.abd-machine .mtotals .machine-total-pcs{font-family:var(--mono);color:var(--muted)}
+.abd-machine .mtotals .machine-total-pns{font-family:var(--mono);color:var(--text)}
 /* an inactive / maintenance Machine stays visually distinct */
 .abd-machine.maintenance{border-style:dashed;border-color:var(--warn-t);opacity:.85}
 .abd-machine.idle .mtotals{color:var(--faint)}
@@ -1411,7 +1436,7 @@ body.light{color-scheme:light}
         </div>
       </div>
     </div>
-    <div id="offbanner">⚠ OFFLINE — Connection to the PartFlow server has been lost. Production actions are disabled, and scans will not be recorded or queued until the connection is restored. Previously loaded read-only information remains available.</div>
+    <div id="offbanner"><span class="msg">⚠ OFFLINE — Connection to the PartFlow server has been lost. Production actions are disabled</span><span class="sep" aria-hidden="true"></span><button class="retry" onclick="toggleOffline()">Retry connection</button></div>
 
     <div class="ss-body">
       <!-- Scan barcode card — full width directly under the header (v8) -->
@@ -1424,15 +1449,19 @@ body.light{color-scheme:light}
                    onkeydown="if(event.key==='Enter')doScan()" aria-label="Scan barcode">
             <button class="manualbtn" id="ss-manualbtn" onclick="ssOpenFlow({kind:'manual-pn'})">⌨ Enter PN manually</button>
           </div>
-          <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span> Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>PF:WORKER:88</code> worker</p>
+          <!-- Fixed content order (mirrors the app): scan row, the
+               manual-entry fallback explanation, the DEV demo barcodes,
+               then Last scanned PN / Undo. DOM order = visual order. -->
           <div id="manualcap">Manual PN entry is the fallback when the scanner is unavailable — any non-empty PN
             value is validated exactly like a scan; raw PN text is never treated as barcode input.</div>
-        </div>
-        <div id="lastpn">
-          <span class="l">Last scanned PN</span>
-          <span class="p mono" id="lastpn-p">—</span>
-          <span class="d" id="lastpn-d">no completed PN operations yet</span>
-          <button id="ssundo" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
+          <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span><span class="dev-notice-content">Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>PF:WORKER:88</code> worker</span></p>
+          <div class="ss-lastpnlabel">Last scanned PN</div>
+          <div id="lastpn">
+            <span class="p mono" id="lastpn-p">—</span>
+            <span class="d" id="lastpn-d">no completed PN operations yet</span>
+            <span class="ss-undosep" aria-hidden="true"></span>
+            <button id="ssundo" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
+          </div>
         </div>
       </div>
 
@@ -2640,6 +2669,16 @@ function ssGuide(tone,html){
     '<span class="gtext">'+html+'</span></div>';
 }
 function ssChip(label){ return '<span class="dlgchip">'+label+'</span>'; }
+/* Work Order context line for recaps (mirrors WorkOrderRecapLine): `WO`
+   stays a plain label, the WO Number carries .rval emphasis (`—` for an
+   internal blank number), a NEW/MODIFY segment stays the shared Request
+   Type chip, every other segment renders as the shared entity chip. */
+function ssWoRecapLine(label){
+  const parts=label.split(' · ');
+  const number=parts[0].replace(/^WO\s*/,'')||'—';
+  return 'WO <b class="rval">'+number+'</b>'+parts.slice(1).map(s=>' · '+
+    (s==='NEW'||s==='MODIFY'?'<span class="typechip '+s.toLowerCase()+'">'+s+'</span>':ssChip(s))).join('');
+}
 /* v15: Area entity chip — the stable Area identity dot beside plain
    text; the text keeps the normal value color (area hues are not
    body-text safe in both themes). */
@@ -3023,7 +3062,7 @@ function ssDlgTransfer(){
   if(f.step==='qty'){
     ssDlg().innerHTML='<h3>Transfer into this Area</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       ssRecap(['Transfer '+ssAreaChip(ssAreaColor(f.source.card.area),f.source.areaLabel)+' → '+
-        ssAreaChip(ssAreaColor(ssStation.area),f.destNote),f.source.card.wo])+
+        ssAreaChip(ssAreaColor(ssStation.area),f.destNote),ssWoRecapLine(f.source.card.wo)])+
       ssGuide('info','Available at '+f.source.areaLabel+': <b>'+f.source.qty+' pcs</b>. MAX is selected by default.')+
       '<div id="ss-qtymsg"></div>'+
       ssKeypadHTML(f.source.qty)+
@@ -3085,8 +3124,6 @@ function ssDlgIntake(){
     ssDlg().innerHTML='<h3>Receive Quantity</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       '<div class="sub">'+(known?'This PN has no active Work Order Demand. Review the production details below before continuing.'
         :'New PN — not registered yet. Verify the Part Number carefully. It will be registered when the receipt is confirmed.')+'</div>'+
-      ssRecap(['MODIFY and FLOATING are selected by default and can be changed.',
-        'The received date is recorded from this scan; the due date is optional. Enter the received quantity in the next step.'])+
       ssGuide('info','No changes are recorded until you review and confirm the final step.')+
       '<div class="ss-dlgrid">'+
         '<label for="in-type">Request Type</label>'+
@@ -3098,7 +3135,7 @@ function ssDlgIntake(){
         (f.route==='PLANNED'?('<label for="in-planned">Planned Route</label>'+
           '<select id="in-planned" onchange="ssFlow.planned=this.value;ssUpdate()">'+
           ['Bracket std v3','Shaft std v2'].map(t=>'<option'+(f.planned===t?' selected':'')+'>'+t+'</option>').join('')+'</select>'):'')+
-        '<label for="in-due">Due date (optional)</label>'+
+        '<label for="in-due">Due date <span class="field-optional">(optional)</span></label>'+
         '<input id="in-due" type="date" class="mono" value="'+f.due+'" onchange="ssFlow.due=this.value;ssUpdate()">'+
         '<label for="in-op">Starting Area · Operation</label>'+
         '<select id="in-op" onchange="ssFlow.op=this.value">'+
@@ -3114,7 +3151,7 @@ function ssDlgIntake(){
        Route Mode chips carry the selection (route name inside the
        chip); WO/Due values read bold in the primary text color. */
     ssDlg().innerHTML='<h3>Receive Quantity</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
-      ssRecap(['<span class="typechip '+f.type.toLowerCase()+'">'+f.type+'</span> '+
+      ssRecap(['<span class="typechip '+f.type.toLowerCase()+'">'+f.type+'</span> · '+
           '<span class="routechip '+f.route.toLowerCase()+'">'+
             (f.route==='PLANNED'?'PLANNED — '+f.planned:'FLOATING — actual trace')+'</span> · '+ssChip(f.op),
         'WO <b class="rval">—</b> · Due: <b class="rval">'+fmtDate(f.due)+'</b>'+(f.notes?' · Notes: '+f.notes:'')])+
@@ -3787,7 +3824,7 @@ function amMachineCard(m,entries,rowActionFn){
   return '<div class="abd-card abd-machine '+status+'">'+
     '<div class="mhead"><span class="mname" title="'+name+'">'+name+'</span><span class="mstat '+status+'">'+status+
       (age?'<span class="mage"> · '+age+'</span>':'')+'</span></div>'+
-    '<div class="mtotals"><b>'+mq+'</b> pcs assigned · <b>'+entries.length+'</b> PN'+(entries.length===1?'':'s')+'</div>'+
+    '<div class="mtotals"><b class="machine-total-pcs">'+mq+'</b> pcs assigned · <b class="machine-total-pns">'+entries.length+'</b> PN'+(entries.length===1?'':'s')+'</div>'+
     body+'</div>';
 }
 /* structural layout: Machine cards wrap only within the right grid and

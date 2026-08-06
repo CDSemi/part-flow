@@ -187,33 +187,55 @@ main {
   font-weight: 800;
 }
 
-/* ============ Offline banner — persistent, actionable ============ */
+/* ============ Offline banner — persistent, actionable ============
+   One compact row: message | Retry connection. The separator is its
+   own aria-hidden element (never a button border), the action is a
+   quiet text action (no button chrome), and the row wraps naturally
+   on narrow screens without horizontal overflow. */
 .offbanner {
   display: flex;
   align-items: center;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   background: var(--error-surface);
   border-bottom: 1px solid var(--error-border);
   color: var(--err-t);
-  padding: 9px 22px;
+  padding: 5px 22px;
   font-size: 14px;
   font-weight: 650;
 }
 
+.offbanner .msg {
+  min-width: 0;
+}
+
+.offbanner .sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: currentColor;
+  opacity: 0.45;
+}
+
 .offbanner .retry {
-  border: 1px solid var(--err-t);
-  border-radius: 9px;
-  padding: 7px 14px;
-  min-height: 40px;
+  border: none;
+  border-radius: 6px;
+  padding: 2px 4px;
+  min-height: 0;
   font-size: 13px;
   font-weight: 750;
   color: var(--err-t);
-  background: transparent;
+  background: none;
   flex: none;
 }
 
 .offbanner .retry:hover {
-  background: var(--error-surface);
+  text-decoration: underline;
+}
+
+.offbanner .retry:focus-visible {
+  outline: 2px solid var(--err-t);
+  outline-offset: 2px;
 }
 
 /* ============ Production not-connected state ============ */
