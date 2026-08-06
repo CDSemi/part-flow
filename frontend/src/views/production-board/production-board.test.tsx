@@ -270,11 +270,14 @@ test('rows follow canonical order: Hot → dated → undated → stocked', async
     visibleTable().querySelectorAll('tbody .part'),
     (el) => el.textContent,
   );
+  // 0123-40-0007-22 and 0455-20-0118-03 share the SAME due date in the
+  // v16 mocks — equal dated demands keep the stable creation order
+  // (demand-order rule 4), so 0123 (earlier in the mock array) leads.
   expect(parts).toEqual([
     '2027-60-8114-00',
     '142-260',
-    '0455-20-0118-03',
     '0123-40-0007-22',
+    '0455-20-0118-03',
     '78-04-0031',
     '118-052',
     '309-127',
@@ -596,9 +599,16 @@ test('long data paginates and rotates automatically; single pages never claim ro
   expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
 
   // Page 2 dwells another 30 s (10 rows); the 5-row last page only
-  // 15 s — then rotation wraps around after the last page.
+  // 15 s — then rotation wraps around after the last page. Advanced in
+  // two steps: each page's timer is armed in an effect AFTER the page
+  // change commits, so one combined 45 s advance would end exactly at
+  // the deadline of a timer that did not exist when the advance began.
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(45_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+  });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15_000);
   });
   expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
 });

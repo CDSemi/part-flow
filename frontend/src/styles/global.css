@@ -360,7 +360,7 @@ textarea {
   color: var(--faint);
   font-size: 12px;
   line-height: 1.5;
-  /* Fills the parent block's available width (no max-width cap) and
+  /* Fills the parent block's available width (never capped) and
      shrinks correctly inside flex/grid parents. */
   width: 100%;
   box-sizing: border-box;

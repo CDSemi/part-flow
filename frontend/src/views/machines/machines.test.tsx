@@ -63,7 +63,8 @@ test('active Machines list derived states with the time in state', () => {
   expect(lathe2.querySelector('.mg-state')?.textContent).toMatch(
     /^Running · \d/,
   );
-  expect(lathe2.textContent).toContain('2027-60-8114-00');
+  // v16 mock data: Lathe 2 runs 0455-20-0118-03 (area-board.ts).
+  expect(lathe2.textContent).toContain('0455-20-0118-03');
 
   // No assignment → Idle (derived, never chosen).
   expect(
@@ -168,7 +169,7 @@ test('starting maintenance keeps the assigned quantity in place', () => {
   expect(row.textContent).toContain('Coolant leak');
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'true');
   // The assigned PN portions are untouched by the state change.
-  expect(row.textContent).toContain('2027-60-8114-00');
+  expect(row.textContent).toContain('0455-20-0118-03');
 });
 
 test('clearing maintenance returns to Running with quantity, Idle without', () => {

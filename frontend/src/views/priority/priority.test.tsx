@@ -432,13 +432,14 @@ test('the snapshot divider spans every row and rows pin to explicit grid lines',
     const divider = list.firstElementChild as HTMLElement;
     expect(divider.className).toContain('pr-snapdivider');
     expect(divider).toHaveAttribute('aria-hidden', 'true');
-    expect(divider.style.gridRow).toBe('1 / span 3');
-    // Every content row pins to its own explicit grid line so the
-    // divider's occupied cells never push auto-placed rows below it.
+    // The invariant is structural, not a fixed count: the divider spans
+    // EXACTLY the rows the change produces (the affected-row count is
+    // mock-data-derived and changed with the v16 mock rework).
     const rows = Array.from(
       list.querySelectorAll<HTMLElement>(':scope > li.pr-snaprow'),
     );
-    expect(rows).toHaveLength(3);
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    expect(divider.style.gridRow).toBe(`1 / span ${rows.length}`);
     rows.forEach((row, index) => {
       expect(row.style.gridRow).toBe(String(index + 1));
     });

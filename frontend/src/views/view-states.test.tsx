@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../App';
@@ -55,19 +55,28 @@ test('a view renders its error state', async () => {
 test('the Production Board renders long data without wrapping the PN', async () => {
   renderAt('/production-board?state=long');
 
-  // Over-long identifier from the long-data mock set (page 1).
-  const longPn = await screen.findByText(/0118-40-0022-07-0455-88-REV-C/);
+  // Over-long identifier from the long-data mock set (page 1). Every
+  // row also renders once more inside the hidden measurement copy
+  // (v15 height-aware pagination), so the PN legitimately appears
+  // twice — the visible instance is the first.
+  const [longPn] = await screen.findAllByText(/0118-40-0022-07-0455-88-REV-C/);
   expect(longPn).toBeInTheDocument();
   // The long description renders on its own secondary line and never
   // displaces the quantity / due / total columns of the row.
   expect(
-    screen.getByText(/MANIFOLD ASSY, 6-PORT ANODIZED, W\/ FITTINGS 1\/4 NPT/),
-  ).toBeInTheDocument();
-  // The long list paginates and honestly reports its mock rotation:
-  // the footer claim exists only because the interval really rotates.
-  expect(
-    screen.getByText(/Page 1 \/ 3 · rotates every 12 s/),
-  ).toBeInTheDocument();
+    screen.getAllByText(/MANIFOLD ASSY, 6-PORT ANODIZED, W\/ FITTINGS 1\/4 NPT/)
+      .length,
+  ).toBeGreaterThanOrEqual(1);
+  // The long list paginates (25 rows → 3 fallback pages in jsdom) and
+  // honestly reports its rotation: the per-page countdown indicator
+  // exists only while more than one page really rotates (v15 replaced
+  // the fixed `rotates every 12 s` claim with the live indicator).
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+  // The rotation deadline is armed in a post-commit effect — wait for
+  // the indicator instead of asserting synchronously.
+  await waitFor(() =>
+    expect(document.querySelector('.pb-foot .pb-rotate')).toBeInTheDocument(),
+  );
 });
 
 test('the Tracking long-data state renders 30 or more rows', async () => {

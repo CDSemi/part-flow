@@ -42,6 +42,16 @@ const channels: Record<ClockPrecision, Channel> = {
   },
 };
 
+// `useSyncExternalStore` re-subscribes whenever the subscribe function's
+// identity changes, so the subscribe and snapshot functions below are
+// created ONCE per precision at module scope and never inside the hook.
+// An inline `(listener) => subscribeTo(channel, listener)` closure would
+// be a new reference on every render: React would then unsubscribe and
+// re-subscribe each render, each re-subscribe of a momentarily empty
+// channel refreshes `now`, the changed snapshot schedules another
+// render, and under StrictMode this feedback loop crashes the view
+// with "Maximum update depth exceeded" (observed on the Production
+// Board and Area Board — every useUiClock consumer was affected).
 function subscribeTo(channel: Channel, listener: () => void): () => void {
   if (channel.listeners.size === 0) {
     // First subscriber (re)starts the interval from a fresh reading —
@@ -62,15 +72,27 @@ function subscribeTo(channel: Channel, listener: () => void): () => void {
   };
 }
 
+// Stable per-precision function references (see the note above
+// subscribeTo). Both records are keyed by precision so the hook body
+// allocates nothing and passes identical references on every render.
+const subscribers: Record<
+  ClockPrecision,
+  (listener: () => void) => () => void
+> = {
+  minute: (listener) => subscribeTo(channels.minute, listener),
+  second: (listener) => subscribeTo(channels.second, listener),
+};
+
+const snapshots: Record<ClockPrecision, () => number> = {
+  minute: () => channels.minute.now,
+  second: () => channels.second.now,
+};
+
 /**
  * Current time (epoch ms) at the requested precision. All subscribers
  * of one precision share one interval and one snapshot — components
  * re-render together and derive identical values from it.
  */
 export function useUiClock(precision: ClockPrecision = 'minute'): number {
-  const channel = channels[precision];
-  return useSyncExternalStore(
-    (listener) => subscribeTo(channel, listener),
-    () => channel.now,
-  );
+  return useSyncExternalStore(subscribers[precision], snapshots[precision]);
 }

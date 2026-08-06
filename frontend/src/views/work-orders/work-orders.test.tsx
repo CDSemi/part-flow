@@ -335,11 +335,11 @@ test('a complete save flow (number + due entered) saves without extra confirmati
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(screen.getByText('007482')).toBeInTheDocument();
   expect(window.location.pathname).toBe('/management/work-orders');
+  // The toast states the business rule only; per-surface persistence
+  // explanations were consolidated into the single DevNotice (v16) and
+  // rendered-copy.test.ts forbids the old wording everywhere.
   expect(
     screen.getByText(/007482 saved — business demand only/),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(/Nothing was persisted to the backend/),
   ).toBeInTheDocument();
 });
 
@@ -564,7 +564,12 @@ test('the Add Part flow rejects a PN already on the Work Order', async () => {
   fireEvent.change(screen.getByLabelText('Search PartNumber'), {
     target: { value: '78-04-0031' },
   });
-  fireEvent.click(screen.getByRole('button', { name: /78-04-0031/ }));
+  // Scope to the Add Part dialog: the scanned demand line behind it
+  // exposes its own control whose accessible name carries the same PN.
+  const addPartDialog = screen.getByRole('dialog', { name: /Add Part/ });
+  fireEvent.click(
+    within(addPartDialog).getByRole('button', { name: /78-04-0031/ }),
+  );
 
   expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
   expect(
@@ -778,11 +783,10 @@ test('saving an edited OPEN Work Order reports demand-only saving', async () => 
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
+  // The toast states the business rule only; the mock/persistence
+  // boundary lives solely in the shared DevNotice (v16).
   expect(
     screen.getByText(/demand updated — business demand only/),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(/nothing was persisted to the backend/),
   ).toBeInTheDocument();
   // Saving keeps Work Order Details open with the draft now clean.
   expect(

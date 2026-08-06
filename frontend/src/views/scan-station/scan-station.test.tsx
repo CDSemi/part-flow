@@ -985,8 +985,10 @@ test('an unknown PN opens the three-step receive wizard with editable defaults',
   // chips (never inside chip content): TypeChip · RouteModeChip ·
   // Operation chip.
   const line1 = recap.querySelector('.ss-recapline')!;
+  // The trailing chip is the OPERATION (station default: Turning at a
+  // Lathe-Area station) — never the Area name.
   expect(line1.textContent).toMatch(
-    /^MODIFY · FLOATING — actual trace · Lathe/,
+    /^MODIFY · FLOATING — actual trace · Turning/,
   );
   const chipOrder = Array.from(
     line1.querySelectorAll('.typechip, .routechip, .dlgchip'),
@@ -1130,10 +1132,12 @@ test('PN identity is case-insensitive and keeps the first-entered casing', async
   expect(screen.getByText(/abc-part × 1/)).toBeInTheDocument();
 
   // Scanning the same PN in a different casing resolves to the SAME
-  // PartNumber and shows the preserved original casing.
+  // PartNumber — the quantity just received lives in this Area now, so
+  // the scan routes to the PN action chooser (openPnFlow), which shows
+  // the preserved original casing, never the re-scanned one.
   scan('PF:PN:ABC-PART');
   const dialog2 = await screen.findByRole('dialog', {
-    name: 'Receive Quantity',
+    name: 'Choose the action for this PN',
   });
   expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
   expect(
@@ -2311,8 +2315,19 @@ test('partial completion-and-transfer preserves the remaining source quantity', 
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
-  // The remaining 1 pc stays at the source in its existing state.
+  // The remaining 1 pc stays at the source in its existing state. The
+  // PN now has quantity in THIS Area, so the re-scan opens the action
+  // chooser first; receiving more re-enters the source selection.
   scan('PF:PN:78-04-0031');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Choose the action for this PN',
+  });
+  expect(actions).toHaveTextContent('1 pcs at Mill');
+  fireEvent.click(
+    within(actions as HTMLElement).getByRole('button', {
+      name: /Receive more quantity from another Area/,
+    }),
+  );
   const select = await screen.findByRole('dialog', {
     name: 'Select the source',
   });
