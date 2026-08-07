@@ -442,9 +442,9 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(follows(manualCap, hint!)).toBe(true);
   expect(follows(hint!, label)).toBe(true);
   expect(follows(label, lastPn)).toBe(true);
-  expect(label.textContent).toBe('Last scanned PN');
+  expect(label.textContent).toBe('Last Action');
   expect(lastPn.contains(label)).toBe(false);
-  expect(lastPn.textContent).not.toContain('Last scanned PN');
+  expect(lastPn.textContent).not.toContain('Last Action');
 
   // Two explicit regions, no separator element: the information
   // region fills the remaining space; the WHOLE right region is the
@@ -1979,7 +1979,7 @@ test('recovery re-enables and refocuses the scan input', async () => {
   const blocked = document.querySelector('.ss-toast.err')!;
   expect(blocked.textContent).toContain('Connection lost — scanning is paused');
   expect(blocked.textContent).toContain(
-    'Reconnect to PartFlow before continuing. No scans or production updates will be recorded while offline.',
+    'Reconnect to PartFlow server before continuing. No scans or production updates will be recorded while offline.',
   );
 
   failing = false;
