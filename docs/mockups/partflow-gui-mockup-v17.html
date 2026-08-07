@@ -1456,18 +1456,18 @@ body.light{color-scheme:light}
       <!-- Scan barcode card — full width directly under the header (v8) -->
       <div class="panel">
         <div class="ph">Scan barcode<div class="spacer"></div>
-          <span class="note">PN and Worker barcodes; a Machine barcode opens Assign to Machine for a single assignment</span></div>
+          <span class="note">Scan a Part Number or Worker badge. Scanning a Machine opens a one-time assignment.</span></div>
         <div id="scanwrap">
           <div id="scanrow">
-            <input id="scaninput" autocomplete="off" placeholder="Scan PN / Worker / Machine barcode… (ENTER)"
+            <input id="scaninput" autocomplete="off" placeholder="Scan Part Number, Worker, or Machine barcode · Press Enter"
                    onkeydown="if(event.key==='Enter')doScan()" aria-label="Scan barcode">
             <button class="manualbtn" id="ss-manualbtn" onclick="ssOpenFlow({kind:'manual-pn'})">⌨ Enter PN manually</button>
           </div>
           <!-- Fixed content order (mirrors the app): scan row, the
                manual-entry fallback explanation, the DEV demo barcodes,
                then Last scanned PN / Undo. DOM order = visual order. -->
-          <div id="manualcap">Manual PN entry is the fallback when the scanner is unavailable — any non-empty PN
-            value is validated exactly like a scan; raw PN text is never treated as barcode input.</div>
+          <div id="manualcap">Use manual entry only when the scanner is unavailable. The Part
+            Number will be validated before any action is recorded.</div>
           <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span><span class="dev-notice-content">Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>PF:WORKER:88</code> worker</span></p>
           <div class="ss-lastpnlabel">Last scanned PN</div>
           <!-- Two explicit regions (station-card division): info left,
@@ -1476,7 +1476,7 @@ body.light{color-scheme:light}
           <div id="lastpn">
             <div class="ss-lastpninfo">
               <span class="p mono" id="lastpn-p">—</span>
-              <span class="d" id="lastpn-d">no completed PN operations yet</span>
+              <span class="d" id="lastpn-d">No completed Part Number actions yet</span>
             </div>
             <button id="ssundo" class="zone-action" onclick="ssOpenFlow({kind:'undo'})" disabled>⟲ UNDO</button>
           </div>
@@ -2450,8 +2450,8 @@ function ssShowSelector(){
         '<span class="sid mono">'+st.id+'</span>'+
         '<span class="smeta">'+st.dept+' · <span class="dot" style="background:'+a.color+'"></span>'+a.name+
           ' · Operations: <span class="opchips">'+a.ops.map(o=>'<span class="opchip">'+o+'</span>').join('')+'</span></span>'+
-        '<span class="stype">'+(m.length? m.length+' Machine'+(m.length===1?'':'s')+' — queue & assign'
-          :'No Machines — direct Area processing')+'</span>'+
+        '<span class="stype">'+(m.length? m.length+' Machine'+(m.length===1?'':'s')+' · Queue and assignment enabled'
+          :'Direct Area processing · No Machine assignment')+'</span>'+
       '</button>'+
       '<div class="ss-stationacts">'+
         '<button class="ss-openbtn" aria-label="Open '+st.id+' in production mode"'+
@@ -2531,7 +2531,7 @@ function ssEligible(){ return ssHistory.find(h=>!h.reversed)||null; }
 function ssRenderLastPn(){
   const el=ssEligible();
   document.getElementById('lastpn-p').textContent=el?el.action.pn:'—';
-  document.getElementById('lastpn-d').textContent=el?(el.action.movementType+' · '+el.action.description):'no completed PN operations yet';
+  document.getElementById('lastpn-d').textContent=el?(el.action.movementType+' · '+el.action.description):'No completed Part Number actions yet';
   document.getElementById('ssundo').disabled=offline||!el;
 }
 function ssRecord(a){ ssHistory.unshift({action:a,reversed:false}); ssRenderLastPn(); }
@@ -2598,7 +2598,7 @@ function ssToastClose(){
   document.getElementById('sstoast').style.display='none';
 }
 function blockedFeedback(){
-  feedback('err','Disconnected — production actions are disabled','Scans will not be recorded or queued until the connection to the PartFlow server is restored.','✕');
+  feedback('err','Connection lost — scanning is paused','Reconnect to PartFlow before continuing. No scans or production updates will be recorded while offline.','✕');
 }
 
 /* ---- main scan input ---- */
@@ -2609,31 +2609,31 @@ function doScan(){
   switch(p.kind){
     case 'empty': return;
     case 'scrap':
-      feedback('err',SCRAP_BARCODE+' is accepted only inside the Scrap workflow',
-        'Open “Scrap damaged quantity” from a PN first — the scrap barcode is context-sensitive. Nothing recorded.','✕');
+      feedback('err','Scrap barcode cannot be used here',
+        'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.','✕');
       return;
     case 'worker':{
       const name=SS_WORKER_BARCODES[p.value];
-      if(!name){ feedback('err','Unknown Worker barcode','Rejected — nothing recorded.','✕'); return; }
+      if(!name){ feedback('err','Worker badge not recognized','Check the badge and scan again. No changes were recorded.','✕'); return; }
       ssWorker=name;
       document.getElementById('pill-worker').innerHTML='<span class="sdot"></span>'+name;
       /* New badge scan opens a new session window: from <scan time> to <shift end>. */
       document.getElementById('pill-workersub').textContent='from '+new Date().toTimeString().slice(0,5)+' to 18:00';
       /* A Worker scan never replaces the Last Scanned PN. */
-      feedback('ok','Worker session: '+name,
-        'Previous Worker signed out. Worker identity is accountability metadata — it never determines business correctness.','✓');
+      feedback('ok','Worker signed in: '+name,
+        'The previous worker was signed out. New scans will be recorded under '+name+'.','✓');
       return;
     }
     case 'machine':{
       const m=SS_MACHINE_BARCODES[p.value];
-      if(!m){ feedback('err','Unknown Machine barcode','Rejected — nothing recorded.','✕'); return; }
+      if(!m){ feedback('err','Machine barcode not recognized','Check the Machine barcode and scan again. No changes were recorded.','✕'); return; }
       if(m[1]!==ssStation.area){
-        feedback('err',m[0]+' belongs to another Area','Invalid Area/Machine combination — rejected, nothing recorded.','✕');
+        feedback('err',m[0]+' belongs to another Area','This Machine is assigned to a different Area and cannot be used at this station. No changes were recorded.','✕');
         return;
       }
       const entry=ssMachines().find(x=>x[0]===m[0]);
       if(entry&&entry[1]==='maintenance'){
-        feedback('err',m[0]+' is inactive (maintenance)','Inactive entities must not accept production updates.','✕');
+        feedback('err',m[0]+' is unavailable for production','This Machine is under maintenance. Select another Machine or contact a supervisor.','✕');
         return;
       }
       /* The Assign to Machine dialog opens with the Machine
@@ -2642,14 +2642,14 @@ function doScan(){
       return;
     }
     case 'area':
-      feedback('err','Area barcodes are not used at a Scan Station','This station is bound to one Area. Nothing recorded.','✕');
+      feedback('err','Area barcode is not required here','This Scan Station is already assigned to an Area. Scan a Part Number, Worker badge, or Machine barcode. No changes were recorded.','✕');
       return;
     case 'pn':
       ssOpenPnFlow(p.value);
       return;
     default:
-      feedback('err','Unrecognized barcode',
-        'Only PF:-prefixed PartFlow barcodes are accepted — unrelated factory/vendor barcodes and raw PN text are rejected. Nothing recorded.','✕');
+      feedback('err','Barcode not recognized',
+        'Scan a PartFlow Part Number, Worker, or Machine barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.','✕');
   }
 }
 /* Route a resolved PN to the applicable one-shot dialog (§4.7). */
@@ -2698,7 +2698,7 @@ function ssCloseDlg(msg){
 function ssSetStep(step){ if(!ssFlow) return; ssFlow.step=step; ssRenderFlow(); }
 /* Cancel always cancels the ENTIRE wizard with no write; a cancelled
    workflow never replaces the Last Scanned PN. */
-function ssCancel(){ ssCloseDlg('Cancelled — nothing recorded.'); }
+function ssCancel(){ ssCloseDlg('Cancelled. No changes were recorded.'); }
 
 /* wizard building blocks */
 /* v15: four guidance kinds only — the former marker-less `neutral`
@@ -2738,7 +2738,7 @@ function ssRecap(lines){
    stay present but quiet. */
 const SS_SUM_PRIMARY=['Action','PN','Quantity','Source','Destination','Destination Machine','Source Machine',
   'Machine','Area','Reason','Result','Starting Area · Operation','Scrap quantity','Original action',
-  'Source → destination','Effect of the reversal'];
+  'Source → destination','Result after reversal'];
 const SS_SUM_SECONDARY=['Worker','Scan Station','Recorded event','Recorded events','Time'];
 const SS_SUM_CHIP=['Source','Destination','Destination Machine','Source Machine','Machine','Area',
   'Request Type','Route Mode','Starting Area · Operation'];
@@ -2940,7 +2940,7 @@ function ssMAMachinePicker(){
       '</select>';
   }
   return '<div class="ss-choicerow">'+machines.map(m=>'<button type="button" class="pickbtn'+(f.machine===m[0]?' sel':'')+'"'+
-    (m[1]==='maintenance'?' disabled title="Under maintenance — accepts no production"':'')+
+    (m[1]==='maintenance'?' disabled title="Under maintenance · Unavailable for production"':'')+
     ' onclick="ssFlow.machine=\''+m[0]+'\';ssRenderFlow()">'+m[0]+'<span class="s">'+m[1]+'</span></button>').join('')+'</div>';
 }
 function ssMAPnPicker(){
@@ -2978,18 +2978,18 @@ function ssMAScan(raw){
     if(ssQueuedQty(pn)<1){ ssMAScanError(pn+' has no queued quantity in this Area — selection unchanged.'); return; }
     ssMAPickPn(pn); f.scanError=null; return;
   }
-  ssMAScanError('Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.');
+  ssMAScanError('Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.');
 }
 function ssMAScanError(msg){ ssFlow.scanError=msg; ssRenderFlow(); }
 function ssMABack(){ ssOpenFlow({kind:'pn-actions',pn:ssFlow.pn}); }
 function ssMARenderSelect(){
   const f=ssFlow;
   ssDlg().innerHTML='<h3>Assign to Machine</h3>'+
-    '<div class="sub">Assign queued quantity to a Machine: select the Machine and the queued PN (scan either '+
-      'barcode, or pick below), then enter the quantity and confirm. The assignment applies once — the next '+
-      'scan starts fresh.</div>'+
+    '<div class="sub">Select a Machine and a queued Part Number, then enter the quantity '+
+      'to assign. This assignment applies once and closes after '+
+      'confirmation.</div>'+
     '<input id="ss-mascan" class="field mono ss-scanfield" data-autofocus autocomplete="off"'+
-      ' placeholder="Scan Machine or queued PN barcode… (ENTER)" aria-label="Scan Machine or queued PN barcode"'+
+      ' placeholder="Scan machine or queued part barcode… (ENTER)" aria-label="Scan machine or queued part barcode"'+
       ' onkeydown="if(event.key===\'Enter\'){ssMAScan(this.value);this.value=\'\';}">'+
     (f.scanError?ssGuide('error',f.scanError):'')+
     '<div class="ss-dlgrid"><span class="lbl">Machine</span>'+ssMAMachinePicker()+
@@ -3003,7 +3003,7 @@ function ssMARenderQty(){
     '<div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
     ssRecap(['Assigning to '+ssChip(f.machine)+'. Queued quantity: <b>'+max+' pcs</b>.',
       'Source: '+ssAreaChip(ssAreaColor(ssStation.area),'Area queue')+' → Destination: '+ssChip(f.machine)])+
-    ssGuide('info','MAX defaults to the queued quantity. Enter a smaller quantity if needed.')+
+    ssGuide('info','The full queued quantity is selected by default. Enter a smaller quantity if needed.')+
     '<div id="ss-qtymsg"></div>'+
     ssKeypadHTML(max)+
     ssStepButtons({back:"ssSetStep('select')",label:'Next'});
@@ -3035,7 +3035,7 @@ function ssConfirmMachineAssign(){
     qty:q,source:'Area queue',destination:f.machine,machine:f.machine,worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Returns '+q+' pcs from '+f.machine+' to the Area queue.'});
   feedback('ok',f.pn+' × '+q+' → '+f.machine,
-    f.machine+' is now processing this quantity. The assignment is complete — scan the next barcode.','✓');
+    f.machine+' is now processing this quantity. Scan the next barcode when ready.','✓');
   ssCloseDlg();
 }
 
@@ -3043,25 +3043,25 @@ function ssConfirmMachineAssign(){
 function ssDlgPnActions(){
   const f=ssFlow, areaName=ssArea().name, hasM=ssMachines().length>0;
   const queued=ssQueuedQty(f.pn), sources=ssSourcesFor(f.pn), reps=ssRepairSources(f.pn), inArea=ssInAreaQty(f.pn);
-  let h='<h3>Choose the action for this PN</h3><div class="big mono">'+f.pn+'</div>'+
-    '<div class="sub">Only currently valid choices are shown. Nothing is recorded until one action is completed; Cancel abandons the scan with no write.</div>';
+  let h='<h3>Select an action</h3><div class="big mono">'+f.pn+'</div>'+
+    '<div class="sub">Only available actions are shown. No changes are recorded until you review and confirm an action.</div>';
   if(hasM&&queued>0)
     h+=ssChoice('que','ASN','Assign queued quantity to a Machine',
-      queued+' pcs waiting in the '+areaName+' queue — applies to one assignment; MAX defaults to the queued quantity.','ssPAAssign()');
+      queued+' pcs waiting in the '+areaName+' queue — applies to one assignment; the full queued quantity is selected by default.','ssPAAssign()');
   if(sources.length)
     h+=ssChoice('run','MOVE','Receive more quantity from another Area',
-      sources.map(x=>x.qty+' pcs at '+x.areaLabel).join(' · ')+' — sources are never combined silently.','ssPAReceive()');
+      sources.map(x=>x.qty+' pcs at '+x.areaLabel).join(' · ')+'. Select the source Area before entering the quantity.','ssPAReceive()');
   if(!hasM&&ssProcessingQty(f.pn)>0)
-    h+=ssChoice('run','DONE','Complete processing — DONE',
+    h+=ssChoice('run','DONE','Complete Area processing',
       ssProcessingQty(f.pn)+' pcs in processing. The finished quantity moves to the finished rack, ready to transfer to another Area.','ssPADone()');
   h+=ssChoice('add','ADD','Add more quantity',
-    'Add physical quantity that was not received from another Area — reason required, auditable, no Manager approval needed.','ssPAAdd()');
+    'Add physical quantity found at this Area that was not transferred from another Area. A reason is required.','ssPAAdd()');
   if(reps.length)
-    h+=ssChoice('rep','REP','Send quantity here for repair',
-      'Return quantity that previously passed '+areaName+' to correct earlier work — explicit intent, never assumed from history.','ssPARepair()');
+    h+=ssChoice('rep','REP','Return quantity for repair',
+      'Return quantity to '+areaName+' so earlier work can be corrected.','ssPARepair()');
   if(inArea>0)
     h+=ssChoice('scr','SCR','Scrap damaged quantity',
-      'Scan '+SCRAP_BARCODE+' once for each damaged piece, then enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.','ssPAScrap()');
+      'Scan '+SCRAP_BARCODE+' once for each damaged piece, then enter one reason for the total. Nothing is recorded until confirmation.','ssPAScrap()');
   h+='<div class="row"><button class="bigbtn ghost" onclick="ssCancel()">Cancel (Esc)</button></div>';
   ssDlg().innerHTML=h;
 }
@@ -3080,9 +3080,9 @@ function ssPAScrap(){ ssOpenFlow({kind:'scrap',pn:ssFlow.pn,available:ssInAreaQt
 function ssDlgSourceSelect(){
   const f=ssFlow;
   ssDlg().innerHTML='<h3>Select the source</h3><div class="big mono">'+f.pn+'</div>'+
-    '<div class="sub">This PN has quantity in more than one source position. Select exactly one — quantities from multiple sources are never combined silently.</div>'+
+    '<div class="sub">This Part Number is available in more than one Area. Select one source to continue.</div>'+
     f.sources.map((x,i)=>ssChoice('run','SRC',x.areaLabel+' — '+x.qty+' pcs available',
-      x.card.wo+' · quantity entry follows (MAX '+x.qty+').','ssSSPick('+i+')')).join('')+
+      x.card.wo+' · Up to '+x.qty+' pcs available','ssSSPick('+i+')')).join('')+
     '<div class="row"><button class="bigbtn ghost" onclick="ssCancel()">Cancel (Esc)</button></div>';
 }
 function ssSSPick(i){ const f=ssFlow; ssOpenFlow({kind:'transfer',pn:f.pn,source:f.sources[i]}); }
@@ -3106,30 +3106,30 @@ function ssDlgTransfer(){
   if(f.qty===undefined) f.qty=String(f.source.qty);   // MAX is the default
   f.destNote=hasM?areaName+' queue (awaiting Machine)':areaName+' — direct processing';
   if(f.step==='qty'){
-    ssDlg().innerHTML='<h3>Transfer into this Area</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Receive from another Area</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       ssRecap(['Transfer '+ssAreaChip(ssAreaColor(f.source.card.area),f.source.areaLabel)+' → '+
         ssAreaChip(ssAreaColor(ssStation.area),f.destNote),ssWoRecapLine(f.source.card.wo)])+
-      ssGuide('info','Available at '+f.source.areaLabel+': <b>'+f.source.qty+' pcs</b>. MAX is selected by default.')+
+      ssGuide('info','Available at '+f.source.areaLabel+': <b>'+f.source.qty+' pcs</b>. The full quantity is selected by default.')+
       '<div id="ss-qtymsg"></div>'+
       ssKeypadHTML(f.source.qty)+
       ssStepButtons({label:'Next'});
   } else {
     const q=parseInt(f.qty||'0',10);
     const completes=ssCompletionRequired(f.source.card,q);
-    ssDlg().innerHTML='<h3>Transfer into this Area</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Receive from another Area</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       '<div class="sub">Review the transfer, then confirm.</div>'+
       ssConfirmSummary([
-        ['Action','Transfer into this Area'],
+        ['Action','Receive from another Area'],
         ['PN','<span class="mono">'+f.pn+'</span>'],
         ['Quantity','<span class="mono">'+q+' pcs</span>'],
         ['Source',ssAreaChip(ssAreaColor(f.source.card.area),f.source.areaLabel)],
         ['Destination',ssAreaChip(ssAreaColor(ssStation.area),f.destNote)],
-        ['Source processing',completes>0?'Completed by this transfer for '+completes+' pcs — no separate DONE needed first':null,'warn'],
+        ['Source processing',completes>0?completes+' pcs will be marked complete at the source before transfer':null,'warn'],
         ['Remaining at source','<span class="mono">'+(f.source.qty-q)+' pcs</span>'],
         ['Worker',ssWorker],
         ['Scan Station',ssStation.id],
         [completes>0?'Recorded events':'Recorded event',
-         completes>0?'AREA_COMPLETED, then TRANSFERRED — one atomic operation':'TRANSFERRED']])+
+         completes>0?'AREA_COMPLETED, then TRANSFERRED':'TRANSFERRED']])+
       ssStepButtons({back:"ssSetStep('qty')",label:'Confirm transfer',autofocus:true});
   }
   ssUpdate();
@@ -3146,7 +3146,7 @@ function ssConfirmTransfer(){
       :'Returns '+q+' pcs to '+f.source.areaLabel+'.'});
   feedback('ok',f.pn+' × '+q+' → '+f.destNote,
     completes>0
-      ?'Processing at '+f.source.areaLabel+' is completed for '+completes+' pcs and the quantity moved here in one step (AREA_COMPLETED, then TRANSFERRED — one atomic operation).'
+      ?completes+' pcs were completed at '+f.source.areaLabel+' and transferred here.'
       :'The quantity moved here from '+f.source.areaLabel+'.','✓');
   ssCloseDlg();
 }
@@ -3168,9 +3168,9 @@ function ssDlgIntake(){
     /* v15 layout: PN identity recap first, one short info line, then
        the intake settings — never one merged paragraph. */
     ssDlg().innerHTML='<h3>Receive Quantity</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
-      '<div class="sub">'+(known?'This PN has no active Work Order Demand. Review the production details below before continuing.'
-        :'New PN — not registered yet. Verify the Part Number carefully. It will be registered when the receipt is confirmed.')+'</div>'+
-      ssGuide('info','No changes are recorded until you review and confirm the final step.')+
+      '<div class="sub">'+(known?'This Part Number has no active production demand. Review the details below before receiving quantity.'
+        :'New Part Number. Verify it carefully; it will be registered when you confirm the receipt.')+'</div>'+
+      ssGuide('info','Review all details before confirming. Nothing is recorded until the final confirmation.')+
       '<div class="ss-dlgrid">'+
         '<label for="in-type">Request Type</label>'+
         '<select id="in-type" data-autofocus onchange="ssFlow.type=this.value;ssRenderFlow()">'+
@@ -3239,11 +3239,8 @@ function ssConfirmIntake(){
     qty:q,source:'—',destination:areaName,worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Removes the '+q+' pcs introduced by this intake.'});
   feedback('ok',f.pn+' × '+q+' received into '+areaName+(f.hasM?' queue':''),
-    (known?'Uses the known PN':'Registers the new PN exactly as entered')+' and '+
-    (f.reuseWo?'reuses the applicable internal MODIFY Work Order (WO —)'
-      :(f.type==='MODIFY'?'creates an internal Work Order without an external number (displays —)'
-        :'creates or uses the applicable Work Order'))+
-    '; the quantity '+(f.hasM?'now waits in the Area queue for a Machine':'is now processing in this Area')+'.','✓');
+    (f.hasM?'Receipt recorded. The quantity is now waiting in the Area queue.'
+      :'Receipt recorded. The quantity is now in processing at this Area.'),'✓');
   ssCloseDlg();
 }
 
@@ -3255,16 +3252,16 @@ function ssDlgAddQty(){
   if(f.step==='entry'){
     const hasM=ssMachines().length>0;
     ssDlg().innerHTML='<h3>Add more quantity</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
-      '<div class="sub">Add physical quantity that was not received from another Area. Enter a reason '+
-        'so the adjustment can be reviewed later.</div>'+
+      '<div class="sub">Add physical quantity found at this Area that was not transferred '+
+        'from another Area. A reason is required.</div>'+
       ssRecap(['Adding at '+ssAreaChip(ssAreaColor(ssStation.area),areaName)+' → '+
         ssAreaChip(ssAreaColor(ssStation.area),
           hasM?(areaName+' queue (awaiting Machine)'):(areaName+' — direct processing'))])+
-      ssGuide('info','There is no MAX and no assumed default — enter the actual physical count.')+
+      ssGuide('info','Enter the actual quantity found. No default quantity is provided.')+
       '<div id="ss-qtymsg"></div>'+
       ssKeypadHTML()+
       '<label class="ss-reasonlbl" for="addq-reason">Reason (required)</label>'+
-      '<div class="ss-fieldhint">Stored with the adjustment for later review.</div>'+
+      '<div class="ss-fieldhint">This reason will be included in the adjustment history.</div>'+
       '<input id="addq-reason" class="field" value="'+(f.reason||'')+'" placeholder="e.g. found 2 additional blanks with the lot" oninput="ssFlow.reason=this.value;ssUpdate()">'+
       ssStepButtons({label:'Next'});
   } else {
@@ -3295,8 +3292,8 @@ function ssConfirmAddQty(){
     qty:q,source:'—',destination:areaName,worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Removes the '+q+' added pcs again.'});
   feedback('ok',f.pn+' +'+q+' pcs at '+areaName,
-    'QUANTITY_ADJUSTED · direction INCREASE (auditable; never an ordinary transfer, never changes the WO Demand requested quantity). '+
-    (hasM?'Added quantity enters the Area queue.':'Added quantity enters direct Area processing.'),'✓');
+    (hasM?'The quantity adjustment was recorded with your reason. The added quantity is now waiting in the Area queue.'
+      :'The quantity adjustment was recorded with your reason. The added quantity is now in processing at this Area.'),'✓');
   ssCloseDlg();
 }
 
@@ -3309,11 +3306,10 @@ function ssDlgRepair(){
   if(f.reason===undefined){ f.reason=''; f.source=(sources.length===1?sources[0]:null); f.qty=f.source?String(f.source.qty):''; }
   const max=f.source?f.source.qty:0;
   if(f.step==='entry'){
-    ssDlg().innerHTML='<h3>Send quantity here for repair</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
-      '<div class="sub">An explicit Repair intent: quantity already in production returns to '+areaName+' — an Area it '+
-        'previously visited — to correct earlier work. Repair is a movement (TRANSFERRED with an explicit Repair intent), never a '+
-        'Request Type and never new demand or new quantity. Returning to a previously visited Area is <b>not</b> assumed to '+
-        'be Repair — you chose it here.</div>'+
+    ssDlg().innerHTML='<h3>Return quantity for repair</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+      '<div class="sub">Select the source Area, enter the quantity to return, and provide '+
+        'the repair reason. This moves existing quantity; it does not create '+
+        'additional quantity.</div>'+
       ssRecap(['Repair destination: '+ssAreaChip(ssAreaColor(ssStation.area),areaName)])+
       '<div class="ss-dlgrid"><span class="lbl">Source</span><div class="ss-choicerow">'+
         sources.map((x,i)=>'<button type="button" class="pickbtn'+(f.source&&f.source.areaLabel===x.areaLabel?' sel':'')+'"'+
@@ -3321,17 +3317,17 @@ function ssDlgRepair(){
       '</div></div>'+
       /* v15: the MAX/default statement is an instruction, not a hazard
          — info; genuine deviations keep warn */
-      (f.source?(ssGuide('info','Repair quantity — MAX '+max+' pcs, the default. A partial quantity splits off its own Quantity Flow; the full quantity moves the whole flow.')+
+      (f.source?(ssGuide('info','Up to '+max+' pcs are available. The full quantity is selected by default; enter a smaller quantity for a partial return.')+
         '<div id="ss-qtymsg"></div>'+ssKeypadHTML(max)):'')+
       '<label class="ss-reasonlbl" for="rep-reason">Reason (required)</label>'+
-      '<input id="rep-reason" class="field" value="'+(f.reason||'')+'" placeholder="what must be corrected?" oninput="ssFlow.reason=this.value;ssUpdate()">'+
+      '<input id="rep-reason" class="field" value="'+(f.reason||'')+'" placeholder="Describe the work that must be corrected" oninput="ssFlow.reason=this.value;ssUpdate()">'+
       ssStepButtons({label:'Next'});
   } else {
     const q=parseInt(f.qty||'0',10), partial=f.source&&q<f.source.qty;
-    ssDlg().innerHTML='<h3>Send quantity here for repair</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Return quantity for repair</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       '<div class="sub">Review the Repair movement, then confirm.</div>'+
       ssConfirmSummary([
-        ['Action','Send quantity here for repair'],
+        ['Action','Return quantity for repair'],
         ['PN','<span class="mono">'+f.pn+'</span>'],
         ['Quantity','<span class="mono">'+q+' pcs</span>'],
         ['Source',f.source?(ssChip(f.source.areaLabel)+' · '+f.source.flow):null],
@@ -3357,9 +3353,8 @@ function ssConfirmRepair(){
     description:'REPAIR · '+f.source.areaLabel+' → '+areaName+' · qty '+q+' · reason: '+f.reason.trim(),
     qty:q,source:f.source.areaLabel,destination:areaName,worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Returns '+q+' pcs to '+f.source.areaLabel+'.'});
-  feedback('ok','REPAIR — '+f.pn+' × '+q+' returns to '+areaName,
-    'TRANSFERRED · REPAIR intent ('+f.source.flow+(partial?' — partial quantity requires a QuantityFlow SPLIT first':'')+
-    '). Repair creates no new quantity and no new demand; the Movement history stays authoritative.','✓');
+  feedback('ok','Repair — '+f.pn+' × '+q+' returned to '+areaName,
+    'The selected quantity was returned from '+f.source.areaLabel+' to '+areaName+' for repair.','✓');
   ssCloseDlg();
 }
 
@@ -3374,15 +3369,15 @@ function ssDlgScrap(){
        instruction. */
     ssDlg().innerHTML='<h3>Scrap damaged quantity</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       '<div class="sub">Scan <code>'+SCRAP_BARCODE+'</code> once for each damaged piece, then '+
-        'enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.</div>'+
+        'enter one reason for the total. Nothing is recorded until confirmation.</div>'+
       '<div id="ss-scrapinfo">'+ssScrapInfo()+'</div>'+
       '<div class="ss-scrapcount" role="status"><span class="lbl">Pending scrap count</span><span class="cnt mono" id="ss-scnt">'+f.count+'</span>'+
-        '<button type="button" class="pickbtn" id="ss-sminus" '+(f.count===0?'disabled ':'')+'onclick="ssScrapStep(-1)">−1 correct</button>'+
+        '<button type="button" class="pickbtn" id="ss-sminus" '+(f.count===0?'disabled ':'')+'onclick="ssScrapStep(-1)">Remove one</button>'+
         '<button type="button" class="pickbtn" id="ss-sreset" '+(f.count===0?'disabled ':'')+'onclick="ssScrapStep(0)">Reset</button></div>'+
       '<input id="ss-scrapscan" class="field mono ss-scanfield" data-autofocus placeholder="Scan '+SCRAP_BARCODE+' — Enter" aria-label="Scrap barcode input" autocomplete="off"'+
         ' onkeydown="if(event.key===\'Enter\'){ssScrapScan(this.value);this.value=\'\';}">'+
       '<div id="ss-snote" style="display:none"></div>'+
-      '<label class="ss-reasonlbl" for="scrap-reason">Common scrap reason (required)</label>'+
+      '<label class="ss-reasonlbl" for="scrap-reason">Scrap reason (required)</label>'+
       '<input id="scrap-reason" class="field" value="'+(f.reason||'')+'" placeholder="e.g. tool crash — gouged face" oninput="ssFlow.reason=this.value;ssUpdate()">'+
       ssStepButtons({label:'Next'});
   } else {
@@ -3432,7 +3427,7 @@ function ssScrapScan(value){
   if(p.kind!=='scrap'){
     /* v16: barcode-selection errors use the shared guidance error
        presentation (✕ marker) instead of a dedicated note style */
-    note.innerHTML=ssGuide('error','Rejected “'+value.trim()+'” — only '+SCRAP_BARCODE+' counts here.');
+    note.innerHTML=ssGuide('error','“'+value.trim()+'” is not a valid scrap barcode. Scan '+SCRAP_BARCODE+' to add one piece.');
     note.style.display='block';
     return;
   }
@@ -3449,7 +3444,7 @@ function ssConfirmScrap(){
     qty:f.count,source:areaName,destination:'scrap',worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Restores the '+f.count+' scrapped pcs to active quantity.'});
   feedback('ok','Scrapped — '+f.pn+' × '+f.count+' at '+areaName,
-    'One scrap record covers the counted total and can be reviewed later. Scrap never reduces the WO Demand requested quantity.','✓');
+    'The scrap quantity and reason were recorded. Remaining active quantity: '+(ssInAreaQty(f.pn)-f.count)+' pcs.','✓');
   ssCloseDlg();
 }
 
@@ -3459,18 +3454,18 @@ function ssDlgQueueReturn(){
   if(!f.step) f.step='qty';
   if(f.qty===undefined) f.qty=String(f.max);   // MAX default
   if(f.step==='qty'){
-    ssDlg().innerHTML='<h3>Return quantity to the Area queue</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Return unfinished quantity to queue</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       ssRecap([ssChip(f.machine)+' → '+ssChip(areaName+' queue')])+
-      ssGuide('info','Assigned on '+f.machine+': <b>'+f.max+' pcs</b>. MAX is selected by default.')+
+      ssGuide('info','<b>'+f.max+' pcs</b> are assigned to '+f.machine+'. Enter a lower quantity to return only part of them.')+
       '<div id="ss-qtymsg"></div>'+
       ssKeypadHTML(f.max)+
       ssStepButtons({label:'Next'});
   } else {
     const q=parseInt(f.qty||'0',10);
-    ssDlg().innerHTML='<h3>Return quantity to the Area queue</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Return unfinished quantity to queue</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       '<div class="sub">Review the queue return, then confirm.</div>'+
       ssConfirmSummary([
-        ['Action','Return to Area queue'],
+        ['Action','Return unfinished quantity to queue'],
         ['PN','<span class="mono">'+f.pn+'</span>'],
         ['Quantity','<span class="mono">'+q+' pcs</span>'],
         ['Source Machine',f.machine],
@@ -3479,7 +3474,7 @@ function ssDlgQueueReturn(){
         ['Worker',ssWorker],
         ['Scan Station',ssStation.id],
         ['Recorded event','RELEASED_FROM_MACHINE']])+
-      ssStepButtons({back:"ssSetStep('qty')",label:'Confirm queue return',autofocus:true});
+      ssStepButtons({back:"ssSetStep('qty')",label:'Confirm return to queue',autofocus:true});
   }
   ssUpdate();
 }
@@ -3492,7 +3487,7 @@ function ssConfirmQueueReturn(){
     qty:q,source:f.machine,destination:'Area queue',machine:f.machine,worker:ssWorker,time:MOCK_SCAN_TIME,
     reversalEffect:'Re-assigns '+q+' pcs to '+f.machine+'.'});
   feedback('ok',f.pn+' × '+q+' returned to the '+areaName+' queue',
-    'RELEASED_FROM_MACHINE — the quantity waits in the Area queue for its next assignment. QUEUE never marks quantity DONE.','✓');
+    'The quantity was removed from '+f.machine+' and returned to the '+areaName+' queue. It remains unfinished.','✓');
   ssCloseDlg();
 }
 
@@ -3506,16 +3501,16 @@ function ssDlgDone(){
   if(!f.step) f.step='qty';
   if(f.qty===undefined) f.qty=String(f.max);   // MAX = quantity at the current source position
   if(f.step==='qty'){
-    ssDlg().innerHTML='<h3>Complete processing — DONE</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+    ssDlg().innerHTML='<h3>Complete Area processing</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
       ssRecap([ssChip(f.machine?f.machine:areaName+' processing')+' → '+ssChip(areaName+' finished rack')])+
-      ssGuide('info',(f.machine?'On '+f.machine:'In processing')+': <b>'+f.max+' pcs</b>. MAX is selected by default — enter a smaller quantity to finish only part of it.')+
+      ssGuide('info',(f.machine?'<b>'+f.max+' pcs</b> are available on '+f.machine:'<b>'+f.max+' pcs</b> in process')+'. The full quantity is selected by default. Enter a smaller quantity to complete only part of it.')+
       '<div id="ss-qtymsg"></div>'+
       ssKeypadHTML(f.max)+
       ssStepButtons({label:'Next'});
   } else {
     const q=parseInt(f.qty||'0',10);
-    ssDlg().innerHTML='<h3>Complete processing — DONE</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
-      '<div class="sub">Review the completion, then confirm. The finished quantity stays in '+areaName+' on the finished rack until it is transferred.</div>'+
+    ssDlg().innerHTML='<h3>Complete Area processing</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+      '<div class="sub">Confirm the completed quantity. It will remain on the '+areaName+' finished rack until transferred.</div>'+
       ssConfirmSummary([
         ['Action','Complete Area processing'],
         ['PN','<span class="mono">'+f.pn+'</span>'],
@@ -3526,7 +3521,7 @@ function ssDlgDone(){
         ['Worker',ssWorker],
         ['Scan Station',ssStation.id],
         ['Recorded event','AREA_COMPLETED']])+
-      ssStepButtons({back:"ssSetStep('qty')",label:'Confirm DONE',autofocus:true});
+      ssStepButtons({back:"ssSetStep('qty')",label:'Confirm completion',autofocus:true});
   }
   ssUpdate();
 }
@@ -3546,8 +3541,8 @@ function ssConfirmDone(){
 /* ---- Undo: shares the structured confirmation-summary presentation ---- */
 function ssDlgUndo(){
   const t=ssEligible().action;
-  ssDlg().innerHTML='<h3>Undo last PN operation?</h3><div class="big mono">'+t.pn+'</div>'+
-    '<div class="sub">Undo creates a compensating REVERSED Movement — the original action is preserved, never deleted.</div>'+
+  ssDlg().innerHTML='<h3>Reverse the last Part Number action?</h3><div class="big mono">'+t.pn+'</div>'+
+    '<div class="sub">This will reverse the complete last action. The original history will remain available for audit.</div>'+
     ssConfirmSummary([
       ['Original action',t.movementType],
       ['Quantity','<span class="mono">'+t.qty+'</span>'],
@@ -3555,9 +3550,9 @@ function ssDlgUndo(){
       ['Machine',t.machine||null],
       ['Worker',t.worker],
       ['Time','<span class="mono">'+t.time+'</span>'],
-      ['Effect of the reversal',t.reversalEffect,'warn']])+
+      ['Result after reversal',t.reversalEffect,'warn']])+
     '<div class="row"><button class="bigbtn ghost" onclick="ssCancel()">Cancel (Esc)</button>'+
-    '<button class="bigbtn danger" onclick="ssConfirmCurrent()">Confirm Undo</button></div>';
+    '<button class="bigbtn danger" onclick="ssConfirmCurrent()">Confirm reversal</button></div>';
 }
 function ssConfirmUndo(){
   const el=ssEligible();
@@ -3565,21 +3560,21 @@ function ssConfirmUndo(){
   el.reversed=true;   // original stays in history; Last Scanned PN advances
   const t=el.action;
   ssCloseDlgOnly();
-  feedback('warn','Undo recorded as REVERSED — '+t.pn,
-    t.reversalEffect+' The original '+t.movementType+' Movement is preserved; a compensating event references the complete operation.','⟲');
+  feedback('warn','Last action reversed — '+t.pn,
+    t.reversalEffect+' The original history remains available for audit.','⟲');
   ssRenderStation();
   focusScan();
 }
 
 /* ---- manual PN entry — explicit fallback (any non-empty PN) ---- */
 function ssDlgManual(){
-  ssDlg().innerHTML='<h3>Manual PN entry — explicit fallback</h3>'+
-    '<div class="sub">Type the <b>exact PartNumber</b> (not a barcode). Capitalization does not matter. A PN that is '+
-      'not known here yet opens the receive workflow, where you review and confirm it first. Nothing is recorded by this step.</div>'+
-    '<input id="ss-mpn" class="field mono ss-scanfield" data-autofocus autocomplete="off" placeholder="Exact PartNumber, e.g. 0455-20-0118-03"'+
+  ssDlg().innerHTML='<h3>Enter Part Number manually</h3>'+
+    '<div class="sub">Enter the Part Number exactly as shown on the traveler or job paperwork. '+
+      'Unknown Part Numbers will open the receive workflow for review. Nothing is recorded at this step.</div>'+
+    '<input id="ss-mpn" class="field mono ss-scanfield" data-autofocus autocomplete="off" placeholder="Part Number, e.g. 0455-20-0118-03"'+
       ' onkeydown="if(event.key===\'Enter\')ssConfirmManual()">'+
     '<div class="row"><button class="bigbtn ghost" onclick="ssCancel()">Cancel (Esc)</button>'+
-    '<button class="bigbtn primary" onclick="ssConfirmManual()">Look up PN</button></div>';
+    '<button class="bigbtn primary" onclick="ssConfirmManual()">Continue</button></div>';
 }
 function ssConfirmManual(){
   const v=(document.getElementById('ss-mpn').value||'').trim();
@@ -3601,7 +3596,7 @@ function toggleOffline(){
     input.placeholder='Disconnected — scanning disabled';
     blockedFeedback();
   } else {
-    input.placeholder='Scan PN / Worker / Machine barcode… (ENTER)';
+    input.placeholder='Scan Part Number, Worker, or Machine barcode · Press Enter';
     feedback('ok','Reconnected — scanning restored','Input re-enabled and refocused. Nothing was recorded or queued while disconnected.','✓');
     focusScan();
   }

@@ -86,11 +86,13 @@ test('/scan-station shows the Station Selector without auto-redirecting', async 
     .getByRole('button', { name: 'Open LATHE-ST-01' })
     .closest('.ss-stationcard') as HTMLElement;
   expect(lathe).toHaveTextContent('Machine Shop');
-  expect(lathe).toHaveTextContent('4 Machines — queue & assign');
+  expect(lathe).toHaveTextContent('4 Machines · Queue and assignment enabled');
   const deburr = screen
     .getByRole('button', { name: 'Open DEBURR-ST-01' })
     .closest('.ss-stationcard') as HTMLElement;
-  expect(deburr).toHaveTextContent('No Machines — direct Area processing');
+  expect(deburr).toHaveTextContent(
+    'Direct Area processing · No Machine assignment',
+  );
 });
 
 test('the Station Selector renders Operations as individual chips', async () => {
@@ -156,7 +158,7 @@ test('an unknown Station ID is an explicit error, never a fallback', async () =>
   render(<App />);
 
   expect(
-    await screen.findByText(/Unknown or inactive Scan Station “GHOST-ST-99”/),
+    await screen.findByText(/Scan Station “GHOST-ST-99” is unavailable/),
   ).toBeInTheDocument();
   expect(screen.queryByLabelText('Scan barcode')).not.toBeInTheDocument();
 });
@@ -347,7 +349,7 @@ test('the shortcut works from the barcode input but never from dialogs or other 
   // inert too.
   fireEvent.keyDown(activeDialog(), { key: 'Escape' });
   fireEvent.click(screen.getByRole('button', { name: '⌨ Enter PN manually' }));
-  const manualInput = screen.getByLabelText('Exact PartNumber');
+  const manualInput = screen.getByLabelText('Part Number');
   fireEvent.keyDown(manualInput, { key: 'K', ctrlKey: true, shiftKey: true });
   expect(window.location.pathname).toBe('/scan-station/LATHE-ST-01');
 });
@@ -406,7 +408,7 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(screen.queryByRole('button', { name: 'ENTER' })).toBeNull();
   expect(input).toHaveAttribute(
     'placeholder',
-    'Scan PN / Worker / Machine barcode… (ENTER)',
+    'Scan Part Number, Worker, or Machine barcode · Press Enter',
   );
 
   // Manual PN entry occupies the scan-row secondary position; the old
@@ -473,7 +475,7 @@ test('scan feedback floats as a single closable notification', async () => {
   const toast = document.querySelector('.ss-toast.err');
   expect(toast).not.toBeNull();
   expect(toast).toHaveAttribute('role', 'alert');
-  expect(toast?.textContent).toContain('Unrecognized barcode');
+  expect(toast?.textContent).toContain('Barcode not recognized');
 
   // Only the most recent notification shows.
   scan('PF:WORKER:88');
@@ -664,13 +666,13 @@ test('row DONE opens the existing DONE wizard without a Machine field; partial D
     screen.getByRole('button', { name: 'Complete Area processing' }),
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'Complete processing — DONE',
+    name: 'Complete Area processing',
   });
   // The existing manual DONE wizard: MAX defaults to the actively
   // processing quantity of the selected row; the direct-processing
   // guidance wording; no Machine field or wording anywhere.
   expect(screen.getByLabelText('Quantity: 6')).toBeInTheDocument();
-  expect(dialog.textContent).toContain('In processing: 6 pcs');
+  expect(dialog.textContent).toContain('6 pcs in process');
   expect(dialog.textContent).not.toContain('Machine');
 
   // Partial DONE: finish only 2 of the 6 pcs.
@@ -695,7 +697,7 @@ test('row DONE opens the existing DONE wizard without a Machine field; partial D
   expect(dialog.textContent).toContain('Complete Area processing');
   expect(dialog.textContent).toContain('Finished — ready to move');
   expect(dialog.textContent).toContain('AREA_COMPLETED');
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
 
   // Only the confirmed 2 pcs moved to `Finished — ready to move`; the
   // remaining 4 pcs keep processing and keep their DONE action. The
@@ -748,7 +750,7 @@ test('a fully completed row leaves In processing and shows no DONE anywhere', as
     screen.getByRole('button', { name: 'Complete Area processing' }),
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'Complete processing — DONE',
+    name: 'Complete Area processing',
   });
   // MAX (6) is the default — Enter advances, Enter confirms.
   fireEvent.keyDown(dialog, { key: 'Enter' });
@@ -797,12 +799,14 @@ test('a Machine scan opens the Assign to Machine dialog and leaves nothing armed
   const dialog = await screen.findByRole('dialog', {
     name: 'Assign to Machine',
   });
-  expect(dialog).toHaveTextContent('The assignment applies once');
+  expect(dialog).toHaveTextContent('This assignment applies once');
 
   // Cancel: no write, no sticky Machine context anywhere.
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(document.querySelector('.ss-head')?.textContent).not.toContain(
     'Lathe 2',
   );
@@ -822,7 +826,7 @@ test('the assignment dialog renders "Assign to Machine" in operator language onl
   ).toBeInTheDocument();
   // The temporary behavior is explained naturally; implementation
   // wording (one-shot, armed context, session mechanics) never renders.
-  expect(dialog.textContent).toContain('the next scan starts fresh');
+  expect(dialog.textContent).toContain('closes after confirmation');
   expect(dialog.textContent).not.toMatch(/one-shot/i);
   expect(dialog.textContent).not.toMatch(/armed/i);
   expect(dialog.textContent).not.toMatch(/Machine Session/i);
@@ -851,7 +855,9 @@ test('the Machine-first wizard: PN pick → MAX quantity → confirmation → re
   // Step 2 — quantity defaults to MAX (queued 2), context recap shown.
   expect(screen.getByLabelText('Quantity: 2')).toBeInTheDocument();
   expect(dialog.textContent).toContain('Assigning to');
-  expect(dialog.textContent).toContain('MAX defaults to the queued quantity');
+  expect(dialog.textContent).toContain(
+    'The full queued quantity is selected by default',
+  );
   expect(lastPnText()).toBe('—'); // nothing recorded yet
 
   // Step 3 — dedicated confirmation summary; only Confirm records.
@@ -890,7 +896,7 @@ test('the PN-first assignment wizard preselects the PN and can go Back', async (
   fireEvent.click(screen.getByRole('button', { name: '‹ Back' }));
   expect(
     await screen.findByRole('dialog', {
-      name: 'Choose the action for this PN',
+      name: 'Select an action',
     }),
   ).toBeInTheDocument();
 });
@@ -900,10 +906,12 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
 
   scan('PF:MACHINE:L1');
   const dialog = activeDialog();
-  const scanField = screen.getByLabelText('Scan Machine or queued PN barcode');
+  const scanField = screen.getByLabelText(
+    'Scan machine or queued part barcode',
+  );
   expect(scanField).toHaveAttribute(
     'placeholder',
-    'Scan Machine or queued PN barcode… (ENTER)',
+    'Scan machine or queued part barcode… (ENTER)',
   );
 
   function scanInside(value: string) {
@@ -932,11 +940,11 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   expect(dialog.textContent).toContain('no queued quantity in this Area');
   scanInside('PF:WORKER:88');
   expect(dialog.textContent).toContain(
-    'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
+    'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
   );
   // Selection errors share the Guidance error presentation (v16).
   expect(dialog.querySelector('.ss-guide.error')?.textContent).toContain(
-    'Barcode not valid for this step',
+    'Your current selections were kept',
   );
   expect(dialog.querySelector('.ss-scannote')).toBeNull();
   expect(
@@ -1024,7 +1032,7 @@ test('an inactive Machine is rejected with no write', async () => {
 
   scan('PF:MACHINE:L4');
   expect(
-    screen.getByText('Lathe 4 is inactive (maintenance)'),
+    screen.getByText('Lathe 4 is unavailable for production'),
   ).toBeInTheDocument();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
@@ -1036,7 +1044,7 @@ test('a PN with quantity in the Area opens the one-shot action dialog with valid
 
   scan('PF:PN:2027-60-8114-00');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   // Queued quantity exists → assign choice; quantity at Cut → receive.
   expect(dialog).toHaveTextContent('Assign queued quantity to a Machine');
@@ -1044,11 +1052,13 @@ test('a PN with quantity in the Area opens the one-shot action dialog with valid
   expect(dialog).toHaveTextContent('Add more quantity');
   expect(dialog).toHaveTextContent('Scrap damaged quantity');
   // No repair source exists for this PN → the intent is not offered.
-  expect(dialog).not.toHaveTextContent('Send quantity here for repair');
+  expect(dialog).not.toHaveTextContent('Return quantity for repair');
 
   // Cancel abandons with no write and never touches Last Scanned PN.
   fireEvent.keyDown(dialog, { key: 'Escape' });
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1057,7 +1067,7 @@ test('a PN elsewhere with one source goes to quantity, then a confirmation view'
 
   scan('PF:PN:118-052'); // only at Manual (4 pcs)
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   expect(dialog).toHaveTextContent('Transfer Manual → Lathe');
   // The Work Order context is no longer one raw string: `WO` stays a
@@ -1100,7 +1110,9 @@ test('Back on the transfer confirmation preserves the entered quantity', async (
 
   // Cancel still abandons everything with no write.
   fireEvent.keyDown(dialog, { key: 'Escape' });
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1111,13 +1123,13 @@ test('multiple sources require explicit selection — never combined silently', 
   const dialog = await screen.findByRole('dialog', {
     name: 'Select the source',
   });
-  expect(dialog).toHaveTextContent('never combined silently');
+  expect(dialog).toHaveTextContent('Select one source to continue');
   expect(dialog).toHaveTextContent('Mill — 3 pcs available');
   expect(dialog).toHaveTextContent('Deburr — 3 pcs available');
 
   fireEvent.click(screen.getByRole('button', { name: /Deburr — 3 pcs/ }));
   const qtyDialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   expect(qtyDialog).toHaveTextContent('Transfer Deburr → Lathe');
   expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
@@ -1134,9 +1146,9 @@ test('an unknown PN opens the three-step receive wizard with editable defaults',
   });
   // Operator-facing guidance: what was scanned and what confirmation
   // does — never internal record/persistence wording.
-  expect(dialog).toHaveTextContent('New PN — not registered yet');
+  expect(dialog).toHaveTextContent('New Part Number');
   expect(dialog).toHaveTextContent(
-    'It will be registered when the receipt is confirmed',
+    'it will be registered when you confirm the receipt',
   );
   expect(dialog.textContent).not.toMatch(/record is created/i);
   expect(dialog.textContent).not.toMatch(/case-insensitive/i);
@@ -1213,7 +1225,9 @@ test('an unknown PN opens the three-step receive wizard with editable defaults',
   ).toBeInTheDocument();
   // Internal Work Order without an external number — no TMP number.
   const detail = document.querySelector('.ss-toast .t2')?.textContent ?? '';
-  expect(detail).toContain('without an external number (displays —)');
+  expect(detail).toContain(
+    'Receipt recorded. The quantity is now waiting in the Area queue.',
+  );
   expect(detail).not.toMatch(/TMP-/);
 });
 
@@ -1230,7 +1244,7 @@ test('the receive settings step separates PN identity, defaults recap, and confi
   // visible directly in the fields, so the settings page has NO
   // recap block at all.
   expect(dialog.querySelector('.sub')?.textContent).toContain(
-    'New PN — not registered yet. Verify the Part Number carefully.',
+    'New Part Number. Verify it carefully',
   );
   expect(dialog.querySelector('.ss-recap')).toBeNull();
   expect(dialog.textContent).not.toContain(
@@ -1252,7 +1266,7 @@ test('the receive settings step separates PN identity, defaults recap, and confi
   const guide = dialog.querySelector('.ss-guide.info')!;
   expect(guide.querySelector('.gmark')?.textContent).toBe('ℹ');
   expect(guide.textContent).toContain(
-    'No changes are recorded until you review and confirm the final step.',
+    'Nothing is recorded until the final confirmation.',
   );
   // v15: the marker-less `neutral` guidance kind no longer exists.
   expect(dialog.querySelector('.ss-guide.neutral')).toBeNull();
@@ -1293,7 +1307,9 @@ test('receive Back preserves settings and quantity; Cancel records nothing', asy
   // Cancel on the confirmation step records nothing.
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1315,7 +1331,7 @@ test('PN identity is case-insensitive and keeps the first-entered casing', async
   // action dialog opens — and shows the preserved original casing.
   scan('PF:PN:ABC-PART');
   const dialog2 = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
   expect(
@@ -1359,7 +1375,7 @@ test('Add more quantity requires a reason, has no MAX/default, and confirms sepa
     screen.getByText(/0455-20-0118-03 \+2 pcs at Lathe/),
   ).toBeInTheDocument();
   expect(document.querySelector('.ss-toast .t2')?.textContent).toContain(
-    'never changes the WO Demand requested quantity',
+    'The added quantity is now waiting in the Area queue',
   );
 });
 
@@ -1403,7 +1419,9 @@ test('quantity dialogs keep a dedicated review step separate from quantity entry
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1414,22 +1432,22 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
 
   scan('PF:PN:0455-20-0118-03');
   const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   // A repair source exists for this PN → the intent is offered, but
   // never auto-selected.
   fireEvent.click(
     within(actions as HTMLElement).getByRole('button', {
-      name: /Send quantity here for repair/,
+      name: /Return quantity for repair/,
     }),
   );
 
   const dialog = await screen.findByRole('dialog', {
-    name: 'Send quantity here for repair',
+    name: 'Return quantity for repair',
   });
   // Operator wording — the intent is explicit, never inferred.
-  expect(dialog).toHaveTextContent('never assumed to be a repair');
-  expect(dialog).toHaveTextContent('no new quantity and no new demand');
+  expect(dialog).toHaveTextContent('This moves existing quantity');
+  expect(dialog).toHaveTextContent('it does not create additional quantity');
 
   // v15 entry recap names the repair destination.
   expect(dialog.querySelector('.ss-recap')?.textContent).toContain(
@@ -1440,7 +1458,7 @@ test('the Repair intent is explicit: source, quantity, reason, then a Repair con
   // The MAX/default statement is an ℹ instruction (v15), not a warning.
   expect(screen.getByLabelText('Quantity: 4')).toBeInTheDocument();
   const maxGuide = dialog.querySelector('.ss-guide.info')!;
-  expect(maxGuide.textContent).toContain('MAX 4 pcs, the default');
+  expect(maxGuide.textContent).toContain('Up to 4 pcs are available');
   const next = screen.getByRole('button', { name: 'Next' });
   expect(next).toBeDisabled(); // reason is required
 
@@ -1483,15 +1501,15 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   }
   fireEvent.change(scrapInput, { target: { value: 'PF:PN:1' } });
   fireEvent.keyDown(scrapInput, { key: 'Enter' });
-  expect(screen.getByText(/only PF:SCRAP counts here/)).toBeInTheDocument();
+  expect(screen.getByText(/is not a valid scrap barcode/)).toBeInTheDocument();
   // The rejection renders in the shared Guidance error style (v16).
   expect(dialog.querySelector('.ss-guide.error')?.textContent).toContain(
-    'only PF:SCRAP counts here',
+    'is not a valid scrap barcode',
   );
   expect(dialog.querySelector('.ss-scrapcount .cnt')?.textContent).toBe('3');
 
   // The count can be corrected before confirmation.
-  fireEvent.click(screen.getByRole('button', { name: '−1 correct' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove one' }));
   expect(dialog.querySelector('.ss-scrapcount .cnt')?.textContent).toBe('2');
 
   // Available / pending / remaining stay visible while counting — a
@@ -1503,7 +1521,7 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
   // Next stays blocked until the common reason exists.
   const next = screen.getByRole('button', { name: 'Next' });
   expect(next).toBeDisabled();
-  fireEvent.change(screen.getByLabelText('Common scrap reason (required)'), {
+  fireEvent.change(screen.getByLabelText('Scrap reason (required)'), {
     target: { value: 'tool crash' },
   });
   expect(next).toBeEnabled();
@@ -1527,7 +1545,9 @@ test('the Scrap workflow counts PF:SCRAP scans, requires a reason, and cancel di
       name: 'Cancel (Esc)',
     }),
   );
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1541,7 +1561,7 @@ test('confirming Scrap records one auditable SCRAPPED operation', async () => {
   const scrapInput = screen.getByLabelText('Scrap barcode input');
   fireEvent.change(scrapInput, { target: { value: 'PF:SCRAP' } });
   fireEvent.keyDown(scrapInput, { key: 'Enter' });
-  fireEvent.change(screen.getByLabelText('Common scrap reason (required)'), {
+  fireEvent.change(screen.getByLabelText('Scrap reason (required)'), {
     target: { value: 'gouged face' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -1551,7 +1571,7 @@ test('confirming Scrap records one auditable SCRAPPED operation', async () => {
     screen.getByText('Scrapped — 2027-60-8114-00 × 1 at Lathe'),
   ).toBeInTheDocument();
   expect(document.querySelector('.ss-toast .t2')?.textContent).toContain(
-    'never reduces the WO Demand requested quantity',
+    'The scrap quantity and reason were recorded',
   );
 });
 
@@ -1560,7 +1580,7 @@ test('scrap instructions describe the workflow without the SCRAPPED event name',
 
   scan('PF:PN:2027-60-8114-00');
   const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   // The action-choice explanation uses operator wording (v15) — the
   // canonical event name never appears in instructions.
@@ -1568,7 +1588,7 @@ test('scrap instructions describe the workflow without the SCRAPPED event name',
     name: /Scrap damaged quantity/,
   });
   expect(choice.textContent).toContain(
-    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.',
+    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the total. Nothing is recorded until confirmation.',
   );
   expect(choice.textContent).not.toContain('SCRAPPED');
 
@@ -1577,7 +1597,7 @@ test('scrap instructions describe the workflow without the SCRAPPED event name',
     name: 'Scrap damaged quantity',
   });
   expect(dialog.querySelector('.sub')?.textContent).toContain(
-    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the entire quantity. Nothing changes until you review and confirm the scrap.',
+    'Scan PF:SCRAP once for each damaged piece, then enter one reason for the total. Nothing is recorded until confirmation.',
   );
   // SCRAPPED appears only in the confirmation summary's Recorded
   // event row and in history surfaces — never on the counting step.
@@ -1590,7 +1610,7 @@ test('PF:SCRAP in the main scan input is rejected outside the workflow', async (
 
   scan('PF:SCRAP');
   expect(
-    screen.getByText(/accepted only inside the Scrap workflow/),
+    screen.getByText(/Scrap barcode cannot be used here/),
   ).toBeInTheDocument();
 });
 
@@ -1606,9 +1626,11 @@ test('QUEUE return uses quantity then a dedicated confirmation view', async () =
     })[0],
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'Return quantity to the Area queue',
+    name: 'Return unfinished quantity to queue',
   });
-  expect(dialog).toHaveTextContent('MAX is selected by default');
+  expect(dialog).toHaveTextContent(
+    'Enter a lower quantity to return only part of them',
+  );
 
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(dialog.querySelector('.ss-confirm')).not.toBeNull();
@@ -1616,8 +1638,12 @@ test('QUEUE return uses quantity then a dedicated confirmation view', async () =
   expect(dialog.textContent).toContain('Remaining on Machine');
   expect(lastPnText()).toBe('—');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm queue return' }));
-  expect(screen.getByText(/returned to the Lathe queue/)).toBeInTheDocument();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
+  expect(
+    screen.getByText(/× \d+ returned to the Lathe queue/),
+  ).toBeInTheDocument();
 });
 
 /* ============ Worker scans and Last Scanned PN ============ */
@@ -1631,7 +1657,7 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
   expect(lastPnText()).toBe('118-052');
 
   scan('PF:WORKER:88');
-  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(lastPnText()).toBe('118-052');
 
   // The badge scan opens a NEW session window: the pill shows the new
@@ -1663,12 +1689,12 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   // Cancel performs no write.
   fireEvent.click(undoButton());
   const dialog = await screen.findByRole('dialog', {
-    name: 'Undo last PN operation?',
+    name: 'Reverse the last Part Number action?',
   });
   expect(dialog).toHaveTextContent('78-04-0031');
   expect(dialog).toHaveTextContent('TRANSFERRED');
   expect(dialog).toHaveTextContent('Mill → Lathe');
-  expect(dialog).toHaveTextContent('Effect of the reversal');
+  expect(dialog).toHaveTextContent('Result after reversal');
   // The reversal effect carries the warning value tone (v15).
   expect(
     dialog.querySelector('.ss-confirm dd.tone-warn')?.textContent,
@@ -1681,13 +1707,15 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
 
   // Confirmed Undo reverses and advances to the next eligible action.
   fireEvent.click(undoButton());
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm Undo' }));
-  expect(screen.getByText('Undo recorded — 78-04-0031')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  expect(
+    screen.getByText('Last action reversed — 78-04-0031'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('118-052');
 
   // Undo the remaining operation; afterwards nothing is eligible.
   fireEvent.click(undoButton());
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm Undo' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
   expect(lastPnText()).toBe('—');
   expect(undoButton()).toBeDisabled();
 });
@@ -1699,7 +1727,7 @@ test('the quantity step opens focused and maps physical keys centrally', async (
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
 
   // The numeric entry is a real focusable input, focused on open.
@@ -1743,7 +1771,7 @@ test('virtual keypad buttons cannot capture Space or Enter afterwards', async ()
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
 
   // Keypad buttons are type="button" and non-focusable.
@@ -1775,7 +1803,7 @@ test('quantity editing is cursor-aware: selection replace, caret insert, fallbac
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
 
   // The MAX default mounts focused with its value selected — a typed
@@ -1823,7 +1851,7 @@ test('guidance kinds are distinct and summaries emphasize operational values', a
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
 
   // Info guidance carries its marker; the required-action prompt and
@@ -1883,7 +1911,7 @@ test('Add more quantity separates description, guidance, validation and reason h
 
   // Description: purpose and operational consequence.
   expect(dialog.querySelector('.sub')?.textContent).toContain(
-    'Add physical quantity that was not received from another Area.',
+    'Add physical quantity found at this Area that was not transferred from another Area.',
   );
   // v15 entry recap: where the quantity is added and where it lands.
   expect(dialog.querySelector('.ss-recap')?.textContent).toContain(
@@ -1892,7 +1920,7 @@ test('Add more quantity separates description, guidance, validation and reason h
   // Quantity guidance: no MAX and no assumed default — an ℹ info
   // instruction (v15), with its marker.
   const guide = dialog.querySelector('.ss-guide.info')!;
-  expect(guide.textContent).toContain('no MAX and no assumed default');
+  expect(guide.textContent).toContain('No default quantity is provided');
   expect(guide.querySelector('.gmark')?.textContent).toBe('ℹ');
   expect(dialog.querySelector('.keypad-max')).toBeNull();
   // Validation: a positive quantity is required (action kind).
@@ -1901,7 +1929,7 @@ test('Add more quantity separates description, guidance, validation and reason h
   );
   // Reason requirement: explained at the field, not repeated verbatim.
   expect(dialog.querySelector('.ss-fieldhint')?.textContent).toContain(
-    'later review',
+    'adjustment history',
   );
   fireEvent.keyDown(dialog, { key: 'Escape' });
 });
@@ -1911,7 +1939,7 @@ test('MAX exists for transfers; Escape always cancels with no write', async () =
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   // MAX shortcut restores the maximum after edits.
   fireEvent.keyDown(dialog, { key: 'Delete' });
@@ -1923,7 +1951,9 @@ test('MAX exists for transfers; Escape always cancels with no write', async () =
   expect(dialog.textContent).toContain('Confirm transfer');
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('Cancelled — nothing recorded.')).toBeInTheDocument();
+  expect(
+    screen.getByText('Cancelled. No changes were recorded.'),
+  ).toBeInTheDocument();
   expect(lastPnText()).toBe('—');
 });
 
@@ -1947,11 +1977,9 @@ test('recovery re-enables and refocuses the scan input', async () => {
   // blocked notice with the v15 wording.
   fireEvent.keyDown(input, { key: 'Enter' });
   const blocked = document.querySelector('.ss-toast.err')!;
+  expect(blocked.textContent).toContain('Connection lost — scanning is paused');
   expect(blocked.textContent).toContain(
-    'Disconnected — production actions are disabled',
-  );
-  expect(blocked.textContent).toContain(
-    'Scans will not be recorded or queued until the connection to the PartFlow server is restored.',
+    'Reconnect to PartFlow before continuing. No scans or production updates will be recorded while offline.',
   );
 
   failing = false;
@@ -1961,7 +1989,7 @@ test('recovery re-enables and refocuses the scan input', async () => {
   await waitFor(() => expect(input).toHaveFocus());
   expect(input).toHaveAttribute(
     'placeholder',
-    'Scan PN / Worker / Machine barcode… (ENTER)',
+    'Scan Part Number, Worker, or Machine barcode · Press Enter',
   );
 });
 
@@ -1988,7 +2016,7 @@ test('a scan is captured while a non-input element has focus; the first characte
   fireEvent.keyDown(document.body, { key: 'Enter' });
 
   // Submitted exactly once.
-  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(document.querySelectorAll('.ss-toast').length).toBe(1);
   expect(input.value).toBe('');
 
@@ -2001,7 +2029,7 @@ test('scanning while the main input has focus keeps working (single submit)', as
   await renderStation();
 
   scan('PF:WORKER:88');
-  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(document.querySelectorAll('.ss-toast').length).toBe(1);
 });
 
@@ -2012,7 +2040,7 @@ test('wedge capture never interferes with dialogs, other fields, or buttons', as
   // to the main barcode input.
   scan('PF:PN:0455-20-0118-03');
   const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   fireEvent.keyDown(actions, { key: 'X' });
   expect(input.value).toBe('');
@@ -2030,7 +2058,7 @@ test('wedge capture never interferes with dialogs, other fields, or buttons', as
   const manual = screen.getByRole('button', { name: '⌨ Enter PN manually' });
   manual.focus();
   fireEvent.keyDown(manual, { key: 'Enter' });
-  expect(screen.queryByText('Worker session: V. Tran')).toBeNull();
+  expect(screen.queryByText('Worker signed in: V. Tran')).toBeNull();
   expect(input.value).toBe('PF:WORKER:88');
 });
 
@@ -2066,7 +2094,7 @@ test('a Machine scan opens Assign to Machine with focus on the in-dialog scan fi
   });
   expect(dialog.contains(document.activeElement)).toBe(true);
   expect(
-    screen.getByLabelText('Scan Machine or queued PN barcode'),
+    screen.getByLabelText('Scan machine or queued part barcode'),
   ).toHaveFocus();
 });
 
@@ -2074,7 +2102,9 @@ test('Enter acts inside the open dialog and Escape closes it — the main input 
   await renderStation();
 
   scan('PF:MACHINE:L1');
-  const scanField = screen.getByLabelText('Scan Machine or queued PN barcode');
+  const scanField = screen.getByLabelText(
+    'Scan machine or queued part barcode',
+  );
   fireEvent.change(scanField, { target: { value: 'PF:PN:2027-60-8114-00' } });
   fireEvent.keyDown(scanField, { key: 'Enter' });
   // Machine + PN selected; the empty-input Enter advances to quantity.
@@ -2111,7 +2141,7 @@ test('wedge capture keeps working after a dialog cycle: a full barcode lands int
   wedgeType('PF:WORKER:88');
   expect(input.value).toBe('PF:WORKER:88');
   fireEvent.keyDown(document.body, { key: 'Enter' });
-  expect(screen.getByText('Worker session: V. Tran')).toBeInTheDocument();
+  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(input.value).toBe('');
 });
 
@@ -2121,7 +2151,7 @@ test('Assign to Machine Enter rules: filled scans once, empty advances only when
   scan('PF:MACHINE:L1');
   const dialog = activeDialog();
   const scanField = screen.getByLabelText(
-    'Scan Machine or queued PN barcode',
+    'Scan machine or queued part barcode',
   ) as HTMLInputElement;
 
   // Empty input + incomplete pair (no PN yet): Enter does nothing.
@@ -2177,7 +2207,7 @@ test('a touch-primary device suppresses the soft keyboard on the main barcode in
     // …while scanner/physical-keyboard input keeps working unchanged.
     scan('PF:PN:2027-60-8114-00');
     const dialog = await screen.findByRole('dialog', {
-      name: 'Choose the action for this PN',
+      name: 'Select an action',
     });
     fireEvent.keyDown(dialog, { key: 'Escape' });
 
@@ -2186,7 +2216,7 @@ test('a touch-primary device suppresses the soft keyboard on the main barcode in
     fireEvent.click(
       screen.getByRole('button', { name: '⌨ Enter PN manually' }),
     );
-    expect(screen.getByLabelText('Exact PartNumber')).not.toHaveAttribute(
+    expect(screen.getByLabelText('Part Number')).not.toHaveAttribute(
       'inputmode',
     );
   } finally {
@@ -2345,7 +2375,7 @@ test('manual DONE moves the selected quantity to Finished — ready to move', as
   );
 
   const dialog = await screen.findByRole('dialog', {
-    name: 'Complete processing — DONE',
+    name: 'Complete Area processing',
   });
   // MAX defaults to the quantity at the source position.
   expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
@@ -2364,7 +2394,7 @@ test('manual DONE moves the selected quantity to Finished — ready to move', as
   expect(dialog.textContent).toContain('AREA_COMPLETED');
   expect(lastPnText()).toBe('—');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(
     screen.getByText(/2027-60-8114-00 × 3 finished at Lathe/),
@@ -2406,10 +2436,12 @@ test('QUEUE returns quantity to the queue and never marks it DONE', async () => 
     within(lathe2).getByRole('button', { name: 'Return to Area queue' }),
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'Return quantity to the Area queue',
+    name: 'Return unfinished quantity to queue',
   });
   fireEvent.keyDown(dialog, { key: 'Enter' });
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm queue return' }));
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
 
   // The quantity is queued again — not finished.
   const lathe2After = document.querySelectorAll(
@@ -2436,15 +2468,15 @@ test('a direct-processing Area can also mark quantity DONE', async () => {
 
   scan('PF:PN:142-260');
   const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   fireEvent.click(
     within(actions as HTMLElement).getByRole('button', {
-      name: /Complete processing — DONE/,
+      name: /Complete Area processing/,
     }),
   );
   const dialog = await screen.findByRole('dialog', {
-    name: 'Complete processing — DONE',
+    name: 'Complete Area processing',
   });
   // No Machine field for a no-Machine Area; MAX = processing quantity.
   expect(screen.getByLabelText('Quantity: 20')).toBeInTheDocument();
@@ -2454,7 +2486,7 @@ test('a direct-processing Area can also mark quantity DONE', async () => {
   fireEvent.keyDown(dialog, { key: 'Enter' });
   expect(dialog.textContent).toContain('Finished — ready to move');
   expect(dialog.textContent).not.toContain('Machine');
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm DONE' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
 
   const stats = new Map(
     Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
@@ -2478,20 +2510,18 @@ test('a transfer from actively processing quantity appends AREA_COMPLETED, then 
   scan('PF:PN:78-04-0031'); // Mill (on Mill 1) + Deburr (finished)
   fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   fireEvent.keyDown(dialog, { key: 'Enter' });
 
   // One atomic command: completion of source processing + transfer.
   expect(dialog.textContent).toContain('Source processing');
-  expect(dialog.textContent).toContain('Completed by this transfer');
+  expect(dialog.textContent).toContain('marked complete at the source');
   // The source-processing deviation carries the warning value tone.
   expect(
     dialog.querySelector('.ss-confirm dd.tone-warn')?.textContent,
-  ).toContain('Completed by this transfer');
-  expect(dialog.textContent).toContain(
-    'AREA_COMPLETED, then TRANSFERRED — one atomic operation',
-  );
+  ).toContain('marked complete at the source');
+  expect(dialog.textContent).toContain('AREA_COMPLETED, then TRANSFERRED');
   fireEvent.keyDown(dialog, { key: 'Enter' });
 
   expect(lastPnText()).toBe('78-04-0031');
@@ -2510,7 +2540,7 @@ test('a transfer from READY_TO_TRANSFER quantity appends only TRANSFERRED', asyn
   scan('PF:PN:78-04-0031');
   fireEvent.click(screen.getByRole('button', { name: /Deburr — 3 pcs/ }));
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   fireEvent.keyDown(dialog, { key: 'Enter' });
 
@@ -2534,7 +2564,7 @@ test('partial completion-and-transfer preserves the remaining source quantity', 
   scan('PF:PN:78-04-0031');
   fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   // Move only 2 of the 3 pcs.
   fireEvent.keyDown(dialog, { key: 'Delete' });
@@ -2548,7 +2578,7 @@ test('partial completion-and-transfer preserves the remaining source quantity', 
   // the PN action dialog; its receive choice lists the sources.
   scan('PF:PN:78-04-0031');
   const actions = await screen.findByRole('dialog', {
-    name: 'Choose the action for this PN',
+    name: 'Select an action',
   });
   expect(actions).toHaveTextContent('1 pcs at Mill');
   expect(actions).toHaveTextContent('3 pcs at Deburr');
@@ -2566,11 +2596,11 @@ test('whole-command Undo reverses completion-plus-transfer together', async () =
 
   fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
   const dialog = await screen.findByRole('dialog', {
-    name: 'Undo last PN operation?',
+    name: 'Reverse the last Part Number action?',
   });
   // The Undo summary names the COMPLETE command, not one arbitrary row.
   expect(dialog).toHaveTextContent('AREA_COMPLETED + TRANSFERRED');
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm Undo' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
 
   // Both effects reverse together: the quantity left this Area again …
   expect(document.querySelector('.abd-summary')?.textContent).not.toContain(
@@ -2591,7 +2621,7 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
 
   scan('PF:PN:118-052');
   const dialog = await screen.findByRole('dialog', {
-    name: 'Transfer into this Area',
+    name: 'Receive from another Area',
   });
   const cancel = within(dialog as HTMLElement).getByRole('button', {
     name: 'Cancel (Esc)',
@@ -2600,10 +2630,10 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
   fireEvent.keyDown(dialog, { key: 'Escape' });
 
   // The manual PN entry dialog shares the standard wizard buttons
-  // (v15): the same Cancel label plus a primary `Look up PN` action.
+  // (v15): the same Cancel label plus a primary `Continue` action.
   fireEvent.click(screen.getByRole('button', { name: '⌨ Enter PN manually' }));
   const manual = await screen.findByRole('dialog', {
-    name: 'Manual PN entry — explicit fallback',
+    name: 'Enter Part Number manually',
   });
   expect(
     within(manual as HTMLElement).getByRole('button', {
@@ -2611,7 +2641,7 @@ test('wizard Cancel buttons use the standard `Cancel (Esc)` label', async () => 
     }).textContent,
   ).toBe('Cancel (Esc)');
   expect(
-    within(manual as HTMLElement).getByRole('button', { name: 'Look up PN' }),
+    within(manual as HTMLElement).getByRole('button', { name: 'Continue' }),
   ).toHaveClass('primary');
   fireEvent.keyDown(manual, { key: 'Escape' });
 });

@@ -1320,7 +1320,7 @@ Rules:
 - Repair does not create new physical quantity, is not a WorkOrderDemand, and is not a Request Type.
 - Repair operates on an existing QuantityFlow: partial Repair splits the flow (depends on SPLIT); full-flow Repair moves the whole flow.
 - Repair is recorded as a movement intent: `movement_type = TRANSFERRED`, `movement_reason = REPAIR` (§8.11) — no separate Repair aggregate.
-- Returning to a previously visited Area must **never** automatically be assumed to be Repair — a previously visited Area may legitimately be the next normal production step, and a normal transfer there remains possible. The user explicitly chooses the Repair intent (UI wording: “Send quantity here for repair”, never “Create REPAIR demand”).
+- Returning to a previously visited Area must **never** automatically be assumed to be Repair — a previously visited Area may legitimately be the next normal production step, and a normal transfer there remains possible. The user explicitly chooses the Repair intent (UI wording: “Return quantity for repair”, never “Create REPAIR demand”).
 - The Repair workflow collects: source Area / source QuantityFlow, destination repair Area, repair quantity, a required reason, the affected PN, Worker, Scan Station, and timestamp, and ends with a summary confirmation that identifies the movement as a Repair movement.
 - Actual Movement history remains authoritative; the Repair return extends a Floating Route's observed trace.
 

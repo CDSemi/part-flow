@@ -123,11 +123,11 @@ test('an unknown Station ID shows an explicit error — no silent fallback', asy
   renderAt('/scan-station/NO-SUCH-STATION');
 
   expect(
-    await screen.findByText(/Unknown or inactive Scan Station/),
+    await screen.findByText(/Scan Station “.*” is unavailable/),
   ).toBeInTheDocument();
   expect(screen.queryByLabelText('Scan barcode')).not.toBeInTheDocument();
   expect(
-    screen.getByRole('button', { name: 'Choose a Scan Station' }),
+    screen.getByRole('button', { name: 'Select another Scan Station' }),
   ).toBeInTheDocument();
 });
 

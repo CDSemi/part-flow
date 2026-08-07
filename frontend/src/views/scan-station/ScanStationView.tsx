@@ -179,10 +179,8 @@ function StationSelector() {
       <div className="ss-select">
         <h1>Select a Scan Station</h1>
         <p className="ss-select-sub">
-          Each Scan Station is bound to one Area. Select the station you are
-          working at to open it — <b>Production mode</b> opens the same station
-          with the application navigation hidden, so operators stay on the
-          station.
+          Select the Scan Station for your work area. <b>Production mode</b>{' '}
+          hides the main navigation to keep the station focused on scanning.
         </p>
         <ul className="ss-stationlist">
           {MOCK_SCAN_STATIONS.filter((s) => s.active).map((s) => {
@@ -210,8 +208,8 @@ function StationSelector() {
                   </span>
                   <span className="stype">
                     {machines.length > 0
-                      ? `${machines.length} Machines — queue & assign`
-                      : 'No Machines — direct Area processing'}
+                      ? `${machines.length} Machines · Queue and assignment enabled`
+                      : 'Direct Area processing · No Machine assignment'}
                   </span>
                 </button>
                 <div className="ss-stationacts">
@@ -245,12 +243,10 @@ function UnknownStation({ stationId }: { stationId: string }) {
             ✕
           </div>
           <div>
-            <div className="t1">
-              Unknown or inactive Scan Station “{stationId}”
-            </div>
+            <div className="t1">Scan Station “{stationId}” is unavailable</div>
             <div className="t2">
-              This Station ID is not an active Scan Station. Nothing is loaded —
-              a station is never silently substituted.
+              The Station ID is invalid or inactive. Select an available Scan
+              Station to continue.
             </div>
           </div>
         </div>
@@ -258,7 +254,7 @@ function UnknownStation({ stationId }: { stationId: string }) {
           className="bigbtn primary"
           onClick={() => navigate('/scan-station')}
         >
-          Choose a Scan Station
+          Select another Scan Station
         </button>
       </div>
     </section>
@@ -496,9 +492,9 @@ function StationView({
     setNotice({
       kind: 'err',
       icon: '✕',
-      title: 'Disconnected — production actions are disabled',
+      title: 'Connection lost — scanning is paused',
       detail:
-        'Scans will not be recorded or queued until the connection to the PartFlow server is restored.',
+        'Reconnect to PartFlow server before continuing. No scans or production updates will be recorded while offline.',
     });
   }, []);
 
@@ -516,7 +512,7 @@ function StationView({
   const cancelFlow = useCallback(() => {
     // Cancel always means no write; the temporary context is cleared
     // and never replaces the Last Scanned PN.
-    closeFlow('Cancelled — nothing recorded.');
+    closeFlow('Cancelled. No changes were recorded.');
   }, [closeFlow]);
 
   /** Route a resolved PN to the applicable one-shot dialog. */
@@ -566,9 +562,9 @@ function StationView({
         setNotice({
           kind: 'err',
           icon: '✕',
-          title: `${SCRAP_BARCODE} is accepted only inside the Scrap workflow`,
+          title: 'Scrap barcode cannot be used here',
           detail:
-            'Open “Scrap damaged quantity” from a PN first — the scrap barcode is context-sensitive. Nothing recorded.',
+            'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.',
         });
         return;
       case 'worker': {
@@ -578,8 +574,8 @@ function StationView({
           setNotice({
             kind: 'err',
             icon: '✕',
-            title: 'Unknown Worker barcode',
-            detail: 'Rejected — nothing recorded.',
+            title: 'Worker badge not recognized',
+            detail: 'Check the badge and scan again. No changes were recorded.',
           });
           return;
         }
@@ -589,9 +585,8 @@ function StationView({
         setNotice({
           kind: 'ok',
           icon: '✓',
-          title: `Worker session: ${name}`,
-          detail:
-            'Previous Worker signed out. Worker identity is accountability metadata — it never determines business correctness.',
+          title: `Worker signed in: ${name}`,
+          detail: `The previous worker was signed out. New scans will be recorded under ${name}.`,
         });
         return;
       }
@@ -602,8 +597,9 @@ function StationView({
           setNotice({
             kind: 'err',
             icon: '✕',
-            title: 'Unknown Machine barcode',
-            detail: 'Rejected — nothing recorded.',
+            title: 'Machine barcode not recognized',
+            detail:
+              'Check the Machine barcode and scan again. No changes were recorded.',
           });
           return;
         }
@@ -614,7 +610,7 @@ function StationView({
             icon: '✕',
             title: `${machine.machine} belongs to another Area`,
             detail:
-              'Invalid Area/Machine combination — rejected, nothing recorded.',
+              'This Machine is assigned to a different Area and cannot be used at this station. No changes were recorded.',
           });
           return;
         }
@@ -624,8 +620,9 @@ function StationView({
           setNotice({
             kind: 'err',
             icon: '✕',
-            title: `${machine.machine} is inactive (maintenance)`,
-            detail: 'Inactive entities must not accept production updates.',
+            title: `${machine.machine} is unavailable for production`,
+            detail:
+              'This Machine is under maintenance. Select another Machine or contact a supervisor.',
           });
           return;
         }
@@ -643,8 +640,9 @@ function StationView({
         setNotice({
           kind: 'err',
           icon: '✕',
-          title: 'Area barcodes are not used at a Scan Station',
-          detail: 'This station is bound to one Area. Nothing recorded.',
+          title: 'Area barcode is not required here',
+          detail:
+            'This Scan Station is already assigned to an Area. Scan a Part Number, Worker badge, or Machine barcode. No changes were recorded.',
         });
         return;
       case 'pn':
@@ -656,9 +654,9 @@ function StationView({
         setNotice({
           kind: 'err',
           icon: '✕',
-          title: 'Unrecognized barcode',
+          title: 'Barcode not recognized',
           detail:
-            'Only PartFlow barcodes are accepted here. Unrelated factory or vendor barcodes and plain PN text are rejected — use “Enter PN manually” to type a PN. Nothing recorded.',
+            'Scan a PartFlow Part Number, Worker, or Machine barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
         });
         return;
     }
@@ -769,10 +767,8 @@ function StationView({
     setNotice({
       kind: 'warn',
       icon: '⟲',
-      title: `Undo recorded — ${entry.action.pn}`,
-      detail: `${entry.action.reversalEffect} The original ${entry.action.movements.join(
-        ' + ',
-      )} record${entry.action.movements.length > 1 ? 's are' : ' is'} preserved; a compensating REVERSED event references the complete operation.`,
+      title: `Last action reversed — ${entry.action.pn}`,
+      detail: `${entry.action.reversalEffect} The original history remains available for audit.`,
     });
     focusScan();
   }
@@ -800,9 +796,9 @@ function StationView({
       ? {
           kind: 'err',
           icon: '✕',
-          title: 'Unrecognized barcode',
+          title: 'Barcode not recognized',
           detail:
-            'Rejected — unknown or invalid scans never update tracking data. Nothing recorded.',
+            'Unknown or invalid scans never update tracking data. No changes were recorded.',
         }
       : notice;
 
@@ -958,8 +954,8 @@ function StationView({
             Scan barcode
             <span className="spacer" />
             <span className="note">
-              PN and Worker barcodes; a Machine barcode opens Assign to Machine
-              for a single assignment
+              Scan a Part Number or Worker badge. Scanning a Machine opens a
+              one-time assignment.
             </span>
           </div>
           <div className="ss-scanwrap">
@@ -982,7 +978,7 @@ function StationView({
                     ? 'Disconnected — scanning disabled'
                     : status === 'connecting'
                       ? 'Connecting…'
-                      : 'Scan PN / Worker / Machine barcode… (ENTER)'
+                      : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
                 }
                 aria-label="Scan barcode"
                 onKeyDown={(e) => {
@@ -1003,9 +999,8 @@ function StationView({
                 it, the development demo barcodes, then Last scanned
                 PN / Undo. */}
             <div className="ss-manualcap">
-              Manual PN entry is the fallback when the scanner is unavailable —
-              any non-empty PN value is validated exactly like a scan; raw PN
-              text is never treated as barcode input.
+              Use manual entry only when the scanner is unavailable. The Part
+              Number will be validated before any action is recorded.
             </div>
             {/* Development-only demo barcodes: the shared DevNotice
                 renders only in the dev build (the whole mock view is
@@ -1029,14 +1024,14 @@ function StationView({
                 remaining space, the Undo ACTION REGION is the block's
                 complete right edge (the button itself), separated by
                 its own stronger border-left — no separator element. */}
-            <div className="ss-lastpnlabel">Last scanned PN</div>
+            <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
               <div className="ss-lastpninfo">
                 <span className="p">{lastPn?.pn ?? '—'}</span>
                 <span className="d">
                   {lastPn
                     ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
-                    : 'no completed PN operations yet'}
+                    : 'No Part Number actions yet'}
                 </span>
               </div>
               <button
@@ -1759,7 +1754,7 @@ function MachineAssignDialog({
       return;
     }
     setScanError(
-      'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
+      'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
     );
   }
 
@@ -1800,7 +1795,7 @@ function MachineAssignDialog({
       kind: 'ok',
       icon: '✓',
       title: `${selectedPn} × ${parsedQty} → ${selectedMachine}`,
-      detail: `${selectedMachine} is now processing this quantity. The assignment is complete — scan the next barcode.`,
+      detail: `${selectedMachine} is now processing this quantity. Scan the next barcode when ready.`,
     });
     onClose();
   }
@@ -1825,9 +1820,9 @@ function MachineAssignDialog({
       {step === 'select' ? (
         <>
           <div className="sub">
-            Select a machine and a queued part number. Scan either barcode or
-            choose from the options below, then enter the quantity to assign.
-            Selections reset after confirmation.
+            Select a Machine and a queued Part Number, then enter the quantity
+            to assign. This assignment applies once and closes after
+            confirmation.
           </div>
           <input
             ref={scanRef}
@@ -1894,7 +1889,7 @@ function MachineAssignDialog({
                     disabled={m.status === 'maintenance'}
                     title={
                       m.status === 'maintenance'
-                        ? 'Under maintenance — accepts no production'
+                        ? 'Under maintenance · Unavailable for production'
                         : undefined
                     }
                     onClick={() => setMachine(m.name)}
@@ -1977,8 +1972,8 @@ function MachineAssignDialog({
             ]}
           />
           <Guidance tone="info">
-            MAX defaults to the queued quantity. Enter a smaller quantity if
-            needed.
+            The full queued quantity is selected by default. Enter a smaller
+            quantity if needed.
           </Guidance>
           {(() => {
             const v = quantityValidation(
@@ -2081,12 +2076,12 @@ function PnActionsDialog({
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   return (
-    <ModalDialog label="Choose the action for this PN" onClose={onCancel}>
-      <h3>Choose the action for this PN</h3>
+    <ModalDialog label="Select an action" onClose={onCancel}>
+      <h3>Select an action</h3>
       <div className="big mono">{pn}</div>
       <div className="sub">
-        Only currently valid choices are shown. Nothing is recorded until one
-        action is completed; Cancel abandons the scan with no write.
+        Only available actions are shown. No changes are recorded until you
+        review and confirm an action.
       </div>
       {hasMachines && queuedQty > 0 ? (
         <button
@@ -2108,7 +2103,7 @@ function PnActionsDialog({
             <br />
             <span className="ct2">
               {queuedQty} pcs waiting in the {areaName} queue — applies to one
-              assignment; MAX defaults to the queued quantity.
+              assignment; the full queued quantity is selected by default.
             </span>
           </span>
         </button>
@@ -2133,8 +2128,8 @@ function PnActionsDialog({
             <span className="ct1">Receive more quantity from another Area</span>
             <br />
             <span className="ct2">
-              {sources.map((s) => `${s.qty} pcs at ${s.areaLabel}`).join(' · ')}{' '}
-              — sources are never combined silently.
+              {sources.map((s) => `${s.qty} pcs at ${s.areaLabel}`).join(' · ')}
+              {'. '}Select the source Area before entering the quantity.
             </span>
           </span>
         </button>
@@ -2150,7 +2145,7 @@ function PnActionsDialog({
             DONE
           </span>
           <span>
-            <span className="ct1">Complete processing — DONE</span>
+            <span className="ct1">Complete Area processing</span>
             <br />
             <span className="ct2">
               {directQty} pcs in processing. The finished quantity moves to the
@@ -2170,8 +2165,8 @@ function PnActionsDialog({
           <span className="ct1">Add more quantity</span>
           <br />
           <span className="ct2">
-            Add physical quantity that was not received from another Area. Enter
-            a reason so the adjustment can be reviewed later.
+            Add physical quantity found at this Area that was not transferred
+            from another Area. A reason is required.
           </span>
         </span>
       </button>
@@ -2184,11 +2179,10 @@ function PnActionsDialog({
             REP
           </span>
           <span>
-            <span className="ct1">Send quantity here for repair</span>
+            <span className="ct1">Return quantity for repair</span>
             <br />
             <span className="ct2">
-              Return quantity that previously passed {areaName} to correct
-              earlier work — explicit intent, never assumed from history.
+              Return quantity to {areaName} so earlier work can be corrected.
             </span>
           </span>
         </button>
@@ -2206,8 +2200,7 @@ function PnActionsDialog({
             <br />
             <span className="ct2">
               Scan {SCRAP_BARCODE} once for each damaged piece, then enter one
-              reason for the entire quantity. Nothing changes until you review
-              and confirm the scrap.
+              reason for the total. Nothing is recorded until confirmation.
             </span>
           </span>
         </button>
@@ -2237,8 +2230,8 @@ function SourceSelectDialog({
       <h3>Select the source</h3>
       <div className="big mono">{pn}</div>
       <div className="sub">
-        This PN has quantity in more than one source position. Select exactly
-        one — quantities from multiple sources are never combined silently.
+        This Part Number is available in more than one Area. Select one source
+        to continue.
       </div>
       {sources.map((source) => (
         <button
@@ -2255,8 +2248,7 @@ function SourceSelectDialog({
             </span>
             <br />
             <span className="ct2">
-              {source.card.workOrder} · quantity entry follows (MAX {source.qty}
-              ).
+              {source.card.workOrder} · Up to {source.qty} pcs available
             </span>
           </span>
         </button>
@@ -2340,7 +2332,7 @@ function TransferDialog({
       title: `${pn} × ${parsedQty} → ${destinationNote}`,
       detail:
         completesQty > 0
-          ? `Processing at ${source.areaLabel} is completed for ${completesQty} pcs and the quantity moved here in one step.`
+          ? `${completesQty} pcs were completed at ${source.areaLabel} and transferred here.`
           : `The quantity moved here from ${source.areaLabel}.`,
     });
     onClose();
@@ -2348,7 +2340,7 @@ function TransferDialog({
 
   return (
     <ModalDialog
-      label="Transfer into this Area"
+      label="Receive from another Area"
       onClose={onCancel}
       onKeyDown={
         step === 'qty'
@@ -2356,7 +2348,7 @@ function TransferDialog({
           : enterKeyHandler(confirm)
       }
     >
-      <h3>Transfer into this Area</h3>
+      <h3>Receive from another Area</h3>
       {step === 'qty' ? (
         <div>
           <div className="big mono" title={pn}>
@@ -2375,8 +2367,8 @@ function TransferDialog({
             ]}
           />
           <Guidance tone="info">
-            Available at {source.areaLabel}: <b>{source.qty} pcs</b>. MAX is
-            selected by default.
+            Available at {source.areaLabel}: <b>{source.qty} pcs</b>. The full
+            quantity is selected by default.
           </Guidance>
           {(() => {
             const v = quantityValidation(
@@ -2404,7 +2396,7 @@ function TransferDialog({
           <div className="sub">Review the transfer, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Transfer into this Area', 'primary'],
+              ['Action', 'Receive from another Area', 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
@@ -2426,7 +2418,7 @@ function TransferDialog({
               [
                 'Source processing',
                 completesQty > 0
-                  ? `Completed by this transfer for ${completesQty} pcs — no separate DONE needed first`
+                  ? `${completesQty} pcs will be marked complete at the source before transfer`
                   : null,
                 undefined,
                 'warn',
@@ -2439,9 +2431,7 @@ function TransferDialog({
               ['Scan Station', station.stationId, 'secondary'],
               [
                 movements.length > 1 ? 'Recorded events' : 'Recorded event',
-                movements.length > 1
-                  ? `${movements.join(', then ')} — one atomic operation`
-                  : movements[0],
+                movements.length > 1 ? movements.join(', then ') : movements[0],
                 'secondary',
               ],
             ]}
@@ -2551,17 +2541,9 @@ function IntakeDialog({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} received into ${areaName}${hasMachines ? ' queue' : ''}`,
-      detail: `${isKnown ? 'Uses the known PN' : 'Registers the new PN exactly as entered'} and ${
-        reusableInternalWo
-          ? 'reuses the applicable internal MODIFY Work Order (WO —)'
-          : requestType === 'MODIFY'
-            ? 'creates an internal Work Order without an external number (displays —)'
-            : 'creates or uses the applicable Work Order'
-      }; the quantity ${
-        hasMachines
-          ? 'now waits in the Area queue for a Machine'
-          : 'is now processing in this Area'
-      }.`,
+      detail: hasMachines
+        ? 'Receipt recorded. The quantity is now waiting in the Area queue.'
+        : 'Receipt recorded. The quantity is now in processing at this Area.',
     });
     onClose();
   }
@@ -2597,14 +2579,13 @@ function IntakeDialog({
           <div className="sub">
             {isKnown ? (
               <>
-                This part number has no active Work Order Demand. Review the
-                production details below before continuing.
+                This Part Number has no active production demand. Review the
+                details below before receiving quantity.
               </>
             ) : (
               <>
-                This part number is not registered and has no active work order
-                demand. It will be created when the receipt is confirmed. Review
-                the production details before continuing.
+                New Part Number. Verify it carefully; it will be registered when
+                you confirm the receipt.
               </>
             )}
           </div>
@@ -2612,7 +2593,8 @@ function IntakeDialog({
               are visible directly in the fields below — the header
               stays the PN message plus one guidance line. */}
           <Guidance>
-            No changes are saved until you confirm the final step.
+            Review all details before confirming. Nothing is recorded until the
+            final confirmation.
           </Guidance>
           <div className="ss-dlgrid">
             <label htmlFor="in-type">Request Type</label>
@@ -2671,7 +2653,7 @@ function IntakeDialog({
             <input
               id="in-notes"
               value={notes}
-              placeholder="Enter a reason or note"
+              placeholder="Add a reason or note, if needed"
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
@@ -2853,11 +2835,9 @@ function AddQuantityDialog({
       kind: 'ok',
       icon: '✓',
       title: `${pn} +${parsedQty} pcs at ${areaName}`,
-      detail: `The addition is recorded with your reason so it can be reviewed later; it never changes the WO Demand requested quantity. ${
-        hasMachines
-          ? 'The added quantity waits in the Area queue.'
-          : 'The added quantity is now processing in this Area.'
-      }`,
+      detail: hasMachines
+        ? 'The quantity adjustment was recorded with your reason. The added quantity is now waiting in the Area queue.'
+        : 'The quantity adjustment was recorded with your reason. The added quantity is now in processing at this Area.',
     });
     onClose();
   }
@@ -2879,8 +2859,8 @@ function AddQuantityDialog({
             {pn}
           </div>
           <div className="sub">
-            Add physical quantity that was not received from another Area. Enter
-            a reason so the adjustment can be reviewed later.
+            Add physical quantity found at this Area that was not transferred
+            from another Area. A reason is required.
           </div>
           <StepRecap
             lines={[
@@ -2896,8 +2876,7 @@ function AddQuantityDialog({
             ]}
           />
           <Guidance>
-            There is no MAX and no assumed default — enter the actual physical
-            count.
+            Enter the actual quantity found. No default quantity is provided.
           </Guidance>
           {parsedQty < 1 ? (
             <Guidance tone="action">A positive quantity is required.</Guidance>
@@ -2907,7 +2886,7 @@ function AddQuantityDialog({
             Reason (required)
           </label>
           <div className="ss-fieldhint">
-            Stored with the adjustment for later review.
+            This reason will be included in the adjustment history.
           </div>
           <input
             id="addq-reason"
@@ -3039,16 +3018,14 @@ function RepairDialog({
       kind: 'ok',
       icon: '✓',
       title: `Repair — ${pn} × ${parsedQty} returned to ${areaName}`,
-      detail: `The quantity came back from ${selectedSource.areaLabel} to correct earlier work${
-        partial ? '; the partial quantity splits its Quantity Flow first' : ''
-      }. Repair creates no new quantity and no new demand.`,
+      detail: `The selected quantity was returned from ${selectedSource.areaLabel} to ${areaName} for repair.`,
     });
     onClose();
   }
 
   return (
     <ModalDialog
-      label="Send quantity here for repair"
+      label="Return quantity for repair"
       onClose={onCancel}
       size="wide"
       onKeyDown={
@@ -3057,18 +3034,16 @@ function RepairDialog({
           : enterKeyHandler(confirm)
       }
     >
-      <h3>Send quantity here for repair</h3>
+      <h3>Return quantity for repair</h3>
       {step === 'entry' ? (
         <div>
           <div className="big mono" title={pn}>
             {pn}
           </div>
           <div className="sub">
-            Return quantity that previously passed {areaName} so earlier work
-            can be corrected. Select where the quantity comes from, enter the
-            repair quantity, and give the reason. Repair creates no new quantity
-            and no new demand — and returning to a previously visited Area is
-            never assumed to be a repair; you choose it here.
+            Select the source Area, enter the quantity to return, and provide
+            the repair reason. This moves existing quantity; it does not create
+            additional quantity.
           </div>
           <StepRecap
             lines={[
@@ -3099,9 +3074,8 @@ function RepairDialog({
               {/* MAX/default statement is an instruction, not a hazard
                   — `info` (v15); genuine deviations keep `warn`. */}
               <Guidance>
-                Repair quantity — MAX {max} pcs, the default. A partial quantity
-                splits off its own Quantity Flow; the full quantity moves the
-                whole flow.
+                Up to {max} pcs are available. The full quantity is selected by
+                default; enter a smaller quantity for a partial return.
               </Guidance>
               {(() => {
                 const v = quantityValidation(
@@ -3121,7 +3095,7 @@ function RepairDialog({
             id="rep-reason"
             className="field"
             value={reason}
-            placeholder="what must be corrected?"
+            placeholder="Describe the work that must be corrected"
             onChange={(e) => setReason(e.target.value)}
           />
           <StepButtons
@@ -3141,7 +3115,7 @@ function RepairDialog({
           <div className="sub">Review the Repair movement, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Send quantity here for repair', 'primary'],
+              ['Action', 'Return quantity for repair', 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
@@ -3218,7 +3192,7 @@ function ScrapDialog({
     if (parsed.kind === 'empty') return;
     if (parsed.kind !== 'scrap') {
       setScanNote(
-        `Rejected “${value.trim()}” — only ${SCRAP_BARCODE} counts here.`,
+        `“${value.trim()}” is not a valid scrap barcode. Scan ${SCRAP_BARCODE} to add one piece.`,
       );
       return;
     }
@@ -3252,8 +3226,7 @@ function ScrapDialog({
       kind: 'ok',
       icon: '✓',
       title: `Scrapped — ${pn} × ${count} at ${areaName}`,
-      detail:
-        'One scrap record covers the counted total and can be reviewed later. Scrap never reduces the WO Demand requested quantity.',
+      detail: `The scrap quantity and reason were recorded. Remaining active quantity: ${available - count} pcs.`,
     });
     onClose();
   }
@@ -3293,8 +3266,8 @@ function ScrapDialog({
               surfaces, never in this instruction. */}
           <div className="sub">
             Scan <code>{SCRAP_BARCODE}</code> once for each damaged piece, then
-            enter one reason for the entire quantity. Nothing changes until you
-            review and confirm the scrap.
+            enter one reason for the total. Nothing is recorded until
+            confirmation.
           </div>
           <Guidance>
             Available at {areaName}: <b>{available} pcs</b> · pending scrap{' '}
@@ -3316,7 +3289,7 @@ function ScrapDialog({
               disabled={count === 0}
               onClick={() => setCount((c) => Math.max(0, c - 1))}
             >
-              −1 correct
+              Remove one
             </button>
             <button
               type="button"
@@ -3342,7 +3315,7 @@ function ScrapDialog({
           />
           {scanNote ? <Guidance tone="error">{scanNote}</Guidance> : null}
           <label className="ss-reasonlbl" htmlFor="scrap-reason">
-            Common scrap reason (required)
+            Scrap reason (required)
           </label>
           <input
             id="scrap-reason"
@@ -3457,14 +3430,14 @@ function QueueReturnDialog({
       kind: 'ok',
       icon: '✓',
       title: `${pn} × ${parsedQty} returned to the ${areaName} queue`,
-      detail: `The unfinished quantity left ${machine} and waits in the Area queue for its next assignment — it is not finished.`,
+      detail: `The quantity was removed from ${machine} and returned to the ${areaName} queue. It remains unfinished.`,
     });
     onClose();
   }
 
   return (
     <ModalDialog
-      label="Return quantity to the Area queue"
+      label="Return unfinished quantity to queue"
       onClose={onCancel}
       onKeyDown={
         step === 'qty'
@@ -3472,7 +3445,7 @@ function QueueReturnDialog({
           : enterKeyHandler(confirm)
       }
     >
-      <h3>Return quantity to the Area queue</h3>
+      <h3>Return unfinished quantity to queue</h3>
       {step === 'qty' ? (
         <div>
           <div className="big mono" title={pn}>
@@ -3487,8 +3460,8 @@ function QueueReturnDialog({
             ]}
           />
           <Guidance tone="info">
-            <b>{max} pcs</b> are assigned to {machine}. Enter
-            a lower quantity to return only part of them.
+            <b>{max} pcs</b> are assigned to {machine}. Enter a lower quantity
+            to return only part of them.
           </Guidance>
           {(() => {
             const v = quantityValidation(
@@ -3516,7 +3489,7 @@ function QueueReturnDialog({
           <div className="sub">Review the queue return, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Return to Area queue', 'primary'],
+              ['Action', 'Return unfinished quantity to queue', 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
@@ -3544,7 +3517,7 @@ function QueueReturnDialog({
             onBack={() => setStep('qty')}
             onCancel={onCancel}
             primary={{
-              label: 'Confirm queue return',
+              label: 'Confirm return to queue',
               onClick: confirm,
               disabled: !valid,
               autoFocus: true,
@@ -3625,7 +3598,7 @@ function DoneDialog({
 
   return (
     <ModalDialog
-      label="Complete processing — DONE"
+      label="Complete Area processing"
       onClose={onCancel}
       onKeyDown={
         step === 'qty'
@@ -3633,7 +3606,7 @@ function DoneDialog({
           : enterKeyHandler(confirm)
       }
     >
-      <h3>Complete processing — DONE</h3>
+      <h3>Complete Area processing</h3>
       {step === 'qty' ? (
         <div>
           <div className="big mono" title={pn}>
@@ -3657,13 +3630,14 @@ function DoneDialog({
           <Guidance tone="info">
             {machine ? (
               <>
-                <b>{max} pcs</b> are available on {machine}. Adjust the quantity
-                for partial completion.
+                <b>{max} pcs</b> are available on {machine}. The full quantity
+                is selected by default. Enter a smaller quantity to complete
+                only part of it.
               </>
             ) : (
               <>
-                <b>{max} pcs</b> in process. Adjust the quantity for partial
-                completion.
+                <b>{max} pcs</b> in process. The full quantity is selected by
+                default. Enter a smaller quantity to complete only part of it.
               </>
             )}
           </Guidance>
@@ -3693,8 +3667,8 @@ function DoneDialog({
             {pn}
           </div>
           <div className="sub">
-            Review the completion, then confirm. The finished quantity stays in{' '}
-            {areaName} on the finished rack until it is transferred.
+            Confirm the completed quantity. It will remain on the {areaName}{' '}
+            finished rack until transferred.
           </div>
           <ConfirmationSummary
             rows={[
@@ -3725,7 +3699,7 @@ function DoneDialog({
             onBack={() => setStep('qty')}
             onCancel={onCancel}
             primary={{
-              label: 'Confirm DONE',
+              label: 'Confirm completion',
               onClick: confirm,
               disabled: !valid,
               autoFocus: true,
@@ -3747,13 +3721,15 @@ function UndoConfirmDialog({
   onCancel: () => void;
 }) {
   return (
-    <ModalDialog label="Undo last PN operation?" onClose={onCancel}>
-      <h3>Undo last PN operation?</h3>
+    <ModalDialog
+      label="Reverse the last Part Number action?"
+      onClose={onCancel}
+    >
+      <h3>Reverse the last Part Number action?</h3>
       <div className="big mono">{target.pn}</div>
       <div className="sub">
-        Undo reverses the complete operation with a compensating REVERSED record
-        — when one action recorded several related events, all of them are
-        reversed together. The original records are preserved, never deleted.
+        This will reverse the complete last action. The original history will
+        remain available for audit.
       </div>
       <ConfirmationSummary
         rows={[
@@ -3773,13 +3749,13 @@ function UndoConfirmDialog({
           ],
           ['Worker', target.worker, 'secondary'],
           ['Time', <span className="mono">{target.time}</span>, 'secondary'],
-          ['Effect of the reversal', target.reversalEffect, 'primary', 'warn'],
+          ['Result after reversal', target.reversalEffect, 'primary', 'warn'],
         ]}
       />
       <StepButtons
         onCancel={onCancel}
         primary={{
-          label: 'Confirm Undo',
+          label: 'Confirm reversal',
           onClick: onConfirm,
           danger: true,
         }}
@@ -3800,22 +3776,22 @@ function ManualEntryDialog({
     fieldRef.current?.focus();
   }, []);
   return (
-    <ModalDialog label="Manual Part Number Entry" onClose={onCancel}>
-      <h3>Manual Part Number Entry</h3>
+    <ModalDialog label="Enter Part Number manually" onClose={onCancel}>
+      <h3>Enter Part Number manually</h3>
       {/* Operator wording only — engineering detail: PN identity is
           case-insensitive; an unknown PN opens the intake wizard, where
           the PartNumber record is created on first valid use. */}
       <div className="sub">
-        Enter the <b>exact Part Number</b>, not a barcode. Matching is not
-        case-sensitive. If the part number is not recognized, you’ll be taken to
-        Receiving to review and confirm it. No changes are saved at this step.
+        Enter the Part Number exactly as shown on the traveler or job paperwork.
+        Unknown Part Numbers will open the receive workflow for review. Nothing
+        is recorded at this step.
       </div>
       <input
-        aria-label="Part number"
+        aria-label="Part Number"
         ref={fieldRef}
         className="field mono"
         autoComplete="off"
-        placeholder="Part number, e.g. 0455-20-0118-03"
+        placeholder="Part Number, e.g. 0455-20-0118-03"
         onKeyDown={(e) => {
           if (e.key === 'Enter') onConfirm(e.currentTarget.value);
         }}
@@ -3823,7 +3799,7 @@ function ManualEntryDialog({
       <StepButtons
         onCancel={onCancel}
         primary={{
-          label: 'Look Up Part',
+          label: 'Continue',
           onClick: () => onConfirm(fieldRef.current?.value ?? ''),
         }}
       />
