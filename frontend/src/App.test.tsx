@@ -164,7 +164,8 @@ test('the Retry action rail is a full-height region at the banner edge', () => {
   // .zone-action pattern (surface and hover/focus-visible/active from
   // styles/global.css — the same treatment as the Scan Station Undo
   // region), stretched to the full banner height at the right edge,
-  // divided by its own stronger border-left, with the text centered
+  // divided by its own inset vertical rule (never a full-height border
+  // touching the banner's top/bottom), with the text centered
   // vertically. The banner carries no own padding, so no leftover
   // background sits right of the rail.
   const css = readFileSync(
@@ -173,9 +174,14 @@ test('the Retry action rail is a full-height region at the banner edge', () => {
   );
   const retry = /\.offbanner \.retry \{[^}]*}/s.exec(css)![0];
   expect(retry).toContain('align-self: stretch');
-  expect(retry).toContain('border-left: 2px solid');
+  expect(retry).not.toContain('border-left');
   expect(retry).toContain('align-items: center');
   expect(retry).not.toContain('min-height: 40px');
+  const retrySep = /\.offbanner \.retry::before \{[^}]*}/s.exec(css)![0];
+  expect(retrySep).toContain("content: ''");
+  expect(retrySep).toContain('position: absolute');
+  expect(retrySep).toMatch(/top:\s*\d/);
+  expect(retrySep).toMatch(/bottom:\s*\d/);
   expect(css).not.toMatch(/\.offbanner \.sep/);
   const banner = /\.offbanner \{[^}]*}/s.exec(css)![0];
   expect(banner).toContain('padding: 0');

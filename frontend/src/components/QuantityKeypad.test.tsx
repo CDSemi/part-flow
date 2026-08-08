@@ -155,7 +155,7 @@ test('Backspace is cursor-aware and identical for both keyboards', () => {
   expect(input.selectionStart).toBe(0);
 });
 
-test('CLEAR and MAX keep focus on the input', () => {
+test('CLEAR keeps focus on the input; MAX keeps focus and selects the applied value', () => {
   render(<Harness initial="12" max={34} />);
   const input = qtyInput();
   const clear = screen.getByRole('button', { name: 'CLEAR' });
@@ -168,7 +168,33 @@ test('CLEAR and MAX keep focus on the input', () => {
   fireEvent.click(maxButton);
   expect(input.value).toBe('34');
   expect(input).toHaveFocus();
-  expect(input.selectionStart).toBe(2);
+  // The applied value is selected in full — not just caret-placed
+  // after it — so a following digit overrides it directly.
+  expect(input.selectionStart).toBe(0);
+  expect(input.selectionEnd).toBe(2);
+});
+
+test('a digit typed right after MAX overrides the selected value instead of appending to it', () => {
+  render(<Harness initial="12" max={34} />);
+  const input = qtyInput();
+  const maxButton = screen.getByRole('button', { name: 'MAX 34' });
+  fireEvent.mouseDown(maxButton);
+  fireEvent.click(maxButton);
+  expect(input.value).toBe('34');
+  fireEvent.keyDown(input, { key: '5' });
+  expect(input.value).toBe('5');
+});
+
+test('clicking MAX again while already at the max value re-selects it', () => {
+  render(<Harness initial="34" max={34} />);
+  const input = qtyInput();
+  input.setSelectionRange(2, 2);
+  const maxButton = screen.getByRole('button', { name: 'MAX 34' });
+  fireEvent.mouseDown(maxButton);
+  fireEvent.click(maxButton);
+  expect(input.value).toBe('34');
+  expect(input.selectionStart).toBe(0);
+  expect(input.selectionEnd).toBe(2);
 });
 
 test('paste is sanitized to digits within the maximum length', () => {

@@ -27,7 +27,9 @@ import { isTouchPrimaryDevice, useSoftKeyboardOpen } from './touch-device';
  * are `type="button"`, non-focusable (tabIndex -1) and keep focus on
  * the input (mousedown prevented), so Space or Enter can never
  * re-activate a previously clicked button.
- * `max` renders a MAX shortcut (transfer/assignment flows); flows
+ * `max` renders a MAX shortcut (transfer/assignment flows) that also
+ * selects the applied value, so a following digit — physical or
+ * keypad — overrides it directly without first clearing; flows
  * without a MAX (Add More Quantity) simply omit it.
  *
  * Touch devices (GUI_DESIGN §4.8): on a touch-primary device the
@@ -51,6 +53,10 @@ export function QuantityKeypad({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingCaret = useRef<number | null>(null);
+  // Set by the MAX shortcut instead of pendingCaret — the applied
+  // value is selected in full, not just caret-placed, so it can be
+  // overridden in one step.
+  const pendingSelectAll = useRef(false);
   // Decided once per dialog lifecycle — pointer capabilities do not
   // change while a quantity step is open.
   const [touchPrimary] = useState(isTouchPrimaryDevice);
@@ -59,15 +65,20 @@ export function QuantityKeypad({
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
-  // Place the caret after our own edit once the new value has rendered.
-  // External value changes (e.g. the dialog setting the MAX default)
-  // leave the caret alone.
+  // Place the caret (or select-all, for MAX) after our own edit once
+  // the new value has rendered. External value changes (e.g. the
+  // dialog setting an initial default) leave the selection alone.
   useLayoutEffect(() => {
     const caret = pendingCaret.current;
+    const selectAll = pendingSelectAll.current;
     pendingCaret.current = null;
-    if (caret === null) return;
+    pendingSelectAll.current = false;
+    if (caret === null && !selectAll) return;
     const input = inputRef.current;
-    if (input && document.activeElement === input) {
+    if (!input || document.activeElement !== input) return;
+    if (selectAll) {
+      input.setSelectionRange(0, input.value.length);
+    } else if (caret !== null) {
       input.setSelectionRange(caret, caret);
     }
   }, [value]);
@@ -89,6 +100,24 @@ export function QuantityKeypad({
       onChange(edit.value);
     } else if (input && document.activeElement === input) {
       input.setSelectionRange(edit.caret, edit.caret);
+    }
+    input?.focus();
+  };
+
+  /**
+   * MAX shortcut: apply the max value and select it in full (rather
+   * than just caret-placing after it), so the worker can override with
+   * a different quantity by typing straight over the selection instead
+   * of clearing it first.
+   */
+  const applyMax = (maxValue: number) => {
+    const input = inputRef.current;
+    const next = String(maxValue);
+    if (next !== value) {
+      pendingSelectAll.current = true;
+      onChange(next);
+    } else if (input && document.activeElement === input) {
+      input.setSelectionRange(0, next.length);
     }
     input?.focus();
   };
@@ -191,9 +220,7 @@ export function QuantityKeypad({
               tabIndex={-1}
               className="act keypad-max"
               onMouseDown={keep}
-              onClick={() =>
-                applyEdit({ value: String(max), caret: String(max).length })
-              }
+              onClick={() => applyMax(max)}
             >
               MAX {max}
             </button>

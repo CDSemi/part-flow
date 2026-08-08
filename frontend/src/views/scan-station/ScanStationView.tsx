@@ -1023,7 +1023,7 @@ function StationView({
                 Selector card: the information region fills the
                 remaining space, the Undo ACTION REGION is the block's
                 complete right edge (the button itself), separated by
-                its own stronger border-left — no separator element. */}
+                its own inset vertical rule — no separator element. */}
             <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
               <div className="ss-lastpninfo">

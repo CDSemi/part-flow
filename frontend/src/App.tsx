@@ -61,7 +61,7 @@ function OfflineBanner() {
   // Two explicit regions — the same division as the Scan Station Undo
   // block: the message region fills the remaining space; the Retry
   // ACTION RAIL is the banner's complete right edge (the button
-  // itself), divided by its own stronger border-left — no separator
+  // itself), divided by its own inset vertical rule — no separator
   // element. No extra explanatory sentences (the write-blocked
   // behavior itself is the explanation on every surface).
   return (

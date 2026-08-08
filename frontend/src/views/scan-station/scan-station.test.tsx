@@ -2659,27 +2659,39 @@ test('Undo is a shared full-height action zone beside its separator; the shared 
     'utf8',
   );
 
-  // The shared action-zone presentation (Undo + offline Retry): a
-  // light error surface over the whole click region, one hover /
-  // active / focus-visible / disabled treatment, never button chrome.
+  // The shared action-zone presentation (Undo + offline Retry):
+  // transparent at rest (reads as the owning surface's own
+  // background), a light error surface highlights in on hover, with
+  // one active / focus-visible / disabled treatment, never button
+  // chrome.
   const zone = /\.zone-action \{[^}]*}/s.exec(globalCss)![0];
   expect(zone).toContain('border: none');
-  expect(zone).toContain('background: var(--error-surface-weak)');
-  expect(globalCss).toMatch(/\.zone-action:hover:not\(:disabled\) \{[^}]*}/s);
+  expect(zone).toContain('background: transparent');
+  const zoneHover = /\.zone-action:hover:not\(:disabled\) \{[^}]*}/s.exec(
+    globalCss,
+  )![0];
+  expect(zoneHover).toContain('background: var(--error-surface)');
   expect(globalCss).toMatch(/\.zone-action:active:not\(:disabled\) \{[^}]*}/s);
   expect(globalCss).toMatch(/\.zone-action:focus-visible \{[^}]*outline/s);
   expect(globalCss).toMatch(/\.zone-action:disabled \{[^}]*opacity/s);
 
   // Undo action region: the whole right region is the button — full
   // block height, flush right edge, centered content, divided from
-  // the information region by its own stronger border-left (the
-  // Station Selector card divider pattern; no separator element).
+  // the information region by an inset vertical rule (never a
+  // full-height border touching the block's top/bottom) — the click
+  // target itself still reaches flush to the block's border and right
+  // up to that rule.
   const undo = /\.ss-lastpn \.ss-undo \{[^}]*}/s.exec(css)![0];
   expect(undo).toContain('align-self: stretch');
-  expect(undo).toContain('border-left: 2px solid');
+  expect(undo).not.toContain('border-left');
   expect(undo).toContain('align-items: center');
   expect(undo).toContain('justify-content: center');
   expect(undo).not.toContain('min-height: 44px');
+  const undoSep = /\.ss-lastpn \.ss-undo::before \{[^}]*}/s.exec(css)![0];
+  expect(undoSep).toContain("content: ''");
+  expect(undoSep).toContain('position: absolute');
+  expect(undoSep).toMatch(/top:\s*\d/);
+  expect(undoSep).toMatch(/bottom:\s*\d/);
   expect(css).not.toContain('.ss-undosep');
   // The label lives OUTSIDE the block; the block clips its children
   // (no leftover background right of the action region), keeps no

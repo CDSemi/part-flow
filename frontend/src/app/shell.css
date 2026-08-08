@@ -192,10 +192,9 @@ main {
    block: the message region fills the remaining space (its text wraps
    naturally on narrow screens — never horizontal overflow); the Retry
    ACTION RAIL is the banner's complete right edge and full height,
-   divided by its own stronger border-left (the Station Selector card
-   divider pattern — no separator element, no `|`). The banner itself
-   carries no padding: the regions carry their own, so no gap or
-   leftover background sits right of the rail. */
+   divided by its own inset vertical rule (no separator element, no
+   `|`). The banner itself carries no padding: the regions carry their
+   own, so no gap or leftover background sits right of the rail. */
 .offbanner {
   display: flex;
   align-items: stretch;
@@ -215,21 +214,35 @@ main {
 }
 
 /* Retry rail: the WHOLE right region is the button — full banner
-   height, flush right edge, text centered vertically. Surface and the
-   shared hover / focus-visible / active presentation come from
-   .zone-action; the higher-specificity border-left always wins over
-   the shared border reset. Never a small text button after the
-   message. */
+   height, flush right edge, text centered vertically, no button
+   chrome of its own (surface and the shared hover / focus-visible /
+   active presentation come from .zone-action). Never a small text
+   button after the message. The divider from the message region is
+   the inset rule below — the click/hover region itself still reaches
+   flush to the banner's edge and right up to that rule. */
 .offbanner .retry {
+  position: relative;
   flex: none;
   align-self: stretch;
   display: inline-flex;
   align-items: center;
   padding: 0 22px;
   min-height: 0;
-  border-left: 2px solid var(--error-border);
   border-radius: 0;
   font-size: 13px;
+}
+
+/* Divider rule: a short vertical line inset from the banner's top and
+   bottom edges (never a full-height border touching them) — purely
+   decorative, so it never affects the Retry region's click target. */
+.offbanner .retry::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 1px;
+  background: var(--error-border);
 }
 
 /* ============ Production not-connected state ============ */

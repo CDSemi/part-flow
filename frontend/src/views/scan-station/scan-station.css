@@ -380,14 +380,15 @@
 
 /* Undo action region: the WHOLE right region is the button — flush
    with the block's right edge and full height, its icon and text
-   centered both ways. A stronger border-left on the region itself
-   divides it from the information region (the Station Selector card
-   divider pattern — no separator element). Surface and the shared
-   hover / focus-visible / active presentation come from .zone-action;
-   a disabled region keeps its layout, border and surface (opacity
-   dims icon, text and surface together) and never dims the
-   information region. */
+   centered both ways, no button chrome of its own (surface and the
+   shared hover / focus-visible / active presentation come from
+   .zone-action). A disabled region keeps its layout and surface
+   (opacity dims icon, text and surface together) and never dims the
+   information region. The divider from the information region is the
+   inset rule below — the click/hover region itself still reaches
+   flush to the block's border and right up to that rule. */
 .ss-lastpn .ss-undo {
+  position: relative;
   flex: none;
   align-self: stretch;
   display: inline-flex;
@@ -395,13 +396,23 @@
   justify-content: center;
   padding: 0 20px;
   min-height: 0;
-  /* Higher specificity than the shared .zone-action border reset, so
-     the dividing border-left always wins regardless of stylesheet
-     order. */
-  border-left: 2px solid var(--border2);
   border-radius: 0;
   font-size: 14px;
   letter-spacing: 0.3px;
+}
+
+/* Divider rule: a short vertical line inset from the block's top and
+   bottom edges (never a full-height border touching them) — purely
+   decorative, so it never affects the action region's click target or
+   layout above. */
+.ss-lastpn .ss-undo::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border2);
 }
 
 /* Narrow: the PN keeps the first row; the movement summary moves to
