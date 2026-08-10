@@ -73,9 +73,11 @@ function rowByPn(pn: string) {
 test('columns render in the approved order with Job Numbers last', async () => {
   await renderBoard();
 
+  // Headers carrying a tooltip wrap their label in .thlbl — the
+  // column NAME is the label, never the tooltip text (v18).
   const headers = Array.from(
     visibleTable().querySelectorAll('thead th'),
-    (th) => th.textContent,
+    (th) => th.querySelector('.thlbl')?.textContent ?? th.textContent,
   );
   expect(headers).toEqual([
     'No.',
@@ -147,13 +149,66 @@ test('Hot rows carry the flame in the No. column only, with an accessible label'
   ).toBeNull();
 });
 
-test('the footer legend describes the No.-column flame, not 🔥#n before the PN', async () => {
+test('the legend conventions live in the column-header tooltips, not the footer', async () => {
   await renderBoard();
 
+  // Each convention sits in the header of the column it describes
+  // (v18), as key/description rows inside a hover tooltip panel.
+  const ths = Array.from(visibleTable().querySelectorAll('thead th'));
+  const thByLabel = (label: string) =>
+    ths.find((th) => th.querySelector('.thlbl')?.textContent === label);
+
+  const noTip = thByLabel('No.')?.querySelector('.th-tip');
+  expect(noTip).not.toBeNull();
+  expect(noTip?.querySelector('.tipkey')?.textContent).toBe('🔥');
+  expect(noTip?.textContent).toContain('Hot priority (highest first)');
+
+  const dueTip = thByLabel('Due Date')?.querySelector('.th-tip');
+  const dueRows = Array.from(dueTip?.querySelectorAll('.tiprow') ?? []);
+  expect(dueRows).toHaveLength(2);
+  expect(dueRows[0].querySelector('.tipkey')?.textContent).toBe(
+    'Blinking days count',
+  );
+  // Kept short so the row fits the panel on one line — the
+  // steady-date/PN parenthetical is gone.
+  expect(dueRows[0].querySelector('.tipdesc')?.textContent).toBe(
+    'due soon / overdue',
+  );
+  expect(dueRows[1].querySelector('.tipkey')?.textContent).toBe('—');
+  expect(dueRows[1].textContent).toContain('no due date');
+
+  const jobsTip = thByLabel('Job Numbers')?.querySelector('.th-tip');
+  expect(jobsTip?.querySelector('.tipkey')?.textContent).toBe('—');
+  expect(jobsTip?.textContent).toContain('no external WO Number');
+
+  // The other headers carry no tooltip.
+  expect(
+    visibleTable().querySelectorAll('thead th.hastip .th-tip'),
+  ).toHaveLength(3);
+
+  // The footer legend row no longer repeats the conventions — only
+  // the sorting rule remains there.
   const foot = document.querySelector('.pb-foot');
-  expect(foot?.textContent).toContain('🔥 in the No. column = Hot priority');
-  expect(foot?.textContent).not.toContain('before the PN');
+  expect(foot?.textContent).not.toContain('Hot priority');
+  expect(foot?.textContent).not.toContain('blinking days count');
+  expect(foot?.textContent).not.toContain('no external WO Number');
   expect(foot?.textContent).not.toContain('⊘');
+  expect(foot?.textContent).toContain('Order: Hot rank first');
+
+  // Stylesheet: hover-only tooltip panel, hidden otherwise (adds no
+  // height to the sticky header), with a right-anchored variant for
+  // the table's right edge.
+  const css = await readBoardCss();
+  expect(ruleBlock(css, '.pb-table .th-tip')).toContain('display: none');
+  expect(css).toMatch(/th\.hastip:hover \.th-tip \{[^}]*display: flex/);
+  expect(ruleBlock(css, '.pb-table .th-tip.right')).toContain('right: 8px');
+  // Long descriptions wrap INSIDE the panel instead of overflowing
+  // its border: no nowrap on the rows or descriptions — only the key
+  // itself never wraps.
+  expect(ruleBlock(css, '.pb-table .th-tip .tiprow')).not.toContain('nowrap');
+  expect(ruleBlock(css, '.pb-table .th-tip .tipkey')).toContain(
+    'white-space: nowrap',
+  );
 });
 
 test('the footer states the sorting rule in user language', async () => {
@@ -175,13 +230,13 @@ test('the footer is separated into readable control and legend rows', async () =
   // Controls + aggregate totals in the first row…
   expect(rows[0].querySelector('.pgnav')).not.toBeNull();
   expect(rows[0].textContent).toContain('pcs in production');
-  // …legend items (flame, blink, dashes, sorting) in the second.
+  // …and only the sorting rule in the legend row (v18 — the flame /
+  // blink / dash conventions live in the column-header tooltips).
   const legends = Array.from(rows[1].querySelectorAll('.leg'), (el) =>
     el.textContent?.trim(),
   );
-  expect(legends).toHaveLength(4);
-  expect(legends[0]).toContain('🔥 in the No. column');
-  expect(legends[3]).toContain('Order: Hot rank first');
+  expect(legends).toHaveLength(1);
+  expect(legends[0]).toContain('Order: Hot rank first');
 });
 
 test('the footer anchors through flex layout — never position: fixed', async () => {

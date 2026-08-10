@@ -200,6 +200,78 @@
   white-space: nowrap;
 }
 
+/* Column-header tooltips (v18): the former footer legend conventions
+   live with the columns they describe (No., Due Date, Job Numbers).
+   A quiet dotted underline marks a header that carries a tooltip;
+   the tooltip itself is a small key/description panel floating below
+   the header on hover — hidden otherwise, so it adds no height to
+   the sticky header and stays outside the pagination measurement.
+   Hover-only by design: the board is a read-only display. */
+.pb-table th.hastip {
+  cursor: help;
+}
+
+.pb-table th.hastip .thlbl {
+  border-bottom: 1px dotted var(--faint);
+  padding-bottom: 1px;
+}
+
+.pb-table .th-tip {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  z-index: 8;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: 60ch;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  padding: 10px 14px;
+  /* Reset the header typography for readable body text. */
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* Right-edge columns anchor the panel to the header's right side so
+   it never leaves the viewport. */
+.pb-table .th-tip.right {
+  left: auto;
+  right: 8px;
+}
+
+.pb-table th.hastip:hover .th-tip {
+  display: flex;
+}
+
+/* One convention per row: an emphasized key (symbol or term), then
+   its plain description. The description wraps inside the panel's
+   max-width (never overflows the rounded border); the key never
+   wraps or shrinks. */
+.pb-table .th-tip .tiprow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pb-table .th-tip .tiprow .tipdesc {
+  min-width: 0;
+}
+
+.pb-table .th-tip .tipkey {
+  flex: none;
+  font-weight: 750;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .pb-table td {
   padding: 17px 14px;
   border-bottom: 1px solid var(--hair);

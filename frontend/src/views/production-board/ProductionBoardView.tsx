@@ -324,15 +324,48 @@ function BoardColgroup() {
   );
 }
 
+// Column-header tooltips (v18): the former footer legend conventions
+// live with the columns they describe — a small key/description panel
+// shown on header hover (production-board.css .th-tip). Hover-only:
+// the board is a read-only display with no tab order, and the hidden
+// tooltip adds no height to the sticky header (pagination unaffected).
 function BoardHeadRow() {
   return (
     <tr>
-      <th>No.</th>
+      <th className="hastip">
+        <span className="thlbl">No.</span>
+        <span className="th-tip">
+          <span className="tiprow">
+            <span className="tipkey">🔥</span>
+            <span className="tipdesc">Hot priority (highest first)</span>
+          </span>
+        </span>
+      </th>
       <th className="pn">Part Number</th>
       <th>Areas &amp; Quantities · Time</th>
-      <th>Due Date</th>
+      <th className="hastip">
+        <span className="thlbl">Due Date</span>
+        <span className="th-tip">
+          <span className="tiprow">
+            <span className="tipkey">Blinking days count</span>
+            <span className="tipdesc">due soon / overdue</span>
+          </span>
+          <span className="tiprow">
+            <span className="tipkey">—</span>
+            <span className="tipdesc">no due date</span>
+          </span>
+        </span>
+      </th>
       <th>Total Days</th>
-      <th>Job Numbers</th>
+      <th className="hastip">
+        <span className="thlbl">Job Numbers</span>
+        <span className="th-tip right">
+          <span className="tiprow">
+            <span className="tipkey">—</span>
+            <span className="tipdesc">no external WO Number</span>
+          </span>
+        </span>
+      </th>
     </tr>
   );
 }
@@ -719,8 +752,9 @@ export function ProductionBoardView() {
           board viewport (margin-top: auto — never position: fixed), so
           it stays part of layout, never covers table content, and its
           height stays inside the pagination measurement. Two readable
-          rows: pagination controls + aggregate totals, then the
-          legends including the user-facing sorting rule. */}
+          rows: pagination controls + aggregate totals, then the legend
+          row carrying the user-facing sorting rule (v18 — the other
+          conventions live in the column-header tooltips). */}
       <div className="pb-foot" ref={footRef}>
         <div className="pb-footrow">
           <span>
@@ -833,15 +867,10 @@ export function ProductionBoardView() {
             <span className="swstate">{autoScale ? 'On' : 'Off'}</span>
           </button>
         </div>
+        {/* Legend row (v18): only the user-facing sorting rule remains
+            — the flame / blink / dash conventions moved into the
+            column-header tooltips of the columns they describe. */}
         <div className="pb-footrow legend">
-          <span className="leg">
-            🔥 in the No. column = Hot priority (highest first)
-          </span>
-          <span className="leg">
-            blinking days count = due soon / overdue (the date and PN stay
-            steady)
-          </span>
-          <span className="leg">— = no due date / no external WO Number</span>
           <span className="leg sort">
             Order: Hot rank first → earliest due date → no due date by oldest
             received date.
