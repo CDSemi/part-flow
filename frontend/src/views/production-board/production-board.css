@@ -345,9 +345,10 @@
   white-space: nowrap;
 }
 
-/* Per-location quantities are subtotals (v15): neutral secondary tone
-   so the main total below carries the emphasis — weight and size stay,
-   color recedes. */
+/* Per-location quantities are subtotals: muted base tone (v15) for
+   rows without a state tone (Stockroom), overridden by the semantic
+   state tones below (v18) — the main total still carries the
+   strongest emphasis through the primary text color. */
 .pb-table .lqty {
   font-family: var(--mono), monospace;
   font-weight: 800;
@@ -356,26 +357,38 @@
   color: var(--muted);
 }
 
-.pb-table .ltag {
-  font-size: 11px;
-  color: var(--faint);
-  font-weight: 650;
-  padding-left: 8px;
-  white-space: nowrap;
-}
-
-/* Semantic state-text tones, consistent with the Scan Station
-   statistics (GUI_DESIGN §4.3): queue → warning, on machine and
-   processing / External activity → information, done → success
-   (below). Color is never the only distinction — the state text
-   itself remains. */
-.pb-table .ltag.st-queue {
+/* Semantic state tones (v18 — supersedes the v13 state-label tones):
+   the tone moved from the state words to the row's QUANTITY value —
+   queue → warning, on machine / processing / External activity →
+   information, done → success (below) — consistent with the Scan
+   Station statistic tones (GUI_DESIGN §4.3). Each location row
+   carries its explicit `st-*` state class. The state words themselves
+   read as quiet secondary text (.ltag below), and color is never the
+   only distinction: the written state remains beside every toned
+   quantity. */
+.pb-table .locrow.st-queue .lqty {
   color: var(--warn-t);
 }
 
-.pb-table .ltag.st-machine,
-.pb-table .ltag.st-processing {
+.pb-table .locrow.st-machine .lqty,
+.pb-table .locrow.st-processing .lqty {
   color: var(--info-t);
+}
+
+/* Done (finished at the Area, waiting for transfer): success tone on
+   the quantity — ready status, never current Machine ownership. */
+.pb-table .locrow.st-done .lqty {
+  color: var(--ok-t);
+}
+
+/* State words: quiet secondary text — the tone lives on the quantity
+   (v18), never on the label. */
+.pb-table .ltag {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 650;
+  padding-left: 8px;
+  white-space: nowrap;
 }
 
 /* External activity (`plating`, `vendor`, …): a light informational
@@ -389,12 +402,6 @@
   font-size: 11px;
   font-weight: 700;
   color: var(--muted);
-}
-
-/* Done (finished at the Area, waiting for transfer): success tone —
-   ready status, never current Machine ownership. */
-.pb-table .ltag.done {
-  color: var(--ok-t);
 }
 
 .pb-table .ltime {

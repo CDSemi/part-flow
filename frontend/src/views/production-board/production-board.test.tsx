@@ -453,6 +453,43 @@ test('queue and processing rows keep their state labels', async () => {
   expect(processingRow?.querySelector('.lname')?.textContent).toBe('Manual');
 });
 
+test('state tones color the quantity values — state words stay quiet secondary text', async () => {
+  await renderBoard();
+
+  // Markup: every location row carries its explicit `st-*` state
+  // class (v18), so the stylesheet can tone the row's QUANTITY by
+  // state; the total row stays outside the state classes.
+  const latheLoc = rowByPn('2027-60-8114-00')?.querySelector('.loc');
+  const rows = Array.from(latheLoc?.querySelectorAll('.locrow') ?? []);
+  const byTag = (text: string) =>
+    rows.find((row) => row.querySelector('.ltag')?.textContent === text);
+  expect(byTag('on machine')?.classList.contains('st-machine')).toBe(true);
+  expect(byTag('queue')?.classList.contains('st-queue')).toBe(true);
+  expect(byTag('done')?.classList.contains('st-done')).toBe(true);
+  const total = latheLoc?.querySelector('.locrow.total');
+  expect(total?.className).toBe('locrow total');
+
+  // Stylesheet: the semantic tone lives on the quantity value —
+  // queue → warning, on machine / processing → information, done →
+  // success — never on the state words, which read as quiet
+  // secondary text. Color is never the only distinction: the written
+  // state stays beside every toned quantity.
+  const css = await readBoardCss();
+  expect(ruleBlock(css, '.pb-table .locrow.st-queue .lqty')).toContain(
+    'color: var(--warn-t)',
+  );
+  expect(ruleBlock(css, '.pb-table .locrow.st-processing .lqty')).toContain(
+    'color: var(--info-t)',
+  );
+  expect(ruleBlock(css, '.pb-table .locrow.st-done .lqty')).toContain(
+    'color: var(--ok-t)',
+  );
+  expect(ruleBlock(css, '.pb-table .ltag')).toContain('color: var(--muted)');
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  expect(stripped).not.toMatch(/\.ltag\.st-[\w-]+[^{]*\{[^}]*color/);
+  expect(stripped).not.toMatch(/\.ltag\.done[^{,]*\{/);
+});
+
 test('scrap renders as plain error-toned text on the total line, right-anchored, no ⊘', async () => {
   await renderBoard();
 

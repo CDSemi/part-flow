@@ -144,10 +144,12 @@ function LiveClock({ control }: { control?: ReactNode }) {
  * the active-Machine rows (never an abbreviation); canonical Movement
  * type names never appear in board text. Stocked rows keep their quiet
  * presentation (no tag — the `total … pcs stocked` line already states
- * it). Each state also carries its semantic text tone (production-
- * board.css), consistent with the Scan Station statistics: queue →
- * warning, on machine / processing → information, done → success.
- * Color is never the only distinction — the state text remains.
+ * it). The semantic tone lives on the row's QUANTITY value (v18,
+ * production-board.css, via the locrow `st-*` state class), consistent
+ * with the Scan Station statistics: queue → warning, on machine /
+ * processing → information, done → success — while the state words
+ * read as quiet secondary text. Color is never the only distinction —
+ * the written state text remains beside every toned quantity.
  */
 function locationStateLabel(state: MockLocationRow['state']): string {
   switch (state) {
@@ -188,7 +190,9 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
           : 'Completed — ready to transfer'
       : undefined;
   return (
-    <div className="locrow">
+    // The explicit `st-*` state class lets the stylesheet tone the
+    // row's quantity by state (v18).
+    <div className={`locrow st-${loc.state}`}>
       <span className="lname">
         <AreaDot
           colorVar={areaByKey(loc.area)?.colorVar ?? 'var(--faint)'}
