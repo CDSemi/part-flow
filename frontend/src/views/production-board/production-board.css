@@ -23,6 +23,17 @@
   --loc-lqty: initial;
   --loc-ltag: initial;
   --loc-ltime: initial;
+  /* Automatic display scaling (v18): the board recalc measures the
+     table's intrinsic (max-content) width in the hidden measurement
+     copy and applies the auto-fit factor (board-logic autoFitScale)
+     as an inline CSS `zoom` on this element. Zoom multiplies EVERY
+     length in the subtree — all text (header, table, footer alike),
+     paddings, chips, indicator dots — so the whole board scales
+     uniformly until the table content fills the display width with
+     no column left half-empty and no content forced to wrap. All
+     sizes below therefore stay plain baseline pixels; nothing here
+     depends on the viewport, and the footer toggle switches the
+     scaling off by resetting the zoom to 1. */
 }
 
 /* Header (restructured v17): one balanced row shared by both
@@ -750,24 +761,63 @@ tr.hotrow2 td:first-child {
 
 /* ============ Kiosk mode (route /production-board/kiosk) ============ */
 
-/* Kiosk mode toggle (footer controls row — `Enter kiosk` in standard
-   mode, `Exit kiosk` in Kiosk mode, v17): sized like the
-   page-navigation family so the footer keeps one control height —
-   its height stays inside the pagination measurement. Quiet, never
-   louder than the board content; Ctrl+Shift+K stays the keyboard
-   path (tooltip). */
-.pb-foot .pb-kioskbtn {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel2);
+/* Footer slide switches (v18): ONE shared On/Off slide-control family
+   for the Kiosk mode toggle (`Enter/Exit kiosk` button until v17;
+   Ctrl+Shift+K stays the keyboard path via the tooltip) and the
+   auto-scale toggle — the same control language as the Machines
+   Maintenance switch (machines.css .mg-switch), restyled board-locally
+   in the quiet footer-control family. Information tone when on (an
+   enabled display preference, never a warning), and the state is
+   always written as text beside the knob, never color-only. Sized to
+   the footer's 30px control height so the switch height stays inside
+   the pagination measurement. */
+.pb-foot .pb-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: none;
+  padding: 4px;
+  min-height: 30px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 750;
-  padding: 4px 12px;
-  min-height: 30px;
 }
 
-.pb-foot .pb-kioskbtn:hover {
-  color: var(--text);
+.pb-foot .pb-switch .track {
+  display: inline-flex;
+  align-items: center;
+  width: 40px;
+  height: 22px;
+  border-radius: 12px;
+  border: 1px solid var(--border2);
+  background: var(--panel2);
+  padding: 2px;
+  transition: background 0.15s;
+}
+
+.pb-foot .pb-switch .knob {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--thumb);
+  transition: transform 0.15s;
+}
+
+.pb-foot .pb-switch.on .track {
+  background: var(--info-surface);
+  border-color: var(--info-border);
+}
+
+.pb-foot .pb-switch.on .knob {
+  background: var(--info);
+  transform: translateX(18px);
+}
+
+.pb-foot .pb-switch.on .swstate {
+  color: var(--info-t);
+}
+
+.pb-foot .pb-switch:hover .track {
   border-color: var(--border2);
 }

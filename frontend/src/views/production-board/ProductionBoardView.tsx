@@ -35,6 +35,7 @@ import {
 } from '../dates';
 import type { MockBoardRow, MockLocationRow } from '../view-models';
 import {
+  autoFitScale,
   FALLBACK_PAGE_SIZE,
   fallbackPageBreaks,
   LONG_DWELL_MINUTES,
@@ -366,11 +367,48 @@ export function ProductionBoardView() {
     fallbackPageBreaks(allRows.length, FALLBACK_PAGE_SIZE),
   );
 
+  // Automatic display scaling (v18): ON by default — the board is a
+  // large-display view and fills wide screens instead of leaving the
+  // columns half empty. The footer toggle turns it off (baseline
+  // sizes). Presentation only, never persisted.
+  const [autoScale, setAutoScale] = useState(true);
+
   const recalc = useCallback(() => {
     const section = sectionRef.current;
     const body = measureBodyRef.current;
     const table = measureTableRef.current;
     if (!section || !body || !table) return;
+    // Every measurement below is taken at zoom 1, where offset
+    // metrics, published pixel variables and viewport pixels all
+    // share one coordinate space in every engine — the computed
+    // auto-fit scale is applied once at the end, so measuring and
+    // scaling never feed back into each other. This runs before
+    // paint (useLayoutEffect / resize / ResizeObserver), so the
+    // intermediate state is never visible.
+    section.style.setProperty('zoom', '1');
+    // Auto-fit display scale: the measurement table is forced to its
+    // intrinsic max-content width for one synchronous read — the
+    // width the board content needs with every column at its widest
+    // real value and nothing newly wrapped. Scaling the board so
+    // that width fills the actual board width closes the
+    // inter-column whitespace on large displays; CSS zoom multiplies
+    // every length in the subtree (header, table and footer text,
+    // paddings, chips, dots), so the layout scales uniformly and
+    // content that fits at zoom 1 can never start wrapping at the
+    // fitted scale. Guarded to environments that really support
+    // zoom — elsewhere the board simply keeps its baseline.
+    let scale = 1;
+    if (
+      autoScale &&
+      typeof CSS !== 'undefined' &&
+      typeof CSS.supports === 'function' &&
+      CSS.supports('zoom', '1.5')
+    ) {
+      table.style.width = 'max-content';
+      const intrinsic = table.offsetWidth;
+      table.style.width = '';
+      scale = autoFitScale(section.getBoundingClientRect().width, intrinsic);
+    }
     // Shared content-driven location tracks: each PN row lays its
     // location fields out in its OWN grid, so cross-row alignment
     // needs a shared track width. The widest real value of each field
@@ -407,12 +445,20 @@ export function ProductionBoardView() {
     const headHeight = headRef.current?.offsetHeight ?? 0;
     const theadHeight = table.tHead?.offsetHeight ?? 0;
     const footHeight = footRef.current?.offsetHeight ?? 0;
+    // The visual height budget shrinks by the display scale: every
+    // measured height above is a zoom-1 pixel that renders `scale`
+    // times taller, so the viewport budget is divided by the scale
+    // before the zoom-1 heights are subtracted — the existing
+    // height-aware pagination then recomputes rows-per-page for the
+    // scaled typography on its own.
     const available =
-      window.innerHeight -
-      section.getBoundingClientRect().top -
+      (window.innerHeight - section.getBoundingClientRect().top) / scale -
       headHeight -
       theadHeight -
       footHeight;
+    // Apply the fit AFTER all zoom-1 measurements: one uniform zoom on
+    // the board root scales header, table and footer together.
+    section.style.setProperty('zoom', String(scale));
     const usable =
       available > 0 &&
       rowHeights.length > 0 &&
@@ -426,7 +472,7 @@ export function ProductionBoardView() {
         ? current
         : next,
     );
-  }, []);
+  }, [autoScale]);
 
   // Derived row content (dwell times, countdowns) changes on the
   // shared minute tick, which can change measured widths/heights — the
@@ -733,25 +779,54 @@ export function ProductionBoardView() {
             </span>
           </span>
           {/* The kiosk mode toggle lives in the footer controls row —
-              a normal layout child sized like the page-navigation
-              family, so the footer height stays inside the pagination
-              measurement; the shortcut lives in the tooltip instead
-              of a legend line. Standard mode enters kiosk, kiosk
-              mode exits (v17) — the same position and styling in
-              both presentations. */}
+              a normal layout child, so the footer height stays inside
+              the pagination measurement; the shortcut lives in the
+              tooltip instead of a legend line. An On/Off slide switch
+              (v18) in the shared footer-switch family: aria-checked
+              mirrors the active route, switching navigates between
+              the standard and kiosk routes (v17) — the same position
+              and presentation in both modes. */}
           <button
-            className="pb-kioskbtn"
-            aria-label={kiosk ? 'Exit kiosk mode' : 'Enter kiosk mode'}
+            type="button"
+            role="switch"
+            aria-checked={kiosk}
+            aria-label="Kiosk mode"
             title={
               kiosk
                 ? 'Exit kiosk mode (Ctrl+Shift+K)'
                 : 'Enter kiosk mode (Ctrl+Shift+K)'
             }
+            className={`pb-switch pb-kioskswitch${kiosk ? ' on' : ''}`}
             onClick={() =>
               navigate(kiosk ? '/production-board' : '/production-board/kiosk')
             }
           >
-            {kiosk ? 'Exit kiosk' : 'Enter kiosk'}
+            <span className="swlbl">Kiosk</span>
+            <span className="track" aria-hidden="true">
+              <span className="knob" />
+            </span>
+            <span className="swstate">{kiosk ? 'On' : 'Off'}</span>
+          </button>
+          {/* Automatic display scaling switch (v18): the same On/Off
+              slide-control language as the Machines Maintenance switch
+              (role="switch", track + knob + written state). ON scales
+              the whole board (header, table, footer) uniformly until
+              the table content fills the display width; OFF returns to
+              the baseline sizes. Presentation only. */}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoScale}
+            aria-label="Automatic display scaling"
+            title="Scale the board to fill the display width"
+            className={`pb-switch pb-scaleswitch${autoScale ? ' on' : ''}`}
+            onClick={() => setAutoScale((current) => !current)}
+          >
+            <span className="swlbl">Auto scale</span>
+            <span className="track" aria-hidden="true">
+              <span className="knob" />
+            </span>
+            <span className="swstate">{autoScale ? 'On' : 'Off'}</span>
           </button>
         </div>
         <div className="pb-footrow legend">

@@ -4,6 +4,7 @@ import type { MockBoardRow } from '../view-models';
 import {
   ROTATE_MS_MIN,
   ROTATE_MS_PER_ROW,
+  autoFitScale,
   fallbackPageBreaks,
   pageBreaksByHeight,
   rotationDurationMs,
@@ -37,6 +38,31 @@ test('fallback chunking when measurements are unavailable', () => {
   expect(fallbackPageBreaks(25, 10)).toEqual([0, 10, 20]);
   expect(fallbackPageBreaks(10, 10)).toEqual([0]);
   expect(fallbackPageBreaks(0, 10)).toEqual([]);
+});
+
+/* ============ Automatic display scale (v18) ============ */
+
+test('the auto-fit scale fills the board width from the intrinsic table width', () => {
+  // A 3840px display over 1900px of intrinsic content: the scale is
+  // (3840 − allowance) / 1900 — the content grows until it fills the
+  // width, minus the small fixed allowance for the Hot-row border.
+  expect(autoFitScale(3840, 1900)).toBeCloseTo((3840 - 8) / 1900, 10);
+  // An exact-fit viewport stays at 1 (the allowance prevents a
+  // marginal overflow from wrapping the Job Numbers column).
+  expect(autoFitScale(1908, 1900)).toBe(1);
+});
+
+test('the auto-fit scale never shrinks below the baseline', () => {
+  // A viewport narrower than the content keeps the baseline size and
+  // the existing wrapping behavior — never a downscale.
+  expect(autoFitScale(1200, 1900)).toBe(1);
+});
+
+test('the auto-fit scale is 1 when measurements are unavailable', () => {
+  // jsdom and the first paint before layout report zero widths.
+  expect(autoFitScale(0, 1900)).toBe(1);
+  expect(autoFitScale(3840, 0)).toBe(1);
+  expect(autoFitScale(0, 0)).toBe(1);
 });
 
 /* ============ Per-page rotation timing (v15) ============ */

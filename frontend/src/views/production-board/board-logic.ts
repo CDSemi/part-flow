@@ -37,6 +37,35 @@ export function rotationDurationMs(rowCount: number): number {
 }
 
 /**
+ * Fixed width allowance subtracted before computing the auto-fit
+ * scale: the visible table can need a few pixels more than the
+ * measured copy (the Hot-row accent border is absent there, plus
+ * sub-pixel rounding), which would otherwise wrap the Job Numbers
+ * column at an exact fit.
+ */
+const FIT_WIDTH_ALLOWANCE_PX = 8;
+
+/**
+ * Automatic display scale (v18): the factor that makes the table's
+ * intrinsic (max-content) width fill the available board width, so the
+ * inter-column whitespace closes on large displays while every column
+ * keeps its full unwrapped content. Never below 1 — a viewport
+ * narrower than the content keeps the baseline size and the existing
+ * wrapping behavior — and 1 whenever real measurements are unavailable
+ * (first paint before layout, or DOM environments without layout).
+ */
+export function autoFitScale(
+  boardWidth: number,
+  intrinsicTableWidth: number,
+): number {
+  if (boardWidth <= 0 || intrinsicTableWidth <= 0) return 1;
+  return Math.max(
+    1,
+    (boardWidth - FIT_WIDTH_ALLOWANCE_PX) / intrinsicTableWidth,
+  );
+}
+
+/**
  * Board row order: canonical demand order (Hot rank → earliest due date
  * → undated by WO received date → stable creation order). Stocked rows
  * are completed demand and stay after every active row regardless of

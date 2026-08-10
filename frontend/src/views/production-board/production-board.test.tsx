@@ -934,56 +934,74 @@ test('the kiosk route renders the coherent board-owned kiosk header', async () =
   // row — its shortcut moved into the tooltip; no legend line
   // repeats it.
   expect(
-    screen.getByRole('button', { name: 'Exit kiosk mode' }),
+    screen.getByRole('switch', { name: 'Kiosk mode' }),
   ).toBeInTheDocument();
-  expect(head?.querySelector('.pb-kioskbtn')).toBeNull();
+  expect(head?.querySelector('.pb-kioskswitch')).toBeNull();
   expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
     'Ctrl+Shift+K: exit kiosk mode',
   );
 });
 
-test('the kiosk toggle sits in the footer controls row after the aggregate summary', async () => {
+test('the kiosk switch sits in the footer controls row after the aggregate summary', async () => {
   const view = await renderBoard('/production-board/kiosk');
 
   // Inside the FIRST .pb-footrow (controls), directly after .pb-agg —
   // a normal layout child measured by pagination, never in the header
-  // and never in the legend row.
+  // and never in the legend row. An On/Off slide switch (v18):
+  // aria-checked mirrors the active route, the state is written text
+  // beside the knob, and the shortcut lives in the tooltip instead of
+  // a legend line.
   const controls = document.querySelector('.pb-foot .pb-footrow');
-  const exit = controls?.querySelector('.pb-kioskbtn');
-  expect(exit).not.toBeNull();
-  expect(exit?.textContent).toBe('Exit kiosk');
-  expect(exit?.getAttribute('aria-label')).toBe('Exit kiosk mode');
-  // The keyboard shortcut lives in the tooltip instead of a legend
-  // line.
-  expect(exit?.getAttribute('title')).toBe('Exit kiosk mode (Ctrl+Shift+K)');
-  expect(exit?.previousElementSibling?.className).toBe('pb-agg');
-  expect(document.querySelector('.pb-head .pb-kioskbtn')).toBeNull();
-  expect(document.querySelector('.pb-footrow.legend .pb-kioskbtn')).toBeNull();
+  const kioskSw = controls?.querySelector('.pb-kioskswitch');
+  expect(kioskSw).not.toBeNull();
+  expect(kioskSw?.getAttribute('role')).toBe('switch');
+  expect(kioskSw?.getAttribute('aria-checked')).toBe('true');
+  expect(kioskSw?.getAttribute('aria-label')).toBe('Kiosk mode');
+  expect(kioskSw?.classList.contains('on')).toBe(true);
+  expect(kioskSw?.querySelector('.track .knob')).not.toBeNull();
+  expect(kioskSw?.querySelector('.swlbl')?.textContent).toBe('Kiosk');
+  expect(kioskSw?.querySelector('.swstate')?.textContent).toBe('On');
+  expect(kioskSw?.getAttribute('title')).toBe('Exit kiosk mode (Ctrl+Shift+K)');
+  expect(kioskSw?.previousElementSibling?.className).toBe('pb-agg');
+  expect(document.querySelector('.pb-head .pb-kioskswitch')).toBeNull();
+  expect(
+    document.querySelector('.pb-footrow.legend .pb-kioskswitch'),
+  ).toBeNull();
   view.unmount();
 
-  // Standard mode renders the SAME control as the explicit kiosk
-  // entry (v17) — same footer position, same styling family.
+  // Standard mode renders the SAME switch as the explicit kiosk entry
+  // (v17) — same footer position, same presentation, state Off.
   await renderBoard('/production-board');
-  const enter = document.querySelector('.pb-foot .pb-footrow .pb-kioskbtn');
-  expect(enter?.textContent).toBe('Enter kiosk');
-  expect(enter?.getAttribute('aria-label')).toBe('Enter kiosk mode');
+  const enter = document.querySelector('.pb-foot .pb-footrow .pb-kioskswitch');
+  expect(enter?.getAttribute('aria-checked')).toBe('false');
+  expect(enter?.classList.contains('on')).toBe(false);
+  expect(enter?.querySelector('.swstate')?.textContent).toBe('Off');
   expect(enter?.getAttribute('title')).toBe('Enter kiosk mode (Ctrl+Shift+K)');
   expect(enter?.previousElementSibling?.className).toBe('pb-agg');
-  expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
 });
 
-test('the footer kiosk toggle switches between the two routes', async () => {
+test('the footer kiosk switch navigates between the two routes', async () => {
   await renderBoard('/production-board/kiosk');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Exit kiosk mode' }));
+  fireEvent.click(screen.getByRole('switch', { name: 'Kiosk mode' }));
   await act(async () => {});
   expect(window.location.pathname).toBe('/production-board');
   expect(document.querySelector('.pbk-head')).toBeNull();
+  expect(
+    screen
+      .getByRole('switch', { name: 'Kiosk mode' })
+      .getAttribute('aria-checked'),
+  ).toBe('false');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Enter kiosk mode' }));
+  fireEvent.click(screen.getByRole('switch', { name: 'Kiosk mode' }));
   await act(async () => {});
   expect(window.location.pathname).toBe('/production-board/kiosk');
   expect(document.querySelector('.pbk-head')).not.toBeNull();
+  expect(
+    screen
+      .getByRole('switch', { name: 'Kiosk mode' })
+      .getAttribute('aria-checked'),
+  ).toBe('true');
 });
 
 test('the standard route keeps the normal header and no kiosk chrome', async () => {
@@ -997,7 +1015,13 @@ test('the standard route keeps the normal header and no kiosk chrome', async () 
   expect(document.querySelector('.pb-head .live')).not.toBeNull();
   expect(document.querySelector('.pbk-brand')).toBeNull();
   expect(document.querySelector('.pb-head .themetoggle')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
+  // The footer kiosk switch reads Off — no `Exit kiosk` action text
+  // anywhere in the standard presentation.
+  expect(
+    screen
+      .getByRole('switch', { name: 'Kiosk mode' })
+      .getAttribute('aria-checked'),
+  ).toBe('false');
   expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
     'Exit kiosk',
   );
@@ -1035,4 +1059,128 @@ test('Ctrl+Shift+K toggles the kiosk route but stays inert in fields and dialogs
   // Without the full chord nothing toggles.
   fireEvent.keyDown(window, { key: 'K', ctrlKey: true });
   expect(window.location.pathname).toBe('/production-board');
+});
+
+/* ============ Automatic display scaling (auto-fit zoom, v18) ============ */
+
+// jsdom applies no layout and no CSS zoom, so the scaling contract is
+// checked structurally (the footer toggle) and at the stylesheet
+// level: baseline sizes stay plain pixels (the board recalc applies
+// one uniform inline `zoom` computed by board-logic autoFitScale —
+// unit-tested in board-logic.test.ts), with no width breakpoints and
+// no leftover per-element fluid math.
+
+async function readBoardCss(): Promise<string> {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  return readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+}
+
+/** The rule block for an exact selector, with comments stripped. */
+function ruleBlock(css: string, selector: string): string {
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return stripped.match(new RegExp(`${escaped}\\s*\\{[^}]*\\}`))?.[0] ?? '';
+}
+
+test('the footer slide switch toggles automatic display scaling on and off', async () => {
+  await renderBoard();
+
+  // Default ON — the board is a large-display view. The switch uses
+  // the same slide-control language as the Machines Maintenance
+  // switch (role="switch", track + knob + written state) and sits in
+  // the footer controls row directly after the kiosk toggle, never
+  // in the header or the legend row.
+  const sw = document.querySelector('.pb-foot .pb-footrow .pb-scaleswitch');
+  expect(sw).not.toBeNull();
+  expect(sw?.getAttribute('role')).toBe('switch');
+  expect(sw?.getAttribute('aria-checked')).toBe('true');
+  expect(sw?.getAttribute('aria-label')).toBe('Automatic display scaling');
+  expect(sw?.classList.contains('on')).toBe(true);
+  expect(sw?.querySelector('.track .knob')).not.toBeNull();
+  // The state is written text beside the knob — never color-only.
+  expect(sw?.querySelector('.swlbl')?.textContent).toBe('Auto scale');
+  expect(sw?.querySelector('.swstate')?.textContent).toBe('On');
+  expect(sw?.previousElementSibling?.classList.contains('pb-kioskswitch')).toBe(
+    true,
+  );
+  expect(document.querySelector('.pb-head .pb-scaleswitch')).toBeNull();
+  expect(
+    document.querySelector('.pb-footrow.legend .pb-scaleswitch'),
+  ).toBeNull();
+
+  // OFF: state flips in aria, class and written text together.
+  fireEvent.click(sw!);
+  expect(sw?.getAttribute('aria-checked')).toBe('false');
+  expect(sw?.classList.contains('on')).toBe(false);
+  expect(sw?.querySelector('.swstate')?.textContent).toBe('Off');
+
+  // And back on.
+  fireEvent.click(sw!);
+  expect(sw?.getAttribute('aria-checked')).toBe('true');
+  expect(sw?.classList.contains('on')).toBe(true);
+  expect(sw?.querySelector('.swstate')?.textContent).toBe('On');
+});
+
+test('the scale switch exists in both presentations of the board', async () => {
+  const view = await renderBoard('/production-board/kiosk');
+  expect(
+    document
+      .querySelector('.pb-foot .pb-footrow .pb-scaleswitch')
+      ?.getAttribute('aria-checked'),
+  ).toBe('true');
+  view.unmount();
+
+  await renderBoard('/production-board');
+  expect(
+    document
+      .querySelector('.pb-foot .pb-footrow .pb-scaleswitch')
+      ?.getAttribute('aria-checked'),
+  ).toBe('true');
+});
+
+test('scaling is one uniform zoom — the stylesheet keeps fixed baseline sizes', async () => {
+  const css = await readBoardCss();
+
+  // No per-element fluid font math and no discrete width breakpoints
+  // survive: the auto-fit factor is computed from the measured
+  // intrinsic table width (board-logic autoFitScale) and applied as
+  // ONE inline zoom on the board root, so every text — header, table
+  // and footer alike, primary and secondary — scales by the same
+  // factor and the visual hierarchy is preserved exactly.
+  expect(css).not.toContain('--pb-fluid');
+  expect(css).not.toContain('--pb-scale');
+  expect(css).not.toMatch(/@media[^{]*min-width/);
+  expect(css).not.toMatch(/font-size:\s*calc/);
+
+  // Baseline sizes stay plain pixels at every tier.
+  expect(ruleBlock(css, '.pb-table .part')).toContain('font-size: 22px');
+  expect(ruleBlock(css, '.pb-table .pname')).toContain('font-size: 13px');
+  expect(ruleBlock(css, '.pb-head .clock')).toContain('font-size: 30px');
+  expect(ruleBlock(css, '.pb-foot')).toContain('font-size: 13.5px');
+
+  // The hidden measurement copy never overrides sizes: identical
+  // classes → identical metrics, so the intrinsic-width measurement
+  // and the height-aware pagination stay truthful for the scaled
+  // board (the pagination divides its viewport budget by the same
+  // scale in the component).
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  expect(stripped).not.toMatch(/\.pb-measure[^{]*\{[^}]*font-size/);
+  expect(stripped).not.toMatch(/\.pb-measure[^{]*\{[^}]*zoom/);
+
+  // The slide switches are board-owned: ONE shared track/knob family
+  // (.pb-switch) styled in this stylesheet for BOTH footer toggles
+  // (kiosk mode and auto scale), with no selector dependency on the
+  // Machines stylesheet (comments may reference it) and the knob
+  // travel expressed as a transform like the Maintenance switch the
+  // family mirrors.
+  expect(stripped).not.toContain('mg-switch');
+  expect(ruleBlock(css, '.pb-foot .pb-switch .track')).not.toBe('');
+  expect(ruleBlock(css, '.pb-foot .pb-switch.on .knob')).toContain(
+    'transform: translateX(',
+  );
 });
