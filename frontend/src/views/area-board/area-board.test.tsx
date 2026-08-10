@@ -83,8 +83,8 @@ test('each Machine gets a monitoring card; inactive Machines stay distinct', () 
   expect(lathe3.textContent).toContain('2027-60-8114-00');
   // Only the actively assigned 3 pcs — the finished 1 pc left the card.
   // The totals use two SEMANTIC value classes (never positional
-  // selectors), sharing the header-statistics tones: pcs = secondary
-  // neutral (Total pcs), PN count = primary neutral (Total PNs).
+  // selectors); both keep the secondary muted neutral of the totals
+  // line, quieter than the header Total PNs (primary text neutral).
   expect(lathe3.querySelector('.mtotals .machine-total-pcs')?.textContent).toBe(
     '3',
   );

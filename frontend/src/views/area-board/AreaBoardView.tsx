@@ -252,7 +252,7 @@ function AllAreasOverview({
                     <div className="l">Stocked pcs</div>
                   </div>
                   <div className="stat">
-                    <div className="n">{areaCards.length}</div>
+                    <div className="n pn">{areaCards.length}</div>
                     <div className="l">PNs</div>
                   </div>
                 </>

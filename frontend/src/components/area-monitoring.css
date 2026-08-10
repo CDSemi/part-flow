@@ -120,13 +120,13 @@
 }
 
 .am .abd-machine .mstat.idle {
-  background: var(--chip);
-  color: var(--muted);
+  background: var(--warning-surface);
+  color: var(--warn-t);
 }
 
 .am .abd-machine .mstat.maintenance {
-  background: var(--warning-surface);
-  color: var(--warn-t);
+  background: var(--error-surface);
+  color: var(--err-t);
 }
 
 /* Time in the current state (derived from stateChangedAt): part of the
@@ -144,9 +144,10 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* Totals values share ONE muted neutral with the surrounding line
-   text and the header `Total pcs` / `Total PNs` statistics — semantic
-   classes, never positional selectors, no per-meaning color split. */
+/* Totals values share ONE muted (secondary) neutral with the
+   surrounding line text — deliberately quieter than the header
+   `Total PNs` statistic, which carries the primary text neutral.
+   Semantic classes, never positional selectors. */
 .am .abd-machine .mtotals .machine-total-pcs,
 .am .abd-machine .mtotals .machine-total-pns {
   font-family: var(--mono), monospace;
@@ -156,7 +157,7 @@
 /* An inactive/maintenance Machine stays visually distinct. */
 .am .abd-machine.maintenance {
   border-style: dashed;
-  border-color: var(--warn-t);
+  border-color: var(--err-t);
   opacity: 0.85;
 }
 
@@ -203,13 +204,18 @@
   border-right: none;
 }
 
-/* Neutral statistic values (Total PNs / Total pcs) share ONE muted
-   neutral — the same color as the Machine-card totals line text. */
+/* Neutral statistic values: Total pcs keeps the secondary muted
+   neutral (the Machine-card totals line color); the PN totals carry
+   the primary text neutral (`pn`). */
 .am .stat .n {
   font-family: var(--mono), monospace;
   font-size: 21px;
   font-weight: 800;
   color: var(--muted);
+}
+
+.am .stat .n.pn {
+  color: var(--text);
 }
 
 .am .stat .n.q {

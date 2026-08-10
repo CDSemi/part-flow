@@ -115,14 +115,19 @@
   border-right: none;
 }
 
-/* Neutral statistic values (Total PNs / Total pcs) share ONE muted
-   neutral — the same color as the Machine-card totals line text; only
-   the status statistics below carry semantic tones. */
+/* Neutral statistic values: Total pcs keeps the secondary muted
+   neutral (the Machine-card totals line color); the PN totals carry
+   the primary text neutral (`pn`); only the status statistics below
+   carry semantic tones. */
 .ss-stats .stat .n {
   font-family: var(--mono), monospace;
   font-size: 20px;
   font-weight: 800;
   color: var(--muted);
+}
+
+.ss-stats .stat .n.pn {
+  color: var(--text);
 }
 
 .ss-stats .stat .n.q {

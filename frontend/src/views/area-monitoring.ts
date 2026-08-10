@@ -80,15 +80,16 @@ export function splitAssignments(cards: readonly MockAreaCard[]): {
 export interface AreaStat {
   value: number | string;
   label: string;
-  tone?: 'q' | 'm' | 'd' | 'h';
+  tone?: 'pn' | 'q' | 'm' | 'd' | 'h';
 }
 
 /**
  * Shared Area statistics with the shared semantic tone mapping
- * (`q` warning · `m` information · `d` success · `h` error). The
- * plain totals (Total PNs, Total pcs) carry no tone: they share ONE
- * muted neutral — the same color as the Machine-card totals line —
- * with no per-meaning color split. The quantity statistics reconcile —
+ * (`pn` primary neutral · `q` warning · `m` information · `d` success ·
+ * `h` error). The PN totals (Total PNs / PNs) carry the primary
+ * neutral (main text color) on every view; Total pcs stays on the
+ * secondary muted neutral — the same color as the Machine-card totals
+ * line. The quantity statistics reconcile —
  * Areas with Machines: `Total pcs = Queued + On machines + Done`;
  * Areas without Machines: `Total pcs = Processing + Done`; the
  * terminal Stockroom shows stocked totals instead. Hot renders `—`
@@ -107,14 +108,14 @@ export function areaStats(
   const finishedQty = finished.reduce((s, e) => s + e.qty, 0);
   if (area.terminal) {
     return [
-      { value: cards.length, label: 'PNs' },
+      { value: cards.length, label: 'PNs', tone: 'pn' },
       { value: totalQty, label: 'Stocked pcs' },
       { value: hotCount || '—', label: 'Hot', tone: 'h' },
     ];
   }
   if (!hasMachines) {
     return [
-      { value: cards.length, label: 'Total PNs' },
+      { value: cards.length, label: 'Total PNs', tone: 'pn' },
       { value: totalQty, label: 'Total pcs' },
       { value: queuedQty, label: 'Processing', tone: 'm' },
       { value: finishedQty, label: 'Done', tone: 'd' },
@@ -122,7 +123,7 @@ export function areaStats(
     ];
   }
   return [
-    { value: cards.length, label: 'Total PNs' },
+    { value: cards.length, label: 'Total PNs', tone: 'pn' },
     { value: totalQty, label: 'Total pcs' },
     { value: queuedQty, label: 'Queued', tone: 'q' },
     { value: machineQty, label: 'On machines', tone: 'm' },

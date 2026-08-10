@@ -162,11 +162,11 @@
 }
 
 .mg-state.idle {
-  color: var(--muted);
+  color: var(--warn-t);
 }
 
 .mg-state.maintenance {
-  color: var(--warn-t);
+  color: var(--err-t);
 }
 
 .mg-state .age {
@@ -191,7 +191,7 @@
 
 /* Assigned-now line (v15): separator and unit recede so the PN reads
    first; the quantity carries the state tone (information while
-   Running, warning while Maintenance) IN ADDITION to its weight — the
+   Running, error while Maintenance) IN ADDITION to its weight — the
    State column keeps the redundant non-color signal. */
 .mg-assign .sep,
 .mg-assign .unit {
@@ -208,7 +208,7 @@
 }
 
 .mg-assign .q.maintenance {
-  color: var(--warn-t);
+  color: var(--err-t);
 }
 
 .mg-meta {
@@ -265,17 +265,17 @@
 }
 
 .mg-switch.on .track {
-  background: var(--warning-surface);
-  border-color: var(--warning-border);
+  background: var(--error-surface);
+  border-color: var(--error-border);
 }
 
 .mg-switch.on .knob {
-  background: var(--warn);
+  background: var(--err);
   transform: translateX(18px);
 }
 
 .mg-switch.on {
-  color: var(--warn-t);
+  color: var(--err-t);
 }
 
 .mg-switch:hover .track {

@@ -204,6 +204,11 @@
   font-weight: 800;
 }
 
+/* PN totals carry the primary text neutral on every view (§4.3). */
+.ab .stat .n.pn {
+  color: var(--text);
+}
+
 .ab .stat .n.q {
   color: var(--warn-t);
 }

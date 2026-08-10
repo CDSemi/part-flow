@@ -2315,9 +2315,10 @@ test('header totals use semantic tones, include Done, and reconcile', async () =
   expect(stats.get('On machines')?.classList.contains('m')).toBe(true);
   expect(stats.get('Done')?.classList.contains('d')).toBe(true);
   expect(stats.get('Hot')?.classList.contains('h')).toBe(true);
-  // The two plain totals share ONE muted neutral (v16c): no tone class
-  // on either — never a status tone and no per-meaning color split.
-  expect(stats.get('Total PNs')?.className.trim()).toBe('n');
+  // Total PNs carries the primary text neutral (`pn`) — never a status
+  // tone; Total pcs keeps the secondary muted neutral with no tone
+  // class at all.
+  expect(stats.get('Total PNs')?.className.trim()).toBe('n pn');
   expect(stats.get('Total pcs')?.className.trim()).toBe('n');
   for (const tone of ['s', 'q', 'm', 'd', 'h']) {
     expect(stats.get('Total pcs')?.classList.contains(tone)).toBe(false);
