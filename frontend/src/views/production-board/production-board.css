@@ -201,7 +201,7 @@
 }
 
 /* Column-header tooltips (v18): the former footer legend conventions
-   live with the columns they describe (No., Due Date, Job Numbers).
+   live with the columns they describe (No., Due Date).
    A quiet dotted underline marks a header that carries a tooltip;
    the tooltip itself is a small key/description panel floating below
    the header on hover — hidden otherwise, so it adds no height to
@@ -238,13 +238,6 @@
   font-size: 12.5px;
   font-weight: 500;
   color: var(--muted);
-}
-
-/* Right-edge columns anchor the panel to the header's right side so
-   it never leaves the viewport. */
-.pb-table .th-tip.right {
-  left: auto;
-  right: 8px;
 }
 
 .pb-table th.hastip:hover .th-tip {

@@ -27,7 +27,9 @@ import {
 } from '../../mocks/production-board';
 import { useUiClock } from '../../components/ui-clock';
 import {
+  DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
+  dueSoonWindowDays,
   daysInProductionNote,
   elapsedMinutesSince,
   formatElapsedSince,
@@ -232,7 +234,10 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
   const now = useUiClock('minute');
   const dueInfo = row.totalStocked
     ? { note: '✓ stocked', dueClass: 'none' as const }
-    : dueCountdown(row.due, now);
+    : dueCountdown(row.due, now, {
+        received: row.received,
+        policy: DEFAULT_DUE_SOON_POLICY,
+      });
   const urgent = dueInfo.dueClass === 'soon' || dueInfo.dueClass === 'late';
   return (
     <>
@@ -329,6 +334,14 @@ function BoardColgroup() {
 // shown on header hover (production-board.css .th-tip). Hover-only:
 // the board is a read-only display with no tab order, and the hidden
 // tooltip adds no height to the sticky header (pagination unaffected).
+//
+// The Due Date tooltip explains the Due Soon warning window. Every
+// number in its copy — the percentage, the clamps, and the example
+// windows — derives from the shared policy (views/dates,
+// Administration-configurable later), never from duplicated literals.
+const DUE_SOON = DEFAULT_DUE_SOON_POLICY;
+const DUE_SOON_EXAMPLE_LEADS = [10, 30, 90];
+
 function BoardHeadRow() {
   return (
     <tr>
@@ -351,21 +364,24 @@ function BoardHeadRow() {
             <span className="tipdesc">due soon / overdue</span>
           </span>
           <span className="tiprow">
-            <span className="tipkey">—</span>
-            <span className="tipdesc">no due date</span>
+            <span className="tipkey">Due soon</span>
+            <span className="tipdesc">
+              within {Math.round(DUE_SOON.ratio * 100)}% of the lead time
+              (received → due), {DUE_SOON.minDays}–{DUE_SOON.maxDays} days
+            </span>
           </span>
+          {DUE_SOON_EXAMPLE_LEADS.map((lead) => (
+            <span className="tiprow" key={lead}>
+              <span className="tipkey">{lead}-day lead</span>
+              <span className="tipdesc">
+                warns {dueSoonWindowDays(lead, DUE_SOON)} days ahead
+              </span>
+            </span>
+          ))}
         </span>
       </th>
       <th>Total Days</th>
-      <th className="hastip">
-        <span className="thlbl">Job Numbers</span>
-        <span className="th-tip right">
-          <span className="tiprow">
-            <span className="tipkey">—</span>
-            <span className="tipdesc">no external WO Number</span>
-          </span>
-        </span>
-      </th>
+      <th>Job Numbers</th>
     </tr>
   );
 }

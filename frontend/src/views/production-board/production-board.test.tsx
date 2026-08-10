@@ -165,7 +165,7 @@ test('the legend conventions live in the column-header tooltips, not the footer'
 
   const dueTip = thByLabel('Due Date')?.querySelector('.th-tip');
   const dueRows = Array.from(dueTip?.querySelectorAll('.tiprow') ?? []);
-  expect(dueRows).toHaveLength(2);
+  expect(dueRows).toHaveLength(5);
   expect(dueRows[0].querySelector('.tipkey')?.textContent).toBe(
     'Blinking days count',
   );
@@ -174,17 +174,43 @@ test('the legend conventions live in the column-header tooltips, not the footer'
   expect(dueRows[0].querySelector('.tipdesc')?.textContent).toBe(
     'due soon / overdue',
   );
-  expect(dueRows[1].querySelector('.tipkey')?.textContent).toBe('—');
-  expect(dueRows[1].textContent).toContain('no due date');
+  // The former `— no due date` row is gone; instead the tooltip
+  // explains the Due Soon window — every number derived from the
+  // shared policy (views/dates), never duplicated literals — with a
+  // few lead-time examples: clamp(min 2, ceil(lead × 15%), max 7).
+  expect(dueTip?.textContent).not.toContain('no due date');
+  expect(dueRows[1].querySelector('.tipkey')?.textContent).toBe('Due soon');
+  expect(dueRows[1].querySelector('.tipdesc')?.textContent).toContain(
+    '15% of the lead time',
+  );
+  expect(dueRows[1].querySelector('.tipdesc')?.textContent).toContain(
+    '2–7 days',
+  );
+  expect(dueRows[2].querySelector('.tipkey')?.textContent).toBe('10-day lead');
+  expect(dueRows[2].querySelector('.tipdesc')?.textContent).toContain(
+    'warns 2 days ahead',
+  );
+  expect(dueRows[3].querySelector('.tipkey')?.textContent).toBe('30-day lead');
+  expect(dueRows[3].querySelector('.tipdesc')?.textContent).toContain(
+    'warns 5 days ahead',
+  );
+  expect(dueRows[4].querySelector('.tipkey')?.textContent).toBe('90-day lead');
+  expect(dueRows[4].querySelector('.tipdesc')?.textContent).toContain(
+    'warns 7 days ahead',
+  );
 
-  const jobsTip = thByLabel('Job Numbers')?.querySelector('.th-tip');
-  expect(jobsTip?.querySelector('.tipkey')?.textContent).toBe('—');
-  expect(jobsTip?.textContent).toContain('no external WO Number');
+  // Job Numbers carries no tooltip anymore (v19) — the `— no external
+  // WO Number` note was unnecessary detail for a read-only board. The
+  // header is a plain <th> without the tooltip label wrapper.
+  const jobsTh = ths.find((th) => th.textContent === 'Job Numbers');
+  expect(jobsTh).toBeDefined();
+  expect(jobsTh?.classList.contains('hastip')).toBe(false);
+  expect(jobsTh?.querySelector('.th-tip')).toBeNull();
 
   // The other headers carry no tooltip.
   expect(
     visibleTable().querySelectorAll('thead th.hastip .th-tip'),
-  ).toHaveLength(3);
+  ).toHaveLength(2);
 
   // The footer legend row no longer repeats the conventions — only
   // the sorting rule remains there.
@@ -196,12 +222,12 @@ test('the legend conventions live in the column-header tooltips, not the footer'
   expect(foot?.textContent).toContain('Order: Hot rank first');
 
   // Stylesheet: hover-only tooltip panel, hidden otherwise (adds no
-  // height to the sticky header), with a right-anchored variant for
-  // the table's right edge.
+  // height to the sticky header). The right-anchored variant left with
+  // the Job Numbers tooltip (v19) — no rule may linger unused.
   const css = await readBoardCss();
   expect(ruleBlock(css, '.pb-table .th-tip')).toContain('display: none');
   expect(css).toMatch(/th\.hastip:hover \.th-tip \{[^}]*display: flex/);
-  expect(ruleBlock(css, '.pb-table .th-tip.right')).toContain('right: 8px');
+  expect(css).not.toContain('.th-tip.right');
   // Long descriptions wrap INSIDE the panel instead of overflowing
   // its border: no nowrap on the rows or descriptions — only the key
   // itself never wraps.

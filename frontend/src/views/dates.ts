@@ -114,18 +114,84 @@ export function daysBetweenIso(fromIso: string, toIso: string): number | null {
   return Math.round((toUtc - fromUtc) / 86_400_000);
 }
 
-/** Due dates at most this many days away read as `soon`. */
-export const DUE_SOON_DAYS = 3;
+/**
+ * Due Soon policy — the single source of truth for when a due date
+ * starts reading as `soon`. The warning window scales with the
+ * demand's total lead time (received → due): `ratio` of the lead
+ * days, clamped into [`minDays`, `maxDays`]. These are configuration
+ * values owned by the future Administration → Policies → Due Soon
+ * warning settings (GUI_DESIGN §9) — business logic receives a policy
+ * and never hard-codes the numbers.
+ */
+export interface DueSoonPolicy {
+  /** Lower clamp — the warning window never shrinks below this. */
+  minDays: number;
+  /** Fraction (0–1) of the total lead time that reads as `soon`. */
+  ratio: number;
+  /** Upper clamp — the warning window never grows beyond this. */
+  maxDays: number;
+}
+
+/**
+ * Initial Due Soon defaults (Minimum warning days = 2, Lead-time
+ * warning percentage = 15%, Maximum warning days = 7). This object is
+ * the stand-in for the Administration-configured policy until that
+ * page exists — call sites pass it in; nothing else may restate the
+ * numbers.
+ */
+export const DEFAULT_DUE_SOON_POLICY: DueSoonPolicy = {
+  minDays: 2,
+  ratio: 0.15,
+  maxDays: 7,
+};
+
+/**
+ * Days-before-due threshold at or below which a due date reads as
+ * `soon`: `ceil(totalLeadDays × ratio)` clamped into
+ * [`minDays`, `maxDays`]. An unknown or invalid lead time (no
+ * received date, malformed dates, or a non-positive lead) falls back
+ * to the policy's minimum warning window.
+ */
+export function dueSoonWindowDays(
+  totalLeadDays: number | null,
+  policy: DueSoonPolicy,
+): number {
+  if (
+    totalLeadDays === null ||
+    !Number.isFinite(totalLeadDays) ||
+    totalLeadDays <= 0
+  ) {
+    return policy.minDays;
+  }
+  return Math.min(
+    policy.maxDays,
+    Math.max(policy.minDays, Math.ceil(totalLeadDays * policy.ratio)),
+  );
+}
+
+/** Lead-time context + policy required to derive the Due Soon window. */
+export interface DueSoonContext {
+  /**
+   * Parent Work Order received date (ISO `YYYY-MM-DD`), or null where
+   * the surface has no received date — the window then falls back to
+   * the policy's minimum warning window.
+   */
+  received: string | null;
+  policy: DueSoonPolicy;
+}
 
 /**
  * Derived due-date countdown in the one shared language: `N days left`
- * (`soon` within DUE_SOON_DAYS, `due today` at zero), `overdue N days`
- * (`late`), or `No due date` (`none`). Never stored — derived at render
- * from the fixed due date plus the shared UI clock.
+ * (`soon` within the lead-time-proportional Due Soon window derived
+ * from `dueSoon`, `due today` at zero), `overdue N days` (`late`), or
+ * `No due date` (`none`). Never stored — derived at render from the
+ * fixed due/received dates plus the shared UI clock, with the policy
+ * supplied by the caller (future Administration configuration).
  */
 export function dueCountdown(
   due: string | null,
   nowMs: number,
+  dueSoon: DueSoonContext,
 ): { note: string; dueClass: DueClass | 'none' } {
   if (!due) return { note: 'No due date', dueClass: 'none' };
   const days = daysBetweenIso(todayIso(nowMs), due);
@@ -137,9 +203,13 @@ export function dueCountdown(
     };
   }
   if (days === 0) return { note: 'due today', dueClass: 'soon' };
+  const totalLeadDays = dueSoon.received
+    ? daysBetweenIso(dueSoon.received, due)
+    : null;
   return {
     note: `${days} day${days === 1 ? '' : 's'} left`,
-    dueClass: days <= DUE_SOON_DAYS ? 'soon' : 'ok',
+    dueClass:
+      days <= dueSoonWindowDays(totalLeadDays, dueSoon.policy) ? 'soon' : 'ok',
   };
 }
 

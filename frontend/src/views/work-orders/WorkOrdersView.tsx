@@ -18,7 +18,7 @@ import {
   MOCK_WORK_ORDER_LIST,
 } from '../../mocks/work-orders';
 import { useUiClock } from '../../components/ui-clock';
-import { dueCountdown, formatIsoDate } from '../dates';
+import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
 import type { MockWorkOrder } from '../view-models';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
@@ -260,7 +260,14 @@ function WorkOrderListPanel({
   const dueTone = (w: MockWorkOrder): string => {
     if (!w.due) return 'none';
     if (w.status === 'Complete') return '';
-    return dueCountdown(w.due, now).dueClass === 'late' ? 'late' : '';
+    // The policy is the shared Due Soon configuration stand-in — only
+    // the `late` class is used here, but the call stays uniform.
+    return dueCountdown(w.due, now, {
+      received: w.received,
+      policy: DEFAULT_DUE_SOON_POLICY,
+    }).dueClass === 'late'
+      ? 'late'
+      : '';
   };
   const query = search.trim().toLowerCase();
   const rows = list.filter(

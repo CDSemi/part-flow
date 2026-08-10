@@ -8,7 +8,11 @@ import {
   directGroupLabel,
   FINISHED_GROUP_LABEL,
 } from '../views/area-monitoring';
-import { dueCountdown, formatElapsedSince } from '../views/dates';
+import {
+  DEFAULT_DUE_SOON_POLICY,
+  dueCountdown,
+  formatElapsedSince,
+} from '../views/dates';
 import { formatStateAge } from '../views/machine-state';
 import type { AreaAssignment } from '../views/area-monitoring';
 import type {
@@ -50,7 +54,10 @@ export function DueStatus({
  */
 function CardDueStatus({ card, now }: { card: MockAreaCard; now: number }) {
   if (card.dueText) return <DueStatus due={card.dueText} dueClass="ok" />;
-  const { note, dueClass } = dueCountdown(card.due, now);
+  const { note, dueClass } = dueCountdown(card.due, now, {
+    received: card.received,
+    policy: DEFAULT_DUE_SOON_POLICY,
+  });
   return <DueStatus due={note} dueClass={dueClass} />;
 }
 

@@ -12,8 +12,18 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
 import { useUiClock } from '../../components/ui-clock';
-import { dueCountdown, formatIsoDateShort } from '../dates';
+import {
+  DEFAULT_DUE_SOON_POLICY,
+  dueCountdown,
+  formatIsoDateShort,
+} from '../dates';
 import type { MockHotEntry } from '../view-models';
+
+// Hot entries carry no parent-WO received date, so the derived due
+// countdown has no lead time — the shared Due Soon policy (the future
+// Administration configuration) then applies its minimum-window
+// fallback (views/dates `dueSoonWindowDays`).
+const DUE_SOON = { received: null, policy: DEFAULT_DUE_SOON_POLICY };
 
 const hotKey = (h: MockHotEntry) => `${h.pn}|${h.workOrder}`;
 
@@ -308,7 +318,7 @@ export function PriorityView() {
               <span className="due">
                 <span>{formatIsoDateShort(entry.due)}</span>
                 {(() => {
-                  const dueInfo = dueCountdown(entry.due, now);
+                  const dueInfo = dueCountdown(entry.due, now, DUE_SOON);
                   return (
                     <span
                       className={`d2 ${dueInfo.dueClass}`}
@@ -791,7 +801,7 @@ function HotAddDialog({
               <span className="hwo">{c.workOrder}</span>
               <TypeChip type={c.type} />
               {(() => {
-                const dueInfo = dueCountdown(c.due, now);
+                const dueInfo = dueCountdown(c.due, now, DUE_SOON);
                 return (
                   <span
                     className={`hdue ${dueInfo.dueClass === 'late' ? 'late' : ''}`}

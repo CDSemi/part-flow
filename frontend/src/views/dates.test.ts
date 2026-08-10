@@ -3,8 +3,9 @@ import { expect, test } from 'vitest';
 import {
   daysBetweenIso,
   daysInProductionNote,
-  DUE_SOON_DAYS,
+  DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
+  dueSoonWindowDays,
   elapsedMinutesSince,
   formatDuration,
   formatElapsedSince,
@@ -64,34 +65,102 @@ test('daysBetweenIso is calendar-day arithmetic on plain ISO dates', () => {
   expect(daysBetweenIso('2026-08-05', 'garbage')).toBeNull();
 });
 
+// The initial Due Soon defaults stand in for the future
+// Administration-configured policy at every call site.
+const dueSoon = (received: string | null) => ({
+  received,
+  policy: DEFAULT_DUE_SOON_POLICY,
+});
+
+test('DEFAULT_DUE_SOON_POLICY carries the initial Administration defaults', () => {
+  expect(DEFAULT_DUE_SOON_POLICY).toEqual({
+    minDays: 2,
+    ratio: 0.15,
+    maxDays: 7,
+  });
+});
+
+test('dueSoonWindowDays scales with the lead time, clamped by the policy', () => {
+  const policy = DEFAULT_DUE_SOON_POLICY;
+  expect(dueSoonWindowDays(10, policy)).toBe(2); // ceil(1.5) = 2
+  expect(dueSoonWindowDays(20, policy)).toBe(3); // ceil(3.0) = 3
+  expect(dueSoonWindowDays(30, policy)).toBe(5); // ceil(4.5) = 5
+  expect(dueSoonWindowDays(46, policy)).toBe(7); // ceil(6.9) = 7
+  expect(dueSoonWindowDays(90, policy)).toBe(7); // clamped to maxDays
+  expect(dueSoonWindowDays(1, policy)).toBe(2); // clamped to minDays
+  // An unknown or invalid lead time falls back to the minimum window.
+  expect(dueSoonWindowDays(null, policy)).toBe(policy.minDays);
+  expect(dueSoonWindowDays(0, policy)).toBe(policy.minDays);
+  expect(dueSoonWindowDays(-4, policy)).toBe(policy.minDays);
+});
+
 test('dueCountdown derives the one shared countdown language', () => {
-  expect(dueCountdown(null, NOW)).toEqual({
+  expect(dueCountdown(null, NOW, dueSoon('2026-07-20'))).toEqual({
     note: 'No due date',
     dueClass: 'none',
   });
-  expect(dueCountdown('2026-08-05', NOW)).toEqual({
+  expect(dueCountdown('2026-08-05', NOW, dueSoon('2026-07-20'))).toEqual({
     note: 'due today',
     dueClass: 'soon',
   });
-  expect(dueCountdown('2026-08-06', NOW)).toEqual({
+  expect(dueCountdown('2026-08-06', NOW, dueSoon('2026-07-20'))).toEqual({
     note: '1 day left',
     dueClass: 'soon',
   });
-  expect(dueCountdown(todayIso(NOW + DUE_SOON_DAYS * 86_400_000), NOW)).toEqual(
-    { note: `${DUE_SOON_DAYS} days left`, dueClass: 'soon' },
-  );
-  expect(dueCountdown('2026-08-14', NOW)).toEqual({
+  expect(dueCountdown('2026-08-14', NOW, dueSoon('2026-07-20'))).toEqual({
     note: '9 days left',
     dueClass: 'ok',
   });
-  expect(dueCountdown('2026-08-04', NOW)).toEqual({
+  expect(dueCountdown('2026-08-04', NOW, dueSoon('2026-07-20'))).toEqual({
     note: 'overdue 1 day',
     dueClass: 'late',
   });
-  expect(dueCountdown('2026-07-30', NOW)).toEqual({
+  expect(dueCountdown('2026-07-30', NOW, dueSoon('2026-06-20'))).toEqual({
     note: 'overdue 6 days',
     dueClass: 'late',
   });
+});
+
+test('the due-soon window scales with the demand lead time', () => {
+  // Short lead (received 2026-08-01 → due 2026-08-08 = 7 days):
+  // window = clamp(2, ceil(7 × 0.15) = 2, 7) = 2 days.
+  expect(dueCountdown('2026-08-08', NOW, dueSoon('2026-08-01'))).toEqual({
+    note: '3 days left',
+    dueClass: 'ok',
+  });
+  expect(dueCountdown('2026-08-07', NOW, dueSoon('2026-08-01'))).toEqual({
+    note: '2 days left',
+    dueClass: 'soon',
+  });
+  // Long lead (received 2026-06-03 → due 2026-08-12 = 70 days):
+  // window = clamp(2, ceil(70 × 0.15) = 11, 7) = 7 days.
+  expect(dueCountdown('2026-08-12', NOW, dueSoon('2026-06-03'))).toEqual({
+    note: '7 days left',
+    dueClass: 'soon',
+  });
+  expect(dueCountdown('2026-08-13', NOW, dueSoon('2026-06-03'))).toEqual({
+    note: '8 days left',
+    dueClass: 'ok',
+  });
+});
+
+test('an unknown or invalid lead time falls back to the policy minimum window', () => {
+  // No received date (e.g. Priority Hot entries carry none).
+  expect(dueCountdown('2026-08-07', NOW, dueSoon(null))).toEqual({
+    note: '2 days left',
+    dueClass: 'soon',
+  });
+  expect(dueCountdown('2026-08-08', NOW, dueSoon(null))).toEqual({
+    note: '3 days left',
+    dueClass: 'ok',
+  });
+  // A malformed received date or one after the due date behaves the same.
+  expect(dueCountdown('2026-08-07', NOW, dueSoon('garbage')).dueClass).toBe(
+    'soon',
+  );
+  expect(dueCountdown('2026-08-08', NOW, dueSoon('2026-09-01')).dueClass).toBe(
+    'ok',
+  );
 });
 
 test('daysInProductionNote derives Total Days from the received date', () => {
