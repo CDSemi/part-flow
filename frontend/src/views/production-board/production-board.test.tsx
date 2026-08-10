@@ -260,7 +260,13 @@ test('the clock reads time-first with the date as its secondary line', async () 
 
   const wrap = document.querySelector('.pb-head .clockwrap');
   const children = Array.from(wrap?.children ?? [], (el) => el.className);
-  expect(children).toEqual(['clock', 'clockdate']);
+  expect(children).toEqual(['clockrow', 'clockdate']);
+  // The time row leads; standard mode renders no control inside it
+  // (the kiosk theme control lives here in kiosk mode, v17).
+  const row = wrap?.querySelector('.clockrow');
+  expect(Array.from(row?.children ?? [], (el) => el.className)).toEqual([
+    'clock',
+  ]);
 });
 
 test('rows follow canonical order: Hot → dated → undated → stocked', async () => {
@@ -547,12 +553,19 @@ test('the board stylesheet owns its heartbeat and never clips Machine names or P
   expect(css).toMatch(/\.pb-measure \.pb-table \.loc \{/);
 });
 
-test('the Live indicator distinguishes connected and stale states', async () => {
+test('the identity group shows the Department line and the live board title', async () => {
   await renderBoard();
-  const live = document.querySelector('.pb-head .live');
-  expect(live?.textContent).toBe('Live');
+  // Scan Station-style identity (v17): the Department line above the
+  // board title; the title itself is the heading and carries the live
+  // status dot (Area-indicator geometry, shared heartbeat via CSS).
+  const headid = document.querySelector('.pb-head .pb-headid');
+  expect(headid?.querySelector('.dept')?.textContent).toBe('Machine Shop');
+  const live = headid?.querySelector('h1.live');
+  expect(live?.textContent).toBe('Live Production');
   expect(live?.className).not.toContain('stale');
   expect(live?.querySelector('.ld')).not.toBeNull();
+  // Healthy state renders no stale note.
+  expect(live?.querySelector('.stalenote')).toBeNull();
 });
 
 test('the hidden measurement table renders the identical row structure', async () => {
@@ -901,43 +914,42 @@ test('the kiosk route renders the coherent board-owned kiosk header', async () =
   const head = document.querySelector('.pb-head.pbk-head');
   expect(head).not.toBeNull();
   expect(head?.querySelector('.pbk-actions')).toBeNull();
-  // Identity group: compact brand mark, board title, ONE shared
-  // connectivity status — together inside .pb-headid.
+  // Identity group (v17): the SAME Scan Station-style identity as the
+  // standard header — Department line + `Live Production` title with
+  // the live status dot; the kiosk header renders NO app brand.
   const headid = head?.querySelector('.pb-headid');
-  expect(headid?.querySelector('.pbk-brand')).not.toBeNull();
-  expect(headid?.querySelector('h1')?.textContent).toBe(
-    'Machine Shop — Production',
-  );
-  // The SAME `Live` operational status as the standard header (shared
-  // meaning, shared heartbeat) — never a second `ONLINE` chip
-  // repeating the same connectivity in the board header.
-  expect(headid?.querySelector('.live')?.textContent).toBe('Live');
+  expect(headid?.querySelector('.pbk-brand')).toBeNull();
+  expect(headid?.querySelector('.dept')?.textContent).toBe('Machine Shop');
+  expect(headid?.querySelector('h1')?.textContent).toBe('Live Production');
+  // The SAME live status as the standard header (shared meaning,
+  // shared heartbeat) — never a second `ONLINE` chip repeating the
+  // same connectivity in the board header.
   expect(headid?.querySelector('.live .ld')).not.toBeNull();
   expect(head?.querySelector('.connchip')).toBeNull();
   // Clock zone: the shared compact (borderless) theme control sits
-  // beside the clock in the header row.
-  expect(head?.querySelector('.themetoggle.compact')).not.toBeNull();
-  expect(head?.querySelector('.clock')).not.toBeNull();
+  // INSIDE the clock's time row, centered on the time text (v17).
+  expect(head?.querySelector('.clockrow .themetoggle.compact')).not.toBeNull();
+  expect(head?.querySelector('.clockrow .clock')).not.toBeNull();
   // The explicit exit action exists but lives in the footer controls
-  // row (v15) — its shortcut moved into the tooltip; no legend line
+  // row — its shortcut moved into the tooltip; no legend line
   // repeats it.
   expect(
     screen.getByRole('button', { name: 'Exit kiosk mode' }),
   ).toBeInTheDocument();
-  expect(head?.querySelector('.pbk-exit')).toBeNull();
+  expect(head?.querySelector('.pb-kioskbtn')).toBeNull();
   expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
     'Ctrl+Shift+K: exit kiosk mode',
   );
 });
 
-test('Exit kiosk sits in the footer controls row after the aggregate summary — kiosk only', async () => {
+test('the kiosk toggle sits in the footer controls row after the aggregate summary', async () => {
   const view = await renderBoard('/production-board/kiosk');
 
   // Inside the FIRST .pb-footrow (controls), directly after .pb-agg —
   // a normal layout child measured by pagination, never in the header
   // and never in the legend row.
   const controls = document.querySelector('.pb-foot .pb-footrow');
-  const exit = controls?.querySelector('.pbk-exit');
+  const exit = controls?.querySelector('.pb-kioskbtn');
   expect(exit).not.toBeNull();
   expect(exit?.textContent).toBe('Exit kiosk');
   expect(exit?.getAttribute('aria-label')).toBe('Exit kiosk mode');
@@ -945,23 +957,33 @@ test('Exit kiosk sits in the footer controls row after the aggregate summary —
   // line.
   expect(exit?.getAttribute('title')).toBe('Exit kiosk mode (Ctrl+Shift+K)');
   expect(exit?.previousElementSibling?.className).toBe('pb-agg');
-  expect(document.querySelector('.pb-head .pbk-exit')).toBeNull();
-  expect(document.querySelector('.pb-footrow.legend .pbk-exit')).toBeNull();
+  expect(document.querySelector('.pb-head .pb-kioskbtn')).toBeNull();
+  expect(document.querySelector('.pb-footrow.legend .pb-kioskbtn')).toBeNull();
   view.unmount();
 
-  // Standard mode renders no exit control anywhere.
+  // Standard mode renders the SAME control as the explicit kiosk
+  // entry (v17) — same footer position, same styling family.
   await renderBoard('/production-board');
-  expect(document.querySelector('.pbk-exit')).toBeNull();
+  const enter = document.querySelector('.pb-foot .pb-footrow .pb-kioskbtn');
+  expect(enter?.textContent).toBe('Enter kiosk');
+  expect(enter?.getAttribute('aria-label')).toBe('Enter kiosk mode');
+  expect(enter?.getAttribute('title')).toBe('Enter kiosk mode (Ctrl+Shift+K)');
+  expect(enter?.previousElementSibling?.className).toBe('pb-agg');
   expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
 });
 
-test('the kiosk exit button returns to the standard route', async () => {
+test('the footer kiosk toggle switches between the two routes', async () => {
   await renderBoard('/production-board/kiosk');
 
   fireEvent.click(screen.getByRole('button', { name: 'Exit kiosk mode' }));
   await act(async () => {});
   expect(window.location.pathname).toBe('/production-board');
   expect(document.querySelector('.pbk-head')).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Enter kiosk mode' }));
+  await act(async () => {});
+  expect(window.location.pathname).toBe('/production-board/kiosk');
+  expect(document.querySelector('.pbk-head')).not.toBeNull();
 });
 
 test('the standard route keeps the normal header and no kiosk chrome', async () => {
@@ -969,10 +991,15 @@ test('the standard route keeps the normal header and no kiosk chrome', async () 
 
   expect(document.querySelector('.pbk-head')).toBeNull();
   expect(document.querySelector('.pb')?.className).not.toContain('kiosk');
+  // The identity group is IDENTICAL to the kiosk header (v17); no
+  // brand mark exists anywhere, and no theme control renders in the
+  // standard header (the top navigation supplies it there).
   expect(document.querySelector('.pb-head .live')).not.toBeNull();
+  expect(document.querySelector('.pbk-brand')).toBeNull();
+  expect(document.querySelector('.pb-head .themetoggle')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Exit kiosk mode' })).toBeNull();
   expect(document.querySelector('.pb-foot')?.textContent).not.toContain(
-    'exit kiosk mode',
+    'Exit kiosk',
   );
 });
 

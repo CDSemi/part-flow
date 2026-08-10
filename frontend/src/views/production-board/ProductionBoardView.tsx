@@ -1,5 +1,6 @@
 import './production-board.css';
 
+import type { ReactNode } from 'react';
 import {
   useCallback,
   useEffect,
@@ -84,32 +85,46 @@ function RotationProgress({
 }
 
 /**
- * Board operational status — the same meaning in the standard and
- * kiosk presentations: `Live` with the shared connected heartbeat
- * (styles/global.css — identical to the ONLINE connectivity dot) while
- * the shared connectivity state is healthy, an explicit non-pulsing
- * warning while it is not. The label is `Live` (board feed running),
- * never a second `ONLINE` chip — one status per header.
+ * Board title carrying the operational status (v17) — the same
+ * presentation and meaning in the standard and kiosk headers, styled
+ * like the Scan Station Area title: an Area-indicator-style rounded
+ * square dot with the shared connected heartbeat (styles/global.css —
+ * identical "alive" behavior to the ONLINE connectivity dot) while the
+ * shared connectivity state is healthy, an explicit non-pulsing
+ * warning dot plus a small stale note while it is not. One status per
+ * header — never a second `ONLINE` chip.
  */
-function BoardLiveStatus() {
+function BoardTitle() {
   const { status } = useConnectivity();
+  const stale = status !== 'connected';
   return (
-    <span className={`live${status === 'connected' ? '' : ' stale'}`}>
+    <h1 className={`live${stale ? ' stale' : ''}`}>
       <span className="ld" aria-hidden="true" />
-      {status === 'connected' ? 'Live' : 'Feed stale — reconnecting'}
-    </span>
+      Live Production
+      {stale ? (
+        <span className="stalenote">Feed stale — reconnecting</span>
+      ) : null}
+    </h1>
   );
 }
 
-/** Live clock on the shared second-precision UI clock (ui-clock.ts). */
-function LiveClock() {
+/**
+ * Live clock on the shared second-precision UI clock (ui-clock.ts).
+ * The optional `control` (kiosk: the compact theme toggle) renders
+ * inside the time row, so it centers on the current-time text — never
+ * on the taller time + date block (v17).
+ */
+function LiveClock({ control }: { control?: ReactNode }) {
   const now = new Date(useUiClock('second'));
   // One coherent clock block: the time leads, the date sits directly
   // beneath it as the secondary line (production-board.css).
   return (
     <span className="clockwrap">
-      <span className="clock">
-        {now.toLocaleTimeString(undefined, { hour12: false })}
+      <span className="clockrow">
+        {control}
+        <span className="clock">
+          {now.toLocaleTimeString(undefined, { hour12: false })}
+        </span>
       </span>
       <span className="clockdate">
         {now.toLocaleDateString(undefined, {
@@ -584,29 +599,25 @@ export function ProductionBoardView() {
       aria-label="Production Board"
       ref={sectionRef}
     >
-      {/* Header (restructured v15): one three-zone layout shared by
-          both presentations — identity (kiosk brand + title + the
-          SAME `Live` operational status; BoardLiveStatus with the
-          shared heartbeat, never a second `ONLINE` chip), a flexible
-          center, and the clock zone. Kiosk mode adds the shared
-          borderless Dark/Light control beside the clock (what the
-          hidden navigation would otherwise provide); the explicit
-          exit action lives in the footer controls row (v15). Two
-          presentations of one board, not two boards. */}
+      {/* Header (restructured v17): ONE identical identity group in
+          both presentations, styled like the Scan Station header —
+          the Department line above the `Live Production` board title
+          (BoardTitle: Area-indicator-style dot with the shared
+          heartbeat, never a second `ONLINE` chip); a flexible
+          center; then the clock zone. Kiosk mode renders the shared
+          borderless Dark/Light control inside the clock's time row
+          (centered on the time text — what the hidden navigation
+          would otherwise provide) and NO app brand — the board
+          identity carries the header. The explicit enter/exit action
+          lives in the footer controls row. Two presentations of one
+          board, not two boards. */}
       <div className={`pb-head${kiosk ? ' pbk-head' : ''}`} ref={headRef}>
         <div className="pb-headid">
-          {kiosk ? (
-            <span className="pbk-brand" aria-hidden="true">
-              <span className="mark">⇄</span>
-              Part<span className="pf">Flow</span>
-            </span>
-          ) : null}
-          <h1>Machine Shop — Production</h1>
-          <BoardLiveStatus />
+          <div className="dept">Machine Shop</div>
+          <BoardTitle />
         </div>
         <span className="spacer" />
-        {kiosk ? <ThemeToggle compact /> : null}
-        <LiveClock />
+        <LiveClock control={kiosk ? <ThemeToggle compact /> : undefined} />
       </div>
       {rows.length === 0 ? (
         <EmptyState message="No active production in this Department." />
@@ -721,21 +732,27 @@ export function ProductionBoardView() {
               <b className="aggnum e">{scrappedTotal}</b> pcs scrapped
             </span>
           </span>
-          {kiosk ? (
-            // Exit kiosk lives in the footer controls row (v15) — a
-            // normal layout child sized like the page-navigation
-            // family, so the footer height stays inside the
-            // pagination measurement; the shortcut moves into the
-            // tooltip instead of a legend line.
-            <button
-              className="pbk-exit"
-              aria-label="Exit kiosk mode"
-              title="Exit kiosk mode (Ctrl+Shift+K)"
-              onClick={() => navigate('/production-board')}
-            >
-              Exit kiosk
-            </button>
-          ) : null}
+          {/* The kiosk mode toggle lives in the footer controls row —
+              a normal layout child sized like the page-navigation
+              family, so the footer height stays inside the pagination
+              measurement; the shortcut lives in the tooltip instead
+              of a legend line. Standard mode enters kiosk, kiosk
+              mode exits (v17) — the same position and styling in
+              both presentations. */}
+          <button
+            className="pb-kioskbtn"
+            aria-label={kiosk ? 'Exit kiosk mode' : 'Enter kiosk mode'}
+            title={
+              kiosk
+                ? 'Exit kiosk mode (Ctrl+Shift+K)'
+                : 'Enter kiosk mode (Ctrl+Shift+K)'
+            }
+            onClick={() =>
+              navigate(kiosk ? '/production-board' : '/production-board/kiosk')
+            }
+          >
+            {kiosk ? 'Exit kiosk' : 'Enter kiosk'}
+          </button>
         </div>
         <div className="pb-footrow legend">
           <span className="leg">

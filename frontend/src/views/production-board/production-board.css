@@ -25,12 +25,12 @@
   --loc-ltime: initial;
 }
 
-/* Header (restructured v15): one balanced three-zone row shared by
-   both presentations — the identity group (kiosk brand · title ·
-   Live) on the left, a flexible center, and the clock zone (kiosk
-   adds the compact theme control beside it) on the right. Everything
-   center-aligned on one axis: no baseline-aligned column stacks, no
-   per-element separators. */
+/* Header (restructured v17): one balanced row shared by both
+   presentations — the Scan Station-style identity group (Department
+   line above the `Live Production` title) on the left, a flexible
+   center, and the clock zone (kiosk renders the compact theme
+   control inside the clock's time row) on the right. No app brand in
+   either presentation and no per-element separators. */
 .pb-head {
   display: flex;
   align-items: center;
@@ -41,36 +41,48 @@
 }
 
 .pb-head .pb-headid {
-  display: flex;
-  align-items: center;
-  gap: 16px;
   min-width: 0;
 }
 
-.pb-head h1 {
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: 0.4px;
-  line-height: 1.1;
+/* Department line: identical styling to the Scan Station header's
+   Department line (scan-station.css .ss-head .dept). */
+.pb-head .dept {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  font-weight: 700;
 }
 
-.pb-head .live {
-  display: inline-flex;
+/* Board title = live status (v17): the Scan Station Area-title
+   typography (.ss-head .area) with a leading Area-indicator-style
+   rounded-square dot carrying the live heartbeat. */
+.pb-head h1.live {
+  font-size: 28px;
+  font-weight: 800;
+  display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 650;
+  gap: 10px;
+  line-height: 1.15;
 }
 
 .pb-head .live .ld {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
   background: var(--ok);
   /* The shared connected heartbeat (styles/global.css) — the same
      "alive" behavior as the connectivity chip's ONLINE dot. */
   animation: pf-heartbeat 2s infinite;
+}
+
+/* Stale note: explicit small warning text beside the title — the
+   status is never color-only. */
+.pb-head .live .stalenote {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--warn-t);
 }
 
 /* Stale / reconnecting: solid warning dot, no heartbeat. */
@@ -101,6 +113,15 @@
   align-items: flex-end;
   gap: 2px;
   line-height: 1.05;
+}
+
+/* Time row: hosts the kiosk compact theme control beside the time,
+   centered on the time text itself — never on the taller time + date
+   block (v17). */
+.pb-head .clockrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .pb-head .clock {
@@ -729,33 +750,13 @@ tr.hotrow2 td:first-child {
 
 /* ============ Kiosk mode (route /production-board/kiosk) ============ */
 
-/* Kiosk brand (v15): a quiet identity mark inside the header identity
-   group — no separator line; the shared header gap carries the
-   spacing, matching the rest of the row. */
-.pbk-brand {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
-  font-size: 19px;
-  font-weight: 850;
-  letter-spacing: 0.4px;
-  color: var(--text);
-}
-
-.pbk-brand .mark {
-  color: var(--info);
-}
-
-.pbk-brand .pf {
-  color: var(--info-t);
-}
-
-/* Explicit kiosk exit action (footer controls row, v15): sized like
-   the page-navigation family so the footer keeps one control height —
+/* Kiosk mode toggle (footer controls row — `Enter kiosk` in standard
+   mode, `Exit kiosk` in Kiosk mode, v17): sized like the
+   page-navigation family so the footer keeps one control height —
    its height stays inside the pagination measurement. Quiet, never
    louder than the board content; Ctrl+Shift+K stays the keyboard
    path (tooltip). */
-.pb-foot .pbk-exit {
+.pb-foot .pb-kioskbtn {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel2);
@@ -766,7 +767,7 @@ tr.hotrow2 td:first-child {
   min-height: 30px;
 }
 
-.pb-foot .pbk-exit:hover {
+.pb-foot .pb-kioskbtn:hover {
   color: var(--text);
   border-color: var(--border2);
 }
