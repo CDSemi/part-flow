@@ -552,9 +552,9 @@ test('state tones color the quantity values — state words stay quiet secondary
 
   // Stylesheet: the semantic tone lives on the quantity value —
   // queue → warning, on machine / processing → information, done →
-  // success — never on the state words, which read as quiet
-  // secondary text. Color is never the only distinction: the written
-  // state stays beside every toned quantity.
+  // success — never on the state words, which read as the row's
+  // quietest (dim) text. Color is never the only distinction: the
+  // written state stays beside every toned quantity.
   const css = await readBoardCss();
   expect(ruleBlock(css, '.pb-table .locrow.st-queue .lqty')).toContain(
     'color: var(--warn-t)',
@@ -565,7 +565,10 @@ test('state tones color the quantity values — state words stay quiet secondary
   expect(ruleBlock(css, '.pb-table .locrow.st-done .lqty')).toContain(
     'color: var(--ok-t)',
   );
-  expect(ruleBlock(css, '.pb-table .ltag')).toContain('color: var(--muted)');
+  // v19 tone swap: the state words take the dim tone the time used to
+  // carry, the dwell time reads as secondary text.
+  expect(ruleBlock(css, '.pb-table .ltag')).toContain('color: var(--faint)');
+  expect(ruleBlock(css, '.pb-table .ltime')).toContain('color: var(--muted)');
   const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
   expect(stripped).not.toMatch(/\.ltag\.st-[\w-]+[^{]*\{[^}]*color/);
   expect(stripped).not.toMatch(/\.ltag\.done[^{,]*\{/);

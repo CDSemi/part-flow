@@ -446,18 +446,20 @@
   color: var(--ok-t);
 }
 
-/* State words: quiet secondary text — the tone lives on the quantity
-   (v18), never on the label. */
+/* State words: the quietest text in the row (dim tone, v19 — swapped
+   with the time's former tone) — the semantic tone lives on the
+   quantity (v18), never on the label. */
 .pb-table .ltag {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--faint);
   font-weight: 650;
   padding-left: 8px;
   white-space: nowrap;
 }
 
 /* External activity (`plating`, `vendor`, …): a light informational
-   chip in the state position — a label, never a control. */
+   chip in the state position — a label, never a control. Its text
+   shares the state words' dim tone (v19). */
 .pb-table .ltag .actchip {
   display: inline-block;
   background: var(--panel2);
@@ -466,13 +468,15 @@
   padding: 1px 8px;
   font-size: 11px;
   font-weight: 700;
-  color: var(--muted);
+  color: var(--faint);
 }
 
+/* Dwell time: secondary text (v19 — swapped with the state words'
+   former dim tone; the derived duration is the more useful value). */
 .pb-table .ltime {
   font-family: var(--mono), monospace;
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
   font-weight: 600;
   padding-left: 12px;
   text-align: right;
