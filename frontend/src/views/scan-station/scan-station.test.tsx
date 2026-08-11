@@ -965,27 +965,94 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   expect(screen.getByText(/2027-60-8114-00 × 2 → Lathe 2/)).toBeInTheDocument();
 });
 
-test('more than 6 queued PNs use a compact dropdown instead of buttons', async () => {
+test('the queued-PN selection is viewport-fit driven — buttons regardless of count, a dropdown only on real overflow', async () => {
   await renderStation('LATHE-ST-01', '?state=long');
 
   scan('PF:MACHINE:L1');
   const dialog = activeDialog();
-  // Machines (4) keep explicit buttons; queued PNs (>6) use a select.
+  // > 6 queued PNs with no measurable overflow (the no-layout test
+  // default): every queued PN stays an explicit selection button —
+  // there is no PN-count threshold anymore.
+  expect(within(dialog as HTMLElement).queryByRole('combobox')).toBeNull();
+  const pnButtons = within(dialog as HTMLElement)
+    .getAllByRole('button')
+    .filter(
+      (b) => b.classList.contains('pickbtn') && b.classList.contains('mono'),
+    );
+  expect(pnButtons.length).toBeGreaterThan(7);
+
+  // jsdom performs no layout: install the measured heights — the
+  // dialog's viewport height cap (inline max-height stands in for the
+  // stylesheet's 92vh), its content height, and the PN cell / probe
+  // heights — and let the resize listener re-run the fit measurement.
+  const cell = dialog.querySelector('.ss-pncell') as HTMLElement;
+  const probe = dialog.querySelector('.ss-pnprobe') as HTMLElement;
+  const setHeights = (
+    cap: number,
+    scroll: number,
+    cellH: number,
+    probeH: number,
+  ) => {
+    (dialog as HTMLElement).style.maxHeight = `${cap}px`;
+    Object.defineProperty(dialog, 'scrollHeight', {
+      value: scroll,
+      configurable: true,
+    });
+    Object.defineProperty(cell, 'offsetHeight', {
+      value: cellH,
+      configurable: true,
+    });
+    Object.defineProperty(probe, 'offsetHeight', {
+      value: probeH,
+      configurable: true,
+    });
+  };
+
+  // The natural button layout (700px) exceeds the 500px viewport cap:
+  // the queued-PN selection collapses to the compact dropdown. The
+  // Machine selection NEVER becomes a dropdown.
+  setHeights(500, 700, 300, 300);
+  fireEvent(window, new Event('resize'));
+  const pnSelect = within(dialog as HTMLElement).getByRole('combobox', {
+    name: 'PN (queued)',
+  });
+  expect(pnSelect.tagName).toBe('SELECT');
+  expect(within(dialog as HTMLElement).getAllByRole('combobox').length).toBe(1);
   expect(
     within(dialog as HTMLElement).getByRole('button', { name: /Lathe 1/ }),
   ).toBeInTheDocument();
-  const pnSelect = screen.getByLabelText('PN (queued)');
-  expect(pnSelect.tagName).toBe('SELECT');
   const options = Array.from(
     (pnSelect as HTMLSelectElement).options,
     (o) => o.text,
   );
-  expect(options.length).toBeGreaterThan(7);
-  // Options display PN and queued quantity.
   expect(options.some((o) => /queued \d+/.test(o))).toBe(true);
 
+  // Selection and validation flow are unchanged in dropdown mode.
   fireEvent.change(pnSelect, { target: { value: '2027-60-8114-00' } });
   expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled();
+
+  // The decision measures the NATURAL button layout (probe), never the
+  // collapsed dropdown layout: the collapsed dialog (440px) would fit
+  // the 500px cap, but the natural 700px still does not → the dropdown
+  // stays.
+  setHeights(500, 440, 40, 300);
+  fireEvent(window, new Event('resize'));
+  expect(
+    within(dialog as HTMLElement).getByRole('combobox', {
+      name: 'PN (queued)',
+    }),
+  ).toBeInTheDocument();
+
+  // A taller viewport (800px cap) fits the 700px natural height again:
+  // back to buttons, with the selection preserved.
+  setHeights(800, 440, 40, 300);
+  fireEvent(window, new Event('resize'));
+  expect(within(dialog as HTMLElement).queryByRole('combobox')).toBeNull();
+  expect(
+    within(dialog as HTMLElement).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  ).toHaveClass('sel');
 });
 
 test('Back preserves Machine, PN and an edited quantity', async () => {

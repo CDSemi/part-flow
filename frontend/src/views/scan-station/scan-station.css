@@ -817,6 +817,32 @@
   gap: 8px;
 }
 
+/* Assign-to-Machine queued-PN cell: hosts the visible selection UI
+   (buttons, or the dropdown while the measured natural button layout
+   cannot fit the viewport) plus the invisible measurement probe. */
+.ss-pncell {
+  position: relative;
+}
+
+/* The dropdown fills the control column exactly like it did as a
+   direct grid child. */
+.ss-pncell > select {
+  width: 100%;
+}
+
+/* Natural-height probe: an invisible copy of the full PN button
+   layout at the cell's width, absolutely positioned so it wraps
+   exactly like the real buttons WITHOUT affecting layout. Its height
+   feeds the viewport-fit decision — never a PN-count threshold. */
+.ss-pnprobe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .pickbtn {
   display: flex;
   flex-direction: column;

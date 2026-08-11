@@ -1851,6 +1851,50 @@ function MachineAssignDialog({
     ),
   );
 
+  // Viewport-fit decision for the queued-PN selection (Machines always
+  // stay explicit buttons). PN buttons are the default; the compact
+  // dropdown appears ONLY while the dialog's NATURAL height with the
+  // full PN button layout exceeds the dialog's viewport height cap
+  // (the `.dlg` max-height, which already carries the required margin
+  // to the viewport edges) — never a PN-count threshold. The invisible
+  // probe copy always lays out the buttons at the cell's width, so the
+  // measurement is independent of the currently applied mode and the
+  // dialog returns to buttons as soon as a larger viewport fits them.
+  const pnCellRef = useRef<HTMLDivElement>(null);
+  const pnProbeRef = useRef<HTMLDivElement>(null);
+  const [pnCombobox, setPnCombobox] = useState(false);
+  const measurePnFit = useCallback(() => {
+    const cell = pnCellRef.current;
+    const probe = pnProbeRef.current;
+    const dlg = cell?.closest('.dlg');
+    if (!cell || !probe || !(dlg instanceof HTMLElement)) return;
+    const cap = Number.parseFloat(getComputedStyle(dlg).maxHeight);
+    if (!Number.isFinite(cap) || cap <= 0) {
+      // No measurable viewport cap (no-layout environments — tests):
+      // keep the default button presentation.
+      setPnCombobox(false);
+      return;
+    }
+    // Natural dialog height with PN buttons: the current content
+    // height with the visible PN control's height replaced by the
+    // probe's button layout height.
+    const naturalWithButtons =
+      dlg.scrollHeight - cell.offsetHeight + probe.offsetHeight;
+    // Half-pixel tolerance so subpixel rounding never flips the mode.
+    setPnCombobox(naturalWithButtons > cap + 0.5);
+  }, []);
+  // Re-evaluate whenever the measured content can change: entering the
+  // selection view (also on Back) and a changed queued-PN list.
+  useLayoutEffect(() => {
+    if (step === 'select') measurePnFit();
+  }, [step, queuedPns.length, measurePnFit]);
+  // …and whenever the viewport size changes.
+  useEffect(() => {
+    const onResize = () => measurePnFit();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [measurePnFit]);
+
   const parsedQty = parseInt(qty || '0', 10);
   const pairSelected = machine !== null && pn !== null && max > 0;
   const qtyValid = parsedQty >= 1 && parsedQty <= max;
@@ -2000,93 +2044,101 @@ function MachineAssignDialog({
             <span className="lbl" id="ma-machine-lbl">
               Machine
             </span>
-            {machines.length > 6 ? (
-              <select
-                aria-label="Machine"
-                value={machine ?? ''}
-                onChange={(e) => setMachine(e.target.value)}
-              >
-                <option value="" disabled>
-                  Select a Machine…
-                </option>
-                {machines.map((m) => (
-                  <option
-                    key={m.name}
-                    value={m.name}
-                    disabled={m.status === 'maintenance'}
-                  >
-                    {m.name}
-                    {m.status === 'maintenance'
-                      ? ' — maintenance (unavailable)'
-                      : ''}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div
-                className="ss-choicerow"
-                role="group"
-                aria-labelledby="ma-machine-lbl"
-              >
-                {machines.map((m) => (
-                  <button
-                    key={m.name}
-                    type="button"
-                    className={`pickbtn ${machine === m.name ? 'sel' : ''}`}
-                    disabled={m.status === 'maintenance'}
-                    title={
-                      m.status === 'maintenance'
-                        ? 'Under maintenance · Unavailable for production'
-                        : undefined
-                    }
-                    onClick={() => setMachine(m.name)}
-                  >
-                    {m.name}
-                    <span className="s">{m.status}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Machines are ALWAYS explicit selection buttons — never a
+                dropdown; an Area's Machine list stays small and wraps. */}
+            <div
+              className="ss-choicerow"
+              role="group"
+              aria-labelledby="ma-machine-lbl"
+            >
+              {machines.map((m) => (
+                <button
+                  key={m.name}
+                  type="button"
+                  className={`pickbtn ${machine === m.name ? 'sel' : ''}`}
+                  disabled={m.status === 'maintenance'}
+                  title={
+                    m.status === 'maintenance'
+                      ? 'Under maintenance · Unavailable for production'
+                      : undefined
+                  }
+                  onClick={() => setMachine(m.name)}
+                >
+                  {m.name}
+                  <span className="s">{m.status}</span>
+                </button>
+              ))}
+            </div>
             <span className="lbl" id="ma-pn-lbl">
               PN (queued)
             </span>
             {queuedPns.length === 0 ? (
               <span className="sub">No queued quantity in this Area.</span>
-            ) : queuedPns.length > 6 ? (
-              <select
-                aria-label="PN (queued)"
-                className="mono"
-                value={pn ?? ''}
-                onChange={(e) => setPn(e.target.value)}
-              >
-                <option value="" disabled>
-                  Select a queued PN…
-                </option>
-                {queuedPns.map((queuedPn) => (
-                  <option key={queuedPn} value={queuedPn}>
-                    {queuedPn} — queued {queuedQtyFor(queuedPn)}
-                  </option>
-                ))}
-              </select>
             ) : (
-              <div
-                className="ss-choicerow"
-                role="group"
-                aria-labelledby="ma-pn-lbl"
-              >
-                {queuedPns.map((queuedPn) => (
-                  <button
-                    key={queuedPn}
-                    type="button"
-                    className={`pickbtn mono ${pn === queuedPn ? 'sel' : ''}`}
-                    onClick={() => setPn(queuedPn)}
+              <div className="ss-pncell" ref={pnCellRef}>
+                {pnCombobox ? (
+                  // The dialog with the full PN button layout would not
+                  // fit the viewport right now — compact dropdown.
+                  <select
+                    aria-label="PN (queued)"
+                    className="mono"
+                    value={pn ?? ''}
+                    onChange={(e) => setPn(e.target.value)}
                   >
-                    <span className="pickpn" title={queuedPn}>
-                      {queuedPn}
-                    </span>
-                    <span className="s">queued {queuedQtyFor(queuedPn)}</span>
-                  </button>
-                ))}
+                    <option value="" disabled>
+                      Select a queued PN…
+                    </option>
+                    {queuedPns.map((queuedPn) => (
+                      <option key={queuedPn} value={queuedPn}>
+                        {queuedPn} — queued {queuedQtyFor(queuedPn)}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div
+                    className="ss-choicerow"
+                    role="group"
+                    aria-labelledby="ma-pn-lbl"
+                  >
+                    {queuedPns.map((queuedPn) => (
+                      <button
+                        key={queuedPn}
+                        type="button"
+                        className={`pickbtn mono ${pn === queuedPn ? 'sel' : ''}`}
+                        onClick={() => setPn(queuedPn)}
+                      >
+                        <span className="pickpn" title={queuedPn}>
+                          {queuedPn}
+                        </span>
+                        <span className="s">
+                          queued {queuedQtyFor(queuedPn)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* Invisible measurement copy of the full PN button
+                    layout at the cell's width (same wrapping): its
+                    height feeds the viewport-fit decision in BOTH
+                    modes. Hidden from a11y and never interactive. */}
+                <div className="ss-pnprobe" aria-hidden="true" ref={pnProbeRef}>
+                  <div className="ss-choicerow">
+                    {queuedPns.map((queuedPn) => (
+                      <button
+                        key={queuedPn}
+                        type="button"
+                        tabIndex={-1}
+                        disabled
+                        className="pickbtn mono"
+                      >
+                        <span className="pickpn">{queuedPn}</span>
+                        <span className="s">
+                          queued {queuedQtyFor(queuedPn)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
           </div>
