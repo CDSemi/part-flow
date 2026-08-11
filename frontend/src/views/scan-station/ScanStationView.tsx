@@ -261,6 +261,33 @@ function UnknownStation({ stationId }: { stationId: string }) {
   );
 }
 
+/**
+ * Development-only clickable demo barcode inside the DevNotice. The
+ * button is an invisible wrapper around the shared code chip — the
+ * value keeps its `<code>` presentation, hover/focus reveal the
+ * affordance (scan-station.css). A click feeds the value through the
+ * EXACT scanner path (`onScan` → main input + `handleScan()`); there
+ * is no parallel demo scan flow.
+ */
+function DemoBarcode({
+  value,
+  onScan,
+}: {
+  value: string;
+  onScan: (value: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="ss-demobarcode"
+      title="Click to simulate scan"
+      onClick={() => onScan(value)}
+    >
+      <code>{value}</code>
+    </button>
+  );
+}
+
 function StationView({
   station,
   productionMode,
@@ -669,6 +696,22 @@ function StationView({
     openPnFlow,
   ]);
 
+  // Development-only: a click on a DemoBarcode in the DevNotice is the
+  // exact equivalent of a keyboard-wedge scan ending in Enter — the
+  // value lands in the main barcode input and goes through the SAME
+  // handleScan()/parseScan() path (validation, notices, dialogs).
+  // While writes are blocked the value is NOT staged (mirroring the
+  // wedge capture, which is inert then); handleScan still runs so the
+  // click gets the same blocked notice a real scan would.
+  const simulateScan = useCallback(
+    (value: string) => {
+      const input = inputRef.current;
+      if (input && !writeBlocked) input.value = value;
+      handleScan();
+    },
+    [writeBlocked, handleScan],
+  );
+
   // Keyboard-wedge capture at the Scan Station level: when no dialog
   // is open, a scanned barcode reaches the main input even when the
   // input is not focused. The first character is captured (never
@@ -1007,13 +1050,20 @@ function StationView({
                 also excluded from production bundles — see
                 app/dev-views.ts and the mock-sentinel build check). */}
             <DevNotice>
-              Demo barcodes (development build only) —{' '}
-              <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
-              <code>PF:PN:2027-60-8114-00</code> in this Area ·{' '}
-              <code>PF:PN:118-052</code> elsewhere ·{' '}
-              <code>PF:PN:NEW-PART-01</code> unknown → intake) ·{' '}
-              <code>PF:MACHINE:L2</code> assign to Machine ·{' '}
-              <code>PF:WORKER:88</code> worker
+              Demo barcodes (development build only) — click one to simulate a
+              scan — <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
+              <DemoBarcode
+                value="PF:PN:2027-60-8114-00"
+                onScan={simulateScan}
+              />{' '}
+              in this Area ·{' '}
+              <DemoBarcode value="PF:PN:118-052" onScan={simulateScan} />{' '}
+              elsewhere ·{' '}
+              <DemoBarcode value="PF:PN:NEW-PART-01" onScan={simulateScan} />{' '}
+              unknown → intake) ·{' '}
+              <DemoBarcode value="PF:MACHINE:L2" onScan={simulateScan} /> assign
+              to Machine ·{' '}
+              <DemoBarcode value="PF:WORKER:88" onScan={simulateScan} /> worker
             </DevNotice>
             {/* Compact section label OUTSIDE the block (uppercase via
                 CSS), then one quiet row: PN + movement summary, a

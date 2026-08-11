@@ -295,7 +295,39 @@
 }
 
 /* The demo-barcodes hint is the shared DevNotice component — styled
-   globally (.dev-notice in styles/global.css), no local rules. */
+   globally (.dev-notice in styles/global.css). Local rule: the
+   CONCRETE demo barcodes are clickable (they simulate a real scan
+   through the main input + handleScan). The button is an invisible
+   wrapper so the value keeps the shared code-chip look at rest;
+   hover/focus reveal the affordance without inventing a new visual
+   language — the info surface/outline every other Scan Station
+   control already uses. */
+.ss-demobarcode {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.ss-demobarcode code {
+  cursor: pointer;
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+
+.ss-demobarcode:hover code {
+  background: var(--info-surface);
+  color: var(--info-t);
+}
+
+.ss-demobarcode:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 1px;
+}
 
 /* Manual PN entry — the secondary action inside the scan row itself:
    visibly secondary to scanning (panel surface, no accent fill) but
