@@ -1,6 +1,6 @@
 import './machines.css';
 
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
@@ -378,7 +378,7 @@ function AssetMeta({ machine }: { machine: MockMachine }) {
           Asset <span className="tagv">{machine.assetTag}</span>
         </div>
       ) : null}
-      <div>
+      <div className="mg-makeline">
         {/* Manufacturer and model in two distinct neutral tones (v15)
             — never one merged string tone. */}
         {machine.manufacturer || machine.model ? (
@@ -509,6 +509,69 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/**
+ * Area select with the selected Area's color previewed as a slim
+ * horizontal line filling the label row up to the dialog's right edge
+ * (v17) — a native select, never a custom control just for a color.
+ * Shared by New Machine and Reactivate Machine.
+ */
+function AreaSelectField({
+  label,
+  value,
+  choices,
+  onChange,
+}: {
+  label: string;
+  value: AreaKey;
+  choices: { key: AreaKey; name: string }[];
+  onChange: (area: AreaKey) => void;
+}) {
+  const fieldId = useId();
+  const selected = areaByKey(value);
+  return (
+    <>
+      <label className="mg-arealabelrow" htmlFor={fieldId}>
+        {label}
+        <span
+          className="mg-arealine"
+          style={{ background: selected?.colorVar ?? 'var(--faint)' }}
+          aria-hidden="true"
+        />
+      </label>
+      <select
+        id={fieldId}
+        className="field"
+        value={value}
+        onChange={(event) => onChange(event.target.value as AreaKey)}
+      >
+        {choices.map((choice) => (
+          <option key={choice.key} value={choice.key}>
+            {choice.name}
+          </option>
+        ))}
+      </select>
+    </>
+  );
+}
+
+/** Key/value recap rows shared by the final confirmation summaries. */
+function SummaryList({
+  rows,
+}: {
+  rows: { label: string; value: ReactNode }[];
+}) {
+  return (
+    <div className="mg-summary">
+      {rows.map((row) => (
+        <div className="srow" key={row.label}>
+          <span className="k">{row.label}</span>
+          <span className="v">{row.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Quiet append-only lifecycle audit list (RETIRED / REACTIVATED). */
 function LifecycleList({ machine }: { machine: MockMachine }) {
   const events = machine.lifecycle ?? [];
@@ -547,7 +610,9 @@ function LifecycleList({ machine }: { machine: MockMachine }) {
  * Editing also hosts the Danger Zone (v15): Retire lives here instead
  * of a table button. Starting Retire with unsaved edits never saves
  * them silently — an explicit Save / Discard / Cancel decision comes
- * first.
+ * first. The decision is only RECORDED (v17): it is applied when the
+ * retirement completes, so cancelling the typed confirmation or the
+ * final summary returns to the form with the edits intact.
  */
 function MachineEditDialog({
   machines,
@@ -588,20 +653,26 @@ function MachineEditDialog({
   const [installedOn, setInstalledOn] = useState(initial.installedOn);
   const [notes, setNotes] = useState(initial.notes);
   const [error, setError] = useState<string | null>(null);
-  const [baseline, setBaseline] = useState(initial);
   const [retireStage, setRetireStage] = useState<
-    null | 'blocked' | 'unsaved' | 'confirm'
+    null | 'blocked' | 'unsaved' | 'confirm' | 'summary'
+  >(null);
+  // Recorded DECISION for the pending edits inside the retire flow —
+  // nothing is saved or discarded until the retirement completes, so
+  // cancelling any later step returns to the form with the edits
+  // intact.
+  const [retireEditsIntent, setRetireEditsIntent] = useState<
+    'save' | 'discard' | null
   >(null);
 
   const dirty =
-    name !== baseline.name ||
-    barcode !== baseline.barcode ||
-    manufacturer !== baseline.manufacturer ||
-    model !== baseline.model ||
-    assetTag !== baseline.assetTag ||
-    serialNumber !== baseline.serialNumber ||
-    installedOn !== baseline.installedOn ||
-    notes !== baseline.notes;
+    name !== initial.name ||
+    barcode !== initial.barcode ||
+    manufacturer !== initial.manufacturer ||
+    model !== initial.model ||
+    assetTag !== initial.assetTag ||
+    serialNumber !== initial.serialNumber ||
+    installedOn !== initial.installedOn ||
+    notes !== initial.notes;
 
   /** Pure validation + record assembly (no state changes). */
   const build = (): { machine: MockMachine } | { error: string } => {
@@ -649,12 +720,36 @@ function MachineEditDialog({
       setRetireStage('blocked');
       return;
     }
+    setRetireEditsIntent(null);
     setRetireStage(dirty ? 'unsaved' : 'confirm');
+  };
+
+  /** Leave the retire flow — the form keeps its (unsaved) edits. */
+  const cancelRetire = () => {
+    setRetireStage(null);
+    setRetireEditsIntent(null);
+  };
+
+  /** The retirement really happens HERE: apply the recorded edits
+   * decision first, then retire. */
+  const finalizeRetire = () => {
+    if (retireEditsIntent === 'save') {
+      const built = build();
+      if ('error' in built) return; // validated when the decision was made
+      onApplyChanges(built.machine);
+    }
+    onRetire();
   };
 
   const buildForRetire = build();
   const identifier = machine ? confirmIdentifier(machine) : null;
   const selectedArea = areaByKey(area);
+  // The summary shows the record as it will be retired: with the
+  // edits when the recorded decision is Save, as last saved otherwise.
+  const summaryRecord =
+    retireEditsIntent === 'save' && !('error' in buildForRetire)
+      ? buildForRetire.machine
+      : machine;
 
   return (
     <ModalDialog
@@ -662,8 +757,10 @@ function MachineEditDialog({
       onClose={onCancel}
       size="wide"
     >
-      <h3>{machine ? 'Edit Machine' : 'New Machine'}</h3>
-      {dirty ? <div className="mg-dirty">● Unsaved changes</div> : null}
+      <div className="mg-dlghead">
+        <h3>{machine ? 'Edit Machine' : 'New Machine'}</h3>
+        {dirty ? <span className="mg-dirty">● Unsaved changes</span> : null}
+      </div>
       <div className="mg-form">
         <div className="mg-grid2">
           <Field label="Display name">
@@ -685,38 +782,34 @@ function MachineEditDialog({
         </div>
         {machine ? (
           <>
-            <label>Area</label>
-            <div className="mg-fixed">
+            <div className="mg-arealabelrow">
+              Area
+              <span
+                className="mg-arealine"
+                style={{ background: selectedArea?.colorVar ?? 'var(--faint)' }}
+                aria-hidden="true"
+              />
+            </div>
+            <div className="mg-areafixedvalue">
               <AreaDot
                 colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
                 size={11}
               />
-              {areaByKey(machine.area)?.name ?? machine.area} — fixed; a Machine
-              belongs to one Area
+              {areaByKey(machine.area)?.name ?? machine.area}
             </div>
+            <p className="mg-areahelp">
+              The Area is set when a Machine is created and stays fixed for its
+              whole service life. To move capacity to another Area, retire this
+              Machine and create a new Machine record there.
+            </p>
           </>
         ) : (
-          <Field label="Area">
-            {/* Native select + selected-Area color preview beside it —
-                never a custom select just for a color (v15). */}
-            <div className="mg-areapick">
-              <AreaDot
-                colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-                size={12}
-              />
-              <select
-                className="field"
-                value={area}
-                onChange={(e) => setArea(e.target.value as AreaKey)}
-              >
-                {MOCK_AREAS.filter((a) => !a.terminal).map((a) => (
-                  <option key={a.key} value={a.key}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </Field>
+          <AreaSelectField
+            label="Area"
+            value={area}
+            choices={MOCK_AREAS.filter((a) => !a.terminal)}
+            onChange={setArea}
+          />
         )}
         <div className="mg-grid2">
           <Field label="Manufacturer (optional)">
@@ -724,6 +817,7 @@ function MachineEditDialog({
               className="field"
               value={manufacturer}
               onChange={(e) => setManufacturer(e.target.value)}
+              placeholder="e.g. Mazak"
             />
           </Field>
           <Field label="Model (optional)">
@@ -731,6 +825,7 @@ function MachineEditDialog({
               className="field"
               value={model}
               onChange={(e) => setModel(e.target.value)}
+              placeholder="e.g. QT-250"
             />
           </Field>
           <Field label="Asset tag (optional)">
@@ -738,6 +833,7 @@ function MachineEditDialog({
               className="field mono"
               value={assetTag}
               onChange={(e) => setAssetTag(e.target.value)}
+              placeholder="e.g. CD-0512"
             />
           </Field>
           <Field label="Serial number (optional)">
@@ -745,9 +841,12 @@ function MachineEditDialog({
               className="field mono"
               value={serialNumber}
               onChange={(e) => setSerialNumber(e.target.value)}
+              placeholder="e.g. Q25-90412"
             />
           </Field>
           <Field label="Installed date (optional)">
+            {/* Native date input — the browser shows its own date
+                format hint, a placeholder would never render. */}
             <input
               className="field"
               type="date"
@@ -760,6 +859,7 @@ function MachineEditDialog({
               className="field"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g. Coolant system upgraded 2024"
             />
           </Field>
         </div>
@@ -832,46 +932,29 @@ function MachineEditDialog({
       {retireStage === 'unsaved' && machine ? (
         <UnsavedChoiceDialog
           title="Unsaved changes"
-          saveLabel="Save changes, then retire"
+          saveLabel="Save changes"
           discardLabel="Discard changes"
           saveDisabledReason={
             'error' in buildForRetire
               ? `The edits cannot be saved yet: ${buildForRetire.error}`
               : undefined
           }
-          onCancel={() => setRetireStage(null)}
+          onCancel={cancelRetire}
           onSave={() => {
             if ('error' in buildForRetire) return;
-            onApplyChanges(buildForRetire.machine);
-            setBaseline({
-              name: buildForRetire.machine.name,
-              area: buildForRetire.machine.area,
-              barcode: buildForRetire.machine.barcode,
-              manufacturer: buildForRetire.machine.manufacturer ?? '',
-              model: buildForRetire.machine.model ?? '',
-              assetTag: buildForRetire.machine.assetTag ?? '',
-              serialNumber: buildForRetire.machine.serialNumber ?? '',
-              installedOn: buildForRetire.machine.installedOn ?? '',
-              notes: buildForRetire.machine.notes ?? '',
-            });
+            setRetireEditsIntent('save');
             setRetireStage('confirm');
           }}
           onDiscard={() => {
-            setName(baseline.name);
-            setBarcode(baseline.barcode);
-            setManufacturer(baseline.manufacturer);
-            setModel(baseline.model);
-            setAssetTag(baseline.assetTag);
-            setSerialNumber(baseline.serialNumber);
-            setInstalledOn(baseline.installedOn);
-            setNotes(baseline.notes);
-            setError(null);
+            setRetireEditsIntent('discard');
             setRetireStage('confirm');
           }}
         >
-          This form still has unsaved edits. Retiring never saves them silently
-          — choose what happens to the edits before the retirement confirmation
-          opens.
+          This Machine has unsaved edits. Choose what happens to them when the
+          retirement completes: <b>Save changes</b> keeps them on the retired
+          record, <b>Discard changes</b> retires the Machine as last saved.
+          Nothing is saved or discarded yet — cancelling a later step returns
+          here with the edits still in the form.
         </UnsavedChoiceDialog>
       ) : null}
       {retireStage === 'confirm' && machine && identifier ? (
@@ -879,9 +962,9 @@ function MachineEditDialog({
           title="Retire Machine"
           expectedValue={identifier.value}
           valueLabel={identifier.label}
-          confirmLabel="Retire Machine"
-          onCancel={() => setRetireStage(null)}
-          onConfirm={onRetire}
+          confirmLabel="Continue"
+          onCancel={cancelRetire}
+          onConfirm={() => setRetireStage('summary')}
         >
           Retiring <b>{machine.name}</b>:
           <ul className="mg-consequences">
@@ -900,6 +983,70 @@ function MachineEditDialog({
             </li>
           </ul>
         </TypedConfirmDialog>
+      ) : null}
+      {retireStage === 'summary' && machine && summaryRecord ? (
+        <ModalDialog label="Confirm retirement" onClose={cancelRetire}>
+          <h3>Confirm retirement</h3>
+          <div className="sub">
+            Final check — nothing has changed yet. <b>{machine.name}</b> is
+            retired only when you confirm below.
+          </div>
+          <SummaryList
+            rows={[
+              { label: 'Machine', value: summaryRecord.name },
+              {
+                label: 'Area',
+                value: (
+                  <>
+                    <AreaDot
+                      colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
+                      size={10}
+                    />
+                    {areaByKey(summaryRecord.area)?.name ?? summaryRecord.area}
+                  </>
+                ),
+              },
+              {
+                label: 'Barcode',
+                value: <span className="mono">{summaryRecord.barcode}</span>,
+              },
+              ...(summaryRecord.assetTag
+                ? [
+                    {
+                      label: 'Asset Tag',
+                      value: (
+                        <span className="mono">{summaryRecord.assetTag}</span>
+                      ),
+                    },
+                  ]
+                : []),
+              ...(retireEditsIntent
+                ? [
+                    {
+                      label: 'Unsaved edits',
+                      value:
+                        retireEditsIntent === 'save'
+                          ? 'Saved with the retirement'
+                          : 'Discarded — retires as last saved',
+                    },
+                  ]
+                : []),
+            ]}
+          />
+          <div className="mg-note">
+            The Machine leaves all assignment choices and its barcode stops
+            accepting assignment scans. All history is preserved — the record
+            moves to Retired Machines and is never deleted.
+          </div>
+          <div className="row">
+            <button className="bigbtn ghost" onClick={cancelRetire}>
+              Cancel (Esc)
+            </button>
+            <button className="bigbtn danger" onClick={finalizeRetire}>
+              Retire Machine
+            </button>
+          </div>
+        </ModalDialog>
       ) : null}
     </ModalDialog>
   );
@@ -996,6 +1143,9 @@ function ReactivateMachineDialog({
   const [reason, setReason] = useState('');
   const [samePhysical, setSamePhysical] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step confirmation (v17): the form validates on Continue, then
+  // a summary recap is confirmed before the Machine really reactivates.
+  const [stage, setStage] = useState<'form' | 'summary'>('form');
 
   const activeOnes = machines.filter(
     (m) => m.retiredOn === undefined && m.id !== machine.id,
@@ -1032,7 +1182,7 @@ function ReactivateMachineDialog({
   );
   const moved = area !== machine.area;
 
-  const confirm = () => {
+  const continueToSummary = () => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       setError('A display name is required.');
@@ -1056,8 +1206,78 @@ function ReactivateMachineDialog({
       );
       return;
     }
-    onConfirm({ name: trimmedName, area, reason: reason.trim() });
+    setError(null);
+    setStage('summary');
   };
+
+  if (stage === 'summary') {
+    return (
+      <ModalDialog label="Confirm reactivation" onClose={onCancel} size="wide">
+        <h3>Confirm reactivation</h3>
+        <div className="sub">
+          Final check — nothing has changed yet. <b>{machine.name}</b> returns
+          to service only when you confirm below.
+        </div>
+        <SummaryList
+          rows={[
+            { label: 'Machine', value: name.trim() },
+            {
+              label: 'Area',
+              value: (
+                <>
+                  <AreaDot
+                    colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
+                    size={10}
+                  />
+                  {moved ? (
+                    <>
+                      {areaByKey(machine.area)?.name ?? machine.area} →{' '}
+                      {selectedArea?.name ?? area}
+                    </>
+                  ) : (
+                    (selectedArea?.name ?? area)
+                  )}
+                </>
+              ),
+            },
+            {
+              label: 'Barcode',
+              value: <span className="mono">{machine.barcode}</span>,
+            },
+            ...(machine.assetTag
+              ? [
+                  {
+                    label: 'Asset Tag',
+                    value: <span className="mono">{machine.assetTag}</span>,
+                  },
+                ]
+              : []),
+            { label: 'Reason', value: reason.trim() },
+            { label: 'Returns as', value: 'Idle' },
+          ]}
+        />
+        <div className="mg-note">
+          Lifecycle: <b>Retired → Active</b> on the same record — identity,
+          barcode, asset metadata and history stay untouched; one REACTIVATED
+          audit event is added
+          {moved ? ' with the previous and current Area' : ''}.
+        </div>
+        <div className="row">
+          <button className="bigbtn ghost" onClick={() => setStage('form')}>
+            Back
+          </button>
+          <button
+            className="bigbtn primary"
+            onClick={() =>
+              onConfirm({ name: name.trim(), area, reason: reason.trim() })
+            }
+          >
+            Reactivate Machine
+          </button>
+        </div>
+      </ModalDialog>
+    );
+  }
 
   return (
     <ModalDialog label="Reactivate Machine" onClose={onCancel} size="wide">
@@ -1088,6 +1308,7 @@ function ReactivateMachineDialog({
             className="field"
             value={name}
             onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Lathe 1"
           />
         </Field>
         {nameCollision ? (
@@ -1096,25 +1317,12 @@ function ReactivateMachineDialog({
             {selectedArea?.name ?? area} — rename one of them to continue.
           </div>
         ) : null}
-        <Field label="Current Area after reactivation">
-          <div className="mg-areapick">
-            <AreaDot
-              colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-              size={12}
-            />
-            <select
-              className="field"
-              value={area}
-              onChange={(e) => setArea(e.target.value as AreaKey)}
-            >
-              {areaChoices.map((a) => (
-                <option key={a.key} value={a.key}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </Field>
+        <AreaSelectField
+          label="Current Area after reactivation"
+          value={area}
+          choices={areaChoices}
+          onChange={setArea}
+        />
         <div className="mg-note">
           Change the Area only if this physical machine was moved while retired.
           The change applies from reactivation onward — historical Movements
@@ -1134,27 +1342,12 @@ function ReactivateMachineDialog({
             checked={samePhysical}
             onChange={(e) => setSamePhysical(e.target.checked)}
           />
-          This is the same physical machine returning to service — not a
-          replacement.
+          <span>
+            This is the same physical machine returning to service — not a
+            replacement.
+          </span>
         </label>
         <LifecycleList machine={machine} />
-        <div className="mg-recap">
-          <div>
-            Lifecycle: <b>Retired → Active</b>
-            {moved ? (
-              <>
-                {' '}
-                · Area: <b>
-                  {areaByKey(machine.area)?.name ?? machine.area}
-                </b> → <b>{selectedArea?.name ?? area}</b>
-              </>
-            ) : null}
-          </div>
-          <div>
-            Recorded for audit: who, when, reason, the state before and after
-            {moved ? ', and the previous and current Area' : ''}.
-          </div>
-        </div>
         {error ? (
           <div className="err" role="alert">
             {error}
@@ -1168,9 +1361,9 @@ function ReactivateMachineDialog({
         <button
           className="bigbtn primary"
           disabled={blockers.length > 0}
-          onClick={confirm}
+          onClick={continueToSummary}
         >
-          Reactivate Machine
+          Continue
         </button>
       </div>
     </ModalDialog>

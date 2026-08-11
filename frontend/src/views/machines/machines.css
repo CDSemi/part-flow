@@ -113,15 +113,17 @@
   width: 1%;
 }
 
-/* Asset column: the `Asset <tag>` line never wraps and defines the
-   minimum width; manufacturer and model use two distinct neutral
-   tones. */
+/* Asset column: content-sized — BOTH the `Asset <tag>` line and the
+   manufacturer + model line never wrap, so the widest of the two
+   defines the column's minimum width; manufacturer and model use two
+   distinct neutral tones. */
 .mg-table th.mg-metacol,
 .mg-table td.mg-metacol {
   width: 1%;
 }
 
-.mg-meta .mg-assetline {
+.mg-meta .mg-assetline,
+.mg-meta .mg-makeline {
   white-space: nowrap;
 }
 
@@ -362,37 +364,66 @@
   margin: 2px 0 8px;
 }
 
-.mg-fixed {
-  font-size: 14px;
-  padding: 6px 0 2px;
+/* Area label row (v17): the label shares its row with a slim
+   horizontal line in the selected Area's color, running from after
+   the label text to the dialog's right edge — the Area color preview
+   for the native select below it (and for the fixed Area on edit).
+   Never a custom select just for a color. */
+.mg-form .mg-arealabelrow {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin: 10px 0 4px;
 }
 
-/* Area select with the selected-Area color preview beside it — a
-   native select, never a custom control just for a color (v15). */
-.mg-areapick {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.mg-areapick .areadot {
-  flex: none;
-}
-
-.mg-areapick select {
+.mg-arealine {
   flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  min-width: 40px;
 }
 
-/* Unsaved-changes badge in the dialog heading area. */
+/* Fixed Area of an existing Machine (v17): the Area name as a calm
+   read-only value, followed by a quiet plain-language explanation —
+   evenly spaced against the metadata fields below. */
+.mg-areafixedvalue {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  padding: 3px 0;
+}
+
+.mg-areahelp {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+  margin: 2px 0 10px;
+  max-width: 60ch;
+}
+
+/* Dialog heading row: the title and the unsaved-changes badge share
+   one line (v17). */
+.mg-dlghead {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.mg-dlghead h3 {
+  margin-bottom: 0;
+}
+
 .mg-dirty {
   display: inline-block;
   font-size: 11.5px;
   font-weight: 800;
   color: var(--warn-t);
-  margin-bottom: 6px;
 }
 
 /* Quiet append-only lifecycle audit list. */
@@ -517,24 +548,64 @@
   font-size: 12.5px;
 }
 
-.mg-check {
+/* Same-physical-machine confirmation: checkbox and text clearly
+   separated and vertically centered against each other (v17). The
+   selector must out-rank `.mg-form label` (class + element), which
+   otherwise wins specificity and forces the label back to
+   display:block — gluing the text to the checkbox. */
+.mg-form label.mg-check {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
   font-size: 13px;
+  /* Body text, not label styling — `.mg-form label` would otherwise
+     leave its 750 label weight on the sentence. */
+  font-weight: 500;
   color: var(--text);
   margin: 12px 0 4px;
   line-height: 1.5;
 }
 
-.mg-recap {
-  margin-top: 12px;
-  font-size: 12.5px;
-  color: var(--muted);
-  line-height: 1.6;
-  border: 1px dashed var(--border);
+.mg-check input[type='checkbox'] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+/* Final-confirmation summary rows (retire / reactivate, v17). */
+.mg-summary {
+  border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 9px 12px;
+  padding: 2px 14px;
+}
+
+.mg-summary .srow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hair);
+  font-size: 13.5px;
+}
+
+.mg-summary .srow:last-child {
+  border-bottom: none;
+}
+
+.mg-summary .k {
+  flex: none;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.mg-summary .v {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  text-align: right;
+  font-weight: 700;
 }
 
 .mg-note {

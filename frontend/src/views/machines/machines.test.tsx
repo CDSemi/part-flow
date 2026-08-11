@@ -16,8 +16,9 @@ import { MachinesView } from './MachinesView';
 // assigned. v15: the whole active row opens Edit Machine, maintenance
 // toggles through a switch that only opens the existing dialogs,
 // Retire lives in the Edit dialog's Danger Zone behind a typed
-// confirmation, and retired records offer Reactivate for the SAME
-// physical machine.
+// confirmation plus a final summary (v17), and retired records offer
+// Reactivate for the SAME physical machine — also behind a final
+// summary (v17).
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/machines');
@@ -122,8 +123,12 @@ test('the whole active row opens Edit Machine with the Area fixed', () => {
   const dialog = openEdit('Lathe 2');
   expect(within(dialog).getByLabelText('Display name')).toHaveValue('Lathe 2');
   expect(within(dialog).getByLabelText('Barcode value')).toHaveValue('L2');
-  // A Machine belongs to exactly one Area — no Area select on edit.
-  expect(dialog.textContent).toContain('fixed; a Machine belongs to one Area');
+  // A Machine belongs to exactly one Area — no Area select on edit,
+  // only the read-only Area with its plain-language explanation (v17).
+  expect(within(dialog).queryByRole('combobox')).toBeNull();
+  expect(dialog.textContent).toContain(
+    'stays fixed for its whole service life',
+  );
 
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
   expect(screen.queryByRole('dialog')).toBeNull();
@@ -212,7 +217,7 @@ test('retirement is blocked while quantity is assigned', () => {
   expect(activeRow('Lathe 2')).toBeTruthy();
 });
 
-test('an idle Machine retires after typing its Asset Tag — never deleted', () => {
+test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', () => {
   render(<MachinesView />);
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
@@ -226,19 +231,29 @@ test('an idle Machine retires after typing its Asset Tag — never deleted', () 
   expect(confirm.textContent).toContain('nothing is deleted');
   expect(confirm.textContent).toContain('The record moves to Retired Machines');
 
-  // The confirming action stays disabled until the Asset Tag is typed
-  // (trim + case-insensitive deliberate acknowledgement).
-  const retireButton = within(confirm).getByRole('button', {
-    name: 'Retire Machine',
+  // Continue stays disabled until the Asset Tag is typed (trim +
+  // case-insensitive deliberate acknowledgement).
+  const continueButton = within(confirm).getByRole('button', {
+    name: 'Continue',
   });
   const gate = within(confirm).getByLabelText(/to confirm$/);
   expect(gate).toHaveAttribute('placeholder', 'CD-0303');
-  expect(retireButton).toBeDisabled();
+  expect(continueButton).toBeDisabled();
   fireEvent.change(gate, { target: { value: 'CD-0304' } });
-  expect(retireButton).toBeDisabled();
+  expect(continueButton).toBeDisabled();
   fireEvent.change(gate, { target: { value: '  cd-0303 ' } });
-  expect(retireButton).toBeEnabled();
-  fireEvent.click(retireButton);
+  expect(continueButton).toBeEnabled();
+  fireEvent.click(continueButton);
+
+  // The typed confirmation leads to a final summary (v17) — nothing
+  // has been retired yet.
+  const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
+  expect(summary.textContent).toContain('Mill 3 — Horizontal Boring');
+  expect(summary.textContent).toContain('CD-0303');
+  expect(summary.textContent).toContain('nothing has changed yet');
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Retire Machine' }),
+  );
 
   // Gone from the active table…
   expect(screen.queryByRole('dialog')).toBeNull();
@@ -248,6 +263,68 @@ test('an idle Machine retires after typing its Asset Tag — never deleted', () 
   const retired = retiredTable();
   expect(retired.textContent).toContain('Mill 3 — Horizontal Boring');
   expect(retired.textContent).toContain('CD-0303');
+});
+
+test('the retire edits decision is recorded, not applied — cancelling later keeps the edits', () => {
+  render(<MachinesView />);
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Pending disposal review' },
+  });
+  expect(edit.textContent).toContain('● Unsaved changes');
+  fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
+
+  // Discard is a DECISION for the retirement, not an immediate reset.
+  const unsaved = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(unsaved).getByRole('button', { name: 'Save changes' }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(unsaved).getByRole('button', { name: 'Discard changes' }),
+  );
+
+  // Cancelling the typed confirmation returns to the form with the
+  // edits still in place.
+  const confirm = screen.getByRole('dialog', { name: 'Retire Machine' });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  const editAgain = screen.getByRole('dialog', { name: 'Edit Machine' });
+  expect(within(editAgain).getByLabelText('Notes (optional)')).toHaveValue(
+    'Pending disposal review',
+  );
+  expect(editAgain.textContent).toContain('● Unsaved changes');
+});
+
+test('a recorded Save decision applies the edits only when the retirement completes', () => {
+  render(<MachinesView />);
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Sold for scrap' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
+  const unsaved = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  fireEvent.click(
+    within(unsaved).getByRole('button', { name: 'Save changes' }),
+  );
+
+  const confirm = screen.getByRole('dialog', { name: 'Retire Machine' });
+  fireEvent.change(within(confirm).getByLabelText(/to confirm$/), {
+    target: { value: 'CD-0303' },
+  });
+  fireEvent.click(within(confirm).getByRole('button', { name: 'Continue' }));
+
+  // The summary names the recorded decision before anything happens.
+  const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
+  expect(summary.textContent).toContain('Saved with the retirement');
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Retire Machine' }),
+  );
+
+  // The edit was applied together with the retirement.
+  expect(retiredTable().textContent).toContain('Sold for scrap');
 });
 
 test('reactivation blocks on a name collision until a rename, then returns the Machine as Idle', () => {
@@ -272,9 +349,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
     target: { value: 'Returned from overhaul' },
   });
-  fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Reactivate Machine' }),
-  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   expect(dialog.textContent).toContain('rename this Machine to continue');
   expect(
     screen.getByRole('dialog', { name: 'Reactivate Machine' }),
@@ -288,15 +363,21 @@ test('reactivation blocks on a name collision until a rename, then returns the M
     'already exists in Lathe — rename one of them',
   );
   // …and the same-physical-machine confirmation stays required.
-  fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Reactivate Machine' }),
-  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   expect(dialog.textContent).toContain(
     'Confirm that this is the same physical machine.',
   );
   fireEvent.click(within(dialog).getByRole('checkbox'));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+
+  // The form leads to a final summary (v17) — reactivation happens
+  // only on its confirmation.
+  const summary = screen.getByRole('dialog', { name: 'Confirm reactivation' });
+  expect(summary.textContent).toContain('Lathe 1B');
+  expect(summary.textContent).toContain('Returned from overhaul');
+  expect(summary.textContent).toContain('Idle');
   fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Reactivate Machine' }),
+    within(summary).getByRole('button', { name: 'Reactivate Machine' }),
   );
 
   // The Machine returns as Idle (running stays derived).
@@ -329,8 +410,12 @@ test('a Machine without an Asset Tag confirms retirement with its barcode', () =
     target: { value: 'Back from gearbox overhaul' },
   });
   fireEvent.click(within(dialog).getByRole('checkbox'));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  const reactSummary = screen.getByRole('dialog', {
+    name: 'Confirm reactivation',
+  });
   fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Reactivate Machine' }),
+    within(reactSummary).getByRole('button', { name: 'Reactivate Machine' }),
   );
   expect(activeRow('Saw 2').querySelector('.mg-state')?.textContent).toMatch(
     /^Idle · /,
@@ -344,13 +429,18 @@ test('a Machine without an Asset Tag confirms retirement with its barcode', () =
   expect(confirm.textContent).toContain('(Machine barcode) to confirm');
   const gate = within(confirm).getByLabelText(/to confirm$/);
   expect(gate).toHaveAttribute('placeholder', 'S2');
-  const retireButton = within(confirm).getByRole('button', {
-    name: 'Retire Machine',
+  const continueButton = within(confirm).getByRole('button', {
+    name: 'Continue',
   });
-  expect(retireButton).toBeDisabled();
+  expect(continueButton).toBeDisabled();
   fireEvent.change(gate, { target: { value: 's2' } });
-  expect(retireButton).toBeEnabled();
-  fireEvent.click(retireButton);
+  expect(continueButton).toBeEnabled();
+  fireEvent.click(continueButton);
+  const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
+  expect(summary.textContent).toContain('S2');
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Retire Machine' }),
+  );
 
   expect(retiredTable().textContent).toContain('Saw 2');
 });
