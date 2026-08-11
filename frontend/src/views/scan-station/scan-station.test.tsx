@@ -2937,3 +2937,290 @@ test('the shared DevNotice fills its parent width with one content flow', async 
   const code = /\.dev-notice code \{[^}]*}/s.exec(css)![0];
   expect(code).toContain('white-space: nowrap');
 });
+
+/* ============ Consistent Back across dialog workflows ============ */
+
+// Back must return to the exact previous dialog/step of the same
+// one-shot workflow (context preserved) and must never record or
+// change tracking data; flows entered directly from the Scan Station
+// surface show no Back at all — Cancel stays the only exit there.
+
+function manualEnter(pn: string) {
+  fireEvent.click(screen.getByRole('button', { name: '⌨ Enter PN manually' }));
+  const field = screen.getByLabelText('Part Number');
+  fireEvent.change(field, { target: { value: pn } });
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+}
+
+function manualFieldValue() {
+  return (screen.getByLabelText('Part Number') as HTMLInputElement).value;
+}
+
+test('Back returns from the action dialog to manual PN entry with the PN preserved', async () => {
+  await renderStation();
+
+  manualEnter('2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+
+  await screen.findByRole('dialog', { name: 'Enter Part Number manually' });
+  expect(manualFieldValue()).toBe('2027-60-8114-00');
+  // Back is navigation only — no write, and no cancel notice.
+  expect(lastPnText()).toBe('—');
+  expect(screen.queryByText('Cancelled. No changes were recorded.')).toBeNull();
+
+  // Forward again from the preserved value.
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+  expect(
+    await screen.findByRole('dialog', { name: 'Select an action' }),
+  ).toBeInTheDocument();
+});
+
+test('Back returns from the receive wizard to manual PN entry; the scanned wizard has no Back', async () => {
+  await renderStation();
+
+  manualEnter('NEW-PART-01');
+  const wizard = await screen.findByRole('dialog', {
+    name: 'Receive Quantity',
+  });
+  fireEvent.click(
+    within(wizard as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  await screen.findByRole('dialog', { name: 'Enter Part Number manually' });
+  expect(manualFieldValue()).toBe('NEW-PART-01');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // The same wizard resolved from a scan has no previous dialog step.
+  scan('PF:PN:NEW-PART-01');
+  const scanned = await screen.findByRole('dialog', {
+    name: 'Receive Quantity',
+  });
+  expect(
+    within(scanned as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+  fireEvent.keyDown(scanned, { key: 'Escape' });
+  expect(lastPnText()).toBe('—');
+});
+
+test('Back returns from the transfer quantity view to manual PN entry; a direct scan has none there', async () => {
+  await renderStation();
+
+  manualEnter('118-052'); // one source (Manual) → straight to quantity
+  let dialog = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  fireEvent.click(
+    within(dialog as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  await screen.findByRole('dialog', { name: 'Enter Part Number manually' });
+  expect(manualFieldValue()).toBe('118-052');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // Scanned entry: the quantity view shows no Back (the confirmation
+  // view's internal Back to the quantity view is separate and stays).
+  scan('PF:PN:118-052');
+  dialog = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  expect(
+    within(dialog as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(lastPnText()).toBe('—');
+});
+
+test('transfer Back returns to the source selection with all sources intact', async () => {
+  await renderStation();
+
+  scan('PF:PN:78-04-0031'); // Mill + Deburr
+  const select = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  // Direct scan entry: the selection view itself has no parent step.
+  expect(
+    within(select as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: /Deburr — 3 pcs/ }));
+  const qty = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  expect(qty).toHaveTextContent('Transfer Deburr → Lathe');
+  fireEvent.click(
+    within(qty as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+
+  // Back re-opens the SAME selection — both sources again, no write —
+  // and picking the other source carries the corrected context forward.
+  const again = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  expect(again).toHaveTextContent('Mill — 3 pcs available');
+  expect(again).toHaveTextContent('Deburr — 3 pcs available');
+  fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
+  const qty2 = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  expect(qty2).toHaveTextContent('Transfer Mill → Lathe');
+  expect(lastPnText()).toBe('—');
+});
+
+test('Back walks the exact entry chain: manual entry → source selection → transfer', async () => {
+  await renderStation();
+
+  manualEnter('78-04-0031');
+  const select = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  // Opened from manual entry, the selection view DOES offer Back.
+  expect(
+    within(select as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Mill — 3 pcs/ }));
+  const qty = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  fireEvent.click(
+    within(qty as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  const back = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  fireEvent.click(
+    within(back as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  await screen.findByRole('dialog', { name: 'Enter Part Number manually' });
+  expect(manualFieldValue()).toBe('78-04-0031');
+  expect(lastPnText()).toBe('—');
+});
+
+test('every child of the action dialog goes Back to it with the PN context intact', async () => {
+  await renderStation();
+
+  scan('PF:PN:0455-20-0118-03');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  // Opened by a scan: the action dialog itself has no Back.
+  expect(
+    within(actions as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+
+  async function openAndBack(choice: RegExp, dialogName: string) {
+    fireEvent.click(
+      within(activeDialog() as HTMLElement).getByRole('button', {
+        name: choice,
+      }),
+    );
+    const child = await screen.findByRole('dialog', { name: dialogName });
+    expect(child).toHaveTextContent('0455-20-0118-03');
+    fireEvent.click(
+      within(child as HTMLElement).getByRole('button', { name: '‹ Back' }),
+    );
+    const back = await screen.findByRole('dialog', {
+      name: 'Select an action',
+    });
+    expect(back).toHaveTextContent('0455-20-0118-03');
+  }
+
+  await openAndBack(/Add more quantity/, 'Add more quantity');
+  await openAndBack(/Return quantity for repair/, 'Return quantity for repair');
+  await openAndBack(/Scrap damaged quantity/, 'Scrap damaged quantity');
+  // Back is navigation only — nothing was recorded in the whole loop.
+  expect(lastPnText()).toBe('—');
+});
+
+test('DONE from the action dialog goes Back to it; the row DONE enters without Back', async () => {
+  await renderStation('DEBURR-ST-01');
+
+  scan('PF:PN:81-1042');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions as HTMLElement).getByRole('button', {
+      name: /Complete Area processing/,
+    }),
+  );
+  const done = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.click(
+    within(done as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  expect(
+    await screen.findByRole('dialog', { name: 'Select an action' }),
+  ).toBeInTheDocument();
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // The row DONE enters directly from the monitoring surface — no Back.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Complete Area processing' }),
+  );
+  const rowDone = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  expect(
+    within(rowDone as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+  fireEvent.keyDown(rowDone, { key: 'Escape' });
+  expect(lastPnText()).toBe('—');
+});
+
+test('the assignment wizard Back re-enters the action dialog and keeps the chain to manual entry', async () => {
+  await renderStation();
+
+  manualEnter('2027-60-8114-00');
+  await screen.findByRole('dialog', { name: 'Select an action' });
+  fireEvent.click(
+    within(activeDialog() as HTMLElement).getByRole('button', {
+      name: /Assign queued quantity/,
+    }),
+  );
+  const assign = await screen.findByRole('dialog', {
+    name: 'Assign to Machine',
+  });
+  fireEvent.click(
+    within(assign as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  // The re-opened action dialog still knows ITS parent: Back again
+  // reaches manual entry with the PN preserved.
+  fireEvent.click(
+    within(actions as HTMLElement).getByRole('button', { name: '‹ Back' }),
+  );
+  await screen.findByRole('dialog', { name: 'Enter Part Number manually' });
+  expect(manualFieldValue()).toBe('2027-60-8114-00');
+  expect(lastPnText()).toBe('—');
+});
+
+test('workflows entered directly from the station surface never show a fake Back', async () => {
+  await renderStation();
+
+  // Machine-first assignment (Machine scan) — no previous dialog step.
+  scan('PF:MACHINE:L1');
+  let dialog = activeDialog();
+  expect(
+    within(dialog as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+
+  // Machine-row QUEUE return — entered from the monitoring surface.
+  fireEvent.click(
+    screen.getAllByRole('button', { name: 'Return to Area queue' })[0],
+  );
+  dialog = await screen.findByRole('dialog', {
+    name: 'Return unfinished quantity to queue',
+  });
+  expect(
+    within(dialog as HTMLElement).queryByRole('button', { name: '‹ Back' }),
+  ).toBeNull();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(lastPnText()).toBe('—');
+});

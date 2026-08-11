@@ -105,30 +105,63 @@ interface Command {
   update: (cards: MockAreaCard[]) => MockAreaCard[];
 }
 
-/** One-shot dialog flows — no persistent context survives a dialog. */
+/**
+ * One-shot dialog flows — no persistent context survives a dialog.
+ *
+ * `parent` is the dialog/step the flow was opened FROM within the same
+ * one-shot workflow (the PN action dialog, the source selection, or
+ * manual PN entry) — the complete previous flow value, so Back re-opens
+ * exactly that step with its context (PN, source, selections) intact.
+ * Back is pure dialog navigation and never records or changes tracking
+ * data. Flows opened directly from the Scan Station surface (scan, row
+ * action, Undo) carry no parent: they show no Back, and Cancel stays
+ * the only exit. Variants that can never be opened from another dialog
+ * (queue-return, undo, manual-pn) deliberately have no `parent`.
+ */
 type Flow =
   | {
       kind: 'machine-assign';
       machine: string | null;
       pn: string | null;
-      /** True when opened from the PN action dialog (enables Back). */
-      fromActions?: boolean;
+      parent?: Flow;
     }
-  | { kind: 'pn-actions'; pn: string }
+  | { kind: 'pn-actions'; pn: string; parent?: Flow }
   | {
       kind: 'transfer';
       pn: string;
       source: SourceOption;
+      parent?: Flow;
     }
-  | { kind: 'source-select'; pn: string; sources: SourceOption[] }
-  | { kind: 'intake'; pn: string }
-  | { kind: 'add-qty'; pn: string }
-  | { kind: 'repair'; pn: string }
-  | { kind: 'scrap'; pn: string }
+  | {
+      kind: 'source-select';
+      pn: string;
+      sources: SourceOption[];
+      parent?: Flow;
+    }
+  | { kind: 'intake'; pn: string; parent?: Flow }
+  | { kind: 'add-qty'; pn: string; parent?: Flow }
+  | { kind: 'repair'; pn: string; parent?: Flow }
+  | { kind: 'scrap'; pn: string; parent?: Flow }
   | { kind: 'queue-return'; pn: string; machine: string; max: number }
-  | { kind: 'done'; pn: string; machine: string | null; max: number }
+  | {
+      kind: 'done';
+      pn: string;
+      machine: string | null;
+      max: number;
+      parent?: Flow;
+    }
   | { kind: 'undo' }
-  | { kind: 'manual-pn' };
+  | { kind: 'manual-pn'; initialPn?: string };
+
+/**
+ * Flow variants the PN action dialog can open as its next step — every
+ * one carries the optional `parent` back-reference, so the caller can
+ * attach the action dialog as the step Back returns to.
+ */
+type PnActionChildFlow = Exclude<
+  Flow,
+  { kind: 'queue-return' } | { kind: 'undo' } | { kind: 'manual-pn' }
+>;
 
 /**
  * Scan Station routing: `/scan-station` shows the Station Selector
@@ -578,27 +611,41 @@ function StationView({
     closeFlow('Cancelled. No changes were recorded.');
   }, [closeFlow]);
 
-  /** Route a resolved PN to the applicable one-shot dialog. */
+  /**
+   * Back handler for a flow's stored parent step: re-opens exactly the
+   * previous dialog/step of the same workflow (context preserved) and
+   * writes nothing. Returns undefined when no parent exists, so
+   * StepButtons renders no Back for flows entered directly from the
+   * Scan Station surface.
+   */
+  const backTo = (parent?: Flow) =>
+    parent ? () => setFlow(parent) : undefined;
+
+  /**
+   * Route a resolved PN to the applicable one-shot dialog. `parent` is
+   * the dialog step the resolution came from (manual PN entry) so the
+   * opened dialog can offer Back to it; a plain scan passes none.
+   */
   const openPnFlow = useCallback(
-    (rawPn: string) => {
+    (rawPn: string, parent?: Flow) => {
       const pn = resolvePn(rawPn);
       if (cardsFor(pn).length > 0) {
-        setFlow({ kind: 'pn-actions', pn });
+        setFlow({ kind: 'pn-actions', pn, parent });
         return;
       }
       const sources = sourcesFor(pn);
       if (sources.length === 1) {
-        setFlow({ kind: 'transfer', pn, source: sources[0] });
+        setFlow({ kind: 'transfer', pn, source: sources[0], parent });
         return;
       }
       if (sources.length > 1) {
-        setFlow({ kind: 'source-select', pn, sources });
+        setFlow({ kind: 'source-select', pn, sources, parent });
         return;
       }
       // No active WO Demand and no active quantity: intake flow
       // (equivalent to Work Orders "Add Part") — MODIFY + FLOATING
       // defaults, both editable. The PN is created on first valid use.
-      setFlow({ kind: 'intake', pn });
+      setFlow({ kind: 'intake', pn, parent });
     },
     [cardsFor, resolvePn, sourcesFor],
   );
@@ -1169,11 +1216,7 @@ function StationView({
           resolvePn={resolvePn}
           areaCards={areaCards}
           worker={worker}
-          onBack={
-            flow.fromActions && flow.pn
-              ? () => setFlow({ kind: 'pn-actions', pn: flow.pn! })
-              : undefined
-          }
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1190,7 +1233,10 @@ function StationView({
           sources={sourcesFor(flow.pn)}
           repairSources={repairSourcesFor(flow.pn)}
           inAreaQty={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
-          onPick={(next) => setFlow(next)}
+          // Every picked child flow records THIS dialog (with its own
+          // parent chain) as the step Back returns to.
+          onPick={(next) => setFlow({ ...next, parent: flow })}
+          onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
         />
       )}
@@ -1199,8 +1245,9 @@ function StationView({
           pn={flow.pn}
           sources={flow.sources}
           onPick={(source) =>
-            setFlow({ kind: 'transfer', pn: flow.pn, source })
+            setFlow({ kind: 'transfer', pn: flow.pn, source, parent: flow })
           }
+          onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
         />
       )}
@@ -1211,6 +1258,7 @@ function StationView({
           source={flow.source}
           hasMachines={hasMachines}
           worker={worker}
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1233,6 +1281,7 @@ function StationView({
               return next;
             })
           }
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1245,6 +1294,7 @@ function StationView({
           pn={flow.pn}
           hasMachines={hasMachines}
           worker={worker}
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1257,6 +1307,7 @@ function StationView({
           pn={flow.pn}
           sources={repairSourcesFor(flow.pn)}
           worker={worker}
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1269,6 +1320,7 @@ function StationView({
           pn={flow.pn}
           available={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
           worker={worker}
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1295,6 +1347,7 @@ function StationView({
           machine={flow.machine}
           max={flow.max}
           worker={worker}
+          onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1310,6 +1363,7 @@ function StationView({
       )}
       {flow?.kind === 'manual-pn' && (
         <ManualEntryDialog
+          initialPn={flow.initialPn}
           onCancel={cancelFlow}
           onConfirm={(pnText) => {
             const pn = pnText.trim();
@@ -1318,7 +1372,9 @@ function StationView({
               focusScan();
               return;
             }
-            openPnFlow(pn);
+            // The resolved dialog can go Back to manual entry with the
+            // entered PN preserved for correction.
+            openPnFlow(pn, { kind: 'manual-pn', initialPn: pn });
           }}
         />
       )}
@@ -1767,7 +1823,8 @@ function MachineAssignDialog({
   queuedQtyFor: (pn: string) => number;
   resolvePn: (pn: string) => string;
   areaCards: MockAreaCard[];
-  /** Back from Step 1 to the PN action dialog (PN-first entry only). */
+  /** Back from Step 1 to the parent dialog (PN action dialog); absent
+   * for the Machine-scan entry, which has no previous dialog step. */
   onBack?: () => void;
 }) {
   const [step, setStep] = useState<'select' | 'qty' | 'confirm'>('select');
@@ -2145,6 +2202,7 @@ function PnActionsDialog({
   repairSources,
   inAreaQty,
   onPick,
+  onBack,
   onCancel,
 }: {
   pn: string;
@@ -2161,7 +2219,9 @@ function PnActionsDialog({
     note: string;
   }[];
   inAreaQty: number;
-  onPick: (flow: Flow) => void;
+  onPick: (flow: PnActionChildFlow) => void;
+  /** Back to the parent step (manual PN entry); absent for scans. */
+  onBack?: () => void;
   onCancel: () => void;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
@@ -2181,7 +2241,6 @@ function PnActionsDialog({
               kind: 'machine-assign',
               machine: null,
               pn,
-              fromActions: true,
             })
           }
         >
@@ -2296,6 +2355,11 @@ function PnActionsDialog({
         </button>
       ) : null}
       <div className="row">
+        {onBack ? (
+          <button className="bigbtn ghost ss-back" onClick={onBack}>
+            ‹ Back
+          </button>
+        ) : null}
         <button className="bigbtn ghost" onClick={onCancel}>
           Cancel (Esc)
         </button>
@@ -2308,11 +2372,15 @@ function SourceSelectDialog({
   pn,
   sources,
   onPick,
+  onBack,
   onCancel,
 }: {
   pn: string;
   sources: SourceOption[];
   onPick: (source: SourceOption) => void;
+  /** Back to the parent step (PN action dialog or manual PN entry);
+   * absent when the scan resolved directly to this selection. */
+  onBack?: () => void;
   onCancel: () => void;
 }) {
   return (
@@ -2344,6 +2412,11 @@ function SourceSelectDialog({
         </button>
       ))}
       <div className="row">
+        {onBack ? (
+          <button className="bigbtn ghost ss-back" onClick={onBack}>
+            ‹ Back
+          </button>
+        ) : null}
         <button className="bigbtn ghost" onClick={onCancel}>
           Cancel (Esc)
         </button>
@@ -2358,6 +2431,7 @@ function TransferDialog({
   source,
   hasMachines,
   worker,
+  onBack,
   onApply,
   onNotice,
   onClose,
@@ -2366,6 +2440,9 @@ function TransferDialog({
   pn: string;
   source: SourceOption;
   hasMachines: boolean;
+  /** Back from the quantity view to the parent step (source selection,
+   * PN action dialog, or manual PN entry); absent for direct scans. */
+  onBack?: () => void;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
@@ -2470,6 +2547,7 @@ function TransferDialog({
           })()}
           <QuantityKeypad value={qty} onChange={setQty} max={source.qty} />
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -2548,6 +2626,7 @@ function IntakeDialog({
   hasMachines,
   worker,
   onCreatePn,
+  onBack,
   onApply,
   onNotice,
   onClose,
@@ -2556,6 +2635,9 @@ function IntakeDialog({
   pn: string;
   hasMachines: boolean;
   onCreatePn: (pn: string) => void;
+  /** Back from the settings view to the parent step (manual PN entry);
+   * absent when a scan resolved directly to this wizard. */
+  onBack?: () => void;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const operations = areaByKey(station.area)?.operations ?? [];
@@ -2748,6 +2830,7 @@ function IntakeDialog({
             />
           </div>
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -2879,11 +2962,17 @@ function AddQuantityDialog({
   pn,
   hasMachines,
   worker,
+  onBack,
   onApply,
   onNotice,
   onClose,
   onCancel,
-}: ActionDialogProps & { pn: string; hasMachines: boolean }) {
+}: ActionDialogProps & {
+  pn: string;
+  hasMachines: boolean;
+  /** Back from the entry view to the parent PN action dialog. */
+  onBack?: () => void;
+}) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'entry' | 'confirm'>('entry');
   const [qty, setQty] = useState(''); // deliberately no MAX, no default
@@ -2986,6 +3075,7 @@ function AddQuantityDialog({
             onChange={(e) => setReason(e.target.value)}
           />
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -3046,6 +3136,7 @@ function RepairDialog({
   pn,
   sources,
   worker,
+  onBack,
   onApply,
   onNotice,
   onClose,
@@ -3053,6 +3144,8 @@ function RepairDialog({
 }: ActionDialogProps & {
   pn: string;
   sources: { areaLabel: string; qty: number; flow: string; note: string }[];
+  /** Back from the entry view to the parent PN action dialog. */
+  onBack?: () => void;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'entry' | 'confirm'>('entry');
@@ -3189,6 +3282,7 @@ function RepairDialog({
             onChange={(e) => setReason(e.target.value)}
           />
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -3261,11 +3355,17 @@ function ScrapDialog({
   pn,
   available,
   worker,
+  onBack,
   onApply,
   onNotice,
   onClose,
   onCancel,
-}: ActionDialogProps & { pn: string; available: number }) {
+}: ActionDialogProps & {
+  pn: string;
+  available: number;
+  /** Back from the counting view to the parent PN action dialog. */
+  onBack?: () => void;
+}) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'count' | 'confirm'>('count');
   const [count, setCount] = useState(0);
@@ -3415,6 +3515,7 @@ function ScrapDialog({
             onChange={(e) => setReason(e.target.value)}
           />
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -3633,6 +3734,7 @@ function DoneDialog({
   machine,
   max,
   worker,
+  onBack,
   onApply,
   onNotice,
   onClose,
@@ -3643,6 +3745,9 @@ function DoneDialog({
    * Area processing (Areas without Machines). */
   machine: string | null;
   max: number;
+  /** Back from the quantity view to the parent PN action dialog;
+   * absent for the DONE row actions, which have no previous dialog. */
+  onBack?: () => void;
 }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
@@ -3743,6 +3848,7 @@ function DoneDialog({
           })()}
           <QuantityKeypad value={qty} onChange={setQty} max={max} />
           <StepButtons
+            onBack={onBack}
             onCancel={onCancel}
             primary={{
               label: 'Next',
@@ -3855,9 +3961,12 @@ function UndoConfirmDialog({
 }
 
 function ManualEntryDialog({
+  initialPn,
   onCancel,
   onConfirm,
 }: {
+  /** Previously entered PN, preserved when Back returns here. */
+  initialPn?: string;
   onCancel: () => void;
   onConfirm: (pn: string) => void;
 }) {
@@ -3881,6 +3990,7 @@ function ManualEntryDialog({
         ref={fieldRef}
         className="field mono"
         autoComplete="off"
+        defaultValue={initialPn}
         placeholder="Part Number, e.g. 0455-20-0118-03"
         onKeyDown={(e) => {
           if (e.key === 'Enter') onConfirm(e.currentTarget.value);
