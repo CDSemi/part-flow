@@ -219,7 +219,7 @@ test('the legend conventions live in the column-header tooltips, not the footer'
   expect(foot?.textContent).not.toContain('blinking days count');
   expect(foot?.textContent).not.toContain('no external WO Number');
   expect(foot?.textContent).not.toContain('⊘');
-  expect(foot?.textContent).toContain('Order: Hot rank first');
+  expect(foot?.textContent).toContain('Sorted: Hot rank first');
 
   // Stylesheet: hover-only tooltip panel, hidden otherwise (adds no
   // height to the sticky header). The right-anchored variant left with
@@ -242,7 +242,7 @@ test('the footer states the sorting rule in user language', async () => {
 
   const foot = document.querySelector('.pb-foot');
   expect(foot?.textContent).toContain(
-    'Order: Hot rank first → earliest due date → no due date by oldest received date.',
+    'Sorted: Hot rank first → earliest due date → no due date by oldest received date.',
   );
   // No deterministic tie-breakers and no implementation field names.
   expect(foot?.textContent).not.toMatch(/tie-break|hotRank|received:/);
@@ -262,7 +262,7 @@ test('the footer is separated into readable control and legend rows', async () =
     el.textContent?.trim(),
   );
   expect(legends).toHaveLength(1);
-  expect(legends[0]).toContain('Order: Hot rank first');
+  expect(legends[0]).toContain('Sorted: Hot rank first');
 });
 
 test('the footer anchors through flex layout — never position: fixed', async () => {

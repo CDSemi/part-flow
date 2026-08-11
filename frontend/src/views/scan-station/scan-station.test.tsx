@@ -2983,6 +2983,31 @@ test('the header wrap is measurement-driven and the Worker pill is content-sized
   expect(pill).toContain('white-space: nowrap');
 });
 
+test('the production header actions align their labels with the Worker pill text lines', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+
+  // The pill's outer padding is the alignment reference (9px 14px).
+  const pill = /\.ss-pill \{[^}]*}/s.exec(css)![0];
+  expect(pill).toContain('padding: 9px 14px');
+  // Connectivity chip: top/side padding match the pill (both carry a
+  // 1px border), so ONLINE/OFFLINE sits on the `Worker session` line;
+  // only the inward-facing bottom padding stays compact.
+  const chip = /\.ss-headactions \.connchip \{[^}]*}/s.exec(css)![0];
+  expect(chip).toContain('padding: 9px 14px 4px');
+  // Theme control: side padding matches the pill and the bottom is the
+  // pill's padding + border (the toggle is borderless), so Dark/Light
+  // sits on the `from … to …` line; the inward-facing top stays
+  // compact — the pill remains the group's height driver.
+  const toggle = /\.ss-headactions \.themetoggle\.compact \{[^}]*}/s.exec(
+    css,
+  )![0];
+  expect(toggle).toContain('padding: 3px 14px 10px');
+});
+
 test('the shared DevNotice fills its parent width with one content flow', async () => {
   const { readFileSync } = await import('node:fs');
   const { dirname, join } = await import('node:path');

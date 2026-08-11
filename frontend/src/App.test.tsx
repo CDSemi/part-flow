@@ -59,6 +59,26 @@ test('shows ONLINE when the health endpoint succeeds', async () => {
   expect(await screen.findByLabelText('Scan barcode')).toBeEnabled();
 });
 
+test('the primary navigation trails: preview tag → theme control → connectivity chip', async () => {
+  stubFetch(healthOk);
+
+  render(<App />);
+  await screen.findByText('ONLINE');
+
+  // Right-side block order after the spacer: the development preview
+  // tag first, then the Dark/Light control, and the connectivity
+  // status chip at the outer edge.
+  const nav = screen.getByRole('navigation', { name: 'Primary' });
+  const children = Array.from(nav.children, (el) => el.className);
+  const spacer = children.indexOf('spacer');
+  expect(spacer).toBeGreaterThan(0);
+  expect(children.slice(spacer + 1)).toEqual([
+    'mock-tag',
+    'navbtn',
+    expect.stringContaining('connchip'),
+  ]);
+});
+
 test('shows OFFLINE with the persistent banner when the health request fails', async () => {
   const fetchMock = stubFetch(() =>
     Promise.reject(new TypeError('Failed to fetch')),

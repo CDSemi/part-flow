@@ -1292,15 +1292,18 @@
 
 /* The chip keeps its own frame (app/shell.css) — one status chip, no
    surrounding group card. Its ONLINE/OFFLINE text and the shared
-   heartbeat dot stay untouched. Reduced vertical padding (with the
-   theme control below) keeps the actions' combined natural height
-   BELOW the pill's natural height (~70px), so the actions can never
-   become the group's height driver. */
+   heartbeat dot stay untouched. Top and side padding match the Worker
+   Session pill (9px 14px, both surfaces carry a 1px border), so the
+   ONLINE/OFFLINE text sits on the same line as the pill's `Worker
+   session` label. Only the BOTTOM padding is reduced — it faces the
+   theme control, aligns nothing, and keeps the actions' combined
+   natural height BELOW the pill's natural height (~70px), so the
+   actions can never become the group's height driver. */
 .ss-headactions .connchip {
   justify-content: center;
   margin-right: 0;
   min-height: 0;
-  padding: 4px 12px;
+  padding: 8px 14px;
 }
 
 /* Compact theme control (shared ThemeToggle component, production
@@ -1327,14 +1330,18 @@
   background: var(--panel2);
 }
 
-/* Inside the header actions the theme control centers its label and
-   keeps a compact vertical padding, so the chip + toggle pair always
-   fits within the Worker Session pill's natural height (the pill is
-   the height driver — see the group contract above). */
+/* Inside the header actions the theme control centers its label.
+   Bottom and side padding follow the Worker Session pill: 14px sides,
+   and 10px bottom = the pill's 9px padding + 1px border (the toggle is
+   borderless), so the Dark/Light label sits on the same line as the
+   pill's `from … to …` sub line. Only the TOP padding stays compact —
+   it faces the chip, aligns nothing, and keeps the pair within the
+   pill's natural height (the pill is the height driver — see the
+   group contract above). */
 .ss-headactions .themetoggle.compact {
   justify-content: center;
   min-height: 0;
-  padding: 3px 12px;
+  padding: 10px 14px;
   border-radius: 10px;
 }
 

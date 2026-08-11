@@ -138,13 +138,13 @@ function AppShell() {
             </Link>
           ))}
           <span className="spacer" />
-          <ConnectivityChip />
-          <ThemeToggle />
           {import.meta.env.DEV ? (
             <span className="mock-tag">
               Development preview · <b>sample data</b>
             </span>
           ) : null}
+          <ThemeToggle />
+          <ConnectivityChip />
         </nav>
       )}
       {route.view === 'management' && (

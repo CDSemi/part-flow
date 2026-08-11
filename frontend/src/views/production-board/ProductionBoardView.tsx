@@ -888,7 +888,7 @@ export function ProductionBoardView() {
             column-header tooltips of the columns they describe. */}
         <div className="pb-footrow legend">
           <span className="leg sort">
-            Order: Hot rank first → earliest due date → no due date by oldest
+            Sorted: Hot rank first → earliest due date → no due date by oldest
             received date.
           </span>
         </div>
