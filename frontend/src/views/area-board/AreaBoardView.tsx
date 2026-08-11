@@ -83,6 +83,10 @@ export function AreaBoardView() {
   const [activeTab, setActiveTab] = useState<'all' | string>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('due');
+  // All Areas layout choice: horizontal scroll (default, GUI §6.2) or
+  // wrapping columns onto additional rows within the page width.
+  // Presentation state within the view, like the active tab.
+  const [wrapOverview, setWrapOverview] = useState(false);
   // Shared minute clock: `Time in Area` sorting and every derived time
   // display stay current (and identical across views) while the board
   // stays open.
@@ -162,6 +166,19 @@ export function AreaBoardView() {
           <option value="tia">Sort: Time in Area</option>
           <option value="qty">Sort: Quantity</option>
         </select>
+        {activeTab === 'all' ? (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={wrapOverview}
+            className={`ab-wrap ${wrapOverview ? 'on' : ''}`}
+            onClick={() => setWrapOverview((w) => !w)}
+            title="Wrap Area columns onto additional rows instead of scrolling horizontally"
+          >
+            <span className="knob" aria-hidden="true" />
+            Wrap columns
+          </button>
+        ) : null}
         <span className="ab-meta">
           {activeTab === 'all' ? (
             <>
@@ -186,6 +203,7 @@ export function AreaBoardView() {
       {activeTab === 'all' ? (
         <AllAreasOverview
           cards={visible}
+          wrap={wrapOverview}
           onOpenArea={(key) => setActiveTab(key)}
         />
       ) : (
@@ -200,13 +218,15 @@ export function AreaBoardView() {
 
 function AllAreasOverview({
   cards,
+  wrap,
   onOpenArea,
 }: {
   cards: MockAreaCard[];
+  wrap: boolean;
   onOpenArea: (key: string) => void;
 }) {
   return (
-    <div className="ms-scroll">
+    <div className={`ms-scroll ${wrap ? 'wrap' : ''}`}>
       {MOCK_AREAS.map((area) => {
         const areaCards = cards.filter((c) => c.area === area.key);
         const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;

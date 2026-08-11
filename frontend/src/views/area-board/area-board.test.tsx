@@ -265,6 +265,34 @@ test('the All Areas overview reuses the shared PN row presentation', () => {
   expect(latheColumn.querySelector('.stat .n.d')?.textContent).toBe('1');
 });
 
+test('the All Areas overview wraps columns via the slide toggle', () => {
+  render(<AreaBoardView />);
+
+  // Default stays the horizontal scroll layout (GUI §6.2).
+  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
+    false,
+  );
+
+  const toggle = screen.getByRole('switch', { name: 'Wrap columns' });
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
+    true,
+  );
+
+  // The switch belongs to the overview only — a detail tab hides it.
+  openArea(/^Lathe/);
+  expect(screen.queryByRole('switch', { name: 'Wrap columns' })).toBeNull();
+
+  // Returning to All Areas keeps the chosen layout.
+  const tabs = document.querySelector<HTMLElement>('.ab-tabs')!;
+  fireEvent.click(within(tabs).getByRole('button', { name: /All Areas/ }));
+  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
+    true,
+  );
+});
+
 test('queued, on-Machine, processing, and finished states stay distinguishable', () => {
   render(<AreaBoardView />);
   openArea(/^Lathe/);

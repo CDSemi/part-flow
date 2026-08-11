@@ -350,7 +350,7 @@ Monitoring sub view of Management (follows the global theme mode, §2.1). One vi
 
 ## 6.2 All Areas overview
 
-One column per Area; the layout scrolls horizontally when all Areas do not fit. Each Area column shows:
+One column per Area; by default the layout scrolls horizontally when all Areas do not fit. A **Wrap columns** slide toggle in the toolbar (shown in overview mode only) switches to a wrapping layout: columns flow onto additional rows within the page width and nothing scrolls horizontally. The choice is presentation state within the view — it survives switching to a detail tab and back, and defaults to horizontal scroll on each open. Each Area column shows:
 
 - a **clickable header** (Area color, name, description, supported Operation chips) with a "detail ›" affordance — clicking it opens that Area's detail mode, equivalent to selecting its tab;
 - a stat row with only meaningful values: Areas with Machines show **total pcs · queued · on machines** plus **done** when finished quantity exists; Areas without Machines show **total pcs · processing** plus **done** when finished quantity exists (no zero-value noise); the terminal Stockroom column shows **stocked pcs · PNs**;
