@@ -3324,3 +3324,16 @@ test('a light separator divides the Machine and queued-PN selection groups', asy
   expect(rule).toContain('linear-gradient');
   expect(rule).toContain('var(--border)');
 });
+
+test('the dialog grid label column is content-sized, never a fixed-width gap', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+  // The confirmation-summary idiom (v14) applies to the one-shot
+  // dialog grid too: labels sit close to their controls; long labels
+  // still cap at the former fixed width.
+  const rule = /\.ss-dlgrid \{[^}]*}/s.exec(css)![0];
+  expect(rule).toContain('grid-template-columns: fit-content(170px) 1fr');
+});

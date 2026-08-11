@@ -788,8 +788,13 @@
 /* One-shot dialog helpers */
 .ss-dlgrid {
   display: grid;
-  grid-template-columns: 170px 1fr;
-  gap: 10px 14px;
+  /* Content-sized label column (the confirmation-summary idiom, v14):
+     short labels like `Machine` / `PN (queued)` sit close to their
+     selection groups instead of drifting across a fixed-width gap,
+     while long labels (`Starting Area · Operation`) still cap at the
+     former fixed width. */
+  grid-template-columns: fit-content(170px) 1fr;
+  gap: 10px 44px;
   align-items: center;
   margin: 14px 0;
 }
