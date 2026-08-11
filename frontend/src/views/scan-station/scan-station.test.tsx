@@ -2464,6 +2464,167 @@ test('QUEUE returns quantity to the queue and never marks it DONE', async () => 
   );
 });
 
+/* ============ Machine state follows the session assignments ============ */
+
+// Running/idle are DERIVED from the quantity actively assigned on each
+// Machine in the session-local mock state — queue and finished never
+// count, maintenance stays an explicit override — and `stateChangedAt`
+// restamps only when a confirmed command actually flips a Machine
+// between Idle and Running (the new state's age starts at the flip,
+// never at the old state's timestamp).
+
+const machineCard = (index: number) =>
+  document.querySelectorAll('.am-machines .abd-machine')[index] as HTMLElement;
+
+const machineStat = (index: number) =>
+  machineCard(index).querySelector('.mstat')?.textContent ?? '';
+
+test('assigning to an empty Machine flips it Idle → Running with a fresh state age', async () => {
+  await renderStation();
+
+  // Lathe 1 (index 0) starts without assigned quantity: derived idle,
+  // aged from the registry timestamp (18m — not a fresh `<1m`).
+  expect(machineCard(0).classList.contains('idle')).toBe(true);
+  expect(machineStat(0)).toContain('idle');
+  expect(machineStat(0)).not.toContain('<1m');
+
+  // Machine-first wizard: assign the queued 2 pcs (MAX default).
+  scan('PF:MACHINE:L1');
+  const dialog = activeDialog();
+  fireEvent.click(
+    within(dialog as HTMLElement).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assignment' }));
+
+  // Idle → Running immediately, and the running age starts NOW — the
+  // idle timestamp is never reused for the new state.
+  expect(machineCard(0).classList.contains('running')).toBe(true);
+  expect(machineStat(0)).toContain('running · <1m');
+  // A Machine the command did not flip keeps its state AND timestamp:
+  // Lathe 2 stays running with its aged state.
+  expect(machineCard(1).classList.contains('running')).toBe(true);
+  expect(machineStat(1)).not.toContain('<1m');
+  // Maintenance stays an explicit override — never derived away.
+  expect(machineCard(3).classList.contains('maintenance')).toBe(true);
+});
+
+test('QUEUE return keeps Running while quantity remains; a full return flips Idle', async () => {
+  await renderStation();
+
+  // Lathe 3 (index 2) actively processes 3 pcs. Partial return: 1 pc
+  // back to the queue — the Machine keeps processing the remainder,
+  // stays Running and keeps its state age.
+  expect(machineCard(2).classList.contains('running')).toBe(true);
+  fireEvent.click(
+    within(machineCard(2)).getByRole('button', {
+      name: 'Return to Area queue',
+    }),
+  );
+  let dialog = await screen.findByRole('dialog', {
+    name: 'Return unfinished quantity to queue',
+  });
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '1' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
+  expect(machineCard(2).classList.contains('running')).toBe(true);
+  expect(machineStat(2)).toContain('running');
+  expect(machineStat(2)).not.toContain('<1m');
+
+  // Full return of the remaining 2 pcs (MAX default): no active
+  // quantity remains — Running → Idle, the idle age starts NOW.
+  fireEvent.click(
+    within(machineCard(2)).getByRole('button', {
+      name: 'Return to Area queue',
+    }),
+  );
+  dialog = await screen.findByRole('dialog', {
+    name: 'Return unfinished quantity to queue',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
+  expect(machineCard(2).classList.contains('idle')).toBe(true);
+  expect(machineStat(2)).toContain('idle · <1m');
+  expect(machineCard(2).textContent).toContain('No production assigned');
+});
+
+test('DONE keeps Running while assigned quantity remains; completing all of it flips Idle', async () => {
+  await renderStation();
+
+  // Partial DONE: 2 of the 3 pcs on Lathe 3 finish — 1 pc keeps
+  // processing, so the Machine stays Running with its state age
+  // (queued and finished quantity never count as assigned).
+  fireEvent.click(
+    within(machineCard(2)).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  let dialog = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.keyDown(dialog, { key: 'Delete' });
+  fireEvent.keyDown(dialog, { key: '2' });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  expect(machineCard(2).classList.contains('running')).toBe(true);
+  expect(machineStat(2)).not.toContain('<1m');
+
+  // Full DONE of the remaining 1 pc: Running → Idle with a fresh age;
+  // the finished quantity waits in the Area summary, not on the card.
+  fireEvent.click(
+    within(machineCard(2)).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  dialog = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  expect(machineCard(2).classList.contains('idle')).toBe(true);
+  expect(machineStat(2)).toContain('idle · <1m');
+  expect(machineCard(2).textContent).toContain('No production assigned');
+});
+
+test('the assignment dialog checks Machine availability against the session state', async () => {
+  await renderStation();
+
+  // The Machine picker statuses follow the session derivation — after
+  // Lathe 2 empties through a full QUEUE return, the wizard shows it
+  // idle (the load-time mock said running).
+  fireEvent.click(
+    within(machineCard(1)).getByRole('button', {
+      name: 'Return to Area queue',
+    }),
+  );
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Return unfinished quantity to queue',
+  });
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
+  expect(machineCard(1).classList.contains('idle')).toBe(true);
+
+  scan('PF:MACHINE:L1');
+  const assign = await screen.findByRole('dialog', {
+    name: 'Assign to Machine',
+  });
+  const lathe2Pick = within(assign as HTMLElement).getByRole('button', {
+    name: /Lathe 2/,
+  });
+  expect(lathe2Pick.querySelector('.s')?.textContent).toBe('idle');
+  fireEvent.keyDown(assign, { key: 'Escape' });
+});
+
 test('a direct-processing Area can also mark quantity DONE', async () => {
   await renderStation('EXT-ST-01');
 

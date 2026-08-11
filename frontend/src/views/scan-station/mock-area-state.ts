@@ -10,7 +10,13 @@
 // phases — and they are never imported by production-safe modules.
 
 import { isQueueContext } from '../area-monitoring';
-import type { AreaKey, MockAreaCard } from '../view-models';
+import { machineAssignedQty, toAreaMachine } from '../machine-state';
+import type {
+  AreaKey,
+  MockAreaCard,
+  MockAreaMachine,
+  MockMachine,
+} from '../view-models';
 import { pnKey } from './barcode';
 
 /** How one card's quantity is currently held. */
@@ -270,4 +276,44 @@ export function applyScrap(
   card.scrapped = (card.scrapped ?? 0) + args.qty;
   // A fully scrapped presence keeps its card so the scrap stays visible.
   return cards;
+}
+
+/**
+ * Project this Area's Machines into monitoring cards from the CURRENT
+ * session cards. `running`/`idle` derive from the quantity actively
+ * assigned on each Machine in `cards` (queue and finished portions
+ * never count; maintenance stays an explicit override), so every
+ * confirmed command is reflected immediately — the load-time mock
+ * projection is never reused once the session state diverges from it.
+ *
+ * `previous` carries the session's per-Machine timestamps forward:
+ * a Machine whose derived state is unchanged keeps its
+ * `stateChangedAt` (the visible state age keeps aging); a Machine that
+ * actually flips between `running` and `idle` gets `changedAt`, so the
+ * age of the NEW state never starts from the old state's timestamp.
+ * A Machine absent from `previous` (session start) keeps its registry
+ * timestamp. Keyed by the stable Machine identity (`id`) — reused
+ * display names never collide. The result is idempotent: re-deriving
+ * from its own output with unchanged cards returns identical state.
+ */
+export function deriveSessionMachines(
+  machines: readonly MockMachine[],
+  cards: readonly MockAreaCard[],
+  previous: ReadonlyMap<string, MockAreaMachine>,
+  changedAt: string,
+): Map<string, MockAreaMachine> {
+  const next = new Map<string, MockAreaMachine>();
+  for (const machine of machines) {
+    const projected = toAreaMachine(
+      machine,
+      machineAssignedQty(cards, machine),
+    );
+    const prev = previous.get(machine.id);
+    if (prev) {
+      projected.stateChangedAt =
+        prev.status === projected.status ? prev.stateChangedAt : changedAt;
+    }
+    next.set(machine.id, projected);
+  }
+  return next;
 }

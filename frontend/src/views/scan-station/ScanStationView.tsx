@@ -34,6 +34,7 @@ import {
   MOCK_AREA_MACHINES,
 } from '../../mocks/area-board';
 import { areaByKey } from '../../mocks/areas';
+import { activeMachines } from '../../mocks/machines';
 import {
   MOCK_MACHINE_BARCODES,
   MOCK_REPAIR_SOURCES,
@@ -48,6 +49,7 @@ import type { AreaAssignment } from '../area-monitoring';
 import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
 import type {
   MockAreaCard,
+  MockAreaMachine,
   MockCompletedAction,
   MockScanStation,
   MovementType,
@@ -64,6 +66,7 @@ import {
   applyTransferIn,
   cardBreakdown,
   completionRequired,
+  deriveSessionMachines,
 } from './mock-area-state';
 
 /**
@@ -302,11 +305,15 @@ function StationView({
   const writeBlocked = status !== 'connected';
 
   const area = areaByKey(station.area);
-  const machines = useMemo(
-    () => MOCK_AREA_MACHINES[station.area] ?? [],
+  // This Area's Machines from the registry (retired Machines never
+  // appear). Their monitoring state (running/idle + state age) is NOT
+  // taken from the load-time mock projection — it is derived below from
+  // the session-local cards, so confirmed commands are reflected.
+  const stationMachines = useMemo(
+    () => activeMachines().filter((m) => m.area === station.area),
     [station.area],
   );
-  const hasMachines = machines.length > 0;
+  const hasMachines = stationMachines.length > 0;
 
   const inputRef = useRef<HTMLInputElement>(null);
   // Decided once per station lifecycle — pointer capabilities do not
@@ -335,11 +342,23 @@ function StationView({
   const [createdPns, setCreatedPns] = useState<Map<string, string>>(
     () => new Map(),
   );
+  // Per-Machine session monitoring state (keyed by stable Machine id):
+  // `running`/`idle` derive from the quantity currently assigned on
+  // each Machine in the session-local cards (queue and finished never
+  // count; maintenance stays an explicit override). The ref carries
+  // each Machine's `stateChangedAt` across commands, so the displayed
+  // state age keeps aging while the state is unchanged and restarts
+  // only when a command actually flips a Machine between Idle and
+  // Running.
+  const machineStateRef = useRef<Map<string, MockAreaMachine>>(new Map());
 
-  // Reset the session-local mock state when the dev preview changes.
+  // Reset the session-local mock state when the dev preview changes —
+  // including the per-Machine session timestamps, so the next
+  // derivation starts from the registry anchors again.
   useEffect(() => {
     setAllCards(structuredClone(baseCards));
     setHistory([]);
+    machineStateRef.current = new Map();
   }, [baseCards]);
 
   // Auto-dismiss the floating notification: ~4 s for success/info,
@@ -379,6 +398,23 @@ function StationView({
     [allCards, preview, station.area],
   );
   const { assigned } = splitAssignments(areaCards);
+
+  // Session-local Machine monitoring cards, derived from the CURRENT
+  // session cards above (never the load-time mock projection): a
+  // Machine keeps its `stateChangedAt` while its derived state is
+  // unchanged and gets a fresh timestamp only when a confirmed command
+  // actually flips it between Idle and Running. Idempotent per card
+  // state — safe under re-renders.
+  const machines = useMemo(() => {
+    const derived = deriveSessionMachines(
+      stationMachines,
+      areaCards,
+      machineStateRef.current,
+      new Date().toISOString(),
+    );
+    machineStateRef.current = derived;
+    return [...derived.values()];
+  }, [stationMachines, areaCards]);
 
   // Header fit measurement (§4.3): the Area totals drop to their
   // full-width second row only when the single-row layout genuinely
@@ -1126,6 +1162,7 @@ function StationView({
       {flow?.kind === 'machine-assign' && (
         <MachineAssignDialog
           station={station}
+          machines={machines}
           initialMachine={flow.machine}
           initialPn={flow.pn}
           queuedQtyFor={queuedQtyFor}
@@ -1709,6 +1746,7 @@ function quantityValidation(
 
 function MachineAssignDialog({
   station,
+  machines,
   initialMachine,
   initialPn,
   queuedQtyFor,
@@ -1721,6 +1759,9 @@ function MachineAssignDialog({
   onClose,
   onCancel,
 }: ActionDialogProps & {
+  /** Session-derived Machine monitoring state of this Area — the
+   * statuses shown and checked here follow the current assignments. */
+  machines: readonly MockAreaMachine[];
   initialMachine: string | null;
   initialPn: string | null;
   queuedQtyFor: (pn: string) => number;
@@ -1729,7 +1770,6 @@ function MachineAssignDialog({
   /** Back from Step 1 to the PN action dialog (PN-first entry only). */
   onBack?: () => void;
 }) {
-  const machines = MOCK_AREA_MACHINES[station.area] ?? [];
   const [step, setStep] = useState<'select' | 'qty' | 'confirm'>('select');
   const [machine, setMachine] = useState<string | null>(initialMachine);
   const [pn, setPn] = useState<string | null>(initialPn);
