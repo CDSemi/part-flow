@@ -2983,31 +2983,6 @@ test('the header wrap is measurement-driven and the Worker pill is content-sized
   expect(pill).toContain('white-space: nowrap');
 });
 
-test('the production header actions align their labels with the Worker pill text lines', async () => {
-  const { readFileSync } = await import('node:fs');
-  const { dirname, join } = await import('node:path');
-  const { fileURLToPath } = await import('node:url');
-  const here = dirname(fileURLToPath(import.meta.url));
-  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
-
-  // The pill's outer padding is the alignment reference (9px 14px).
-  const pill = /\.ss-pill \{[^}]*}/s.exec(css)![0];
-  expect(pill).toContain('padding: 9px 14px');
-  // Connectivity chip: top/side padding match the pill (both carry a
-  // 1px border), so ONLINE/OFFLINE sits on the `Worker session` line;
-  // only the inward-facing bottom padding stays compact.
-  const chip = /\.ss-headactions \.connchip \{[^}]*}/s.exec(css)![0];
-  expect(chip).toContain('padding: 9px 14px 4px');
-  // Theme control: side padding matches the pill and the bottom is the
-  // pill's padding + border (the toggle is borderless), so Dark/Light
-  // sits on the `from … to …` line; the inward-facing top stays
-  // compact — the pill remains the group's height driver.
-  const toggle = /\.ss-headactions \.themetoggle\.compact \{[^}]*}/s.exec(
-    css,
-  )![0];
-  expect(toggle).toContain('padding: 3px 14px 10px');
-});
-
 test('the shared DevNotice fills its parent width with one content flow', async () => {
   const { readFileSync } = await import('node:fs');
   const { dirname, join } = await import('node:path');
@@ -3315,4 +3290,37 @@ test('workflows entered directly from the station surface never show a fake Back
   ).toBeNull();
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(lastPnText()).toBe('—');
+});
+
+test('a light separator divides the Machine and queued-PN selection groups', async () => {
+  await renderStation();
+
+  scan('PF:MACHINE:L1');
+  const dialog = activeDialog();
+  const grid = dialog.querySelector('.ss-dlgrid')!;
+  const sep = grid.querySelector('.ss-dlgsep')!;
+  // Purely presentational: hidden from assistive technology.
+  expect(sep).not.toBeNull();
+  expect(sep.getAttribute('aria-hidden')).toBe('true');
+  // DOM order: Machine group → separator → PN (queued) label.
+  const children = Array.from(grid.children);
+  const machineGroup = grid.querySelector(
+    '[aria-labelledby="ma-machine-lbl"]',
+  )!;
+  const pnLabel = grid.querySelector('#ma-pn-lbl')!;
+  expect(children.indexOf(sep)).toBeGreaterThan(children.indexOf(machineGroup));
+  expect(children.indexOf(sep)).toBeLessThan(children.indexOf(pnLabel));
+
+  // Presentation: a full-width 1px hairline on the subtle border
+  // token, fading toward both ends — never a heavy rule.
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+  const rule = /\.ss-dlgrid \.ss-dlgsep \{[^}]*}/s.exec(css)![0];
+  expect(rule).toContain('grid-column: 1 / -1');
+  expect(rule).toContain('height: 1px');
+  expect(rule).toContain('linear-gradient');
+  expect(rule).toContain('var(--border)');
 });

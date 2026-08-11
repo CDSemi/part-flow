@@ -2069,6 +2069,9 @@ function MachineAssignDialog({
                 </button>
               ))}
             </div>
+            {/* Light separator between the two selection groups —
+                purely presentational grouping, no semantics. */}
+            <div className="ss-dlgsep" aria-hidden="true" />
             <span className="lbl" id="ma-pn-lbl">
               PN (queued)
             </span>
