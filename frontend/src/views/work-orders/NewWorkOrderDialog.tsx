@@ -263,7 +263,9 @@ export function NewWorkOrderDialog({
           </p>
 
           <div className="nwo-form">
-            <label htmlFor="nwo-num">WO Number (optional)</label>
+            <label htmlFor="nwo-num">
+              WO Number <span className="field-optional">(optional)</span>
+            </label>
             <div>
               <input
                 id="nwo-num"
@@ -295,7 +297,9 @@ export function NewWorkOrderDialog({
                 <div className="rowerr">{headerErrors.received}</div>
               ) : null}
             </div>
-            <label htmlFor="nwo-due">WO due date (optional)</label>
+            <label htmlFor="nwo-due">
+              WO due date <span className="field-optional">(optional)</span>
+            </label>
             <div>
               <input
                 id="nwo-due"

@@ -45,12 +45,13 @@ export function TypedConfirmDialog({
   const [entered, setEntered] = useState('');
   const confirmed = matches(expectedValue, entered);
   return (
-    <ModalDialog labelledBy={headingId} onClose={onCancel}>
+    <ModalDialog labelledBy={headingId} onClose={onCancel} className="msgdlg">
       <h3 id={headingId}>{title}</h3>
       <div className="sub">{children}</div>
       <div className="typedconfirm">
         <label htmlFor={fieldId}>
-          Type <b>{expectedValue}</b> ({valueLabel}) to confirm
+          Type <b>{expectedValue}</b>{' '}
+          <span className="field-note">({valueLabel})</span> to confirm
         </label>
         <input
           id={fieldId}

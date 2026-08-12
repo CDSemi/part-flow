@@ -691,10 +691,13 @@ function ActiveMachineRow({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
+  // The label text (including any parenthesized qualifier span) is ONE
+  // inline flex item — the stacked flex-column label must never place
+  // a qualifier on its own row between the text and the control.
   return (
     <label>
-      {label}
+      <span>{label}</span>
       {children}
     </label>
   );
@@ -1168,7 +1171,13 @@ function MachineEditDialog({
           </div>
         )}
         <div className="mg-grid2">
-          <Field label="Manufacturer (optional)">
+          <Field
+            label={
+              <>
+                Manufacturer <span className="field-optional">(optional)</span>
+              </>
+            }
+          >
             <input
               className="field"
               value={manufacturer}
@@ -1176,7 +1185,13 @@ function MachineEditDialog({
               placeholder="e.g. Mazak"
             />
           </Field>
-          <Field label="Model (optional)">
+          <Field
+            label={
+              <>
+                Model <span className="field-optional">(optional)</span>
+              </>
+            }
+          >
             <input
               className="field"
               value={model}
@@ -1184,7 +1199,13 @@ function MachineEditDialog({
               placeholder="e.g. QT-250"
             />
           </Field>
-          <Field label="Serial number (optional)">
+          <Field
+            label={
+              <>
+                Serial number <span className="field-optional">(optional)</span>
+              </>
+            }
+          >
             <input
               className="field mono"
               value={serialNumber}
@@ -1192,7 +1213,14 @@ function MachineEditDialog({
               placeholder="e.g. Q25-90412"
             />
           </Field>
-          <Field label="Installed date (optional)">
+          <Field
+            label={
+              <>
+                Installed date{' '}
+                <span className="field-optional">(optional)</span>
+              </>
+            }
+          >
             {/* Native date input — the browser shows its own date
                 format hint, a placeholder would never render. */}
             <input
@@ -1203,7 +1231,13 @@ function MachineEditDialog({
             />
           </Field>
         </div>
-        <Field label="Notes (optional)">
+        <Field
+          label={
+            <>
+              Notes <span className="field-optional">(optional)</span>
+            </>
+          }
+        >
           <input
             className="field"
             value={notes}
@@ -1220,7 +1254,14 @@ function MachineEditDialog({
               the Machines list.
             </p>
             <div className="mg-grid2">
-              <Field label="Reason / note (optional)">
+              <Field
+                label={
+                  <>
+                    Reason / note{' '}
+                    <span className="field-optional">(optional)</span>
+                  </>
+                }
+              >
                 <input
                   className="field"
                   value={maintenanceNote}
@@ -1228,7 +1269,14 @@ function MachineEditDialog({
                   placeholder="e.g. Spindle bearing replacement"
                 />
               </Field>
-              <Field label="Expected return date (optional)">
+              <Field
+                label={
+                  <>
+                    Expected return date{' '}
+                    <span className="field-optional">(optional)</span>
+                  </>
+                }
+              >
                 <input
                   className="field"
                   type="date"
@@ -1593,7 +1641,13 @@ function StartMaintenanceDialog({
           : 'No quantity is currently assigned to it.'}
       </div>
       <div className="mg-form">
-        <Field label="Reason / note (optional)">
+        <Field
+          label={
+            <>
+              Reason / note <span className="field-optional">(optional)</span>
+            </>
+          }
+        >
           <input
             className="field"
             value={note}
@@ -1601,7 +1655,14 @@ function StartMaintenanceDialog({
             placeholder="e.g. Spindle bearing replacement"
           />
         </Field>
-        <Field label="Expected return date (optional)">
+        <Field
+          label={
+            <>
+              Expected return date{' '}
+              <span className="field-optional">(optional)</span>
+            </>
+          }
+        >
           <input
             className="field"
             type="date"
@@ -1846,7 +1907,13 @@ function ReactivateMachineDialog({
           The change applies from reactivation onward — historical Movements
           keep the Areas they were recorded with.
         </div>
-        <Field label="Reason (required)">
+        <Field
+          label={
+            <>
+              Reason <span className="field-required">(required)</span>
+            </>
+          }
+        >
           <input
             className="field"
             value={reason}

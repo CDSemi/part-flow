@@ -265,7 +265,7 @@
 
 .wo-table input,
 .wo-table select {
-  background: var(--panel);
+  background-color: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 13px;
@@ -593,7 +593,7 @@
 
 .relgrid input,
 .relgrid select {
-  background: var(--panel);
+  background-color: var(--panel);
   border: 1.5px solid var(--border);
   border-radius: 9px;
   font-size: 14px;
@@ -710,7 +710,7 @@
 
 .ap-meta input,
 .ap-meta select {
-  background: var(--field-bg);
+  background-color: var(--field-bg);
   border: 1px solid var(--border2);
   border-radius: 9px;
   color: var(--text);

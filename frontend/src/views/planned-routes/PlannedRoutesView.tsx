@@ -635,7 +635,9 @@ function RouteEditDialog({
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Bracket std v4"
         />
-        <label htmlFor="rt-desc">Description (optional)</label>
+        <label htmlFor="rt-desc">
+          Description <span className="field-optional">(optional)</span>
+        </label>
         <input
           id="rt-desc"
           className="field"

@@ -2073,7 +2073,7 @@ function MachineAssignDialog({
                 purely presentational grouping, no semantics. */}
             <div className="ss-dlgsep" aria-hidden="true" />
             <span className="lbl" id="ma-pn-lbl">
-              PN (queued)
+              PN <span className="field-note">(queued)</span>
             </span>
             {queuedPns.length === 0 ? (
               <span className="sub">No queued quantity in this Area.</span>
@@ -3117,7 +3117,7 @@ function AddQuantityDialog({
           ) : null}
           <QuantityKeypad value={qty} onChange={setQty} />
           <label className="ss-reasonlbl" htmlFor="addq-reason">
-            Reason (required)
+            Reason <span className="field-required">(required)</span>
           </label>
           <div className="ss-fieldhint">
             This reason will be included in the adjustment history.
@@ -3327,7 +3327,7 @@ function RepairDialog({
             </>
           ) : null}
           <label className="ss-reasonlbl" htmlFor="rep-reason">
-            Reason (required)
+            Reason <span className="field-required">(required)</span>
           </label>
           <input
             id="rep-reason"
@@ -3560,7 +3560,7 @@ function ScrapDialog({
           />
           {scanNote ? <Guidance tone="error">{scanNote}</Guidance> : null}
           <label className="ss-reasonlbl" htmlFor="scrap-reason">
-            Scrap reason (required)
+            Scrap reason <span className="field-required">(required)</span>
           </label>
           <input
             id="scrap-reason"

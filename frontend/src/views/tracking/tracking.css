@@ -36,7 +36,7 @@
 
 .tk-filters input,
 .tk-filters select {
-  background: var(--panel);
+  background-color: var(--panel);
   border: 1px solid var(--border);
   border-radius: 9px;
   font-size: 13.5px;

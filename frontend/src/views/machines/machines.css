@@ -384,13 +384,13 @@
   display: flow-root;
 }
 
-/* Labelled fields: one explicit 6px gap between the label text and
+/* Labelled fields: one explicit 8px gap between the label text and
    its control, so both columns of a two-column row align exactly —
-   the Area select's separate label row uses the same 6px (below). */
+   the Area select's separate label row uses the same 8px (below). */
 .mg-form label {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   font-weight: 750;
   color: var(--muted);
@@ -429,7 +429,7 @@
   font-size: 12px;
   font-weight: 750;
   color: var(--muted);
-  margin: 12px 0 6px;
+  margin: 12px 0 8px;
 }
 
 .mg-arealine {

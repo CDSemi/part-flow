@@ -81,7 +81,7 @@
 }
 
 .ab-tools select {
-  background: var(--panel);
+  background-color: var(--panel);
   border: 1px solid var(--border);
   border-radius: 11px;
   color: var(--muted);

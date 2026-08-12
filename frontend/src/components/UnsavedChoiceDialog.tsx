@@ -33,7 +33,7 @@ export function UnsavedChoiceDialog({
 }) {
   const headingId = useId();
   return (
-    <ModalDialog labelledBy={headingId} onClose={onCancel}>
+    <ModalDialog labelledBy={headingId} onClose={onCancel} className="msgdlg">
       <h3 id={headingId}>{title}</h3>
       <div className="sub">{children}</div>
       {saveDisabledReason ? (

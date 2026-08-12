@@ -71,6 +71,20 @@ textarea {
   font-family: inherit;
 }
 
+/* One consistent dropdown chevron on every native select (the UA
+   arrow differs per browser/OS and ignores the theme). The chevron is
+   the theme's muted color via --select-arrow (tokens.css). Rules that
+   surface selects must set `background-color`, never the `background`
+   shorthand — the shorthand would erase this arrow. */
+select {
+  appearance: none;
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+  padding-right: 28px;
+}
+
 /* Visible keyboard focus everywhere */
 :focus-visible {
   outline: 2px solid var(--info-t);
@@ -405,11 +419,26 @@ textarea {
   white-space: nowrap;
 }
 
-/* Shared quiet marker for an optional form field inside its label,
-   e.g. `Due date (optional)` — reusable by any form. */
+/* Shared markers for parenthesized qualifiers inside a field label —
+   visually distinct from the label text itself, reusable by any form:
+   - `.field-optional` — quiet, e.g. `Due date (optional)`;
+   - `.field-required` — the semantic error tone marks the field as
+     mandatory, e.g. `Reason (required)`;
+   - `.field-note` — neutral qualifier, one step quieter than the
+     label, e.g. `PN (queued)`. */
 .field-optional {
   color: var(--faint);
   font-weight: 450;
+}
+
+.field-required {
+  color: var(--err-t);
+  font-weight: 650;
+}
+
+.field-note {
+  color: var(--faint);
+  font-weight: 550;
 }
 
 /* Shared clickable action ZONE (Scan Station Undo, offline-banner
@@ -582,7 +611,7 @@ textarea {
 
 .dlg .field {
   width: 100%;
-  background: var(--field-bg);
+  background-color: var(--field-bg);
   border: 2px solid var(--border2);
   border-radius: 10px;
   color: var(--text);
@@ -636,7 +665,7 @@ textarea {
   display: block;
   font-size: 13px;
   color: var(--muted);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .dlg .typedconfirm label b {
@@ -646,7 +675,7 @@ textarea {
 
 .dlg .typedconfirm input {
   width: 100%;
-  background: var(--field-bg);
+  background-color: var(--field-bg);
   border: 2px solid var(--border2);
   border-radius: 10px;
   color: var(--text);
@@ -665,4 +694,38 @@ textarea {
   color: var(--warn-t);
   font-weight: 650;
   margin-top: -8px;
+}
+
+/* ============ Message/confirmation dialogs ============ */
+/* Compact decision dialogs (ConfirmDialog, UnsavedChoiceDialog,
+   TypedConfirmDialog): the same .dlg shell with a calmer vertical
+   rhythm — the eyebrow title, the message body and the action row
+   each get clear breathing room so the message never crowds the
+   heading or the buttons. Workflow dialogs keep the tighter base
+   spacing. */
+.dlg.msgdlg {
+  padding: 26px 28px;
+}
+
+.dlg.msgdlg h3 {
+  margin-bottom: 14px;
+}
+
+.dlg.msgdlg .sub {
+  font-size: 14.5px;
+  line-height: 1.65;
+  margin-bottom: 0;
+}
+
+.dlg.msgdlg .typedconfirm {
+  margin-top: 18px;
+}
+
+.dlg.msgdlg .row {
+  margin-top: 26px;
+  gap: 12px;
+}
+
+.dlg.msgdlg .sub.disabled-reason {
+  margin-top: 10px;
 }

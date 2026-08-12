@@ -20,6 +20,7 @@ export function ModalDialog({
   onClose,
   children,
   size,
+  className,
   onKeyDown,
 }: {
   /** Accessible name when no visible heading is referenced. */
@@ -30,6 +31,9 @@ export function ModalDialog({
   children: ReactNode;
   /** Responsive width step; every size stays within the viewport. */
   size?: 'wide' | 'xwide';
+  /** Extra class on the dialog surface (e.g. `msgdlg` for the
+      message/confirmation spacing variant). */
+  className?: string;
   /**
    * Dialog-wide key handling (e.g. physical-keyboard quantity entry).
    * Attached at the dialog root so keys work while the dialog itself
@@ -85,7 +89,7 @@ export function ModalDialog({
     >
       <div
         ref={dialogRef}
-        className={`dlg ${size ?? ''}`}
+        className={`dlg ${size ?? ''} ${className ?? ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={labelledBy ? undefined : label}

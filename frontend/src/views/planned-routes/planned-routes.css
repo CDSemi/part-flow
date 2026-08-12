@@ -255,7 +255,7 @@
   font-size: 12px;
   font-weight: 750;
   color: var(--muted);
-  margin: 10px 0 4px;
+  margin: 12px 0 8px;
 }
 
 .rt-form .err {
@@ -357,7 +357,7 @@
 
 .rt-steprow select,
 .rt-steprow input {
-  background: var(--field-bg);
+  background-color: var(--field-bg);
   border: 1.5px solid var(--border2);
   border-radius: 9px;
   color: var(--text);
