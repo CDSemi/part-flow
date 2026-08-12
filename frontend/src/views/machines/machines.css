@@ -778,16 +778,22 @@
   text-align: center;
 }
 
+/* The display name is the label's PRIMARY information — big and bold;
+   the Asset Tag is secondary metadata (the barcode itself carries it
+   for scanning), so it recedes. Fixed grays: the label card is always
+   white with black ink (printable in both themes). */
 .mg-label .lname {
-  font-size: 14px;
-  font-weight: 750;
+  font-size: 22px;
+  font-weight: 850;
+  line-height: 1.2;
 }
 
 .mg-label .ltag {
   font-family: var(--mono), monospace;
-  font-size: 19px;
-  font-weight: 800;
-  margin-bottom: 6px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: #555;
+  margin: 2px 0 6px;
 }
 
 .mg-label .lbarcode {
@@ -928,6 +934,17 @@
   line-height: 1.55;
 }
 
+/* While retirement is possible the consequences line takes a soft
+   error reading tone (the Machine name in the full error text tone);
+   the blocked explanation keeps the neutral muted tone above. */
+.mg-dangerzone .dz-body p.dz-live {
+  color: color-mix(in srgb, var(--err-t) 55%, var(--muted));
+}
+
+.mg-dangerzone .dz-body p.dz-live b {
+  color: var(--err-t);
+}
+
 .mg-dangerzone .dz-retire {
   flex: none;
   border: 1px solid var(--err-t);
@@ -942,6 +959,14 @@
 
 .mg-dangerzone .dz-retire:hover {
   background: var(--err-d);
+}
+
+.mg-dangerzone .dz-retire:disabled {
+  opacity: 0.4;
+}
+
+.mg-dangerzone .dz-retire:disabled:hover {
+  background: var(--err);
 }
 
 @media (max-width: 640px) {

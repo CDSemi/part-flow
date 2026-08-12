@@ -209,27 +209,25 @@ test('clearing maintenance returns to Running with quantity, Idle without', () =
   expect(maintenanceSwitch('Lathe 4')).toHaveAttribute('aria-checked', 'false');
 });
 
-test('retirement is blocked while quantity is assigned', () => {
+test('retirement is blocked in place while quantity is assigned', () => {
   render(<MachinesView />);
 
+  // The Danger Zone states the blocked truth itself (neutral tone) and
+  // disables Retire — no dialog is needed to find out.
   const edit = openEdit('Lathe 2');
   expect(edit.textContent).toContain(
-    'Retirement is blocked while 4 pcs are still assigned.',
+    'cannot be retired while 4 pcs are still assigned',
   );
-  fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
+  expect(edit.textContent).toContain('normal production workflow');
+  expect(edit.querySelector('.dz-live')).toBeNull();
+  const retire = within(edit).getByRole('button', { name: 'Retire…' });
+  expect(retire).toBeDisabled();
+  fireEvent.click(retire);
+  expect(
+    screen.queryByRole('dialog', { name: 'Cannot retire Machine' }),
+  ).toBeNull();
 
-  const blocked = screen.getByRole('dialog', { name: 'Cannot retire Machine' });
-  expect(blocked.textContent).toContain('4 pcs');
-  expect(blocked.textContent).toContain('normal production workflow');
-  // No confirming action exists — only Close.
-  expect(within(blocked).queryByRole('button', { name: /Retire/ })).toBeNull();
-  fireEvent.click(within(blocked).getByRole('button', { name: 'Close' }));
-
-  // Back in the still-open Edit dialog; the Machine stays active.
-  const editAgain = screen.getByRole('dialog', { name: 'Edit Machine' });
-  fireEvent.click(
-    within(editAgain).getByRole('button', { name: 'Cancel (Esc)' }),
-  );
+  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
   expect(activeRow('Lathe 2')).toBeTruthy();
 });
 
@@ -237,6 +235,12 @@ test('an idle Machine retires after typing its Asset Tag and a final summary —
   render(<MachinesView />);
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
+  // Nothing assigned: the Danger Zone shows the consequences in its
+  // soft error reading tone and Retire is enabled.
+  expect(edit.querySelector('.dz-live')?.textContent).toContain(
+    'removes it from every assignment choice',
+  );
+  expect(within(edit).getByRole('button', { name: 'Retire…' })).toBeEnabled();
   fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
 
   const confirm = screen.getByRole('dialog', { name: 'Retire Machine' });
@@ -588,6 +592,111 @@ test('cancelling the add confirmation returns to the summary, then the form — 
   // Nothing was added.
   const activeTable = document.querySelectorAll('.mg-table')[0];
   expect(activeTable.textContent).not.toContain('Lathe 5');
+});
+
+test('the New Machine dialog focuses Display name; Edit Machine claims no field', () => {
+  render(<MachinesView />);
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Machine' });
+  expect(within(dialog).getByLabelText('Display name')).toHaveFocus();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  const edit = openEdit('Lathe 2');
+  expect(within(edit).getByLabelText('Display name')).not.toHaveFocus();
+  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
+});
+
+test('cancelling Edit Machine with unsaved edits asks to save first', () => {
+  render(<MachinesView />);
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Coolant flushed 2026' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // The decision comes first; Cancel returns with the edits intact.
+  const ask = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  fireEvent.click(within(ask).getByRole('button', { name: 'Cancel (Esc)' }));
+  const editAgain = screen.getByRole('dialog', { name: 'Edit Machine' });
+  expect(within(editAgain).getByLabelText('Notes (optional)')).toHaveValue(
+    'Coolant flushed 2026',
+  );
+
+  // Save changes saves and closes; reopening shows the saved value.
+  fireEvent.click(
+    within(editAgain).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Unsaved changes' })).getByRole(
+      'button',
+      { name: 'Save changes' },
+    ),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  const reopened = openEdit('Mill 3 — Horizontal Boring');
+  expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue(
+    'Coolant flushed 2026',
+  );
+});
+
+test('discarding on cancel never saves; a dirty New Machine confirms the discard', () => {
+  render(<MachinesView />);
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Never saved' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Unsaved changes' })).getByRole(
+      'button',
+      { name: 'Discard changes' },
+    ),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  const reopened = openEdit('Mill 3 — Horizontal Boring');
+  expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue('');
+  fireEvent.click(
+    within(reopened).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+
+  // New Machine with entered input: closing asks before discarding.
+  fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Machine' });
+  fireEvent.change(within(dialog).getByLabelText('Display name'), {
+    target: { value: 'Lathe 9' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  const discardAsk = screen.getByRole('dialog', {
+    name: 'Discard new Machine?',
+  });
+  expect(discardAsk.textContent).toContain('Nothing has been added yet');
+  // Keep editing returns with the input intact…
+  fireEvent.click(
+    within(discardAsk).getByRole('button', { name: 'Keep editing' }),
+  );
+  expect(
+    within(screen.getByRole('dialog', { name: 'New Machine' })).getByLabelText(
+      'Display name',
+    ),
+  ).toHaveValue('Lathe 9');
+  // …Discard input closes without adding anything.
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'New Machine' })).getByRole(
+      'button',
+      { name: 'Cancel (Esc)' },
+    ),
+  );
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Discard new Machine?' }),
+    ).getByRole('button', { name: 'Discard input' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  const activeTable = document.querySelectorAll('.mg-table')[0];
+  expect(activeTable.textContent).not.toContain('Lathe 9');
 });
 
 test('a new Machine cannot reuse an active display name of the same Area', () => {

@@ -1,6 +1,6 @@
 import './machines.css';
 
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
@@ -1071,6 +1071,19 @@ function MachineEditDialog({
   const [retireEditsIntent, setRetireEditsIntent] = useState<
     'save' | 'discard' | null
   >(null);
+  // Close request while the form holds unsaved input — an explicit
+  // decision comes first (§3.10: cancel never silently saves, and
+  // entered input is never silently lost either).
+  const [leaveConfirm, setLeaveConfirm] = useState(false);
+  // A NEW Machine starts with the Display name focused — the one
+  // required field. Edit keeps the dialog-root focus (no field claims
+  // it: the whole record is equally editable).
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!machine) nameInputRef.current?.focus();
+    // Initial focus only — `machine` never changes while open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const dirty =
     name !== initial.name ||
@@ -1163,6 +1176,20 @@ function MachineEditDialog({
     setAddStage('summary');
   };
 
+  /** Close request: with unsaved input an explicit decision comes
+   * first — nothing is saved or discarded by the request itself. */
+  const requestClose = () => {
+    if (dirty) {
+      setLeaveConfirm(true);
+      return;
+    }
+    onCancel();
+  };
+
+  // The in-place Danger Zone state disables Retire while quantity is
+  // assigned; startRetire keeps the `Cannot retire Machine` dialog as
+  // the fallback for a stale row (the real gate stays in the
+  // production workflow, never presentation).
   const startRetire = () => {
     if (!machine) return;
     if (assignedQty > 0) {
@@ -1203,7 +1230,7 @@ function MachineEditDialog({
   return (
     <ModalDialog
       label={machine ? 'Edit Machine' : 'New Machine'}
-      onClose={onCancel}
+      onClose={requestClose}
       size="wide"
     >
       <div className="mg-dlghead">
@@ -1253,6 +1280,7 @@ function MachineEditDialog({
           <div className="mg-grid3">
             <Field label="Display name">
               <input
+                ref={nameInputRef}
                 className="field"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -1400,7 +1428,7 @@ function MachineEditDialog({
         ) : null}
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
         <button className="bigbtn primary" onClick={save}>
@@ -1411,23 +1439,66 @@ function MachineEditDialog({
         <div className="mg-dangerzone">
           <div className="dz-title">Danger Zone</div>
           <div className="dz-body">
-            <p>
-              Retiring removes <b>{machine.name}</b> from every assignment
-              choice and stops its barcode from accepting assignment scans.
-              History is preserved — the Machine is never deleted.
-              {assignedQty > 0 ? (
-                <>
-                  {' '}
-                  Retirement is blocked while <b>{assignedQty} pcs</b> are still
-                  assigned.
-                </>
-              ) : null}
-            </p>
-            <button className="dz-retire" onClick={startRetire}>
+            {/* The zone states the CURRENT truth in place: the
+                consequences (soft error reading tone) while retirement
+                is possible, the plain blocked explanation (neutral
+                muted tone) with Retire disabled while quantity is
+                still assigned. */}
+            {assignedQty > 0 ? (
+              <p>
+                <b>{machine.name}</b> cannot be retired while{' '}
+                <b>{assignedQty} pcs</b> are still assigned. Complete or
+                transfer that quantity through the normal production workflow
+                first.
+              </p>
+            ) : (
+              <p className="dz-live">
+                Retiring <b>{machine.name}</b> removes it from every assignment
+                choice and stops its barcode from accepting assignment scans.
+                History is preserved — the Machine is never deleted.
+              </p>
+            )}
+            <button
+              className="dz-retire"
+              disabled={assignedQty > 0}
+              onClick={startRetire}
+            >
               Retire…
             </button>
           </div>
         </div>
+      ) : null}
+      {leaveConfirm && machine ? (
+        <UnsavedChoiceDialog
+          title="Unsaved changes"
+          saveLabel="Save changes"
+          discardLabel="Discard changes"
+          saveDisabledReason={
+            'error' in builtRecord
+              ? `The edits cannot be saved yet: ${builtRecord.error}`
+              : undefined
+          }
+          onCancel={() => setLeaveConfirm(false)}
+          onSave={() => {
+            if ('error' in builtRecord) return;
+            onSave(builtRecord.machine);
+          }}
+          onDiscard={onCancel}
+        >
+          This Machine has unsaved edits. <b>Save changes</b> saves them and
+          closes, <b>Discard changes</b> closes without saving them.
+        </UnsavedChoiceDialog>
+      ) : null}
+      {leaveConfirm && !machine ? (
+        <ConfirmDialog
+          title="Discard new Machine?"
+          confirmLabel="Discard input"
+          cancelLabel="Keep editing"
+          onCancel={() => setLeaveConfirm(false)}
+          onConfirm={onCancel}
+        >
+          Nothing has been added yet — closing now discards the entered input.
+        </ConfirmDialog>
       ) : null}
       {retireStage === 'blocked' && machine ? (
         <ModalDialog
