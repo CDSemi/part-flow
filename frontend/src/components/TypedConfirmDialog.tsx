@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { ModalDialog } from './ModalDialog';
@@ -49,6 +49,14 @@ export function TypedConfirmDialog({
   const fieldId = useId();
   const [entered, setEntered] = useState('');
   const confirmed = matches(expectedValue, entered);
+  // The typed gate IS the dialog's task — initial focus goes straight
+  // to the input. This effect runs after ModalDialog's own mount
+  // effect (child effects fire first), so the opener capture for focus
+  // restoration on close stays intact.
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
   return (
     <ModalDialog
       labelledBy={headingId}
@@ -64,6 +72,7 @@ export function TypedConfirmDialog({
         </label>
         <input
           id={fieldId}
+          ref={inputRef}
           type="text"
           value={entered}
           autoComplete="off"

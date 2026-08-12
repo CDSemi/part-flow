@@ -778,6 +778,18 @@ select {
   box-shadow: 0 0 0 8px var(--error-surface);
 }
 
+/* The description takes a soft wash of the decision's tone (a light
+   red / light amber reading tone, mixed toward the neutral muted
+   text so it stays calm prose); the bold emphasis — the Machine name
+   and the cannot-be-undone statement — carries the full text tone. */
+.dlg.alertdlg.tone-danger .sub {
+  color: color-mix(in srgb, var(--err-t) 62%, var(--muted));
+}
+
+.dlg.alertdlg.tone-danger .sub b {
+  color: var(--err-t);
+}
+
 .dlg.alertdlg.tone-warning {
   border-color: var(--warning-border);
   background:
@@ -789,6 +801,14 @@ select {
   background: var(--warn);
   color: var(--on-warn);
   box-shadow: 0 0 0 8px var(--warning-surface);
+}
+
+.dlg.alertdlg.tone-warning .sub {
+  color: color-mix(in srgb, var(--warn-t) 62%, var(--muted));
+}
+
+.dlg.alertdlg.tone-warning .sub b {
+  color: var(--warn-t);
 }
 
 /* ============ Danger-toned workflow dialogs (dangerdlg) ============ */

@@ -98,17 +98,14 @@ test('the replacement pair stays distinguishable: retired records keep their ide
   expect(retiredRow.querySelector('.mgname')?.textContent).toBe('Lathe 1');
   expect(retiredRow.textContent).toContain('CD-0104');
   expect(retiredRow.textContent).toContain('Replaced by asset CD-0512');
-  // Historical display with exactly two entry points per row: the
-  // read-only details (whole row / name-cell button) and reactivation
-  // of the same physical machine — no edit, no delete.
-  expect(within(retiredRow).getAllByRole('button')).toHaveLength(2);
+  // Historical display with exactly one entry point per row: the
+  // read-only details dialog (whole row / name-cell button), which
+  // carries the Reactivate entry — no row action, no edit, no delete.
+  expect(within(retiredRow).getAllByRole('button')).toHaveLength(1);
   expect(
     within(retiredRow).getByRole('button', {
       name: 'Machine details — Lathe 1',
     }),
-  ).toBeInTheDocument();
-  expect(
-    within(retiredRow).getByRole('button', { name: 'Reactivate' }),
   ).toBeInTheDocument();
 
   // Second retired record: retired Machines keep their Asset Tag
@@ -256,6 +253,8 @@ test('an idle Machine retires after typing its Asset Tag and a final summary —
     name: 'Continue',
   });
   const gate = within(confirm).getByLabelText(/to confirm$/);
+  // The typed gate is the dialog's task — it receives initial focus.
+  expect(gate).toHaveFocus();
   expect(gate).toHaveAttribute('placeholder', 'CD-0303');
   expect(continueButton).toBeDisabled();
   fireEvent.change(gate, { target: { value: 'CD-0304' } });
@@ -357,15 +356,24 @@ test('a recorded Save decision applies the edits only when the retirement comple
 test('reactivation blocks on a name collision until a rename, then returns the Machine as Idle', () => {
   render(<MachinesView />);
 
+  // Reactivate is entered through the Retired Machine Details dialog.
   const lathe1Row = within(retiredTable())
     .getByText('Retired on 2026-02-14')
     .closest('tr') as HTMLElement;
+  fireEvent.click(lathe1Row);
   fireEvent.click(
-    within(lathe1Row).getByRole('button', { name: 'Reactivate' }),
+    within(
+      screen.getByRole('dialog', { name: 'Retired Machine Details' }),
+    ).getByRole('button', { name: 'Reactivate' }),
   );
 
   const dialog = screen.getByRole('dialog', { name: 'Reactivate Machine' });
   expect(dialog.textContent).toContain('returns to service on the SAME record');
+  // The same-physical acknowledgement sits on the warning Important
+  // panel — a be-sure marker, not an error.
+  expect(
+    dialog.querySelector('.mg-confirmpanel .cp-head')?.textContent,
+  ).toContain('Important');
   // The reused floor-position name collides with the active replacement
   // MC-512 `Lathe 1` in the same Area.
   expect(dialog.textContent).toContain(
@@ -402,6 +410,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   const summary = screen.getByRole('dialog', { name: 'Confirm reactivation' });
   expect(summary.textContent).toContain('Lathe 1B');
   expect(summary.textContent).toContain('Returned from overhaul');
+  expect(summary.textContent).toContain('Same physical machine confirmed');
   expect(summary.textContent).toContain('Idle');
   fireEvent.click(
     within(summary).getByRole('button', { name: 'Reactivate Machine' }),
@@ -420,10 +429,13 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   const row = activeRow('Lathe 1B');
   expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
 
-  // The lifecycle audit keeps both events, append-only.
+  // The lifecycle audit keeps both events, append-only — presented in
+  // the shared timeline style, in its compact one-line-per-event
+  // variant inside Edit Machine.
   fireEvent.click(row);
   const edit = screen.getByRole('dialog', { name: 'Edit Machine' });
-  const events = edit.querySelectorAll('.mg-lifeevent');
+  expect(edit.querySelector('.mg-timeline')).toHaveClass('compact');
+  const events = edit.querySelectorAll('.mg-tlevent');
   expect(events).toHaveLength(2);
   expect(events[0].textContent).toContain('RETIRED');
   expect(events[1].textContent).toContain('REACTIVATED');
@@ -434,11 +446,17 @@ test('reactivation blocks on a name collision until a rename, then returns the M
 test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', () => {
   render(<MachinesView />);
 
-  // Reactivate Saw 2 first (no identity conflicts, no name collision).
+  // Reactivate Saw 2 first (no identity conflicts, no name collision)
+  // — entered through the Retired Machine Details dialog.
   const saw2Row = within(retiredTable())
     .getByText('Retired on 2025-11-03')
     .closest('tr') as HTMLElement;
-  fireEvent.click(within(saw2Row).getByRole('button', { name: 'Reactivate' }));
+  fireEvent.click(saw2Row);
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Retired Machine Details' }),
+    ).getByRole('button', { name: 'Reactivate' }),
+  );
   const dialog = screen.getByRole('dialog', { name: 'Reactivate Machine' });
   expect(dialog.querySelector('.mg-blockers')).toBeNull();
   fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
@@ -732,20 +750,14 @@ test('the Retired Machines table sorts independently through its own headers', (
   ).not.toHaveClass('on');
 });
 
-test('the Retired Machines columns order Machine, Asset, Retired, Notes, Reactivate', () => {
+test('the Retired Machines columns order Machine, Retired, Asset, Notes — no action column', () => {
   render(<MachinesView />);
 
   const headers = Array.from(
     retiredTable().querySelectorAll('thead th'),
     (th) => th.textContent?.replace(/[↕↑↓]/g, '').trim(),
   );
-  expect(headers).toEqual([
-    'Machine',
-    'Asset',
-    'Retired',
-    'Notes',
-    'Reactivate',
-  ]);
+  expect(headers).toEqual(['Machine', 'Retired', 'Asset', 'Notes']);
 });
 
 test('a retired row opens the read-only Retired Machine Details dialog with the lifecycle', () => {
@@ -786,31 +798,25 @@ test('a retired row opens the read-only Retired Machine Details dialog with the 
   expect(retiredTable().textContent).toContain('Retired on 2026-02-14');
 });
 
-test('the Reactivate cell never opens the details; the details dialog leads to Reactivate', () => {
+test('the details dialog leads to Reactivate and ‹ Back returns to the details', () => {
   render(<MachinesView />);
 
   const saw2Row = within(retiredTable())
     .getByText('Retired on 2025-11-03')
     .closest('tr') as HTMLElement;
-  // The action cell is the row's one interactive island — it stops
-  // propagation, so Reactivate never also opens the details dialog.
-  fireEvent.click(within(saw2Row).getByRole('button', { name: 'Reactivate' }));
-  expect(
-    screen.queryByRole('dialog', { name: 'Retired Machine Details' }),
-  ).toBeNull();
-  const reactivate = screen.getByRole('dialog', { name: 'Reactivate Machine' });
-  fireEvent.click(
-    within(reactivate).getByRole('button', { name: 'Cancel (Esc)' }),
-  );
-
-  // The details dialog offers the same staged Reactivate workflow.
   fireEvent.click(saw2Row);
   const details = screen.getByRole('dialog', {
     name: 'Retired Machine Details',
   });
   fireEvent.click(within(details).getByRole('button', { name: 'Reactivate' }));
+
+  // Entered from the details dialog, leaving the workflow is ‹ Back…
+  const reactivate = screen.getByRole('dialog', { name: 'Reactivate Machine' });
+  fireEvent.click(within(reactivate).getByRole('button', { name: '‹ Back' }));
+
+  // …returning to the details dialog instead of closing everything.
   expect(
-    screen.getByRole('dialog', { name: 'Reactivate Machine' }),
+    screen.getByRole('dialog', { name: 'Retired Machine Details' }),
   ).toBeInTheDocument();
 });
 

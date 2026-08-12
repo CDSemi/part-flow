@@ -372,8 +372,8 @@ export function MachinesView() {
                 {(
                   [
                     { key: 'machine', label: 'Machine', className: undefined },
-                    { key: 'asset', label: 'Asset', className: 'mg-metacol' },
                     { key: 'retired', label: 'Retired', className: undefined },
+                    { key: 'asset', label: 'Asset', className: 'mg-metacol' },
                     { key: 'notes', label: 'Notes', className: undefined },
                   ] as const
                 ).map((column) => (
@@ -401,9 +401,6 @@ export function MachinesView() {
                     />
                   </th>
                 ))}
-                <th>
-                  <span className="mg-visuallyquiet">Reactivate</span>
-                </th>
               </tr>
             </thead>
             <tbody>
@@ -411,9 +408,8 @@ export function MachinesView() {
                 // The COMPLETE retired row opens the read-only Retired
                 // Machine Details dialog (same pattern as the active
                 // rows, v15): the name-cell button is the keyboard and
-                // screen-reader entry point. The Reactivate cell is the
-                // row's one interactive island — it stops propagation
-                // so the action never also opens the details.
+                // screen-reader entry point. There is no per-row action
+                // — Reactivate lives inside the details dialog.
                 <tr
                   key={machine.id}
                   className="selrow"
@@ -429,34 +425,29 @@ export function MachinesView() {
                       <MachineIdentityCell machine={machine} />
                     </button>
                   </td>
-                  <td className="mg-metacol">
-                    <AssetMeta machine={machine} />
-                  </td>
                   <td>
                     <span className="mg-retiredtag">
                       Retired on {machine.retiredOn}
                     </span>
                   </td>
-                  <td className="mg-meta">{machine.notes ?? '—'}</td>
-                  <td onClick={(event) => event.stopPropagation()}>
-                    <button
-                      className="mg-reactivate"
-                      onClick={() => setDialog({ kind: 'reactivate', machine })}
-                    >
-                      Reactivate
-                    </button>
+                  <td className="mg-metacol">
+                    <AssetMeta machine={machine} />
                   </td>
+                  <td className="mg-meta">{machine.notes ?? '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="mg-retirednote">
-            Retired Machines stay visible here and in history — they accept no
-            new work and never appear in assignment choices. A replacement
-            Machine may reuse the display name of the floor position; the asset
-            tag keeps the physical Machines apart. Reactivate returns the SAME
-            physical machine to service on the same record — a different
-            physical machine always gets a new Machine record.
+          <p className="mg-retirednote" role="note">
+            <span className="mg-retirednote-tag">Note</span>
+            <span className="mg-retirednote-content">
+              Retired Machines stay visible here and in history — they accept no
+              new work and never appear in assignment choices. A replacement
+              Machine may reuse the display name of the floor position; the
+              asset tag keeps the physical Machines apart. Reactivate returns
+              the SAME physical machine to service on the same record — a
+              different physical machine always gets a new Machine record.
+            </span>
           </p>
         </div>
       ) : null}
@@ -543,10 +534,16 @@ export function MachinesView() {
         />
       ) : null}
       {dialog?.kind === 'reactivate' ? (
+        // Reactivate is entered from the Retired Machine Details dialog
+        // — leaving the workflow (the `‹ Back` action or Escape) pops
+        // back to the details instead of closing everything.
         <ReactivateMachineDialog
           machine={dialog.machine}
           machines={machines}
-          onCancel={() => setDialog(null)}
+          cancelLabel="‹ Back"
+          onCancel={() =>
+            setDialog({ kind: 'retired-details', machine: dialog.machine })
+          }
           onConfirm={({ name, area, reason }) => {
             const now = new Date().toISOString();
             const moved = area !== dialog.machine.area;
@@ -793,30 +790,81 @@ function SummaryList({
   );
 }
 
-/** Quiet append-only lifecycle audit list (RETIRED / REACTIVATED). */
-function LifecycleList({ machine }: { machine: MockMachine }) {
+/**
+ * Append-only lifecycle audit (RETIRED / REACTIVATED) as the ONE
+ * shared vertical-timeline presentation — tone-ringed markers on a
+ * hairline rail (error for RETIRED, success for REACTIVATED; the event
+ * name always renders — color is never the only distinction), with
+ * date, actor, reason, and the previous → current Area on a move.
+ * Used by Edit Machine, Reactivate Machine and the Retired Machine
+ * Details dialog. `compact` keeps the rail and markers but renders
+ * each event on ONE line (Edit Machine — the audit stays present
+ * without claiming form height). Without events it renders `emptyText`
+ * when given, nothing otherwise.
+ */
+function LifecycleTimeline({
+  machine,
+  emptyText,
+  compact = false,
+}: {
+  machine: MockMachine;
+  emptyText?: string;
+  compact?: boolean;
+}) {
   const events = machine.lifecycle ?? [];
-  if (events.length === 0) return null;
+  if (events.length === 0 && !emptyText) return null;
   return (
-    <div className="mg-lifecycle">
+    <div className={`mg-timeline${compact ? ' compact' : ''}`}>
       <div className="mg-lifetitle">Lifecycle</div>
-      {events.map((event, index) => (
-        <div
-          className="mg-lifeevent"
-          key={`${event.event}-${event.at}-${index}`}
-        >
-          <span className="ev">{event.event}</span>{' '}
-          <span className="at">{event.at.slice(0, 10)}</span> · {event.by}
-          {event.reason ? <> — {event.reason}</> : null}
-          {event.fromArea && event.toArea ? (
-            <>
-              {' '}
-              · {areaByKey(event.fromArea)?.name ?? event.fromArea} →{' '}
-              {areaByKey(event.toArea)?.name ?? event.toArea}
-            </>
-          ) : null}
-        </div>
-      ))}
+      {events.length === 0 ? (
+        <p className="tl-empty">{emptyText}</p>
+      ) : (
+        <ol>
+          {events.map((event, index) => (
+            <li
+              className={`mg-tlevent ${
+                event.event === 'RETIRED' ? 'ev-retired' : 'ev-reactivated'
+              }`}
+              key={`${event.event}-${event.at}-${index}`}
+            >
+              <span className="dot" aria-hidden="true" />
+              {compact ? (
+                <div className="tl-line">
+                  <span className="ev">{event.event}</span>{' '}
+                  <span className="at">{event.at.slice(0, 10)}</span> ·{' '}
+                  {event.by}
+                  {event.reason ? <> — {event.reason}</> : null}
+                  {event.fromArea && event.toArea ? (
+                    <>
+                      {' '}
+                      · {areaByKey(event.fromArea)?.name ??
+                        event.fromArea} →{' '}
+                      {areaByKey(event.toArea)?.name ?? event.toArea}
+                    </>
+                  ) : null}
+                </div>
+              ) : (
+                <>
+                  <div className="tl-head">
+                    <span className="ev">{event.event}</span>
+                    <span className="at">{event.at.slice(0, 10)}</span>
+                  </div>
+                  <div className="tl-meta">{event.by}</div>
+                  {event.reason ? (
+                    <div className="tl-reason">{event.reason}</div>
+                  ) : null}
+                  {event.fromArea && event.toArea ? (
+                    <div className="tl-meta">
+                      {areaByKey(event.fromArea)?.name ?? event.fromArea} →{' '}
+                      {areaByKey(event.toArea)?.name ?? event.toArea}
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   );
 }
@@ -1319,7 +1367,7 @@ function MachineEditDialog({
             {error}
           </div>
         ) : null}
-        {machine ? <LifecycleList machine={machine} /> : null}
+        {machine ? <LifecycleTimeline machine={machine} compact /> : null}
         {!machine ? (
           <div className="mg-note">
             Replacing a physical Machine? Retire the old Machine record and
@@ -1518,9 +1566,10 @@ function MachineEditDialog({
               onCancel={() => setRetireStage('summary')}
               onConfirm={finalizeRetire}
             >
-              Retiring <b>{machine.name}</b> is recorded permanently in the
-              Machine&apos;s lifecycle and cannot be undone — even a later
-              return to service keeps the retirement in the record.
+              <b>{machine.name}</b> will be retired. This action{' '}
+              <b>cannot be undone</b> — the retirement is recorded permanently
+              in the Machine&apos;s lifecycle, and even a later return to
+              service keeps it in the record.
             </ConfirmDialog>
           ) : null}
         </ModalDialog>
@@ -1630,8 +1679,9 @@ function MachineEditDialog({
               onConfirm={() => onSave(builtRecord.machine)}
             >
               Add <b>{builtRecord.machine.name}</b> with Asset Tag{' '}
-              <b>{builtRecord.machine.assetTag}</b>? A Machine record cannot be
-              deleted once added — it can only be retired later.
+              <b>{builtRecord.machine.assetTag}</b>? A Machine record is
+              permanent and <b>cannot be deleted or undone</b> once added — it
+              can only be retired later.
             </ConfirmDialog>
           ) : null}
         </ModalDialog>
@@ -1664,7 +1714,6 @@ function RetiredMachineDetailsDialog({
   onReactivate: () => void;
 }) {
   const area = areaByKey(machine.area);
-  const events = machine.lifecycle ?? [];
   return (
     <ModalDialog label="Retired Machine Details" onClose={onClose} size="wide">
       <h3>Retired Machine Details</h3>
@@ -1710,39 +1759,10 @@ function RetiredMachineDetailsDialog({
           <p>{machine.notes}</p>
         </div>
       ) : null}
-      <div className="mg-timeline">
-        <div className="mg-lifetitle">Lifecycle</div>
-        {events.length === 0 ? (
-          <p className="tl-empty">No lifecycle events recorded.</p>
-        ) : (
-          <ol>
-            {events.map((event, index) => (
-              <li
-                className={`mg-tlevent ${
-                  event.event === 'RETIRED' ? 'ev-retired' : 'ev-reactivated'
-                }`}
-                key={`${event.event}-${event.at}-${index}`}
-              >
-                <span className="dot" aria-hidden="true" />
-                <div className="tl-head">
-                  <span className="ev">{event.event}</span>
-                  <span className="at">{event.at.slice(0, 10)}</span>
-                </div>
-                <div className="tl-meta">{event.by}</div>
-                {event.reason ? (
-                  <div className="tl-reason">{event.reason}</div>
-                ) : null}
-                {event.fromArea && event.toArea ? (
-                  <div className="tl-meta">
-                    {areaByKey(event.fromArea)?.name ?? event.fromArea} →{' '}
-                    {areaByKey(event.toArea)?.name ?? event.toArea}
-                  </div>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
+      <LifecycleTimeline
+        machine={machine}
+        emptyText="No lifecycle events recorded."
+      />
       <div className="row">
         <button className="bigbtn ghost" onClick={onClose}>
           Close (Esc)
@@ -1846,11 +1866,15 @@ function StartMaintenanceDialog({
 function ReactivateMachineDialog({
   machine,
   machines,
+  cancelLabel = 'Cancel (Esc)',
   onCancel,
   onConfirm,
 }: {
   machine: MockMachine;
   machines: MockMachine[];
+  /** Label of the leave-the-workflow action — `‹ Back` when the dialog
+   * is entered from the Retired Machine Details dialog. */
+  cancelLabel?: string;
   onCancel: () => void;
   onConfirm: (result: { name: string; area: AreaKey; reason: string }) => void;
 }) {
@@ -1960,6 +1984,10 @@ function ReactivateMachineDialog({
                 <span className="mono">{machineBarcode(machine.assetTag)}</span>
               ),
             },
+            {
+              label: 'Physical identity',
+              value: 'Same physical machine confirmed',
+            },
             { label: 'Reason', value: reason.trim() },
             { label: 'Returns as', value: 'Idle' },
           ]}
@@ -1992,9 +2020,10 @@ function ReactivateMachineDialog({
               onConfirm({ name: name.trim(), area, reason: reason.trim() })
             }
           >
-            Reactivating <b>{machine.name}</b> is recorded permanently in the
-            Machine&apos;s lifecycle and cannot be undone — the record of when
-            it was out of service stays part of its history.
+            <b>{machine.name}</b> returns to service. This action{' '}
+            <b>cannot be undone</b> — the reactivation is recorded permanently
+            in the Machine&apos;s lifecycle, and the record of when it was out
+            of service stays part of its history.
           </ConfirmDialog>
         ) : null}
       </ModalDialog>
@@ -2064,18 +2093,31 @@ function ReactivateMachineDialog({
             placeholder="e.g. Returned from overhaul"
           />
         </Field>
-        <label className="mg-check">
-          <input
-            type="checkbox"
-            checked={samePhysical}
-            onChange={(e) => setSamePhysical(e.target.checked)}
-          />
-          <span>
-            This is the same physical machine returning to service — not a
-            replacement.
-          </span>
-        </label>
-        <LifecycleList machine={machine} />
+        {/* The same-physical-machine acknowledgement sits on a calm
+            warning panel — "be sure of this before continuing", never
+            an error: only the Important marker carries the warning
+            tone, the sentence keeps the normal text tone. Continuing
+            without the check is what becomes a validation error. */}
+        <div className="mg-confirmpanel">
+          <div className="cp-head">
+            <span className="cp-icon" aria-hidden="true">
+              ⚠
+            </span>
+            Important <span className="cp-req">(required)</span>
+          </div>
+          <label className="mg-check">
+            <input
+              type="checkbox"
+              checked={samePhysical}
+              onChange={(e) => setSamePhysical(e.target.checked)}
+            />
+            <span>
+              This is the same physical machine returning to service — not a
+              replacement.
+            </span>
+          </label>
+        </div>
+        <LifecycleTimeline machine={machine} />
         {error ? (
           <div className="err" role="alert">
             {error}
@@ -2084,7 +2126,7 @@ function ReactivateMachineDialog({
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc)
+          {cancelLabel}
         </button>
         <button
           className="bigbtn primary"

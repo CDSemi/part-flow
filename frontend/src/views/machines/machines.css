@@ -323,46 +323,46 @@
   border-color: var(--border2);
 }
 
-/* Reactivate action inside the Retired Machines rows (v15). */
-.mg-reactivate {
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 7px 12px;
-  min-height: 40px;
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--text);
-  background: var(--panel2);
-  white-space: nowrap;
-}
-
-.mg-reactivate:hover {
-  border-color: var(--info-t);
-  color: var(--info-t);
-}
-
-.mg-visuallyquiet {
-  color: var(--faint);
-}
-
 /* Retired Machines — historical display only, visually quiet. Rows
    share the whole-row activation pattern of the active table (the
-   name-cell button is the keyboard entry; the Reactivate cell is the
-   interactive island) and open the read-only details dialog. */
+   name-cell button is the keyboard entry) and open the read-only
+   details dialog, which carries the Reactivate entry — the table has
+   no action column. */
 .mg-retired {
   margin-top: 26px;
 }
 
-/* The explanation stays deliberately dim — reference reading, never
-   competing with the tables: faint tone behind a hairline rule. */
+/* The explanation stays deliberately dim reference reading — the same
+   full-width tag + single-inline-content block language as the shared
+   DEV notice, in the neutral faint tone. */
 .mg-retirednote {
-  font-size: 12.5px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 7px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
   color: var(--faint);
-  line-height: 1.6;
-  max-width: 900px;
-  margin-top: 10px;
-  padding-left: 12px;
-  border-left: 2px solid var(--hair);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mg-retirednote .mg-retirednote-tag {
+  flex: none;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.mg-retirednote .mg-retirednote-content {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .mg-retired h2 {
@@ -534,6 +534,36 @@
   color: var(--text);
   margin-top: 2px;
   line-height: 1.5;
+}
+
+/* Compact timeline variant (Edit Machine): the same rail and tone
+   markers, ONE line per event — event name, date, actor, reason and
+   Area move inline, so the audit stays present without claiming form
+   height. */
+.mg-timeline.compact ol::before {
+  left: 5px;
+  top: 6px;
+  bottom: 6px;
+}
+
+.mg-timeline.compact .mg-tlevent {
+  padding: 0 0 8px 24px;
+}
+
+.mg-timeline.compact .mg-tlevent:last-child {
+  padding-bottom: 0;
+}
+
+.mg-timeline.compact .mg-tlevent .dot {
+  width: 12px;
+  height: 12px;
+  top: 4px;
+}
+
+.mg-timeline.compact .tl-line {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 /* Dialog helpers: labelled fields and the maintenance/retire notes. */
@@ -825,13 +855,8 @@
   margin: 0 0 2px;
 }
 
-/* Quiet append-only lifecycle audit list. */
-.mg-lifecycle {
-  margin-top: 14px;
-  border-top: 1px dashed var(--border);
-  padding-top: 10px;
-}
-
+/* Small uppercase section label shared by the lifecycle timeline, the
+   details-dialog Notes block and the maintenance section. */
 .mg-lifetitle {
   font-size: 10.5px;
   font-weight: 800;
@@ -839,23 +864,6 @@
   text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 4px;
-}
-
-.mg-lifeevent {
-  font-size: 12.5px;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
-.mg-lifeevent .ev {
-  font-family: var(--mono), monospace;
-  font-weight: 750;
-  color: var(--text);
-  font-size: 11.5px;
-}
-
-.mg-lifeevent .at {
-  font-family: var(--mono), monospace;
 }
 
 /* Danger Zone (v15): visually separated destructive area at the end
@@ -973,6 +981,48 @@
   width: 18px;
   height: 18px;
   margin: 0;
+}
+
+/* Same-physical-machine acknowledgement panel: a calm warning surface
+   ("be sure of this before continuing" — deliberately NOT error/danger)
+   with the Important marker in the warning text tone; the sentence
+   itself keeps the normal text tone. Continuing without the check
+   raises the normal red validation error instead. */
+.mg-confirmpanel {
+  margin: 14px 0 4px;
+  background: var(--warning-surface-weak);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 10px 14px 12px;
+}
+
+.mg-confirmpanel .cp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--warn-t);
+}
+
+.mg-confirmpanel .cp-head .cp-icon {
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.mg-confirmpanel .cp-head .cp-req {
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  opacity: 0.8;
+}
+
+/* Inside the panel the checkbox row needs no extra top margin — the
+   panel's own padding provides the rhythm. Same specificity as
+   `.mg-form label.mg-check`; source order decides. */
+.mg-confirmpanel label.mg-check {
+  margin: 8px 0 0;
 }
 
 /* Final-confirmation summary rows (retire / reactivate, v17). */
