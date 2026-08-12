@@ -12,9 +12,17 @@ import {
 import {
   MOCK_ADMIN_AREAS,
   MOCK_ADMIN_SECTIONS,
+  MOCK_ASSET_TAG_FORMAT,
 } from '../../mocks/administration';
 import { areaByKey } from '../../mocks/areas';
+import { MOCK_MACHINES } from '../../mocks/machines';
 import { AreaDot } from '../../components/indicators';
+import {
+  MACHINE_BARCODE_NAMESPACE,
+  formatAssetTag,
+  machineBarcode,
+  nextAssetTag,
+} from '../asset-tags';
 
 const GROUPS = [
   'Organization',
@@ -81,21 +89,27 @@ export function AdministrationView() {
             <span className="spacer" />
             {/* Honest presentation: configuration editing does not
                 exist yet, so the entry action is disabled instead of
-                pretending to work. */}
-            <button
-              className="btn primary"
-              disabled
-              title="Configuration editing is not available yet"
-            >
-              + New {section.label === 'Areas' ? 'Area' : 'entry'}
-            </button>
+                pretending to work. Barcode configuration is a settings
+                form, not an entry table — no entry action at all. */}
+            {section.id !== 'barcode-configuration' ? (
+              <button
+                className="btn primary"
+                disabled
+                title="Configuration editing is not available yet"
+              >
+                + New {section.label === 'Areas' ? 'Area' : 'entry'}
+              </button>
+            ) : null}
           </div>
           <DevNotice>
-            Development preview — configuration values shown are sample data,
-            and editing is not available yet.
+            {section.id === 'barcode-configuration'
+              ? 'Development preview — configuration values shown are sample data, and changes affect only this preview.'
+              : 'Development preview — configuration values shown are sample data, and editing is not available yet.'}
           </DevNotice>
           {section.id === 'areas' ? (
             <AreasTable empty={preview === 'empty'} />
+          ) : section.id === 'barcode-configuration' ? (
+            <BarcodeConfigurationPanel />
           ) : (
             <div className="ad-placeholder">
               {section.phase === 'minimum' ? (
@@ -120,6 +134,96 @@ export function AdministrationView() {
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * Barcode configuration (minimum environment setup): the PF: namespace
+ * reference and the Machine Asset Tag format — deliberately a simple
+ * prefix + zero-padded numeric sequence, never a template engine.
+ * Machine barcodes carry the Asset Tag directly
+ * (`PF:MACHINE:<asset-tag>`), so no separate Machine barcode value is
+ * ever configured or entered.
+ */
+function BarcodeConfigurationPanel() {
+  const [prefix, setPrefix] = useState(MOCK_ASSET_TAG_FORMAT.prefix);
+  const [digitsText, setDigitsText] = useState(
+    String(MOCK_ASSET_TAG_FORMAT.digits),
+  );
+
+  const parsedDigits = Number.parseInt(digitsText, 10);
+  const digits = Number.isNaN(parsedDigits)
+    ? MOCK_ASSET_TAG_FORMAT.digits
+    : Math.min(8, Math.max(1, parsedDigits));
+  const trimmedPrefix = prefix.trim();
+  const prefixError = /[\s:]/.test(trimmedPrefix)
+    ? 'The prefix cannot contain spaces or “:”.'
+    : null;
+  const format = { prefix: trimmedPrefix, digits };
+  const next = nextAssetTag(
+    format,
+    MOCK_MACHINES.map((m) => m.assetTag),
+  );
+
+  return (
+    <div className="ad-config">
+      <h2>Machine Asset Tag format</h2>
+      <p className="ad-confighelp">
+        Every Machine receives its Asset Tag automatically when it is created in
+        Management → Machines: the configured prefix followed by the next number
+        in sequence, zero-padded to the configured length. Asset Tags are
+        unique, are never reused — retired Machines keep theirs — and never
+        change after creation. The Machine barcode is the Asset Tag in the{' '}
+        <code>{MACHINE_BARCODE_NAMESPACE}</code> namespace.
+      </p>
+      <div className="ad-configgrid">
+        <label>
+          Prefix
+          <input
+            className="field mono"
+            value={prefix}
+            onChange={(event) => setPrefix(event.target.value)}
+            placeholder="e.g. CD-"
+          />
+        </label>
+        <label>
+          Number length (digits)
+          <input
+            className="field mono"
+            type="number"
+            min={1}
+            max={8}
+            value={digitsText}
+            onChange={(event) => setDigitsText(event.target.value)}
+          />
+        </label>
+      </div>
+      {prefixError ? (
+        <div className="err" role="alert">
+          {prefixError}
+        </div>
+      ) : null}
+      <div className="ad-configpreview">
+        <div className="prow">
+          <span className="k">Asset Tags</span>
+          <span className="v">
+            {formatAssetTag(format, 1)}, {formatAssetTag(format, 2)}, …
+          </span>
+        </div>
+        <div className="prow">
+          <span className="k">Next Asset Tag</span>
+          <span className="v">{next}</span>
+        </div>
+        <div className="prow">
+          <span className="k">Scanned barcode</span>
+          <span className="v">{machineBarcode(next)}</span>
+        </div>
+      </div>
+      <p className="ad-confighelp">
+        A format change applies to Machines created afterwards only — existing
+        Asset Tags are never renamed or regenerated.
+      </p>
+    </div>
   );
 }
 

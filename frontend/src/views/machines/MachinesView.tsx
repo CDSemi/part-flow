@@ -17,8 +17,10 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { MOCK_AREA_CARDS } from '../../mocks/area-board';
+import { MOCK_ASSET_TAG_FORMAT } from '../../mocks/administration';
 import { MOCK_AREAS, areaByKey } from '../../mocks/areas';
 import { MOCK_MACHINE_ACTOR, MOCK_MACHINES } from '../../mocks/machines';
+import { machineBarcode, nextAssetTag } from '../asset-tags';
 import {
   MACHINE_STATE_LABEL,
   effectiveMachineStatus,
@@ -43,15 +45,13 @@ type PendingDialog =
   | { kind: 'clear-maintenance'; machine: MockMachine }
   | { kind: 'reactivate'; machine: MockMachine };
 
-/** Typed-confirmation identifier: Asset Tag preferred, barcode always
- * present as the fallback — never the reusable display name. */
+/** Typed-confirmation identifier: always the Asset Tag (required on
+ * every Machine) — never the reusable display name. */
 function confirmIdentifier(machine: MockMachine): {
   value: string;
   label: string;
 } {
-  return machine.assetTag
-    ? { value: machine.assetTag, label: 'Asset Tag' }
-    : { value: machine.barcode, label: 'Machine barcode' };
+  return { value: machine.assetTag, label: 'Asset Tag' };
 }
 
 export function MachinesView() {
@@ -97,7 +97,7 @@ export function MachinesView() {
     [
       machine.name,
       areaByKey(machine.area)?.name ?? '',
-      machine.assetTag ?? '',
+      machine.assetTag,
       machine.model ?? '',
       machine.manufacturer ?? '',
     ]
@@ -373,11 +373,9 @@ function MachineIdentityCell({ machine }: { machine: MockMachine }) {
 function AssetMeta({ machine }: { machine: MockMachine }) {
   return (
     <div className="mg-meta">
-      {machine.assetTag ? (
-        <div className="mg-assetline">
-          Asset <span className="tagv">{machine.assetTag}</span>
-        </div>
-      ) : null}
+      <div className="mg-assetline">
+        Asset <span className="tagv">{machine.assetTag}</span>
+      </div>
       <div className="mg-makeline">
         {/* Manufacturer and model in two distinct neutral tones (v15)
             — never one merged string tone. */}
@@ -601,11 +599,38 @@ function LifecycleList({ machine }: { machine: MockMachine }) {
 }
 
 /**
+ * Read-only Machine identity: the Asset Tag (assigned automatically at
+ * creation from the format configured in Administration → Barcode
+ * configuration, never edited afterwards) and the barcode derived from
+ * it — one value in the PF:MACHINE: namespace, never an independent
+ * identifier.
+ */
+function IdentityRows({ assetTag, help }: { assetTag: string; help: string }) {
+  return (
+    <>
+      <div className="mg-identity">
+        <div className="idrow">
+          <span className="k">Asset Tag</span>
+          <span className="v">{assetTag}</span>
+        </div>
+        <div className="idrow">
+          <span className="k">Barcode</span>
+          <span className="v">{machineBarcode(assetTag)}</span>
+        </div>
+      </div>
+      <p className="mg-areahelp">{help}</p>
+    </>
+  );
+}
+
+/**
  * Add or edit one Machine. The Area of an existing Machine is fixed —
  * a Machine belongs to exactly one Area; moving production capacity is
  * a replacement (retire + new record). The ONE exception is the
  * Reactivate workflow, where the same physical machine may return to
- * service in a different Area. All asset metadata stays optional.
+ * service in a different Area. The Asset Tag (and with it the barcode)
+ * is assigned automatically at creation and is never editable; all
+ * other asset metadata stays optional.
  *
  * Editing also hosts the Danger Zone (v15): Retire lives here instead
  * of a table button. Starting Retire with unsaved edits never saves
@@ -635,20 +660,16 @@ function MachineEditDialog({
   const initial = {
     name: machine?.name ?? '',
     area: machine?.area ?? ('lathe' as AreaKey),
-    barcode: machine?.barcode ?? '',
     manufacturer: machine?.manufacturer ?? '',
     model: machine?.model ?? '',
-    assetTag: machine?.assetTag ?? '',
     serialNumber: machine?.serialNumber ?? '',
     installedOn: machine?.installedOn ?? '',
     notes: machine?.notes ?? '',
   };
   const [name, setName] = useState(initial.name);
   const [area, setArea] = useState<AreaKey>(initial.area);
-  const [barcode, setBarcode] = useState(initial.barcode);
   const [manufacturer, setManufacturer] = useState(initial.manufacturer);
   const [model, setModel] = useState(initial.model);
-  const [assetTag, setAssetTag] = useState(initial.assetTag);
   const [serialNumber, setSerialNumber] = useState(initial.serialNumber);
   const [installedOn, setInstalledOn] = useState(initial.installedOn);
   const [notes, setNotes] = useState(initial.notes);
@@ -666,38 +687,60 @@ function MachineEditDialog({
 
   const dirty =
     name !== initial.name ||
-    barcode !== initial.barcode ||
     manufacturer !== initial.manufacturer ||
     model !== initial.model ||
-    assetTag !== initial.assetTag ||
     serialNumber !== initial.serialNumber ||
     installedOn !== initial.installedOn ||
     notes !== initial.notes;
 
+  // The Asset Tag shown in the dialog: the Machine's own on edit, the
+  // next tag to assign on create (deterministic against the current
+  // list — the same value the save assigns).
+  const dialogAssetTag = useMemo(
+    () =>
+      machine?.assetTag ??
+      nextAssetTag(
+        MOCK_ASSET_TAG_FORMAT,
+        machines.map((m) => m.assetTag),
+      ),
+    [machine, machines],
+  );
+
   /** Pure validation + record assembly (no state changes). */
   const build = (): { machine: MockMachine } | { error: string } => {
     const trimmedName = name.trim();
-    const trimmedBarcode = barcode.trim();
     if (!trimmedName) return { error: 'A display name is required.' };
-    if (!trimmedBarcode) return { error: 'A barcode value is required.' };
-    const duplicate = machines.some(
-      (m) => m.id !== machine?.id && m.barcode === trimmedBarcode,
+    const targetArea = machine?.area ?? area;
+    // Display names stay unique among the active Machines of one Area
+    // (reuse across time and replacements stays allowed).
+    const nameCollision = machines.some(
+      (m) =>
+        m.id !== machine?.id &&
+        m.retiredOn === undefined &&
+        m.area === targetArea &&
+        m.name === trimmedName,
     );
-    if (duplicate) {
-      return { error: 'That barcode is already used by another Machine.' };
+    if (nameCollision) {
+      return {
+        error: `An active Machine named “${trimmedName}” already exists in ${
+          areaByKey(targetArea)?.name ?? targetArea
+        }. Display names stay unique among the active Machines of one Area.`,
+      };
     }
     return {
       machine: {
         ...(machine ?? {
           id: `MC-${String(Date.now()).slice(-4)}`,
           stateChangedAt: new Date().toISOString(),
+          // Assigned automatically, never entered: the Asset Tag is
+          // the Machine's stable physical identity and its barcode.
+          assetTag: dialogAssetTag,
+          barcode: dialogAssetTag,
         }),
-        area: machine?.area ?? area,
+        area: targetArea,
         name: trimmedName,
-        barcode: trimmedBarcode,
         manufacturer: manufacturer.trim() || undefined,
         model: model.trim() || undefined,
-        assetTag: assetTag.trim() || undefined,
         serialNumber: serialNumber.trim() || undefined,
         installedOn: installedOn || undefined,
         notes: notes.trim() || undefined,
@@ -762,24 +805,22 @@ function MachineEditDialog({
         {dirty ? <span className="mg-dirty">● Unsaved changes</span> : null}
       </div>
       <div className="mg-form">
-        <div className="mg-grid2">
-          <Field label="Display name">
-            <input
-              className="field"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Lathe 5"
-            />
-          </Field>
-          <Field label="Barcode value">
-            <input
-              className="field mono"
-              value={barcode}
-              onChange={(e) => setBarcode(e.target.value)}
-              placeholder="e.g. L5"
-            />
-          </Field>
-        </div>
+        <Field label="Display name">
+          <input
+            className="field"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Lathe 5"
+          />
+        </Field>
+        <IdentityRows
+          assetTag={dialogAssetTag}
+          help={
+            machine
+              ? 'The Asset Tag identifies this physical Machine for its whole service life and never changes. The barcode is the Asset Tag in the PF:MACHINE: namespace.'
+              : 'Assigned automatically when the Machine is added — the next Asset Tag in the format from Administration → Barcode configuration. The barcode is the Asset Tag in the PF:MACHINE: namespace.'
+          }
+        />
         {machine ? (
           <>
             <div className="mg-arealabelrow">
@@ -828,14 +869,6 @@ function MachineEditDialog({
               placeholder="e.g. QT-250"
             />
           </Field>
-          <Field label="Asset tag (optional)">
-            <input
-              className="field mono"
-              value={assetTag}
-              onChange={(e) => setAssetTag(e.target.value)}
-              placeholder="e.g. CD-0512"
-            />
-          </Field>
           <Field label="Serial number (optional)">
             <input
               className="field mono"
@@ -872,9 +905,9 @@ function MachineEditDialog({
         {!machine ? (
           <div className="mg-note">
             Replacing a physical Machine? Retire the old Machine record and
-            create a new one — the new Machine gets its own barcode and may
-            reuse the familiar display name. History always keeps the Machine
-            that really did the work.
+            create a new one — the new Machine gets its own new Asset Tag and
+            barcode and may reuse the familiar display name. History always
+            keeps the Machine that really did the work.
           </div>
         ) : null}
       </div>
@@ -970,8 +1003,9 @@ function MachineEditDialog({
           <ul className="mg-consequences">
             <li>It disappears from Machine assignment choices.</li>
             <li>
-              Its barcode (<span className="mono">{machine.barcode}</span>) no
-              longer accepts assignment scans.
+              Its barcode (
+              <span className="mono">{machineBarcode(machine.assetTag)}</span>)
+              no longer accepts assignment scans.
             </li>
             <li>
               All history is preserved and keeps its reference to this Machine —
@@ -1007,19 +1041,17 @@ function MachineEditDialog({
                 ),
               },
               {
-                label: 'Barcode',
-                value: <span className="mono">{summaryRecord.barcode}</span>,
+                label: 'Asset Tag',
+                value: <span className="mono">{summaryRecord.assetTag}</span>,
               },
-              ...(summaryRecord.assetTag
-                ? [
-                    {
-                      label: 'Asset Tag',
-                      value: (
-                        <span className="mono">{summaryRecord.assetTag}</span>
-                      ),
-                    },
-                  ]
-                : []),
+              {
+                label: 'Barcode',
+                value: (
+                  <span className="mono">
+                    {machineBarcode(summaryRecord.assetTag)}
+                  </span>
+                ),
+              },
               ...(retireEditsIntent
                 ? [
                     {
@@ -1118,8 +1150,8 @@ function StartMaintenanceDialog({
  * `retiredOn` clears and one REACTIVATED lifecycle event is appended.
  * The machine normally returns as Idle (running stays derived from
  * assigned quantity — reactivation never invents an assignment).
- * Blocked while its barcode, asset tag or serial number has been
- * reissued to another active Machine, and while the display name would
+ * Blocked while its Asset Tag (which is also its barcode) or serial
+ * number has been reissued to another active Machine, and while the display name would
  * collide with an active Machine in the target Area (names must stay
  * unique among active Machines of one Area — assignment displays rely
  * on them); a rename inside this dialog resolves the collision. If the
@@ -1151,17 +1183,10 @@ function ReactivateMachineDialog({
     (m) => m.retiredOn === undefined && m.id !== machine.id,
   );
   // Hard blockers: identity conflicts that make a safe reactivation
-  // impossible without fixing other records first.
+  // impossible without fixing other records first. The Asset Tag check
+  // also covers the barcode — the barcode IS the Asset Tag.
   const blockers: string[] = [];
-  if (activeOnes.some((m) => m.barcode === machine.barcode)) {
-    blockers.push(
-      `Barcode ${machine.barcode} has been reissued to another active Machine.`,
-    );
-  }
-  if (
-    machine.assetTag &&
-    activeOnes.some((m) => m.assetTag === machine.assetTag)
-  ) {
+  if (activeOnes.some((m) => m.assetTag === machine.assetTag)) {
     blockers.push(
       `Asset Tag ${machine.assetTag} is used by another active Machine.`,
     );
@@ -1241,17 +1266,15 @@ function ReactivateMachineDialog({
               ),
             },
             {
-              label: 'Barcode',
-              value: <span className="mono">{machine.barcode}</span>,
+              label: 'Asset Tag',
+              value: <span className="mono">{machine.assetTag}</span>,
             },
-            ...(machine.assetTag
-              ? [
-                  {
-                    label: 'Asset Tag',
-                    value: <span className="mono">{machine.assetTag}</span>,
-                  },
-                ]
-              : []),
+            {
+              label: 'Barcode',
+              value: (
+                <span className="mono">{machineBarcode(machine.assetTag)}</span>
+              ),
+            },
             { label: 'Reason', value: reason.trim() },
             { label: 'Returns as', value: 'Idle' },
           ]}

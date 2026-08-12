@@ -1,4 +1,4 @@
-# PartFlow Project Profile v13
+# PartFlow Project Profile v14
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -422,7 +422,8 @@ Machine is optional.
 A Machine:
 
 - belongs to exactly one Area,
-- has its own barcode,
+- has a required **Asset Tag** — the stable, human-readable identity of the physical machine, assigned automatically by PartFlow when the Machine is created (§8.6),
+- has its own barcode, which is the Asset Tag in the `PF:MACHINE:` namespace (`PF:MACHINE:<asset-tag>`, §10) — never an independent, manually entered value,
 - becomes the current executor when quantity is assigned to it,
 - also identifies the physical processing location while assigned.
 
@@ -430,7 +431,7 @@ A Machine has a lifecycle: it is active until it is **retired**. A Machine that 
 
 A retired Machine may later **return to service** — but only as the **same physical machine** on the **same record**: reactivation keeps the stable identity, barcode, asset metadata, and complete history, and clears the retirement date. Retirement and reactivation are recorded as append-only lifecycle audit events (§8.6). A **different** physical machine is always a new record, never a reactivation.
 
-A Machine keeps a stable internal identity; the operator-facing display name is separate and may be reused **across time and replacements** — but display names must be **unique among the active Machines of one Area**. Replacing a physical Machine means retiring the old record and creating a **new** record with its own stable identity and its own new barcode. The new Machine may reuse the familiar floor-position display name (for example `Lathe 1`); the old record is never renamed or mutated, and the two remain distinguishable through internal identity and asset metadata. There is no MachineSlot or WorkCenter abstraction — the display name alone carries the floor-position familiarity.
+A Machine keeps a stable internal identity; the operator-facing display name is separate and may be reused **across time and replacements** — but display names must be **unique among the active Machines of one Area**. Replacing a physical Machine means retiring the old record and creating a **new** record with its own stable identity and its own new Asset Tag (and therefore new barcode). The new Machine may reuse the familiar floor-position display name (for example `Lathe 1`); the old record is never renamed or mutated, and the two remain distinguishable through the Asset Tag and internal identity. There is no MachineSlot or WorkCenter abstraction — the display name alone carries the floor-position familiarity.
 
 ---
 
@@ -692,11 +693,11 @@ Typical attributes (illustrative only):
 - `id`
 - `area_id`
 - `name`
-- `barcode_value`
+- `asset_tag` (required; assigned automatically at creation, immutable)
+- `barcode_value` (always equal to `asset_tag` — the barcode is derived, never entered)
 - `description`
 - `manufacturer`
 - `model`
-- `asset_tag`
 - `serial_number`
 - `installed_on`
 - `notes`
@@ -704,11 +705,19 @@ Typical attributes (illustrative only):
 - `state_changed_at`
 - `retired_on`
 
-Asset metadata (manufacturer, model, asset tag, serial number, installed date, notes) is optional — production tracking never depends on it. The Asset Tag identifies the physical asset even when display names are reused across replacements.
+The **Asset Tag** is required on every Machine: it is the stable, human-readable identity of the physical asset — it identifies the physical machine even when display names are reused across replacements — and it doubles as the Machine barcode (`PF:MACHINE:<asset-tag>`, §10). Asset metadata beyond it (manufacturer, model, serial number, installed date, notes) is optional — production tracking never depends on it.
+
+Asset Tag rules:
+
+- PartFlow assigns the Asset Tag automatically when a Machine is created; it is never entered or edited by hand.
+- The format is configured in Administration → Barcode configuration and is deliberately simple: a prefix plus a zero-padded numeric sequence (for example prefix `CD-` with 4 digits → `CD-0001`, `CD-0002`, …). There is no generic formatting/template engine.
+- Asset Tags are unique and are **never reused** — a retired Machine keeps its Asset Tag forever, and a replacement Machine always receives a new one.
+- An Asset Tag never changes after the Machine is created. A format change applies to Machines created afterwards only; existing Asset Tags are never renamed or regenerated.
+- The Asset Tag is the human-readable identity of the physical Machine — it is not the database-internal identity (`id`).
 
 Rules:
 
-- Every Machine barcode must be unique.
+- Every Machine barcode must be unique. The barcode is the Asset Tag in the `PF:MACHINE:` namespace — there is no independent Machine barcode identifier, and it is never entered manually.
 - A Machine belongs to exactly one Area. The Area of an existing **active** Machine is fixed — moving production capacity to another Area is a replacement (retire + new record), never an edit that would make history ambiguous. The only exception is reactivation of the same physical machine that was physically moved while retired (below) — a forward-looking Area change that never touches history.
 - Display names must be **unique among the active Machines of one Area**. Reuse across time and across replacements stays allowed — the uniqueness rule constrains only simultaneously active Machines of the same Area.
 - Machine assignment identifies the current executor.
@@ -720,9 +729,9 @@ Rules:
 - Retirement is blocked while active quantity is assigned — the quantity must first complete or transfer through the normal production workflow. A Machine ever referenced by Movement history is never hard-deleted; it is retired (operator wording: `Retired`, `Retire Machine`, `Retired on …`) and remains available for historical display and reporting only.
 - A retired Machine never appears in assignment choices and accepts no new scans.
 - A retired Machine may **return to service (reactivation: RETIRED → ACTIVE)** — for the **same physical machine only**, on the **same record**: identity, barcode, asset metadata, and history are unchanged, and `retired_on` clears. During reactivation a new active Area may be chosen when the physical machine moved while it was retired; the change is forward-looking only — historical Movements keep their recorded Areas. The reactivated Machine returns as Idle (the operational state stays derived — assigned quantity, not reactivation, makes it Running).
-- Reactivation is blocked when the barcode, asset tag, or serial number has meanwhile been reissued to another active Machine, when the target Area is not active and no replacement Area is chosen, or when the display name would collide with an active Machine of the target Area.
+- Reactivation is blocked when the Asset Tag (which is also the barcode) or the serial number has meanwhile been reissued to another active Machine — with never-reused Asset Tags this indicates a data problem that must be resolved first — when the target Area is not active and no replacement Area is chosen, or when the display name would collide with an active Machine of the target Area.
 - Retirement and reactivation are recorded as **append-only lifecycle audit events** (`RETIRED`, `REACTIVATED`): who, when, reason, the before/after state, and the previous and current Area when the Machine moved. (Phase 2 mocks these events; persistence arrives with the relevant backend phase.)
-- Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and new barcode; the display name may be reused, the old record is never mutated. A **different physical machine is always a new record** — never a reactivation.
+- Replacement follows §7 Machine: retire the old record, create a new record with its own stable identity and its own new Asset Tag (and barcode); the display name may be reused, the old record is never mutated. A **different physical machine is always a new record** — never a reactivation.
 
 ---
 
@@ -966,13 +975,15 @@ Logical formats:
 
 ```text
 PF:PN:<part-number>
-PF:MACHINE:<stable-id>
+PF:MACHINE:<asset-tag>
 PF:WORKER:<stable-id>
 PF:AREA:<stable-id>
 PF:SCRAP
 ```
 
 The `PF:` namespace exists to identify PartFlow-owned barcodes, determine the entity type safely, and avoid confusing unrelated factory or vendor barcodes with PartFlow entities.
+
+The Machine barcode carries the Machine's Asset Tag (§8.6) — the automatically assigned, immutable identity of the physical machine (`Asset Tag CD-0512` → scanned barcode `PF:MACHINE:CD-0512`). There is no independent Machine barcode identifier and no manual Machine barcode entry.
 
 The PN barcode carries the PN itself. Parsing rules:
 
@@ -1772,14 +1783,14 @@ Machines is the management view for Machine lifecycle, maintenance, and asset id
 
 It must provide:
 
-- a table of active Machines: identity (display name and Area), derived operational state with the elapsed time in state, currently assigned PN portions with quantities, asset metadata (asset tag, manufacturer, model), and a per-row **Maintenance On/Off switch** that opens the existing start-maintenance (optional note, optional expected return date) and clear-maintenance dialogs — there is no separate actions column,
+- a table of active Machines: identity (display name and Area), derived operational state with the elapsed time in state, currently assigned PN portions with quantities, asset metadata (Asset Tag, manufacturer, model), and a per-row **Maintenance On/Off switch** that opens the existing start-maintenance (optional note, optional expected return date) and clear-maintenance dialogs — there is no separate actions column,
 - whole-row activation: selecting a Machine row opens the Edit Machine dialog,
 - a separate Retired Machines table: name, `Retired on YYYY-MM-DD`, asset metadata, notes — historical display and reporting plus a per-row **Reactivate** action (§8.6 return to service); retired Machines still never appear in assignment choices and accept no new scans,
-- a New Machine / Edit Machine dialog: display name and barcode value (both required; barcode unique), Area (selectable for a new Machine, fixed for an existing one — §8.6), optional manufacturer, model, asset tag, serial number, installed date, and notes, and the Machine's append-only lifecycle audit events (`RETIRED` / `REACTIVATED` — §8.6),
-- retirement as the Edit dialog's **Danger Zone** action: `Retire…` requires a typed identifier confirmation — the Asset Tag, or the Machine barcode when no asset tag exists, never the reusable display name — after an explicit consequences warning,
+- a New Machine / Edit Machine dialog: display name (required), Area (selectable for a new Machine, fixed for an existing one — §8.6), the read-only Machine identity — the Asset Tag assigned automatically at creation per the configured format (§8.6) and the barcode derived from it (`PF:MACHINE:<asset-tag>`, §10; neither is ever entered or edited) — optional manufacturer, model, serial number, installed date, and notes, and the Machine's append-only lifecycle audit events (`RETIRED` / `REACTIVATED` — §8.6),
+- retirement as the Edit dialog's **Danger Zone** action: `Retire…` requires a typed identifier confirmation — always the Asset Tag, never the reusable display name — after an explicit consequences warning,
 - retirement blocked while active quantity is assigned, with the quantity completing or transferring through the normal production workflow first,
-- reactivation of a retired Machine per §8.6: same physical machine on the same record, required reason, an optional new active Area applied forward only, blocked on reissued identity (barcode / asset tag / serial number) and on active-name collisions in the target Area, returning the Machine as Idle,
-- replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and new barcode; the display name may be reused (unique among active Machines of one Area).
+- reactivation of a retired Machine per §8.6: same physical machine on the same record, required reason, an optional new active Area applied forward only, blocked on reissued identity (Asset Tag — which is also the barcode — or serial number) and on active-name collisions in the target Area, returning the Machine as Idle,
+- replacement guidance following §7 Machine: retire the old record, create a new record with its own identity and its own new automatically assigned Asset Tag (and barcode); the display name may be reused (unique among active Machines of one Area).
 
 Machine management stays focused on lifecycle, maintenance, and asset identification. PartFlow is not a CMMS: no spare parts, maintenance schedules, service contracts, or cost accounting.
 
@@ -1910,7 +1921,7 @@ Administration stays focused on system administration:
 - users,
 - roles,
 - permissions,
-- barcode configuration,
+- barcode configuration (the `PF:` prefix scheme and the Machine Asset Tag format — prefix + zero-padded numeric sequence, §8.6, §10),
 - scan behavior,
 - Worker policies,
 - history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),

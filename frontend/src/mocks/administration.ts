@@ -1,3 +1,17 @@
+import type { AssetTagFormat } from '../views/asset-tags';
+
+/**
+ * Development sample of the configured Machine Asset Tag format
+ * (Administration → Barcode configuration): prefix + zero-padded
+ * numeric sequence. The mock Machine registry's tags (`CD-0512`, …)
+ * follow this format; Management → Machines assigns the next tag from
+ * it when a new Machine is created.
+ */
+export const MOCK_ASSET_TAG_FORMAT: AssetTagFormat = {
+  prefix: 'CD-',
+  digits: 4,
+};
+
 export interface MockAdminAreaRow {
   areaKey: string;
   name: string;
@@ -155,7 +169,7 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     phase: 'minimum',
     group: 'Production setup',
     label: 'Barcode configuration',
-    subtitle: 'PF: prefix scheme and label printing',
+    subtitle: 'PF: prefix scheme, Machine Asset Tag format, label printing',
   },
   {
     id: 'scan-behavior',

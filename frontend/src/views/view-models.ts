@@ -121,8 +121,9 @@ export interface MachineLifecycleEvent {
 /**
  * One physical Machine record (Management → Machines). A Machine is a
  * specific physical production resource with a stable internal
- * identity and its own barcode. A replacement Machine is a NEW record
- * (new identity, new barcode) that may reuse the operator-facing
+ * identity and a required Asset Tag that doubles as its barcode
+ * (`PF:MACHINE:<asset-tag>`). A replacement Machine is a NEW record
+ * (new identity, new Asset Tag and barcode) that may reuse the operator-facing
  * display name of a familiar floor position (`Lathe 1`) — the retired
  * record is never renamed or mutated, so history keeps pointing at the
  * Machine that really did the work. Return to service of the SAME
@@ -136,7 +137,12 @@ export interface MockMachine {
   area: AreaKey;
   /** Operator-facing display name; reusable across replacements. */
   name: string;
-  /** Machine barcode value (`PF:MACHINE:<value>`); unique, stable. */
+  /**
+   * Machine barcode value (`PF:MACHINE:<asset-tag>`). Always equal to
+   * `assetTag` — the barcode is derived from the Asset Tag and never
+   * entered or edited by hand (views/asset-tags.ts); there is no
+   * independent Machine barcode identifier.
+   */
   barcode: string;
   /**
    * Explicit maintenance override. Entering maintenance never moves,
@@ -164,12 +170,18 @@ export interface MockMachine {
    * chronological order. Absent or empty = never retired.
    */
   lifecycle?: MachineLifecycleEvent[];
-  /* Optional asset metadata — identification of the physical asset
-     (the Asset Tag stays unique even when display names are reused).
-     Production tracking never depends on these fields. */
+  /**
+   * Required Asset Tag — the stable, human-readable identity of the
+   * physical machine, assigned automatically at creation from the
+   * configured format (views/asset-tags.ts). Unique, never reused
+   * (retired Machines keep theirs), never edited, and the source of
+   * the Machine barcode (`barcode` above is always this value).
+   */
+  assetTag: string;
+  /* Optional asset metadata — production tracking never depends on
+     these fields. */
   manufacturer?: string;
   model?: string;
-  assetTag?: string;
   serialNumber?: string;
   installedOn?: string;
   notes?: string;

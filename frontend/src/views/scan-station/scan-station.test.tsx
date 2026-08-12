@@ -795,7 +795,7 @@ test('disconnected: the direct-processing DONE stays in the rail but is disabled
 test('a Machine scan opens the Assign to Machine dialog and leaves nothing armed', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L2');
+  scan('PF:MACHINE:CD-0105');
   const dialog = await screen.findByRole('dialog', {
     name: 'Assign to Machine',
   });
@@ -815,7 +815,7 @@ test('a Machine scan opens the Assign to Machine dialog and leaves nothing armed
 test('the assignment dialog renders "Assign to Machine" in operator language only', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L2');
+  scan('PF:MACHINE:CD-0105');
   const dialog = await screen.findByRole('dialog', {
     name: 'Assign to Machine',
   });
@@ -836,7 +836,7 @@ test('the assignment dialog renders "Assign to Machine" in operator language onl
 test('the Machine-first wizard: PN pick → MAX quantity → confirmation → record once', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   // Step 1 — Machine preselected from the scan; Next needs the PN too.
   expect(
@@ -904,7 +904,7 @@ test('the PN-first assignment wizard preselects the PN and can go Back', async (
 test('Step 1 barcode selection: Machine and queued PN scans select; invalid scans error inline', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   const scanField = screen.getByLabelText(
     'Scan machine or queued part barcode',
@@ -932,9 +932,9 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   // Invalid scans: inline error, no selection change, nothing recorded.
   scanInside('PF:MACHINE:ZZ');
   expect(dialog.textContent).toContain('Unknown Machine barcode');
-  scanInside('PF:MACHINE:S1');
+  scanInside('PF:MACHINE:CD-0201');
   expect(dialog.textContent).toContain('belongs to another Area');
-  scanInside('PF:MACHINE:L4');
+  scanInside('PF:MACHINE:CD-0107');
   expect(dialog.textContent).toContain('inactive (maintenance)');
   scanInside('PF:PN:118-052');
   expect(dialog.textContent).toContain('no queued quantity in this Area');
@@ -952,7 +952,7 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   ).toHaveClass('sel');
 
   // A Machine barcode re-selects the Machine.
-  scanInside('PF:MACHINE:L2');
+  scanInside('PF:MACHINE:CD-0105');
   expect(
     within(dialog as HTMLElement).getByRole('button', { name: /Lathe 2/ }),
   ).toHaveClass('sel');
@@ -968,7 +968,7 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
 test('the queued-PN selection is viewport-fit driven — buttons regardless of count, a dropdown only on real overflow', async () => {
   await renderStation('LATHE-ST-01', '?state=long');
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   // > 6 queued PNs with no measurable overflow (the no-layout test
   // default): every queued PN stays an explicit selection button —
@@ -1058,7 +1058,7 @@ test('the queued-PN selection is viewport-fit driven — buttons regardless of c
 test('Back preserves Machine, PN and an edited quantity', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   fireEvent.click(
     within(dialog as HTMLElement).getByRole('button', {
@@ -1097,7 +1097,7 @@ test('Back preserves Machine, PN and an edited quantity', async () => {
 test('an inactive Machine is rejected with no write', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L4');
+  scan('PF:MACHINE:CD-0107');
   expect(
     screen.getByText('Lathe 4 is unavailable for production'),
   ).toBeInTheDocument();
@@ -2154,7 +2154,7 @@ test('a Machine scan opens Assign to Machine with focus on the in-dialog scan fi
   await renderStation();
   vi.useFakeTimers();
 
-  scan('PF:MACHINE:L2');
+  scan('PF:MACHINE:CD-0105');
   const dialog = activeDialog();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(200);
@@ -2168,7 +2168,7 @@ test('a Machine scan opens Assign to Machine with focus on the in-dialog scan fi
 test('Enter acts inside the open dialog and Escape closes it — the main input never swallows them', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const scanField = screen.getByLabelText(
     'Scan machine or queued part barcode',
   );
@@ -2215,7 +2215,7 @@ test('wedge capture keeps working after a dialog cycle: a full barcode lands int
 test('Assign to Machine Enter rules: filled scans once, empty advances only when complete', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   const scanField = screen.getByLabelText(
     'Scan machine or queued part barcode',
@@ -2556,7 +2556,7 @@ test('assigning to an empty Machine flips it Idle → Running with a fresh state
   expect(machineStat(0)).not.toContain('<1m');
 
   // Machine-first wizard: assign the queued 2 pcs (MAX default).
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   fireEvent.click(
     within(dialog as HTMLElement).getByRole('button', {
@@ -2681,7 +2681,7 @@ test('the assignment dialog checks Machine availability against the session stat
   );
   expect(machineCard(1).classList.contains('idle')).toBe(true);
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const assign = await screen.findByRole('dialog', {
     name: 'Assign to Machine',
   });
@@ -3271,7 +3271,7 @@ test('workflows entered directly from the station surface never show a fake Back
   await renderStation();
 
   // Machine-first assignment (Machine scan) — no previous dialog step.
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   let dialog = activeDialog();
   expect(
     within(dialog as HTMLElement).queryByRole('button', { name: '‹ Back' }),
@@ -3295,7 +3295,7 @@ test('workflows entered directly from the station surface never show a fake Back
 test('a light separator divides the Machine and queued-PN selection groups', async () => {
   await renderStation();
 
-  scan('PF:MACHINE:L1');
+  scan('PF:MACHINE:CD-0512');
   const dialog = activeDialog();
   const grid = dialog.querySelector('.ss-dlgrid')!;
   const sep = grid.querySelector('.ss-dlgsep')!;

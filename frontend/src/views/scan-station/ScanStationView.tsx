@@ -1144,8 +1144,8 @@ function StationView({
               elsewhere ·{' '}
               <DemoBarcode value="PF:PN:NEW-PART-01" onScan={simulateScan} />{' '}
               unknown → intake) ·{' '}
-              <DemoBarcode value="PF:MACHINE:L2" onScan={simulateScan} /> assign
-              to Machine ·{' '}
+              <DemoBarcode value="PF:MACHINE:CD-0105" onScan={simulateScan} />{' '}
+              assign to Machine ·{' '}
               <DemoBarcode value="PF:WORKER:88" onScan={simulateScan} /> worker
             </DevNotice>
             {/* Compact section label OUTSIDE the block (uppercase via

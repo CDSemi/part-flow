@@ -398,6 +398,37 @@
   padding: 3px 0;
 }
 
+/* Read-only Machine identity (Edit/New dialog): the Asset Tag and the
+   barcode derived from it — calm key/value rows, never inputs. */
+.mg-identity {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 14px;
+}
+
+.mg-identity .idrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  padding: 8px 0;
+}
+
+.mg-identity .idrow + .idrow {
+  border-top: 1px solid var(--hair);
+}
+
+.mg-identity .k {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mg-identity .v {
+  font-family: var(--mono), monospace;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .mg-areahelp {
   font-size: 12px;
   color: var(--faint);

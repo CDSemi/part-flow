@@ -1,4 +1,5 @@
-import type { MockScanStation } from '../views/view-models';
+import type { AreaKey, MockScanStation } from '../views/view-models';
+import { activeMachines } from './machines';
 import { minutesAgoIso } from './mock-time';
 
 // Scan Station mock registry: the station selector at /scan-station
@@ -47,17 +48,16 @@ export const MOCK_WORKER = {
   shiftEnd: '18:00',
 };
 
-// Machine barcode ids of the Lathe Area (mock): PF:MACHINE:<id>.
+// Machine barcode resolution (mock): PF:MACHINE:<asset-tag>, derived
+// from the shared Machine registry so the scanned value is always the
+// Machine's Asset Tag — there is no independent barcode registry.
+// Retired Machines are excluded: their barcodes accept no new scans.
 export const MOCK_MACHINE_BARCODES: Record<
   string,
-  { machine: string; area: 'lathe' | 'cut' }
-> = {
-  L1: { machine: 'Lathe 1', area: 'lathe' },
-  L2: { machine: 'Lathe 2', area: 'lathe' },
-  L3: { machine: 'Lathe 3', area: 'lathe' },
-  L4: { machine: 'Lathe 4', area: 'lathe' },
-  S1: { machine: 'Saw 1', area: 'cut' },
-};
+  { machine: string; area: AreaKey }
+> = Object.fromEntries(
+  activeMachines().map((m) => [m.barcode, { machine: m.name, area: m.area }]),
+);
 
 // Worker barcode ids (mock).
 export const MOCK_WORKER_BARCODES: Record<string, string> = {

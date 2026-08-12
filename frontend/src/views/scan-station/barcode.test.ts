@@ -30,7 +30,10 @@ test('an empty PN suffix is not a valid PN barcode', () => {
 });
 
 test('entity prefixes classify Machine, Worker and Area barcodes', () => {
-  expect(parseScan('PF:MACHINE:L2')).toEqual({ kind: 'machine', id: 'L2' });
+  expect(parseScan('PF:MACHINE:CD-0105')).toEqual({
+    kind: 'machine',
+    id: 'CD-0105',
+  });
   expect(parseScan('PF:WORKER:88')).toEqual({ kind: 'worker', id: '88' });
   expect(parseScan('PF:AREA:LATHE')).toEqual({ kind: 'area', id: 'LATHE' });
 });

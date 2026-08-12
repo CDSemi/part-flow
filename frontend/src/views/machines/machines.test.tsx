@@ -105,13 +105,15 @@ test('the replacement pair stays distinguishable: retired records keep their ide
     within(retiredRow).getByRole('button', { name: 'Reactivate…' }),
   ).toBeInTheDocument();
 
-  // Second retired record (v15): Saw 2 has no asset tag — its barcode
-  // is the typed-confirmation identifier for lifecycle actions.
+  // Second retired record: retired Machines keep their Asset Tag
+  // forever — the tag is never reused by a later Machine.
   const saw2Row = within(retired)
     .getByText('Retired on 2025-11-03')
     .closest('tr') as HTMLElement;
   expect(saw2Row.querySelector('.mgname')?.textContent).toBe('Saw 2');
-  expect(saw2Row.querySelector('.mg-assetline')).toBeNull();
+  expect(saw2Row.querySelector('.mg-assetline')?.textContent).toContain(
+    'CD-0202',
+  );
   expect(saw2Row.textContent).toContain(
     'Kept in storage — may return to service after overhaul.',
   );
@@ -122,7 +124,15 @@ test('the whole active row opens Edit Machine with the Area fixed', () => {
 
   const dialog = openEdit('Lathe 2');
   expect(within(dialog).getByLabelText('Display name')).toHaveValue('Lathe 2');
-  expect(within(dialog).getByLabelText('Barcode value')).toHaveValue('L2');
+  // The Asset Tag and its derived barcode are read-only identity —
+  // there is no input for either, and the barcode is the Asset Tag in
+  // the PF:MACHINE: namespace.
+  expect(within(dialog).queryByLabelText('Barcode value')).toBeNull();
+  expect(within(dialog).queryByLabelText(/Asset tag/)).toBeNull();
+  const identity = dialog.querySelector('.mg-identity') as HTMLElement;
+  expect(identity.textContent).toContain('CD-0105');
+  expect(identity.textContent).toContain('PF:MACHINE:CD-0105');
+  expect(dialog.textContent).toContain('never changes');
   // A Machine belongs to exactly one Area — no Area select on edit,
   // only the read-only Area with its plain-language explanation (v17).
   expect(within(dialog).queryByRole('combobox')).toBeNull();
@@ -396,7 +406,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   expect(events[1].textContent).toContain('Returned from overhaul');
 });
 
-test('a Machine without an Asset Tag confirms retirement with its barcode', () => {
+test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', () => {
   render(<MachinesView />);
 
   // Reactivate Saw 2 first (no identity conflicts, no name collision).
@@ -414,6 +424,10 @@ test('a Machine without an Asset Tag confirms retirement with its barcode', () =
   const reactSummary = screen.getByRole('dialog', {
     name: 'Confirm reactivation',
   });
+  // The summary recaps the untouched identity: Asset Tag and the
+  // barcode derived from it.
+  expect(reactSummary.textContent).toContain('CD-0202');
+  expect(reactSummary.textContent).toContain('PF:MACHINE:CD-0202');
   fireEvent.click(
     within(reactSummary).getByRole('button', { name: 'Reactivate Machine' }),
   );
@@ -421,23 +435,23 @@ test('a Machine without an Asset Tag confirms retirement with its barcode', () =
     /^Idle · /,
   );
 
-  // Retire it again: without an asset tag the typed confirmation falls
-  // back to the Machine barcode (always present).
+  // Retire it again: the typed confirmation is always the Asset Tag —
+  // never the reusable display name.
   const edit = openEdit('Saw 2');
   fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
   const confirm = screen.getByRole('dialog', { name: 'Retire Machine' });
-  expect(confirm.textContent).toContain('(Machine barcode) to confirm');
+  expect(confirm.textContent).toContain('(Asset Tag) to confirm');
   const gate = within(confirm).getByLabelText(/to confirm$/);
-  expect(gate).toHaveAttribute('placeholder', 'S2');
+  expect(gate).toHaveAttribute('placeholder', 'CD-0202');
   const continueButton = within(confirm).getByRole('button', {
     name: 'Continue',
   });
   expect(continueButton).toBeDisabled();
-  fireEvent.change(gate, { target: { value: 's2' } });
+  fireEvent.change(gate, { target: { value: 'cd-0202' } });
   expect(continueButton).toBeEnabled();
   fireEvent.click(continueButton);
   const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
-  expect(summary.textContent).toContain('S2');
+  expect(summary.textContent).toContain('CD-0202');
   fireEvent.click(
     within(summary).getByRole('button', { name: 'Retire Machine' }),
   );
@@ -445,28 +459,51 @@ test('a Machine without an Asset Tag confirms retirement with its barcode', () =
   expect(retiredTable().textContent).toContain('Saw 2');
 });
 
-test('a new Machine requires a unique barcode', () => {
+test('a new Machine receives the next Asset Tag automatically — no barcode entry', () => {
   render(<MachinesView />);
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
+  // No manual identity entry exists: the Asset Tag is assigned from
+  // the configured format (highest existing sequence is CD-0512) and
+  // the barcode derives from it.
+  expect(within(dialog).queryByLabelText('Barcode value')).toBeNull();
+  expect(within(dialog).queryByLabelText(/Asset tag/)).toBeNull();
+  const identity = dialog.querySelector('.mg-identity') as HTMLElement;
+  expect(identity.textContent).toContain('CD-0513');
+  expect(identity.textContent).toContain('PF:MACHINE:CD-0513');
+
   fireEvent.change(within(dialog).getByLabelText('Display name'), {
     target: { value: 'Lathe 5' },
   });
-  fireEvent.change(within(dialog).getByLabelText('Barcode value'), {
-    target: { value: 'L2' },
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Machine' }));
+
+  // The new Machine starts Idle (no assignment yet) and carries the
+  // assigned Asset Tag.
+  const row = activeRow('Lathe 5');
+  expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  expect(row.querySelector('.mg-assetline')?.textContent).toContain('CD-0513');
+});
+
+test('a new Machine cannot reuse an active display name of the same Area', () => {
+  render(<MachinesView />);
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Machine' });
+  // The default Area is Lathe, where an active `Lathe 2` exists.
+  fireEvent.change(within(dialog).getByLabelText('Display name'), {
+    target: { value: 'Lathe 2' },
   });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Add Machine' }));
   expect(within(dialog).getByRole('alert').textContent).toContain(
-    'already used by another Machine',
+    'already exists in Lathe',
   );
 
-  fireEvent.change(within(dialog).getByLabelText('Barcode value'), {
-    target: { value: 'L5' },
+  // Renaming resolves it (reuse across time stays allowed — the rule
+  // constrains simultaneously active Machines of one Area only).
+  fireEvent.change(within(dialog).getByLabelText('Display name'), {
+    target: { value: 'Lathe 5' },
   });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Add Machine' }));
-
-  // The new Machine starts Idle (no assignment yet).
-  const row = activeRow('Lathe 5');
-  expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  expect(activeRow('Lathe 5')).toBeTruthy();
 });

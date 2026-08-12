@@ -58,7 +58,8 @@ const machine = (over: Partial<MockMachine>): MockMachine => ({
   id: 'MC-1',
   area: 'lathe',
   name: 'Lathe 2',
-  barcode: 'L2',
+  barcode: 'CD-0105',
+  assetTag: 'CD-0105',
   stateChangedAt: '2026-08-04T10:00:00.000Z',
   ...over,
 });

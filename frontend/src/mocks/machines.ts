@@ -8,11 +8,15 @@ import { minutesAgoIso } from './mock-time';
 // are never stored here. `stateChangedAt` timestamps are anchored
 // relative to module load so the derived state ages stay realistic.
 //
+// Every Machine barcode equals its Asset Tag (`PF:MACHINE:<asset-tag>`
+// — views/asset-tags.ts): the Asset Tag is assigned automatically at
+// creation and there is no independent, manually entered barcode.
+//
 // The two `Lathe 1` records demonstrate physical replacement: the old
-// Machine record is retired untouched (its identity, barcode and asset
-// metadata keep pointing at the Machine that really did the work) and
-// the replacement is a NEW record with its own identity and barcode
-// that reuses the familiar floor-position display name.
+// Machine record is retired untouched (its identity, Asset Tag and
+// asset metadata keep pointing at the Machine that really did the
+// work) and the replacement is a NEW record with its own identity and
+// Asset Tag that reuses the familiar floor-position display name.
 
 // Anchored through the shared mock time source (mock-time.ts) so every
 // mock module resolves its relative offsets against ONE load anchor.
@@ -30,7 +34,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-201',
     area: 'cut',
     name: 'Saw 1',
-    barcode: 'S1',
+    barcode: 'CD-0201',
     stateChangedAt: minutesAgo(220),
     manufacturer: 'Amada',
     model: 'HFA-250W',
@@ -40,11 +44,12 @@ export const MOCK_MACHINES: MockMachine[] = [
   },
   {
     // Replacement Machine for the retired MC-104: new identity, new
-    // barcode, reused display name for the familiar floor position.
+    // Asset Tag (and barcode), reused display name for the familiar
+    // floor position.
     id: 'MC-512',
     area: 'lathe',
     name: 'Lathe 1',
-    barcode: 'L1',
+    barcode: 'CD-0512',
     stateChangedAt: minutesAgo(18),
     manufacturer: 'Mazak',
     model: 'QT-250',
@@ -56,7 +61,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-105',
     area: 'lathe',
     name: 'Lathe 2',
-    barcode: 'L2',
+    barcode: 'CD-0105',
     stateChangedAt: minutesAgo(65),
     manufacturer: 'Mazak',
     model: 'QT-15',
@@ -68,7 +73,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-106',
     area: 'lathe',
     name: 'Lathe 3',
-    barcode: 'L3',
+    barcode: 'CD-0106',
     stateChangedAt: minutesAgo(125),
     manufacturer: 'Haas',
     model: 'ST-20',
@@ -80,7 +85,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-107',
     area: 'lathe',
     name: 'Lathe 4',
-    barcode: 'L4',
+    barcode: 'CD-0107',
     // Explicit maintenance override with an expected return date —
     // running/idle stay derived, maintenance is always a decision.
     maintenance: {
@@ -99,7 +104,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-301',
     area: 'mill',
     name: 'Mill 1',
-    barcode: 'M1',
+    barcode: 'CD-0301',
     stateChangedAt: minutesAgo(45),
     manufacturer: 'Haas',
     model: 'VF-2',
@@ -111,7 +116,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-302',
     area: 'mill',
     name: 'Mill 2',
-    barcode: 'M2',
+    barcode: 'CD-0302',
     stateChangedAt: minutesAgo(80),
     manufacturer: 'Haas',
     model: 'VF-4',
@@ -123,7 +128,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-303',
     area: 'mill',
     name: 'Mill 3 — Horizontal Boring',
-    barcode: 'M3',
+    barcode: 'CD-0303',
     stateChangedAt: minutesAgo(370),
     manufacturer: 'Toshiba',
     model: 'BTD-110',
@@ -138,7 +143,7 @@ export const MOCK_MACHINES: MockMachine[] = [
     id: 'MC-104',
     area: 'lathe',
     name: 'Lathe 1',
-    barcode: 'M-0104',
+    barcode: 'CD-0104',
     retiredOn: '2026-02-14',
     stateChangedAt: '2026-02-14T16:00:00.000Z',
     lifecycle: [
@@ -158,13 +163,13 @@ export const MOCK_MACHINES: MockMachine[] = [
       'Replaced by asset CD-0512 — display name reused for the floor position.',
   },
   {
-    // Retired Machine WITHOUT an asset tag: the typed retirement /
-    // reactivation confirmation falls back to the Machine barcode for
-    // records like this one (barcode is always present).
+    // Second retired record: like every Machine it keeps its Asset
+    // Tag forever — the tag is never reused by a later Machine.
     id: 'MC-202',
     area: 'cut',
     name: 'Saw 2',
-    barcode: 'S2',
+    barcode: 'CD-0202',
+    assetTag: 'CD-0202',
     retiredOn: '2025-11-03',
     stateChangedAt: '2025-11-03T09:30:00.000Z',
     lifecycle: [
