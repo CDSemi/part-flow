@@ -21,6 +21,7 @@ import { MOCK_ASSET_TAG_FORMAT } from '../../mocks/administration';
 import { MOCK_AREAS, areaByKey } from '../../mocks/areas';
 import { MOCK_MACHINE_ACTOR, MOCK_MACHINES } from '../../mocks/machines';
 import { machineBarcode, nextAssetTag } from '../asset-tags';
+import { code128ModuleCount, encodeCode128B } from '../code128';
 import {
   MACHINE_STATE_LABEL,
   effectiveMachineStatus,
@@ -599,27 +600,127 @@ function LifecycleList({ machine }: { machine: MockMachine }) {
 }
 
 /**
- * Read-only Machine identity: the Asset Tag (assigned automatically at
- * creation from the format configured in Administration → Barcode
- * configuration, never edited afterwards) and the barcode derived from
- * it — one value in the PF:MACHINE: namespace, never an independent
- * identifier.
+ * Read-only Machine identity header at the top of the New/Edit dialog:
+ * the Asset Tag (assigned automatically at creation, never edited) and
+ * the barcode derived from it — one value in the PF:MACHINE:
+ * namespace, never an independent identifier. On an existing Machine
+ * the header also carries the fixed Area with its service-life
+ * explanation, and the entry to the printable barcode label.
  */
-function IdentityRows({ assetTag, help }: { assetTag: string; help: string }) {
+function IdentityHeader({
+  assetTag,
+  machine,
+  onOpenLabel,
+}: {
+  assetTag: string;
+  machine?: MockMachine;
+  onOpenLabel?: () => void;
+}) {
+  const area = machine ? areaByKey(machine.area) : undefined;
   return (
-    <>
-      <div className="mg-identity">
-        <div className="idrow">
-          <span className="k">Asset Tag</span>
-          <span className="v">{assetTag}</span>
-        </div>
-        <div className="idrow">
-          <span className="k">Barcode</span>
-          <span className="v">{machineBarcode(assetTag)}</span>
-        </div>
+    <div className="mg-idhead">
+      <div className="idcol">
+        <span className="idlabel">Asset Tag</span>
+        <span className="idvalue tag">{assetTag}</span>
       </div>
-      <p className="mg-areahelp">{help}</p>
-    </>
+      <div className="idcol grow">
+        <span className="idlabel">Barcode</span>
+        <span className="idvalue">{machineBarcode(assetTag)}</span>
+      </div>
+      {machine && onOpenLabel ? (
+        <button type="button" className="mg-labelbtn" onClick={onOpenLabel}>
+          Barcode label…
+        </button>
+      ) : null}
+      {machine ? (
+        <div className="idarea">
+          <div className="idarealine">
+            <span className="idlabel">Area</span>
+            <span
+              className="mg-arealine"
+              style={{ background: area?.colorVar ?? 'var(--faint)' }}
+              aria-hidden="true"
+            />
+          </div>
+          <div className="mg-areafixedvalue">
+            <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={11} />
+            {area?.name ?? machine.area}
+          </div>
+          <p className="idareahelp">
+            The Area is set when a Machine is created and stays fixed for its
+            whole service life. To move capacity to another Area, retire this
+            Machine and create a new Machine record there.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Printable Machine barcode label: the display name, the Asset Tag and
+ * the Code 128 barcode of the scanned value (`PF:MACHINE:<asset-tag>`).
+ * Print Label prints exactly the label area (print styles hide the
+ * rest of the page).
+ */
+function BarcodeLabelDialog({
+  machine,
+  onClose,
+}: {
+  machine: MockMachine;
+  onClose: () => void;
+}) {
+  const value = machineBarcode(machine.assetTag);
+  const runs = encodeCode128B(value);
+  const quiet = 10;
+  const moduleWidth = 2;
+  const barHeight = 64;
+  const totalModules = runs ? code128ModuleCount(runs) + quiet * 2 : 0;
+  let x = quiet;
+  return (
+    <ModalDialog label="Machine barcode label" onClose={onClose}>
+      <h3>Machine barcode label</h3>
+      <div className="sub">
+        The barcode carries the Asset Tag — scanning it selects{' '}
+        <b>{machine.name}</b> for Machine workflows.
+      </div>
+      <div className="mg-label mg-labelprint">
+        <div className="lname">{machine.name}</div>
+        <div className="ltag">{machine.assetTag}</div>
+        {runs ? (
+          <svg
+            className="lbarcode"
+            viewBox={`0 0 ${totalModules * moduleWidth} ${barHeight}`}
+            preserveAspectRatio="xMidYMid meet"
+            role="img"
+            aria-label={`Barcode ${value}`}
+          >
+            {runs.map((run, index) => {
+              const rect = run.bar ? (
+                <rect
+                  key={index}
+                  x={x * moduleWidth}
+                  y={0}
+                  width={run.width * moduleWidth}
+                  height={barHeight}
+                />
+              ) : null;
+              x += run.width;
+              return rect;
+            })}
+          </svg>
+        ) : null}
+        <div className="lvalue">{value}</div>
+      </div>
+      <div className="row">
+        <button className="bigbtn ghost" onClick={onClose}>
+          Cancel (Esc)
+        </button>
+        <button className="bigbtn primary" onClick={() => window.print()}>
+          Print Label
+        </button>
+      </div>
+    </ModalDialog>
   );
 }
 
@@ -674,8 +775,13 @@ function MachineEditDialog({
   const [installedOn, setInstalledOn] = useState(initial.installedOn);
   const [notes, setNotes] = useState(initial.notes);
   const [error, setError] = useState<string | null>(null);
+  // New-Machine flow (v17 pattern): form → `Confirm new Machine`
+  // summary → final add confirmation. Nothing is added before the last
+  // confirmation.
+  const [addStage, setAddStage] = useState<null | 'summary' | 'confirm'>(null);
+  const [labelOpen, setLabelOpen] = useState(false);
   const [retireStage, setRetireStage] = useState<
-    null | 'blocked' | 'unsaved' | 'confirm' | 'summary'
+    null | 'blocked' | 'unsaved' | 'confirm' | 'summary' | 'final'
   >(null);
   // Recorded DECISION for the pending edits inside the retire flow —
   // nothing is saved or discarded until the retirement completes, so
@@ -748,13 +854,19 @@ function MachineEditDialog({
     };
   };
 
+  /** Edit: save immediately. New: validate, then enter the summary. */
   const save = () => {
     const built = build();
     if ('error' in built) {
       setError(built.error);
       return;
     }
-    onSave(built.machine);
+    if (machine) {
+      onSave(built.machine);
+      return;
+    }
+    setError(null);
+    setAddStage('summary');
   };
 
   const startRetire = () => {
@@ -784,14 +896,14 @@ function MachineEditDialog({
     onRetire();
   };
 
-  const buildForRetire = build();
+  const builtRecord = build();
   const identifier = machine ? confirmIdentifier(machine) : null;
   const selectedArea = areaByKey(area);
   // The summary shows the record as it will be retired: with the
   // edits when the recorded decision is Save, as last saved otherwise.
   const summaryRecord =
-    retireEditsIntent === 'save' && !('error' in buildForRetire)
-      ? buildForRetire.machine
+    retireEditsIntent === 'save' && !('error' in builtRecord)
+      ? builtRecord.machine
       : machine;
 
   return (
@@ -804,53 +916,40 @@ function MachineEditDialog({
         <h3>{machine ? 'Edit Machine' : 'New Machine'}</h3>
         {dirty ? <span className="mg-dirty">● Unsaved changes</span> : null}
       </div>
+      <IdentityHeader
+        assetTag={dialogAssetTag}
+        machine={machine}
+        onOpenLabel={() => setLabelOpen(true)}
+      />
       <div className="mg-form">
-        <Field label="Display name">
-          <input
-            className="field"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Lathe 5"
-          />
-        </Field>
-        <IdentityRows
-          assetTag={dialogAssetTag}
-          help={
-            machine
-              ? 'The Asset Tag identifies this physical Machine for its whole service life and never changes. The barcode is the Asset Tag in the PF:MACHINE: namespace.'
-              : 'Assigned automatically when the Machine is added — the next Asset Tag in the format from Administration → Barcode configuration. The barcode is the Asset Tag in the PF:MACHINE: namespace.'
-          }
-        />
         {machine ? (
-          <>
-            <div className="mg-arealabelrow">
-              Area
-              <span
-                className="mg-arealine"
-                style={{ background: selectedArea?.colorVar ?? 'var(--faint)' }}
-                aria-hidden="true"
-              />
-            </div>
-            <div className="mg-areafixedvalue">
-              <AreaDot
-                colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-                size={11}
-              />
-              {areaByKey(machine.area)?.name ?? machine.area}
-            </div>
-            <p className="mg-areahelp">
-              The Area is set when a Machine is created and stays fixed for its
-              whole service life. To move capacity to another Area, retire this
-              Machine and create a new Machine record there.
-            </p>
-          </>
+          <Field label="Display name">
+            <input
+              className="field"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Lathe 5"
+            />
+          </Field>
         ) : (
-          <AreaSelectField
-            label="Area"
-            value={area}
-            choices={MOCK_AREAS.filter((a) => !a.terminal)}
-            onChange={setArea}
-          />
+          <div className="mg-grid2">
+            <Field label="Display name">
+              <input
+                className="field"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Lathe 5"
+              />
+            </Field>
+            <div className="mg-areacell">
+              <AreaSelectField
+                label="Area"
+                value={area}
+                choices={MOCK_AREAS.filter((a) => !a.terminal)}
+                onChange={setArea}
+              />
+            </div>
+          </div>
         )}
         <div className="mg-grid2">
           <Field label="Manufacturer (optional)">
@@ -887,15 +986,15 @@ function MachineEditDialog({
               onChange={(e) => setInstalledOn(e.target.value)}
             />
           </Field>
-          <Field label="Notes (optional)">
-            <input
-              className="field"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="e.g. Coolant system upgraded 2024"
-            />
-          </Field>
         </div>
+        <Field label="Notes (optional)">
+          <input
+            className="field"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. Coolant system upgraded 2024"
+          />
+        </Field>
         {error ? (
           <div className="err" role="alert">
             {error}
@@ -916,7 +1015,7 @@ function MachineEditDialog({
           Cancel (Esc)
         </button>
         <button className="bigbtn primary" onClick={save}>
-          {machine ? 'Save changes' : 'Add Machine'}
+          {machine ? 'Save changes' : 'Continue'}
         </button>
       </div>
       {machine ? (
@@ -968,13 +1067,13 @@ function MachineEditDialog({
           saveLabel="Save changes"
           discardLabel="Discard changes"
           saveDisabledReason={
-            'error' in buildForRetire
-              ? `The edits cannot be saved yet: ${buildForRetire.error}`
+            'error' in builtRecord
+              ? `The edits cannot be saved yet: ${builtRecord.error}`
               : undefined
           }
           onCancel={cancelRetire}
           onSave={() => {
-            if ('error' in buildForRetire) return;
+            if ('error' in builtRecord) return;
             setRetireEditsIntent('save');
             setRetireStage('confirm');
           }}
@@ -1018,7 +1117,9 @@ function MachineEditDialog({
           </ul>
         </TypedConfirmDialog>
       ) : null}
-      {retireStage === 'summary' && machine && summaryRecord ? (
+      {(retireStage === 'summary' || retireStage === 'final') &&
+      machine &&
+      summaryRecord ? (
         <ModalDialog label="Confirm retirement" onClose={cancelRetire}>
           <h3>Confirm retirement</h3>
           <div className="sub">
@@ -1074,11 +1175,147 @@ function MachineEditDialog({
             <button className="bigbtn ghost" onClick={cancelRetire}>
               Cancel (Esc)
             </button>
-            <button className="bigbtn danger" onClick={finalizeRetire}>
+            <button
+              className="bigbtn danger"
+              onClick={() => setRetireStage('final')}
+            >
               Retire Machine
             </button>
           </div>
+          {/* Last safeguard: retiring writes a permanent lifecycle
+              record — an explicit yes/no question, never a silent
+              action from the summary alone. */}
+          {retireStage === 'final' ? (
+            <ConfirmDialog
+              title="Retire this Machine?"
+              confirmLabel="Retire Machine"
+              cancelLabel="Cancel (Esc)"
+              danger
+              onCancel={() => setRetireStage('summary')}
+              onConfirm={finalizeRetire}
+            >
+              Retiring <b>{machine.name}</b> is recorded permanently in the
+              Machine&apos;s lifecycle and cannot be undone — even a later
+              return to service keeps the retirement in the record.
+            </ConfirmDialog>
+          ) : null}
         </ModalDialog>
+      ) : null}
+      {!machine && addStage !== null && !('error' in builtRecord) ? (
+        <ModalDialog
+          label="Confirm new Machine"
+          onClose={() => setAddStage(null)}
+        >
+          <h3>Confirm new Machine</h3>
+          <div className="sub">
+            Final check — nothing has been added yet.{' '}
+            <b>{builtRecord.machine.name}</b> is added only when you confirm
+            below.
+          </div>
+          <SummaryList
+            rows={[
+              { label: 'Machine', value: builtRecord.machine.name },
+              {
+                label: 'Area',
+                value: (
+                  <>
+                    <AreaDot
+                      colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
+                      size={10}
+                    />
+                    {areaByKey(builtRecord.machine.area)?.name ??
+                      builtRecord.machine.area}
+                  </>
+                ),
+              },
+              {
+                label: 'Asset Tag',
+                value: (
+                  <span className="mono">{builtRecord.machine.assetTag}</span>
+                ),
+              },
+              {
+                label: 'Barcode',
+                value: (
+                  <span className="mono">
+                    {machineBarcode(builtRecord.machine.assetTag)}
+                  </span>
+                ),
+              },
+              ...(builtRecord.machine.manufacturer
+                ? [
+                    {
+                      label: 'Manufacturer',
+                      value: builtRecord.machine.manufacturer,
+                    },
+                  ]
+                : []),
+              ...(builtRecord.machine.model
+                ? [{ label: 'Model', value: builtRecord.machine.model }]
+                : []),
+              ...(builtRecord.machine.serialNumber
+                ? [
+                    {
+                      label: 'Serial number',
+                      value: (
+                        <span className="mono">
+                          {builtRecord.machine.serialNumber}
+                        </span>
+                      ),
+                    },
+                  ]
+                : []),
+              ...(builtRecord.machine.installedOn
+                ? [
+                    {
+                      label: 'Installed',
+                      value: builtRecord.machine.installedOn,
+                    },
+                  ]
+                : []),
+              ...(builtRecord.machine.notes
+                ? [{ label: 'Notes', value: builtRecord.machine.notes }]
+                : []),
+            ]}
+          />
+          <div className="mg-note">
+            The Asset Tag and barcode are assigned when the Machine is added and
+            never change afterwards. A Machine record is permanent — it can be
+            retired, never deleted.
+          </div>
+          <div className="row">
+            <button className="bigbtn ghost" onClick={() => setAddStage(null)}>
+              Back
+            </button>
+            <button
+              className="bigbtn primary"
+              onClick={() => setAddStage('confirm')}
+            >
+              Add Machine
+            </button>
+          </div>
+          {/* Last safeguard: a Machine record can never be deleted —
+              adding one is an explicit yes/no question. */}
+          {addStage === 'confirm' ? (
+            <ConfirmDialog
+              title="Add this Machine?"
+              confirmLabel="Add Machine"
+              cancelLabel="Cancel (Esc)"
+              onCancel={() => setAddStage('summary')}
+              onConfirm={() => onSave(builtRecord.machine)}
+            >
+              Add <b>{builtRecord.machine.name}</b> with Asset Tag{' '}
+              <b>{builtRecord.machine.assetTag}</b>? A Machine record cannot be
+              deleted once added — it can only be retired later.
+            </ConfirmDialog>
+          ) : null}
+        </ModalDialog>
+      ) : null}
+      {labelOpen && machine ? (
+        <BarcodeLabelDialog
+          machine={machine}
+          onClose={() => setLabelOpen(false)}
+        />
       ) : null}
     </ModalDialog>
   );
@@ -1175,9 +1412,10 @@ function ReactivateMachineDialog({
   const [reason, setReason] = useState('');
   const [samePhysical, setSamePhysical] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Two-step confirmation (v17): the form validates on Continue, then
-  // a summary recap is confirmed before the Machine really reactivates.
-  const [stage, setStage] = useState<'form' | 'summary'>('form');
+  // Staged confirmation (v17): the form validates on Continue, a
+  // summary recap follows, and a final explicit question confirms
+  // before the Machine really reactivates.
+  const [stage, setStage] = useState<'form' | 'summary' | 'final'>('form');
 
   const activeOnes = machines.filter(
     (m) => m.retiredOn === undefined && m.id !== machine.id,
@@ -1235,7 +1473,7 @@ function ReactivateMachineDialog({
     setStage('summary');
   };
 
-  if (stage === 'summary') {
+  if (stage === 'summary' || stage === 'final') {
     return (
       <ModalDialog label="Confirm reactivation" onClose={onCancel} size="wide">
         <h3>Confirm reactivation</h3>
@@ -1289,15 +1527,28 @@ function ReactivateMachineDialog({
           <button className="bigbtn ghost" onClick={() => setStage('form')}>
             Back
           </button>
-          <button
-            className="bigbtn primary"
-            onClick={() =>
-              onConfirm({ name: name.trim(), area, reason: reason.trim() })
-            }
-          >
+          <button className="bigbtn primary" onClick={() => setStage('final')}>
             Reactivate Machine
           </button>
         </div>
+        {/* Last safeguard: reactivating writes a permanent lifecycle
+            record — an explicit yes/no question, never a silent action
+            from the summary alone. */}
+        {stage === 'final' ? (
+          <ConfirmDialog
+            title="Reactivate this Machine?"
+            confirmLabel="Reactivate Machine"
+            cancelLabel="Cancel (Esc)"
+            onCancel={() => setStage('summary')}
+            onConfirm={() =>
+              onConfirm({ name: name.trim(), area, reason: reason.trim() })
+            }
+          >
+            Reactivating <b>{machine.name}</b> is recorded permanently in the
+            Machine&apos;s lifecycle and cannot be undone — the record of when
+            it was out of service stays part of its history.
+          </ConfirmDialog>
+        ) : null}
       </ModalDialog>
     );
   }

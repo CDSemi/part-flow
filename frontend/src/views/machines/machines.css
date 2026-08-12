@@ -337,12 +337,17 @@
 }
 
 /* Dialog helpers: labelled fields and the maintenance/retire notes. */
+/* Labelled fields: one explicit 6px gap between the label text and
+   its control, so both columns of a two-column row align exactly —
+   the Area select's separate label row uses the same 6px (below). */
 .mg-form label {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   font-size: 12px;
   font-weight: 750;
   color: var(--muted);
-  margin: 10px 0 4px;
+  margin: 12px 0 4px;
 }
 
 .mg-form .mg-grid2 {
@@ -371,12 +376,13 @@
    Never a custom select just for a color. */
 .mg-form .mg-arealabelrow {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 10px;
   font-size: 12px;
   font-weight: 750;
   color: var(--muted);
-  margin: 10px 0 4px;
+  margin: 12px 0 6px;
 }
 
 .mg-arealine {
@@ -398,35 +404,161 @@
   padding: 3px 0;
 }
 
-/* Read-only Machine identity (Edit/New dialog): the Asset Tag and the
-   barcode derived from it — calm key/value rows, never inputs. */
-.mg-identity {
+/* Read-only Machine identity header (Edit/New dialog): the Asset Tag
+   and the barcode derived from it lead the dialog — calm values on a
+   quiet panel, never inputs. On edit the header also carries the fixed
+   Area (full-width row) and the barcode-label entry. */
+.mg-idhead {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 28px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.mg-idhead .idcol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mg-idhead .idlabel {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  font-weight: 800;
+  color: var(--faint);
+}
+
+.mg-idhead .idvalue {
+  font-family: var(--mono), monospace;
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.mg-idhead .idvalue.tag {
+  font-size: 17px;
+}
+
+/* Info-toned action (semantic token, correct in both themes) — the
+   label entry should read as an inviting utility, not a plain field. */
+.mg-labelbtn {
+  align-self: center;
+  border: 1px solid var(--info-border);
+  border-radius: 9px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--info-t);
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.mg-labelbtn:hover {
+  background: var(--info-surface);
+}
+
+/* Fixed Area inside the identity header (edit only): full-width row
+   under the identity values, with the shared Area color line and the
+   service-life explanation. */
+.mg-idhead .idarea {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--hair);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.mg-idhead .idarealine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mg-idhead .idarea .mg-areafixedvalue {
+  padding: 4px 0 2px;
+}
+
+.mg-idhead .idareahelp {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* New-Machine form: the Area select shares the first row with the
+   Display name — one grid cell wrapping the label row + select. */
+.mg-areacell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Machine barcode label: a light, printable label card — always a
+   white surface with black ink so the printed label scans in both UI
+   themes. */
+.mg-label {
+  background: #fff;
+  color: #111;
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 2px 14px;
+  padding: 14px 18px 12px;
+  margin: 6px 0 2px;
+  text-align: center;
 }
 
-.mg-identity .idrow {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 14px;
-  padding: 8px 0;
-}
-
-.mg-identity .idrow + .idrow {
-  border-top: 1px solid var(--hair);
-}
-
-.mg-identity .k {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.mg-identity .v {
-  font-family: var(--mono), monospace;
+.mg-label .lname {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 750;
+}
+
+.mg-label .ltag {
+  font-family: var(--mono), monospace;
+  font-size: 19px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.mg-label .lbarcode {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  height: 64px;
+  margin: 0 auto;
+  fill: #111;
+}
+
+.mg-label .lvalue {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Print Label: print exactly the label — everything else on the page
+   is hidden while the label fills the sheet's top-left corner. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .mg-labelprint,
+  .mg-labelprint * {
+    visibility: visible;
+  }
+
+  .mg-labelprint {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 90mm;
+    border: none;
+    margin: 0;
+  }
 }
 
 .mg-areahelp {
@@ -443,7 +575,7 @@
   display: flex;
   align-items: baseline;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .mg-dlghead h3 {
@@ -586,6 +718,9 @@
    display:block — gluing the text to the checkbox. */
 .mg-form label.mg-check {
   display: flex;
+  /* The base `.mg-form label` stacks label text above its control —
+     the checkbox row is the one label laid out as a row. */
+  flex-direction: row;
   align-items: center;
   gap: 12px;
   font-size: 13px;
