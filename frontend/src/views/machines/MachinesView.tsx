@@ -44,6 +44,7 @@ type PendingDialog =
   | { kind: 'edit'; machine: MockMachine }
   | { kind: 'start-maintenance'; machine: MockMachine }
   | { kind: 'clear-maintenance'; machine: MockMachine }
+  | { kind: 'retired-details'; machine: MockMachine }
   | { kind: 'reactivate'; machine: MockMachine };
 
 /** Sortable columns of the active Machines table. */
@@ -371,8 +372,8 @@ export function MachinesView() {
                 {(
                   [
                     { key: 'machine', label: 'Machine', className: undefined },
-                    { key: 'retired', label: 'Retired', className: undefined },
                     { key: 'asset', label: 'Asset', className: 'mg-metacol' },
+                    { key: 'retired', label: 'Retired', className: undefined },
                     { key: 'notes', label: 'Notes', className: undefined },
                   ] as const
                 ).map((column) => (
@@ -407,32 +408,49 @@ export function MachinesView() {
             </thead>
             <tbody>
               {retired.map((machine) => (
-                <tr key={machine.id}>
+                // The COMPLETE retired row opens the read-only Retired
+                // Machine Details dialog (same pattern as the active
+                // rows, v15): the name-cell button is the keyboard and
+                // screen-reader entry point. The Reactivate cell is the
+                // row's one interactive island — it stops propagation
+                // so the action never also opens the details.
+                <tr
+                  key={machine.id}
+                  className="selrow"
+                  onClick={() =>
+                    setDialog({ kind: 'retired-details', machine })
+                  }
+                >
                   <td>
-                    <MachineIdentityCell machine={machine} />
+                    <button
+                      className="rowbtn"
+                      aria-label={`Machine details — ${machine.name}`}
+                    >
+                      <MachineIdentityCell machine={machine} />
+                    </button>
+                  </td>
+                  <td className="mg-metacol">
+                    <AssetMeta machine={machine} />
                   </td>
                   <td>
                     <span className="mg-retiredtag">
                       Retired on {machine.retiredOn}
                     </span>
                   </td>
-                  <td className="mg-metacol">
-                    <AssetMeta machine={machine} />
-                  </td>
                   <td className="mg-meta">{machine.notes ?? '—'}</td>
-                  <td>
+                  <td onClick={(event) => event.stopPropagation()}>
                     <button
                       className="mg-reactivate"
                       onClick={() => setDialog({ kind: 'reactivate', machine })}
                     >
-                      Reactivate…
+                      Reactivate
                     </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="mg-sub">
+          <p className="mg-retirednote">
             Retired Machines stay visible here and in history — they accept no
             new work and never appear in assignment choices. A replacement
             Machine may reuse the display name of the floor position; the asset
@@ -514,6 +532,15 @@ export function MachinesView() {
             ? 'quantity is still assigned to it.'
             : 'no quantity is currently assigned to it.'}
         </ConfirmDialog>
+      ) : null}
+      {dialog?.kind === 'retired-details' ? (
+        <RetiredMachineDetailsDialog
+          machine={dialog.machine}
+          onClose={() => setDialog(null)}
+          onReactivate={() =>
+            setDialog({ kind: 'reactivate', machine: dialog.machine })
+          }
+        />
       ) : null}
       {dialog?.kind === 'reactivate' ? (
         <ReactivateMachineDialog
@@ -1384,6 +1411,7 @@ function MachineEditDialog({
       {retireStage === 'confirm' && machine && identifier ? (
         <TypedConfirmDialog
           title="Retire Machine"
+          danger
           expectedValue={identifier.value}
           valueLabel={identifier.label}
           confirmLabel="Continue"
@@ -1412,7 +1440,11 @@ function MachineEditDialog({
       {(retireStage === 'summary' || retireStage === 'final') &&
       machine &&
       summaryRecord ? (
-        <ModalDialog label="Confirm retirement" onClose={cancelRetire}>
+        <ModalDialog
+          label="Confirm retirement"
+          onClose={cancelRetire}
+          className="dangerdlg"
+        >
           <h3>Confirm retirement</h3>
           <div className="sub">
             Final check — nothing has changed yet. <b>{machine.name}</b> is
@@ -1482,7 +1514,7 @@ function MachineEditDialog({
               title="Retire this Machine?"
               confirmLabel="Retire Machine"
               cancelLabel="Cancel (Esc)"
-              danger
+              tone="danger"
               onCancel={() => setRetireStage('summary')}
               onConfirm={finalizeRetire}
             >
@@ -1593,6 +1625,7 @@ function MachineEditDialog({
               title="Add this Machine?"
               confirmLabel="Add Machine"
               cancelLabel="Cancel (Esc)"
+              tone="warning"
               onCancel={() => setAddStage('summary')}
               onConfirm={() => onSave(builtRecord.machine)}
             >
@@ -1609,6 +1642,115 @@ function MachineEditDialog({
           onClose={() => setLabelOpen(false)}
         />
       ) : null}
+    </ModalDialog>
+  );
+}
+
+/**
+ * Read-only Retired Machine Details dialog, opened from a Retired
+ * Machines row: the record's identity (name, Area, retirement badge),
+ * the untouched Asset Tag and derived barcode, the asset metadata, the
+ * notes, and the append-only lifecycle as a timeline. Nothing here is
+ * editable — a retired record is historical evidence; the only action
+ * besides Close is the existing staged Reactivate workflow.
+ */
+function RetiredMachineDetailsDialog({
+  machine,
+  onClose,
+  onReactivate,
+}: {
+  machine: MockMachine;
+  onClose: () => void;
+  onReactivate: () => void;
+}) {
+  const area = areaByKey(machine.area);
+  const events = machine.lifecycle ?? [];
+  return (
+    <ModalDialog label="Retired Machine Details" onClose={onClose} size="wide">
+      <h3>Retired Machine Details</h3>
+      <div className="mg-rdhead">
+        <div className="rdid">
+          <span className="nm">{machine.name}</span>
+          <span className="rdarea">
+            <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={9} />
+            {area?.name ?? machine.area}
+          </span>
+        </div>
+        <span className="mg-retiredtag">Retired on {machine.retiredOn}</span>
+      </div>
+      <div className="mg-idhead">
+        <div className="idcol">
+          <span className="idlabel">Asset Tag</span>
+          <span className="idvalue tag">{machine.assetTag}</span>
+        </div>
+        <div className="idcol grow">
+          <span className="idlabel">Barcode</span>
+          <span className="idvalue">{machineBarcode(machine.assetTag)}</span>
+        </div>
+      </div>
+      <SummaryList
+        rows={[
+          { label: 'Manufacturer', value: machine.manufacturer ?? '—' },
+          { label: 'Model', value: machine.model ?? '—' },
+          {
+            label: 'Serial number',
+            value: machine.serialNumber ? (
+              <span className="mono">{machine.serialNumber}</span>
+            ) : (
+              '—'
+            ),
+          },
+          { label: 'Installed', value: machine.installedOn ?? '—' },
+          { label: 'Retired on', value: machine.retiredOn ?? '—' },
+        ]}
+      />
+      {machine.notes ? (
+        <div className="mg-rdnotes">
+          <div className="mg-lifetitle">Notes</div>
+          <p>{machine.notes}</p>
+        </div>
+      ) : null}
+      <div className="mg-timeline">
+        <div className="mg-lifetitle">Lifecycle</div>
+        {events.length === 0 ? (
+          <p className="tl-empty">No lifecycle events recorded.</p>
+        ) : (
+          <ol>
+            {events.map((event, index) => (
+              <li
+                className={`mg-tlevent ${
+                  event.event === 'RETIRED' ? 'ev-retired' : 'ev-reactivated'
+                }`}
+                key={`${event.event}-${event.at}-${index}`}
+              >
+                <span className="dot" aria-hidden="true" />
+                <div className="tl-head">
+                  <span className="ev">{event.event}</span>
+                  <span className="at">{event.at.slice(0, 10)}</span>
+                </div>
+                <div className="tl-meta">{event.by}</div>
+                {event.reason ? (
+                  <div className="tl-reason">{event.reason}</div>
+                ) : null}
+                {event.fromArea && event.toArea ? (
+                  <div className="tl-meta">
+                    {areaByKey(event.fromArea)?.name ?? event.fromArea} →{' '}
+                    {areaByKey(event.toArea)?.name ?? event.toArea}
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <div className="row">
+        <button className="bigbtn ghost" onClick={onClose}>
+          Close (Esc)
+        </button>
+        <button className="bigbtn primary" onClick={onReactivate}>
+          Reactivate
+        </button>
+      </div>
     </ModalDialog>
   );
 }
@@ -1844,6 +1986,7 @@ function ReactivateMachineDialog({
             title="Reactivate this Machine?"
             confirmLabel="Reactivate Machine"
             cancelLabel="Cancel (Esc)"
+            tone="warning"
             onCancel={() => setStage('summary')}
             onConfirm={() =>
               onConfirm({ name: name.trim(), area, reason: reason.trim() })

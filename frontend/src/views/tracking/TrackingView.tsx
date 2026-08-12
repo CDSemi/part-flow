@@ -95,16 +95,16 @@ export function TrackingView() {
 
   if (preview === 'loading') {
     return (
-      <section className="tk" aria-label="Tracking">
-        <LoadingState label="Loading Tracking" />
+      <section className="tk" aria-label="PN Tracking">
+        <LoadingState label="Loading PN Tracking" />
       </section>
     );
   }
   if (preview === 'error') {
     return (
-      <section className="tk" aria-label="Tracking">
+      <section className="tk" aria-label="PN Tracking">
         <ErrorState
-          message="Tracking data could not be loaded."
+          message="PN Tracking data could not be loaded."
           detail="Check the backend connection, then retry from the offline banner."
         />
       </section>
@@ -129,10 +129,10 @@ export function TrackingView() {
   const detail = MOCK_TRACKING_DETAIL;
 
   return (
-    <section className="tk" aria-label="Tracking">
+    <section className="tk" aria-label="PN Tracking">
       <div className="tk-wrap">
         <div className="tk-left">
-          <h1>Tracking</h1>
+          <h1>PN Tracking</h1>
           <div className="tk-filters">
             <input
               placeholder="Search: PN, WO, Job Number…"

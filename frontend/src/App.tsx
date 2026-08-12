@@ -48,11 +48,11 @@ const TOP_NAV: {
 
 const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
   { subview: 'area-board', label: 'Area Board' },
-  { subview: 'machines', label: 'Machines' },
-  { subview: 'tracking', label: 'Tracking' },
   { subview: 'work-orders', label: 'Work Orders' },
-  { subview: 'planned-routes', label: 'Planned Routes' },
+  { subview: 'tracking', label: 'PN Tracking' },
   { subview: 'priority', label: 'Priority' },
+  { subview: 'planned-routes', label: 'Planned Routes' },
+  { subview: 'machines', label: 'Machines' },
 ];
 
 function OfflineBanner() {
@@ -82,7 +82,7 @@ const VIEW_TITLES: Record<AppViewKey, string> = {
   'production-board': 'Production Board',
   'area-board': 'Area Board',
   machines: 'Machines',
-  tracking: 'Tracking',
+  tracking: 'PN Tracking',
   'work-orders': 'Work Orders',
   'planned-routes': 'Planned Routes',
   priority: 'Priority Management',

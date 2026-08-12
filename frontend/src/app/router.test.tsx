@@ -186,11 +186,11 @@ test('Management opens Area Board first and exposes the sub navigation', async (
     await screen.findByRole('button', { name: /All Areas/ }),
   ).toHaveAttribute('aria-pressed', 'true');
 
-  fireEvent.click(screen.getByRole('link', { name: 'Tracking' }));
+  fireEvent.click(screen.getByRole('link', { name: 'PN Tracking' }));
 
   expect(window.location.pathname).toBe('/management/tracking');
   expect(
-    await screen.findByRole('heading', { name: 'Tracking' }),
+    await screen.findByRole('heading', { name: 'PN Tracking' }),
   ).toBeInTheDocument();
 });
 
@@ -229,11 +229,11 @@ test('Management exposes the six sub views in the approved order', async () => {
   });
   expect(Array.from(nav.querySelectorAll('a'), (a) => a.textContent)).toEqual([
     'Area Board',
-    'Machines',
-    'Tracking',
     'Work Orders',
-    'Planned Routes',
+    'PN Tracking',
     'Priority',
+    'Planned Routes',
+    'Machines',
   ]);
 });
 

@@ -32,7 +32,7 @@ test('a view renders its loading state', async () => {
   renderAt('/management/tracking?state=loading');
 
   expect(
-    await screen.findByRole('status', { name: 'Loading Tracking' }),
+    await screen.findByRole('status', { name: 'Loading PN Tracking' }),
   ).toBeInTheDocument();
 });
 

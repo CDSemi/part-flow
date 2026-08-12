@@ -883,7 +883,7 @@ test('Management sub-navigation is guarded too', async () => {
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
-  fireEvent.click(screen.getByRole('link', { name: 'Tracking' }));
+  fireEvent.click(screen.getByRole('link', { name: 'PN Tracking' }));
 
   expect(confirmSpy).toHaveBeenCalled();
   expect(window.location.pathname).toBe('/management/work-orders');

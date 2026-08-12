@@ -26,6 +26,7 @@ export function TypedConfirmDialog({
   expectedValue,
   valueLabel,
   confirmLabel,
+  danger = false,
   onConfirm,
   onCancel,
 }: {
@@ -37,6 +38,10 @@ export function TypedConfirmDialog({
   /** Human name of the identifier, e.g. "Asset Tag" or "route name". */
   valueLabel: string;
   confirmLabel: string;
+  /** Danger-tone the WHOLE dialog (error border, tinted surface, error
+   * heading) so the destructive context never reads as routine —
+   * Machine retirement uses this. */
+  danger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -45,7 +50,11 @@ export function TypedConfirmDialog({
   const [entered, setEntered] = useState('');
   const confirmed = matches(expectedValue, entered);
   return (
-    <ModalDialog labelledBy={headingId} onClose={onCancel} className="msgdlg">
+    <ModalDialog
+      labelledBy={headingId}
+      onClose={onCancel}
+      className={`msgdlg${danger ? ' dangerdlg' : ''}`}
+    >
       <h3 id={headingId}>{title}</h3>
       <div className="sub">{children}</div>
       <div className="typedconfirm">

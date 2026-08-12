@@ -98,11 +98,17 @@ test('the replacement pair stays distinguishable: retired records keep their ide
   expect(retiredRow.querySelector('.mgname')?.textContent).toBe('Lathe 1');
   expect(retiredRow.textContent).toContain('CD-0104');
   expect(retiredRow.textContent).toContain('Replaced by asset CD-0512');
-  // Historical display with exactly one action per row: reactivation
-  // of the same physical machine (v15) — no edit, no delete.
-  expect(within(retiredRow).getAllByRole('button')).toHaveLength(1);
+  // Historical display with exactly two entry points per row: the
+  // read-only details (whole row / name-cell button) and reactivation
+  // of the same physical machine — no edit, no delete.
+  expect(within(retiredRow).getAllByRole('button')).toHaveLength(2);
   expect(
-    within(retiredRow).getByRole('button', { name: 'Reactivate…' }),
+    within(retiredRow).getByRole('button', {
+      name: 'Machine details — Lathe 1',
+    }),
+  ).toBeInTheDocument();
+  expect(
+    within(retiredRow).getByRole('button', { name: 'Reactivate' }),
   ).toBeInTheDocument();
 
   // Second retired record: retired Machines keep their Asset Tag
@@ -355,7 +361,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
     .getByText('Retired on 2026-02-14')
     .closest('tr') as HTMLElement;
   fireEvent.click(
-    within(lathe1Row).getByRole('button', { name: 'Reactivate…' }),
+    within(lathe1Row).getByRole('button', { name: 'Reactivate' }),
   );
 
   const dialog = screen.getByRole('dialog', { name: 'Reactivate Machine' });
@@ -432,7 +438,7 @@ test('a reactivated Machine keeps its Asset Tag and confirms retirement with it'
   const saw2Row = within(retiredTable())
     .getByText('Retired on 2025-11-03')
     .closest('tr') as HTMLElement;
-  fireEvent.click(within(saw2Row).getByRole('button', { name: 'Reactivate…' }));
+  fireEvent.click(within(saw2Row).getByRole('button', { name: 'Reactivate' }));
   const dialog = screen.getByRole('dialog', { name: 'Reactivate Machine' });
   expect(dialog.querySelector('.mg-blockers')).toBeNull();
   fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
@@ -724,6 +730,88 @@ test('the Retired Machines table sorts independently through its own headers', (
   expect(
     screen.getByRole('button', { name: 'Sort by Machine' }),
   ).not.toHaveClass('on');
+});
+
+test('the Retired Machines columns order Machine, Asset, Retired, Notes, Reactivate', () => {
+  render(<MachinesView />);
+
+  const headers = Array.from(
+    retiredTable().querySelectorAll('thead th'),
+    (th) => th.textContent?.replace(/[↕↑↓]/g, '').trim(),
+  );
+  expect(headers).toEqual([
+    'Machine',
+    'Asset',
+    'Retired',
+    'Notes',
+    'Reactivate',
+  ]);
+});
+
+test('a retired row opens the read-only Retired Machine Details dialog with the lifecycle', () => {
+  render(<MachinesView />);
+
+  const lathe1Row = within(retiredTable())
+    .getByText('Retired on 2026-02-14')
+    .closest('tr') as HTMLElement;
+  fireEvent.click(lathe1Row);
+
+  const dialog = screen.getByRole('dialog', {
+    name: 'Retired Machine Details',
+  });
+  // Identity and the untouched asset metadata of the record.
+  expect(dialog.textContent).toContain('Lathe 1');
+  expect(dialog.textContent).toContain('Retired on 2026-02-14');
+  expect(dialog.textContent).toContain('CD-0104');
+  expect(dialog.textContent).toContain('PF:MACHINE:CD-0104');
+  expect(dialog.textContent).toContain('Mazak');
+  expect(dialog.textContent).toContain('QT-10');
+  expect(dialog.textContent).toContain('Q10-61208');
+  expect(dialog.textContent).toContain(
+    'display name reused for the floor position',
+  );
+  // The lifecycle timeline presents the append-only audit events.
+  const events = dialog.querySelectorAll('.mg-tlevent');
+  expect(events).toHaveLength(1);
+  expect(events[0].textContent).toContain('RETIRED');
+  expect(events[0].textContent).toContain('2026-02-14');
+  expect(events[0].textContent).toContain('M. Chen (Production Manager)');
+  expect(events[0].textContent).toContain('Replaced by asset CD-0512');
+  // Read-only: no inputs — Close and the Reactivate entry only.
+  expect(dialog.querySelector('input')).toBeNull();
+
+  // Close changes nothing.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Close (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(retiredTable().textContent).toContain('Retired on 2026-02-14');
+});
+
+test('the Reactivate cell never opens the details; the details dialog leads to Reactivate', () => {
+  render(<MachinesView />);
+
+  const saw2Row = within(retiredTable())
+    .getByText('Retired on 2025-11-03')
+    .closest('tr') as HTMLElement;
+  // The action cell is the row's one interactive island — it stops
+  // propagation, so Reactivate never also opens the details dialog.
+  fireEvent.click(within(saw2Row).getByRole('button', { name: 'Reactivate' }));
+  expect(
+    screen.queryByRole('dialog', { name: 'Retired Machine Details' }),
+  ).toBeNull();
+  const reactivate = screen.getByRole('dialog', { name: 'Reactivate Machine' });
+  fireEvent.click(
+    within(reactivate).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+
+  // The details dialog offers the same staged Reactivate workflow.
+  fireEvent.click(saw2Row);
+  const details = screen.getByRole('dialog', {
+    name: 'Retired Machine Details',
+  });
+  fireEvent.click(within(details).getByRole('button', { name: 'Reactivate' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Reactivate Machine' }),
+  ).toBeInTheDocument();
 });
 
 test('the maintenance note and expected return date are editable from Edit Machine', () => {

@@ -345,9 +345,24 @@
   color: var(--faint);
 }
 
-/* Retired Machines — historical display only, visually quiet. */
+/* Retired Machines — historical display only, visually quiet. Rows
+   share the whole-row activation pattern of the active table (the
+   name-cell button is the keyboard entry; the Reactivate cell is the
+   interactive island) and open the read-only details dialog. */
 .mg-retired {
   margin-top: 26px;
+}
+
+/* The explanation stays deliberately dim — reference reading, never
+   competing with the tables: faint tone behind a hairline rule. */
+.mg-retirednote {
+  font-size: 12.5px;
+  color: var(--faint);
+  line-height: 1.6;
+  max-width: 900px;
+  margin-top: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--hair);
 }
 
 .mg-retired h2 {
@@ -373,6 +388,152 @@
   border-radius: 6px;
   padding: 2px 8px;
   white-space: nowrap;
+}
+
+/* Retired Machine Details dialog: read-only record presentation —
+   identity row (name + Area + retirement badge), the shared identity
+   panel, summary rows, notes, and the lifecycle timeline. */
+.mg-rdhead {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.mg-rdhead .rdid {
+  flex: 1;
+  min-width: 0;
+}
+
+.mg-rdhead .nm {
+  display: block;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.mg-rdhead .rdarea {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.mg-rdnotes {
+  margin-top: 14px;
+}
+
+.mg-rdnotes p {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0;
+}
+
+/* Lifecycle timeline: the same append-only audit events as the quiet
+   list (RETIRED / REACTIVATED), presented as a vertical timeline —
+   tone-ringed markers on a hairline rail, dates and actors as calm
+   metadata. Read-only; color is never the only distinction (the event
+   name always renders). */
+.mg-timeline {
+  margin-top: 16px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+
+.mg-timeline ol {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  position: relative;
+}
+
+.mg-timeline ol::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--hair);
+}
+
+.mg-timeline .tl-empty {
+  font-size: 12.5px;
+  color: var(--faint);
+  margin: 4px 0 0;
+}
+
+.mg-tlevent {
+  position: relative;
+  padding: 0 0 14px 30px;
+}
+
+.mg-tlevent:last-child {
+  padding-bottom: 2px;
+}
+
+.mg-tlevent .dot {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--faint);
+  background: var(--panel);
+}
+
+.mg-tlevent.ev-retired .dot {
+  border-color: var(--err-t);
+}
+
+.mg-tlevent.ev-reactivated .dot {
+  border-color: var(--ok-t);
+}
+
+.mg-tlevent .tl-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.mg-tlevent .ev {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+}
+
+.mg-tlevent.ev-retired .ev {
+  color: var(--err-t);
+}
+
+.mg-tlevent.ev-reactivated .ev {
+  color: var(--ok-t);
+}
+
+.mg-tlevent .at {
+  font-family: var(--mono), monospace;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.mg-tlevent .tl-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+.mg-tlevent .tl-reason {
+  font-size: 13px;
+  color: var(--text);
+  margin-top: 2px;
+  line-height: 1.5;
 }
 
 /* Dialog helpers: labelled fields and the maintenance/retire notes. */

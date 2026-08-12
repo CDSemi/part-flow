@@ -729,3 +729,81 @@ select {
 .dlg.msgdlg .sub.disabled-reason {
   margin-top: 10px;
 }
+
+/* ============ Attention confirmations (alertdlg) ============ */
+/* Final, permanent lifecycle decisions (add / retire / reactivate a
+   Machine): the last question must never read as a routine notice an
+   operator confirms on reflex. A centered icon badge with a tone halo
+   and an emphasized sentence-style title carry the decision's semantic
+   tone; the whole dialog surface takes a faint wash of the same tone. */
+.dlg.alertdlg {
+  text-align: center;
+}
+
+.dlg.alertdlg .alertbadge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  margin: 4px auto 16px;
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.dlg.alertdlg h3 {
+  font-size: 19px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.dlg.alertdlg .sub {
+  font-size: 14.5px;
+}
+
+.dlg.alertdlg.tone-danger {
+  border-color: var(--error-border);
+  background:
+    linear-gradient(var(--error-surface-weak), var(--error-surface-weak)),
+    var(--panel);
+}
+
+.dlg.alertdlg.tone-danger .alertbadge {
+  background: var(--err);
+  color: var(--on-accent);
+  box-shadow: 0 0 0 8px var(--error-surface);
+}
+
+.dlg.alertdlg.tone-warning {
+  border-color: var(--warning-border);
+  background:
+    linear-gradient(var(--warning-surface-weak), var(--warning-surface-weak)),
+    var(--panel);
+}
+
+.dlg.alertdlg.tone-warning .alertbadge {
+  background: var(--warn);
+  color: var(--on-warn);
+  box-shadow: 0 0 0 8px var(--warning-surface);
+}
+
+/* ============ Danger-toned workflow dialogs (dangerdlg) ============ */
+/* Retirement keeps the user in a visibly dangerous context for the
+   WHOLE dialog (typed confirmation and final summary) — error border,
+   a faint error wash and the error-toned eyebrow title, never only a
+   red confirming button. Direct-child heading only: a dialog stacked
+   on top keeps its own tone. */
+.dlg.dangerdlg {
+  border-color: var(--error-border);
+  background:
+    linear-gradient(var(--error-surface-weak), var(--error-surface-weak)),
+    var(--panel);
+}
+
+.dlg.dangerdlg > h3 {
+  color: var(--err-t);
+}

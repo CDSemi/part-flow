@@ -8,6 +8,12 @@ import { ModalDialog } from './ModalDialog';
  * names the dialog (aria-labelledby), Cancel never changes anything,
  * and the confirming action is explicit. Presentation only — Phase 2
  * confirmations change local mock state at most.
+ *
+ * `tone` opts into the ATTENTION variant for final, permanent
+ * decisions (adding / retiring / reactivating a Machine): a centered
+ * icon badge and an emphasized title in the decision's semantic tone
+ * interrupt reflexive confirmation without adding steps. `danger`
+ * (color of the confirming action) is implied by `tone="danger"`.
  */
 export function ConfirmDialog({
   title,
@@ -15,6 +21,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   danger = false,
+  tone,
   onConfirm,
   onCancel,
 }: {
@@ -23,12 +30,25 @@ export function ConfirmDialog({
   confirmLabel: string;
   cancelLabel: string;
   danger?: boolean;
+  /** Attention variant: `danger` for destructive finals, `warning`
+   * for permanent-but-constructive finals. */
+  tone?: 'danger' | 'warning';
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const headingId = useId();
+  const destructive = danger || tone === 'danger';
   return (
-    <ModalDialog labelledBy={headingId} onClose={onCancel} className="msgdlg">
+    <ModalDialog
+      labelledBy={headingId}
+      onClose={onCancel}
+      className={`msgdlg${tone ? ` alertdlg tone-${tone}` : ''}`}
+    >
+      {tone ? (
+        <span className="alertbadge" aria-hidden="true">
+          !
+        </span>
+      ) : null}
       <h3 id={headingId}>{title}</h3>
       <div className="sub">{children}</div>
       <div className="row">
@@ -36,7 +56,7 @@ export function ConfirmDialog({
           {cancelLabel}
         </button>
         <button
-          className={`bigbtn ${danger ? 'danger' : 'primary'}`}
+          className={`bigbtn ${destructive ? 'danger' : 'primary'}`}
           onClick={onConfirm}
         >
           {confirmLabel}
