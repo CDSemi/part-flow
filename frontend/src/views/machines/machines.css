@@ -58,6 +58,45 @@
   box-shadow: var(--shadow);
 }
 
+/* Sortable column headers: the whole header text is the toggle,
+   cycling ascending → descending → unsorted. The arrow names the
+   direction; the active sort renders emphasized in the info tone. */
+.mg-table th .mg-sortbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  /* `font: inherit` already carries the weight — the th typography
+     (size, weight, spacing, casing) passes through untouched. */
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+}
+
+.mg-table th .mg-sortbtn .arrow {
+  color: var(--faint);
+  font-size: 12px;
+  /* The arrow glyphs sit low in their em-box — a tight line box plus
+     a small upward nudge centers them optically on the header text. */
+  line-height: 1;
+  position: relative;
+  top: -1.5px;
+}
+
+.mg-table th .mg-sortbtn:hover {
+  color: var(--text);
+}
+
+.mg-table th .mg-sortbtn.on,
+.mg-table th .mg-sortbtn.on .arrow {
+  color: var(--info-t);
+  font-weight: 800;
+}
+
 .mg-table th {
   font-size: 11.5px;
   text-transform: uppercase;
@@ -337,6 +376,14 @@
 }
 
 /* Dialog helpers: labelled fields and the maintenance/retire notes. */
+/* A form directly under the identity header contains its first
+   field's top margin (flow-root stops it collapsing out through the
+   form edge) — the Edit dialog's full-width Display name then sits at
+   the same distance from the header as the New dialog's grid row. */
+.mg-idhead + .mg-form {
+  display: flow-root;
+}
+
 /* Labelled fields: one explicit 6px gap between the label text and
    its control, so both columns of a two-column row align exactly —
    the Area select's separate label row uses the same 6px (below). */
@@ -587,6 +634,34 @@
   font-size: 11.5px;
   font-weight: 800;
   color: var(--warn-t);
+}
+
+/* Editable maintenance context (Edit dialog, Machine under
+   maintenance): note + expected return date on a warning-toned panel —
+   the same semantic tone as the Maintenance state, so the section
+   reads as the machine's active override. The state itself is
+   switched only through the existing dialogs. */
+.mg-maintedit {
+  margin-top: 16px;
+  background: var(--warning-surface-weak);
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  padding: 12px 16px 14px;
+}
+
+.mg-maintedit .mg-lifetitle {
+  color: var(--warn-t);
+}
+
+.mg-maintedit label {
+  margin-top: 8px;
+}
+
+.mg-mainteditnote {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0 0 2px;
 }
 
 /* Quiet append-only lifecycle audit list. */

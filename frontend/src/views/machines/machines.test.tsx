@@ -584,6 +584,182 @@ test('a new Machine cannot reuse an active display name of the same Area', () =>
   ).toBeNull();
 });
 
+/** Display names of the active table, in row order. */
+function activeNames(): (string | null)[] {
+  const table = document.querySelectorAll('.mg-table')[0];
+  return Array.from(table.querySelectorAll('tbody .mgname')).map(
+    (cell) => cell.textContent,
+  );
+}
+
+test('column headers sort the active table and cycle ascending → descending → unsorted', () => {
+  render(<MachinesView />);
+
+  const original = [
+    'Saw 1',
+    'Lathe 1',
+    'Lathe 2',
+    'Lathe 3',
+    'Lathe 4',
+    'Mill 1',
+    'Mill 2',
+    'Mill 3 — Horizontal Boring',
+  ];
+  expect(activeNames()).toEqual(original);
+
+  const byMachine = screen.getByRole('button', { name: 'Sort by Machine' });
+  // Unsorted headers carry the neutral both-ways arrow, no emphasis.
+  expect(byMachine).not.toHaveClass('on');
+  expect(byMachine.textContent).toContain('↕');
+
+  fireEvent.click(byMachine);
+  expect(activeNames()).toEqual([
+    'Lathe 1',
+    'Lathe 2',
+    'Lathe 3',
+    'Lathe 4',
+    'Mill 1',
+    'Mill 2',
+    'Mill 3 — Horizontal Boring',
+    'Saw 1',
+  ]);
+  expect(byMachine).toHaveClass('on');
+  expect(byMachine.textContent).toContain('↑');
+  expect(byMachine.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+
+  fireEvent.click(byMachine);
+  expect(activeNames()).toEqual([
+    'Saw 1',
+    'Mill 3 — Horizontal Boring',
+    'Mill 2',
+    'Mill 1',
+    'Lathe 4',
+    'Lathe 3',
+    'Lathe 2',
+    'Lathe 1',
+  ]);
+  expect(byMachine.textContent).toContain('↓');
+  expect(byMachine.closest('th')).toHaveAttribute('aria-sort', 'descending');
+
+  // Third click returns to the unsorted registry order.
+  fireEvent.click(byMachine);
+  expect(activeNames()).toEqual(original);
+  expect(byMachine).not.toHaveClass('on');
+  expect(byMachine.closest('th')).not.toHaveAttribute('aria-sort');
+});
+
+test('Assigned now sorts by quantity and State by derived state — ties stay in name order', () => {
+  render(<MachinesView />);
+
+  // Assigned quantities (mock): Saw 1 = 4, Lathe 2 = 4, Lathe 3 = 3,
+  // Mill 1 = 3, Mill 2 = 2, others 0.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Assigned now' }));
+  expect(activeNames()).toEqual([
+    'Lathe 1',
+    'Lathe 4',
+    'Mill 3 — Horizontal Boring',
+    'Mill 2',
+    'Lathe 3',
+    'Mill 1',
+    'Lathe 2',
+    'Saw 1',
+  ]);
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Assigned now' }));
+  expect(activeNames()).toEqual([
+    'Lathe 2',
+    'Saw 1',
+    'Lathe 3',
+    'Mill 1',
+    'Mill 2',
+    'Lathe 1',
+    'Lathe 4',
+    'Mill 3 — Horizontal Boring',
+  ]);
+
+  // Switching to another column starts a fresh ascending sort:
+  // Running first, then Idle, Maintenance last (ties by name).
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by State' }));
+  expect(activeNames()).toEqual([
+    'Lathe 2',
+    'Lathe 3',
+    'Mill 1',
+    'Mill 2',
+    'Saw 1',
+    'Lathe 1',
+    'Mill 3 — Horizontal Boring',
+    'Lathe 4',
+  ]);
+});
+
+test('the Retired Machines table sorts independently through its own headers', () => {
+  render(<MachinesView />);
+
+  /** Display names of the retired table, in row order. */
+  const retiredNames = () =>
+    Array.from(retiredTable().querySelectorAll('tbody .mgname')).map(
+      (cell) => cell.textContent,
+    );
+  // Registry order: the retired Lathe 1 (2026-02-14), then Saw 2
+  // (2025-11-03).
+  expect(retiredNames()).toEqual(['Lathe 1', 'Saw 2']);
+
+  // Ascending by retirement date puts the older retirement first.
+  const byRetired = screen.getByRole('button', {
+    name: 'Sort Retired Machines by Retired',
+  });
+  fireEvent.click(byRetired);
+  expect(retiredNames()).toEqual(['Saw 2', 'Lathe 1']);
+  expect(byRetired).toHaveClass('on');
+  expect(byRetired.closest('th')).toHaveAttribute('aria-sort', 'ascending');
+
+  fireEvent.click(byRetired);
+  expect(retiredNames()).toEqual(['Lathe 1', 'Saw 2']);
+  expect(byRetired.closest('th')).toHaveAttribute('aria-sort', 'descending');
+
+  // Third click returns to the registry order; the active table's own
+  // sort state is untouched throughout.
+  fireEvent.click(byRetired);
+  expect(retiredNames()).toEqual(['Lathe 1', 'Saw 2']);
+  expect(byRetired).not.toHaveClass('on');
+  expect(
+    screen.getByRole('button', { name: 'Sort by Machine' }),
+  ).not.toHaveClass('on');
+});
+
+test('the maintenance note and expected return date are editable from Edit Machine', () => {
+  render(<MachinesView />);
+
+  // A Machine that is NOT under maintenance shows no maintenance
+  // fields in the Edit dialog.
+  const lathe2 = openEdit('Lathe 2');
+  expect(within(lathe2).queryByLabelText(/Reason \/ note/)).toBeNull();
+  fireEvent.click(within(lathe2).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // Lathe 4 is under maintenance — the context is editable in place.
+  const edit = openEdit('Lathe 4');
+  expect(within(edit).getByLabelText(/Reason \/ note/)).toHaveValue(
+    'Spindle bearing replacement',
+  );
+  expect(within(edit).getByLabelText(/Expected return date/)).toHaveValue(
+    '2026-08-06',
+  );
+  fireEvent.change(within(edit).getByLabelText(/Reason \/ note/), {
+    target: { value: 'Spindle rebuilt — waiting on parts' },
+  });
+  fireEvent.change(within(edit).getByLabelText(/Expected return date/), {
+    target: { value: '2026-08-20' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Save changes' }));
+
+  // The row shows the updated context; the state itself is untouched.
+  const row = activeRow('Lathe 4');
+  expect(row.querySelector('.mg-state')?.textContent).toMatch(
+    /^Maintenance · /,
+  );
+  expect(row.textContent).toContain('Spindle rebuilt — waiting on parts');
+  expect(row.textContent).toContain('Expected back 2026-08-20');
+});
+
 test('the barcode label dialog renders the scannable Asset Tag barcode', () => {
   render(<MachinesView />);
 

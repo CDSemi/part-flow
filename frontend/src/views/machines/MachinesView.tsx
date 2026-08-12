@@ -46,6 +46,74 @@ type PendingDialog =
   | { kind: 'clear-maintenance'; machine: MockMachine }
   | { kind: 'reactivate'; machine: MockMachine };
 
+/** Sortable columns of the active Machines table. */
+type SortKey = 'machine' | 'state' | 'assigned' | 'asset' | 'maintenance';
+/** Sortable columns of the Retired Machines table. */
+type RetiredSortKey = 'machine' | 'retired' | 'asset' | 'notes';
+type SortDir = 'asc' | 'desc';
+
+/** State column sort order: working machines first, maintenance last. */
+const STATE_SORT_RANK = { running: 0, idle: 1, maintenance: 2 } as const;
+
+/**
+ * Stable one-column sort: equal primary values keep name order, then
+ * the input (registry) order — the same rows never swap between
+ * renders.
+ */
+function sortMachines(
+  rows: MockMachine[],
+  dir: SortDir,
+  value: (m: MockMachine) => string | number,
+): MockMachine[] {
+  return rows
+    .map((machine, index) => ({ machine, index }))
+    .sort((a, b) => {
+      const va = value(a.machine);
+      const vb = value(b.machine);
+      const primary = va < vb ? -1 : va > vb ? 1 : 0;
+      return (
+        (dir === 'asc' ? primary : -primary) ||
+        a.machine.name.localeCompare(b.machine.name) ||
+        a.index - b.index
+      );
+    })
+    .map((entry) => entry.machine);
+}
+
+/**
+ * One sortable column header: a toggle cycling ascending → descending
+ * → unsorted. The arrow names the direction; the active sort renders
+ * emphasized in the info tone. `aria-sort` lives on the owning th.
+ */
+function SortHeader({
+  label,
+  active,
+  dir,
+  onToggle,
+  ariaLabel,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onToggle: () => void;
+  /** Distinct accessible name when two tables share column labels. */
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`mg-sortbtn${active ? ' on' : ''}`}
+      aria-label={ariaLabel ?? `Sort by ${label}`}
+      onClick={onToggle}
+    >
+      {label}
+      <span className="arrow" aria-hidden="true">
+        {active ? (dir === 'asc' ? '↑' : '↓') : '↕'}
+      </span>
+    </button>
+  );
+}
+
 /** Typed-confirmation identifier: always the Asset Tag (required on
  * every Machine) — never the reusable display name. */
 function confirmIdentifier(machine: MockMachine): {
@@ -60,6 +128,30 @@ export function MachinesView() {
   const [machines, setMachines] = useState<MockMachine[]>(MOCK_MACHINES);
   const [search, setSearch] = useState('');
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  // Per-table sort: null = the registry order. Each header cycles
+  // ascending → descending → unsorted; the two tables sort
+  // independently.
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
+  const toggleSort = (key: SortKey) =>
+    setSort((current) =>
+      current?.key !== key
+        ? { key, dir: 'asc' }
+        : current.dir === 'asc'
+          ? { key, dir: 'desc' }
+          : null,
+    );
+  const [retiredSort, setRetiredSort] = useState<{
+    key: RetiredSortKey;
+    dir: SortDir;
+  } | null>(null);
+  const toggleRetiredSort = (key: RetiredSortKey) =>
+    setRetiredSort((current) =>
+      current?.key !== key
+        ? { key, dir: 'asc' }
+        : current.dir === 'asc'
+          ? { key, dir: 'desc' }
+          : null,
+    );
 
   const assignmentsById = useMemo(
     () =>
@@ -107,8 +199,49 @@ export function MachinesView() {
       .includes(query);
 
   const visible = preview === 'empty' ? [] : machines.filter(matches);
-  const active = visible.filter((m) => m.retiredOn === undefined);
-  const retired = visible.filter((m) => m.retiredOn !== undefined);
+  const unsortedActive = visible.filter((m) => m.retiredOn === undefined);
+  const unsortedRetired = visible.filter((m) => m.retiredOn !== undefined);
+
+  /** Active-table column value driving the current sort. */
+  const sortValue = (m: MockMachine, key: SortKey): string | number => {
+    switch (key) {
+      case 'machine':
+        return m.name.toLowerCase();
+      case 'state':
+        return STATE_SORT_RANK[effectiveMachineStatus(m, assignedQty(m))];
+      case 'assigned':
+        return assignedQty(m);
+      case 'asset':
+        return m.assetTag.toLowerCase();
+      case 'maintenance':
+        return m.maintenance ? 0 : 1;
+    }
+  };
+  const active = sort
+    ? sortMachines(unsortedActive, sort.dir, (m) => sortValue(m, sort.key))
+    : unsortedActive;
+
+  /** Retired-table column value driving the current sort. */
+  const retiredSortValue = (
+    m: MockMachine,
+    key: RetiredSortKey,
+  ): string | number => {
+    switch (key) {
+      case 'machine':
+        return m.name.toLowerCase();
+      case 'retired':
+        return m.retiredOn ?? '';
+      case 'asset':
+        return m.assetTag.toLowerCase();
+      case 'notes':
+        return (m.notes ?? '').toLowerCase();
+    }
+  };
+  const retired = retiredSort
+    ? sortMachines(unsortedRetired, retiredSort.dir, (m) =>
+        retiredSortValue(m, retiredSort.key),
+      )
+    : unsortedRetired;
 
   const update = (id: string, change: (m: MockMachine) => MockMachine) =>
     setMachines((current) => current.map((m) => (m.id === id ? change(m) : m)));
@@ -170,11 +303,42 @@ export function MachinesView() {
         <table className="mg-table">
           <thead>
             <tr>
-              <th>Machine</th>
-              <th className="mg-statecol">State</th>
-              <th>Assigned now</th>
-              <th className="mg-metacol">Asset</th>
-              <th className="mg-maintcol">Maintenance</th>
+              {(
+                [
+                  { key: 'machine', label: 'Machine', className: undefined },
+                  { key: 'state', label: 'State', className: 'mg-statecol' },
+                  {
+                    key: 'assigned',
+                    label: 'Assigned now',
+                    className: undefined,
+                  },
+                  { key: 'asset', label: 'Asset', className: 'mg-metacol' },
+                  {
+                    key: 'maintenance',
+                    label: 'Maintenance',
+                    className: 'mg-maintcol',
+                  },
+                ] as const
+              ).map((column) => (
+                <th
+                  key={column.key}
+                  className={column.className}
+                  aria-sort={
+                    sort?.key === column.key
+                      ? sort.dir === 'asc'
+                        ? 'ascending'
+                        : 'descending'
+                      : undefined
+                  }
+                >
+                  <SortHeader
+                    label={column.label}
+                    active={sort?.key === column.key}
+                    dir={sort?.key === column.key ? sort.dir : 'asc'}
+                    onToggle={() => toggleSort(column.key)}
+                  />
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -204,10 +368,38 @@ export function MachinesView() {
           <table className="mg-table">
             <thead>
               <tr>
-                <th>Machine</th>
-                <th>Retired</th>
-                <th className="mg-metacol">Asset</th>
-                <th>Notes</th>
+                {(
+                  [
+                    { key: 'machine', label: 'Machine', className: undefined },
+                    { key: 'retired', label: 'Retired', className: undefined },
+                    { key: 'asset', label: 'Asset', className: 'mg-metacol' },
+                    { key: 'notes', label: 'Notes', className: undefined },
+                  ] as const
+                ).map((column) => (
+                  <th
+                    key={column.key}
+                    className={column.className}
+                    aria-sort={
+                      retiredSort?.key === column.key
+                        ? retiredSort.dir === 'asc'
+                          ? 'ascending'
+                          : 'descending'
+                        : undefined
+                    }
+                  >
+                    <SortHeader
+                      label={column.label}
+                      ariaLabel={`Sort Retired Machines by ${column.label}`}
+                      active={retiredSort?.key === column.key}
+                      dir={
+                        retiredSort?.key === column.key
+                          ? retiredSort.dir
+                          : 'asc'
+                      }
+                      onToggle={() => toggleRetiredSort(column.key)}
+                    />
+                  </th>
+                ))}
                 <th>
                   <span className="mg-visuallyquiet">Reactivate</span>
                 </th>
@@ -766,6 +958,8 @@ function MachineEditDialog({
     serialNumber: machine?.serialNumber ?? '',
     installedOn: machine?.installedOn ?? '',
     notes: machine?.notes ?? '',
+    maintenanceNote: machine?.maintenance?.note ?? '',
+    maintenanceReturn: machine?.maintenance?.expectedReturn ?? '',
   };
   const [name, setName] = useState(initial.name);
   const [area, setArea] = useState<AreaKey>(initial.area);
@@ -774,6 +968,15 @@ function MachineEditDialog({
   const [serialNumber, setSerialNumber] = useState(initial.serialNumber);
   const [installedOn, setInstalledOn] = useState(initial.installedOn);
   const [notes, setNotes] = useState(initial.notes);
+  // Maintenance context (existing Machine under maintenance only):
+  // the note and expected return date are editable here — the state
+  // itself is only switched through the existing dialogs (§12.2).
+  const [maintenanceNote, setMaintenanceNote] = useState(
+    initial.maintenanceNote,
+  );
+  const [maintenanceReturn, setMaintenanceReturn] = useState(
+    initial.maintenanceReturn,
+  );
   const [error, setError] = useState<string | null>(null);
   // New-Machine flow (v17 pattern): form → `Confirm new Machine`
   // summary → final add confirmation. Nothing is added before the last
@@ -797,7 +1000,9 @@ function MachineEditDialog({
     model !== initial.model ||
     serialNumber !== initial.serialNumber ||
     installedOn !== initial.installedOn ||
-    notes !== initial.notes;
+    notes !== initial.notes ||
+    maintenanceNote !== initial.maintenanceNote ||
+    maintenanceReturn !== initial.maintenanceReturn;
 
   // The Asset Tag shown in the dialog: the Machine's own on edit, the
   // next tag to assign on create (deterministic against the current
@@ -850,6 +1055,17 @@ function MachineEditDialog({
         serialNumber: serialNumber.trim() || undefined,
         installedOn: installedOn || undefined,
         notes: notes.trim() || undefined,
+        // Update the maintenance context in place — `since` and the
+        // Maintenance state itself never change here.
+        ...(machine?.maintenance
+          ? {
+              maintenance: {
+                ...machine.maintenance,
+                note: maintenanceNote.trim() || undefined,
+                expectedReturn: maintenanceReturn || undefined,
+              },
+            }
+          : {}),
       },
     };
   };
@@ -995,6 +1211,34 @@ function MachineEditDialog({
             placeholder="e.g. Coolant system upgraded 2024"
           />
         </Field>
+        {machine?.maintenance ? (
+          <div className="mg-maintedit">
+            <div className="mg-lifetitle">Maintenance</div>
+            <p className="mg-mainteditnote">
+              This Machine is under Maintenance. The reason and expected return
+              date can be updated here — Maintenance itself is switched off from
+              the Machines list.
+            </p>
+            <div className="mg-grid2">
+              <Field label="Reason / note (optional)">
+                <input
+                  className="field"
+                  value={maintenanceNote}
+                  onChange={(e) => setMaintenanceNote(e.target.value)}
+                  placeholder="e.g. Spindle bearing replacement"
+                />
+              </Field>
+              <Field label="Expected return date (optional)">
+                <input
+                  className="field"
+                  type="date"
+                  value={maintenanceReturn}
+                  onChange={(e) => setMaintenanceReturn(e.target.value)}
+                />
+              </Field>
+            </div>
+          </div>
+        ) : null}
         {error ? (
           <div className="err" role="alert">
             {error}
