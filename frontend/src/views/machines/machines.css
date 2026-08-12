@@ -594,10 +594,38 @@
   column-gap: 12px;
 }
 
+/* Three-column form grid (New/Edit Machine): row 1 — Display name
+   (spanning two columns on edit; name + Area on new) with Installed
+   date last; row 2 — Manufacturer, Model, Serial number. The date
+   column is exactly one metadata-column wide. */
+.mg-form .mg-grid3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  column-gap: 12px;
+}
+
+.mg-form .mg-grid3 .mg-span2 {
+  grid-column: span 2;
+  min-width: 0;
+}
+
 @media (max-width: 640px) {
-  .mg-form .mg-grid2 {
+  .mg-form .mg-grid2,
+  .mg-form .mg-grid3 {
     grid-template-columns: 1fr;
   }
+
+  .mg-form .mg-grid3 .mg-span2 {
+    grid-column: auto;
+  }
+}
+
+/* One explicit shared control height: the native date input's internal
+   editor renders taller than a text field with identical padding —
+   pinning every .field control (inputs and selects alike) to the same
+   height keeps all form rows on one baseline. */
+.mg-form .field {
+  height: 47px;
 }
 
 .mg-form .err {

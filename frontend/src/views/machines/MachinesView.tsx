@@ -1216,17 +1216,41 @@ function MachineEditDialog({
         onOpenLabel={() => setLabelOpen(true)}
       />
       <div className="mg-form">
+        {/* First row on the three-column form grid: Display name (with
+            the Area select on a new Machine), Installed date last — the
+            date column matches the width of one metadata column below.
+            The native date input shows the browser's own format hint —
+            a placeholder would never render. */}
         {machine ? (
-          <Field label="Display name">
-            <input
-              className="field"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Lathe 5"
-            />
-          </Field>
+          <div className="mg-grid3">
+            <div className="mg-span2">
+              <Field label="Display name">
+                <input
+                  className="field"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Lathe 5"
+                />
+              </Field>
+            </div>
+            <Field
+              label={
+                <>
+                  Installed date{' '}
+                  <span className="field-optional">(optional)</span>
+                </>
+              }
+            >
+              <input
+                className="field"
+                type="date"
+                value={installedOn}
+                onChange={(e) => setInstalledOn(e.target.value)}
+              />
+            </Field>
+          </div>
         ) : (
-          <div className="mg-grid2">
+          <div className="mg-grid3">
             <Field label="Display name">
               <input
                 className="field"
@@ -1243,9 +1267,24 @@ function MachineEditDialog({
                 onChange={setArea}
               />
             </div>
+            <Field
+              label={
+                <>
+                  Installed date{' '}
+                  <span className="field-optional">(optional)</span>
+                </>
+              }
+            >
+              <input
+                className="field"
+                type="date"
+                value={installedOn}
+                onChange={(e) => setInstalledOn(e.target.value)}
+              />
+            </Field>
           </div>
         )}
-        <div className="mg-grid2">
+        <div className="mg-grid3">
           <Field
             label={
               <>
@@ -1286,23 +1325,6 @@ function MachineEditDialog({
               value={serialNumber}
               onChange={(e) => setSerialNumber(e.target.value)}
               placeholder="e.g. Q25-90412"
-            />
-          </Field>
-          <Field
-            label={
-              <>
-                Installed date{' '}
-                <span className="field-optional">(optional)</span>
-              </>
-            }
-          >
-            {/* Native date input — the browser shows its own date
-                format hint, a placeholder would never render. */}
-            <input
-              className="field"
-              type="date"
-              value={installedOn}
-              onChange={(e) => setInstalledOn(e.target.value)}
             />
           </Field>
         </div>
