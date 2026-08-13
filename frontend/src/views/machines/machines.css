@@ -332,9 +332,9 @@
   margin-top: 26px;
 }
 
-/* The explanation stays deliberately dim reference reading — the same
-   full-width tag + single-inline-content block language as the shared
-   DEV notice, in the neutral faint tone. */
+/* The explanation stays quiet reference reading — the same full-width
+   tag + single-inline-content block language as the shared DEV
+   notice, one step brighter than faint (the muted reading tone). */
 .mg-retirednote {
   display: flex;
   align-items: baseline;
@@ -343,7 +343,7 @@
   padding: 7px 12px;
   border: 1px dashed var(--border);
   border-radius: 9px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1238,16 +1238,13 @@
   }
 }
 
-/* Quiet mono chip for scanned identifiers (barcodes) in summaries. */
-.mg-chip {
-  display: inline-block;
+/* Quiet mono barcode value in summaries: plain verification text in
+   the muted reading tone — never a badge. */
+.mg-barcodeval {
   font-family: var(--mono), monospace;
   font-size: 12px;
   font-weight: 650;
   color: var(--muted);
-  background: var(--chip);
-  border-radius: 6px;
-  padding: 2px 8px;
 }
 
 .mg-note {

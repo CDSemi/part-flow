@@ -267,9 +267,8 @@ export function MachinesView() {
     <section className="mg" aria-label="Machines">
       <h1>Machines</h1>
       <p className="mg-sub">
-        Operational Machine monitoring, maintenance, and configuration for
-        authorized production roles. Running and idle are derived from the
-        assigned quantity — maintenance is the only state set by hand.
+        Monitor Machine status, assignments, maintenance, and configuration.
+        Running and Idle are based on assigned quantity.
       </p>
       <DevNotice>
         Development preview — Machines shown are sample data and changes affect
@@ -441,12 +440,10 @@ export function MachinesView() {
           <p className="mg-retirednote" role="note">
             <span className="mg-retirednote-tag">Note</span>
             <span className="mg-retirednote-content">
-              Retired Machines stay visible here and in history — they accept no
-              new work and never appear in assignment choices. A replacement
-              Machine may reuse the display name of the floor position; the
-              asset tag keeps the physical Machines apart. Reactivate returns
-              the SAME physical machine to service on the same record — a
-              different physical machine always gets a new Machine record.
+              Retired Machines remain in history and cannot receive new work or
+              assignments. Reactivate only the same physical Machine.
+              Replacements may reuse the display name but require a new Machine
+              record and Asset Tag.
             </span>
           </p>
         </div>
@@ -810,9 +807,10 @@ function SummaryList({ rows }: { rows: SummaryRow[] }) {
   );
 }
 
-/** Quiet mono chip for scanned identifiers (barcodes) in summaries. */
-function BarcodeChip({ value }: { value: string }) {
-  return <span className="mg-chip">{value}</span>;
+/** Quiet mono barcode value in summaries — the muted reading tone,
+ * plain text (verification text, never a badge). */
+function BarcodeValue({ value }: { value: string }) {
+  return <span className="mg-barcodeval">{value}</span>;
 }
 
 /**
@@ -1672,7 +1670,9 @@ function MachineEditDialog({
               {
                 label: 'Barcode',
                 value: (
-                  <BarcodeChip value={machineBarcode(summaryRecord.assetTag)} />
+                  <BarcodeValue
+                    value={machineBarcode(summaryRecord.assetTag)}
+                  />
                 ),
                 emphasis: 'secondary',
               },
@@ -1767,7 +1767,7 @@ function MachineEditDialog({
               {
                 label: 'Barcode',
                 value: (
-                  <BarcodeChip
+                  <BarcodeValue
                     value={machineBarcode(builtRecord.machine.assetTag)}
                   />
                 ),
@@ -2159,7 +2159,7 @@ function ReactivateMachineDialog({
             },
             {
               label: 'Barcode',
-              value: <BarcodeChip value={machineBarcode(machine.assetTag)} />,
+              value: <BarcodeValue value={machineBarcode(machine.assetTag)} />,
               emphasis: 'secondary',
             },
             {
