@@ -332,20 +332,22 @@
   margin-top: 26px;
 }
 
-/* The explanation stays quiet reference reading — the same full-width
-   tag + single-inline-content block language as the shared DEV
-   notice, one step brighter than faint (the muted reading tone). */
+/* The explanation shares the Work Orders page-note tone (`.wo-note`):
+   the info surface, border and text tone — informational reference
+   reading, full width, with the small NOTE tag leading the single
+   inline content flow. */
 .mg-retirednote {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding: 7px 12px;
-  border: 1px dashed var(--border);
-  border-radius: 9px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 12px 16px;
+  background: var(--info-surface-weak);
+  border: 1px solid var(--info-border);
+  border-radius: 12px;
+  color: var(--info-t);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .mg-retirednote .mg-retirednote-tag {
@@ -354,8 +356,8 @@
   font-weight: 800;
   letter-spacing: 1.2px;
   text-transform: uppercase;
-  color: var(--muted);
-  border: 1px solid var(--border);
+  color: var(--info-t);
+  border: 1px solid var(--info-border);
   border-radius: 5px;
   padding: 1px 6px;
 }
