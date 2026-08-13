@@ -137,25 +137,18 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     label: 'Operations',
     subtitle: 'Work performed within an Area (§8.5)',
   },
-  // Machines and Planned Routes (Route Templates) are production
-  // master data owned by authorized production roles — they live in
-  // Management → Machines / Planned Routes, never as a duplicate
-  // Administration screen. Administration stays focused on system
-  // administration (users, roles, Scan Stations, policies).
+  // Machines, Planned Routes (Route Templates) and PartNumber master
+  // metadata are production master data owned by authorized production
+  // roles — they live in Management → Machines / Planned Routes / Part
+  // Numbers, never as a duplicate Administration screen. Administration
+  // stays focused on system administration (users, roles, Scan
+  // Stations, policies).
   {
     id: 'workers',
     phase: 'full',
     group: 'Organization',
     label: 'Workers',
     subtitle: 'Workers and badge barcodes',
-  },
-  {
-    id: 'part-numbers',
-    phase: 'full',
-    group: 'Organization',
-    label: 'PartNumbers',
-    subtitle:
-      'PN master metadata records — hard-delete junk/test or unwanted master metadata; production data and history are never touched and keep displaying the canonical PN; a master record can be recreated later for the same PN',
   },
   {
     id: 'scan-stations',

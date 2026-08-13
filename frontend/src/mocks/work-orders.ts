@@ -1,50 +1,23 @@
 import type { MockWorkOrder } from '../views/view-models';
 
+import { pnBarcode } from '../views/scan-station/barcode';
 import { isoDateIn } from './mock-time';
+import { MOCK_PART_NUMBERS } from './part-numbers';
 
 // Existing PartNumber master-metadata catalog for the Add Part search
-// step and the optional barcode entry path (mock only). PN barcodes
-// carry the PN itself — `PF:PN:<part-number>` — never an opaque stable
-// id; catalog PNs are canonical (uppercase, whitespace-free), so the
-// PN string itself is the identity and lookup is direct equality.
+// step and the optional barcode entry path (mock only), derived from
+// the ONE master-record sample registry (mocks/part-numbers.ts) so the
+// Part Numbers page and every catalog consumer stay aligned. PN
+// barcodes carry the PN itself — `PF:PN:<part-number>` — never an
+// opaque stable id; catalog PNs are canonical (uppercase,
+// whitespace-free), so the PN string itself is the identity and lookup
+// is direct equality.
 export const MOCK_PN_CATALOG: { pn: string; name: string; barcode: string }[] =
-  [
-    {
-      pn: '0455-20-0118-03',
-      name: 'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900',
-      barcode: 'PF:PN:0455-20-0118-03',
-    },
-    {
-      pn: '78-04-0031',
-      name: 'HOUSING, BEARING CAST AL 356-T6, MACHINED',
-      barcode: 'PF:PN:78-04-0031',
-    },
-    {
-      pn: '309-127',
-      name: 'PIN, DOWEL 1/4 X 1.00 SS',
-      barcode: 'PF:PN:309-127',
-    },
-    {
-      pn: '214-406',
-      name: 'SPACER, THREADED 10-32, BRASS',
-      barcode: 'PF:PN:214-406',
-    },
-    {
-      pn: '118-052',
-      name: 'MOTOR, GEAR STEPPER 7.2T',
-      barcode: 'PF:PN:118-052',
-    },
-    {
-      pn: '2027-60-8114-00',
-      name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125',
-      barcode: 'PF:PN:2027-60-8114-00',
-    },
-    {
-      pn: '142-260',
-      name: 'PLATE, TOP COVER ALUM 6061-T6',
-      barcode: 'PF:PN:142-260',
-    },
-  ];
+  MOCK_PART_NUMBERS.map((record) => ({
+    pn: record.pn,
+    name: record.name ?? '',
+    barcode: pnBarcode(record.pn),
+  }));
 
 /** Catalog lookup by canonical PN (the PN string is the identity). */
 export function catalogPartNumber(

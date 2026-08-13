@@ -221,9 +221,11 @@ test('a Management sub view renders directly from its URL', async () => {
   ).toBeInTheDocument();
 });
 
-test('Management exposes the six sub views in the approved order', async () => {
+test('Management exposes the seven sub views in the approved order', async () => {
   renderAt('/management/area-board');
 
+  // Part Numbers sits next to last; Machines last, directly after it
+  // (GUI_DESIGN §1.1).
   const nav = await screen.findByRole('navigation', {
     name: 'Management sub views',
   });
@@ -233,6 +235,7 @@ test('Management exposes the six sub views in the approved order', async () => {
     'PN Tracking',
     'Priority',
     'Planned Routes',
+    'Part Numbers',
     'Machines',
   ]);
 });
@@ -278,6 +281,17 @@ test('the Machines management view renders from its URL', async () => {
     await screen.findByRole('region', { name: 'Machines' }),
   ).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Machines' })).toBeInTheDocument();
+});
+
+test('the Part Numbers management view renders from its URL', async () => {
+  renderAt('/management/part-numbers');
+
+  expect(
+    await screen.findByRole('region', { name: 'Part Numbers' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('heading', { name: 'Part Numbers' }),
+  ).toBeInTheDocument();
 });
 
 test('the Planned Routes management view renders from its URL', async () => {

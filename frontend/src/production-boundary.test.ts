@@ -63,13 +63,15 @@ test('development builds expose the mock views through the dev-only registry', (
   // exist and cover every application view; production builds compile
   // the registry to null and render the not-connected state instead.
   expect(DEV_MOCK_VIEWS).not.toBeNull();
-  // The nine approved GUI views (dev-views.ts) — Machines and Planned
-  // Routes joined the registry with the v14/v15 Management screens.
+  // The ten approved GUI views (dev-views.ts) — Machines and Planned
+  // Routes joined the registry with the v14/v15 Management screens,
+  // Part Numbers with the post-v18 master-metadata screen.
   expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(
     [
       'administration',
       'area-board',
       'machines',
+      'part-numbers',
       'planned-routes',
       'priority',
       'production-board',

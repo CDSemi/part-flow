@@ -1036,6 +1036,14 @@ tr.hotrow2 td:first-child{border-left:5px solid var(--a-external)}
 .tk-close:hover{color:var(--text);border-color:var(--border2);background:var(--panel2)}
 .tk-img{width:64px;height:64px;border-radius:12px;background:var(--panel2);border:1px solid var(--border);
   display:flex;align-items:center;justify-content:center;font-size:24px;flex:none}
+/* Part Numbers list reuses the ONE shared PN image placeholder above —
+   never a second default image — in a smaller table-row size */
+.tk-img.sm{width:44px;height:44px;border-radius:10px;font-size:19px}
+.pnm-pn{font-family:var(--mono);font-weight:750}
+.pnm-name{color:var(--muted);font-size:13px;line-height:1.5}
+/* Shared muted mono barcode reading tone (identification data, never a
+   badge) — mirrors the application-wide .barcodeval */
+.barcodeval{font-family:var(--mono);font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .tk-right h2{font-family:var(--mono);font-size:23px}
 .tk-right .jsub{color:var(--muted);font-size:13px;margin:3px 0 0;line-height:1.6}
 .tk-right .jsub b{font-family:var(--mono);color:var(--text);font-weight:650}
@@ -1407,11 +1415,12 @@ body.light{color-scheme:light}
 <nav id="mgmtnav">
   <span class="subgrp">Management</span>
   <button class="subbtn" data-v="area" onclick="showView('area')">Area Board</button>
-  <button class="subbtn" data-v="machines" onclick="showView('machines')">Machines</button>
-  <button class="subbtn" data-v="track" onclick="showView('track')">Tracking</button>
   <button class="subbtn" data-v="wo" onclick="showView('wo')">Work Orders</button>
-  <button class="subbtn" data-v="routes" onclick="showView('routes')">Planned Routes</button>
+  <button class="subbtn" data-v="track" onclick="showView('track')">Tracking</button>
   <button class="subbtn" data-v="priority" onclick="showView('priority')">Priority</button>
+  <button class="subbtn" data-v="routes" onclick="showView('routes')">Planned Routes</button>
+  <button class="subbtn" data-v="pn" onclick="showView('pn')">Part Numbers</button>
+  <button class="subbtn" data-v="machines" onclick="showView('machines')">Machines</button>
 </nav>
 
 <!-- ==================== SCAN STATION (v10 — PN-centric, one-shot wizards + DONE) ==================== -->
@@ -2129,6 +2138,19 @@ body.light{color-scheme:light}
   <div id="rt-tablewrap"></div>
 </section>
 
+<!-- ==================== PART NUMBERS (Management master data, post-v18) ==================== -->
+<section id="view-pn" class="view">
+  <h1>Part Numbers</h1>
+  <div class="mg-sub">PartNumber master metadata for authorized production roles — image, name/description, informational revision, and ERP mapping. The canonical PN string itself is the production identity; a PN stays usable with or without a record here.</div>
+  <div class="mg-toolbar">
+    <input id="pnmsearch" type="search" placeholder="Search: PN, name, revision, ERP id…" aria-label="Search Part Numbers" oninput="renderPartNumbers()">
+    <div class="spacer"></div>
+    <button class="btn primary" onclick="mgmtMockAction('New Part Number')">+ New Part Number</button>
+  </div>
+  <div id="pnm-tablewrap"></div>
+  <div class="notice" style="margin-top:12px">Deleting a Part Number record removes only this metadata. Production quantities, Work Order demand and Movement history are never touched and keep showing the PN; a record can be created again later for the same PN.</div>
+</section>
+
 <!-- ==================== PRIORITY MANAGEMENT ==================== -->
 <section id="view-priority" class="view">
   <div class="pr-head">
@@ -2208,7 +2230,6 @@ body.light{color-scheme:light}
       <button class="active" id="adnav-areas" onclick="adminShow('areas')">Areas</button>
       <button>Operations</button>
       <button>Workers</button>
-      <button id="adnav-partnumbers" onclick="adminShow('partnumbers')">PartNumbers</button>
       <div class="grp">Production setup</div>
       <button>Scan Stations</button>
       <button>Barcode configuration</button>
@@ -2246,16 +2267,12 @@ body.light{color-scheme:light}
         </tbody>
       </table>
       <div class="notice">Area <b>identity and barcode are stable</b> — display name, description, color and icon may change without affecting historical Movements. An Area supporting multiple Operations (e.g. External) requires Operation resolution or confirmation at scan time. Deactivating an Area that still holds quantity is blocked with an explanation. <b>Machine assignment follows from the Area's Machines</b>: no Machines → direct processing (Machine = NULL); one or more Machines → queue → one-shot assignment — never auto-assignment, even with a single Machine.</div>
-      <div class="notice" style="margin-top:10px">Departments, Areas, Operations, Scan Stations and barcode configuration become configurable in the <b>minimum environment setup</b> completed before the real production workflows run. Machines and Planned Routes are managed in <b>Management</b> by authorized production roles — Administration keeps no duplicate screen for them. Everything else — Users and roles, authorization, worker-session policies, correction permissions, retention/archive/purge, general settings — arrives with the later <b>full Administration</b> phase.</div>
+      <div class="notice" style="margin-top:10px">Departments, Areas, Operations, Scan Stations and barcode configuration become configurable in the <b>minimum environment setup</b> completed before the real production workflows run. Machines, Planned Routes and Part Numbers are managed in <b>Management</b> by authorized production roles — Administration keeps no duplicate screen for them. Everything else — Users and roles, authorization, worker-session policies, correction permissions, retention/archive/purge, general settings — arrives with the later <b>full Administration</b> phase.</div>
       </div>
 
-      <!-- v8: PartNumbers maintenance — specification placeholder (Phase 2) -->
-      <div id="admin-partnumbers" style="display:none">
-        <div class="ad-top">
-          <div><h1>PartNumbers</h1><div class="sub">PN master records — archive / soft-delete maintenance</div></div>
-        </div>
-        <div class="notice"><b>Specification placeholder (Phase 2).</b> The administrative delete <b>hard-deletes the PN master metadata record</b>: production data and history are never touched — historical surfaces keep displaying the canonical PN normally, with only master-derived metadata absent (see Tracking) — and a master record can be created again later for the same canonical PN. PN identity is the canonical PN string itself: case-insensitive input, normalized to UPPERCASE, surrounding whitespace trimmed, internal whitespace rejected.</div>
-      </div>
+      <!-- post-v18: PartNumber master maintenance moved to Management →
+           Part Numbers (production master data, like Machines and
+           Planned Routes) — Administration keeps no duplicate screen -->
 
       <!-- v8: History archival & purge — specification placeholder (Phase 2) -->
       <div id="admin-archival" style="display:none">
@@ -2273,9 +2290,10 @@ body.light{color-scheme:light}
 /* ================= Mockup navigation =================
    Top level: Scan Station · Production Board · Management · Administration.
    'mgmt' is a container view — it opens its last-used sub view and shows
-   the Management sub-nav (Area Board, Machines, Tracking, Work Orders,
-   Planned Routes, Priority). */
-const MGMT_SUBS=['area','machines','track','wo','routes','priority'];
+   the Management sub-nav (Area Board, Work Orders, Tracking, Priority,
+   Planned Routes, Part Numbers, Machines — Part Numbers next to last,
+   Machines last, post-v18). */
+const MGMT_SUBS=['area','wo','track','priority','routes','pn','machines'];
 let mgmtLast='area';                       // last-used Management sub view (session only)
 function showView(v){
   if(v==='mgmt') v=mgmtLast;               // Management opens its last-used sub view
@@ -2297,6 +2315,7 @@ function showView(v){
   if(v==='scan') focusScan();
   if(v==='area') renderArea();
   if(v==='machines') renderMachines();
+  if(v==='pn') renderPartNumbers();
   if(v==='routes') renderRoutes();
   if(v==='wo') renderWOList();
   if(v==='board') alignBoardLoc();
@@ -3942,6 +3961,42 @@ const MG_RETIRED=[
 const MG_STATE_LABEL={running:'Running',idle:'Idle',maintenance:'Maintenance'};
 /* mockup-only stub for the configuration dialogs of the application */
 function mgmtMockAction(label){ toast('ℹ','Mockup — “'+label+'” opens its dialog in the application'); }
+
+/* ============ Part Numbers (Management master data, post-v18) ============
+   PartNumber master metadata records — the canonical PN string is the
+   identity, the record only optional metadata. TEST-SCRAP-PLATE (see
+   Tracking) deliberately has NO record here: its junk/test master was
+   hard-deleted; production history keeps showing the canonical PN. */
+const PNM_RECORDS=[
+  {pn:'2027-60-8114-00',name:'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125, LASER CUT W/ CSK HOLES, DEBURR ALL EDGES',rev:'C',erp:'ERP-PN-40412'},
+  {pn:'0455-20-0118-03',name:'SHAFT, DRIVE 0.750 DIA X 12.500, 17-4PH H900, GRIND 32 RA',rev:'B',erp:'ERP-PN-38855'},
+  {pn:'78-04-0031',name:'HOUSING, BEARING CAST AL 356-T6, MACHINED',rev:'A',erp:'ERP-PN-31207'},
+  {pn:'309-127',name:'PIN, DOWEL 1/4 X 1.00 SS',rev:'',erp:'ERP-PN-29051'},
+  {pn:'214-406',name:'SPACER, THREADED 10-32, BRASS',rev:'',erp:''},
+  {pn:'118-052',name:'MOTOR, GEAR STEPPER 7.2T',rev:'D',erp:'ERP-PN-27114'},
+  {pn:'142-260',name:'PLATE, TOP COVER ALUM 6061-T6',rev:'A',erp:''}
+];
+function renderPartNumbers(){
+  const raw=(document.getElementById('pnmsearch').value||'').trim();
+  const q=raw.toLowerCase();
+  const rows=PNM_RECORDS.filter(r=>!q||(r.pn+' '+r.name+' '+r.rev+' '+r.erp).toLowerCase().includes(q));
+  /* The image column reuses the ONE shared PN image placeholder from
+     Tracking → Part Details (.tk-img) — no second default image; the
+     barcode is the derived PF:PN:<part-number>, never editable. The
+     COMPLETE row opens Edit Part Number — the PN-cell `.rowbtn` is the
+     keyboard/SR entry (activation bubbles to the row handler). */
+  document.getElementById('pnm-tablewrap').innerHTML= rows.length?
+    '<table class="mg-table"><thead><tr><th>Image</th><th>Part Number</th><th>Name / Description</th><th>Revision</th><th>ERP ID</th><th>Barcode</th></tr></thead><tbody>'+
+    rows.map(r=>'<tr class="selrow" onclick="mgmtMockAction(\'Edit Part Number\')">'+
+      '<td><span class="tk-img sm" aria-hidden="true">🔩</span></td>'+
+      '<td><button class="rowbtn" aria-label="Edit '+r.pn+'"><span class="pnm-pn">'+r.pn+'</span></button></td>'+
+      '<td class="pnm-name">'+r.name+'</td>'+
+      '<td>'+(r.rev||'—')+'</td>'+
+      '<td class="mono">'+(r.erp||'—')+'</td>'+
+      '<td><span class="barcodeval">PF:PN:'+r.pn+'</span></td>'+
+      '</tr>').join('')+'</tbody></table>':
+    '<div class="notice">No Part Numbers match “'+raw+'”.</div>';
+}
 function mgAssignments(m){
   const out=[];
   AB_CARDS.filter(c=>c.area===m.area).forEach(c=>{
@@ -4941,7 +4996,7 @@ function confirmRelease(){
 
 /* ================= Administration (v8): section switching ================= */
 function adminShow(id){
-  ['areas','partnumbers','archival'].forEach(k=>{
+  ['areas','archival'].forEach(k=>{
     const panel=document.getElementById('admin-'+k);
     if(panel) panel.style.display=k===id?'block':'none';
     const btn=document.getElementById('adnav-'+k);
@@ -4963,6 +5018,7 @@ setInterval(pbTick,1000);
 
 renderArea();
 renderMachines();
+renderPartNumbers();
 renderRoutes();
 ssShowSelector();
 </script>

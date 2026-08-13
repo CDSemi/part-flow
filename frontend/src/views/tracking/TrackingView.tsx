@@ -9,6 +9,7 @@ import {
   RouteModeChip,
   TypeChip,
 } from '../../components/indicators';
+import { PnImage } from '../../components/PnImage';
 import {
   EmptyState,
   ErrorState,
@@ -305,9 +306,9 @@ function TrackingDetail({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div className="tk-pnrow">
-        <div className="tk-img" aria-hidden="true">
-          🔩
-        </div>
+        {/* The ONE shared PN image presentation (PnImage) — the same
+            default placeholder as Management → Part Numbers. */}
+        <PnImage pn={d.pn} />
         <div>
           <h2>{d.pn}</h2>
           <div className="jsub">

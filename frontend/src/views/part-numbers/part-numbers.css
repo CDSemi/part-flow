@@ -1,0 +1,490 @@
+/* Management → Part Numbers — PartNumber master metadata maintenance
+   (GUI_DESIGN §14). The presentation follows the Machines family
+   (views/machines/machines.css): page header, toolbar, table, dialog,
+   identity header, label card and Danger Zone share the same idioms. */
+.pnm {
+  padding: 22px 24px;
+  flex: 1 0 auto;
+}
+
+.pnm h1 {
+  font-size: 21px;
+}
+
+.pnm .pnm-sub {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 3px;
+  max-width: 900px;
+  line-height: 1.55;
+}
+
+.pnm-toolbar {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 14px 0;
+}
+
+.pnm-toolbar input[type='search'] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13.5px;
+  padding: 9px 12px;
+  color: var(--text);
+  outline: none;
+  min-height: 42px;
+  min-width: 280px;
+}
+
+.pnm-toolbar input[type='search']:focus {
+  border-color: var(--info-t);
+}
+
+.pnm-toolbar .spacer {
+  flex: 1;
+}
+
+.pnm-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.pnm-table th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.pnm-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 14px;
+  vertical-align: middle;
+}
+
+.pnm-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Whole-row activation: the complete row opens Edit Part Number; the
+   PN-cell button is the keyboard and screen-reader entry point —
+   the same pattern as the Machines and Tracking rows. */
+.pnm-table tr.selrow {
+  cursor: pointer;
+}
+
+.pnm-table tr.selrow:hover td {
+  background: var(--row-hover);
+}
+
+.pnm-table .rowbtn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0;
+}
+
+.pnm-table .rowbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.pnm-table th.pnm-imgcol,
+.pnm-table td.pnm-imgcol {
+  width: 1%;
+}
+
+.pnm-pn {
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+}
+
+.pnm-name {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.pnm-meta {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Dialog heading row: the title and the unsaved-changes badge share
+   one line (the Machines idiom). */
+.pnm-dlghead {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.pnm-dlghead h3 {
+  margin-bottom: 0;
+}
+
+.pnm-dirty {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--warn-t);
+}
+
+/* Read-only Part Number identity header (Edit dialog): the canonical
+   PN and the barcode derived from it lead the dialog — calm values on
+   a quiet panel, never inputs. */
+.pnm-idhead {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 28px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+
+.pnm-idhead .idcol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pnm-idhead .idlabel {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  font-weight: 800;
+  color: var(--faint);
+}
+
+.pnm-idhead .idvalue {
+  font-family: var(--mono), monospace;
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.pnm-idhead .idvalue.tag {
+  font-size: 17px;
+}
+
+/* Info-toned label entry — the same inviting-utility treatment as the
+   Machines barcode-label action. */
+.pnm-labelbtn {
+  align-self: center;
+  border: 1px solid var(--info-border);
+  border-radius: 9px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--info-t);
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.pnm-labelbtn:hover {
+  background: var(--info-surface);
+}
+
+.pnm-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin: 12px 0 4px;
+}
+
+.pnm-form .pnm-grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 12px;
+}
+
+.pnm-form .field {
+  height: 47px;
+}
+
+.pnm-form .err {
+  color: var(--err-t);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin: 2px 0 8px;
+}
+
+.pnm-form .pnm-fieldcol {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Canonical-PN confirmation under the PN field: success text tone
+   with a ✓ marker — color is never the only distinction. */
+.pnm-fieldok {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ok-t);
+  line-height: 1.5;
+  margin: 2px 0 8px;
+}
+
+.pnm-form .pnm-fieldcol .err,
+.pnm-form .pnm-fieldcol .pnm-fieldok {
+  margin: -6px 0 8px;
+}
+
+/* Image block: the current image (or the ONE shared default
+   placeholder) with upload/change/remove actions beside it. */
+.pnm-imgblock {
+  margin-top: 12px;
+}
+
+.pnm-imglabel {
+  display: block;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.pnm-imgrow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.pnm-imgactions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+/* Upload is a real file input wrapped by its visible action label. */
+.pnm-upload {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border2);
+  border-radius: 9px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--panel2);
+  cursor: pointer;
+}
+
+.pnm-upload:hover {
+  background: var(--chip);
+}
+
+.pnm-upload input[type='file'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.pnm-upload:focus-within {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.pnm-imgremove {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  background: none;
+}
+
+.pnm-imgremove:hover {
+  color: var(--text);
+  background: var(--panel2);
+}
+
+.pnm-imghelp {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+  margin: 8px 0 0;
+  max-width: 60ch;
+}
+
+/* PN barcode label: a light, printable label card — always a white
+   surface with black ink so the printed label scans in both UI
+   themes. The PN text is the label's primary text beneath the
+   barcode; the full scanned value stays the quiet verification line. */
+.pnm-label {
+  background: #fff;
+  color: #111;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px 12px;
+  margin: 6px 0 2px;
+  text-align: center;
+}
+
+.pnm-label .lbarcode {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  height: 64px;
+  margin: 0 auto;
+  fill: #111;
+}
+
+.pnm-label .lpn {
+  font-family: var(--mono), monospace;
+  font-size: 21px;
+  font-weight: 850;
+  line-height: 1.25;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.pnm-label .lvalue {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  color: #555;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .pnm-labelprint,
+  .pnm-labelprint * {
+    visibility: visible;
+  }
+
+  .pnm-labelprint {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 90mm;
+    border: none;
+    margin: 0;
+  }
+}
+
+/* Danger Zone (Edit dialog): the Machines presentation — deletion is
+   scoped to the metadata record and the zone states that in place. */
+.pnm-dangerzone {
+  margin-top: 20px;
+  border: 1px solid var(--error-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.pnm-dangerzone .dz-title {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--err-t);
+  background: var(--error-surface-weak);
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--error-border);
+}
+
+.pnm-dangerzone .dz-body {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+}
+
+.pnm-dangerzone .dz-body p {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--err-t) 55%, var(--muted));
+}
+
+.pnm-dangerzone .dz-body p b {
+  color: var(--err-t);
+}
+
+.pnm-dangerzone .dz-delete {
+  border: 1px solid var(--error-border);
+  border-radius: 9px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--err-t);
+  background: none;
+  white-space: nowrap;
+}
+
+.pnm-dangerzone .dz-delete:hover {
+  background: var(--error-surface-weak);
+}
+
+/* Narrow viewports: the wide table columns collapse gracefully — the
+   quiet metadata columns hide first, the identity header stacks. */
+@media (max-width: 880px) {
+  .pnm-table th:nth-child(4),
+  .pnm-table td:nth-child(4),
+  .pnm-table th:nth-child(5),
+  .pnm-table td:nth-child(5) {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .pnm {
+    padding: 16px 14px;
+  }
+
+  .pnm-toolbar input[type='search'] {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .pnm-table th:nth-child(6),
+  .pnm-table td:nth-child(6) {
+    display: none;
+  }
+
+  .pnm-form .pnm-grid2 {
+    grid-template-columns: 1fr;
+  }
+
+  .pnm-idhead {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .pnm-idhead .pnm-labelbtn {
+    justify-self: start;
+  }
+}

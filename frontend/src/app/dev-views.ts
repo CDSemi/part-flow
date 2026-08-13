@@ -1,6 +1,6 @@
 // Development-only mock view boundary.
 //
-// The nine approved GUI views are Phase 2 mock views: they render
+// The ten approved GUI views are Phase 2 mock views: they render
 // development-only sample data from src/mocks/ and mock interactions.
 // They are reachable ONLY through this registry, and the registry is
 // populated ONLY when `import.meta.env.DEV` is true. Vite replaces
@@ -52,6 +52,11 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
       'planned-routes': lazy(() =>
         import('../views/planned-routes/PlannedRoutesView').then((m) => ({
           default: m.PlannedRoutesView,
+        })),
+      ),
+      'part-numbers': lazy(() =>
+        import('../views/part-numbers/PartNumbersView').then((m) => ({
+          default: m.PartNumbersView,
         })),
       ),
       tracking: lazy(() =>

@@ -6,16 +6,17 @@
 // dependency is introduced (see README — Phase 2 frontend).
 
 // Management sub views include the production master-data screens
-// (Machines, Planned Routes): operational management functions owned
-// by authorized production roles — deliberately NOT Administration,
-// which stays focused on system administration (users, roles, Scan
-// Stations, policies).
+// (Machines, Planned Routes, Part Numbers): operational management
+// functions owned by authorized production roles — deliberately NOT
+// Administration, which stays focused on system administration (users,
+// roles, Scan Stations, policies).
 export const MANAGEMENT_SUBVIEWS = [
   'area-board',
   'machines',
   'tracking',
   'work-orders',
   'planned-routes',
+  'part-numbers',
   'priority',
 ] as const;
 

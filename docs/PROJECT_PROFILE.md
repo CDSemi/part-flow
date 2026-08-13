@@ -1,4 +1,4 @@
-# PartFlow Project Profile v16
+# PartFlow Project Profile v17
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -572,7 +572,7 @@ Rules:
 - Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The canonical string must be preserved everywhere; PN segments must never be parsed for business meaning.
 - `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
 - The folder barcode identifies only the PN and carries the PN itself: `PF:PN:<part-number>` with the canonical uppercase PN (§10).
-- An Administrator may **hard-delete** a PartNumber master record (§28 Administrative Archival and Purge): deletion removes only the metadata, never cascades into production data, and never affects the PN's traceability — historical surfaces continue to display the PN string normally. If the PN is used again later, a new master record may be created for the same canonical PN identity. There is no PN archive or tombstone kept merely to preserve PN identity.
+- PartNumber master metadata is production master data maintained in **Management → Part Numbers** (§21) by authorized production roles (§20), like Machines and Planned Routes. An authorized user may **hard-delete** a PartNumber master record there (§28 Administrative Archival and Purge): deletion removes only the metadata, never cascades into production data, and never affects the PN's traceability — historical surfaces continue to display the PN string normally. If the PN is used again later, a new master record may be created for the same canonical PN identity. There is no PN archive or tombstone kept merely to preserve PN identity.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.
 - The PN barcode is reused across all Work Orders requesting the PN.
@@ -1623,7 +1623,7 @@ Session state reduces repetitive scanning but must never replace persistent Move
 
 PartFlow uses role-based authorization.
 
-Machines and Route Templates (Planned Routes) are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines and Route Templates without being an Administrator. Administrators retain these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines or Route Templates screens (§21).
+Machines, Route Templates (Planned Routes), and PartNumber master metadata are production master data — operational management functions, not system administration. Managing them is **permission-based**: an authorized production specialist — for example a Production Manager, Process Engineer, or Maintenance Manager — may manage Machines, Route Templates, and PartNumber master metadata without being an Administrator. Administrators retain these capabilities, but they are not Administrator-exclusive, and Administration keeps no duplicate Machines, Route Templates, or Part Numbers screens (§21).
 
 ## Administrator
 
@@ -1638,6 +1638,7 @@ Administrator capabilities include:
 - manage Scan Stations,
 - manage barcode configuration,
 - manage Route Templates (shared with authorized production roles — managed through Management → Planned Routes, §21),
+- manage PartNumber master metadata, including hard deletion (shared with authorized production roles — managed through Management → Part Numbers, §21),
 - manage scan behavior,
 - manage Worker session policies,
 - manage correction permissions,
@@ -1793,7 +1794,7 @@ The layout may scroll horizontally when all Areas do not fit.
 
 ## Machines
 
-Machines is the management view for Machine lifecycle, maintenance, and asset identification — production master data managed by authorized production roles (§20), grouped under Management alongside Area Board, Tracking, Work Orders, Planned Routes, and Priority. Running and idle are derived from assigned quantity; maintenance is the only state set by hand (§8.6).
+Machines is the management view for Machine lifecycle, maintenance, and asset identification — production master data managed by authorized production roles (§20), grouped under Management alongside Area Board, Tracking, Work Orders, Planned Routes, Part Numbers, and Priority. Running and idle are derived from assigned quantity; maintenance is the only state set by hand (§8.6).
 
 It must provide:
 
@@ -1906,6 +1907,21 @@ There is no separate template-versioning system — Assigned Route snapshots pre
 
 ---
 
+## Part Numbers
+
+Part Numbers is the management view for PartNumber master metadata (§8.1) — production master data managed by authorized production roles (§20) within the Management grouping. The canonical PN string itself remains the stable production identity: the view maintains the optional metadata records that enrich a PN (name/description, image, informational revision, ERP mapping) and never gates production use — a canonical PN stays usable with or without a master record.
+
+It must provide:
+
+- a searchable list of PartNumber master records (PN, name/description, revision, ERP id) showing per record: the PN image (the one shared default PN image placeholder when no custom image was uploaded), the canonical uppercase PN, name/description, informational revision, ERP id, and the derived PN barcode value (`PF:PN:<part-number>`, §10) — the barcode is derived from the canonical PN and is never an independently editable value,
+- whole-row activation: selecting a record opens the metadata edit dialog,
+- creating a master record ahead of first production use: the entered PN is canonicalized (trimmed, internal whitespace rejected, uppercased — §7 Part Number), and one master record may exist per canonical PN; create-on-first-use at intake (§8.1) is unaffected,
+- editing the metadata: name/description, informational revision, ERP id, and uploading, changing, or removing the PN image (removing returns to the shared default placeholder),
+- viewing and printing a simple PN barcode label: the `PF:PN:<part-number>` barcode with the PN text beneath it — no additional barcode configuration,
+- hard deletion of a master record per §8.1/§28: deletion removes only the metadata, never cascades into WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or history, every surface keeps displaying the canonical PN normally, and a record may be created again later for the same canonical PN. There is no PN archive, no soft-delete, and no active/inactive lifecycle.
+
+---
+
 ## Priority Management
 
 Priority belongs to Work Order Demand.
@@ -1936,7 +1952,6 @@ Administration stays focused on system administration:
 - Operations,
 - Scan Stations,
 - Workers,
-- PartNumber maintenance (master metadata upkeep and hard deletion — §28 Administrative Archival and Purge),
 - users,
 - roles,
 - permissions,
@@ -1946,7 +1961,7 @@ Administration stays focused on system administration:
 - history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
 - application settings.
 
-Machines and Route Templates are not Administration screens: they are production master data managed permission-based in Management → Machines and Management → Planned Routes (§20) with no duplicate Administration screens. Machines remain part of the minimum environment setup prerequisite — configured through Management → Machines before real production runs.
+Machines, Route Templates, and PartNumber master metadata are not Administration screens: they are production master data managed permission-based in Management → Machines, Management → Planned Routes, and Management → Part Numbers (§20) with no duplicate Administration screens. Machines remain part of the minimum environment setup prerequisite — configured through Management → Machines before real production runs.
 
 Administrative workflows must remain separate from normal production scanning; retention settings belong in Administration/configuration, never in production workflow logic.
 
@@ -2154,7 +2169,7 @@ Database constraints should enforce, whenever practical:
 
 Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment** (**explicit Admin archival/purge maintenance**).
 
-**PartNumber master deletion.** The PartNumber master record is optional current metadata (§8.1); every production record keeps its own canonical PN value. Admin may therefore **hard-delete** a PN master record — for example a junk or test entry, or metadata that is simply no longer wanted — without any loss of production or history identity:
+**PartNumber master deletion.** The PartNumber master record is optional current metadata (§8.1); every production record keeps its own canonical PN value. An authorized user may therefore **hard-delete** a PN master record through Management → Part Numbers (§20, §21) — for example a junk or test entry, or metadata that is simply no longer wanted — without any loss of production or history identity:
 
 - deleting the PN master must not delete or mutate WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or any history;
 - the deletion never cascades into production data;

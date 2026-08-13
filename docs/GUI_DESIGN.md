@@ -1,15 +1,15 @@
 # PartFlow GUI Design v18
 
-> **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v16).
+> **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v17).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
 > An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v18.html` (previous versions are archived under `docs/archive/`). The v18 mockup is aligned with the PROJECT_PROFILE v16 PN-identity model (canonical uppercase PN — trimmed, no internal whitespace; PN master as optional, hard-deletable metadata).
-> Supersedes GUI Design v17; the differences are listed in §14.1. Differences from v16, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2 and v1 remain listed in §14.2–§14.17.
+> Supersedes GUI Design v17; the differences are listed in §15.1. Differences from v16, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2 and v1 remain listed in §15.2–§15.17.
 
 ---
 
 # 1. Scope
 
-Covers the application-view content of PROJECT_PROFILE §21 in **nine GUI views**:
+Covers the application-view content of PROJECT_PROFILE §21 in **ten GUI views**:
 
 1. Scan Station (production)
 2. Production Board (monitoring, large display)
@@ -18,8 +18,9 @@ Covers the application-view content of PROJECT_PROFILE §21 in **nine GUI views*
 5. Tracking (management, PN-centric; operator-facing label **PN Tracking**)
 6. Work Orders (management, manual Work Order entry and production release — §21 *Work Orders*)
 7. Planned Routes (management, reusable route definitions)
-8. Priority Management (Hot Work Order Demand ranking)
-9. Administration (configuration)
+8. Part Numbers (management, PartNumber master metadata and PN barcode labels — §21 *Part Numbers*, post-v18)
+9. Priority Management (Hot Work Order Demand ranking)
+10. Administration (configuration)
 
 > **Pending PROJECT_PROFILE alignment (v4).** PROJECT_PROFILE (v8 through v13) still lists Area Board and Manager Summary as separate views in §21. GUI v4 merges Manager Summary into Area Board as its All Areas overview (no content dropped). (Two earlier deviations are now resolved: PROJECT_PROFILE v8 §8.2 defines the nullable Work-Order-level `due_date` used as the entry default for demand-line due dates, and the former "PO Intake" view name was resolved by the v7 vocabulary migration — PROJECT_PROFILE §21 names the view **Work Orders**.) PROJECT_PROFILE §21 still needs the view-merge update; until then this document notes the deviation where it occurs.
 
@@ -31,10 +32,10 @@ Top-level navigation exposes four entries; the management views are grouped as *
 |------------------|----------------------------------------------------------------------|
 | Scan Station     | — (single view)                                                     |
 | Production Board | — (single view)                                                     |
-| Management       | Area Board · Work Orders · PN Tracking · Priority · Planned Routes · Machines |
+| Management       | Area Board · Work Orders · PN Tracking · Priority · Planned Routes · Part Numbers · Machines |
 | Administration   | — (single view, own sidebar navigation per §9)                      |
 
-Selecting Management opens its **last-used sub view** (Area Board on first open, which itself opens on its All Areas overview) and reveals a secondary sub-view bar beneath the top navigation. All navigation chrome follows the global theme mode (§2.1). The grouping is navigation only — each sub view keeps its own specification (§6–§8, §11–§13). Machines (`/management/machines`) and Planned Routes (`/management/planned-routes`) are **production master data** sub views: operational management functions accessed permission-based by authorized production roles (Production Manager, Process Engineer, Maintenance Manager, or another authorized specialist — PROJECT_PROFILE §20), deliberately grouped under Management rather than Administration.
+Selecting Management opens its **last-used sub view** (Area Board on first open, which itself opens on its All Areas overview) and reveals a secondary sub-view bar beneath the top navigation. In the sub-view bar **Part Numbers sits next to last and Machines last, directly after it** (post-v18). All navigation chrome follows the global theme mode (§2.1). The grouping is navigation only — each sub view keeps its own specification (§6–§8, §11–§14). Machines (`/management/machines`), Planned Routes (`/management/planned-routes`) and Part Numbers (`/management/part-numbers`) are **production master data** sub views: operational management functions accessed permission-based by authorized production roles (Production Manager, Process Engineer, Maintenance Manager, or another authorized specialist — PROJECT_PROFILE §20), deliberately grouped under Management rather than Administration.
 
 ---
 
@@ -48,7 +49,7 @@ The application has a single global **theme mode — Dark or Light — switchabl
 - **Dark is the default**: PartFlow is shop-floor first — dark reduces glare in the shop, is readable from distance, and is tolerant of low-quality displays. Desk users who prefer light for dense data work switch once.
 - All component styling uses **semantic tokens only** (background, panel, border, text, muted, status-text, …); the two theme definitions supply the values. Adding or restyling a component never hard-codes a theme-specific color.
 - Status colors (§2.2) keep per-theme *text* variants so contrast holds in both modes (e.g. success text is bright on dark, deepened on light); status backgrounds/tints are shared. Area identity colors are identical in both themes.
-- In the mockup the choice is session-only; how the real application persists it (per user, per station, or both) is an open decision (§16).
+- In the mockup the choice is session-only; how the real application persists it (per user, per station, or both) is an open decision (§17).
 
 Both themes share the same color tokens, spacing scale, and typography so the product feels like one system in either mode.
 
@@ -393,7 +394,7 @@ Search across PN, WO and Job Number; selects for Area, Operation, Machine, Reque
 
 ## 7.2 Detail panel sections
 
-1. **PN master** — image placeholder, PN, name, current revision (informational), barcode value (`PF:PN:…`, derived from the canonical PN), ERP id. The master is optional current metadata (PROJECT_PROFILE §8.1): when no master record exists for the PN, the section shows the canonical PN and its derived barcode with the metadata fields absent (`—`) — history and current-state sections below are unaffected.
+1. **PN master** — PN image (the ONE shared default PN image placeholder when no custom image exists — the same default used by Management → Part Numbers, §14; never a second default), PN, name, current revision (informational), barcode value (`PF:PN:…`, derived from the canonical PN), ERP id. The master is optional current metadata (PROJECT_PROFILE §8.1): when no master record exists for the PN, the section shows the canonical PN and its derived barcode with the metadata fields absent (`—`) — history and current-state sections below are unaffected.
 2. **Active WO Demand** — table of WO · Request Type · requested · allocated · remaining shortage · due · priority, with an allocation progress bar. Labeled "business demand — separate from Movement".
 3. **Current quantity by Area** — horizontal bars per Area/Machine in Area colors, queue rows visually distinct; labeled "derived from Movement history".
 4. **Quantity Flows & Routes** — one block per Quantity Flow whose header carries the shared **`RouteModeChip`** (v16 — the one route-mode presentation everywhere, shared with the Scan Station Receive Quantity recap/confirmation: mode and route information in one chip separated by an em dash, colored by mode; here `FLOATING — actual trace` / `PLANNED — snapshot`, deliberately in the **compact variant** — the default chip height elsewhere matches the other chips such as `TypeChip`): a `PLANNED` flow shows its AssignedRoute snapshot chips (done → current → queued → future; deviations marked with who/when/reason and the audit-preservation note); a `FLOATING` flow shows the **actual route trace derived from Movement history** — repeated Areas preserved, split flows shown independently, and Repair transfers marked explicitly, e.g. `A → B → C → D → B ⟲ REPAIR`. Route steps and arrows render as **separate sibling flex items** (step, arrow, step, …): each arrow is centered between adjacent steps, arrows never overlap step cards, and wrapping stays readable. The finished rack never appears as a route step — `AREA_COMPLETED` is completion inside the existing source Area; only `TRANSFERRED` extends the trace. The section explicitly avoids implying the whole PN is at one Route Step.
@@ -425,22 +426,22 @@ Manages the Department's Hot Work Order Demand list (PROJECT_PROFILE §21 Priori
 
 Isolated from production and focused on **system administration**. Sidebar navigation grouped as:
 
-- **Organization:** Departments, Areas, Operations, Workers, PartNumbers (master metadata maintenance and deletion)
+- **Organization:** Departments, Areas, Operations, Workers
 - **Production setup:** Scan Stations, Barcode configuration, Scan behavior
 - **Access:** Users, Roles & permissions
 - **Policies:** Worker sessions, Machine assignment, Correction permissions, History archival & purge, Settings — the future **Department display settings** include the Production Board rotation timing (seconds per displayed row and the minimum page dwell, §5); the future **Due Soon warning settings** own the configuration behind every derived due countdown (§3.12): **Minimum warning days**, **Lead-time warning percentage**, and **Maximum warning days** — initial defaults 2 days, 15%, and 7 days (`DEFAULT_DUE_SOON_POLICY` in `src/views/dates.ts`). Phase 2 ships the defaults only: business logic already receives the policy as configuration, and no Administration UI or persistence exists yet
 
-**No Machines and no Route Templates sections (v14).** Machines and Planned Routes (Route Templates) are production master data owned by authorized production roles: they are managed in **Management → Machines** (§12) and **Management → Planned Routes** (§13), and Administration keeps **no duplicate screens** for them (PROJECT_PROFILE §20, §21). The Machine-assignment entry under Policies remains a policy statement (the two Area ownership modes), not a Machine registry.
+**No Machines, no Route Templates, and no PartNumbers sections (v14; PartNumbers post-v18).** Machines, Planned Routes (Route Templates) and PartNumber master metadata are production master data owned by authorized production roles: they are managed in **Management → Machines** (§12), **Management → Planned Routes** (§13) and **Management → Part Numbers** (§14), and Administration keeps **no duplicate screens** for them (PROJECT_PROFILE §20, §21). The Machine-assignment entry under Policies remains a policy statement (the two Area ownership modes), not a Machine registry.
 
 **Barcode configuration — Machine Asset Tag format.** The Barcode configuration section (Production setup) is no longer a bare placeholder: it hosts the **Machine Asset Tag format** panel — a deliberately simple prefix + zero-padded numeric sequence (PROJECT_PROFILE §8.6; e.g. `CD-` + 4 digits → `CD-0001`), never a template engine. The panel explains that every Machine receives its Asset Tag automatically at creation in Management → Machines, that tags are unique, never reused (retired Machines keep theirs) and never change, and that the Machine barcode is the Asset Tag in the `PF:MACHINE:` namespace. It offers a **Prefix** text input (spaces and `:` rejected with an inline error) and a **Number length (digits)** input (1–8; the digit count is a minimum width, longer sequences never truncate), with a live preview of the resulting tags (`CD-0001, CD-0002, …`), the **Next Asset Tag** against the current Machines, and the resulting **Scanned barcode**; a closing note states that a format change applies to Machines created afterwards only — existing Asset Tags are never renamed or regenerated. It is a settings form, not an entry table, so the section shows no `+ New entry` action. In Phase 2 the panel edits development-only preview state (the shared `DevNotice` says changes affect only the preview); Management → Machines assigns from the same sample format.
 
-**Phased honesty (v13, updated v14).** The Phase 2 Administration view is a development-only visual shell/reference, and its presentation says so honestly: the sample Areas reference table is clearly marked development preview, entry actions that do nothing are disabled (never made to appear functional), and every placeholder section states when it becomes real — the sections covered by the roadmap's **Minimum Environment Setup** prerequisite (Departments, Areas, Operations, Scan Stations, barcode configuration — completed before the real production workflows run; the copy also points out that Machines and Planned Routes are managed in Management by authorized production roles) versus everything that arrives with the later **full Administration** phase (Users and roles, authorization, worker-session policies beyond immediate workflow needs, correction permissions, retention/archive/purge, general settings). See IMPLEMENTATION_ROADMAP Phase 3.5 and Phase 13.
+**Phased honesty (v13, updated v14).** The Phase 2 Administration view is a development-only visual shell/reference, and its presentation says so honestly: the sample Areas reference table is clearly marked development preview, entry actions that do nothing are disabled (never made to appear functional), and every placeholder section states when it becomes real — the sections covered by the roadmap's **Minimum Environment Setup** prerequisite (Departments, Areas, Operations, Scan Stations, barcode configuration — completed before the real production workflows run; the copy also points out that Machines, Planned Routes and Part Numbers are managed in Management by authorized production roles) versus everything that arrives with the later **full Administration** phase (Users and roles, authorization, worker-session policies beyond immediate workflow needs, correction permissions, retention/archive/purge, general settings). See IMPLEMENTATION_ROADMAP Phase 3.5 and Phase 13.
 
 Operations are managed per PROJECT_PROFILE §8.5 — each Operation belongs to an Area, and the Areas table lists the Operations an Area supports.
 
 Each section is a standard table + editor pattern. The Areas table is the reference example: Area (color + name), Operations, Machine assignment (Direct processing — no Machines / Queue → assign (one-shot); the mode follows from the Area's Machines, never from a per-count configuration), Machines, Worker ID mode (Disabled / Fixed Worker / Scanned session), Terminal flag, Active status.
 
-**PartNumbers maintenance:** the administrative delete **hard-deletes the PN master metadata record** (PROJECT_PROFILE §8.1/§28): production data and history are never touched or cascaded into — historical surfaces keep displaying the canonical PN normally, with only master-derived metadata absent — and a master record can be created again later for the same canonical PN. There is no PN archive or soft-delete kept to preserve identity: the canonical PN string itself is the identity. **History archival & purge:** Admin-only Movement-history retention maintenance (configurable retention policy — e.g. N years in the primary database — size threshold, or manual request) executed as lossless archive export → verification → purge of exactly the archived rows, never purge-first; run only through the privileged Admin maintenance path (normal runtime can never UPDATE/DELETE Movement rows), keeping related Movements (e.g. a `REVERSED` correction and its original) together so no retained row references a purged one; with a scope/impact preview, a required reason, and full audit of who ran what and when; retention settings live here, never in production workflow logic (PROJECT_PROFILE §28 Administrative Archival and Purge). Phase 2 shows these sections as specification placeholders.
+**PartNumber master maintenance lives in Management → Part Numbers (§14, post-v18)** — metadata upkeep and hard deletion follow PROJECT_PROFILE §8.1/§28 there; Administration keeps no PartNumbers section. **History archival & purge:** Admin-only Movement-history retention maintenance (configurable retention policy — e.g. N years in the primary database — size threshold, or manual request) executed as lossless archive export → verification → purge of exactly the archived rows, never purge-first; run only through the privileged Admin maintenance path (normal runtime can never UPDATE/DELETE Movement rows), keeping related Movements (e.g. a `REVERSED` correction and its original) together so no retained row references a purged one; with a scope/impact preview, a required reason, and full audit of who ran what and when; retention settings live here, never in production workflow logic (PROJECT_PROFILE §28 Administrative Archival and Purge). Phase 2 shows these sections as specification placeholders.
 
 Editing an Area's display properties shows an inline note that identity and barcode are stable and history is unaffected. Destructive operations (deactivating an Area with active quantities) are blocked with an explanation, not confirmed through.
 
@@ -454,7 +455,7 @@ The Stockroom station reuses the Scan Station shell with one additional step: af
 
 # 11. Work Orders
 
-Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §14.13). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
+Management sub view (follows the global theme mode, §2.1) implementing manual Work Order entry and explicit production release (PROJECT_PROFILE §13; §21 *Work Orders* — the view was called *PO Intake*, then *Purchase Orders*, before the v6 vocabulary migration, §15.13). It handles business demand only — it is not ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 The view lives on two routes (post-v17): the **active WO list** on `/management/work-orders` is the entry screen, and the read-only **Completed Work Orders page** (§11.5) lives on `/management/work-orders/completed` — a real, deep-linkable route (not a toggle or dialog) because the completed history is unbounded and must survive refresh, deep links and browser back/forward. Both routes belong to the Work Orders sub view: the Management sub-view bar keeps **Work Orders** active on either, and the last-used-sub-view restoration (§1.1) always re-enters through the active list — never deep inside the history. Selecting a Work Order opens **Work Order Details as a modal dialog over the list** (v10) — the list stays mounted and visible behind the overlay and the URL never changes. **New Work Order** is likewise a **modal dialog over the WO list** (v6). There is no separate detail panel/view and no per-Work-Order detail route.
 
@@ -634,11 +635,48 @@ Loading, error and empty states follow the standard view-state presentation (`No
 
 ---
 
-# 14. Changes from previous versions
+# 14. Part Numbers (Management) (post-v18)
 
-> Historical entries in §14.12–§14.17 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§14.13 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history. Likewise, older entries describing preserved first-entered PN casing or PN archive/soft-delete (e.g. §14.9) are history: since v18 the canonical uppercase, whitespace-free PN string is the identity and the PN master is optional, hard-deletable metadata (§14.1).
+Management sub view on `/management/part-numbers` (follows the global theme mode, §2.1): the single place for **PartNumber master metadata** (PROJECT_PROFILE §8.1, §21 *Part Numbers*) — production master data managed permission-based by authorized production roles like Machines and Planned Routes (§12, §13; PROJECT_PROFILE §20). The canonical PN string itself stays the stable production identity: records here are **optional current metadata only** (image, name/description, informational revision, ERP mapping) and never gate production use — a canonical PN is always usable, with or without a master record. In the Management sub-view bar the view sits **next to last, directly before Machines** (§1.1). The view follows the Machines presentation family (§12): the same page header, toolbar (search + primary action), table, dialog and Danger Zone idioms.
 
-## 14.1 Changes from GUI Design v17
+## 14.1 Part Number list
+
+A searchable list (PN, name/description, revision, ERP id) with a **+ New Part Number** action sharing the Machines toolbar layout (§12.1). Columns: **Image | Part Number | Name / Description | Revision | ERP ID | Barcode**.
+
+- **Image** — the record's uploaded PN image, or the **ONE shared default PN image placeholder** — exactly the placeholder the Tracking Part Details panel uses (§7.2); no second default image exists anywhere.
+- **Part Number** — the canonical **UPPERCASE** PN in the standard mono presentation.
+- **Name / Description** — the master name/description; absent values render `—` (§3.9).
+- **Revision** — the informational current revision, `—` when absent.
+- **ERP ID** — the ERP mapping id, `—` when absent.
+- **Barcode** — the derived value `PF:PN:<part-number>` in the ONE shared muted mono barcode reading tone (§12.3) — a derived identification value, never an independently editable field and never a badge.
+- **Whole-row activation:** clicking anywhere on a row opens the Edit Part Number dialog (§14.2); the PN cell's row button (accessible name `Edit {pn}`) is the keyboard/screen-reader entry with a visible focus treatment — the same pattern as Machines and Tracking rows.
+
+Beneath the table the shared PageNote states the deletion semantics in user language: deleting a Part Number record removes only this metadata — production quantities, Work Order demand and Movement history are never touched and keep showing the PN; a record can be created again later for the same PN.
+
+## 14.2 New / Edit Part Number dialog
+
+- **Edit leads with the read-only identity header** (the §12.3 idiom): `Part Number` (emphasized) and the derived `Barcode` (`PF:PN:<part-number>`) as calm values on a quiet panel — no PN input and no barcode input on an existing record (the PN is the identity and never edited; the barcode always derives from it) — plus the **`Barcode label…`** entry opening the printable label dialog (§14.3).
+- **New Part Number** collects the PN as its one required field: input is canonicalized on entry exactly like every other PN entry path (§4.4, §11.2 — trimmed; internal whitespace rejected with an inline explanation, never silently removed; lowercase canonicalized to uppercase), a live line under the field shows the canonical PN and its derived barcode once valid, and a PN whose master record already exists is a field error pointing at editing the existing record instead (one master record per canonical PN). Creating a record here is optional-ahead-of-time metadata entry — create-on-first-use at intake (§4.7, §11.2) is unchanged.
+- **Metadata fields:** Name / Description, Revision (informational), ERP ID — all optional, laid out on the Machines form grid with `e.g. …` placeholders.
+- **Image:** the current image (or the shared default placeholder) with `Upload image…` / `Change image…` and, when a custom image exists, `Remove image` — removing returns to the shared default placeholder. The image is master metadata only.
+- Unsaved edits are visibly marked (`● Unsaved changes` beside the dialog title), the cancel action is exactly `Cancel (Esc)` (§3.10), and closing with unsaved input asks first (shared `UnsavedChoiceDialog` on an existing record — `Save changes` / `Discard changes` / `Cancel (Esc)`; a `Discard new Part Number?` confirmation on a new one). The New dialog opens with initial focus on the PN field.
+- **Danger Zone (existing records):** the dialog ends with the `Delete…` action in the §12.3 Danger Zone presentation. Deletion is a **plain destructive confirmation** (danger tone — proportionate like the never-used Planned Route delete, §13.3; no typed confirmation: the deletion is recoverable by re-creating the record) after an explicit consequences statement: only this metadata record is deleted; Work Order demand, production quantities, Movement history and allocations are never touched or cascaded into; every screen keeps displaying the canonical PN with the master-derived fields absent (`—`, §7.1); a record can be created again later for the same PN. There is **no PN archive, no soft-delete and no active/inactive lifecycle** (PROJECT_PROFILE §8.1).
+
+## 14.3 Part Number barcode label
+
+`Barcode label…` opens **`Part Number barcode label`** — a real **Code 128** rendering of the scanned value `PF:PN:<part-number>` (the shared dependency-free encoder `src/views/code128.ts`, §12.3) on the **white label card with black ink in both themes**, with the **PN text beneath the barcode** as the label's primary text and the full scanned value as the quiet mono verification line. `Print Label` prints exactly the label (print styles hide everything else); `Cancel (Esc)` returns to the dialog. Deliberately simple — no barcode configuration exists here (the `PF:` namespace scheme stays in Administration → Barcode configuration, §9).
+
+## 14.4 States and Phase 2 boundary
+
+Loading, error and empty states follow the standard view-state presentation (`No Part Number records yet.` / no-match message). In Phase 2 the view edits development-only mock state (one concise `DevNotice`); the mock master records align with the PN catalog used by Work Orders and the Scan Station, and the Tracking row whose master was hard-deleted (§7.1) deliberately has no record here.
+
+---
+
+# 15. Changes from previous versions
+
+> Historical entries in §15.12–§15.17 intentionally keep the vocabulary of the versions they describe (REWORK, temporary `TMP-…` Work Order Numbers, Machine sessions, Purchase Order / PO / PO Demand / PO Intake). Since v6 the canonical term is **Work Order** (§15.13 item 9); since v8 REWORK, temporary Work Order Numbers, Machine sessions, Action barcodes, and the Recent Scans list no longer exist — the older names appear below only as history. Likewise, older entries describing preserved first-entered PN casing or PN archive/soft-delete (e.g. §15.9) are history: since v18 the canonical uppercase, whitespace-free PN string is the identity and the PN master is optional, hard-deletable metadata (§15.1).
+
+## 15.1 Changes from GUI Design v17
 
 Alignment with the PROJECT_PROFILE v16 PN-identity model — copy, validation feedback, and the interactive mockup; no layout or navigation changes:
 
@@ -648,7 +686,11 @@ Alignment with the PROJECT_PROFILE v16 PN-identity model — copy, validation fe
 4. **No inactive PN state** (§11.2): the PartNumber master has no active/inactive lifecycle — the former "inactive PN is flagged and cannot be released without reactivation" rule is removed; a canonical PN is always usable, with or without a master record.
 5. **Mockup v18** (`mockups/partflow-gui-mockup-v18.html`): the interactive mockup is updated to the same PN model — canonical PN normalization (trim, then reject internal whitespace, then uppercase) in barcode parsing and every PN entry path, direct canonical-PN comparison instead of the former lowercase `pnKey`, no casing preservation, and the Tracking/Administration surfaces showing PN-master hard deletion instead of the former `(archived)` PN. Mockup v17 is archived under `docs/archive/`.
 
-## 14.2 Changes from GUI Design v16
+Post-v18 refinements (same round, updated in place — no version bump):
+
+1. **Part Numbers Management page** (new §14; §1, §1.1, §7.2, §9; PROJECT_PROFILE v17 §8.1/§20/§21): a tenth GUI view on `/management/part-numbers` for PartNumber master metadata — searchable list (Image | Part Number | Name / Description | Revision | ERP ID | Barcode), New/Edit metadata dialog with the read-only PN + derived-barcode identity header, image upload/change/remove falling back to the ONE shared Tracking PN image placeholder, a simple printable Code 128 `PF:PN:<part-number>` label (barcode with the PN text beneath), and hard deletion of the master record in the Danger Zone behind a plain destructive confirmation. In the Management sub-view bar Part Numbers sits next to last with Machines last, directly after it. PartNumber master maintenance thereby moves out of Administration (no PartNumbers section remains, like Machines and Planned Routes); the PN model is unchanged — the canonical PN string stays the identity, master records stay optional hard-deletable metadata, no `is_active`, no archive/reactivate. Mockup v18 is updated in place with the new view and Management sub-view order.
+
+## 15.2 Changes from GUI Design v16
 
 The v16→v17 change adds the **direct-processing row-level `DONE` action** to the Scan Station. No other view behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -683,7 +725,7 @@ Post-v17 refinements (same round, updated in place — no version bump):
 
 14. **Completed Work Orders page** (§11 intro, §11.1, §11.3, new §11.5; PROJECT_PROFILE v15 §8.2, §21): completed Work Orders leave the active WO list entirely — its statuses reduce to **Open / Released** — and move to the new read-only history page on `/management/work-orders/completed`, entered through the quiet `Completed Work Orders ›` toolbar action (and the PageNote link) and led by a `‹ Work Orders` back action. The page is designed for an unbounded permanent history: its own search (WO Number / PN / Job Number), a **Done range** filter defaulting to the last 90 days (presets + custom native date range), a **Due outcome** filter (On time / Late / No due date), sortable columns with **Done ↓** as the default and unsorted state, keyset `Show more` paging (50 rows, `(completed_at, id)` continuation) with a result summary line, a derived `✓ On time` / `✕ N days late` outcome under the Due date, the read-only Work Order Details dialog with a `Done <date>` meta value, and empty states that distinguish no-history from no-match-in-range (with a one-click `Search all history` escape when a search finds nothing inside a bounded range). The active list's search miss now also points at the completed history, and a New Work Order entered with the number of a completed Work Order announces the completion and opens its read-only details instead of duplicating (WO-Number uniqueness spans the whole history). Done date = the new `completed_at` (PROJECT_PROFILE v15 §8.2) — set by the completing allocation event and cleared/recomputed when a later audited allocation correction reopens the Work Order.
 
-## 14.3 Changes from GUI Design v15
+## 15.3 Changes from GUI Design v15
 
 The v15→v16 changes introduce the shared UI clock — every derived time-dependent display value now derives at render from fixed source timestamps plus one shared tick — and refine the Scan Station's receive/assignment copy, chips, header and focus behavior. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -709,7 +751,7 @@ Post-v16 refinements (same round, updated in place — no version bump):
 10. **One muted neutral for the plain totals** (§4.3, §4.10): `Total PNs` and `Total pcs` (and the Machine-card `machine-total-pcs` / `machine-total-pns` values) drop the primary/secondary neutral split and share one muted neutral — the status tones (Queued / On machines / Processing / Done / Hot) are unchanged.
 11. **Default `RouteModeChip` height matches the other chips** (§4.7, §7.2): the default chip metrics align with `TypeChip` (inline-flex, same font size); only Tracking's Details-panel flow header keeps its deliberate compact variant.
 
-## 14.4 Changes from GUI Design v14
+## 15.4 Changes from GUI Design v14
 
 The v14→v15 changes add the Machine return-to-service (reactivation) lifecycle — canonical in PROJECT_PROFILE v12 (§7 Machine, §8.6), together with the new invariant that display names are unique among the **active** Machines of one Area — and refine Phase 2 presentation and interaction across the views. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -726,9 +768,9 @@ The v14→v15 changes add the Machine return-to-service (reactivation) lifecycle
 11. **Kiosk header unified, exit moved to the footer** (§5, §5.1): one three-zone header shared with standard mode (identity group = brand + title + `Live`, spacer, theme control + clock) replaces the kiosk actions stack and the brand separator; the `Exit kiosk` control moves into the footer controls row (sized like the pagination controls, tooltip `Exit kiosk mode (Ctrl+Shift+K)`), and the `Ctrl+Shift+K: exit kiosk mode` legend line is removed — the shortcut stays.
 12. **Work Orders list layout and dialog headings** (§11.1–§11.3): the list spans the full width with search and ＋ New Work Order sharing one right-aligned toolbar row; the whole row opens Work Order Details (row button keyboard/SR entry, focus returned to the row); the two dialogs gain the uppercase-eyebrow heading polish (presentation only) while every existing protection — native dates, narrow-width card layout, dirty-close confirm, released-line read-only, focus-first-error, stacked sibling dialogs — stays unchanged.
 13. **Priority snapshot divider** (§8): each ranking snapshot section draws one row-spanning vertical rule between the shared position track and the PN column (rows pinned to their grid lines); subgrid environments only — hidden in the no-subgrid fallback and the ≤ 560 px stacked layout.
-14. **Administration policies note and open question** (§9, §16): the future Department display settings name the Production Board rotation timing (seconds per displayed row, minimum page dwell); whether those settings are per-Department or global joins the open questions.
+14. **Administration policies note and open question** (§9, §17): the future Department display settings name the Production Board rotation timing (seconds per displayed row, minimum page dwell); whether those settings are per-Department or global joins the open questions.
 
-## 14.5 Changes from GUI Design v13
+## 15.5 Changes from GUI Design v13
 
 The v13→v14 changes add the two Management production-master-data views and refine Phase 2 presentation and interaction. No movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -745,7 +787,7 @@ The v13→v14 changes add the two Management production-master-data views and re
 11. **Scan Station refinements** (§4.4, §4.1, §4.6, §4.7): the main barcode input renders `inputMode="none"` on touch-primary devices through the shared, generalized detection module `src/components/touch-device.ts` (renamed from `quantity-touch.ts`) — wedge scanners, physical keyboards, focus behavior and the manual-entry dialog input unaffected; the production-mode header actions group (connectivity chip + compact theme toggle) shares the header card language as one coherent aligned group; confirmation summaries content-size their label column (`fit-content(230px)`) and flatten entity chips to plain verification text (PN keeps mono; recaps/selection steps keep chips) across all confirmation dialogs including Undo; intake/unknown-PN/manual-entry copy is rewritten operator-facing (`New PN — not registered yet. …`) with no record-creation/database wording; and the assignment dialog is titled **`Assign to Machine`** (formerly "One-shot Machine assignment") with its temporary behavior explained naturally — no "persistent Machine Session"/"armed" wording renders.
 12. **Administration focused on system administration** (§9): the sidebar loses the Machines and Route Templates sections (no duplicates of the Management views); the phased-honesty copy names Departments, Areas, Operations, Scan Stations and barcode configuration as the minimum environment setup and points Machines & Planned Routes to Management. Machines remain part of the roadmap's minimum-setup prerequisite, now configured through Management → Machines.
 
-## 14.6 Changes from GUI Design v12
+## 15.6 Changes from GUI Design v12
 
 The v12→v13 changes are Phase 2 presentation, interaction and responsive-layout refinements plus one roadmap clarification. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -764,7 +806,7 @@ The v12→v13 changes are Phase 2 presentation, interaction and responsive-layou
 13. **Priority confirmation alignment + impact block** (§8): both ranking snapshots share one grid-track definition with a common rank/transition track wide enough for `#2 → #4` (the PN never shifts between sections; a stacking narrow-screen fallback keeps the relationships), and the impact/action line becomes a compact block — shift impact as a sentence, the `Action` label separated from its emphasized value, no decorative pill.
 14. **Administration honesty + roadmap prerequisite** (§9; IMPLEMENTATION_ROADMAP): Phase 2 Administration stays a development-only visual shell with disabled (never fake-functional) entry actions, a `Scan Stations` section joins Production setup, and each placeholder states whether it belongs to the new named **Phase 3.5 — Minimum Environment Setup** prerequisite (Departments, Areas, Operations, Scan Stations, Machines, required active/barcode fields — before real production workflows) or to the later full Administration phase; later phases are not renumbered.
 
-## 14.7 Changes from GUI Design v11
+## 15.7 Changes from GUI Design v11
 
 The v11→v12 changes are Phase 2 presentation, interaction-detail and layout refinements. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -780,7 +822,7 @@ The v11→v12 changes are Phase 2 presentation, interaction-detail and layout re
 10. **Anchored footer with the sorting legend** (§5): the footer is a normal flex child pushed to the bottom of the board viewport (never `position: fixed`, never covering content, height still inside the pagination measurement), reorganized into a controls/totals row and a legend row that now states the user-facing sorting rule: `Order: Hot rank first → earliest due date → no due date by oldest received date.` (no tie-breakers, no implementation names).
 11. **Priority rank transitions** (§8): every `New Position` row shows its complete rank transition `#current → #new` (old rank and arrow quiet, new rank strongest), with the add/remove edge cases explicit — `Not listed → #n` for a restored/newly listed entry and `#n → Not listed` for a removed one; rows stay sorted by new rank, the PN/metadata separation, moved-row emphasis and the `Current Position` snapshot are unchanged.
 
-## 14.8 Changes from GUI Design v10
+## 15.8 Changes from GUI Design v10
 
 The v10→v11 changes are Phase 2 presentation, navigation-chrome and copy refinements. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
 
@@ -795,7 +837,7 @@ The v10→v11 changes are Phase 2 presentation, navigation-chrome and copy refin
 9. **Priority two-snapshot confirmation** (§8): the reorder confirmation replaced the Current/New comparison table with `Current Position` → transition arrow → `New Position` snapshots restricted to the affected rank range; rank first, per-row ↑/↓ arrows only on the current side, PN visually separated from a `WO … · Job …` metadata chip built from explicit fields, and `Not listed` placeholders for entries that exist on only one side (Undo/Redo of add/remove); `MockHotEntry` gained the explicit `workOrderNumber` and `jobNumber` fields.
 10. **Exhaustive professional copy + rendered-copy guard** (§3.10): all rendered strings were audited against the operator / audit-history / development-only classification; developer wording (`(mock)`, `nothing persisted`, `priority_rank`, `movement_reason`, `derived from Movement history`, `separate from Movement`, …) was rewritten in user language or moved behind the single per-view `DevNotice`; `src/rendered-copy.test.ts` now guards the renderable sources and the current mockup against regressions while keeping canonical Movement names legitimate in audit surfaces.
 
-## 14.9 Changes from GUI Design v9
+## 15.9 Changes from GUI Design v9
 
 The v9→v10 changes introduce the Area-level processing completion state — user-facing **DONE**, canonical immutable Movement `AREA_COMPLETED`, derived holding state `READY_TO_TRANSFER` (canonical in PROJECT_PROFILE v10 §7 *Area Completion*, §8.11, §12) — plus Phase 2 presentation refinements across the views. Everything is implemented in the Phase 2 frontend against development-only mock state; no backend persistence and no database migrations exist yet.
 
@@ -812,7 +854,7 @@ The v9→v10 changes introduce the Area-level processing completion state — us
 11. **Priority reorder confirmation** (§8): redesigned around a primary moved-item summary, a current-versus-proposed rank comparison with moved/shifted emphasis and ↑/↓ indicators, `Apply ranking` / `Cancel (Esc)`, and user-facing Undo/Redo titles (`Restore previous ranking` / `Reapply ranking`).
 12. **Professional operator copy** (§3.10): operator guidance stopped exposing raw enum combinations (canonical types remain as audit data and in the confirmation summaries' `Recorded event(s)` row); Cancel buttons standardized to exactly `Cancel (Esc)`; repetitive mock/persistence phrasing reduced to concise development-only notices; demo barcode hints marked development-only and guarded out of production builds.
 
-## 14.10 Changes from GUI Design v8
+## 15.10 Changes from GUI Design v8
 
 All v8→v9 changes are Scan Station interaction and presentation refinements, implemented in the Phase 2 frontend against development-only mock state. No domain behavior, movement semantics, quantity rules, backend APIs or database design changed; the one-shot rule is preserved — every multi-step workflow remains one temporary dialog with no armed state.
 
@@ -825,12 +867,12 @@ All v8→v9 changes are Scan Station interaction and presentation refinements, i
 7. **PN row grid layout** (§4.10): four content lines (Hot+PN | context · quantity `pcs`; WO·Job — truncating with a `title` tooltip | due status; in-Area status | time in Area; `{n} scrapped`), with the action in a dedicated, visually separated right-side action rail (stacking below only at very narrow widths); the compact `⊘n` scrap indicator is removed — scrapped quantity renders only as `{n} scrapped` text; rows are never clickable as a whole.
 8. **Row-action visibility** (§4.6, §4.10): `In this Area now` shows no `ASSIGN`/`QUEUE` row buttons; Machine cards show only `QUEUE`; Machine assignment stays available through PN scan, Machine scan and the action dialog; the Area Board remains completely read-only. The underlying one-shot assignment capability is unchanged.
 
-## 14.11 Changes from GUI Design v7
+## 15.11 Changes from GUI Design v7
 
 All v7→v8 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v9.
 
 1. **PN-centric one-shot Scan Station, no Machine Session** (§4): the Machine session pill, Machine status strip, persistent active-Machine state, armed Action barcodes (`PF:ACTION:…`) and the Recent Scans list are removed. Scanning a Machine barcode is only a one-shot assignment shortcut; scanning a PN opens the applicable one-shot dialog (intake / source-explicit transfer / action dialog with only currently valid choices); completing or cancelling a dialog clears every temporary context. The header carries Area statistics instead of Machine-session state; the Scan Barcode card spans the full width directly under the header; the Last Scanned PN surface carries the Undo action at its right edge with a summary confirmation before every reversal.
-2. **Scan Station routing** (§4.1): `/scan-station` becomes a Station Selector (never auto-redirecting); `/scan-station/:stationId` loads one station; unknown/inactive Station IDs show an explicit error; the faint footer Station ID was made clickable for switching (historical — the footer has been fully non-interactive since v13, §14.6 item 2).
+2. **Scan Station routing** (§4.1): `/scan-station` becomes a Station Selector (never auto-redirecting); `/scan-station/:stationId` loads one station; unknown/inactive Station IDs show an explicit error; the faint footer Station ID was made clickable for switching (historical — the footer has been fully non-interactive since v13, §15.6 item 2).
 3. **Request Types reduce to `NEW` / `MODIFY`; Repair becomes a movement intent** (PROJECT_PROFILE §7, §14): REWORK is removed everywhere; MODIFY intake creates/reuses an internal blank-number Work Order (`work_order_number = NULL`, displayed `—`); Repair is an explicit `TRANSFERRED · movement_reason REPAIR` chosen by the user (“Send quantity here for repair”), never inferred from route history and never new demand.
 4. **Floating Routes by default** (PROJECT_PROFILE §7, §17): every Quantity Flow carries `route_mode` (`FLOATING` default / `PLANNED`); AssignedRoute snapshots exist only for Planned flows; Tracking shows the route-mode badge and derives Floating actual traces from Movement history with repeated Areas and explicit `⟲ REPAIR` markers (§7.2).
 5. **Temporary Work Order Numbers removed** (§11; PROJECT_PROFILE §7): a blank WO Number saves `NULL`, renders `—` (never persisted as a placeholder), non-null numbers stay unique, and the real number can be added later through an audited edit.
@@ -842,7 +884,7 @@ All v7→v8 changes are implemented in the Phase 2 frontend against development-
 11. **Quantity keypad keyboard fix** (§4.8): a real focusable numeric input opens focused (`inputMode="numeric"`); keys are handled centrally (0–9, Backspace, Delete, Enter=Confirm, Escape=Cancel, Space ignored); keypad buttons are `type="button"`, non-focusable, and never re-activate on Space/Enter; MAX exists (and is the default) only for transfer/assignment.
 12. **Administrative archival/purge specified** (§9; PROJECT_PROFILE §28): PN archive (soft-delete) with `(archived)` markers and preserved historical text; Admin-only history archival & purge maintenance with preview, reason, and audit; archive preferred over purge; retention settings in Administration. Phase 2 carries these as specification placeholders only.
 
-## 14.12 Changes from GUI Design v6
+## 15.12 Changes from GUI Design v6
 
 All v6→v7 changes are implemented in the Phase 2 frontend against development-only mock state; the corresponding domain rules are canonical in PROJECT_PROFILE v8.
 
@@ -854,7 +896,7 @@ All v6→v7 changes are implemented in the Phase 2 frontend against development-
 6. **Area Board per-Area detail redesigned** (§6.3): the "one card per PN" grid is replaced by an Area summary card (name, description, Operations, stats, grouped compact PN list — Assigned to Machines / Area queue / Stocked for terminal Stockroom) followed by one monitoring card per Machine (running / idle / maintenance with distinct empty and maintenance presentations, from the `MOCK_AREA_MACHINES` mock model); Areas without Machines render only the summary card; "Sort: Time in Area" works via the sortable `timeInAreaMinutes` duration field, longest first.
 7. **Priority reordering requires confirmation** (§8; PROJECT_PROFILE v8 §21): drag-and-drop, Move Up, Move Down, Undo and Redo confirm before applying — showing affected PN + Work Order Demand, previous rank, proposed new rank and action type; Cancel leaves the list and both histories unchanged and the visible list is never renumbered early; adding at the bottom stays direct; the existing remove confirmation is unchanged.
 
-## 14.13 Changes from GUI Design v5
+## 15.13 Changes from GUI Design v5
 
 All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabulary; Phase 2 implements them against development-only local mock state.
 
@@ -868,12 +910,12 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 8. **Realistic data shapes** (§2.3): mock datasets and the mockup use representative synthetic identifiers — multi-segment hyphenated numeric PNs, manufacturing-style descriptions, numeric-looking opaque Work Order Numbers (`007482`), numeric-looking external Job Numbers (`18427`), and optional Revision values (populated and blank) — instead of demo-style `PF-…` / `PO-…` / `ERP-…` identifiers; §2.3 documents the identifier/description shapes, search, and wrapping constraints.
 9. **Canonical vocabulary migration: Purchase Order → Work Order** (PROJECT_PROFILE v7 §7). The business container previously called Purchase Order is a Work Order on the actual shop floor. The view is renamed **Work Orders**, its route is `/management/work-orders` (no legacy `/management/purchase-orders` alias — the application is not deployed yet), UI labels use Work Order / WO, and code names use the full `WorkOrder` / `WorkOrderDemand` / `WorkOrderAllocation` forms. Work Order Number and external Job Number remain separate identifiers; Job Number keeps its informational display/search/sort/report role.
 
-## 14.14 Changes from GUI Design v4
+## 15.14 Changes from GUI Design v4
 
-1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§16). This removes "dark/light user toggle" from the deferred list (§15).
+1. **Global Dark/Light theme mode** (§2.1): a user-facing toggle in the top navigation switches the entire application between Dark and Light; **every view follows the selected mode**, replacing the fixed per-view themes of v2–v4. Dark remains the default (shop-floor first). All component styling was moved to semantic tokens with per-theme values; status *text* colors have per-theme variants for contrast, while status tints and Area identity colors are shared. Theme persistence (per user / per station) is an open decision (§17). This removes "dark/light user toggle" from the deferred list (§16).
 2. **Area Board card layout hardening** (§6.3): the quantity block is anchored to the card's right edge independent of PN length; an over-long PN truncates with an ellipsis and shows the full identifier in a hover tooltip. The same truncation applies to the All Areas overview PN lists. §2.3's single-line PN rule was amended accordingly.
 
-## 14.15 Changes from GUI Design v3
+## 15.15 Changes from GUI Design v3
 
 1. **Manager Summary merged into Area Board.** The Area-column overview becomes the **All Areas** overview — the first tab of the Area Board tab strip and its default mode (§6.2). The "Manager Summary" name is retired; overview column headers open the per-Area detail. Management sub views reduce to Area Board · Tracking · Purchase Orders · Priority. No §21 content is dropped — only its placement changed.
 2. **Area Board returns to the dark theme** (as in v2), including the All Areas overview: it is a monitoring surface rather than desk paperwork, and the light v3 variant proved hard to read (§2.1). The Management sub-view bar follows the active sub view's theme. Dark now covers Scan Station, Production Board and Area Board; Tracking, Purchase Orders, Priority and Administration stay light.
@@ -881,14 +923,14 @@ All v5→v6 changes concern the Work Orders view (§11) and the canonical vocabu
 4. **PO-level due date** introduced as the default for each demand line's due date, editable per line (§11.2/§11.3). Requires PurchaseOrder.`due_date` — pending PROJECT_PROFILE §8.2 and §21 alignment (§1).
 5. **Section renumbering:** former §7 Manager Summary removed; later sections shift up by one (Tracking §7 … Open Questions §14).
 
-## 14.16 Changes from GUI Design v2
+## 15.16 Changes from GUI Design v2
 
 1. **Navigation regrouped.** Area Board, Manager Summary, Tracking, PO Intake and Priority Management become **sub views of a single Management view** (§1.1). Top-level navigation is reduced to Scan Station · Production Board · Management · Administration. Management remembers its last-used sub view.
 2. **"Shop floor" navigation group label removed.** In v2 it was a nav group heading only (never a view); with only two shop-floor views left at top level the label adds nothing.
 3. **Area Board and Manager Summary move to the light Management context.** §2.1's context table now assigns dark exclusively to Scan Station and Production Board. Both views keep their layout and behavior; only the theme changes so the entire Management view is visually consistent.
 4. **Realigned to PROJECT_PROFILE v6** (was v5): allocation and Hot work ordering use two business criteria only — ① priority rank ② earliest due date — with the deterministic tie-breaker demoted to an implementation detail; Operators may review and adjust the suggested PO Allocation before confirmation (no longer role-gated); PROJECT_PROFILE section references follow the v6 renumbering (Barcode Model §10, Quantity Model §11, …, Application Views §21, Remaining Open Decisions §32).
 
-## 14.17 Changes from GUI Design v1
+## 15.17 Changes from GUI Design v1
 
 Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
@@ -902,13 +944,13 @@ Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 ---
 
-# 15. Out of Scope for v5 UI
+# 16. Out of Scope for v5 UI
 
 Deferred intentionally: localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 
 ---
 
-# 16. Open Questions
+# 17. Open Questions
 
 1. Undo/Redo depth and retention for Priority Management (per session? until sign-out?).
 2. Theme-mode persistence: is the Dark/Light choice stored per user, per station, or both — and which wins on a shared terminal? (§2.1; the mockup keeps it session-only.)

@@ -235,18 +235,8 @@
   background: var(--panel2);
 }
 
-.tk-img {
-  width: 64px;
-  height: 64px;
-  border-radius: 12px;
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-  flex: none;
-}
+/* The PN image renders through the shared PnImage component
+   (components/PnImage.css) — the ONE default placeholder everywhere. */
 
 .tk-right h2 {
   font-family: var(--mono), monospace;

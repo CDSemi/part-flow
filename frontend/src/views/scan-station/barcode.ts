@@ -31,6 +31,18 @@ export type ParsedScan =
 /** The dedicated Scrap-workflow barcode value. */
 export const SCRAP_BARCODE = 'PF:SCRAP';
 
+/** The PF barcode namespace of PN barcodes (PROJECT_PROFILE §10). */
+export const PN_BARCODE_NAMESPACE = 'PF:PN:';
+
+/**
+ * Rendered/scanned PN barcode of one canonical PN — the barcode carries
+ * the PN itself and is always derived from it, never an independently
+ * editable value.
+ */
+export function pnBarcode(pn: string): string {
+  return `${PN_BARCODE_NAMESPACE}${pn}`;
+}
+
 /**
  * Trim scanner terminators (CR/LF/TAB) and surrounding whitespace from
  * the ends of the scanned value. Nothing INSIDE the value is removed —
@@ -65,11 +77,11 @@ export function parseScan(raw: string): ParsedScan {
   const value = normalizeScanInput(raw);
   if (!value) return { kind: 'empty' };
   if (value === SCRAP_BARCODE) return { kind: 'scrap' };
-  if (value.startsWith('PF:PN:')) {
+  if (value.startsWith(PN_BARCODE_NAMESPACE)) {
     // The suffix is the PN candidate: surrounding whitespace is
     // trimmed; after trimming it must be non-empty and free of internal
     // whitespace, and is canonicalized to the uppercase PN.
-    const pn = normalizePartNumber(value.slice('PF:PN:'.length));
+    const pn = normalizePartNumber(value.slice(PN_BARCODE_NAMESPACE.length));
     return pn ? { kind: 'pn', pn } : { kind: 'unknown', raw: value };
   }
   if (value.startsWith('PF:MACHINE:')) {

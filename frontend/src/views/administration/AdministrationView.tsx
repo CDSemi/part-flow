@@ -119,8 +119,9 @@ export function AdministrationView() {
                   is part of the <b>minimum environment setup</b> — the small
                   configuration set (Departments, Areas, Operations, Scan
                   Stations, barcode configuration) that is completed before the
-                  real production workflows run. Machines and Planned Routes are
-                  managed in <b>Management</b> by authorized production roles.
+                  real production workflows run. Machines, Planned Routes and
+                  Part Numbers are managed in <b>Management</b> by authorized
+                  production roles.
                 </>
               ) : (
                 <>

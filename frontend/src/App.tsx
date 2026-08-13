@@ -46,12 +46,15 @@ const TOP_NAV: {
   },
 ];
 
+// Sub-view order: Part Numbers sits next to last, Machines last —
+// directly after it (GUI_DESIGN §1.1).
 const MANAGEMENT_NAV: { subview: ManagementSubview; label: string }[] = [
   { subview: 'area-board', label: 'Area Board' },
   { subview: 'work-orders', label: 'Work Orders' },
   { subview: 'tracking', label: 'PN Tracking' },
   { subview: 'priority', label: 'Priority' },
   { subview: 'planned-routes', label: 'Planned Routes' },
+  { subview: 'part-numbers', label: 'Part Numbers' },
   { subview: 'machines', label: 'Machines' },
 ];
 
@@ -85,6 +88,7 @@ const VIEW_TITLES: Record<AppViewKey, string> = {
   tracking: 'PN Tracking',
   'work-orders': 'Work Orders',
   'planned-routes': 'Planned Routes',
+  'part-numbers': 'Part Numbers',
   priority: 'Priority Management',
   administration: 'Administration',
 };

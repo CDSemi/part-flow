@@ -1,0 +1,24 @@
+/* The ONE shared PN image presentation (PnImage.tsx): uploaded image
+   or the single shared default placeholder, identical on every surface
+   — the same metrics the Tracking Part Details header always used. */
+.pn-img {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  flex: none;
+  object-fit: cover;
+}
+
+/* Compact table-row size (Part Numbers list). */
+.pn-img.sm {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  font-size: 19px;
+}

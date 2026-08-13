@@ -339,6 +339,32 @@ export interface MockAreaCard {
   finished?: { qty: number; completedBy?: string }[];
 }
 
+/**
+ * One PartNumber master metadata record (Management → Part Numbers).
+ * The canonical PN string is the identity and natural key — the record
+ * is optional current metadata only (PROJECT_PROFILE §8.1): production
+ * data and history never depend on its existence, it may be
+ * hard-deleted without touching them, and a record may be created
+ * again later for the same canonical PN. There is no active/inactive
+ * lifecycle and no archive. The PN barcode is always the derived value
+ * `PF:PN:<part-number>` — never stored or edited independently.
+ */
+export interface MockPartNumberMaster {
+  /** Canonical uppercase, whitespace-free PN — the identity. */
+  pn: string;
+  /** Name / description as supplied (commonly uppercase free text). */
+  name?: string;
+  /** Informational current revision. */
+  revision?: string;
+  /** ERP mapping id. */
+  erpId?: string;
+  /**
+   * Uploaded PN image (data/object URL in the Phase 2 preview). Absent
+   * = the ONE shared default PN image placeholder renders instead.
+   */
+  image?: string;
+}
+
 export interface MockTrackingRow {
   pn: string;
   name: string;
