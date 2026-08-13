@@ -104,6 +104,21 @@ export function AddPartDialog({
   const qtyValid = isPositiveInteger(qty);
   const dueValid = dueMode !== 'custom' || customDue !== '';
 
+  // Header context for the selected PN: the catalog description for an
+  // existing PN, a `new Part Number` marker otherwise; the final step
+  // adds the entered quantity and due-date choice.
+  const catalogName = pn
+    ? MOCK_PN_CATALOG.find((entry) => entry.pn === pn)?.name
+    : undefined;
+
+  function dueSummary(): string {
+    if (dueMode === 'none') return 'no due date';
+    if (dueMode === 'custom') return `due ${formatIsoDate(customDue)}`;
+    return workOrderDue
+      ? `due ${formatIsoDate(workOrderDue)} (WO due date)`
+      : 'follows the WO due date';
+  }
+
   function resolvedDue(): { due: string; dueTouched: boolean } {
     if (dueMode === 'none') return { due: '', dueTouched: true };
     if (dueMode === 'custom') return { due: customDue, dueTouched: true };
@@ -166,14 +181,31 @@ export function AddPartDialog({
         <h3 id={headingId}>
           Add Part — step {step + 1} of 4: {STEP_TITLES[step]}
         </h3>
-        {pn ? <div className="big mono">{pn}</div> : null}
+        {pn ? (
+          <div className="ap-pnhead">
+            <div className="big mono">{pn}</div>
+            <div className="ap-pninfo">
+              {isNewPn ? (
+                <span className="ap-pnnew">new Part Number</span>
+              ) : (
+                <span>{catalogName}</span>
+              )}
+              {step === 3 ? (
+                <span>
+                  {' '}
+                  · Qty <b className="mono">{qty}</b> · {dueSummary()}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         {step === 0 && (
           <>
             <div className="sub">
-              Search and select an existing PartNumber, or explicitly create a
-              new one. A PN already on this Work Order focuses its existing line
-              instead of adding a duplicate.
+              Search for an existing Part Number or enter a new one. If it’s
+              already on this Work Order, the existing line will be opened
+              instead.
             </div>
             <input
               ref={searchRef}
@@ -227,9 +259,8 @@ export function AddPartDialog({
         {step === 1 && (
           <>
             <div className="sub">
-              Positive whole number. Use the keypad or a physical keyboard —
-              digits, Backspace, Delete/Clear, Enter to continue, Escape to
-              cancel.
+              Enter a positive whole-number quantity. Use the keypad or
+              keyboard.
             </div>
             <QuantityKeypad value={qty} onChange={setQty} />
           </>
@@ -238,8 +269,7 @@ export function AddPartDialog({
         {step === 2 && (
           <>
             <div className="sub">
-              A blank due date is valid — the demand simply has no due date yet
-              and sorts after all dated demands.
+              Choose the Work Order due date, a specific date, or no due date.
             </div>
             <div className="ap-due" role="radiogroup" aria-label="Due date">
               <label className="ap-duopt">

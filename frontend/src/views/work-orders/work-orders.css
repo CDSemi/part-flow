@@ -499,23 +499,25 @@
   padding: 14px 0 2px;
 }
 
-/* New Work Order header form */
+/* New Work Order header form: one compact row of labeled fields
+   (label above its box); the row wraps only when the dialog is too
+   narrow to show all fields side by side. */
 .nwo-form {
-  display: grid;
-  grid-template-columns: 130px 230px 130px 230px;
-  gap: 12px 14px;
-  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 20px;
+  align-items: flex-start;
   padding: 16px 18px;
   font-size: 13.5px;
 }
 
-@media (max-width: 900px) {
-  .nwo-form {
-    grid-template-columns: 130px 1fr;
-  }
+.nwo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.nwo-form label {
+.nwo-field label {
   color: var(--muted);
   font-weight: 650;
 }
@@ -533,6 +535,16 @@
 
 .nwo-form input:focus {
   border-color: var(--info-t);
+}
+
+/* Field widths follow their content: the date inputs keep their
+   intrinsic control width; the WO Number box stays compact. */
+.nwo-field input[type='date'] {
+  width: max-content;
+}
+
+.nwo-field-num input {
+  width: 220px;
 }
 
 .nwo-scanrow {
@@ -631,23 +643,23 @@
 }
 
 .nwo .nwo-form {
-  padding: 12px 0;
-  align-items: start;
+  padding: 12px 0 14px;
 }
 
-.nwo .nwo-form label {
-  padding-top: 10px;
+/* The scan input fills the width left over by the right-anchored
+   ＋ Add Part manually button. */
+.nwo .nwo-scan {
+  max-width: none;
 }
 
-.nwo .nwo-form > div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.nwo-fieldhint {
-  font-size: 12px;
-  color: var(--faint);
+/* Demand-line list section title (replaces the former scanning hint) */
+.nwo-lines-title {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  margin: 14px 2px 8px;
 }
 
 /* long line lists scroll inside the dialog; the dialog itself stays
@@ -658,9 +670,49 @@
   border-radius: var(--radius-sm);
 }
 
+/* Demand-line column sizing (New Work Order dialog, desktop table):
+   PN, Req. Type, Qty and Due date shrink to their content — the PN
+   column's minimum is the longest PN, Req. Type's is its own header
+   (headers never wrap) and Qty fits four digits; the leftover width
+   splits evenly between Job Numbers and Notes. */
+@media (min-width: 881px) {
+  .nwo-lines .wo-table th {
+    white-space: nowrap;
+  }
+
+  .nwo-lines th.col-pn,
+  .nwo-lines th.col-type,
+  .nwo-lines th.col-qty,
+  .nwo-lines th.col-due {
+    width: 1%;
+  }
+
+  .nwo-lines th.col-job,
+  .nwo-lines th.col-notes {
+    width: 38%;
+  }
+
+  .nwo-lines td[data-label='Qty'] input {
+    width: 64px;
+  }
+
+  .nwo-lines td[data-label='Job Numbers'] input,
+  .nwo-lines td[data-label='Notes'] input {
+    width: 100%;
+    max-width: none;
+  }
+}
+
 .nwo-actions {
   border-top: none;
   padding: 14px 0 0;
+}
+
+/* Inside the New Work Order dialog the action row is the shared
+   dialog `.row` (bigbtn ghost/primary — the same tone as every other
+   saving dialog); the row's own margin separates it from the list. */
+.nwo .nwo-actions {
+  padding: 0;
 }
 
 /* ＋ Add Part entry on an OPEN Work Order detail */
@@ -762,6 +814,30 @@
 }
 
 /* ============ Add Part multi-step dialog ============ */
+/* Selected-PN header block: the strong PN plus one quiet context line
+   (catalog description or `new Part Number`; the final step appends
+   quantity and due-date choice). The hairline keeps the first control
+   of every step clear of the header. */
+.ap-pnhead {
+  margin: 2px 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.ap-pnhead .big {
+  margin-bottom: 2px;
+}
+
+.ap-pninfo {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.ap-pninfo .ap-pnnew {
+  color: var(--info-t);
+  font-weight: 700;
+}
+
 .ap-list {
   max-height: 260px;
   overflow: auto;
@@ -939,7 +1015,7 @@
      scroll: sticky at the dialog's bottom edge, on a solid surface so
      they stay readable — content scrolls beneath and nothing is
      hidden once scrolled to the end. */
-  .wo-actions.nwo-actions {
+  .nwo-actions {
     position: sticky;
     bottom: 0;
     background: var(--panel);

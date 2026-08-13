@@ -365,8 +365,9 @@ test('a PN barcode carries the PN itself; an unknown PN is created on first use'
   scanBarcode('PF:PN:NEW-PLATE-9');
 
   expect(screen.getByText('NEW-PLATE-9')).toBeInTheDocument();
+  // The toast confirms the add (the PN cell itself shows the PN only).
   expect(
-    screen.getByText(/new PN — barcode created with PN master/),
+    screen.getByText(/NEW-PLATE-9 added — Request Type NEW/),
   ).toBeInTheDocument();
 
   // Case-insensitive identity: a re-scan in different casing focuses

@@ -256,31 +256,26 @@ export function NewWorkOrderDialog({
             New Work Order
           </h2>
           <p className="wo-sub">
-            WO Number and due date are optional and can be added later. Add
-            Parts with <b>＋ Add Part manually</b>; every line defaults to
-            Request Type <TypeChip type="NEW" /> and to the WO due date, and
-            both can be changed per line.
+            Enter the Work Order header and add its Parts below. New lines
+            default to Request Type <TypeChip type="NEW" /> and the WO due date.
           </p>
 
           <div className="nwo-form">
-            <label htmlFor="nwo-num">
-              WO Number <span className="field-optional">(optional)</span>
-            </label>
-            <div>
+            <div className="nwo-field nwo-field-num">
+              <label htmlFor="nwo-num">
+                WO Number <span className="field-optional">(optional)</span>
+              </label>
               <input
                 id="nwo-num"
                 ref={workOrderNumRef}
                 className="mono"
-                placeholder="e.g. 007482 — optional"
+                placeholder="e.g. 007482"
                 value={workOrderNumber}
                 onChange={(e) => setWorkOrderNumber(e.target.value)}
               />
-              <span className="nwo-fieldhint">
-                blank = saved without an external number (displays —)
-              </span>
             </div>
-            <label htmlFor="nwo-recv">Received date</label>
-            <div>
+            <div className="nwo-field">
+              <label htmlFor="nwo-recv">Received date</label>
               <input
                 id="nwo-recv"
                 ref={receivedRef}
@@ -297,10 +292,10 @@ export function NewWorkOrderDialog({
                 <div className="rowerr">{headerErrors.received}</div>
               ) : null}
             </div>
-            <label htmlFor="nwo-due">
-              WO due date <span className="field-optional">(optional)</span>
-            </label>
-            <div>
+            <div className="nwo-field">
+              <label htmlFor="nwo-due">
+                WO due date <span className="field-optional">(optional)</span>
+              </label>
               <input
                 id="nwo-due"
                 type="date"
@@ -308,21 +303,10 @@ export function NewWorkOrderDialog({
                 value={due}
                 onChange={(e) => handleDueChange(e.target.value)}
               />
-              <span className="nwo-fieldhint">
-                default due date for demand lines — blank is valid; it can be
-                added later
-              </span>
             </div>
           </div>
 
           <div className="nwo-scanrow">
-            <button
-              className="btn primary"
-              disabled={writeBlocked}
-              onClick={() => setAddPartOpen(true)}
-            >
-              ＋ Add Part manually
-            </button>
             <input
               ref={scanRef}
               className="nwo-scan"
@@ -337,24 +321,27 @@ export function NewWorkOrderDialog({
                 }
               }}
             />
+            <button
+              className="btn primary"
+              disabled={writeBlocked}
+              onClick={() => setAddPartOpen(true)}
+            >
+              ＋ Add Part manually
+            </button>
           </div>
-          <div className="nwo-hint">
-            Scanning is optional: a PN barcode adds a demand line, a new PN is
-            created on first use, and a PN already on this Work Order focuses
-            its existing line instead of adding a duplicate.
-          </div>
+          <div className="nwo-lines-title">Demand lines</div>
 
           <div className="wo-lines nwo-lines">
             <table className="wo-table">
               <thead>
                 <tr>
-                  <th>PN</th>
-                  <th>Request Type</th>
-                  <th>Qty</th>
-                  <th>Due date</th>
-                  <th>Job Numbers</th>
-                  <th>Notes</th>
-                  <th></th>
+                  <th className="col-pn">PN</th>
+                  <th className="col-type">Req. Type</th>
+                  <th className="col-qty">Qty</th>
+                  <th className="col-due">Due date</th>
+                  <th className="col-job">Job Numbers</th>
+                  <th className="col-notes">Notes</th>
+                  <th className="col-x"></th>
                 </tr>
               </thead>
               <tbody>
@@ -376,9 +363,6 @@ export function NewWorkOrderDialog({
                             the Add Part flow or a valid PN barcode. */}
                         <div className="pn" title={line.pn ?? ''}>
                           {line.pn}
-                        </div>
-                        <div className={`bc ${line.isNewPn ? 'newpn' : ''}`}>
-                          {line.barcodeNote}
                         </div>
                         {errorFor(line.id, 'pn') ? (
                           <div className="rowerr">
@@ -509,21 +493,17 @@ export function NewWorkOrderDialog({
             </table>
           </div>
 
-          <div className="wo-actions nwo-actions">
-            <button className="btn ghost" onClick={requestClose}>
+          <div className="row nwo-actions">
+            <button className="bigbtn ghost" onClick={requestClose}>
               Cancel (Esc)
             </button>
             <button
-              className="btn primary"
+              className="bigbtn primary"
               disabled={writeBlocked}
               onClick={handleSave}
             >
               Save demand
             </button>
-            <span className="hint">
-              Saving stores <b>business demand only</b> — release to production
-              stays a separate explicit step.
-            </span>
           </div>
         </div>
       </ModalDialog>
