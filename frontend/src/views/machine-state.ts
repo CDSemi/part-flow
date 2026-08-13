@@ -12,6 +12,7 @@
 
 import { formatDuration } from './dates';
 import type {
+  MachineLifecycleEvent,
   MachineStatus,
   MockAreaCard,
   MockAreaMachine,
@@ -87,6 +88,15 @@ export const MACHINE_STATE_LABEL: Record<MachineStatus, string> = {
   running: 'Running',
   idle: 'Idle',
   maintenance: 'Maintenance',
+};
+
+/** Operator-facing label of one Machine History event. */
+export const LIFECYCLE_EVENT_LABEL: Record<
+  MachineLifecycleEvent['event'],
+  string
+> = {
+  RETIRED: 'Retired',
+  REACTIVATED: 'Reactivated',
 };
 
 /**

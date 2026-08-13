@@ -25,6 +25,7 @@ import { MOCK_MACHINE_ACTOR, MOCK_MACHINES } from '../../mocks/machines';
 import { machineBarcode, nextAssetTag } from '../asset-tags';
 import { code128ModuleCount, encodeCode128B } from '../code128';
 import {
+  LIFECYCLE_EVENT_LABEL,
   MACHINE_STATE_LABEL,
   effectiveMachineStatus,
   formatStateAge,
@@ -558,7 +559,7 @@ export function MachinesView() {
             setDialog(null);
           }}
         >
-          <b>{dialog.machine.name}</b> returns to{' '}
+          <b>{dialog.machine.name}</b> will return to{' '}
           <b>{assignedQty(dialog.machine) > 0 ? 'Running' : 'Idle'}</b> —{' '}
           {assignedQty(dialog.machine) > 0
             ? 'quantity is still assigned to it.'
@@ -897,7 +898,7 @@ function LifecycleTimeline({
   if (events.length === 0 && !emptyText) return null;
   return (
     <div className={`mg-timeline${compact ? ' compact' : ''}`}>
-      <div className="mg-lifetitle">Lifecycle</div>
+      <div className="mg-lifetitle">Machine History</div>
       {events.length === 0 ? (
         <p className="tl-empty">{emptyText}</p>
       ) : (
@@ -912,7 +913,9 @@ function LifecycleTimeline({
               <span className="dot" aria-hidden="true" />
               {compact ? (
                 <div className="tl-line">
-                  <span className="ev">{event.event}</span>{' '}
+                  <span className="ev">
+                    {LIFECYCLE_EVENT_LABEL[event.event]}
+                  </span>{' '}
                   <span className="at">{event.at.slice(0, 10)}</span> ·{' '}
                   {event.by}
                   {event.reason ? <> — {event.reason}</> : null}
@@ -928,7 +931,9 @@ function LifecycleTimeline({
               ) : (
                 <>
                   <div className="tl-head">
-                    <span className="ev">{event.event}</span>
+                    <span className="ev">
+                      {LIFECYCLE_EVENT_LABEL[event.event]}
+                    </span>
                     <span className="at">{event.at.slice(0, 10)}</span>
                   </div>
                   <div className="tl-meta">{event.by}</div>
@@ -999,9 +1004,9 @@ function IdentityHeader({
             {area?.name ?? machine.area}
           </div>
           <p className="idareahelp">
-            The Area is set when a Machine is created and stays fixed for its
-            whole service life. To move capacity to another Area, retire this
-            Machine and create a new Machine record there.
+            The Area cannot be changed while the Machine is active. If the
+            physical Machine moves to another Area, retire it first and update
+            the Area when it is reactivated.
           </p>
         </div>
       ) : null}
@@ -1033,8 +1038,7 @@ function BarcodeLabelDialog({
     <ModalDialog label="Machine barcode label" onClose={onClose}>
       <h3>Machine barcode label</h3>
       <div className="sub">
-        The barcode carries the Asset Tag — scanning it selects{' '}
-        <b>{machine.name}</b> for Machine workflows.
+        Scan this label to identify <b>{machine.name}</b>.
       </div>
       <div className="mg-label mg-labelprint">
         <div className="lname">{machine.name}</div>
@@ -1495,9 +1499,8 @@ function MachineEditDialog({
           <div className="mg-maintedit">
             <div className="mg-lifetitle">Maintenance</div>
             <p className="mg-mainteditnote">
-              This Machine is under Maintenance. The reason and expected return
-              date can be updated here — Maintenance itself is switched off from
-              the Machines list.
+              Update the maintenance reason or expected return date here. To end
+              maintenance, use the Maintenance switch in the Machines list.
             </p>
             <div className="mg-grid2">
               <Field
@@ -1617,7 +1620,7 @@ function MachineEditDialog({
           onCancel={() => setLeaveConfirm(false)}
           onConfirm={onCancel}
         >
-          Nothing has been added yet — closing now discards the entered input.
+          Your entered information will not be saved.
         </ConfirmDialog>
       ) : null}
       {retireStage === 'blocked' && machine ? (
@@ -1788,10 +1791,9 @@ function MachineEditDialog({
               onCancel={() => setRetireStage('summary')}
               onConfirm={finalizeRetire}
             >
-              <b>{machine.name}</b> will be retired. This action{' '}
-              <b>cannot be undone</b> — the retirement is recorded permanently
-              in the Machine&apos;s lifecycle, and even a later return to
-              service keeps it in the record.
+              <b>{machine.name}</b> will be retired. This retirement is
+              permanently recorded in Machine history. If the same Machine is
+              reactivated later, the retirement remains recorded.
             </ConfirmDialog>
           ) : null}
         </ModalDialog>
@@ -2009,7 +2011,7 @@ function RetiredMachineDetailsDialog({
       ) : null}
       <LifecycleTimeline
         machine={machine}
-        emptyText="No lifecycle events recorded."
+        emptyText="No Machine history recorded."
       />
       <div className="row">
         <button className="bigbtn ghost" onClick={onClose}>
@@ -2049,7 +2051,7 @@ function StartMaintenanceDialog({
     <ModalDialog label="Start maintenance" onClose={onCancel}>
       <h3>Start maintenance</h3>
       <div className="sub">
-        <b>{machine.name}</b> switches to <b>Maintenance</b>.{' '}
+        <b>{machine.name}</b> will switch to <b>Maintenance</b>.{' '}
         {assignedQty > 0
           ? `${assignedQty} pcs stay assigned to it — nothing is moved or released by this action.`
           : 'No quantity is currently assigned to it.'}
@@ -2189,7 +2191,7 @@ function ReactivateMachineDialog({
     if (!name.trim()) errors.name = 'A display name is required.';
     if (!reason.trim()) {
       errors.reason =
-        'A reason is required — it becomes part of the audit record.';
+        'A reason is required and will be saved in Machine history.';
     }
     if (!samePhysical) {
       errors.physical =
@@ -2259,10 +2261,9 @@ function ReactivateMachineDialog({
           ]}
         />
         <div className="mg-note">
-          Lifecycle: <b>Retired → Active</b> on the same record — identity,
-          barcode, asset metadata and history stay untouched; one REACTIVATED
-          audit event is added
-          {moved ? ' with the previous and current Area' : ''}.
+          The same Machine returns to Active with its existing Asset Tag and
+          barcode. Previous production history is preserved.
+          {moved ? ' The Area change applies from reactivation onward.' : ''}
         </div>
         <div className="row">
           <button className="bigbtn ghost" onClick={() => setStage('form')}>
@@ -2286,10 +2287,9 @@ function ReactivateMachineDialog({
               onConfirm({ name: name.trim(), area, reason: reason.trim() })
             }
           >
-            <b>{machine.name}</b> returns to service. This action{' '}
-            <b>cannot be undone</b> — the reactivation is recorded permanently
-            in the Machine&apos;s lifecycle, and the record of when it was out
-            of service stays part of its history.
+            <b>{machine.name}</b> will return to service. This reactivation is
+            permanently recorded in Machine history. The previous retirement
+            remains part of that history.
           </ConfirmDialog>
         ) : null}
       </ModalDialog>
@@ -2348,8 +2348,8 @@ function ReactivateMachineDialog({
             ))}
           </ul>
           <p>
-            Resolve the conflicting record first — or create a new Machine
-            record if the physical machine was replaced.
+            Resolve the conflict first. If this is a replacement Machine, create
+            a new Machine instead.
           </p>
         </div>
       ) : null}
@@ -2393,8 +2393,8 @@ function ReactivateMachineDialog({
               onChange={setArea}
             />
             <p className="mg-areahelp">
-              Change only if the Machine physically moved while retired.
-              Historical Movements remain unchanged.
+              Change only if the physical Machine moved while retired. Previous
+              production history keeps the original Area.
             </p>
           </div>
         </div>

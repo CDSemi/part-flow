@@ -156,7 +156,7 @@ test('the whole active row opens Edit Machine with the Area fixed', () => {
   // explanation.
   expect(within(dialog).queryByRole('combobox')).toBeNull();
   expect(identity.textContent).toContain(
-    'stays fixed for its whole service life',
+    'The Area cannot be changed while the Machine is active.',
   );
 
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
@@ -291,9 +291,9 @@ test('an idle Machine retires after typing its Asset Tag and a final summary —
   );
 
   // The summary's action asks one last explicit question — the
-  // retirement is recorded in the lifecycle and cannot be undone.
+  // retirement is permanently recorded in Machine history.
   const ask = screen.getByRole('dialog', { name: 'Retire this Machine?' });
-  expect(ask.textContent).toContain('cannot be undone');
+  expect(ask.textContent).toContain('permanently recorded in Machine history');
   fireEvent.click(within(ask).getByRole('button', { name: 'Retire Machine' }));
 
   // Gone from the active table…
@@ -429,7 +429,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   // The Return Area select sits beside the name with its move note.
   expect(within(dialog).getByLabelText('Return Area')).toBeInTheDocument();
   expect(dialog.textContent).toContain(
-    'Change only if the Machine physically moved while retired.',
+    'Change only if the physical Machine moved while retired.',
   );
   // …and the same-physical-machine confirmation stays required.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
@@ -450,10 +450,10 @@ test('reactivation blocks on a name collision until a rename, then returns the M
     within(summary).getByRole('button', { name: 'Reactivate Machine' }),
   );
 
-  // One last explicit question — reactivation is recorded in the
-  // lifecycle and cannot be undone.
+  // One last explicit question — reactivation is permanently recorded
+  // in Machine history.
   const ask = screen.getByRole('dialog', { name: 'Reactivate this Machine?' });
-  expect(ask.textContent).toContain('cannot be undone');
+  expect(ask.textContent).toContain('permanently recorded in Machine history');
   fireEvent.click(
     within(ask).getByRole('button', { name: 'Reactivate Machine' }),
   );
@@ -471,8 +471,8 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   expect(edit.querySelector('.mg-timeline')).toHaveClass('compact');
   const events = edit.querySelectorAll('.mg-tlevent');
   expect(events).toHaveLength(2);
-  expect(events[0].textContent).toContain('RETIRED');
-  expect(events[1].textContent).toContain('REACTIVATED');
+  expect(events[0].textContent).toContain('Retired');
+  expect(events[1].textContent).toContain('Reactivated');
   expect(events[1].textContent).toContain('M. Chen (Production Manager)');
   expect(events[1].textContent).toContain('Returned from overhaul');
 });
@@ -702,7 +702,9 @@ test('discarding on cancel never saves; a dirty New Machine confirms the discard
   const discardAsk = screen.getByRole('dialog', {
     name: 'Discard new Machine?',
   });
-  expect(discardAsk.textContent).toContain('Nothing has been added yet');
+  expect(discardAsk.textContent).toContain(
+    'Your entered information will not be saved',
+  );
   // Keep editing returns with the input intact…
   fireEvent.click(
     within(discardAsk).getByRole('button', { name: 'Keep editing' }),
@@ -924,7 +926,7 @@ test('a retired row opens the read-only Retired Machine Details dialog with the 
   // The lifecycle timeline presents the append-only audit events.
   const events = dialog.querySelectorAll('.mg-tlevent');
   expect(events).toHaveLength(1);
-  expect(events[0].textContent).toContain('RETIRED');
+  expect(events[0].textContent).toContain('Retired');
   expect(events[0].textContent).toContain('2026-02-14');
   expect(events[0].textContent).toContain('M. Chen (Production Manager)');
   expect(events[0].textContent).toContain('Replaced by asset CD-0512');
