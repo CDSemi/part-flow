@@ -83,7 +83,7 @@ test('search filters over PN, name, revision and ERP id', () => {
     target: { value: 'no-such-part' },
   });
   expect(
-    screen.getByText('No Part Numbers match “no-such-part”.'),
+    screen.getByText('No saved Part Number details match “no-such-part”.'),
   ).toBeInTheDocument();
 });
 
@@ -146,18 +146,20 @@ test('a new Part Number is canonicalized; internal whitespace and duplicates are
   // silently removed.
   fireEvent.change(pnField, { target: { value: 'ABC 123' } });
   expect(dialog.textContent).toContain(
-    'cannot contain spaces or other whitespace',
+    'Part Number cannot contain spaces or other whitespace.',
   );
 
   // An existing canonical PN (entered lowercase) is a duplicate —
   // one master record per canonical PN.
   fireEvent.change(pnField, { target: { value: '142-260' } });
-  expect(dialog.textContent).toContain('A record for “142-260” already exists');
+  expect(dialog.textContent).toContain(
+    'Part Number “142-260” already has saved details.',
+  );
 
   // A valid lowercase entry shows the canonical PN and its derived
   // barcode before anything is added.
   fireEvent.change(pnField, { target: { value: '  abc-123 ' } });
-  expect(dialog.textContent).toContain('Canonical Part Number');
+  expect(dialog.textContent).toContain('Will be saved as');
   expect(dialog.textContent).toContain('ABC-123');
   expect(dialog.textContent).toContain('PF:PN:ABC-123');
 
@@ -266,17 +268,21 @@ test('deleting a record removes only the metadata row after an explicit confirma
   const before = document.querySelectorAll('.pnm-table tbody tr').length;
   const dialog = openEdit('214-406');
   const zone = dialog.querySelector('.pnm-dangerzone') as HTMLElement;
-  expect(zone.textContent).toContain('removes only this metadata record');
+  expect(zone.textContent).toContain('Delete Part Number Details');
+  expect(zone.textContent).toContain(
+    'Production tracking and Work Order history are not affected.',
+  );
 
-  fireEvent.click(within(zone).getByRole('button', { name: 'Delete…' }));
+  fireEvent.click(
+    within(zone).getByRole('button', { name: 'Delete details…' }),
+  );
   const confirm = screen.getByRole('dialog', {
-    name: 'Delete Part Number record',
+    name: 'Delete Part Number details?',
   });
-  // The confirmation states the scope: metadata only — production
-  // data and history stay untouched, and the record can return later.
-  expect(confirm.textContent).toContain('Movement history');
-  expect(confirm.textContent).toContain('never touched');
-  expect(confirm.textContent).toContain('created again later');
+  // The confirmation states the scope: saved details only — the PN and
+  // its production history stay available.
+  expect(confirm.textContent).toContain('permanently removes the saved image');
+  expect(confirm.textContent).toContain('production history remain available');
 
   // Cancel changes nothing.
   fireEvent.click(
@@ -290,13 +296,13 @@ test('deleting a record removes only the metadata row after an explicit confirma
   fireEvent.click(
     within(again.querySelector('.pnm-dangerzone') as HTMLElement).getByRole(
       'button',
-      { name: 'Delete…' },
+      { name: 'Delete details…' },
     ),
   );
   fireEvent.click(
     within(
-      screen.getByRole('dialog', { name: 'Delete Part Number record' }),
-    ).getByRole('button', { name: 'Delete record' }),
+      screen.getByRole('dialog', { name: 'Delete Part Number details?' }),
+    ).getByRole('button', { name: 'Delete details' }),
   );
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(document.querySelectorAll('.pnm-table tbody tr')).toHaveLength(

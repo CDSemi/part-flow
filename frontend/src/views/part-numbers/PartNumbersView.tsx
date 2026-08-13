@@ -7,7 +7,6 @@ import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
 import { ModalDialog } from '../../components/ModalDialog';
-import { PageNote } from '../../components/PageNote';
 import { PnImage } from '../../components/PnImage';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
@@ -74,9 +73,8 @@ export function PartNumbersView() {
     <section className="pnm" aria-label="Part Numbers">
       <h1>Part Numbers</h1>
       <p className="pnm-sub">
-        PartNumber records — image, name, revision, and ERP mapping for
-        canonical Part Numbers. The Part Number itself is the identity; a PN
-        stays usable with or without a record here.
+        Manage optional Part Number details, images, ERP IDs, and barcode
+        labels.
       </p>
       <DevNotice>
         Development preview — Part Number records shown are sample data and
@@ -103,8 +101,8 @@ export function PartNumbersView() {
         <EmptyState
           message={
             query
-              ? `No Part Numbers match “${search.trim()}”.`
-              : 'No Part Number records yet.'
+              ? `No saved Part Number details match “${search.trim()}”.`
+              : 'No Part Number details have been added yet.'
           }
         />
       ) : (
@@ -149,13 +147,6 @@ export function PartNumbersView() {
           </tbody>
         </table>
       )}
-      <PageNote>
-        Deleting a Part Number record removes only this metadata. Production
-        quantities, Work Order demand and Movement history are never touched and
-        keep showing the PN; a record can be created again later for the same
-        PN.
-      </PageNote>
-
       {dialog?.kind === 'new' ? (
         <PartNumberEditDialog
           records={records}
@@ -253,8 +244,7 @@ function BarcodeLabelDialog({
     <ModalDialog label="Part Number barcode label" onClose={onClose}>
       <h3>Part Number barcode label</h3>
       <div className="sub">
-        The barcode carries the Part Number itself — scanning it identifies{' '}
-        <b>{pn}</b>.
+        Scan this label to identify Part Number <b>{pn}</b>.
       </div>
       <div className="pnm-label pnm-labelprint">
         {runs ? (
@@ -301,8 +291,10 @@ function BarcodeLabelDialog({
  * whitespace rejected — never silently removed — and uppercased) and
  * is never edited afterwards — the canonical PN is the identity and
  * the barcode always derives from it. All metadata stays optional.
- * Editing hosts the Danger Zone: Delete… hard-deletes only this
- * metadata record behind a plain destructive confirmation.
+ * Editing hosts the delete section (the Machines Danger-Zone
+ * presentation, user-facing title `Delete Part Number Details`):
+ * `Delete details…` hard-deletes only this metadata record behind a
+ * plain destructive confirmation.
  */
 function PartNumberEditDialog({
   records,
@@ -363,12 +355,11 @@ function PartNumberEditDialog({
       : false;
   const pnFeedback = record ? null : trimmed && !canonical ? (
     <div className="err" role="alert">
-      ✕ A Part Number cannot contain spaces or other whitespace inside the
-      value, so “{trimmed}” cannot be created.
+      Part Number cannot contain spaces or other whitespace.
     </div>
   ) : duplicate ? (
     <div className="err" role="alert">
-      ✕ A record for “{canonical}” already exists — edit it instead.
+      Part Number “{canonical}” already has saved details.
     </div>
   ) : !trimmed && pnAttempted ? (
     <div className="err" role="alert">
@@ -376,7 +367,7 @@ function PartNumberEditDialog({
     </div>
   ) : canonical ? (
     <div className="pnm-fieldok">
-      ✓ Canonical Part Number <b>{canonical}</b> · barcode{' '}
+      ✓ Will be saved as <b>{canonical}</b> · Barcode{' '}
       <span className="barcodeval">{pnBarcode(canonical)}</span>
     </div>
   ) : null;
@@ -531,8 +522,7 @@ function PartNumberEditDialog({
             </div>
           </div>
           <p className="pnm-imghelp">
-            Without a custom image the shared default Part Number placeholder is
-            shown — the same one as in PN Tracking.
+            If no image is uploaded, the default Part Number image is shown.
           </p>
         </div>
       </div>
@@ -546,18 +536,18 @@ function PartNumberEditDialog({
       </div>
       {record && onDelete ? (
         <div className="pnm-dangerzone">
-          <div className="dz-title">Danger Zone</div>
+          <div className="dz-title">Delete Part Number Details</div>
           <div className="dz-body">
             <p className="dz-live">
-              Deleting <b>{record.pn}</b> removes only this metadata record.
-              Production quantities, Work Order demand and Movement history are
-              never touched and keep showing the PN.
+              This removes the saved image, description, revision, and ERP ID
+              for <b>{record.pn}</b>. Production tracking and Work Order history
+              are not affected.
             </p>
             <button
               className="dz-delete"
               onClick={() => setDeleteConfirm(true)}
             >
-              Delete…
+              Delete details…
             </button>
           </div>
         </div>
@@ -570,19 +560,17 @@ function PartNumberEditDialog({
       ) : null}
       {deleteConfirm && record ? (
         <ConfirmDialog
-          title="Delete Part Number record"
-          confirmLabel="Delete record"
+          title="Delete Part Number details?"
+          confirmLabel="Delete details"
           cancelLabel="Cancel (Esc)"
           danger
           onCancel={() => setDeleteConfirm(false)}
           onConfirm={() => onDelete?.()}
         >
-          Only the metadata record for <b>{record.pn}</b> is deleted
-          {dirty ? ' (unsaved edits are discarded with it)' : ''}: Work Order
-          demand, production quantities, Movement history and allocations are
-          never touched, and every screen keeps showing the Part Number with its
-          record fields absent (—). A record can be created again later for the
-          same PN.
+          This permanently removes the saved image, description, revision, and
+          ERP ID for <b>{record.pn}</b>
+          {dirty ? ' (unsaved edits are discarded with it)' : ''}. The Part
+          Number and its production history remain available.
         </ConfirmDialog>
       ) : null}
       {leaveConfirm && record ? (
@@ -597,8 +585,7 @@ function PartNumberEditDialog({
           }}
           onDiscard={onCancel}
         >
-          This Part Number record has unsaved edits. <b>Save changes</b> saves
-          them and closes, <b>Discard changes</b> closes without saving them.
+          You have unsaved changes to <b>{record.pn}</b>.
         </UnsavedChoiceDialog>
       ) : null}
       {leaveConfirm && !record ? (
@@ -609,7 +596,7 @@ function PartNumberEditDialog({
           onCancel={() => setLeaveConfirm(false)}
           onConfirm={onCancel}
         >
-          Nothing has been added yet — closing now discards the entered input.
+          Your entered information will not be saved.
         </ConfirmDialog>
       ) : null}
     </ModalDialog>

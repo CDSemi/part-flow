@@ -2141,14 +2141,15 @@ body.light{color-scheme:light}
 <!-- ==================== PART NUMBERS (Management master data, post-v18) ==================== -->
 <section id="view-pn" class="view">
   <h1>Part Numbers</h1>
-  <div class="mg-sub">PartNumber master metadata for authorized production roles — image, name/description, informational revision, and ERP mapping. The canonical PN string itself is the production identity; a PN stays usable with or without a record here.</div>
+  <div class="mg-sub">Manage optional Part Number details, images, ERP IDs, and barcode labels.</div>
   <div class="mg-toolbar">
     <input id="pnmsearch" type="search" placeholder="Search: PN, name, revision, ERP id…" aria-label="Search Part Numbers" oninput="renderPartNumbers()">
     <div class="spacer"></div>
     <button class="btn primary" onclick="mgmtMockAction('New Part Number')">+ New Part Number</button>
   </div>
   <div id="pnm-tablewrap"></div>
-  <div class="notice" style="margin-top:12px">Deleting a Part Number record removes only this metadata. Production quantities, Work Order demand and Movement history are never touched and keep showing the PN; a record can be created again later for the same PN.</div>
+  <!-- post-v18 copy pass: no page-level note — deletion semantics live
+       in the Edit dialog's delete section, not on the page -->
 </section>
 
 <!-- ==================== PRIORITY MANAGEMENT ==================== -->
@@ -3995,7 +3996,7 @@ function renderPartNumbers(){
       '<td class="mono">'+(r.erp||'—')+'</td>'+
       '<td><span class="barcodeval">PF:PN:'+r.pn+'</span></td>'+
       '</tr>').join('')+'</tbody></table>':
-    '<div class="notice">No Part Numbers match “'+raw+'”.</div>';
+    '<div class="notice">No saved Part Number details match “'+raw+'”.</div>';
 }
 function mgAssignments(m){
   const out=[];
