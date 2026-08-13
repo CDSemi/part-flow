@@ -377,13 +377,15 @@ export function WorkOrderDetailPanel({
                               errorFor(line.id, 'pn') ? true : undefined
                             }
                             onBlur={(e) => {
-                              // Normalize to the canonical uppercase PN;
-                              // whitespace is invalid, never removed.
+                              // Normalize to the canonical uppercase PN:
+                              // surrounding whitespace trims away, and
+                              // internal whitespace is invalid — never
+                              // silently removed.
                               if (!e.target.value.trim()) return;
                               const pn = normalizePartNumber(e.target.value);
                               if (!pn) {
                                 showNotice(
-                                  '⚠ A Part Number cannot contain spaces or other whitespace — correct the entry.',
+                                  '⚠ A Part Number cannot contain spaces or other whitespace inside the value — correct the entry.',
                                 );
                                 return;
                               }

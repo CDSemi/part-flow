@@ -4005,9 +4005,10 @@ function ManualEntryDialog({
   useEffect(() => {
     fieldRef.current?.focus();
   }, []);
-  // Normalize to the canonical uppercase PN before resolving. A value
-  // containing whitespace is invalid and stays in the dialog with an
-  // explanation — it is never silently cleaned up into a valid PN.
+  // Normalize to the canonical uppercase PN before resolving:
+  // surrounding whitespace trims away; a value with INTERNAL whitespace
+  // is invalid and stays in the dialog with an explanation — it is
+  // never silently cleaned up into a valid PN.
   function submit() {
     const raw = fieldRef.current?.value ?? '';
     if (raw.trim() === '') {
@@ -4017,7 +4018,7 @@ function ManualEntryDialog({
     const pn = normalizePartNumber(raw);
     if (!pn) {
       setEntryError(
-        'A Part Number cannot contain spaces, tabs, or other whitespace. Correct the entry and try again.',
+        'A Part Number cannot contain spaces, tabs, or other whitespace inside the value. Correct the entry and try again.',
       );
       return;
     }

@@ -74,9 +74,10 @@ export function AddPartDialog({
   }, [step]);
 
   // Search matching is case-insensitive. Creating a new PN uses the
-  // canonical form (PROJECT_PROFILE §7): the raw entry is canonicalized
-  // to uppercase, and a value containing any whitespace is not a valid
-  // PN — whitespace is never silently removed.
+  // canonical form (PROJECT_PROFILE §7): surrounding whitespace is
+  // trimmed, the entry is canonicalized to uppercase, and a value with
+  // internal whitespace is not a valid PN — internal whitespace is
+  // never silently removed.
   const trimmed = query.trim();
   const upper = trimmed.toUpperCase();
   const matches = MOCK_PN_CATALOG.filter(
@@ -258,8 +259,8 @@ export function AddPartDialog({
             ) : null}
             {trimmed && !canonical ? (
               <div className="ap-empty">
-                A Part Number cannot contain spaces or other whitespace, so “
-                {query}” cannot be created as a new PN.
+                A Part Number cannot contain spaces or other whitespace inside
+                the value, so “{query.trim()}” cannot be created as a new PN.
               </div>
             ) : null}
           </>

@@ -82,7 +82,7 @@ PartMovement carries **no** `work_order_demand_id`. A release may be initiated f
 8. Movement history is immutable and append-only; current state must be reconstructable from it (§15).
 9. The QuantityFlow creation (carrying its initial `current_area_id` projection), AssignedRoute snapshot, and Movement insert commit atomically or not at all (§13).
 10. A duplicate release submission with the same `device_event_id` and the same normalized request returns the original result and creates nothing; the same `device_event_id` with a different normalized request is an idempotency conflict and creates nothing (§14).
-11. Inactive entities (PN, Area, Operation, RouteTemplate) never accept a release.
+11. Inactive entities (Area, Operation, RouteTemplate) never accept a release. (The PartNumber master has no active/inactive lifecycle — the canonical PN string is always usable, with or without a master record.)
 
 ---
 
@@ -101,10 +101,9 @@ PartMovement carries **no** `work_order_demand_id`. A release may be initiated f
 
 ## 6. PartNumber Normalization, Creation, and Barcode
 
-- Every PN entering the system is normalized first (PROJECT_PROFILE §7): the value must be non-empty and contain **no whitespace** (space, tab, newline — rejected, never silently stripped), and is canonicalized to **UPPERCASE**. `abc-123`, `ABC-123`, and `AbC-123` are all the canonical PN `ABC-123`; `"ABC 123"` is invalid.
+- Every PN entering the system is normalized first (PROJECT_PROFILE §7): leading/trailing whitespace is **trimmed**; after trimming the value must be non-empty and contain **no internal whitespace** (space, tab, newline — rejected, never silently stripped), and is canonicalized to **UPPERCASE**. `abc-123`, `ABC-123`, `AbC-123`, `" ABC-123 "` are all the canonical PN `ABC-123`; `"ABC 123"` and `"ABC\t123"` are invalid.
 - A PartNumber master record is **created on first valid use** (PROJECT_PROFILE §8.1): no preloaded catalog is required. The master is optional current metadata keyed by the canonical PN; production rows never reference it by foreign key, so it can be hard-deleted (and later recreated for the same canonical PN) without touching production data (PROJECT_PROFILE §28).
 - The PN barcode carries the canonical PN itself: `PF:PN:<part-number>` (PROJECT_PROFILE §10). Because the PN is canonical uppercase, the barcode value is fully derived — no separately stored, separately unique barcode key is needed for PNs. The barcode identifies only the PN and encodes no Work Order, quantity, Route, or location context.
-- An inactive PN master (`is_active = false`) is visible in lookup but flagged; it cannot be added to new demand or released without reactivation.
 
 ---
 
@@ -125,7 +124,7 @@ Input: PN, release quantity, Route Mode (`FLOATING` default; `PLANNED` with a te
 
 Steps (one transaction, §13):
 
-1. Validate the canonical PN (normalized uppercase, whitespace-free; rejected when a PN master exists and is inactive), Area active and configured as a starting Area, Operation valid for that Area, RouteTemplate active **when `PLANNED`**, quantity > 0.
+1. Validate the canonical PN (normalized: trimmed, uppercase, no internal whitespace), Area active and configured as a starting Area, Operation valid for that Area, RouteTemplate active **when `PLANNED`**, quantity > 0. The PartNumber master has no active/inactive state and its existence is never a release precondition.
 2. If the PN has active flows, require the request to carry the explicit confirmation flag set by the UI after showing the existing distribution; otherwise reject. Never auto-create or auto-merge.
 3. Create the QuantityFlow with its `route_mode` and its initial projection: `current_area_id` = the confirmed starting Area (§9, §15).
 4. Snapshot the AssignedRoute **only for a `PLANNED` release** (§10); a `FLOATING` release creates none.
@@ -166,7 +165,7 @@ Columns per PROJECT_PROFILE §8.11, with slice-relevant shape:
 - `occurred_at`, `server_received_at` — see §14.
 - `device_event_id` NOT NULL UNIQUE — idempotency key (§14).
 - `metadata` carries the deterministic request fingerprint (§14) and may informationally capture the initiating actor (until authentication exists, Phase 14) and the initiating WorkOrderDemand context for audit display; none of this creates ownership — WorkOrderDemand never owns Movement (§3).
-- Immutable: insert-only; UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, per the PostgreSQL-constraints-first rule.
+- Immutable: insert-only; UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, per the PostgreSQL-constraints-first rule. This guard binds the application at all times; the later Movement-history retention maintenance (PROJECT_PROFILE §28, roadmap Phase 16) runs through a separate privileged Admin path and is out of this slice.
 
 ---
 
@@ -262,7 +261,7 @@ Rules:
 
 **`operations`** — PK `id`; `area_id NOT NULL` FK; `code NOT NULL`, `UNIQUE (area_id, code)`; `name`; `is_active`; `created_at`, `updated_at`.
 
-**`part_numbers`** — optional current-metadata master. PK `part_number text` (the canonical uppercase PN — natural key, no surrogate id) with `CHECK (part_number = upper(part_number) AND part_number !~ '\s' AND part_number <> '')` enforcing the canonical form; `is_active NOT NULL DEFAULT true`; `created_at`, `updated_at`. The PN barcode is derived (`'PF:PN:' || part_number`, PROJECT_PROFILE §10) — no stored `barcode_value` column and no `lower(...)` expression indexes (canonical uppercase makes them unnecessary). No production table references this table by FK, so a master row can be hard-deleted (and recreated later for the same canonical PN) per PROJECT_PROFILE §28.
+**`part_numbers`** — optional current-metadata master. PK `part_number text` (the canonical uppercase PN — natural key, no surrogate id) with `CHECK (part_number = upper(part_number) AND part_number !~ '\s' AND part_number <> '')` enforcing the canonical form; `created_at`, `updated_at` (no `is_active` — the PN master has no active/inactive lifecycle). The PN barcode is derived (`'PF:PN:' || part_number`, PROJECT_PROFILE §10) — no stored `barcode_value` column and no `lower(...)` expression indexes (canonical uppercase makes them unnecessary). No production table references this table by FK, so a master row can be hard-deleted (and recreated later for the same canonical PN) per PROJECT_PROFILE §28.
 
 **`work_orders`** — PK `id` (stable internal identity — never the user-facing identifier); `work_order_number` **nullable** with a **partial unique index** (`UNIQUE (work_order_number) WHERE work_order_number IS NOT NULL`) so many internal Work Orders may hold `NULL` while non-null numbers stay unique (§5); `received_date NOT NULL`; `due_date` nullable (a missing Work Order due date is valid data, §5); `status`; `created_at`, `updated_at`.
 
@@ -312,11 +311,11 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 ## 19. Acceptance Criteria
 
 1. Saving a Work Order with WorkOrderDemand creates no QuantityFlow, no PartMovement, and no projection change.
-2. Creating a new PN (on first valid use) normalizes the entered value to the canonical PN: `abc-123`, `AbC-123`, and `ABC-123` all resolve to the single canonical PN `ABC-123` (constraint-verified — a second master row for the same canonical PN is impossible), and any value containing whitespace (`"ABC 123"`, `" ABC-123"`, `"ABC-123 "`, `"ABC\t123"`) is rejected with no write. The barcode is derived as `PF:PN:<part-number>` from the canonical PN. The master creation appends a `CREATED` audit event.
+2. Creating a new PN (on first valid use) normalizes the entered value to the canonical PN: `abc-123`, `AbC-123`, `ABC-123`, `" ABC-123 "` all resolve to the single canonical PN `ABC-123` (surrounding whitespace trimmed; constraint-verified — a second master row for the same canonical PN is impossible), and any value with internal whitespace after trimming (`"ABC 123"`, `"ABC\t123"`, `"ABC\n123"`) is rejected with no write. The barcode is derived as `PF:PN:<part-number>` from the canonical PN. The master creation appends a `CREATED` audit event.
 3. A release creates exactly one QuantityFlow (with its route mode), one `RECEIVED` Movement, and — for a `PLANNED` release only — one AssignedRoute snapshot, atomically and with no generic audit event. A `FLOATING` release (the default) creates no AssignedRoute. If any part fails, nothing commits: no committed state can contain a QuantityFlow without its `RECEIVED` Movement, no `PLANNED` flow without its snapshot, no `FLOATING` flow with one, and no partial release state is ever observable.
 4. `current_area_id` is set to the confirmed starting Area by the QuantityFlow INSERT itself; the column is NOT NULL and no post-insert projection update is required for release.
 5. Every `RECEIVED` Movement records a resolved Operation (`operation_id NOT NULL`, constraint-verified). For a `PLANNED` flow it references the AssignedRoute snapshot's first step (`assigned_route_step_id` set to an `assigned_route_steps` row, never a `route_steps` row); for a `FLOATING` flow `assigned_route_step_id` is NULL.
-6. Releasing with an invalid or inactive PN, Area, Operation, RouteTemplate (when `PLANNED`), or quantity ≤ 0 is rejected with no write.
+6. Releasing with an invalid PN, an inactive Area, Operation, or RouteTemplate (when `PLANNED`), or quantity ≤ 0 is rejected with no write.
 7. Releasing a PN that already has active quantity without the explicit confirmation flag is rejected with no write; with confirmation it creates a separate flow and never merges.
 8. Retrying a release with the same `device_event_id` and the same normalized request (matching fingerprint) returns the original result and creates nothing.
 9. Reusing a `device_event_id` with a different normalized request (mismatched fingerprint) returns an explicit idempotency-conflict error and creates nothing.

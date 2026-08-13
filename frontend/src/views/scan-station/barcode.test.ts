@@ -14,17 +14,19 @@ test('PF:PN: accepts the whitespace-free suffix as the canonical PN', () => {
   expect(parseScan('PF:PN:abc')).toEqual({ kind: 'pn', pn: 'ABC' });
 });
 
-test('a PN suffix containing whitespace is an invalid PN barcode', () => {
-  // Whitespace inside a PN is invalid and is never silently removed to
+test('whitespace inside a PN makes the PN barcode invalid; surrounding whitespace is trimmed', () => {
+  // Whitespace INSIDE a PN is invalid and is never silently removed to
   // turn invalid input into a valid PN.
   expect(parseScan('PF:PN:X 1/2-REV C')).toEqual({
     kind: 'unknown',
     raw: 'PF:PN:X 1/2-REV C',
   });
-  expect(parseScan('PF:PN: ABC-123')).toEqual({
+  expect(parseScan('PF:PN:ABC\t123')).toEqual({
     kind: 'unknown',
-    raw: 'PF:PN: ABC-123',
+    raw: 'PF:PN:ABC\t123',
   });
+  // Surrounding whitespace is input chrome and trims away.
+  expect(parseScan('PF:PN: ABC-123')).toEqual({ kind: 'pn', pn: 'ABC-123' });
 });
 
 test('scanner terminators and surrounding whitespace are trimmed', () => {
@@ -76,11 +78,23 @@ test('normalizePartNumber canonicalizes case-insensitive PN identity to uppercas
   expect(parseScan('PF:PN:Abc')).toEqual({ kind: 'pn', pn: 'ABC' });
 });
 
-test('normalizePartNumber rejects empty values and any whitespace', () => {
+test('normalizePartNumber trims surrounding whitespace', () => {
+  // Leading/trailing space, tab, and newline are input chrome — trimmed
+  // before validation, then canonicalized to uppercase.
+  expect(normalizePartNumber(' ABC-123')).toBe('ABC-123');
+  expect(normalizePartNumber('ABC-123 ')).toBe('ABC-123');
+  expect(normalizePartNumber('\tabc-123\t')).toBe('ABC-123');
+  expect(normalizePartNumber('\nABC-123\n')).toBe('ABC-123');
+  expect(normalizePartNumber('  aBc-123  ')).toBe('ABC-123');
+});
+
+test('normalizePartNumber rejects empty values and internal whitespace', () => {
   expect(normalizePartNumber('')).toBeNull();
+  expect(normalizePartNumber('   ')).toBeNull();
+  expect(normalizePartNumber('\t\n')).toBeNull();
+  // Internal whitespace is never silently removed to make a valid PN.
   expect(normalizePartNumber('ABC 123')).toBeNull();
-  expect(normalizePartNumber(' ABC-123')).toBeNull();
-  expect(normalizePartNumber('ABC-123 ')).toBeNull();
   expect(normalizePartNumber('ABC\t123')).toBeNull();
   expect(normalizePartNumber('ABC\n123')).toBeNull();
+  expect(normalizePartNumber(' ABC 123 ')).toBeNull();
 });

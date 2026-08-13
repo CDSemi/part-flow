@@ -3036,6 +3036,43 @@ function manualFieldValue() {
   return (screen.getByLabelText('Part Number') as HTMLInputElement).value;
 }
 
+test('manual PN entry trims surrounding whitespace and canonicalizes to uppercase', async () => {
+  await renderStation();
+
+  // Leading/trailing whitespace is input chrome; lowercase input
+  // resolves to the canonical uppercase PN.
+  manualEnter('  2027-60-8114-00 ');
+  expect(
+    await screen.findByRole('dialog', { name: 'Select an action' }),
+  ).toHaveTextContent('2027-60-8114-00');
+});
+
+test('manual PN entry rejects internal whitespace with an inline explanation', async () => {
+  await renderStation();
+
+  manualEnter('2027 60 8114');
+  // The dialog stays open with the inline error — nothing resolves and
+  // the invalid value is never silently cleaned up.
+  expect(
+    screen.getByRole('dialog', { name: 'Enter Part Number manually' }),
+  ).toHaveTextContent(
+    'A Part Number cannot contain spaces, tabs, or other whitespace inside the value',
+  );
+  expect(manualFieldValue()).toBe('2027 60 8114');
+  expect(
+    screen.queryByRole('dialog', { name: 'Select an action' }),
+  ).not.toBeInTheDocument();
+
+  // Correcting the entry clears the error and resolves normally.
+  fireEvent.change(screen.getByLabelText('Part Number'), {
+    target: { value: '2027-60-8114-00' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+  expect(
+    await screen.findByRole('dialog', { name: 'Select an action' }),
+  ).toBeInTheDocument();
+});
+
 test('Back returns from the action dialog to manual PN entry with the PN preserved', async () => {
   await renderStation();
 

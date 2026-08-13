@@ -4,13 +4,14 @@
 //
 // The `PF:` namespace identifies PartFlow-owned barcodes and determines
 // the entity type deterministically. The PN string itself is the stable
-// domain identity: PN identity is case-insensitive, the canonical form
-// is UPPERCASE, and a PN may contain no whitespace of any kind
-// (whitespace is rejected, never silently removed). Beyond those rules
-// the PN stays an opaque arbitrary string — segments are never parsed,
-// no format is validated, and the PN does not need to exist in a
-// preloaded catalog (the PartNumber master metadata record is created
-// on first valid use).
+// domain identity: PN identity is case-insensitive and the canonical
+// form is UPPERCASE. Surrounding whitespace is input chrome and is
+// trimmed; whitespace INSIDE the PN is invalid and is rejected — never
+// silently removed. Beyond those rules the PN stays an opaque
+// arbitrary string — segments are never parsed, no format is
+// validated, and the PN does not need to exist in a preloaded catalog
+// (the PartNumber master metadata record is created on first valid
+// use).
 //
 // There are no Action barcodes (the former armed action values were
 // removed): action intent is chosen
@@ -30,21 +31,28 @@ export type ParsedScan =
 /** The dedicated Scrap-workflow barcode value. */
 export const SCRAP_BARCODE = 'PF:SCRAP';
 
-/** Trim scanner terminators (CR/LF/TAB) and surrounding whitespace. */
+/**
+ * Trim scanner terminators (CR/LF/TAB) and surrounding whitespace from
+ * the ends of the scanned value. Nothing INSIDE the value is removed —
+ * an embedded whitespace character stays and makes a PN barcode
+ * invalid (PROJECT_PROFILE §7/§10), never silently cleaned up.
+ */
 export function normalizeScanInput(raw: string): string {
-  return raw.replace(/[\r\n\t]/g, '').trim();
+  return raw.trim();
 }
 
 /**
  * Normalize an entered PN to its canonical form (PROJECT_PROFILE §7):
- * the value must be non-empty and contain no whitespace of any kind
- * (space, tab, newline — rejected, never silently removed); identity is
+ * leading/trailing whitespace is trimmed; after trimming the value must
+ * be non-empty and contain no internal whitespace of any kind (space,
+ * tab, newline — rejected, never silently removed); identity is
  * case-insensitive, so the canonical PN is the UPPERCASE value. Returns
  * the canonical PN, or null when the input is not a valid PN.
  */
 export function normalizePartNumber(input: string): string | null {
-  if (input === '' || /\s/.test(input)) return null;
-  return input.toUpperCase();
+  const trimmed = input.trim();
+  if (trimmed === '' || /\s/.test(trimmed)) return null;
+  return trimmed.toUpperCase();
 }
 
 /**
@@ -58,8 +66,9 @@ export function parseScan(raw: string): ParsedScan {
   if (!value) return { kind: 'empty' };
   if (value === SCRAP_BARCODE) return { kind: 'scrap' };
   if (value.startsWith('PF:PN:')) {
-    // The suffix is the PN candidate: it must be non-empty and
-    // whitespace-free, and is canonicalized to the uppercase PN.
+    // The suffix is the PN candidate: surrounding whitespace is
+    // trimmed; after trimming it must be non-empty and free of internal
+    // whitespace, and is canonicalized to the uppercase PN.
     const pn = normalizePartNumber(value.slice('PF:PN:'.length));
     return pn ? { kind: 'pn', pn } : { kind: 'unknown', raw: value };
   }
