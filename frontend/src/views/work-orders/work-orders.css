@@ -351,6 +351,154 @@
 /* Page notes render through the shared PageNote component
    (styles/global.css .page-note). */
 
+/* ================================================================
+   Completed Work Orders page (GUI §11.5) — read-only history on
+   /management/work-orders/completed. Shares the WO-list presentation
+   (.wolist) and adds the back link, the history toolbar's filters,
+   the result summary line, sortable headers (the §12.1 pattern) and
+   the derived due-outcome line.
+   ================================================================ */
+
+/* Entry from the active list toolbar: a quiet secondary action. */
+.cwo-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.cwo-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  text-decoration: none;
+  margin-bottom: 10px;
+}
+
+.cwo-back:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.cwo-tools {
+  flex-wrap: wrap;
+}
+
+.cwo-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cwo-filter select {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13.5px;
+  padding: 9px 12px;
+  min-height: var(--touch-min);
+  color: var(--text);
+  outline: none;
+}
+
+.cwo-filter select:focus {
+  border-color: var(--info-t);
+}
+
+/* The custom Done range's native date inputs — never stretched by the
+   toolbar's flexible search-input rule. */
+.wo-tools input.cwo-date {
+  flex: none;
+  width: auto;
+  max-width: none;
+}
+
+.cwo-dash {
+  color: var(--faint);
+}
+
+/* Result summary: restates count and effective range so a bounded
+   view is never mistaken for the whole history. */
+.cwo-summary {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: -4px 0 10px;
+}
+
+.cwo-summary b {
+  color: var(--text);
+  font-family: var(--mono), monospace;
+}
+
+/* Sortable column headers — the shared §12.1 presentation. */
+.wolist th .wo-sortbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  /* `font: inherit` already carries the weight — the th typography
+     (size, weight, spacing, casing) passes through untouched. */
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+}
+
+.wolist th .wo-sortbtn .arrow {
+  color: var(--faint);
+  font-size: 12px;
+  /* The arrow glyphs sit low in their em-box — a tight line box plus
+     a small upward nudge centers them optically on the header text. */
+  line-height: 1;
+  position: relative;
+  top: -1.5px;
+}
+
+.wolist th .wo-sortbtn:hover {
+  color: var(--text);
+}
+
+.wolist th .wo-sortbtn.on,
+.wolist th .wo-sortbtn.on .arrow {
+  color: var(--info-t);
+  font-weight: 800;
+}
+
+/* Done — the page's central value. */
+.cwo-done {
+  font-weight: 800;
+}
+
+/* Derived due outcome under the due date — ✓/✕ keeps the signal
+   non-color-only; a completed Work Order is never urgency-ramped. */
+.cwo-outcome.ontime {
+  color: var(--ok-t);
+}
+
+.cwo-outcome.late {
+  color: var(--err-t);
+  font-weight: 700;
+}
+
+.cwo-allhistory {
+  margin-top: 12px;
+}
+
+.cwo-more {
+  display: flex;
+  justify-content: center;
+  padding: 14px 0 2px;
+}
+
 /* New Work Order header form */
 .nwo-form {
   display: grid;

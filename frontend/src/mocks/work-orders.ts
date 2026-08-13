@@ -1,5 +1,7 @@
 import type { MockWorkOrder } from '../views/view-models';
 
+import { isoDateIn } from './mock-time';
+
 // Existing PartNumber catalog for the Add Part search step and the
 // optional barcode entry path (mock only). PN barcodes carry the PN
 // itself — `PF:PN:<part-number>` — never an opaque stable id; PN
@@ -202,12 +204,40 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
       },
     ],
   },
+];
+
+// ====================================================================
+// Completed Work Orders — the permanent read-only history behind
+// `/management/work-orders/completed` (GUI_DESIGN §11.5). A completed
+// Work Order (every demand fully allocated) never appears in the
+// active list above. `done` is the ISO done-date stand-in for
+// `completed_at` (PROJECT_PROFILE §8.2). The dataset is deliberately
+// LARGE (curated examples + a deterministic generated tail) so the
+// page's server-side contract — done-range default, keyset-style
+// `Show more` paging, search across years of history — is really
+// exercised in development.
+// ====================================================================
+
+/** Deterministic pseudo-random stream (LCG) — the generated history
+ * must be identical on every load and in every test run. */
+function lcg(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0xffffffff;
+  };
+}
+
+const COMPLETED_CURATED: MockWorkOrder[] = [
   {
+    // Recently completed, on time (done before due) — the §11.5
+    // `✓ On time` outcome presentation.
     id: 'wo-006996',
     workOrderNumber: '006996',
-    received: '2026-06-18',
-    due: '2026-07-10',
+    received: isoDateIn(-56),
+    due: isoDateIn(-34),
     status: 'Complete',
+    done: isoDateIn(-36),
     preview: '309-127',
     lines: [
       {
@@ -215,13 +245,110 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
         barcode: 'barcode PF:PN:309-127',
         type: 'NEW',
         qty: 50,
-        due: '2026-07-10',
+        due: isoDateIn(-34),
         job: '17740',
         status: 'Allocated 50 / 50',
         statusClass: 'released',
       },
     ],
   },
+  {
+    // Completed late — the `✕ N days late` outcome.
+    id: 'wo-006990',
+    workOrderNumber: '006990',
+    received: isoDateIn(-80),
+    due: isoDateIn(-45),
+    status: 'Complete',
+    done: isoDateIn(-40),
+    preview: '142-260',
+    lines: [
+      {
+        pn: '142-260',
+        barcode: 'barcode PF:PN:142-260',
+        type: 'NEW',
+        qty: 16,
+        due: isoDateIn(-45),
+        job: '17561',
+        status: 'Allocated 16 / 16',
+        statusClass: 'released',
+      },
+    ],
+  },
+  {
+    // Completed internal MODIFY Work Order without an external number
+    // and without a due date (`—` outcome).
+    id: 'wo-int-0003',
+    workOrderNumber: null,
+    received: isoDateIn(-20),
+    due: null,
+    status: 'Complete',
+    done: isoDateIn(-12),
+    internal: true,
+    preview: '214-406',
+    lines: [
+      {
+        pn: '214-406',
+        barcode: 'barcode PF:PN:214-406',
+        type: 'MODIFY',
+        qty: 3,
+        due: null,
+        job: '— (internal)',
+        status: 'Allocated 3 / 3',
+        statusClass: 'released',
+      },
+    ],
+  },
+];
+
+/** Generated completed history: ~180 Work Orders whose done dates
+ * spread from days to roughly two years back, with a realistic mix of
+ * on-time / late / no-due-date outcomes. */
+function generateCompletedHistory(): MockWorkOrder[] {
+  const random = lcg(0x9e3779b9);
+  const catalog = MOCK_PN_CATALOG;
+  return Array.from({ length: 180 }, (_, i): MockWorkOrder => {
+    const doneDaysAgo = 2 + i * 4 + Math.floor(random() * 4);
+    const leadDays = 10 + Math.floor(random() * 40);
+    const hasDue = random() > 1 / 6;
+    // Done vs due mix: mostly on time (due after done), a visible
+    // late share (due before done).
+    const dueOffset =
+      random() < 0.3
+        ? 2 + Math.floor(random() * 12)
+        : -(1 + Math.floor(random() * 9));
+    const entry = catalog[i % catalog.length];
+    const qty = 1 + Math.floor(random() * 60);
+    const number = String(6900 - i).padStart(6, '0');
+    const done = isoDateIn(-doneDaysAgo);
+    const received = isoDateIn(-(doneDaysAgo + leadDays));
+    const due = hasDue ? isoDateIn(-(doneDaysAgo + dueOffset)) : null;
+    return {
+      id: `wo-hist-${number}`,
+      workOrderNumber: number,
+      received,
+      due,
+      status: 'Complete',
+      done,
+      preview: entry.pn,
+      lines: [
+        {
+          pn: entry.pn,
+          barcode: `barcode ${entry.barcode}`,
+          type: 'NEW',
+          qty,
+          due,
+          job: String(17500 - i * 3),
+          status: `Allocated ${qty} / ${qty}`,
+          statusClass: 'released',
+        },
+      ],
+    };
+  });
+}
+
+export const MOCK_COMPLETED_WORK_ORDERS: MockWorkOrder[] = [
+  ...COMPLETED_CURATED,
+  ...generateCompletedHistory(),
 ];
 
 // Release-dialog demo data (presentation only — no release is performed).

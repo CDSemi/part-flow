@@ -1,4 +1,4 @@
-# PartFlow Project Profile v14
+# PartFlow Project Profile v15
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -581,6 +581,7 @@ Typical attributes (illustrative only):
 - `received_date`
 - `due_date`
 - `status`
+- `completed_at`
 - `erp_id`
 - `created_at`
 - `updated_at`
@@ -592,8 +593,11 @@ Rules:
 - `received_date` is required and defaults to the current date during manual creation.
 - `due_date` may be null. A missing Work Order due date is valid data, not a validation error; it may be added later. The Work Order due date serves as the entry default for demand-line due dates.
 - A Work Order contains one or more Work Order Demand records.
-- A Work Order is complete when every Work Order Demand has been fully allocated.
-- Completed Work Orders move out of active views but remain permanently available in history.
+- A Work Order is complete when every Work Order Demand has been fully allocated. Completion is **derived state**: the allocation records remain the source of truth.
+- `completed_at` records the completion moment (the **done date**): it is set to the timestamp of the allocation event that fully allocated the last open Work Order Demand. It exists so the permanent completed history can be ordered, filtered and paged by done date efficiently (indexed; keyset pagination over `(completed_at, id)`) — it is never entered by hand.
+- A later audited allocation adjustment (§18) may make a Work Order incomplete again: `completed_at` is then cleared (and set again by a later completing allocation). The Work Order returns to active views; nothing is deleted and the allocation audit trail preserves the full history.
+- Completed Work Orders move out of active views but remain permanently available in history — presented on a dedicated read-only Completed Work Orders surface, ordered and default-filtered by done date and searchable by WO Number, PN and Job Number (§21 Work Orders). Because completed history is retained permanently, that surface must treat the list as unbounded: its search, filtering, ordering and paging are server-side.
+- Work Order Number uniqueness (and the never-duplicate rule, §13) spans the whole history including completed Work Orders.
 
 ---
 
@@ -1865,6 +1869,8 @@ The view must support the minimum confirmed workflow:
 7. Provide a separate explicit `Release to production` action following the release steps in §12.
 
 On production release the view must confirm release quantity, Route Mode (Floating by default; a Route only for Planned), and the configured starting Area and Operation, and show the resulting Quantity Flow, route mode, Area, quantity, and `RECEIVED` Movement.
+
+Completed Work Orders (every Work Order Demand fully allocated, §8.2) never appear in the active list. They live on a dedicated read-only **Completed Work Orders** history page reached from the list: ordered and default-filtered by done date (`completed_at`, newest first, a bounded default range), with its own search (WO Number, PN, Job Number), a done-date range filter, a due-outcome filter and incremental paging. The history is retained permanently and unbounded, so its search, filtering, ordering and paging are server-side; the page offers no entry, editing or release actions. The active list's search miss points at the completed history, and entering a completed Work Order's number in New Work Order announces the completion and opens its read-only details instead of duplicating (Work Order Number uniqueness spans the whole history, §8.2).
 
 If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
 

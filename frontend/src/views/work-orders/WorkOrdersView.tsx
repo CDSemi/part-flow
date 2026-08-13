@@ -15,12 +15,15 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import {
+  MOCK_COMPLETED_WORK_ORDERS,
   MOCK_RELEASE_DATA,
   MOCK_WORK_ORDER_LIST,
 } from '../../mocks/work-orders';
+import { Link } from '../../app/link';
 import { useUiClock } from '../../components/ui-clock';
 import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
 import type { MockWorkOrder } from '../view-models';
+import { CompletedWorkOrdersView } from './CompletedWorkOrdersView';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -59,7 +62,20 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
 // release. Phase 2: layout and local interactions only — saving and
 // releasing are development mocks that change presentation state and
 // never persist.
+//
+// Two routes belong to this sub view (GUI_DESIGN §11): the active WO
+// list on `/management/work-orders` and the read-only Completed Work
+// Orders history page on `/management/work-orders/completed`. The
+// Management sub-view bar keeps Work Orders active on both.
 export function WorkOrdersView() {
+  const { route } = useRouter();
+  if (route.view === 'management' && route.page === 'completed') {
+    return <CompletedWorkOrdersView />;
+  }
+  return <ActiveWorkOrdersView />;
+}
+
+function ActiveWorkOrdersView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const { setNavigationGuard } = useRouter();
@@ -169,7 +185,13 @@ export function WorkOrdersView() {
       {detailId !== null && (
         <WorkOrderDetailPanel
           key={detailId}
-          workOrder={listData.find((w) => w.id === detailId)}
+          workOrder={
+            // A completed Work Order is only reached here through the
+            // New Work Order duplicate check (its number already
+            // exists in history) — the dialog is read-only for it.
+            listData.find((w) => w.id === detailId) ??
+            MOCK_COMPLETED_WORK_ORDERS.find((w) => w.id === detailId)
+          }
           releasedLines={releasedLines}
           writeBlocked={writeBlocked}
           onClose={closeDetail}
@@ -189,20 +211,35 @@ export function WorkOrdersView() {
 
       {newWorkOrderOpen && (
         <NewWorkOrderDialog
-          existing={workOrderList.flatMap((w) =>
-            w.workOrderNumber === null ? [] : [w.workOrderNumber],
+          // WO-Number uniqueness spans the whole history including
+          // completed Work Orders (PROJECT_PROFILE §8.2) — a completed
+          // number is never silently reusable.
+          existing={[...workOrderList, ...MOCK_COMPLETED_WORK_ORDERS].flatMap(
+            (w) => (w.workOrderNumber === null ? [] : [w.workOrderNumber]),
           )}
           writeBlocked={writeBlocked}
           onClose={closeNewWorkOrder}
           onOpenExisting={(workOrderNumber) => {
             closeNewWorkOrder();
-            showNotice(
-              `⚠ WO Number ${workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
-            );
             const existing = workOrderList.find(
               (w) => w.workOrderNumber === workOrderNumber,
             );
-            if (existing) openWorkOrder(existing.id);
+            if (existing) {
+              showNotice(
+                `⚠ WO Number ${workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
+              );
+              openWorkOrder(existing.id);
+              return;
+            }
+            const completed = MOCK_COMPLETED_WORK_ORDERS.find(
+              (w) => w.workOrderNumber === workOrderNumber,
+            );
+            if (completed) {
+              showNotice(
+                `⚠ WO Number ${workOrderNumber} already exists and is Complete — opening its read-only details.`,
+              );
+              openWorkOrder(completed.id);
+            }
           }}
           onSave={(workOrder) => {
             setWorkOrderList((current) => [workOrder, ...current]);
@@ -305,6 +342,14 @@ function WorkOrderListPanel({
           aria-label="Search WO Number"
         />
         <span className="spacer" />
+        {/* Quiet entry to the read-only completed history (§11.5) —
+            deliberately secondary beside the primary action. */}
+        <Link
+          className="btn ghost cwo-link"
+          to="/management/work-orders/completed"
+        >
+          Completed Work Orders ›
+        </Link>
         <button className="btn primary" onClick={onNew}>
           ＋ New Work Order
         </button>
@@ -326,8 +371,11 @@ function WorkOrderListPanel({
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={5} className="empty">
-                  No Work Order matches “{search.trim()}” — check the number, or
-                  create it with ＋ New Work Order
+                  No active Work Order matches “{search.trim()}” — search{' '}
+                  <Link to="/management/work-orders/completed">
+                    Completed Work Orders
+                  </Link>
+                  , check the number, or create it with ＋ New Work Order
                 </td>
               </tr>
             ) : (
@@ -375,10 +423,14 @@ function WorkOrderListPanel({
         </table>
       )}
       <PageNote>
-        Completed Work Orders move out of the active list but stay permanently
-        available in history. An internal Work Order without an external number
-        displays <span className="mono">—</span>; the real number can be added
-        later through an audited edit.
+        Completed Work Orders leave the active list and stay permanently
+        available in{' '}
+        <Link to="/management/work-orders/completed">
+          Completed Work Orders
+        </Link>
+        . An internal Work Order without an external number displays{' '}
+        <span className="mono">—</span>; the real number can be added later
+        through an audited edit.
       </PageNote>
     </div>
   );

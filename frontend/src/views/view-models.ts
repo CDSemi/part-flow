@@ -389,9 +389,22 @@ export interface MockWorkOrder {
    * a Work Order may be saved without a due date.
    */
   due: string | null;
+  /**
+   * `Complete` never appears in the active WO list — a completed Work
+   * Order (every demand fully allocated) lives on the read-only
+   * Completed Work Orders page instead (GUI_DESIGN §11.5).
+   */
   status: 'Open' | 'Released' | 'Complete';
   /** True for internal Work Orders without an external number. */
   internal?: boolean;
+  /**
+   * Done date — ISO `YYYY-MM-DD` stand-in for `completed_at`
+   * (PROJECT_PROFILE §8.2): set by the allocation event that fully
+   * allocated the last open demand; present exactly on `Complete`
+   * Work Orders. An audited allocation correction may clear it (the
+   * Work Order then returns to the active list).
+   */
+  done?: string;
   preview: string;
   lines: MockWorkOrderLine[];
 }

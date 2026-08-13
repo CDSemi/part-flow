@@ -237,6 +237,40 @@ test('Management exposes the six sub views in the approved order', async () => {
   ]);
 });
 
+test('the Completed Work Orders page renders from its URL with Work Orders active', async () => {
+  renderAt('/management/work-orders/completed');
+
+  expect(
+    await screen.findByRole('heading', { name: 'Completed Work Orders' }),
+  ).toBeInTheDocument();
+  // The sub-view bar keeps Work Orders active — the page belongs to
+  // the Work Orders sub view (GUI_DESIGN §11.5).
+  const workOrdersLink = screen.getByRole('link', { name: 'Work Orders' });
+  expect(workOrdersLink.className).toContain('active');
+  // The back action returns to the active WO list.
+  fireEvent.click(screen.getByRole('link', { name: '‹ Work Orders' }));
+  expect(window.location.pathname).toBe('/management/work-orders');
+  expect(
+    await screen.findByRole('heading', { name: 'Work Orders' }),
+  ).toBeInTheDocument();
+});
+
+test('returning to Management from the completed page re-enters the active WO list', async () => {
+  renderAt('/management/work-orders/completed');
+  await screen.findByRole('heading', { name: 'Completed Work Orders' });
+
+  fireEvent.click(screen.getByRole('link', { name: 'Scan Station' }));
+  expect(window.location.pathname).toBe('/scan-station');
+
+  // Last-used-sub-view restoration stores only the sub view — it
+  // never lands deep inside the history page.
+  fireEvent.click(screen.getByRole('link', { name: 'Management' }));
+  expect(window.location.pathname).toBe('/management/work-orders');
+  expect(
+    await screen.findByRole('heading', { name: 'Work Orders' }),
+  ).toBeInTheDocument();
+});
+
 test('the Machines management view renders from its URL', async () => {
   renderAt('/management/machines');
 

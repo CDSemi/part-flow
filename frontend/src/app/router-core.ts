@@ -53,7 +53,15 @@ export type Route =
    */
   | { view: 'scan-station'; stationId: string | null; mode: ScanStationMode }
   | { view: 'production-board'; mode: ProductionBoardMode }
-  | { view: 'management'; subview: ManagementSubview }
+  /**
+   * `page` is a sub-page of one Management sub view. The only value is
+   * the Work Orders sub view's read-only Completed Work Orders history
+   * page (`/management/work-orders/completed`, GUI_DESIGN §11.5) — a
+   * real, deep-linkable route because the completed history is
+   * unbounded and must survive refresh and browser back/forward. The
+   * sub-view bar keeps Work Orders active on it.
+   */
+  | { view: 'management'; subview: ManagementSubview; page?: 'completed' }
   | { view: 'administration' }
   | { view: 'not-found'; path: string };
 
@@ -93,6 +101,12 @@ export function resolvePath(
   if (path === '/administration') return { view: 'administration' };
   if (path === '/management')
     return { redirect: `/management/${lastManagementSubview}` };
+  // Completed Work Orders history page (GUI_DESIGN §11.5) — the one
+  // Management sub-page route. Last-used-sub-view restoration still
+  // re-enters through the active WO list (only the subview is stored).
+  if (path === '/management/work-orders/completed') {
+    return { view: 'management', subview: 'work-orders', page: 'completed' };
+  }
   const managementMatch = /^\/management\/([^/]+)$/.exec(path);
   if (managementMatch && isManagementSubview(managementMatch[1])) {
     return { view: 'management', subview: managementMatch[1] };

@@ -309,6 +309,14 @@ export function WorkOrderDetailPanel({
           <span className={`wostat ${workOrder.status.toLowerCase()}`}>
             {workOrder.status}
           </span>
+          {workOrder.done ? (
+            // Done date (`completed_at`, GUI_DESIGN §11.5) — present
+            // exactly on completed Work Orders.
+            <>
+              {' '}
+              · Done <b className="mono">{formatIsoDate(workOrder.done)}</b>
+            </>
+          ) : null}
           {workOrder.internal
             ? ' · internal Work Order — no external number yet (displays —)'
             : ''}
