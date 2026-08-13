@@ -670,14 +670,15 @@
   border-radius: var(--radius-sm);
 }
 
-/* Demand-line table presentation (New Work Order dialog): a panel2
-   header band and vertically centered row content — the PN text and
-   the remove button sit on the controls' center line. */
-.nwo-lines .wo-table th {
+/* Demand-line table presentation (New Work Order and Work Order
+   Details dialogs): a panel2 header band and vertically centered row
+   content — the PN text and the row actions sit on the controls'
+   center line. */
+.wo-lines .wo-table th {
   background: var(--panel2);
 }
 
-.nwo-lines .wo-table td {
+.wo-lines .wo-table td {
   vertical-align: middle;
 }
 
@@ -689,18 +690,18 @@
    through faint zebra striping and a hover tint instead of per-row
    hairlines. */
 @media (min-width: 881px) {
-  .nwo-lines .wo-table td {
+  .wo-lines .wo-table td {
     border-bottom: none;
     /* Compact rows: the zebra striping already separates lines, so a
        small vertical padding around the 33px controls is enough. */
     padding: 6px 12px;
   }
 
-  .nwo-lines .wo-table tbody tr:nth-child(even) td {
+  .wo-lines .wo-table tbody tr:nth-child(even) td {
     background: var(--panel2);
   }
 
-  .nwo-lines .wo-table tbody tr:hover td {
+  .wo-lines .wo-table tbody tr:hover td {
     background: var(--row-hover);
   }
 
