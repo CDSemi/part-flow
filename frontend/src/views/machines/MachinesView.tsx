@@ -1,6 +1,6 @@
 import './machines.css';
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
@@ -772,22 +772,47 @@ function AreaSelectField({
   );
 }
 
-/** Key/value recap rows shared by the final confirmation summaries. */
-function SummaryList({
-  rows,
-}: {
-  rows: { label: string; value: ReactNode }[];
-}) {
+/** One confirmation-summary row (the Scan Station §4.6 idiom). */
+interface SummaryRow {
+  label: string;
+  value: ReactNode;
+  /** `primary` rows scan first (bigger, bolder); `secondary` context
+   * rows stay present but quiet. Weight and size carry the
+   * distinction — never color alone. */
+  emphasis?: 'primary' | 'secondary';
+  /** Additive semantic value tone on top of the emphasis. */
+  tone?: 'ok' | 'warn' | 'err';
+}
+
+/**
+ * Key/value recap shared by the final confirmation summaries and the
+ * Retired Machine Details dialog — the same two-column definition-list
+ * presentation as the Scan Station confirmation summaries (§4.6):
+ * content-sized label column on a quiet panel, primary values leading,
+ * secondary context receding, semantic tones additive only.
+ */
+function SummaryList({ rows }: { rows: SummaryRow[] }) {
   return (
-    <div className="mg-summary">
+    <dl className="mg-summary">
       {rows.map((row) => (
-        <div className="srow" key={row.label}>
-          <span className="k">{row.label}</span>
-          <span className="v">{row.value}</span>
-        </div>
+        <Fragment key={row.label}>
+          <dt className={row.emphasis}>{row.label}</dt>
+          <dd
+            className={`${row.emphasis ?? ''}${
+              row.tone ? ` tone-${row.tone}` : ''
+            }`}
+          >
+            {row.value}
+          </dd>
+        </Fragment>
       ))}
-    </div>
+    </dl>
   );
+}
+
+/** Quiet mono chip for scanned identifiers (barcodes) in summaries. */
+function BarcodeChip({ value }: { value: string }) {
+  return <span className="mg-chip">{value}</span>;
 }
 
 /**
@@ -1055,7 +1080,6 @@ function MachineEditDialog({
   const [maintenanceReturn, setMaintenanceReturn] = useState(
     initial.maintenanceReturn,
   );
-  const [error, setError] = useState<string | null>(null);
   // New-Machine flow (v17 pattern): form → `Confirm new Machine`
   // summary → final add confirmation. Nothing is added before the last
   // confirmation.
@@ -1161,18 +1185,50 @@ function MachineEditDialog({
     };
   };
 
-  /** Edit: save immediately. New: validate, then enter the summary. */
+  // Live Display-name feedback (same behavior as the Reactivate
+  // dialog): the collision error — and, after a save attempt, the
+  // missing-name error — render AT the name field; a valid entered
+  // name shows the availability confirmation.
+  const trimmedName = name.trim();
+  const targetArea = machine?.area ?? area;
+  const nameCollision = machines.some(
+    (m) =>
+      m.id !== machine?.id &&
+      m.retiredOn === undefined &&
+      m.area === targetArea &&
+      m.name === trimmedName,
+  );
+  const [nameAttempted, setNameAttempted] = useState(false);
+  const nameFeedback = nameCollision ? (
+    <div className="err" role="alert">
+      ✕ “{trimmedName}” already exists in{' '}
+      {areaByKey(targetArea)?.name ?? targetArea}.
+    </div>
+  ) : !trimmedName && nameAttempted ? (
+    <div className="err" role="alert">
+      A display name is required.
+    </div>
+  ) : trimmedName && trimmedName !== (machine?.name ?? '') ? (
+    <div className="mg-fieldok">
+      ✓ “{trimmedName}” is available in{' '}
+      {areaByKey(targetArea)?.name ?? targetArea}.
+    </div>
+  ) : null;
+
+  /** Edit: save immediately. New: validate, then enter the summary.
+   * Name problems already render at the field — save only blocks. */
   const save = () => {
-    const built = build();
-    if ('error' in built) {
-      setError(built.error);
+    if (!trimmedName) {
+      setNameAttempted(true);
       return;
     }
+    if (nameCollision) return;
+    const built = build();
+    if ('error' in built) return; // covered by the field feedback
     if (machine) {
       onSave(built.machine);
       return;
     }
-    setError(null);
     setAddStage('summary');
   };
 
@@ -1250,7 +1306,7 @@ function MachineEditDialog({
             a placeholder would never render. */}
         {machine ? (
           <div className="mg-grid3">
-            <div className="mg-span2">
+            <div className="mg-span2 mg-fieldcol">
               <Field label="Display name">
                 <input
                   className="field"
@@ -1259,6 +1315,7 @@ function MachineEditDialog({
                   placeholder="e.g. Lathe 5"
                 />
               </Field>
+              {nameFeedback}
             </div>
             <Field
               label={
@@ -1278,15 +1335,18 @@ function MachineEditDialog({
           </div>
         ) : (
           <div className="mg-grid3">
-            <Field label="Display name">
-              <input
-                ref={nameInputRef}
-                className="field"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Lathe 5"
-              />
-            </Field>
+            <div className="mg-fieldcol">
+              <Field label="Display name">
+                <input
+                  ref={nameInputRef}
+                  className="field"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Lathe 5"
+                />
+              </Field>
+              {nameFeedback}
+            </div>
             <div className="mg-areacell">
               <AreaSelectField
                 label="Area"
@@ -1410,11 +1470,6 @@ function MachineEditDialog({
                 />
               </Field>
             </div>
-          </div>
-        ) : null}
-        {error ? (
-          <div className="err" role="alert">
-            {error}
           </div>
         ) : null}
         {machine ? <LifecycleTimeline machine={machine} compact /> : null}
@@ -1593,7 +1648,11 @@ function MachineEditDialog({
           </div>
           <SummaryList
             rows={[
-              { label: 'Machine', value: summaryRecord.name },
+              {
+                label: 'Machine',
+                value: summaryRecord.name,
+                emphasis: 'primary',
+              },
               {
                 label: 'Area',
                 value: (
@@ -1613,10 +1672,9 @@ function MachineEditDialog({
               {
                 label: 'Barcode',
                 value: (
-                  <span className="mono">
-                    {machineBarcode(summaryRecord.assetTag)}
-                  </span>
+                  <BarcodeChip value={machineBarcode(summaryRecord.assetTag)} />
                 ),
+                emphasis: 'secondary',
               },
               ...(retireEditsIntent
                 ? [
@@ -1626,7 +1684,9 @@ function MachineEditDialog({
                         retireEditsIntent === 'save'
                           ? 'Saved with the retirement'
                           : 'Discarded — retires as last saved',
-                    },
+                      emphasis: 'secondary',
+                      tone: 'warn',
+                    } as const,
                   ]
                 : []),
             ]}
@@ -1680,7 +1740,11 @@ function MachineEditDialog({
           </div>
           <SummaryList
             rows={[
-              { label: 'Machine', value: builtRecord.machine.name },
+              {
+                label: 'Machine',
+                value: builtRecord.machine.name,
+                emphasis: 'primary',
+              },
               {
                 label: 'Area',
                 value: (
@@ -1703,21 +1767,29 @@ function MachineEditDialog({
               {
                 label: 'Barcode',
                 value: (
-                  <span className="mono">
-                    {machineBarcode(builtRecord.machine.assetTag)}
-                  </span>
+                  <BarcodeChip
+                    value={machineBarcode(builtRecord.machine.assetTag)}
+                  />
                 ),
+                emphasis: 'secondary',
               },
               ...(builtRecord.machine.manufacturer
                 ? [
                     {
                       label: 'Manufacturer',
                       value: builtRecord.machine.manufacturer,
-                    },
+                      emphasis: 'secondary',
+                    } as const,
                   ]
                 : []),
               ...(builtRecord.machine.model
-                ? [{ label: 'Model', value: builtRecord.machine.model }]
+                ? [
+                    {
+                      label: 'Model',
+                      value: builtRecord.machine.model,
+                      emphasis: 'secondary',
+                    } as const,
+                  ]
                 : []),
               ...(builtRecord.machine.serialNumber
                 ? [
@@ -1728,7 +1800,8 @@ function MachineEditDialog({
                           {builtRecord.machine.serialNumber}
                         </span>
                       ),
-                    },
+                      emphasis: 'secondary',
+                    } as const,
                   ]
                 : []),
               ...(builtRecord.machine.installedOn
@@ -1736,11 +1809,18 @@ function MachineEditDialog({
                     {
                       label: 'Installed',
                       value: builtRecord.machine.installedOn,
-                    },
+                      emphasis: 'secondary',
+                    } as const,
                   ]
                 : []),
               ...(builtRecord.machine.notes
-                ? [{ label: 'Notes', value: builtRecord.machine.notes }]
+                ? [
+                    {
+                      label: 'Notes',
+                      value: builtRecord.machine.notes,
+                      emphasis: 'secondary',
+                    } as const,
+                  ]
                 : []),
             ]}
           />
@@ -2051,7 +2131,7 @@ function ReactivateMachineDialog({
         </div>
         <SummaryList
           rows={[
-            { label: 'Machine', value: name.trim() },
+            { label: 'Machine', value: name.trim(), emphasis: 'primary' },
             {
               label: 'Area',
               value: (
@@ -2070,6 +2150,8 @@ function ReactivateMachineDialog({
                   )}
                 </>
               ),
+              // An Area move is a deviation worth noticing.
+              tone: moved ? 'warn' : undefined,
             },
             {
               label: 'Asset Tag',
@@ -2077,16 +2159,24 @@ function ReactivateMachineDialog({
             },
             {
               label: 'Barcode',
-              value: (
-                <span className="mono">{machineBarcode(machine.assetTag)}</span>
-              ),
+              value: <BarcodeChip value={machineBarcode(machine.assetTag)} />,
+              emphasis: 'secondary',
             },
             {
               label: 'Physical identity',
               value: 'Same physical machine confirmed',
+              tone: 'ok',
             },
             { label: 'Reason', value: reason.trim() },
-            { label: 'Returns as', value: 'Idle' },
+            {
+              label: 'Returns as',
+              value: 'Idle',
+              emphasis: 'secondary',
+              // The Idle state keeps its semantic warn text tone here
+              // too — the same color it carries on every monitoring
+              // surface (§4.10, §12.1).
+              tone: 'warn',
+            },
           ]}
         />
         <div className="mg-note">
@@ -2130,11 +2220,43 @@ function ReactivateMachineDialog({
   return (
     <ModalDialog label="Reactivate Machine" onClose={onCancel} size="wide">
       <h3>Reactivate Machine</h3>
-      <div className="sub">
-        <b>{machine.name}</b> (retired on {machine.retiredOn}) returns to
-        service on the SAME record — identity, barcode, asset metadata and
-        history stay untouched. It returns as <b>Idle</b>; running stays derived
-        from assigned quantity.
+      {/* The read-only identity header (§12.3) leads the dialog like
+          New/Edit Machine: Asset Tag, derived barcode and the asset
+          metadata (labelled `Machine`) share one identity row — all
+          untouched by reactivation. */}
+      <div className="mg-idhead">
+        <div className="idcol">
+          <span className="idlabel">Asset Tag</span>
+          <span className="idvalue tag">{machine.assetTag}</span>
+        </div>
+        <div className="idcol grow">
+          <span className="idlabel">Barcode</span>
+          <span className="idvalue">{machineBarcode(machine.assetTag)}</span>
+        </div>
+        <div className="idcol">
+          <span className="idlabel">Machine</span>
+          <span className="idassets">
+            {machine.manufacturer || machine.model || machine.serialNumber ? (
+              <>
+                {machine.manufacturer ? (
+                  <span className="mfr">{machine.manufacturer}</span>
+                ) : null}
+                {machine.manufacturer && machine.model ? ' ' : null}
+                {machine.model ? (
+                  <span className="mdl">{machine.model}</span>
+                ) : null}
+                {machine.serialNumber ? (
+                  <>
+                    {machine.manufacturer || machine.model ? ' · ' : null}
+                    <span className="mono">S/N {machine.serialNumber}</span>
+                  </>
+                ) : null}
+              </>
+            ) : (
+              '—'
+            )}
+          </span>
+        </div>
       </div>
       {blockers.length > 0 ? (
         <div className="mg-blockers" role="alert">

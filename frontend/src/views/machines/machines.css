@@ -742,6 +742,28 @@
   background: var(--info-surface);
 }
 
+/* Asset-metadata column inside the identity header (Reactivate): the
+   `Machine` label over manufacturer + model in their two neutral
+   tones plus the serial number — the third column of the identity
+   row. */
+.mg-idhead .idassets {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.mg-idhead .idassets .mfr {
+  font-weight: 650;
+}
+
+.mg-idhead .idassets .mdl {
+  color: var(--faint);
+}
+
+.mg-idhead .idassets .mono {
+  font-size: 12px;
+}
+
 /* Fixed Area inside the identity header (edit only): full-width row
    under the identity values, with the shared Area color line and the
    service-life explanation. */
@@ -1142,39 +1164,90 @@
   margin: 8px 0 0;
 }
 
-/* Final-confirmation summary rows (retire / reactivate, v17). */
+/* Confirmation-summary rows — the Scan Station idiom (§4.6): a
+   two-column definition list on a quiet panel, content-sized label
+   column, primary values scanning first, secondary context receding
+   (weight and size carry the distinction — never color alone), with
+   additive semantic value tones. */
 .mg-summary {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 2px 14px;
-}
-
-.mg-summary .srow {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 14px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--hair);
+  display: grid;
+  grid-template-columns: fit-content(200px) 1fr;
+  gap: 7px 14px;
+  margin: 12px 0 0;
   font-size: 13.5px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
 }
 
-.mg-summary .srow:last-child {
-  border-bottom: none;
+.mg-summary dt {
+  color: var(--faint);
+  font-weight: 700;
 }
 
-.mg-summary .k {
-  flex: none;
-  color: var(--muted);
-  font-weight: 650;
-}
-
-.mg-summary .v {
-  display: inline-flex;
+.mg-summary dd {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
-  text-align: right;
-  font-weight: 700;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mg-summary dd.primary {
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.mg-summary dt.primary {
+  color: var(--muted);
+}
+
+.mg-summary dt.secondary,
+.mg-summary dd.secondary {
+  font-size: 12.5px;
+}
+
+.mg-summary dd.secondary {
+  color: var(--muted);
+  font-weight: 450;
+}
+
+.mg-summary dd.tone-ok {
+  color: var(--ok-t);
+}
+
+.mg-summary dd.tone-warn {
+  color: var(--warn-t);
+}
+
+.mg-summary dd.tone-err {
+  color: var(--err-t);
+}
+
+@media (max-width: 560px) {
+  .mg-summary {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .mg-summary dd {
+    margin-bottom: 6px;
+  }
+}
+
+/* Quiet mono chip for scanned identifiers (barcodes) in summaries. */
+.mg-chip {
+  display: inline-block;
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  background: var(--chip);
+  border-radius: 6px;
+  padding: 2px 8px;
 }
 
 .mg-note {

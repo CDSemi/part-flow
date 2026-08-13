@@ -372,7 +372,14 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   );
 
   const dialog = screen.getByRole('dialog', { name: 'Reactivate Machine' });
-  expect(dialog.textContent).toContain('returns to service on the SAME record');
+  // The identity header leads the dialog (like New/Edit Machine): the
+  // untouched Asset Tag, its derived barcode and the asset metadata.
+  const identity = dialog.querySelector('.mg-idhead') as HTMLElement;
+  expect(identity.textContent).toContain('CD-0104');
+  expect(identity.textContent).toContain('PF:MACHINE:CD-0104');
+  expect(identity.textContent).toContain('Mazak');
+  expect(identity.textContent).toContain('QT-10');
+  expect(identity.textContent).toContain('S/N Q10-61208');
   // The same-physical acknowledgement sits on the warning Important
   // panel — a be-sure marker, not an error.
   expect(
