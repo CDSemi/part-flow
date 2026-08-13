@@ -1975,11 +1975,24 @@ function ReactivateMachineDialog({
   const [area, setArea] = useState<AreaKey>(machine.area);
   const [reason, setReason] = useState('');
   const [samePhysical, setSamePhysical] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Validation errors render AT the failing field, never as one
+  // catch-all block at the bottom of the form. Each entry clears
+  // itself as soon as the user fixes the field.
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    reason?: string;
+    physical?: string;
+  }>({});
   // Staged confirmation (v17): the form validates on Continue, a
   // summary recap follows, and a final explicit question confirms
   // before the Machine really reactivates.
   const [stage, setStage] = useState<'form' | 'summary' | 'final'>('form');
+  // The Display name is the field most likely to need attention (the
+  // reused floor-position name may collide) — it takes initial focus.
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    nameInputRef.current?.focus();
+  }, []);
 
   const activeOnes = machines.filter(
     (m) => m.retiredOn === undefined && m.id !== machine.id,
@@ -2010,30 +2023,21 @@ function ReactivateMachineDialog({
   const moved = area !== machine.area;
 
   const continueToSummary = () => {
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setError('A display name is required.');
-      return;
-    }
-    if (nameCollision) {
-      setError(
-        `An active Machine named “${name.trim()}” already exists in ${
-          selectedArea?.name ?? area
-        }. Display names stay unique among active Machines of one Area — rename this Machine to continue.`,
-      );
-      return;
-    }
+    // Collect every failing field at once — each message renders at
+    // its own field (the live collision message already occupies the
+    // name slot, so a collision blocks without a second message).
+    const errors: { name?: string; reason?: string; physical?: string } = {};
+    if (!name.trim()) errors.name = 'A display name is required.';
     if (!reason.trim()) {
-      setError('A reason is required — it becomes part of the audit record.');
-      return;
+      errors.reason =
+        'A reason is required — it becomes part of the audit record.';
     }
     if (!samePhysical) {
-      setError(
-        'Confirm that this is the same physical machine. A different physical machine needs a new Machine record.',
-      );
-      return;
+      errors.physical =
+        'Confirm that this is the same physical machine. A different physical machine needs a new Machine record.';
     }
-    setError(null);
+    setFieldErrors(errors);
+    if (nameCollision || Object.keys(errors).length > 0) return;
     setStage('summary');
   };
 
@@ -2156,6 +2160,7 @@ function ReactivateMachineDialog({
           <div className="mg-fieldcol">
             <Field label="Display name">
               <input
+                ref={nameInputRef}
                 className="field"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -2164,8 +2169,12 @@ function ReactivateMachineDialog({
             </Field>
             {nameCollision ? (
               <div className="err" role="alert">
-                An active Machine named “{name.trim()}” already exists in{' '}
-                {selectedArea?.name ?? area} — rename one of them to continue.
+                ✕ “{name.trim()}” already exists in {selectedArea?.name ?? area}
+                .
+              </div>
+            ) : !name.trim() && fieldErrors.name ? (
+              <div className="err" role="alert">
+                {fieldErrors.name}
               </div>
             ) : name.trim() ? (
               <div className="mg-fieldok">
@@ -2200,11 +2209,23 @@ function ReactivateMachineDialog({
             placeholder="e.g. Returned from overhaul"
           />
         </Field>
+        {/* Fixed-height slot: the Reason error sits 4px under its
+            input (same rhythm as the name/Area feedback) and the
+            reserved height keeps the distance to the Important panel
+            constant whether or not the error shows. */}
+        <div className="mg-reasonslot">
+          {fieldErrors.reason && !reason.trim() ? (
+            <div className="err" role="alert">
+              {fieldErrors.reason}
+            </div>
+          ) : null}
+        </div>
         {/* The same-physical-machine acknowledgement sits on a calm
             warning panel — "be sure of this before continuing", never
             an error: only the Important marker carries the warning
             tone, the sentence keeps the normal text tone. Continuing
-            without the check is what becomes a validation error. */}
+            without the check is what becomes a validation error,
+            rendered right here at the checkbox. */}
         <div className="mg-confirmpanel">
           <div className="cp-head">
             <span className="cp-icon" aria-hidden="true">
@@ -2223,13 +2244,13 @@ function ReactivateMachineDialog({
               replacement.
             </span>
           </label>
+          {fieldErrors.physical && !samePhysical ? (
+            <div className="err" role="alert">
+              {fieldErrors.physical}
+            </div>
+          ) : null}
         </div>
         <LifecycleTimeline machine={machine} />
-        {error ? (
-          <div className="err" role="alert">
-            {error}
-          </div>
-        ) : null}
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>

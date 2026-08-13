@@ -421,6 +421,18 @@
   margin-top: 3px;
 }
 
+/* In the details dialog the retirement badge is the record's KEY
+   status — it steps up from the quiet table badge to the error text
+   tone on the error-weak surface (matching the RETIRED timeline
+   marker), so the lifecycle state cannot be missed. */
+.mg-rdhead .mg-retiredtag {
+  font-size: 12px;
+  color: var(--err-t);
+  border-color: var(--error-border);
+  background: var(--error-surface-weak);
+  padding: 4px 10px;
+}
+
 .mg-rdnotes {
   margin-top: 14px;
 }
@@ -1074,12 +1086,31 @@
    with the Important marker in the warning text tone; the sentence
    itself keeps the normal text tone. Continuing without the check
    raises the normal red validation error instead. */
+/* Fixed-height Reason error slot: 4px under the input, reserved even
+   while empty so the Important panel below never moves when the error
+   appears — and the message stays clearly separate from the panel. */
+.mg-form .mg-reasonslot {
+  min-height: 20px;
+  margin: -10px 0 0;
+}
+
+.mg-form .mg-reasonslot .err {
+  margin: 0;
+}
+
 .mg-confirmpanel {
-  margin: 14px 0 4px;
+  margin: 10px 0 4px;
   background: var(--warning-surface-weak);
   border: 1px solid var(--warning-border);
   border-radius: 10px;
   padding: 10px 14px 12px;
+}
+
+/* The unchecked-acknowledgement error inside the panel: a small gap
+   above the checkbox row, none below — the panel's own bottom padding
+   is the spacing. */
+.mg-confirmpanel .err {
+  margin: 6px 0 0;
 }
 
 .mg-confirmpanel .cp-head {

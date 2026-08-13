@@ -378,30 +378,33 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   expect(
     dialog.querySelector('.mg-confirmpanel .cp-head')?.textContent,
   ).toContain('Important');
+  // The Display name takes initial focus — it is the field most
+  // likely to need attention.
+  expect(within(dialog).getByLabelText('Display name')).toHaveFocus();
   // The reused floor-position name collides with the active replacement
-  // MC-512 `Lathe 1` in the same Area.
-  expect(dialog.textContent).toContain(
-    'An active Machine named “Lathe 1” already exists in Lathe',
-  );
+  // MC-512 `Lathe 1` in the same Area — the error sits in the name
+  // column, marked with the ✕ glyph.
+  expect(dialog.textContent).toContain('✕ “Lathe 1” already exists in Lathe');
 
-  // A required reason alone is not enough while the collision stands.
+  // A required reason alone is not enough while the collision stands —
+  // Continue stays on the form; the collision message remains the ONE
+  // name-column error (no duplicate catch-all block).
   fireEvent.change(within(dialog).getByLabelText('Reason (required)'), {
     target: { value: 'Returned from overhaul' },
   });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-  expect(dialog.textContent).toContain('rename this Machine to continue');
   expect(
     screen.getByRole('dialog', { name: 'Reactivate Machine' }),
   ).toBeInTheDocument();
+  expect(dialog.querySelectorAll('.err')).toHaveLength(2);
+  expect(dialog.textContent).toContain('✕ “Lathe 1” already exists in Lathe');
 
   // Renaming inside the dialog resolves the collision — the name
   // column switches to the availability confirmation…
   fireEvent.change(within(dialog).getByLabelText('Display name'), {
     target: { value: 'Lathe 1B' },
   });
-  expect(dialog.textContent).not.toContain(
-    'already exists in Lathe — rename one of them',
-  );
+  expect(dialog.textContent).not.toContain('already exists in Lathe');
   expect(dialog.textContent).toContain('“Lathe 1B” is available in Lathe');
   // The Return Area select sits beside the name with its move note.
   expect(within(dialog).getByLabelText('Return Area')).toBeInTheDocument();
