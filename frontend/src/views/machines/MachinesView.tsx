@@ -2147,30 +2147,44 @@ function ReactivateMachineDialog({
         </div>
       ) : null}
       <div className="mg-form">
-        <Field label="Display name">
-          <input
-            className="field"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Lathe 1"
-          />
-        </Field>
-        {nameCollision ? (
-          <div className="err" role="alert">
-            An active Machine named “{name.trim()}” already exists in{' '}
-            {selectedArea?.name ?? area} — rename one of them to continue.
+        {/* Display name and Return Area share one row; each column
+            carries its own feedback directly under the input — the
+            collision error (or the availability confirmation) stays
+            inside the name column, the move note inside the Area
+            column. */}
+        <div className="mg-grid2">
+          <div className="mg-fieldcol">
+            <Field label="Display name">
+              <input
+                className="field"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Lathe 1"
+              />
+            </Field>
+            {nameCollision ? (
+              <div className="err" role="alert">
+                An active Machine named “{name.trim()}” already exists in{' '}
+                {selectedArea?.name ?? area} — rename one of them to continue.
+              </div>
+            ) : name.trim() ? (
+              <div className="mg-fieldok">
+                ✓ “{name.trim()}” is available in {selectedArea?.name ?? area}.
+              </div>
+            ) : null}
           </div>
-        ) : null}
-        <AreaSelectField
-          label="Current Area after reactivation"
-          value={area}
-          choices={areaChoices}
-          onChange={setArea}
-        />
-        <div className="mg-note">
-          Change the Area only if this physical machine was moved while retired.
-          The change applies from reactivation onward — historical Movements
-          keep the Areas they were recorded with.
+          <div className="mg-areacell">
+            <AreaSelectField
+              label="Return Area"
+              value={area}
+              choices={areaChoices}
+              onChange={setArea}
+            />
+            <p className="mg-areahelp">
+              Change only if the Machine physically moved while retired.
+              Historical Movements remain unchanged.
+            </p>
+          </div>
         </div>
         <Field
           label={

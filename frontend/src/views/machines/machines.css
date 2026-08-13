@@ -765,6 +765,39 @@
   min-width: 0;
 }
 
+/* Grid cell stacking an input with its own inline feedback (error or
+   availability) — the message wraps inside the column, never under
+   the neighbouring field. */
+.mg-form .mg-fieldcol {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Availability confirmation under the Display name (Reactivate): the
+   success text tone with a ✓ marker — color is never the only
+   distinction. */
+.mg-fieldok {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ok-t);
+  line-height: 1.5;
+}
+
+/* Inline feedback hugs its input: the negative top margins cancel the
+   control's built-in bottom margin (plus the wrapping label's on the
+   Field column), so the error/availability message and the Area note
+   all start at the SAME 4px distance under their 47px controls — the
+   two columns stay level. */
+.mg-form .mg-fieldcol .err,
+.mg-form .mg-fieldcol .mg-fieldok {
+  margin: -10px 0 8px;
+}
+
+.mg-areacell .mg-areahelp {
+  margin: -6px 0 8px;
+}
+
 /* Machine barcode label: a light, printable label card — always a
    white surface with black ink so the printed label scans in both UI
    themes. */

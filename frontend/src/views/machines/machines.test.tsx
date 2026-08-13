@@ -394,12 +394,19 @@ test('reactivation blocks on a name collision until a rename, then returns the M
     screen.getByRole('dialog', { name: 'Reactivate Machine' }),
   ).toBeInTheDocument();
 
-  // Renaming inside the dialog resolves the collision…
+  // Renaming inside the dialog resolves the collision — the name
+  // column switches to the availability confirmation…
   fireEvent.change(within(dialog).getByLabelText('Display name'), {
     target: { value: 'Lathe 1B' },
   });
   expect(dialog.textContent).not.toContain(
     'already exists in Lathe — rename one of them',
+  );
+  expect(dialog.textContent).toContain('“Lathe 1B” is available in Lathe');
+  // The Return Area select sits beside the name with its move note.
+  expect(within(dialog).getByLabelText('Return Area')).toBeInTheDocument();
+  expect(dialog.textContent).toContain(
+    'Change only if the Machine physically moved while retired.',
   );
   // …and the same-physical-machine confirmation stays required.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
