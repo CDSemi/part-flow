@@ -1238,14 +1238,7 @@
   }
 }
 
-/* Quiet mono barcode value in summaries: plain verification text in
-   the muted reading tone — never a badge. */
-.mg-barcodeval {
-  font-family: var(--mono), monospace;
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--muted);
-}
+/* Barcode values use the shared global `.barcodeval` reading tone. */
 
 .mg-note {
   font-size: 13px;

@@ -807,10 +807,10 @@ function SummaryList({ rows }: { rows: SummaryRow[] }) {
   );
 }
 
-/** Quiet mono barcode value in summaries — the muted reading tone,
- * plain text (verification text, never a badge). */
+/** Barcode value in the shared app-wide reading tone (global
+ * `.barcodeval`) — plain verification text, never a badge. */
 function BarcodeValue({ value }: { value: string }) {
-  return <span className="mg-barcodeval">{value}</span>;
+  return <span className="barcodeval">{value}</span>;
 }
 
 /**
@@ -918,7 +918,7 @@ function IdentityHeader({
       </div>
       <div className="idcol grow">
         <span className="idlabel">Barcode</span>
-        <span className="idvalue">{machineBarcode(assetTag)}</span>
+        <span className="idvalue barcodeval">{machineBarcode(assetTag)}</span>
       </div>
       {machine && onOpenLabel ? (
         <button type="button" className="mg-labelbtn" onClick={onOpenLabel}>
@@ -1617,8 +1617,10 @@ function MachineEditDialog({
             <li>It disappears from Machine assignment choices.</li>
             <li>
               Its barcode (
-              <span className="mono">{machineBarcode(machine.assetTag)}</span>)
-              no longer accepts assignment scans.
+              <span className="barcodeval">
+                {machineBarcode(machine.assetTag)}
+              </span>
+              ) no longer accepts assignment scans.
             </li>
             <li>
               All history is preserved and keeps its reference to this Machine —
@@ -1907,7 +1909,9 @@ function RetiredMachineDetailsDialog({
         </div>
         <div className="idcol grow">
           <span className="idlabel">Barcode</span>
-          <span className="idvalue">{machineBarcode(machine.assetTag)}</span>
+          <span className="idvalue barcodeval">
+            {machineBarcode(machine.assetTag)}
+          </span>
         </div>
       </div>
       <SummaryList
@@ -2231,7 +2235,9 @@ function ReactivateMachineDialog({
         </div>
         <div className="idcol grow">
           <span className="idlabel">Barcode</span>
-          <span className="idvalue">{machineBarcode(machine.assetTag)}</span>
+          <span className="idvalue barcodeval">
+            {machineBarcode(machine.assetTag)}
+          </span>
         </div>
         <div className="idcol">
           <span className="idlabel">Machine</span>

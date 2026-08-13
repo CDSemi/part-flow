@@ -216,7 +216,8 @@ function BarcodeConfigurationPanel() {
         </div>
         <div className="prow">
           <span className="k">Scanned barcode</span>
-          <span className="v">{machineBarcode(next)}</span>
+          {/* Shared app-wide barcode reading tone (global .barcodeval). */}
+          <span className="v barcodeval">{machineBarcode(next)}</span>
         </div>
       </div>
       <p className="ad-confighelp">

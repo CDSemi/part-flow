@@ -95,6 +95,16 @@ select {
   font-family: var(--mono), monospace;
 }
 
+/* The ONE shared reading tone for rendered barcode VALUES (`PF:…`) on
+   every surface — summaries, identity headers, configuration
+   previews: quiet muted mono. A barcode is identification data, never
+   emphasis; font size stays with the context. */
+.barcodeval {
+  font-family: var(--mono), monospace;
+  font-weight: 650;
+  color: var(--muted);
+}
+
 .qty {
   font-family: var(--mono), monospace;
   font-weight: 700;
