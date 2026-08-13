@@ -691,7 +691,9 @@
 @media (min-width: 881px) {
   .nwo-lines .wo-table td {
     border-bottom: none;
-    padding: 10px 12px;
+    /* Compact rows: the zebra striping already separates lines, so a
+       small vertical padding around the 33px controls is enough. */
+    padding: 6px 12px;
   }
 
   .nwo-lines .wo-table tbody tr:nth-child(even) td {
