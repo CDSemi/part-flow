@@ -559,11 +559,17 @@ function PartNumberEditDialog({
         />
       ) : null}
       {deleteConfirm && record ? (
+        // The final confirmation is the strongest warning in the flow:
+        // the shared attention confirmation variant in the danger tone
+        // (the Machines final-question presentation, §12.4) — still one
+        // plain destructive confirmation, never a typed gate or an
+        // extra step. The delete section above keeps its lighter
+        // danger-zone treatment.
         <ConfirmDialog
           title="Delete Part Number details?"
           confirmLabel="Delete details"
           cancelLabel="Cancel (Esc)"
-          danger
+          tone="danger"
           onCancel={() => setDeleteConfirm(false)}
           onConfirm={() => onDelete?.()}
         >

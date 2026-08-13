@@ -279,6 +279,19 @@ test('deleting a record removes only the metadata row after an explicit confirma
   const confirm = screen.getByRole('dialog', {
     name: 'Delete Part Number details?',
   });
+  // The final confirmation is the strongest warning in the flow: the
+  // shared attention confirmation variant in the danger tone (the
+  // Machines final-question presentation) — badge, danger-toned title
+  // and a danger-toned confirming action; still one plain destructive
+  // confirmation, never a typed gate. The delete section above keeps
+  // its lighter danger-zone treatment.
+  expect(confirm.className).toContain('alertdlg');
+  expect(confirm.className).toContain('tone-danger');
+  expect(confirm.querySelector('.alertbadge')).not.toBeNull();
+  expect(
+    within(confirm).getByRole('button', { name: 'Delete details' }),
+  ).toHaveClass('danger');
+  expect(confirm.querySelector('.typedconfirm')).toBeNull();
   // The confirmation states the scope: saved details only — the PN and
   // its production history stay available.
   expect(confirm.textContent).toContain('permanently removes the saved image');
