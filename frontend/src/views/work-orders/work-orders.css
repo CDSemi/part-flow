@@ -670,12 +670,38 @@
   border-radius: var(--radius-sm);
 }
 
+/* Demand-line table presentation (New Work Order dialog): a panel2
+   header band and vertically centered row content — the PN text and
+   the remove button sit on the controls' center line. */
+.nwo-lines .wo-table th {
+  background: var(--panel2);
+}
+
+.nwo-lines .wo-table td {
+  vertical-align: middle;
+}
+
 /* Demand-line column sizing (New Work Order dialog, desktop table):
    PN, Req. Type, Qty and Due date shrink to their content — the PN
    column's minimum is the longest PN, Req. Type's is its own header
    (headers never wrap) and Qty fits four digits; the leftover width
-   splits evenly between Job Numbers and Notes. */
+   splits evenly between Job Numbers and Notes. Rows read apart
+   through faint zebra striping and a hover tint instead of per-row
+   hairlines. */
 @media (min-width: 881px) {
+  .nwo-lines .wo-table td {
+    border-bottom: none;
+    padding: 10px 12px;
+  }
+
+  .nwo-lines .wo-table tbody tr:nth-child(even) td {
+    background: var(--panel2);
+  }
+
+  .nwo-lines .wo-table tbody tr:hover td {
+    background: var(--row-hover);
+  }
+
   .nwo-lines .wo-table th {
     white-space: nowrap;
   }

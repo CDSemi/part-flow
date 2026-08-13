@@ -441,9 +441,6 @@ export function NewWorkOrderDialog({
                             });
                           }}
                         />
-                        {line.due === '' ? (
-                          <div className="bc">No due date</div>
-                        ) : null}
                       </td>
                       <td data-label="Job Numbers">
                         <input

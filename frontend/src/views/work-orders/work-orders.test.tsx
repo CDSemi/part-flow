@@ -633,7 +633,6 @@ test('a line whose due date is cleared is user-edited and stops inheriting', asy
   scanBarcode('PF:PN:78-04-0031');
   const due = screen.getByLabelText('Due date for 78-04-0031');
   fireEvent.change(due, { target: { value: '' } });
-  expect(screen.getAllByText('No due date').length).toBeGreaterThan(0);
 
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
     target: { value: '2026-09-15' },
