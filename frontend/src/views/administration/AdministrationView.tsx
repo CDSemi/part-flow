@@ -50,7 +50,7 @@ export function AdministrationView() {
       <section className="ad" aria-label="Administration">
         <ErrorState
           message="Administration data could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );

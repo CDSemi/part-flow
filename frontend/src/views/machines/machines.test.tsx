@@ -5,8 +5,9 @@ import {
   screen,
   within,
 } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { ConnectivityContext } from '../../app/connectivity-context';
 import { MachinesView } from './MachinesView';
 
 // Management → Machines (GUI_DESIGN §12, v15): operational monitoring
@@ -25,6 +26,18 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+/** Render Machines with a fixed connectivity status — deterministic,
+ * no fetch/timer polling. Defaults to `connected` so the existing
+ * behavioral tests exercise a fully-enabled view; offline-specific
+ * tests pass `'unavailable'` explicitly. */
+function renderMachines(status: 'connected' | 'unavailable' = 'connected') {
+  return render(
+    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+      <MachinesView />
+    </ConnectivityContext.Provider>,
+  );
+}
 
 /** The active-Machines table row whose first cell names the Machine. */
 function activeRow(name: string): HTMLElement {
@@ -56,7 +69,7 @@ function openEdit(name: string): HTMLElement {
 }
 
 test('active Machines list derived states with the time in state', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // Running derives from assigned quantity; the age derives from the
   // shared stateChangedAt timestamp.
@@ -83,7 +96,7 @@ test('active Machines list derived states with the time in state', () => {
 });
 
 test('the replacement pair stays distinguishable: retired records keep their identity', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // The active `Lathe 1` is the replacement asset…
   expect(activeRow('Lathe 1').textContent).toContain('CD-0512');
@@ -123,7 +136,7 @@ test('the replacement pair stays distinguishable: retired records keep their ide
 });
 
 test('the whole active row opens Edit Machine with the Area fixed', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const dialog = openEdit('Lathe 2');
   expect(within(dialog).getByLabelText('Display name')).toHaveValue('Lathe 2');
@@ -151,7 +164,7 @@ test('the whole active row opens Edit Machine with the Area fixed', () => {
 });
 
 test('the Maintenance switch mirrors the real state and only opens the dialogs', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // aria-checked reflects the real state only.
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'false');
@@ -170,7 +183,7 @@ test('the Maintenance switch mirrors the real state and only opens the dialogs',
 });
 
 test('starting maintenance keeps the assigned quantity in place', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   fireEvent.click(maintenanceSwitch('Lathe 2'));
   const dialog = screen.getByRole('dialog', { name: 'Start maintenance' });
@@ -194,7 +207,7 @@ test('starting maintenance keeps the assigned quantity in place', () => {
 });
 
 test('clearing maintenance returns to Running with quantity, Idle without', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // Lathe 4 has no assigned quantity → clears to Idle.
   fireEvent.click(maintenanceSwitch('Lathe 4'));
@@ -210,7 +223,7 @@ test('clearing maintenance returns to Running with quantity, Idle without', () =
 });
 
 test('retirement is blocked in place while quantity is assigned', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // The Danger Zone states the blocked truth itself (neutral tone) and
   // disables Retire — no dialog is needed to find out.
@@ -232,7 +245,7 @@ test('retirement is blocked in place while quantity is assigned', () => {
 });
 
 test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   // Nothing assigned: the Danger Zone shows the consequences in its
@@ -294,7 +307,7 @@ test('an idle Machine retires after typing its Asset Tag and a final summary —
 });
 
 test('the retire edits decision is recorded, not applied — cancelling later keeps the edits', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -326,7 +339,7 @@ test('the retire edits decision is recorded, not applied — cancelling later ke
 });
 
 test('a recorded Save decision applies the edits only when the retirement completes', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -358,7 +371,7 @@ test('a recorded Save decision applies the edits only when the retirement comple
 });
 
 test('reactivation blocks on a name collision until a rename, then returns the Machine as Idle', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // Reactivate is entered through the Retired Machine Details dialog.
   const lathe1Row = within(retiredTable())
@@ -465,7 +478,7 @@ test('reactivation blocks on a name collision until a rename, then returns the M
 });
 
 test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // Reactivate Saw 2 first (no identity conflicts, no name collision)
   // — entered through the Retired Machine Details dialog.
@@ -536,7 +549,7 @@ test('a reactivated Machine keeps its Asset Tag and confirms retirement with it'
 });
 
 test('a new Machine receives the next Asset Tag automatically and is added only after summary + confirmation', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -583,7 +596,7 @@ test('a new Machine receives the next Asset Tag automatically and is added only 
 });
 
 test('cancelling the add confirmation returns to the summary, then the form — nothing added', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -612,7 +625,7 @@ test('cancelling the add confirmation returns to the summary, then the form — 
 });
 
 test('the New Machine dialog focuses Display name; Edit Machine claims no field', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -625,7 +638,7 @@ test('the New Machine dialog focuses Display name; Edit Machine claims no field'
 });
 
 test('cancelling Edit Machine with unsaved edits asks to save first', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -659,7 +672,7 @@ test('cancelling Edit Machine with unsaved edits asks to save first', () => {
 });
 
 test('discarding on cancel never saves; a dirty New Machine confirms the discard', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -717,7 +730,7 @@ test('discarding on cancel never saves; a dirty New Machine confirms the discard
 });
 
 test('a new Machine cannot reuse an active display name of the same Area', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -743,7 +756,7 @@ function activeNames(): (string | null)[] {
 }
 
 test('column headers sort the active table and cycle ascending → descending → unsorted', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const original = [
     'Saw 1',
@@ -799,7 +812,7 @@ test('column headers sort the active table and cycle ascending → descending �
 });
 
 test('Assigned now sorts by quantity and State by derived state — ties stay in name order', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // Assigned quantities (mock): Saw 1 = 4, Lathe 2 = 4, Lathe 3 = 3,
   // Mill 1 = 3, Mill 2 = 2, others 0.
@@ -842,7 +855,7 @@ test('Assigned now sorts by quantity and State by derived state — ties stay in
 });
 
 test('the Retired Machines table sorts independently through its own headers', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   /** Display names of the retired table, in row order. */
   const retiredNames = () =>
@@ -877,7 +890,7 @@ test('the Retired Machines table sorts independently through its own headers', (
 });
 
 test('the Retired Machines columns order Machine, Retired, Asset, Notes — no action column', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const headers = Array.from(
     retiredTable().querySelectorAll('thead th'),
@@ -887,7 +900,7 @@ test('the Retired Machines columns order Machine, Retired, Asset, Notes — no a
 });
 
 test('a retired row opens the read-only Retired Machine Details dialog with the lifecycle', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const lathe1Row = within(retiredTable())
     .getByText('Retired on 2026-02-14')
@@ -925,7 +938,7 @@ test('a retired row opens the read-only Retired Machine Details dialog with the 
 });
 
 test('the details dialog leads to Reactivate and ‹ Back returns to the details', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const saw2Row = within(retiredTable())
     .getByText('Retired on 2025-11-03')
@@ -947,7 +960,7 @@ test('the details dialog leads to Reactivate and ‹ Back returns to the details
 });
 
 test('the maintenance note and expected return date are editable from Edit Machine', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   // A Machine that is NOT under maintenance shows no maintenance
   // fields in the Edit dialog.
@@ -981,7 +994,7 @@ test('the maintenance note and expected return date are editable from Edit Machi
 });
 
 test('the barcode label dialog renders the scannable Asset Tag barcode', () => {
-  render(<MachinesView />);
+  renderMachines();
 
   const dialog = openEdit('Lathe 2');
   fireEvent.click(
@@ -1005,4 +1018,77 @@ test('the barcode label dialog renders the scannable Asset Tag barcode', () => {
   expect(
     screen.getByRole('dialog', { name: 'Edit Machine' }),
   ).toBeInTheDocument();
+});
+
+/* ============ Offline write-block ============ */
+
+test('offline disables New Machine and the Maintenance switch; reading stays available', () => {
+  renderMachines('unavailable');
+
+  expect(screen.getByRole('button', { name: '+ New Machine' })).toBeDisabled();
+  expect(maintenanceSwitch('Lathe 2')).toBeDisabled();
+
+  // Read-only/search/navigation stay available offline: the row still
+  // opens Edit Machine.
+  const edit = openEdit('Lathe 2');
+  expect(edit).toBeInTheDocument();
+});
+
+test('offline disables Save and Retire… inside Edit Machine', () => {
+  renderMachines('unavailable');
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  expect(
+    within(edit).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  expect(within(edit).getByRole('button', { name: 'Retire…' })).toBeDisabled();
+});
+
+test('offline disables Reactivate inside Retired Machine Details', () => {
+  renderMachines('unavailable');
+
+  const lathe1Row = within(retiredTable())
+    .getByText('Retired on 2026-02-14')
+    .closest('tr') as HTMLElement;
+  fireEvent.click(lathe1Row);
+  const details = screen.getByRole('dialog', {
+    name: 'Retired Machine Details',
+  });
+  expect(
+    within(details).getByRole('button', { name: 'Reactivate' }),
+  ).toBeDisabled();
+});
+
+test('reconnecting re-enables the write actions', () => {
+  const { rerender } = renderMachines('unavailable');
+  expect(screen.getByRole('button', { name: '+ New Machine' })).toBeDisabled();
+
+  rerender(
+    <ConnectivityContext.Provider
+      value={{ status: 'connected', retry: vi.fn() }}
+    >
+      <MachinesView />
+    </ConnectivityContext.Provider>,
+  );
+  expect(screen.getByRole('button', { name: '+ New Machine' })).toBeEnabled();
+});
+
+/* ============ ?state=long ============ */
+
+test('?state=long renders many long-identifier Machines alongside the sample data', () => {
+  window.history.replaceState({}, '', '/management/machines?state=long');
+  renderMachines();
+
+  // Sample data is still present…
+  expect(activeRow('Lathe 2')).toBeTruthy();
+  // …plus the long-preview rows, including the over-long display name
+  // and asset metadata.
+  const activeTable = document.querySelectorAll('.mg-table')[0];
+  expect(activeTable.textContent).toContain(
+    'Supplemental long-preview Machine — extended display name for dense-table layout testing only',
+  );
+  expect(activeTable.textContent).toContain('CD-LONG-SUPPLEMENTAL');
+  expect(activeTable.textContent).toContain(
+    'Long preview Machine 1 — extended qualification cell',
+  );
 });

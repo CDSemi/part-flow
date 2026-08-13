@@ -6,8 +6,9 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { ConnectivityContext } from '../../app/connectivity-context';
 import { PartNumbersView } from './PartNumbersView';
 
 // Management → Part Numbers (GUI_DESIGN §14): PartNumber master
@@ -22,6 +23,18 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+/** Render Part Numbers with a fixed connectivity status —
+ * deterministic, no fetch/timer polling. Defaults to `connected` so
+ * the existing behavioral tests exercise a fully-enabled view;
+ * offline-specific tests pass `'unavailable'` explicitly. */
+function renderPartNumbers(status: 'connected' | 'unavailable' = 'connected') {
+  return render(
+    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+      <PartNumbersView />
+    </ConnectivityContext.Provider>,
+  );
+}
 
 /** The list row whose PN cell names the record. */
 function row(pn: string): HTMLElement {
@@ -41,7 +54,7 @@ function openEdit(pn: string): HTMLElement {
 }
 
 test('the list shows master records with canonical PN, metadata and derived barcode', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const bracket = row('2027-60-8114-00');
   expect(bracket.textContent).toContain(
@@ -71,7 +84,7 @@ test('the list shows master records with canonical PN, metadata and derived barc
 });
 
 test('search filters over PN, name, revision and ERP id', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   fireEvent.change(screen.getByLabelText('Search Part Numbers'), {
     target: { value: 'bracket' },
@@ -88,7 +101,7 @@ test('search filters over PN, name, revision and ERP id', () => {
 });
 
 test('the whole row opens Edit with the read-only identity header', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const dialog = openEdit('2027-60-8114-00');
   const identity = dialog.querySelector('.pnm-idhead') as HTMLElement;
@@ -114,7 +127,7 @@ test('the whole row opens Edit with the read-only identity header', () => {
 });
 
 test('metadata edits save to the row; closing dirty asks first', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const dialog = openEdit('142-260');
   fireEvent.change(within(dialog).getByLabelText(/Revision/), {
@@ -136,7 +149,7 @@ test('metadata edits save to the row; closing dirty asks first', () => {
 });
 
 test('a new Part Number is canonicalized; internal whitespace and duplicates are field errors', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Part Number' }));
   const dialog = screen.getByRole('dialog', { name: 'New Part Number' });
@@ -180,7 +193,7 @@ test('a new Part Number is canonicalized; internal whitespace and duplicates are
 });
 
 test('an empty PN blocks adding with a field error', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Part Number' }));
   const dialog = screen.getByRole('dialog', { name: 'New Part Number' });
@@ -195,7 +208,7 @@ test('an empty PN blocks adding with a field error', () => {
 });
 
 test('uploading a custom image replaces the placeholder; removing restores it', async () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const dialog = openEdit('309-127');
   // The dialog starts on the shared default placeholder.
@@ -234,7 +247,7 @@ test('uploading a custom image replaces the placeholder; removing restores it', 
 });
 
 test('the barcode label dialog renders the scannable PN barcode with the PN beneath', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const dialog = openEdit('118-052');
   fireEvent.click(
@@ -263,7 +276,7 @@ test('the barcode label dialog renders the scannable PN barcode with the PN bene
 });
 
 test('deleting a record removes only the metadata row after an explicit confirmation', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   const before = document.querySelectorAll('.pnm-table tbody tr').length;
   const dialog = openEdit('214-406');
@@ -327,7 +340,7 @@ test('deleting a record removes only the metadata row after an explicit confirma
 });
 
 test('discarding a new Part Number asks before dropping entered input', () => {
-  render(<PartNumbersView />);
+  renderPartNumbers();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Part Number' }));
   const dialog = screen.getByRole('dialog', { name: 'New Part Number' });
@@ -344,4 +357,73 @@ test('discarding a new Part Number asks before dropping entered input', () => {
   );
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(screen.queryByText('NEW-PART-01')).toBeNull();
+});
+
+/* ============ Offline write-block ============ */
+
+test('offline disables New Part Number; reading stays available', () => {
+  renderPartNumbers('unavailable');
+
+  expect(
+    screen.getByRole('button', { name: '+ New Part Number' }),
+  ).toBeDisabled();
+
+  // Read-only/search/navigation stay available offline: the row still
+  // opens Edit Part Number.
+  const dialog = openEdit('2027-60-8114-00');
+  expect(dialog).toBeInTheDocument();
+});
+
+test('offline disables Save changes and Delete details… inside the edit dialog', () => {
+  renderPartNumbers('unavailable');
+
+  const dialog = openEdit('214-406');
+  expect(
+    within(dialog).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  const zone = dialog.querySelector('.pnm-dangerzone') as HTMLElement;
+  expect(
+    within(zone).getByRole('button', { name: 'Delete details…' }),
+  ).toBeDisabled();
+});
+
+test('reconnecting re-enables the write actions', () => {
+  const { rerender } = renderPartNumbers('unavailable');
+  expect(
+    screen.getByRole('button', { name: '+ New Part Number' }),
+  ).toBeDisabled();
+
+  rerender(
+    <ConnectivityContext.Provider
+      value={{ status: 'connected', retry: vi.fn() }}
+    >
+      <PartNumbersView />
+    </ConnectivityContext.Provider>,
+  );
+  expect(
+    screen.getByRole('button', { name: '+ New Part Number' }),
+  ).toBeEnabled();
+});
+
+/* ============ ?state=long ============ */
+
+test('?state=long renders many long-PN/name/metadata records alongside the sample data', () => {
+  window.history.replaceState({}, '', '/management/part-numbers?state=long');
+  renderPartNumbers();
+
+  // Sample data is still present…
+  expect(row('2027-60-8114-00')).toBeTruthy();
+  // …plus the long-preview records, including the over-long PN, name
+  // and metadata.
+  const supplemental = row(
+    '0118-40-0022-07-0455-88-REV-C-SUPPLEMENTAL-LONG-PREVIEW',
+  );
+  expect(supplemental.textContent).toContain(
+    'SUPPLEMENTAL LONG-PREVIEW PART NUMBER',
+  );
+  expect(supplemental.textContent).toContain('REV-SUPPLEMENTAL-LONG');
+  expect(supplemental.textContent).toContain(
+    'ERP-PN-40412-SUPPLEMENTAL-AMENDMENT-2026-REV-B-LONG-PREVIEW',
+  );
+  expect(document.body.textContent).toContain('0114-60-0101-00');
 });

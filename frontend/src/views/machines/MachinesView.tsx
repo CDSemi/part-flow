@@ -3,6 +3,7 @@ import './machines.css';
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
@@ -125,8 +126,47 @@ function confirmIdentifier(machine: MockMachine): {
   return { value: machine.assetTag, label: 'Asset Tag' };
 }
 
+// Long-data preview Machines (?state=long): many rows plus over-long
+// display names, manufacturer/model/serial and notes, to exercise
+// dense-table and truncation behavior. Never part of the editable
+// `machines` state — added to the rendered list only, like the other
+// views' long-preview rows.
+const LONG_PREVIEW_MACHINES: MockMachine[] = [
+  ...Array.from({ length: 15 }, (_, i): MockMachine => {
+    const n = i + 1;
+    return {
+      id: `MC-long-${n}`,
+      area: 'mill',
+      name: `Long preview Machine ${n} — extended qualification cell`,
+      barcode: `CD-LONG-${String(n).padStart(4, '0')}`,
+      stateChangedAt: '2026-07-01T00:00:00.000Z',
+      manufacturer: 'Long-Preview Manufacturing Equipment Co.',
+      model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
+      assetTag: `CD-LONG-${String(n).padStart(4, '0')}`,
+      serialNumber: `LONG-PREVIEW-SERIAL-${String(100000 + n)}`,
+      installedOn: '2020-01-01',
+    };
+  }),
+  {
+    id: 'MC-long-supplemental',
+    area: 'lathe',
+    name: 'Supplemental long-preview Machine — extended display name for dense-table layout testing only',
+    barcode: 'CD-LONG-SUPPLEMENTAL',
+    stateChangedAt: '2026-07-01T00:00:00.000Z',
+    manufacturer: 'Supplemental Long-Preview Precision Machinery Manufacturing',
+    model: 'SUPPLEMENTAL-LONG-PREVIEW-MODEL-DESIGNATION-EXTENDED-2026',
+    assetTag: 'CD-LONG-SUPPLEMENTAL',
+    serialNumber: 'SUPPLEMENTAL-LONG-PREVIEW-SERIAL-NUMBER-000001',
+    installedOn: '2020-01-01',
+    notes:
+      'Auto-generated long-data preview Machine with an over-long notes field, used only to exercise layout and truncation in the Machines table — not real equipment.',
+  },
+];
+
 export function MachinesView() {
   const preview = getViewStatePreview();
+  const { status } = useConnectivity();
+  const writeBlocked = status !== 'connected';
   const [machines, setMachines] = useState<MockMachine[]>(MOCK_MACHINES);
   const [search, setSearch] = useState('');
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
@@ -180,7 +220,7 @@ export function MachinesView() {
       <section className="mg" aria-label="Machines">
         <ErrorState
           message="Machine data could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );
@@ -200,7 +240,9 @@ export function MachinesView() {
       .toLowerCase()
       .includes(query);
 
-  const visible = preview === 'empty' ? [] : machines.filter(matches);
+  const baseMachines =
+    preview === 'long' ? [...machines, ...LONG_PREVIEW_MACHINES] : machines;
+  const visible = preview === 'empty' ? [] : baseMachines.filter(matches);
   const unsortedActive = visible.filter((m) => m.retiredOn === undefined);
   const unsortedRetired = visible.filter((m) => m.retiredOn !== undefined);
 
@@ -286,6 +328,7 @@ export function MachinesView() {
         <span className="spacer" />
         <button
           className="btn primary"
+          disabled={writeBlocked}
           onClick={() => setDialog({ kind: 'new' })}
         >
           + New Machine
@@ -348,6 +391,7 @@ export function MachinesView() {
                 key={machine.id}
                 machine={machine}
                 assignments={assignmentsById.get(machine.id) ?? []}
+                writeBlocked={writeBlocked}
                 onOpenEdit={() => setDialog({ kind: 'edit', machine })}
                 onToggleMaintenance={() =>
                   setDialog({
@@ -451,6 +495,7 @@ export function MachinesView() {
         <MachineEditDialog
           machines={machines}
           assignedQty={0}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(machine) => {
             setMachines((current) => [...current, machine]);
@@ -465,6 +510,7 @@ export function MachinesView() {
           machines={machines}
           machine={dialog.machine}
           assignedQty={assignedQty(dialog.machine)}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(machine) => {
             update(machine.id, () => machine);
@@ -522,6 +568,7 @@ export function MachinesView() {
       {dialog?.kind === 'retired-details' ? (
         <RetiredMachineDetailsDialog
           machine={dialog.machine}
+          writeBlocked={writeBlocked}
           onClose={() => setDialog(null)}
           onReactivate={() =>
             setDialog({ kind: 'reactivate', machine: dialog.machine })
@@ -618,9 +665,13 @@ function AssetMeta({ machine }: { machine: MockMachine }) {
  */
 function MaintenanceSwitch({
   machine,
+  writeBlocked = false,
   onToggle,
 }: {
   machine: MockMachine;
+  /** Disables the switch while the backend is unreachable — starting
+   * or clearing Maintenance changes mock state (offline write-block). */
+  writeBlocked?: boolean;
   onToggle: () => void;
 }) {
   const on = machine.maintenance !== undefined;
@@ -631,6 +682,7 @@ function MaintenanceSwitch({
       aria-checked={on}
       aria-label={`Maintenance — ${machine.name}`}
       className={`mg-switch${on ? ' on' : ''}`}
+      disabled={writeBlocked}
       onClick={onToggle}
     >
       <span className="track" aria-hidden="true">
@@ -644,11 +696,16 @@ function MaintenanceSwitch({
 function ActiveMachineRow({
   machine,
   assignments,
+  writeBlocked = false,
   onOpenEdit,
   onToggleMaintenance,
 }: {
   machine: MockMachine;
   assignments: { pn: string; qty: number }[];
+  /** Disables the row's Maintenance switch while the backend is
+   * unreachable (offline write-block); opening Edit Machine to read
+   * stays available. */
+  writeBlocked?: boolean;
   onOpenEdit: () => void;
   onToggleMaintenance: () => void;
 }) {
@@ -704,7 +761,11 @@ function ActiveMachineRow({
         <AssetMeta machine={machine} />
       </td>
       <td className="mg-maintcol" onClick={(event) => event.stopPropagation()}>
-        <MaintenanceSwitch machine={machine} onToggle={onToggleMaintenance} />
+        <MaintenanceSwitch
+          machine={machine}
+          writeBlocked={writeBlocked}
+          onToggle={onToggleMaintenance}
+        />
       </td>
     </tr>
   );
@@ -1035,6 +1096,7 @@ function MachineEditDialog({
   machines,
   machine,
   assignedQty,
+  writeBlocked = false,
   onCancel,
   onSave,
   onApplyChanges,
@@ -1043,6 +1105,9 @@ function MachineEditDialog({
   machines: MockMachine[];
   machine?: MockMachine;
   assignedQty: number;
+  /** Disables Save and Retire… while the backend is unreachable
+   * (Management → Machines offline write-block). */
+  writeBlocked?: boolean;
   onCancel: () => void;
   onSave: (machine: MockMachine) => void;
   /** Persist edits without closing (Save inside the retire flow). */
@@ -1482,7 +1547,11 @@ function MachineEditDialog({
         <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
-        <button className="bigbtn primary" onClick={save}>
+        <button
+          className="bigbtn primary"
+          disabled={writeBlocked}
+          onClick={save}
+        >
           {machine ? 'Save changes' : 'Continue'}
         </button>
       </div>
@@ -1511,7 +1580,7 @@ function MachineEditDialog({
             )}
             <button
               className="dz-retire"
-              disabled={assignedQty > 0}
+              disabled={assignedQty > 0 || writeBlocked}
               onClick={startRetire}
             >
               Retire…
@@ -1879,10 +1948,14 @@ function MachineEditDialog({
  */
 function RetiredMachineDetailsDialog({
   machine,
+  writeBlocked = false,
   onClose,
   onReactivate,
 }: {
   machine: MockMachine;
+  /** Disables Reactivate while the backend is unreachable (Management
+   * → Machines offline write-block); viewing history stays available. */
+  writeBlocked?: boolean;
   onClose: () => void;
   onReactivate: () => void;
 }) {
@@ -1942,7 +2015,11 @@ function RetiredMachineDetailsDialog({
         <button className="bigbtn ghost" onClick={onClose}>
           Close (Esc)
         </button>
-        <button className="bigbtn primary" onClick={onReactivate}>
+        <button
+          className="bigbtn primary"
+          disabled={writeBlocked}
+          onClick={onReactivate}
+        >
           Reactivate
         </button>
       </div>

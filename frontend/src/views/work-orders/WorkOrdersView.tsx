@@ -145,7 +145,7 @@ function ActiveWorkOrdersView() {
       <section className="wo-view" aria-label="Work Orders">
         <ErrorState
           message="Work Orders could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );

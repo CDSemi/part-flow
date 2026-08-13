@@ -8,7 +8,7 @@ and the **Phase 2 Frontend Design System and Application Shell**:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
-  nine approved GUI views with development-only mock data, and the real
+  ten approved GUI views with development-only mock data, and the real
   `/api/health` connectivity integration
 - `backend/` — FastAPI with one operational health endpoint (`GET /api/health`)
 - PostgreSQL 16 with Alembic migration wiring (no-op baseline revision)
@@ -19,7 +19,7 @@ workflows.** All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
-and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v16.html`)
+and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
 for the approved target UI.
 
 ## Phase 2 frontend
@@ -38,7 +38,9 @@ an application-level not-found state):
 | `/management/machines` | Management → Machines (Machine lifecycle and maintenance — permission-based production master data) |
 | `/management/tracking` | Management → Tracking (PN-centric) |
 | `/management/work-orders` | Management → Work Orders |
+| `/management/work-orders/completed` | Management → Work Orders → Completed Work Orders (read-only history) |
 | `/management/planned-routes` | Management → Planned Routes (reusable route definitions — permission-based production master data) |
+| `/management/part-numbers` | Management → Part Numbers (PartNumber master metadata and barcode labels — permission-based production master data) |
 | `/management/priority` | Management → Priority (Hot WO Demand ranking) |
 | `/administration` | Administration |
 

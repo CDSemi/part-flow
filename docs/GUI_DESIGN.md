@@ -22,8 +22,6 @@ Covers the application-view content of PROJECT_PROFILE §21 in **ten GUI views**
 9. Priority Management (Hot Work Order Demand ranking)
 10. Administration (configuration)
 
-> **Pending PROJECT_PROFILE alignment (v4).** PROJECT_PROFILE (v8 through v13) still lists Area Board and Manager Summary as separate views in §21. GUI v4 merges Manager Summary into Area Board as its All Areas overview (no content dropped). (Two earlier deviations are now resolved: PROJECT_PROFILE v8 §8.2 defines the nullable Work-Order-level `due_date` used as the entry default for demand-line due dates, and the former "PO Intake" view name was resolved by the v7 vocabulary migration — PROJECT_PROFILE §21 names the view **Work Orders**.) PROJECT_PROFILE §21 still needs the view-merge update; until then this document notes the deviation where it occurs.
-
 ## 1.1 Navigation structure
 
 Top-level navigation exposes four entries; the management views are grouped as **sub views of one Management view**:

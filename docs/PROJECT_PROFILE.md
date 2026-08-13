@@ -1752,7 +1752,29 @@ Time in location may be highlighted when it exceeds the expected duration of the
 
 ## Area Board
 
-The Area Board provides a focused view of production currently owned by one Area. Its per-Area detail uses the same shared Area/Machine monitoring layout and presentation components as the Scan Station (`In this Area now` summary card left, Machine monitoring cards in the right-side grid; the summary card spans the full width for Areas without Machines) — read-only, without the Scan Station action buttons, and without visual drift between the two views.
+Area Board is one Management view with two modes behind a single tab strip: the **All Areas overview** and the **per-Area detail** (GUI_DESIGN §6). The "Manager Summary" name is retired — its content is the All Areas overview below; no content was dropped, only its placement changed.
+
+### All Areas overview
+
+The All Areas overview provides an operational overview grouped by Area.
+
+Each Area should show:
+
+- Area name and description,
+- supported Operations,
+- total physical quantity,
+- queued quantity,
+- Machine assignments,
+- PN list,
+- priority,
+- due date,
+- search and sorting.
+
+The layout may scroll horizontally when all Areas do not fit.
+
+### Per-Area detail
+
+The per-Area detail provides a focused view of production currently owned by one Area. It uses the same shared Area/Machine monitoring layout and presentation components as the Scan Station (`In this Area now` summary card left, Machine monitoring cards in the right-side grid; the summary card spans the full width for Areas without Machines) — read-only, without the Scan Station action buttons, and without visual drift between the two views.
 
 It should show:
 
@@ -1769,26 +1791,6 @@ It should show:
 - time in Area,
 - scrapped quantity in the PN summaries,
 - search and sorting.
-
----
-
-## Manager Summary
-
-The Manager Summary provides an operational overview grouped by Area.
-
-Each Area should show:
-
-- Area name and description,
-- supported Operations,
-- total physical quantity,
-- queued quantity,
-- Machine assignments,
-- PN list,
-- priority,
-- due date,
-- search and sorting.
-
-The layout may scroll horizontally when all Areas do not fit.
 
 ---
 
@@ -2230,8 +2232,7 @@ The initial release should support:
 - Scan Station,
 - Work Orders,
 - Production Board,
-- Area Board,
-- Manager Summary,
+- Area Board (All Areas overview + per-Area detail),
 - Tracking,
 - Machines management,
 - Planned Routes management,

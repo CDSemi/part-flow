@@ -3,6 +3,7 @@ import './planned-routes.css';
 import { Fragment, useState } from 'react';
 import type { CSSProperties, DragEvent } from 'react';
 
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
@@ -40,6 +41,69 @@ type PendingDialog =
   | { kind: 'usage'; template: MockRouteTemplate };
 
 const today = (): string => new Date().toISOString().slice(0, 10);
+
+// Long-data preview routes (?state=long): many routes plus one route
+// with an over-long name/description and a long step chain, to
+// exercise dense-table and step-chip wrapping behavior.
+const LONG_PREVIEW_ROUTE_TEMPLATES: MockRouteTemplate[] = [
+  ...Array.from({ length: 12 }, (_, i): MockRouteTemplate => {
+    const n = i + 1;
+    return {
+      id: `RT-long-${n}`,
+      name: `Long preview route variant ${n} — extended qualification cell`,
+      description:
+        'Auto-generated long-data preview route for layout testing only.',
+      steps: [
+        { area: 'material', operation: 'Receiving' },
+        { area: 'cut', operation: 'Cutting', expectedDuration: '2h' },
+        { area: 'lathe', operation: 'Turning', expectedDuration: '4h' },
+        { area: 'deburr', operation: 'Deburring' },
+        { area: 'stockroom', operation: 'Receiving' },
+      ],
+      usedBy: [],
+      createdOn: '2026-07-01',
+      updatedOn: '2026-07-01',
+    };
+  }),
+  {
+    id: 'RT-long-supplemental',
+    name: 'Supplemental long-preview route — multi-stage housing assembly with outside plating, secondary deburr, and final inspection rework loop',
+    description:
+      'Long-data preview: an over-long route name and description plus many ordered steps, to exercise step-chip wrapping and the full-width dense table layout.',
+    steps: [
+      { area: 'material', operation: 'Receiving' },
+      {
+        area: 'cut',
+        operation: 'Cutting',
+        expectedDuration: '2h',
+        preferredMachineId: 'MC-201',
+      },
+      {
+        area: 'lathe',
+        operation: 'Turning',
+        expectedDuration: '6h',
+        instructions:
+          'Face and turn per drawing; check shoulder depth and verify runout before handoff to Mill.',
+      },
+      {
+        area: 'mill',
+        operation: 'Milling',
+        expectedDuration: '8h',
+        preferredMachineId: 'MC-302',
+        instructions: 'Rough and finish mill; verify bore location.',
+      },
+      { area: 'manual', operation: 'Manual work', expectedDuration: '1h' },
+      { area: 'deburr', operation: 'Deburring', expectedDuration: '1h' },
+      { area: 'external', operation: 'Plating', expectedDuration: '3d' },
+      { area: 'external', operation: 'Testing', expectedDuration: '1d' },
+      { area: 'deburr', operation: 'Deburring', expectedDuration: '1h' },
+      { area: 'stockroom', operation: 'Receiving' },
+    ],
+    usedBy: [],
+    createdOn: '2026-07-28',
+    updatedOn: '2026-07-28',
+  },
+];
 
 /** Editor-facing route data — what Save/Duplicate carry back out. */
 interface RouteDraft {
@@ -92,6 +156,8 @@ function StepChips({ steps }: { steps: MockRouteStep[] }) {
 
 export function PlannedRoutesView() {
   const preview = getViewStatePreview();
+  const { status } = useConnectivity();
+  const writeBlocked = status !== 'connected';
   const [templates, setTemplates] =
     useState<MockRouteTemplate[]>(MOCK_ROUTE_TEMPLATES);
   const [search, setSearch] = useState('');
@@ -109,14 +175,18 @@ export function PlannedRoutesView() {
       <section className="rt" aria-label="Planned Routes">
         <ErrorState
           message="Planned Route data could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );
   }
 
   const query = search.trim().toLowerCase();
-  const visible = (preview === 'empty' ? [] : templates).filter(
+  const baseTemplates =
+    preview === 'long'
+      ? [...templates, ...LONG_PREVIEW_ROUTE_TEMPLATES]
+      : templates;
+  const visible = (preview === 'empty' ? [] : baseTemplates).filter(
     (t) =>
       !query ||
       [t.name, t.description ?? '', ...t.steps.map((s) => s.operation)]
@@ -174,6 +244,7 @@ export function PlannedRoutesView() {
         <span className="spacer" />
         <button
           className="btn primary"
+          disabled={writeBlocked}
           onClick={() => setDialog({ kind: 'new' })}
         >
           + New Planned Route
@@ -300,6 +371,7 @@ export function PlannedRoutesView() {
                   <td>
                     <button
                       className="rt-duplicate"
+                      disabled={writeBlocked}
                       onClick={() =>
                         duplicateFrom({
                           name: template.name,
@@ -326,6 +398,7 @@ export function PlannedRoutesView() {
       {dialog?.kind === 'new' ? (
         <RouteEditDialog
           key="new"
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(draft) => {
             setTemplates((current) => [
@@ -348,6 +421,7 @@ export function PlannedRoutesView() {
         <RouteEditDialog
           key={dialog.template.id}
           template={dialog.template}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(draft) => {
             update(dialog.template.id, (t) => ({
@@ -463,6 +537,7 @@ function projectSteps(steps: EditableStep[]): MockRouteStep[] {
  */
 function RouteEditDialog({
   template,
+  writeBlocked = false,
   onCancel,
   onSave,
   onApplyChanges,
@@ -471,6 +546,9 @@ function RouteEditDialog({
   onDelete,
 }: {
   template?: MockRouteTemplate;
+  /** Disables Save/Duplicate/Archive/Delete while the backend is
+   * unreachable (Management → Planned Routes offline write-block). */
+  writeBlocked?: boolean;
   onCancel: () => void;
   onSave: (draft: RouteDraft) => void;
   /** Persist edits without closing (Save inside Archive/Duplicate). */
@@ -837,6 +915,7 @@ function RouteEditDialog({
         <div className="rt-dlgactions">
           <button
             className="rt-dlgbtn"
+            disabled={writeBlocked}
             onClick={() => {
               if (dirty) setStage('dup-unsaved');
               else onDuplicate?.(draft);
@@ -847,6 +926,7 @@ function RouteEditDialog({
           {used ? (
             <button
               className="rt-dlgbtn warn"
+              disabled={writeBlocked}
               onClick={() => {
                 setStage(dirty ? 'archive-unsaved' : 'archive-confirm');
               }}
@@ -856,6 +936,7 @@ function RouteEditDialog({
           ) : (
             <button
               className="rt-dlgbtn danger"
+              disabled={writeBlocked}
               onClick={() => setStage('delete-confirm')}
             >
               Delete…
@@ -867,7 +948,11 @@ function RouteEditDialog({
         <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
-        <button className="bigbtn primary" onClick={save}>
+        <button
+          className="bigbtn primary"
+          disabled={writeBlocked}
+          onClick={save}
+        >
           {template ? 'Save route' : 'Create route'}
         </button>
       </div>

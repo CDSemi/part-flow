@@ -5,8 +5,9 @@ import {
   screen,
   within,
 } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { ConnectivityContext } from '../../app/connectivity-context';
 import { PlannedRoutesView } from './PlannedRoutesView';
 
 // Management → Planned Routes (GUI_DESIGN §13, v15): reusable route
@@ -25,6 +26,20 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+/** Render Planned Routes with a fixed connectivity status —
+ * deterministic, no fetch/timer polling. Defaults to `connected` so
+ * the existing behavioral tests exercise a fully-enabled view;
+ * offline-specific tests pass `'unavailable'` explicitly. */
+function renderPlannedRoutes(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  return render(
+    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+      <PlannedRoutesView />
+    </ConnectivityContext.Provider>,
+  );
+}
+
 function routeRow(name: string): HTMLElement {
   const row = Array.from(document.querySelectorAll('.rt-table tbody tr')).find(
     (tr) => tr.querySelector('.rtname')?.textContent === name,
@@ -42,7 +57,7 @@ function openEdit(name: string): HTMLElement {
 }
 
 test('active and archived routes split into separate tables without an Actions column', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const bracket = routeRow('Bracket std v3');
   // Whole-row activation with the name-cell button as the keyboard and
@@ -82,7 +97,7 @@ test('active and archived routes split into separate tables without an Actions c
 });
 
 test('usage inspection lists the Quantity Flows released with the route', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   // The usage cell is an interactive island — it opens the usage
   // dialog, never the row's edit dialog.
@@ -104,7 +119,7 @@ test('usage inspection lists the Quantity Flows released with the route', () => 
 });
 
 test('editing a used route states that only future assignments change', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Bracket std v3');
   expect(dialog.textContent).toContain('future assignments only');
@@ -124,7 +139,7 @@ test('editing a used route states that only future assignments change', () => {
 });
 
 test('step Operation and Preferred Machine are selects scoped to the Area', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
   const dialog = openEdit('Milled housing + plating');
 
   // Step 3 (Mill): Operation from the Area's Operations, preferred
@@ -179,7 +194,7 @@ test('step Operation and Preferred Machine are selects scoped to the Area', () =
 });
 
 test('a used route archives from its edit dialog after typing the route name', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Milled housing + plating');
   // Used route: Archive… is offered, Delete… is not.
@@ -217,7 +232,7 @@ test('a used route archives from its edit dialog after typing the route name', (
 });
 
 test('a never-used route deletes outright from its edit dialog', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Lathe + mill combo (trial)');
   // Never used: Delete… is offered, Archive… is not.
@@ -235,7 +250,7 @@ test('a never-used route deletes outright from its edit dialog', () => {
 });
 
 test('archiving with unsaved edits requires an explicit Save / Discard decision first', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Bracket std v3');
   fireEvent.change(within(dialog).getByLabelText('Route name'), {
@@ -275,7 +290,7 @@ test('archiving with unsaved edits requires an explicit Save / Discard decision 
 });
 
 test('duplicating with unsaved edits offers duplicating the saved route instead', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Bracket std v3');
   fireEvent.change(within(dialog).getByLabelText('Route name'), {
@@ -305,7 +320,7 @@ test('duplicating with unsaved edits offers duplicating the saved route instead'
 });
 
 test('closing a dirty route dialog asks before discarding', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   const dialog = openEdit('Lathe + mill combo (trial)');
   fireEvent.change(within(dialog).getByLabelText('Route name'), {
@@ -332,7 +347,7 @@ test('closing a dirty route dialog asks before discarding', () => {
 });
 
 test('duplication creates an active never-used variant and opens it for editing', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   fireEvent.click(
     within(routeRow('Legacy plating route')).getByRole('button', {
@@ -353,7 +368,7 @@ test('duplication creates an active never-used variant and opens it for editing'
 });
 
 test('a new route requires a name and complete steps', () => {
-  render(<PlannedRoutesView />);
+  renderPlannedRoutes();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Planned Route' }));
   const dialog = screen.getByRole('dialog', { name: 'New Planned Route' });
@@ -378,4 +393,85 @@ test('a new route requires a name and complete steps', () => {
   const row = routeRow('Deburr-only rework path');
   expect(row.querySelector('.rt-status')?.textContent).toBe('Active');
   expect(row.textContent).toContain('Never used');
+});
+
+/* ============ Offline write-block ============ */
+
+test('offline disables New Planned Route and archived-row Duplicate; reading stays available', () => {
+  renderPlannedRoutes('unavailable');
+
+  expect(
+    screen.getByRole('button', { name: '+ New Planned Route' }),
+  ).toBeDisabled();
+  expect(
+    within(routeRow('Legacy plating route')).getByRole('button', {
+      name: 'Duplicate',
+    }),
+  ).toBeDisabled();
+
+  // Read-only/search/navigation stay available offline: the row still
+  // opens the edit dialog.
+  const dialog = openEdit('Bracket std v3');
+  expect(dialog).toBeInTheDocument();
+});
+
+test('offline disables Save/Duplicate/Archive…/Delete… inside the route dialog', () => {
+  renderPlannedRoutes('unavailable');
+
+  const used = openEdit('Bracket std v3');
+  expect(
+    within(used).getByRole('button', { name: 'Save route' }),
+  ).toBeDisabled();
+  expect(
+    within(used).getByRole('button', { name: 'Duplicate' }),
+  ).toBeDisabled();
+  expect(within(used).getByRole('button', { name: 'Archive…' })).toBeDisabled();
+  fireEvent.click(within(used).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  const neverUsed = openEdit('Lathe + mill combo (trial)');
+  expect(
+    within(neverUsed).getByRole('button', { name: 'Delete…' }),
+  ).toBeDisabled();
+});
+
+test('reconnecting re-enables the write actions', () => {
+  const { rerender } = renderPlannedRoutes('unavailable');
+  expect(
+    screen.getByRole('button', { name: '+ New Planned Route' }),
+  ).toBeDisabled();
+
+  rerender(
+    <ConnectivityContext.Provider
+      value={{ status: 'connected', retry: vi.fn() }}
+    >
+      <PlannedRoutesView />
+    </ConnectivityContext.Provider>,
+  );
+  expect(
+    screen.getByRole('button', { name: '+ New Planned Route' }),
+  ).toBeEnabled();
+});
+
+/* ============ ?state=long ============ */
+
+test('?state=long renders many long-name/description routes with a long step chain', () => {
+  window.history.replaceState({}, '', '/management/planned-routes?state=long');
+  renderPlannedRoutes();
+
+  // Sample data is still present…
+  expect(routeRow('Bracket std v3')).toBeTruthy();
+  // …plus the long-preview rows, including the over-long name.
+  const supplemental = routeRow(
+    'Supplemental long-preview route — multi-stage housing assembly with outside plating, secondary deburr, and final inspection rework loop',
+  );
+  expect(supplemental.textContent).toContain(
+    'Long-data preview: an over-long route name and description',
+  );
+  // The long step chain renders every step chip.
+  expect(supplemental.querySelectorAll('.rt-steps .rt-stepchip').length).toBe(
+    10,
+  );
+  expect(document.body.textContent).toContain(
+    'Long preview route variant 1 — extended qualification cell',
+  );
 });

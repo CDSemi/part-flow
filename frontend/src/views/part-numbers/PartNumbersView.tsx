@@ -3,6 +3,7 @@ import './part-numbers.css';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
@@ -30,8 +31,31 @@ import type { MockPartNumberMaster } from '../view-models';
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; pn: string };
 
+// Long-data preview records (?state=long): many records plus one with
+// an over-long PN, name/description and metadata, to exercise
+// dense-table and truncation behavior.
+const LONG_PREVIEW_PART_NUMBERS: MockPartNumberMaster[] = [
+  ...Array.from({ length: 15 }, (_, i): MockPartNumberMaster => {
+    const n = i + 1;
+    return {
+      pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
+      name: `LONG PREVIEW PART ${n} — AUTO-GENERATED SAMPLE FOR LAYOUT TESTING ONLY`,
+      revision: String.fromCharCode(65 + (n % 6)),
+      erpId: `ERP-PN-LONG-${String(90000 + n)}`,
+    };
+  }),
+  {
+    pn: '0118-40-0022-07-0455-88-REV-C-SUPPLEMENTAL-LONG-PREVIEW',
+    name: 'SUPPLEMENTAL LONG-PREVIEW PART NUMBER, MULTI-STAGE HOUSING ASSEMBLY WITH OUTSIDE PLATING AND SECONDARY DEBURR OPERATION — OVER-LONG NAME FOR LAYOUT TESTING',
+    revision: 'REV-SUPPLEMENTAL-LONG',
+    erpId: 'ERP-PN-40412-SUPPLEMENTAL-AMENDMENT-2026-REV-B-LONG-PREVIEW',
+  },
+];
+
 export function PartNumbersView() {
   const preview = getViewStatePreview();
+  const { status } = useConnectivity();
+  const writeBlocked = status !== 'connected';
   const [records, setRecords] =
     useState<MockPartNumberMaster[]>(MOCK_PART_NUMBERS);
   const [search, setSearch] = useState('');
@@ -49,7 +73,7 @@ export function PartNumbersView() {
       <section className="pnm" aria-label="Part Numbers">
         <ErrorState
           message="Part Number data could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );
@@ -62,7 +86,9 @@ export function PartNumbersView() {
       .join(' ')
       .toLowerCase()
       .includes(query);
-  const visible = preview === 'empty' ? [] : records.filter(matches);
+  const baseRecords =
+    preview === 'long' ? [...records, ...LONG_PREVIEW_PART_NUMBERS] : records;
+  const visible = preview === 'empty' ? [] : baseRecords.filter(matches);
 
   const editRecord =
     dialog?.kind === 'edit'
@@ -91,6 +117,7 @@ export function PartNumbersView() {
         <span className="spacer" />
         <button
           className="btn primary"
+          disabled={writeBlocked}
           onClick={() => setDialog({ kind: 'new' })}
         >
           + New Part Number
@@ -150,6 +177,7 @@ export function PartNumbersView() {
       {dialog?.kind === 'new' ? (
         <PartNumberEditDialog
           records={records}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(record) => {
             setRecords((current) => [...current, record]);
@@ -161,6 +189,7 @@ export function PartNumbersView() {
         <PartNumberEditDialog
           records={records}
           record={editRecord}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={(record) => {
             setRecords((current) =>
@@ -299,12 +328,16 @@ function BarcodeLabelDialog({
 function PartNumberEditDialog({
   records,
   record,
+  writeBlocked = false,
   onCancel,
   onSave,
   onDelete,
 }: {
   records: MockPartNumberMaster[];
   record?: MockPartNumberMaster;
+  /** Disables Save/Delete while the backend is unreachable (Management
+   * → Part Numbers offline write-block). */
+  writeBlocked?: boolean;
   onCancel: () => void;
   onSave: (record: MockPartNumberMaster) => void;
   onDelete?: () => void;
@@ -530,7 +563,11 @@ function PartNumberEditDialog({
         <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
-        <button className="bigbtn primary" onClick={save}>
+        <button
+          className="bigbtn primary"
+          disabled={writeBlocked}
+          onClick={save}
+        >
           {record ? 'Save changes' : 'Add Part Number'}
         </button>
       </div>
@@ -545,6 +582,7 @@ function PartNumberEditDialog({
             </p>
             <button
               className="dz-delete"
+              disabled={writeBlocked}
               onClick={() => setDeleteConfirm(true)}
             >
               Delete details…

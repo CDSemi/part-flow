@@ -164,7 +164,7 @@ export function PriorityView() {
       <section className="pr-view" aria-label="Priority Management">
         <ErrorState
           message="The Hot list could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );

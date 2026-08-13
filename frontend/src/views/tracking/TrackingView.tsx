@@ -106,7 +106,7 @@ export function TrackingView() {
       <section className="tk" aria-label="PN Tracking">
         <ErrorState
           message="PN Tracking data could not be loaded."
-          detail="Check the backend connection, then retry from the offline banner."
+          detail="Check the backend connection and try again."
         />
       </section>
     );
