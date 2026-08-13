@@ -56,7 +56,7 @@ import type {
   RequestType,
   RouteMode,
 } from '../view-models';
-import { parseScan, pnKey, SCRAP_BARCODE } from './barcode';
+import { normalizePartNumber, parseScan, SCRAP_BARCODE } from './barcode';
 import {
   applyAssign,
   applyDone,
@@ -370,11 +370,6 @@ function StationView({
   const [history, setHistory] = useState<
     { action: MockCompletedAction; reversed: boolean; before: MockAreaCard[] }[]
   >([]);
-  // PNs created on first valid use in this session (mock): identity is
-  // case-insensitive, the first-entered casing is preserved for display.
-  const [createdPns, setCreatedPns] = useState<Map<string, string>>(
-    () => new Map(),
-  );
   // Per-Machine session monitoring state (keyed by stable Machine id):
   // `running`/`idle` derive from the quantity currently assigned on
   // each Machine in the session-local cards (queue and finished never
@@ -513,15 +508,11 @@ function StationView({
   const eligible = history.find((h) => !h.reversed);
   const lastPn = eligible?.action ?? null;
 
-  /** Resolve the display PN: catalog / session-created, else as scanned. */
-  const resolvePn = useCallback(
-    (pn: string) =>
-      catalogPartNumber(pn)?.pn ?? createdPns.get(pnKey(pn)) ?? pn.trim(),
-    [createdPns],
-  );
-
+  // PNs entering this view are already canonical (uppercase,
+  // whitespace-free — parseScan / normalizePartNumber), so the PN
+  // string itself is the identity and direct equality compares it.
   const cardsFor = useCallback(
-    (pn: string) => areaCards.filter((c) => pnKey(c.pn) === pnKey(pn)),
+    (pn: string) => areaCards.filter((c) => c.pn === pn),
     [areaCards],
   );
 
@@ -530,7 +521,7 @@ function StationView({
       allCards
         .filter(
           (c) =>
-            pnKey(c.pn) === pnKey(pn) &&
+            c.pn === pn &&
             c.area !== station.area &&
             c.area !== 'stockroom' &&
             c.qty > 0,
@@ -560,12 +551,10 @@ function StationView({
     [cardsFor],
   );
 
-  const repairSourcesFor = useCallback((pn: string) => {
-    const key = Object.keys(MOCK_REPAIR_SOURCES).find(
-      (k) => pnKey(k) === pnKey(pn),
-    );
-    return key ? MOCK_REPAIR_SOURCES[key] : [];
-  }, []);
+  const repairSourcesFor = useCallback(
+    (pn: string) => MOCK_REPAIR_SOURCES[pn] ?? [],
+    [],
+  );
 
   /**
    * Apply one confirmed application command atomically to the mock
@@ -627,8 +616,9 @@ function StationView({
    * opened dialog can offer Back to it; a plain scan passes none.
    */
   const openPnFlow = useCallback(
-    (rawPn: string, parent?: Flow) => {
-      const pn = resolvePn(rawPn);
+    (pn: string, parent?: Flow) => {
+      // `pn` is already the canonical PN (parseScan / manual-entry
+      // normalization) — the PN string itself is the identity.
       if (cardsFor(pn).length > 0) {
         setFlow({ kind: 'pn-actions', pn, parent });
         return;
@@ -647,7 +637,7 @@ function StationView({
       // defaults, both editable. The PN is created on first valid use.
       setFlow({ kind: 'intake', pn, parent });
     },
-    [cardsFor, resolvePn, sourcesFor],
+    [cardsFor, sourcesFor],
   );
 
   const handleScan = useCallback(() => {
@@ -1213,7 +1203,6 @@ function StationView({
           initialMachine={flow.machine}
           initialPn={flow.pn}
           queuedQtyFor={queuedQtyFor}
-          resolvePn={resolvePn}
           areaCards={areaCards}
           worker={worker}
           onBack={backTo(flow.parent)}
@@ -1271,16 +1260,6 @@ function StationView({
           pn={flow.pn}
           hasMachines={hasMachines}
           worker={worker}
-          onCreatePn={(pn) =>
-            setCreatedPns((current) => {
-              if (current.has(pnKey(pn)) || catalogPartNumber(pn)) {
-                return current;
-              }
-              const next = new Map(current);
-              next.set(pnKey(pn), pn);
-              return next;
-            })
-          }
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1365,15 +1344,16 @@ function StationView({
         <ManualEntryDialog
           initialPn={flow.initialPn}
           onCancel={cancelFlow}
-          onConfirm={(pnText) => {
-            const pn = pnText.trim();
+          onConfirm={(pn) => {
+            // `pn` is already the canonical PN ('' when the entry was
+            // empty — treated like a cancelled entry, no write).
             setFlow(null);
             if (!pn) {
               focusScan();
               return;
             }
             // The resolved dialog can go Back to manual entry with the
-            // entered PN preserved for correction.
+            // canonical PN preserved for correction.
             openPnFlow(pn, { kind: 'manual-pn', initialPn: pn });
           }}
         />
@@ -1806,7 +1786,6 @@ function MachineAssignDialog({
   initialMachine,
   initialPn,
   queuedQtyFor,
-  resolvePn,
   areaCards,
   worker,
   onBack,
@@ -1821,7 +1800,6 @@ function MachineAssignDialog({
   initialMachine: string | null;
   initialPn: string | null;
   queuedQtyFor: (pn: string) => number;
-  resolvePn: (pn: string) => string;
   areaCards: MockAreaCard[];
   /** Back from Step 1 to the parent dialog (PN action dialog); absent
    * for the Machine-scan entry, which has no previous dialog step. */
@@ -1933,14 +1911,14 @@ function MachineAssignDialog({
       return;
     }
     if (parsed.kind === 'pn') {
-      const resolved = resolvePn(parsed.pn);
-      if (queuedQtyFor(resolved) < 1) {
+      // parsed.pn is the canonical PN — the identity itself.
+      if (queuedQtyFor(parsed.pn) < 1) {
         setScanError(
-          `${resolved} has no queued quantity in this Area — selection unchanged.`,
+          `${parsed.pn} has no queued quantity in this Area — selection unchanged.`,
         );
         return;
       }
-      setPn(resolved);
+      setPn(parsed.pn);
       setScanError(null);
       return;
     }
@@ -2680,7 +2658,6 @@ function IntakeDialog({
   pn,
   hasMachines,
   worker,
-  onCreatePn,
   onBack,
   onApply,
   onNotice,
@@ -2689,7 +2666,6 @@ function IntakeDialog({
 }: ActionDialogProps & {
   pn: string;
   hasMachines: boolean;
-  onCreatePn: (pn: string) => void;
   /** Back from the settings view to the parent step (manual PN entry);
    * absent when a scan resolved directly to this wizard. */
   onBack?: () => void;
@@ -2721,8 +2697,7 @@ function IntakeDialog({
   // One clearly applicable blank-number MODIFY Work Order is reused;
   // with several plausible ones an explicit selection dialog would
   // appear (never a guess). The mock data carries one such WO.
-  const reusableInternalWo =
-    requestType === 'MODIFY' && pnKey(pn) === pnKey('214-406');
+  const reusableInternalWo = requestType === 'MODIFY' && pn === '214-406';
   const woBehavior = reusableInternalWo
     ? 'Reuses the applicable internal MODIFY Work Order (WO —)'
     : requestType === 'MODIFY'
@@ -2739,7 +2714,6 @@ function IntakeDialog({
 
   function confirm() {
     if (!valid) return;
-    onCreatePn(pn);
     onApply({
       action: {
         pn,
@@ -2796,11 +2770,11 @@ function IntakeDialog({
             {pn}
           </div>
           {/* Operator wording only. Engineering behavior behind it: the
-              PartNumber record is created on first valid use (no
-              preloaded catalog required); PN identity is
-              case-insensitive and the first-entered casing is kept for
-              display; received_date defaults to the scan timestamp; the
-              optional due date is stored on the WorkOrderDemand. */}
+              PartNumber master metadata record is created on first
+              valid use (no preloaded catalog required); the canonical
+              uppercase PN string is the identity; received_date
+              defaults to the scan timestamp; the optional due date is
+              stored on the WorkOrderDemand. */}
           {/* v15 layout: PN identity recap first, one short info line,
               then the intake settings — never one merged paragraph. */}
           <div className="sub">
@@ -4023,22 +3997,44 @@ function ManualEntryDialog({
   /** Previously entered PN, preserved when Back returns here. */
   initialPn?: string;
   onCancel: () => void;
+  /** Called with the canonical PN, or '' when the entry was empty. */
   onConfirm: (pn: string) => void;
 }) {
   const fieldRef = useRef<HTMLInputElement>(null);
+  const [entryError, setEntryError] = useState<string | null>(null);
   useEffect(() => {
     fieldRef.current?.focus();
   }, []);
+  // Normalize to the canonical uppercase PN before resolving. A value
+  // containing whitespace is invalid and stays in the dialog with an
+  // explanation — it is never silently cleaned up into a valid PN.
+  function submit() {
+    const raw = fieldRef.current?.value ?? '';
+    if (raw.trim() === '') {
+      onConfirm('');
+      return;
+    }
+    const pn = normalizePartNumber(raw);
+    if (!pn) {
+      setEntryError(
+        'A Part Number cannot contain spaces, tabs, or other whitespace. Correct the entry and try again.',
+      );
+      return;
+    }
+    onConfirm(pn);
+  }
   return (
     <ModalDialog label="Enter Part Number manually" onClose={onCancel}>
       <h3>Enter Part Number manually</h3>
-      {/* Operator wording only — engineering detail: PN identity is
-          case-insensitive; an unknown PN opens the intake wizard, where
-          the PartNumber record is created on first valid use. */}
+      {/* Operator wording only — engineering detail: the entry is
+          normalized to the canonical uppercase, whitespace-free PN; an
+          unknown PN opens the intake wizard, where the PartNumber
+          master metadata record is created on first valid use. */}
       <div className="sub">
         Enter the Part Number exactly as shown on the traveler or job paperwork.
-        Unknown Part Numbers will open the receive workflow for review. Nothing
-        is recorded at this step.
+        Lowercase letters are accepted and shown in uppercase. Unknown Part
+        Numbers will open the receive workflow for review. Nothing is recorded
+        at this step.
       </div>
       <input
         aria-label="Part Number"
@@ -4047,15 +4043,17 @@ function ManualEntryDialog({
         autoComplete="off"
         defaultValue={initialPn}
         placeholder="Part Number, e.g. 0455-20-0118-03"
+        onChange={() => setEntryError(null)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') onConfirm(e.currentTarget.value);
+          if (e.key === 'Enter') submit();
         }}
       />
+      {entryError ? <Guidance tone="error">{entryError}</Guidance> : null}
       <StepButtons
         onCancel={onCancel}
         primary={{
           label: 'Continue',
-          onClick: () => onConfirm(fieldRef.current?.value ?? ''),
+          onClick: submit,
         }}
       />
     </ModalDialog>

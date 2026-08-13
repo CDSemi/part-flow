@@ -1,4 +1,4 @@
-# PartFlow Project Profile v15
+# PartFlow Project Profile v16
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -216,11 +216,11 @@ The barcode identifies the PN. Quantity and movement context are resolved by the
 
 The primary tracked object is the PN.
 
-A PN:
+The PN string itself is the stable production identity. A PN:
 
 - is unique in the ERP system,
-- has no guaranteed format,
-- must be treated as an arbitrary string,
+- has no guaranteed format beyond the canonical form rules (case-insensitive, stored in canonical UPPERCASE, no whitespace — §7 Part Number),
+- must otherwise be treated as an opaque arbitrary string,
 - has one reusable drawing folder,
 - has one unique PartFlow barcode,
 - may be requested by multiple active Work Orders,
@@ -228,7 +228,7 @@ A PN:
 - may have quantities in multiple Areas simultaneously,
 - may have quantities assigned to multiple Machines simultaneously,
 - may have different quantity flows following different Routes,
-- must remain permanently traceable after first recording.
+- must remain permanently traceable after first recording: every production record (Work Order Demand, Quantity Flow, Part Movement, Allocation, history) keeps the canonical PN value it needs itself — traceability never depends on the existence of a PartNumber master record.
 
 The system does not track:
 
@@ -277,14 +277,21 @@ A reusable ERP-defined identifier for a manufactured part design.
 
 Abbreviation: `PN`.
 
-The PN is the primary tracked identity.
+The PN is the primary tracked identity, and the **PN string itself is the stable domain identity** — there is no surrogate PN identity, and production data is never linked through a `part_number_id`.
 
 A PN:
 
 - is unique,
-- has no fixed format,
 - remains the same across multiple Work Orders,
 - is represented by the reusable folder barcode.
+
+Canonical form rules:
+
+- PN identity is **case-insensitive**. A PN is normalized to **UPPERCASE** before it is stored and before it is compared: `abc-123`, `ABC-123`, and `AbC-123` all canonicalize to `ABC-123`. The system stores, compares, and displays only the canonical uppercase PN.
+- A PN must contain **no whitespace** of any kind (no space, tab, newline, or other whitespace). Input containing whitespace is rejected as an invalid PN; whitespace is never silently removed to turn invalid input into a valid PN.
+- Beyond these two rules the PN remains an opaque arbitrary string: it has no fixed format, PN segments are never parsed for business meaning, and no format is ever assumed.
+
+`PartNumber` master data is **optional current metadata** for a PN (§8.1). Production identity and historical truth never depend on the existence of a PN master record.
 
 ---
 
@@ -539,13 +546,16 @@ Production correctness must not depend on Worker identity.
 
 ## 8.1 PartNumber
 
-Represents the reusable PN master record.
+Represents the **optional current metadata** for a PN. The canonical PN string itself is the stable production identity (§7 Part Number); the PartNumber master only enriches that identity with current metadata when the record exists.
+
+```text
+PN string        = stable production identity
+PartNumber master = optional/current metadata for that PN
+```
 
 Typical attributes (illustrative only):
 
-- `id`
-- `part_number`
-- `barcode_value`
+- `part_number` (the canonical uppercase PN — the identity and natural key)
 - `name`
 - `description`
 - `image_url`
@@ -557,13 +567,13 @@ Typical attributes (illustrative only):
 
 Rules:
 
-- `part_number` must be unique **case-insensitively**: `abc`, `ABC`, and `Abc` resolve to the same PartNumber. Persistence uses a normalized lookup key or case-insensitive unique constraint (e.g. a unique index on `lower(part_number)`); the stored and displayed value keeps the exact casing of first creation and is never silently re-cased.
-- `part_number` must be treated as an arbitrary string.
-- A PartNumber is **created on first valid use**: no pre-populated authoritative PN catalog is required, ERP is never called during MVP, and manual PN entry accepts any non-empty PN value. The internal PartNumber record is still required for references, tracking, metadata, history, and future ERP mapping.
-- Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The exact string must be preserved everywhere; PN segments must never be parsed for business meaning.
+- `part_number` is stored in canonical form (§7 Part Number): normalized to UPPERCASE, containing no whitespace, otherwise an opaque arbitrary string. Uniqueness follows directly from the canonical form — one master record may exist per canonical PN.
+- A PartNumber master is **created on first valid use**: no pre-populated authoritative PN catalog is required, ERP is never called during MVP, and manual PN entry accepts any non-empty, whitespace-free PN value (canonicalized to uppercase). The master record exists for current metadata and future ERP mapping only.
+- Production identity and historical truth **never depend on the existence of the PartNumber master record**. WorkOrder demand, QuantityFlows, PartMovements, Allocations, and history each keep the canonical PN value they need themselves; historical display never requires a join through the PN master to know what the PN is. A PN master lookup only enriches current metadata when the record exists.
+- Real PN values are commonly multi-segment hyphenated numeric strings of varying length (shapes such as `214-406`, `78-04-0031`, `0455-20-0118-03`, `2027-60-8114-00`). The canonical string must be preserved everywhere; PN segments must never be parsed for business meaning.
 - `name`/`description` are free text as supplied — commonly uppercase with commas, slashes, fractions, dimensions, and manufacturing abbreviations (e.g. `VALVE, SOLENOID VITON, 3/8`) — and may be long enough to span multiple display lines.
-- The folder barcode identifies only the PN and carries the PN itself: `PF:PN:<part-number>` (§10).
-- An Administrator may archive (soft-delete) junk or test PartNumbers (§28 Administrative Archival and Purge): archived PNs disappear from active lookup and intake, while historical displays keep the original PN text with an explicit `(archived)` marker.
+- The folder barcode identifies only the PN and carries the PN itself: `PF:PN:<part-number>` with the canonical uppercase PN (§10).
+- An Administrator may **hard-delete** a PartNumber master record (§28 Administrative Archival and Purge): deletion removes only the metadata, never cascades into production data, and never affects the PN's traceability — historical surfaces continue to display the PN string normally. If the PN is used again later, a new master record may be created for the same canonical PN identity. There is no PN archive or tombstone kept merely to preserve PN identity.
 - Current revision is informational only.
 - Revision changes do not create a new tracked PN unless ERP provides a different PN.
 - The PN barcode is reused across all Work Orders requesting the PN.
@@ -609,7 +619,7 @@ Typical attributes (illustrative only):
 
 - `id`
 - `work_order_id`
-- `part_number_id`
+- `part_number` (the canonical uppercase PN — kept by the demand itself)
 - `request_type`
 - `requested_quantity`
 - `allocated_quantity`
@@ -746,7 +756,7 @@ Represents an internal tracking concept for active PN quantity.
 Typical attributes (illustrative only):
 
 - `id`
-- `part_number_id`
+- `part_number` (the canonical uppercase PN — kept by the flow itself)
 - `quantity`
 - `status`
 - `route_mode`
@@ -845,7 +855,7 @@ Represents an immutable quantity event.
 Typical attributes (illustrative only):
 
 - `id`
-- `part_number_id`
+- `part_number` (the canonical uppercase PN — kept by the Movement itself)
 - `quantity_flow_id`
 - `quantity`
 - `movement_type`
@@ -893,6 +903,7 @@ When quantity that is still actively processing (`ON_MACHINE`, or directly proce
 Rules:
 
 - Movement records PN quantity.
+- A Movement keeps its own canonical PN value: history continues to identify the PN (for example `2027-60-8114-00`) even when no PartNumber master record exists (§8.1).
 - Movement is not tied to a specific Work Order Allocation.
 - Movement must never be silently overwritten.
 - Corrections preserve the original event.
@@ -907,7 +918,7 @@ Represents the assignment of stocked PN quantity to Work Order Demand.
 Typical attributes (illustrative only):
 
 - `id`
-- `part_number_id`
+- `part_number` (the canonical uppercase PN — kept by the allocation itself)
 - `work_order_demand_id`
 - `quantity`
 - `allocated_at`
@@ -989,14 +1000,14 @@ The `PF:` namespace exists to identify PartFlow-owned barcodes, determine the en
 
 The Machine barcode carries the Machine's Asset Tag (§8.6) — the automatically assigned, immutable identity of the physical machine (`Asset Tag CD-0512` → scanned barcode `PF:MACHINE:CD-0512`). There is no independent Machine barcode identifier and no manual Machine barcode entry.
 
-The PN barcode carries the PN itself. Parsing rules:
+The PN barcode carries the PN itself, in canonical uppercase form (§7 Part Number). Parsing rules:
 
-1. Trim scanner terminators and surrounding whitespace.
+1. Trim scanner terminators and surrounding whitespace from the scanned value.
 2. Require the exact `PF:PN:` prefix for scanned PN barcodes.
-3. Treat the entire non-empty suffix as the PN.
-4. Never parse PN segments and never validate a PN format.
-5. Do not require the PN to exist in a preloaded catalog — the internal PartNumber record is created on first valid use (§8.1); ERP is not called during MVP.
-6. Preserve the originally entered PN text for display; identity is case-insensitive (§8.1).
+3. Treat the entire suffix as the PN candidate. The candidate must be non-empty and must contain no whitespace; a suffix containing whitespace is an invalid PN barcode and is rejected — whitespace is never silently removed.
+4. Canonicalize the candidate to UPPERCASE — the canonical PN (identity is case-insensitive, §7).
+5. Never parse PN segments and never validate a PN format beyond the canonical form rules.
+6. Do not require the PN to exist in a preloaded catalog — the PartNumber master record is created on first valid use (§8.1); ERP is not called during MVP.
 
 There are **no Action barcodes**. Action intent (Modify intake, Repair, Scrap, quantity addition) is selected through explicit one-shot dialogs, never through persistent armed barcode state. `PF:SCRAP` is a single dedicated, context-sensitive barcode: it is accepted only inside the Scrap workflow, where each scan increments a pending scrap counter (§11); scanning it in the main Scan Station input is rejected.
 
@@ -1005,7 +1016,7 @@ Requirements:
 - Barcode values must be unique.
 - Barcode identity must not depend on mutable display names.
 - Raw ERP PN text must not automatically be treated as a PartFlow barcode.
-- Manual PN entry must remain available and accepts any non-empty PN value.
+- Manual PN entry must remain available and accepts any non-empty, whitespace-free PN value; the entry (including lowercase input) is canonicalized to the uppercase PN before use.
 - Barcode parsing must be deterministic.
 - Unknown barcodes must be rejected clearly.
 - Inactive entities must not accept production updates.
@@ -1250,7 +1261,7 @@ For a newly received Work Order:
 1. Create or locate the Work Order.
 2. Create or update Work Order Demand for each PN.
 3. Locate the reusable PN folder.
-4. Create the PN master and barcode if the PN is new.
+4. Create the PN master metadata record if the PN is new (the barcode carries the canonical PN itself, §10).
 5. Add Work Order Demand without creating a separate tracked PN.
 6. Save the business demand. Saving Work Order Demand never automatically creates production quantity.
 7. Confirm the Route Mode (Floating by default) — and the Planned Route where chosen — when production is released.
@@ -1696,7 +1707,7 @@ Requirements:
 - separate on-Machine, queued, and finished (`Finished — ready to move`) quantity (Areas with Machines) or direct processing and finished groups (Areas without Machines) — finished quantity belongs to the Area summary and Machine cards show only actively assigned quantity,
 - Machine-card PN rows with the two distinct actions `DONE` and `QUEUE` (§12),
 - authorized Undo with a summary confirmation (§16),
-- manual entry fallback accepting any non-empty PN value.
+- manual entry fallback accepting any non-empty, whitespace-free PN value (canonicalized to the uppercase PN, §7 Part Number).
 
 There is no persistent Machine Session, no pending armed context, and no Recent Scans list.
 
@@ -1840,7 +1851,7 @@ The selected PN view must show:
 - stocked quantity,
 - Allocation history,
 - correction history,
-- the `(archived)` marker on archived/soft-deleted PNs (original PN text preserved),
+- normal PN display for PNs whose master metadata record was deleted: the canonical PN string and all production history remain fully visible; only the master-derived metadata (name, image, revision, ERP mapping) is absent (§8.1),
 - a blank external Work Order Number as `—`.
 
 Route visualization supports both modes. For Planned Routes it must distinguish completed, active, queued, and future steps plus deviations. For Floating Routes it derives the actual trace from Movement history, shows repeated Areas, shows split flows independently, and marks Repair transfers explicitly, for example:
@@ -1864,7 +1875,7 @@ The view must support the minimum confirmed workflow:
 2. Add or update one or more Work Order Demand records.
 3. Locate or create the PartNumber.
 4. Create the PN barcode when the PN is new.
-5. Enter: Work Order Number (optional — a blank number is saved as NULL on an internal Work Order and displays as `—`, §7 Work Order), received date (defaults to the current date), PN (any non-empty PN text — created on first use, §8.1), Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
+5. Enter: Work Order Number (optional — a blank number is saved as NULL on an internal Work Order and displays as `—`, §7 Work Order), received date (defaults to the current date), PN (any non-empty, whitespace-free PN text, canonicalized to uppercase — created on first use, §8.1), Request Type (default `NEW`), requested quantity, due date (optional — a missing due date is valid data, §8.3), priority when applicable, external Job Numbers, and requester, reason, and notes when applicable.
 6. Save business demand without automatically creating production quantity.
 7. Provide a separate explicit `Release to production` action following the release steps in §12.
 
@@ -1926,7 +1937,7 @@ Administration stays focused on system administration:
 - Operations,
 - Scan Stations,
 - Workers,
-- PartNumber maintenance (archive/soft-delete, separate explicit purge — §28 Administrative Archival and Purge),
+- PartNumber maintenance (master metadata upkeep and hard deletion — §28 Administrative Archival and Purge),
 - users,
 - roles,
 - permissions,
@@ -2142,25 +2153,37 @@ Database constraints should enforce, whenever practical:
 
 ## Administrative Archival and Purge
 
-Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment** (**explicit Admin archival/purge maintenance**). Archival is always preferred over destructive deletion.
+Normal production runtime is append-only and never silently rewrites or deletes history. Separately, Administrators hold **explicit maintenance authority in every environment** (**explicit Admin archival/purge maintenance**).
 
-**PartNumber archival/deletion.** Admin may remove junk or test PartNumber records:
+**PartNumber master deletion.** The PartNumber master record is optional current metadata (§8.1); every production record keeps its own canonical PN value. Admin may therefore **hard-delete** a PN master record — for example a junk or test entry, or metadata that is simply no longer wanted — without any loss of production or history identity:
 
-- the default administrative “delete” archives (soft-deletes) the PN;
-- archived PartNumbers disappear from normal active lookup and intake;
-- historical displays retain the original PN text; references display the PN with a clear `(archived)` or `(deleted)` marker;
-- no cascading delete may destroy unrelated tracking history; a PN text snapshot is stored or preserved where required for historical rendering;
-- archived records remain available to Admin history/audit tools;
-- a physical purge may exist as a separate, explicitly named maintenance operation — never as the normal delete button.
+- deleting the PN master must not delete or mutate WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or any history;
+- the deletion never cascades into production data;
+- historical surfaces continue to display the canonical PN string normally — only master-derived metadata (name, image, revision, ERP mapping) becomes unavailable;
+- the deleted PN disappears from metadata-backed active lookup; intake of the PN remains possible (create-on-first-use, §8.1);
+- if the PN appears again later, a new master metadata record may be created for the same canonical PN identity;
+- there is no PN archive, soft-delete, or tombstone kept merely to preserve PN identity — the canonical PN string itself fulfills that responsibility.
 
-**History archival and purge.** Admin may archive or purge history in every environment through explicit maintenance workflows, triggered by an Admin-configured periodic retention policy, an Admin-configured maximum data-size threshold, or a manual Admin request. Rules:
+**Movement history retention, archival, and purge.** PartMovement is immutable during active production runtime: normal workflows never modify or delete Movement records. Immutability does **not** mean that every Movement row must live in the primary PostgreSQL database forever — archival and purge under an explicit retention policy is lifecycle/storage maintenance, separate from production runtime. As Movement history grows, PartFlow may apply a **configurable retention policy** (for example: keep N years of history in the primary database — the retention period is configuration, never a hard-coded number of years in domain rules). Older history is then:
 
-- normal application workflows cannot delete history;
-- maintenance operations require explicit Admin authorization, show a scope/impact preview before execution, require a reason, and record who initiated the operation and when;
-- archive is the default and preferred behavior; physical purge is separate and more explicit;
-- the operation never silently cascades into active production state — active quantity and current projections must remain reconcilable;
-- archived history remains queryable through an Admin archive view or export path where practical;
-- retention settings live in Administration/configuration, not in production workflow logic.
+1. selected by the retention cutoff;
+2. exported losslessly to archival files;
+3. verified as successfully exported;
+4. only then purged (deleted) from the primary database.
+
+The archival files become the long-term historical storage for the purged portion of history. Mandatory rules:
+
+- **Never purge before a successful, verified archive export.**
+- The archive must retain enough data to identify the PN, quantity, Movement type, Area, Operation, Machine, Worker, timestamps, relationships/correction context, and the required audit fields.
+- The PN in archived history is stored directly as the canonical PN string — never dependent on the PN master.
+- Retention/purge is explicit administrative maintenance, never part of a normal production workflow; it may be triggered by the Admin-configured retention policy, an Admin-configured data-size threshold, or a manual Admin request.
+- Maintenance operations require explicit Admin authorization, show a scope/impact preview before execution, require a reason, and are fully auditable: scope, cutoff, who/what initiated it, when, and the result.
+- Records still needed to reconstruct active production state are never archived/purged; active production state and current projections must always remain reconcilable after archival.
+- The purge deletes exactly the archived rows (archive/export first, then purge what was archived) — whole-table truncation is never used.
+- Retention settings live in Administration/configuration, not in production workflow logic.
+- The archive file format and transport are implementation-phase decisions; no additional storage infrastructure is presumed here.
+
+Note the distinction: *production identity must remain traceable* (always true — production records carry their canonical PN, and archived history remains part of the permanent record) is **not** the same as *all raw Movement rows must remain forever in the primary database* (not required — retention archival applies).
 
 ---
 

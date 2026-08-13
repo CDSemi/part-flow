@@ -6,6 +6,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { EmptyState } from '../../components/view-states';
 import { formatIsoDate } from '../dates';
+import { normalizePartNumber } from '../scan-station/barcode';
 import type { MockWorkOrder, RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
 import type { AddPartResult } from './AddPartDialog';
@@ -175,7 +176,7 @@ export function WorkOrderDetailPanel({
       pn: result.pn,
       isNewPn: result.isNewPn,
       barcodeNote: result.isNewPn
-        ? `new PN — barcode created with PN master: ${result.barcode}`
+        ? `new PN — barcode ${result.barcode}`
         : `existing PN · barcode ${result.barcode}`,
       due,
     });
@@ -376,15 +377,21 @@ export function WorkOrderDetailPanel({
                               errorFor(line.id, 'pn') ? true : undefined
                             }
                             onBlur={(e) => {
-                              // The entered casing is preserved; identity
-                              // is case-insensitive (never re-cased).
-                              const pn = e.target.value.trim();
-                              if (!pn) return;
+                              // Normalize to the canonical uppercase PN;
+                              // whitespace is invalid, never removed.
+                              if (!e.target.value.trim()) return;
+                              const pn = normalizePartNumber(e.target.value);
+                              if (!pn) {
+                                showNotice(
+                                  '⚠ A Part Number cannot contain spaces or other whitespace — correct the entry.',
+                                );
+                                return;
+                              }
                               const duplicate = display.find(
                                 (l) =>
                                   l.id !== line.id &&
                                   l.pn !== null &&
-                                  l.pn.toUpperCase() === pn.toUpperCase(),
+                                  l.pn === pn,
                               );
                               if (duplicate) {
                                 showNotice(
@@ -402,7 +409,7 @@ export function WorkOrderDetailPanel({
                               clearLineError(line.id, 'pn');
                               updateLine(line.id, {
                                 pn,
-                                barcodeNote: `new PN — barcode created with PN master: PF:PN:${pn}`,
+                                barcodeNote: `new PN — barcode PF:PN:${pn}`,
                                 isNewPn: true,
                               });
                               setFocusField({

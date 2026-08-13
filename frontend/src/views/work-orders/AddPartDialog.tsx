@@ -4,6 +4,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { MOCK_PN_CATALOG } from '../../mocks/work-orders';
+import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
 import { isPositiveInteger } from './demand-lines';
@@ -72,8 +73,10 @@ export function AddPartDialog({
     if (step === 0) searchRef.current?.focus();
   }, [step]);
 
-  // Search and identity are case-insensitive; the entered casing is
-  // preserved when a new PN is created (never silently re-cased).
+  // Search matching is case-insensitive. Creating a new PN uses the
+  // canonical form (PROJECT_PROFILE §7): the raw entry is canonicalized
+  // to uppercase, and a value containing any whitespace is not a valid
+  // PN — whitespace is never silently removed.
   const trimmed = query.trim();
   const upper = trimmed.toUpperCase();
   const matches = MOCK_PN_CATALOG.filter(
@@ -83,14 +86,14 @@ export function AddPartDialog({
         .toUpperCase()
         .includes(upper),
   );
-  const exactMatch = MOCK_PN_CATALOG.some(
-    (entry) => entry.pn.toUpperCase() === upper,
-  );
+  const canonical = normalizePartNumber(query);
+  const exactMatch =
+    canonical !== null &&
+    MOCK_PN_CATALOG.some((entry) => entry.pn === canonical);
 
   function choosePn(value: string, asNewPn: boolean, barcodeNote: string) {
-    const duplicate = existingPns.find(
-      (existing) => existing.toUpperCase() === value.toUpperCase(),
-    );
+    // `value` is a canonical PN; existing line PNs are canonical too.
+    const duplicate = existingPns.find((existing) => existing === value);
     if (duplicate) {
       onDuplicate(duplicate);
       return;
@@ -239,19 +242,25 @@ export function AddPartDialog({
                 </div>
               ) : null}
             </div>
-            {trimmed && !exactMatch ? (
+            {canonical && !exactMatch ? (
               <button
                 className="btn ghost ap-create"
                 onClick={() =>
                   choosePn(
-                    trimmed,
+                    canonical,
                     true,
-                    `new PN — barcode created with PN master: PF:PN:${trimmed}`,
+                    `new PN — barcode PF:PN:${canonical}`,
                   )
                 }
               >
-                ＋ Create new PN “{trimmed}”
+                ＋ Create new PN “{canonical}”
               </button>
+            ) : null}
+            {trimmed && !canonical ? (
+              <div className="ap-empty">
+                A Part Number cannot contain spaces or other whitespace, so “
+                {query}” cannot be created as a new PN.
+              </div>
             ) : null}
           </>
         )}

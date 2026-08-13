@@ -15,6 +15,10 @@ import { expect, test } from 'vitest';
 //    Machine Session and no Recent Scans list. (Deliberate negative
 //    mentions of the Machine Session stay allowed — the UI explains
 //    that none exists.)
+// 3. PROJECT_PROFILE v16 — the canonical PN string (uppercase,
+//    whitespace-free) is the stable domain identity: no surrogate
+//    part_number_id linkage, no pnKey comparison helper, and no
+//    preserved-first-entered-casing rule may return.
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
 const roots = [srcDir, join(srcDir, '..', 'scripts')];
@@ -45,6 +49,14 @@ const STALE_PATTERNS: RegExp[] = [
   /TMP-YYYYMMDD/,
   /generateTemporaryWorkOrderNumber/,
   /Recent scans/i,
+  // PN-string identity (PROJECT_PROFILE v16): no surrogate PN identity
+  // and no casing-preservation rule may return.
+  /part_number_id/,
+  /partNumberId/,
+  /\bpnKey\b/,
+  /first-entered casing/i,
+  /casing is preserved/i,
+  /casing of first creation/i,
 ];
 
 function walk(dir: string): string[] {

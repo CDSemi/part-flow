@@ -17,7 +17,6 @@ import type {
   MockAreaMachine,
   MockMachine,
 } from '../view-models';
-import { pnKey } from './barcode';
 
 /** How one card's quantity is currently held. */
 export interface CardBreakdown {
@@ -62,7 +61,8 @@ function findCard(
   pn: string,
   area: AreaKey,
 ): MockAreaCard | undefined {
-  return cards.find((c) => pnKey(c.pn) === pnKey(pn) && c.area === area);
+  // PNs are canonical uppercase strings — direct equality is identity.
+  return cards.find((c) => c.pn === pn && c.area === area);
 }
 
 /** Merge `delta` pcs into the tuple named `context` (drop at zero). */

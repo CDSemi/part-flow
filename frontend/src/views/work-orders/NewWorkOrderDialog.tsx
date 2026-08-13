@@ -142,7 +142,7 @@ export function NewWorkOrderDialog({
       pn: result.pn,
       isNewPn: result.isNewPn,
       barcodeNote: result.isNewPn
-        ? `new PN — barcode created with PN master: ${result.barcode}`
+        ? `new PN — barcode ${result.barcode}`
         : `existing PN · barcode ${result.barcode}`,
       due,
     });

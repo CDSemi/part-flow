@@ -1380,30 +1380,43 @@ test('receive Back preserves settings and quantity; Cancel records nothing', asy
   expect(lastPnText()).toBe('—');
 });
 
-test('PN identity is case-insensitive and keeps the first-entered casing', async () => {
+test('PN identity is case-insensitive and canonicalizes to uppercase', async () => {
   await renderStation();
 
+  // A lowercase scan resolves to the canonical uppercase PN — the
+  // system uses and displays only the canonical form.
   scan('PF:PN:abc-part');
   const dialog = await screen.findByRole('dialog', {
     name: 'Receive Quantity',
   });
+  expect(within(dialog as HTMLElement).getByText('ABC-PART')).toBeVisible();
+  expect(
+    within(dialog as HTMLElement).queryByText('abc-part'),
+  ).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Next' }));
   fireEvent.keyDown(dialog, { key: '1' });
   fireEvent.keyDown(dialog, { key: 'Enter' });
   fireEvent.click(screen.getByRole('button', { name: 'Confirm receipt' }));
-  expect(screen.getByText(/abc-part × 1/)).toBeInTheDocument();
+  expect(screen.getByText(/ABC-PART × 1/)).toBeInTheDocument();
 
   // Scanning the same PN in a different casing resolves to the SAME
-  // PartNumber — the received quantity is now in the Area, so the PN
-  // action dialog opens — and shows the preserved original casing.
-  scan('PF:PN:ABC-PART');
+  // canonical PartNumber — the received quantity is now in the Area,
+  // so the PN action dialog opens with the canonical PN.
+  scan('PF:PN:aBc-PaRt');
   const dialog2 = await screen.findByRole('dialog', {
     name: 'Select an action',
   });
-  expect(within(dialog2 as HTMLElement).getByText('abc-part')).toBeVisible();
-  expect(
-    within(dialog2 as HTMLElement).queryByText('ABC-PART'),
-  ).not.toBeInTheDocument();
+  expect(within(dialog2 as HTMLElement).getByText('ABC-PART')).toBeVisible();
+});
+
+test('a PN barcode whose PN contains whitespace is rejected with no write', async () => {
+  await renderStation();
+
+  scan('PF:PN:ABC PART');
+  // Whitespace inside a PN is invalid — never silently cleaned up: the
+  // scan is rejected as an unknown barcode and no dialog opens.
+  expect(await screen.findByText('Barcode not recognized')).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 /* ============ Add more quantity ============ */

@@ -155,7 +155,7 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     group: 'Organization',
     label: 'PartNumbers',
     subtitle:
-      'PN master records — archive (soft-delete) junk/test PNs; history keeps the original PN text with an (archived) marker; physical purge is a separate explicit maintenance operation',
+      'PN master metadata records — hard-delete junk/test or unwanted master metadata; production data and history are never touched and keep displaying the canonical PN; a master record can be recreated later for the same PN',
   },
   {
     id: 'scan-stations',
@@ -220,7 +220,7 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     group: 'Policies',
     label: 'History archival & purge',
     subtitle:
-      'Admin-only maintenance: retention policy, size threshold, manual archive/purge with scope preview, reason and full audit — normal workflows never delete history',
+      'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verify, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
   },
   {
     id: 'settings',

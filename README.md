@@ -72,8 +72,9 @@ Frontend structure:
   Shared view-model types live in `src/views/view-models.ts` (types
   only — production-safe).
 - `src/views/<view>/` — one folder per GUI view. `src/views/scan-station/barcode.ts`
-  holds the deterministic `PF:` barcode parsing (PN barcodes carry the PN
-  itself — `PF:PN:<part-number>` — with case-insensitive PN identity).
+  holds the deterministic `PF:` barcode parsing and PN normalization (PN
+  barcodes carry the canonical uppercase, whitespace-free PN itself —
+  `PF:PN:<part-number>`).
 - `src/components/` — genuinely shared pieces (Area dot, Hot/Type chips,
   view-state blocks, accessible mock dialog, quantity keypad, and the
   shared Area/Machine monitoring components used by both the Scan

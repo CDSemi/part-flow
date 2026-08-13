@@ -95,11 +95,12 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     status: 'Completed',
   },
   {
-    // Archived PN: junk/test record soft-deleted by an Administrator.
-    // It disappears from active lookup and intake; history keeps the
-    // original PN text with an explicit `(archived)` marker.
+    // PN with no master metadata record: a junk/test master record was
+    // hard-deleted by an Administrator. Production history is untouched
+    // and the canonical PN renders normally; only master-derived
+    // metadata (the name here) is absent.
     pn: 'TEST-SCRAP-PLATE',
-    name: 'TEST PLATE — created during scanner testing',
+    name: '—',
     demand: [],
     distribution: [],
     activeQty: 0,
@@ -107,7 +108,7 @@ export const MOCK_TRACKING_ROWS: MockTrackingRow[] = [
     scrappedQty: 3,
     nextDue: '—',
     status: 'Completed',
-    archived: true,
+    noMaster: true,
   },
 ];
 

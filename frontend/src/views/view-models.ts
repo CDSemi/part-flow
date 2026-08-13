@@ -353,8 +353,13 @@ export interface MockTrackingRow {
   /** Display text; `—` means the relevant WO Demand has no due date. */
   nextDue: string;
   status: 'Active' | 'Stocked' | 'Completed';
-  /** Marks an archived/soft-deleted PN kept for history display. */
-  archived?: boolean;
+  /**
+   * True when no PartNumber master metadata record exists for this PN
+   * (the master was hard-deleted, or never created). The canonical PN
+   * and its history render normally; only master-derived metadata
+   * (name, image, revision, ERP mapping) is absent.
+   */
+  noMaster?: boolean;
 }
 
 export interface MockWorkOrderLine {

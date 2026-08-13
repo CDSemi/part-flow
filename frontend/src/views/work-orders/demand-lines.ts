@@ -10,7 +10,7 @@
 // Application/Domain layer when the Phase 4 backend slice exists.
 
 import { catalogPartNumber } from '../../mocks/work-orders';
-import { parseScan, pnKey } from '../scan-station/barcode';
+import { parseScan } from '../scan-station/barcode';
 import type { MockWorkOrderLine, RequestType } from '../view-models';
 
 export interface DemandLineDraft {
@@ -108,10 +108,10 @@ export type ScanResult =
 
 /**
  * Resolve a scanned PN barcode. `PF:PN:<part-number>` carries the PN
- * itself: the entire non-empty suffix is the PN (no format validation,
- * no opaque id mapping). A PN outside the catalog is create-on-first-
- * use; identity is case-insensitive and an existing PN keeps its
- * stored casing. Non-PN barcodes never add demand lines.
+ * itself: the whitespace-free suffix, canonicalized to uppercase, is
+ * the canonical PN (no format validation, no opaque id mapping). A PN
+ * outside the catalog is create-on-first-use. Non-PN barcodes never
+ * add demand lines.
  */
 export function processScan(
   value: string,
@@ -122,11 +122,10 @@ export function processScan(
   if (parsed.kind !== 'pn') {
     return { kind: 'invalid', barcode: value.trim() };
   }
+  // parsed.pn is the canonical PN — the PN string itself is identity.
   const known = catalogPartNumber(parsed.pn);
   const pn = known?.pn ?? parsed.pn;
-  const duplicate = lines.find(
-    (line) => line.pn !== null && pnKey(line.pn) === pnKey(pn),
-  );
+  const duplicate = lines.find((line) => line.pn !== null && line.pn === pn);
   if (duplicate) {
     return {
       kind: 'duplicate',

@@ -195,9 +195,6 @@ export function TrackingView() {
                       >
                         <span className="part">
                           <HotPn rank={row.hotRank} pn={row.pn} />
-                          {row.archived ? (
-                            <span className="archived">(archived)</span>
-                          ) : null}
                         </span>
                         <span className="sub" style={{ display: 'block' }}>
                           {row.name}

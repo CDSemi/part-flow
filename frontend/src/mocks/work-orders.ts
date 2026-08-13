@@ -2,10 +2,11 @@ import type { MockWorkOrder } from '../views/view-models';
 
 import { isoDateIn } from './mock-time';
 
-// Existing PartNumber catalog for the Add Part search step and the
-// optional barcode entry path (mock only). PN barcodes carry the PN
-// itself — `PF:PN:<part-number>` — never an opaque stable id; PN
-// lookup is case-insensitive while the stored casing is preserved.
+// Existing PartNumber master-metadata catalog for the Add Part search
+// step and the optional barcode entry path (mock only). PN barcodes
+// carry the PN itself — `PF:PN:<part-number>` — never an opaque stable
+// id; catalog PNs are canonical (uppercase, whitespace-free), so the
+// PN string itself is the identity and lookup is direct equality.
 export const MOCK_PN_CATALOG: { pn: string; name: string; barcode: string }[] =
   [
     {
@@ -45,12 +46,11 @@ export const MOCK_PN_CATALOG: { pn: string; name: string; barcode: string }[] =
     },
   ];
 
-/** Case-insensitive catalog lookup — display casing stays as stored. */
+/** Catalog lookup by canonical PN (the PN string is the identity). */
 export function catalogPartNumber(
   pn: string,
 ): { pn: string; name: string; barcode: string } | undefined {
-  const key = pn.trim().toLowerCase();
-  return MOCK_PN_CATALOG.find((entry) => entry.pn.toLowerCase() === key);
+  return MOCK_PN_CATALOG.find((entry) => entry.pn === pn);
 }
 
 // Editable dates are ISO `YYYY-MM-DD`; the view formats them for
@@ -82,7 +82,7 @@ export const MOCK_WORK_ORDER_LIST: MockWorkOrder[] = [
       },
       {
         pn: '52-09-0114',
-        barcode: 'new PN — barcode created with PN master: PF:PN:52-09-0114',
+        barcode: 'new PN — barcode PF:PN:52-09-0114',
         type: 'NEW',
         qty: 8,
         due: '2026-08-20',

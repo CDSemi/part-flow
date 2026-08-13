@@ -147,10 +147,11 @@ Never add adjacent capability merely because it is technically possible. Require
 
 ### Architectural Boundaries
 
-- Never conflate the reusable `PartNumber` definition with tracked physical quantity. `QuantityFlow` is the traceable production portion of PN quantity; `WorkOrderDemand` is business demand; `WorkOrderAllocation` connects stocked quantity to WorkOrderDemand only after completion.
+- Treat the canonical PN string (case-insensitive, normalized to UPPERCASE, whitespace-free) as the stable domain identity of a PN. The `PartNumber` master is optional current metadata: production records (WorkOrderDemand, QuantityFlow, PartMovement, Allocation, history) keep their own canonical PN value, never depend on the master record's existence, and are never linked through a surrogate `part_number_id`.
+- Never conflate the `PartNumber` master metadata with tracked physical quantity. `QuantityFlow` is the traceable production portion of PN quantity; `WorkOrderDemand` is business demand; `WorkOrderAllocation` connects stocked quantity to WorkOrderDemand only after completion.
 - Never treat external Job Numbers as a domain aggregate. They are WorkOrderDemand metadata used for search, display, sorting, and reporting.
 - Treat `Area`, `Operation`, and `Machine` as distinct concepts. `Machine` may be absent when the workflow does not require one.
-- Treat immutable movement history as the audit record. Current status must remain consistent with that history.
+- Treat immutable movement history as the audit record. Current status must remain consistent with that history. Immutability applies to active production runtime; the explicit administrative retention workflow (lossless archive export, verification, then purge of exactly the archived rows — per `PROJECT_PROFILE.md` §28) is separate lifecycle maintenance and never a normal production workflow.
 - Presentation must never own production business rules.
 - Routes and controllers must remain thin orchestration boundaries.
 - Workflow orchestration belongs in the Application layer.
