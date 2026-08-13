@@ -9,6 +9,7 @@ import { DevNotice } from '../../components/DevNotice';
 import { TypeChip } from '../../components/indicators';
 import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PageNote } from '../../components/PageNote';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
 import { useUiClock } from '../../components/ui-clock';
@@ -376,12 +377,12 @@ export function PriorityView() {
         </button>
       </div>
 
-      <div className="pr-note">
+      <PageNote>
         <b>Hot</b> demand is always worked first, in rank order. Allocation
         &amp; work ordering: ① Hot rank ② demands with a due date, earliest
         first ③ demands without a due date, by the Work Order received date
         (oldest first).
-      </div>
+      </PageNote>
 
       {pending ? (
         <ReorderConfirmDialog

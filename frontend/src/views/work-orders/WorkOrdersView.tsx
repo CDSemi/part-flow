@@ -8,6 +8,7 @@ import { getViewStatePreview } from '../../app/view-state';
 import { DevNotice } from '../../components/DevNotice';
 import { useMockNotice } from '../../components/mock-notice';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PageNote } from '../../components/PageNote';
 import {
   EmptyState,
   ErrorState,
@@ -373,12 +374,12 @@ function WorkOrderListPanel({
           </tbody>
         </table>
       )}
-      <div className="wo-note">
+      <PageNote>
         Completed Work Orders move out of the active list but stay permanently
         available in history. An internal Work Order without an external number
         displays <span className="mono">—</span>; the real number can be added
         later through an audited edit.
-      </div>
+      </PageNote>
     </div>
   );
 }

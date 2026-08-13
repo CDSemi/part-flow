@@ -8,6 +8,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
@@ -314,11 +315,11 @@ export function PlannedRoutesView() {
               ))}
             </tbody>
           </table>
-          <p className="rt-sub">
+          <PageNote>
             Archived routes stay here for historical context — they are never
             offered when a new Quantity Flow is released. Duplicate creates a
             new active route from one.
-          </p>
+          </PageNote>
         </div>
       ) : null}
 

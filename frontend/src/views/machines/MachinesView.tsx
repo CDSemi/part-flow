@@ -9,6 +9,7 @@ import { DevNotice } from '../../components/DevNotice';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
@@ -437,15 +438,12 @@ export function MachinesView() {
               ))}
             </tbody>
           </table>
-          <p className="mg-retirednote" role="note">
-            <span className="mg-retirednote-tag">Note</span>
-            <span className="mg-retirednote-content">
-              Retired Machines remain in history and cannot receive new work or
-              assignments. Reactivate only the same physical Machine.
-              Replacements may reuse the display name but require a new Machine
-              record and Asset Tag.
-            </span>
-          </p>
+          <PageNote>
+            Retired Machines remain in history and cannot receive new work or
+            assignments. Reactivate only the same physical Machine. Replacements
+            may reuse the display name but require a new Machine record and
+            Asset Tag.
+          </PageNote>
         </div>
       ) : null}
 

@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PageNote } from '../../components/PageNote';
 import { EmptyState } from '../../components/view-states';
 import { formatIsoDate } from '../dates';
 import type { MockWorkOrder, RequestType } from '../view-models';
@@ -634,12 +635,12 @@ export function WorkOrderDetailPanel({
             </div>
           )}
         </div>
-        <div className="wo-note">
+        <PageNote>
           A demand line can be removed only while no production quantity has
           been released for it — a released line stays; later adjustments go
           through the correction workflows. Removal never deletes the Part, its
           production quantity, or its history.
-        </div>
+        </PageNote>
         <div className="wo-actions nwo-actions">
           <button className="btn ghost" onClick={requestClose}>
             Cancel (Esc)

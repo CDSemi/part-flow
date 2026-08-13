@@ -202,17 +202,8 @@
   max-width: 860px;
 }
 
-.pr-note {
-  max-width: 860px;
-  background: var(--info-surface-weak);
-  border: 1px solid var(--info-border);
-  border-radius: 12px;
-  padding: 12px 16px;
-  font-size: 12.5px;
-  color: var(--info-t);
-  margin-top: 16px;
-  line-height: 1.6;
-}
+/* The page note renders through the shared PageNote component
+   (styles/global.css .page-note). */
 
 /* Reorder-confirmation dialog: primary move summary + two snapshot
    sections (Current Position → New Position). The directly moved entry
