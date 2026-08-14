@@ -55,8 +55,10 @@ const FILTERS: { label: string; options: string[] }[] = [
 // list behind it stays visible and scrollable for comparison — never a
 // blocking modal. Selection toggles: the whole result row selects (the
 // PN cell button carries keyboard focus and the accessible name);
-// clicking the selected row again, the panel's close button, or Escape
-// closes the panel and returns focus to the originating row.
+// clicking the selected row again, the panel's close button, Escape, or
+// a click anywhere outside every row and the panel itself all close it
+// (the row and panel cases restore focus to the originating row; a
+// plain outside click does not).
 export function TrackingView() {
   const preview = getViewStatePreview();
   const [search, setSearch] = useState('');
@@ -92,6 +94,27 @@ export function TrackingView() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedPn, close]);
+
+  // A click outside every result row and outside the panel itself also
+  // closes it (mousedown, so it never races the row's own click
+  // handler): clicking a different row still just switches the
+  // selection via that row's own handler, never both toggles at once.
+  useEffect(() => {
+    if (selectedPn === null) return;
+    function onDocumentMouseDown(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest('.tk-table tr.selrow') ||
+        target.closest('.tk-right')
+      ) {
+        return;
+      }
+      close(false);
+    }
+    document.addEventListener('mousedown', onDocumentMouseDown);
+    return () => document.removeEventListener('mousedown', onDocumentMouseDown);
   }, [selectedPn, close]);
 
   if (preview === 'loading') {

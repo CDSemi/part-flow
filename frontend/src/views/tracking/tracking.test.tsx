@@ -193,6 +193,37 @@ test('Escape closes the modeless overlay and restores focus to the row', () => {
   expect(document.querySelector('.tk-right')).toBeNull();
 });
 
+test('a click outside every row and outside the panel closes the overlay', () => {
+  render(<TrackingView />);
+
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+  // The search input is inside .tk-left but outside every result row.
+  fireEvent.mouseDown(screen.getByLabelText('Search PN, WO, Job Number'));
+
+  expect(document.querySelector('.tk-right')).toBeNull();
+  const row = document.querySelector('.tk-table .rowbtn') as HTMLElement;
+  expect(row.getAttribute('aria-pressed')).toBe('false');
+  // Unlike Escape and the close button, a plain outside click does not
+  // steal focus back to the row.
+  expect(row).not.toHaveFocus();
+
+  // With nothing selected, an outside click is inert.
+  fireEvent.mouseDown(document.body);
+  expect(document.querySelector('.tk-right')).toBeNull();
+});
+
+test('a click on the selected row or inside the panel itself does not count as outside', () => {
+  render(<TrackingView />);
+
+  const row = document.querySelector('.tk-table .rowbtn') as HTMLElement;
+  fireEvent.mouseDown(row);
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+
+  const panel = document.querySelector('.tk-right') as HTMLElement;
+  fireEvent.mouseDown(panel);
+  expect(document.querySelector('.tk-right')).not.toBeNull();
+});
+
 test('selecting a different PN keeps the panel open (with its empty-detail state)', () => {
   render(<TrackingView />);
 

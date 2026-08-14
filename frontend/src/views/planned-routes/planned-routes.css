@@ -199,9 +199,7 @@
 }
 
 .rt-table .rowbtn:focus-visible {
-  outline: 2px solid var(--info-t);
-  outline-offset: 3px;
-  border-radius: 6px;
+  outline: none;
 }
 
 /* Duplicate action inside the Archived Routes rows (v15). */
