@@ -139,9 +139,7 @@
 }
 
 .mg-table .rowbtn:focus-visible {
-  outline: 2px solid var(--info-t);
-  outline-offset: 3px;
-  border-radius: 6px;
+  outline: none;
 }
 
 /* State column (v15): sized by its own content — the state line never
