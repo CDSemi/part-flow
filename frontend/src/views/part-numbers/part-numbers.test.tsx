@@ -405,6 +405,91 @@ test('reconnecting re-enables the write actions', () => {
   ).toBeEnabled();
 });
 
+test('offline mid-flow disables the delete confirmation — the record survives', () => {
+  // The realistic sequence: open the workflow while CONNECTED, then
+  // lose connectivity with it already open — entry-point blocking
+  // (Delete details… disabled) alone would miss this gap.
+  const { rerender } = renderPartNumbers('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PartNumbersView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const before = document.querySelectorAll('.pnm-table tbody tr').length;
+  const dialog = openEdit('214-406');
+  const zone = dialog.querySelector('.pnm-dangerzone') as HTMLElement;
+  fireEvent.click(
+    within(zone).getByRole('button', { name: 'Delete details…' }),
+  );
+  const confirm = screen.getByRole('dialog', {
+    name: 'Delete Part Number details?',
+  });
+  const deleteButton = within(confirm).getByRole('button', {
+    name: 'Delete details',
+  });
+  expect(deleteButton).toBeEnabled();
+
+  reconnectAs('unavailable');
+  const stillConfirm = screen.getByRole('dialog', {
+    name: 'Delete Part Number details?',
+  });
+  const stillDisabled = within(stillConfirm).getByRole('button', {
+    name: 'Delete details',
+  });
+  expect(stillDisabled).toBeDisabled();
+  fireEvent.click(stillDisabled);
+
+  // Nothing mutated: still open, and the record is still in the table.
+  expect(
+    screen.getByRole('dialog', { name: 'Delete Part Number details?' }),
+  ).toBeInTheDocument();
+  expect(document.querySelectorAll('.pnm-table tbody tr')).toHaveLength(before);
+  expect(row('214-406')).toBeInTheDocument();
+});
+
+test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard changes available — nothing is saved', () => {
+  const { rerender } = renderPartNumbers('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PartNumbersView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const dialog = openEdit('142-260');
+  fireEvent.change(within(dialog).getByLabelText(/Revision/), {
+    target: { value: 'B' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  const choice = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(choice).getByRole('button', { name: 'Save changes' }),
+  ).toBeEnabled();
+
+  reconnectAs('unavailable');
+  const stillChoice = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  // Save writes immediately here (it calls onSave directly) — it must
+  // gate on writeBlocked. Discard never persists anything — it must
+  // keep working offline.
+  expect(
+    within(stillChoice).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  expect(
+    within(stillChoice).getByRole('button', { name: 'Discard changes' }),
+  ).toBeEnabled();
+
+  fireEvent.click(
+    within(stillChoice).getByRole('button', { name: 'Discard changes' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(row('142-260').textContent).not.toContain('B');
+
+  const reopened = openEdit('142-260');
+  expect(within(reopened).getByLabelText(/Revision/)).toHaveValue('A');
+});
+
 /* ============ ?state=long ============ */
 
 test('?state=long renders many long-PN/name/metadata records alongside the sample data', () => {

@@ -17,6 +17,8 @@ export function UnsavedChoiceDialog({
   saveLabel,
   discardLabel,
   saveDisabledReason,
+  saveDisabled = false,
+  discardDisabled = false,
   onSave,
   onDiscard,
   onCancel,
@@ -27,6 +29,16 @@ export function UnsavedChoiceDialog({
   discardLabel: string;
   /** When set, Save is disabled and this reason is shown. */
   saveDisabledReason?: string;
+  /** External gate on Save (e.g. offline write-block) — applies in
+   * addition to `saveDisabledReason`, without showing a reason of its
+   * own. The caller decides the condition; Cancel (which never persists
+   * anything) is never affected. */
+  saveDisabled?: boolean;
+  /** External gate on Discard — most callers' Discard only abandons
+   * local edits and stays available offline, but a few (e.g. Duplicate)
+   * use Discard to mean "proceed using the last-saved data", which
+   * itself writes; those callers pass this. */
+  discardDisabled?: boolean;
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
@@ -43,12 +55,16 @@ export function UnsavedChoiceDialog({
         <button className="bigbtn ghost" onClick={onCancel}>
           Cancel (Esc)
         </button>
-        <button className="bigbtn ghost" onClick={onDiscard}>
+        <button
+          className="bigbtn ghost"
+          disabled={discardDisabled}
+          onClick={onDiscard}
+        >
           {discardLabel}
         </button>
         <button
           className="bigbtn primary"
-          disabled={saveDisabledReason !== undefined}
+          disabled={saveDisabledReason !== undefined || saveDisabled}
           onClick={onSave}
         >
           {saveLabel}

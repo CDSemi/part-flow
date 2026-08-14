@@ -978,6 +978,8 @@ function RouteEditDialog({
               ? `The edits cannot be saved yet: ${validationProblem}`
               : undefined
           }
+          saveDisabled={writeBlocked}
+          discardDisabled={writeBlocked}
           onCancel={() => setStage(null)}
           onSave={() => applyAndContinue('duplicate')}
           onDiscard={() => discardAndContinue('duplicate')}
@@ -996,6 +998,7 @@ function RouteEditDialog({
               ? `The edits cannot be saved yet: ${validationProblem}`
               : undefined
           }
+          saveDisabled={writeBlocked}
           onCancel={() => setStage(null)}
           onSave={() => applyAndContinue('archive-confirm')}
           onDiscard={() => discardAndContinue('archive-confirm')}
@@ -1011,6 +1014,7 @@ function RouteEditDialog({
           expectedValue={baseline.name || template.name}
           valueLabel="route name"
           confirmLabel="Archive route"
+          confirmDisabled={writeBlocked}
           onCancel={() => setStage(null)}
           onConfirm={() => onArchive?.()}
         >
@@ -1034,6 +1038,7 @@ function RouteEditDialog({
           confirmLabel="Delete route"
           cancelLabel="Cancel (Esc)"
           danger
+          confirmDisabled={writeBlocked}
           onCancel={() => setStage(null)}
           onConfirm={() => onDelete?.()}
         >

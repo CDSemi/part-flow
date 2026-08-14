@@ -452,6 +452,96 @@ test('reconnecting re-enables the write actions', () => {
   ).toBeEnabled();
 });
 
+test('offline mid-flow disables the Archive workflow’s typed-confirm even once the name matches — nothing archives', () => {
+  // The realistic sequence: open the workflow while CONNECTED, then
+  // lose connectivity with it already open — entry-point blocking
+  // (Archive… disabled) alone would miss this gap.
+  const { rerender } = renderPlannedRoutes('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PlannedRoutesView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const dialog = openEdit('Bracket std v3');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Archive…' }));
+  const archiveDialog = screen.getByRole('dialog', {
+    name: 'Archive Planned Route',
+  });
+  fireEvent.change(within(archiveDialog).getByLabelText(/to confirm$/), {
+    target: { value: 'Bracket std v3' },
+  });
+  const confirmButton = within(archiveDialog).getByRole('button', {
+    name: 'Archive route',
+  });
+  expect(confirmButton).toBeEnabled();
+
+  // Connectivity drops with the typed-confirm dialog already open and
+  // already satisfied — the shared TypedConfirmDialog must still gate
+  // its own confirming action on the external writeBlocked prop.
+  reconnectAs('unavailable');
+  const stillArchive = screen.getByRole('dialog', {
+    name: 'Archive Planned Route',
+  });
+  const stillDisabled = within(stillArchive).getByRole('button', {
+    name: 'Archive route',
+  });
+  expect(stillDisabled).toBeDisabled();
+  fireEvent.click(stillDisabled);
+
+  // Nothing mutated: the route is still active, not archived.
+  expect(
+    screen.getByRole('dialog', { name: 'Archive Planned Route' }),
+  ).toBeInTheDocument();
+  expect(routeRow('Bracket std v3').closest('.rt-archived')).toBeNull();
+});
+
+test('offline mid-flow disables both Save and Discard in the Duplicate unsaved-changes dialog — nothing is duplicated', () => {
+  // Duplicate's Discard branch still writes (it duplicates from the
+  // saved baseline) — the shared UnsavedChoiceDialog's discardDisabled
+  // prop covers that, unlike ordinary Discard-just-closes flows.
+  const { rerender } = renderPlannedRoutes('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <PlannedRoutesView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const dialog = openEdit('Bracket std v3');
+  fireEvent.change(within(dialog).getByLabelText('Route name'), {
+    target: { value: 'Bracket experimental' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Duplicate' }));
+  const choice = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(choice).getByRole('button', { name: 'Save, then duplicate' }),
+  ).toBeEnabled();
+  expect(
+    within(choice).getByRole('button', {
+      name: 'Duplicate the saved route',
+    }),
+  ).toBeEnabled();
+
+  reconnectAs('unavailable');
+  const stillChoice = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(stillChoice).getByRole('button', {
+      name: 'Save, then duplicate',
+    }),
+  ).toBeDisabled();
+  expect(
+    within(stillChoice).getByRole('button', {
+      name: 'Duplicate the saved route',
+    }),
+  ).toBeDisabled();
+
+  // No duplicate was created under either name.
+  expect(screen.queryByText('Bracket std v3 (variant)')).toBeNull();
+  expect(screen.queryByText('Bracket experimental (variant)')).toBeNull();
+});
+
 /* ============ ?state=long ============ */
 
 test('?state=long renders many long-name/description routes with a long step chain', () => {

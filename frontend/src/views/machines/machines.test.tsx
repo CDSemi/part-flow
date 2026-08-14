@@ -1075,6 +1075,156 @@ test('reconnecting re-enables the write actions', () => {
   expect(screen.getByRole('button', { name: '+ New Machine' })).toBeEnabled();
 });
 
+test('offline mid-flow disables the Retire workflow’s typed-confirm Continue and the final question — nothing retires', () => {
+  // The realistic sequence: open the workflow while CONNECTED, then
+  // lose connectivity with it already open. Entry-point blocking alone
+  // (Retire… disabled) is not enough — every write-capable step
+  // already reachable inside the open dialog must gate too.
+  const { rerender } = renderMachines('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <MachinesView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.click(within(edit).getByRole('button', { name: 'Retire…' }));
+  const confirm = screen.getByRole('dialog', { name: 'Retire Machine' });
+  fireEvent.change(within(confirm).getByLabelText(/to confirm$/), {
+    target: { value: 'CD-0303' },
+  });
+  const continueButton = within(confirm).getByRole('button', {
+    name: 'Continue',
+  });
+  expect(continueButton).toBeEnabled();
+
+  // Connectivity drops with the typed-confirm dialog already open and
+  // already satisfied — the shared TypedConfirmDialog must still gate
+  // its own confirming action on the external writeBlocked prop.
+  reconnectAs('unavailable');
+  expect(
+    within(screen.getByRole('dialog', { name: 'Retire Machine' })).getByRole(
+      'button',
+      { name: 'Continue' },
+    ),
+  ).toBeDisabled();
+
+  // Reconnecting restores it — the flow can proceed to the final
+  // explicit question.
+  reconnectAs('connected');
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Retire Machine' })).getByRole(
+      'button',
+      { name: 'Continue' },
+    ),
+  );
+  const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Retire Machine' }),
+  );
+  const ask = screen.getByRole('dialog', { name: 'Retire this Machine?' });
+  expect(
+    within(ask).getByRole('button', { name: 'Retire Machine' }),
+  ).toBeEnabled();
+
+  // Connectivity drops again with the FINAL confirmation already open
+  // — this is the exact gap the offline write-block must close.
+  reconnectAs('unavailable');
+  const finalButton = within(
+    screen.getByRole('dialog', { name: 'Retire this Machine?' }),
+  ).getByRole('button', { name: 'Retire Machine' });
+  expect(finalButton).toBeDisabled();
+  fireEvent.click(finalButton);
+
+  // Nothing mutated: the Machine is still active, not retired.
+  expect(
+    screen.getByRole('dialog', { name: 'Retire this Machine?' }),
+  ).toBeInTheDocument();
+  const activeTable = document.querySelectorAll('.mg-table')[0];
+  expect(activeTable.textContent).toContain('Mill 3 — Horizontal Boring');
+  expect(retiredTable().textContent).not.toContain(
+    'Mill 3 — Horizontal Boring',
+  );
+});
+
+test('offline mid-flow disables the Start maintenance confirm — the switch stays off', () => {
+  const { rerender } = renderMachines('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <MachinesView />
+      </ConnectivityContext.Provider>,
+    );
+
+  fireEvent.click(maintenanceSwitch('Lathe 2'));
+  const dialog = screen.getByRole('dialog', { name: 'Start maintenance' });
+  const startButton = within(dialog).getByRole('button', {
+    name: 'Start maintenance',
+  });
+  expect(startButton).toBeEnabled();
+
+  reconnectAs('unavailable');
+  expect(
+    within(screen.getByRole('dialog', { name: 'Start maintenance' })).getByRole(
+      'button',
+      { name: 'Start maintenance' },
+    ),
+  ).toBeDisabled();
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Start maintenance' })).getByRole(
+      'button',
+      { name: 'Start maintenance' },
+    ),
+  );
+
+  // Still open, and the Machine never actually entered Maintenance.
+  expect(
+    screen.getByRole('dialog', { name: 'Start maintenance' }),
+  ).toBeInTheDocument();
+});
+
+test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard changes available — nothing is saved', () => {
+  const { rerender } = renderMachines('connected');
+  const reconnectAs = (status: 'connected' | 'unavailable') =>
+    rerender(
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <MachinesView />
+      </ConnectivityContext.Provider>,
+    );
+
+  const edit = openEdit('Mill 3 — Horizontal Boring');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Pending disposal review' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
+  const unsaved = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(unsaved).getByRole('button', { name: 'Save changes' }),
+  ).toBeEnabled();
+
+  reconnectAs('unavailable');
+  const stillUnsaved = screen.getByRole('dialog', { name: 'Unsaved changes' });
+  // Save writes immediately here (it calls onSave directly) — it must
+  // gate on writeBlocked. Discard never persists anything — it must
+  // keep working offline (§ read-only/close actions stay available).
+  expect(
+    within(stillUnsaved).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  expect(
+    within(stillUnsaved).getByRole('button', { name: 'Discard changes' }),
+  ).toBeEnabled();
+
+  // Discard still works offline — it only closes, never writes.
+  fireEvent.click(
+    within(stillUnsaved).getByRole('button', { name: 'Discard changes' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  // Notes were never saved.
+  const reopened = openEdit('Mill 3 — Horizontal Boring');
+  expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue('');
+});
+
 /* ============ ?state=long ============ */
 
 test('?state=long renders many long-identifier Machines alongside the sample data', () => {

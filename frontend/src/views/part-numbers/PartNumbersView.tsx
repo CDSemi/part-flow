@@ -608,6 +608,7 @@ function PartNumberEditDialog({
           confirmLabel="Delete details"
           cancelLabel="Cancel (Esc)"
           tone="danger"
+          confirmDisabled={writeBlocked}
           onCancel={() => setDeleteConfirm(false)}
           onConfirm={() => onDelete?.()}
         >
@@ -622,6 +623,7 @@ function PartNumberEditDialog({
           title="Unsaved changes"
           saveLabel="Save changes"
           discardLabel="Discard changes"
+          saveDisabled={writeBlocked}
           onCancel={() => setLeaveConfirm(false)}
           onSave={() => {
             if (!built) return;

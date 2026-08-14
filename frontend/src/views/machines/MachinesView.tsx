@@ -527,6 +527,7 @@ export function MachinesView() {
         <StartMaintenanceDialog
           machine={dialog.machine}
           assignedQty={assignedQty(dialog.machine)}
+          writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onConfirm={(note, expectedReturn) => {
             const now = new Date().toISOString();
@@ -548,6 +549,7 @@ export function MachinesView() {
           title="Clear maintenance"
           confirmLabel="Clear maintenance"
           cancelLabel="Cancel (Esc)"
+          confirmDisabled={writeBlocked}
           onCancel={() => setDialog(null)}
           onConfirm={() => {
             const now = new Date().toISOString();
@@ -583,6 +585,7 @@ export function MachinesView() {
         <ReactivateMachineDialog
           machine={dialog.machine}
           machines={machines}
+          writeBlocked={writeBlocked}
           cancelLabel="‹ Back"
           onCancel={() =>
             setDialog({ kind: 'retired-details', machine: dialog.machine })
@@ -1601,6 +1604,7 @@ function MachineEditDialog({
               ? `The edits cannot be saved yet: ${builtRecord.error}`
               : undefined
           }
+          saveDisabled={writeBlocked}
           onCancel={() => setLeaveConfirm(false)}
           onSave={() => {
             if ('error' in builtRecord) return;
@@ -1679,6 +1683,7 @@ function MachineEditDialog({
           expectedValue={identifier.value}
           valueLabel={identifier.label}
           confirmLabel="Continue"
+          confirmDisabled={writeBlocked}
           onCancel={cancelRetire}
           onConfirm={() => setRetireStage('summary')}
         >
@@ -1788,6 +1793,7 @@ function MachineEditDialog({
               confirmLabel="Retire Machine"
               cancelLabel="Cancel (Esc)"
               tone="danger"
+              confirmDisabled={writeBlocked}
               onCancel={() => setRetireStage('summary')}
               onConfirm={finalizeRetire}
             >
@@ -1919,6 +1925,7 @@ function MachineEditDialog({
               confirmLabel="Add Machine"
               cancelLabel="Cancel (Esc)"
               tone="warning"
+              confirmDisabled={writeBlocked}
               onCancel={() => setAddStage('summary')}
               onConfirm={() => onSave(builtRecord.machine)}
             >
@@ -2037,11 +2044,15 @@ function RetiredMachineDetailsDialog({
 function StartMaintenanceDialog({
   machine,
   assignedQty,
+  writeBlocked = false,
   onCancel,
   onConfirm,
 }: {
   machine: MockMachine;
   assignedQty: number;
+  /** Disables Start maintenance while the backend is unreachable
+   * (Management → Machines offline write-block). */
+  writeBlocked?: boolean;
   onCancel: () => void;
   onConfirm: (note: string, expectedReturn: string) => void;
 }) {
@@ -2093,6 +2104,7 @@ function StartMaintenanceDialog({
         </button>
         <button
           className="bigbtn primary"
+          disabled={writeBlocked}
           onClick={() => onConfirm(note.trim(), expectedReturn)}
         >
           Start maintenance
@@ -2121,6 +2133,7 @@ function ReactivateMachineDialog({
   machine,
   machines,
   cancelLabel = 'Cancel (Esc)',
+  writeBlocked = false,
   onCancel,
   onConfirm,
 }: {
@@ -2129,6 +2142,9 @@ function ReactivateMachineDialog({
   /** Label of the leave-the-workflow action — `‹ Back` when the dialog
    * is entered from the Retired Machine Details dialog. */
   cancelLabel?: string;
+  /** Disables the final Reactivate confirmation while the backend is
+   * unreachable (Management → Machines offline write-block). */
+  writeBlocked?: boolean;
   onCancel: () => void;
   onConfirm: (result: { name: string; area: AreaKey; reason: string }) => void;
 }) {
@@ -2282,6 +2298,7 @@ function ReactivateMachineDialog({
             confirmLabel="Reactivate Machine"
             cancelLabel="Cancel (Esc)"
             tone="warning"
+            confirmDisabled={writeBlocked}
             onCancel={() => setStage('summary')}
             onConfirm={() =>
               onConfirm({ name: name.trim(), area, reason: reason.trim() })

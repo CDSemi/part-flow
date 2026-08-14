@@ -27,6 +27,7 @@ export function TypedConfirmDialog({
   valueLabel,
   confirmLabel,
   danger = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -42,6 +43,10 @@ export function TypedConfirmDialog({
    * heading) so the destructive context never reads as routine —
    * Machine retirement uses this. */
   danger?: boolean;
+  /** External gate on the confirming action (e.g. offline write-block)
+   * — applies in addition to the typed-match gate. The caller decides
+   * the condition; Cancel is never affected. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -87,7 +92,7 @@ export function TypedConfirmDialog({
         </button>
         <button
           className="bigbtn danger"
-          disabled={!confirmed}
+          disabled={!confirmed || confirmDisabled}
           onClick={onConfirm}
         >
           {confirmLabel}

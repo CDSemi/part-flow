@@ -22,6 +22,7 @@ export function ConfirmDialog({
   cancelLabel,
   danger = false,
   tone,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -33,6 +34,10 @@ export function ConfirmDialog({
   /** Attention variant: `danger` for destructive finals, `warning`
    * for permanent-but-constructive finals. */
   tone?: 'danger' | 'warning';
+  /** External gate on the confirming action (e.g. offline write-block)
+   * — the caller decides the condition, this component only reflects
+   * it. Cancel is never affected: closing/backing out always works. */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -57,6 +62,7 @@ export function ConfirmDialog({
         </button>
         <button
           className={`bigbtn ${destructive ? 'danger' : 'primary'}`}
+          disabled={confirmDisabled}
           onClick={onConfirm}
         >
           {confirmLabel}
