@@ -1662,9 +1662,11 @@ function AreaChip({
  * Worker pill — shared by both header layouts, following the Area's
  * Worker ID mode (GUI_DESIGN §4.3, post-v18 — there is no shift-end
  * concept): Scanned session shows the active Worker's avatar + name
- * with the live `Worker session · 12m remaining` countdown; Fixed
- * Worker shows the configured Worker with a static `Fixed Worker` sub
- * line; Disabled is one quiet muted line.
+ * with the live `Session · 12m remaining` countdown; Fixed Worker
+ * shows the configured Worker with a static `Fixed Worker` sub line;
+ * Disabled keeps the identical two-line structure and height with a
+ * muted placeholder avatar (`Worker ID disabled` / `Not required in
+ * this Area`). The avatar spans both text lines.
  */
 function WorkerPill({
   mode,
@@ -1676,28 +1678,36 @@ function WorkerPill({
   /** Sliding session deadline (scanned mode with a valid session). */
   expiresAt: number | null;
 }) {
+  // One shared two-line structure for every mode — the avatar spans
+  // both text lines and the Disabled pill keeps the exact same height
+  // as a signed-in pill (muted placeholder avatar, no worker-specific
+  // content).
   if (mode === 'disabled') {
     return (
       <div className="ss-pill off">
-        <span className="val muted">Worker ID disabled</span>
+        <span className="avatar" aria-hidden="true">
+          —
+        </span>
+        <span className="ss-pilltext">
+          <span className="val muted">Worker ID disabled</span>
+          <span className="sub">Not required in this Area</span>
+        </span>
       </div>
     );
   }
   return (
     <div className="ss-pill">
-      <span className="val">
-        {worker ? (
-          <span className="avatar" aria-hidden="true">
-            {worker.avatar}
-          </span>
-        ) : null}
-        {worker?.name ?? 'No Worker signed in'}
+      <span className="avatar" aria-hidden="true">
+        {worker ? worker.avatar : '?'}
       </span>
-      {mode === 'fixed' ? (
-        <span className="sub">Fixed Worker</span>
-      ) : (
-        <SessionCountdown expiresAt={expiresAt} />
-      )}
+      <span className="ss-pilltext">
+        <span className="val">{worker?.name ?? 'No Worker signed in'}</span>
+        {mode === 'fixed' ? (
+          <span className="sub">Fixed Worker</span>
+        ) : (
+          <SessionCountdown expiresAt={expiresAt} />
+        )}
+      </span>
     </div>
   );
 }
@@ -1741,6 +1751,16 @@ function WorkerSignInDialog({
     }
     onSignIn(worker);
   }
+  // Development-only: a click on a demo badge is the exact equivalent
+  // of a wedge badge scan ending in Enter — the value lands in the
+  // modal's own field and goes through the SAME submit()/exact-match
+  // path. Inert while writes are blocked, like the field itself.
+  function simulateBadge(value: string) {
+    if (writeBlocked || !fieldRef.current) return;
+    fieldRef.current.value = value;
+    setScanError(null);
+    submit();
+  }
   return (
     <ModalDialog
       label={title}
@@ -1768,8 +1788,9 @@ function WorkerSignInDialog({
       />
       {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
       <DevNotice>
-        Demo badges (development build only) — type one and press Enter:{' '}
-        <code>100482</code> H. Nguyen · <code>100517</code> V. Tran
+        Demo badges (development build only) — click one to simulate a badge
+        scan: <DemoBarcode value="100482" onScan={simulateBadge} /> H. Nguyen ·{' '}
+        <DemoBarcode value="100517" onScan={simulateBadge} /> V. Tran
       </DevNotice>
     </ModalDialog>
   );
@@ -1793,11 +1814,11 @@ function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
   const tick = useUiClock('second');
   const now = Math.max(tick, Date.now());
   if (expiresAt === null) {
-    return <span className="sub">Worker session · scan badge</span>;
+    return <span className="sub">Session · scan badge</span>;
   }
   const remaining = expiresAt - now;
   if (remaining <= 0) {
-    return <span className="sub warn">Worker session · expired</span>;
+    return <span className="sub warn">Session · expired</span>;
   }
   const label =
     remaining >= 60_000
@@ -1805,7 +1826,7 @@ function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
       : `${Math.max(1, Math.ceil(remaining / 1_000))}s remaining`;
   return (
     <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
-      Worker session · {label}
+      Session · {label}
     </span>
   );
 }

@@ -251,10 +251,11 @@ body.prodmode #ssthemebtn{display:inline-flex}
 @media (max-width:700px){
   .ss-pill{min-width:0}
 }
-.ss-pill{display:flex;flex-direction:column;gap:3px;background:var(--panel2);border:1px solid var(--border);
+.ss-pill{display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--border);
   border-radius:12px;padding:9px 14px;min-width:150px}
-.ss-pill .val{font-size:16px;font-weight:750;display:flex;align-items:center;gap:7px}
-.ss-pill .avatar{width:22px;height:22px;border-radius:50%;background:var(--info-surface,rgba(79,140,255,.12));color:var(--info-t,#4f8cff);border:1px solid var(--info-border,rgba(79,140,255,.25));font-size:9.5px;font-weight:800;letter-spacing:.5px;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.ss-pill .val{font-size:16px;font-weight:750;line-height:1.15}
+.ss-pill .ss-pilltext{display:flex;flex-direction:column;gap:3px}
+.ss-pill .avatar{align-self:stretch;aspect-ratio:1;min-height:34px;border-radius:50%;background:var(--info-surface,rgba(79,140,255,.12));color:var(--info-t,#4f8cff);border:1px solid var(--info-border,rgba(79,140,255,.25));font-size:13px;font-weight:800;letter-spacing:.5px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ss-pill .sub{font-size:10.5px;color:var(--faint)}
 #conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel2)}
 #conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok);
@@ -1450,8 +1451,11 @@ body.light{color-scheme:light}
              session countdown — the shift-end session window no longer
              exists. -->
         <div class="ss-pill">
-          <span class="val" id="pill-worker"><span class="avatar">HN</span>H. Nguyen</span>
-          <span class="sub" id="pill-workersub">Worker session · 12m remaining</span>
+          <span class="avatar" id="pill-avatar" aria-hidden="true">HN</span>
+          <span class="ss-pilltext">
+            <span class="val" id="pill-worker">H. Nguyen</span>
+            <span class="sub" id="pill-workersub">Session · 12m remaining</span>
+          </span>
         </div>
         <div class="ss-headactions">
           <button id="conn" onclick="toggleOffline()" title="Click to simulate offline">
@@ -2677,10 +2681,11 @@ function doScan(){
       const w=SS_WORKER_BADGES[p.raw];
       if(w){
         ssWorker=w[0];
-        document.getElementById('pill-worker').innerHTML='<span class="avatar">'+w[1]+'</span>'+w[0];
+        document.getElementById('pill-avatar').textContent=w[1];
+        document.getElementById('pill-worker').textContent=w[0];
         /* Badge scan opens/switches the session and restarts the
            sliding inactivity countdown (mock value). */
-        document.getElementById('pill-workersub').textContent='Worker session · 20m remaining';
+        document.getElementById('pill-workersub').textContent='Session · 20m remaining';
         /* A Worker scan never replaces the Last Scanned PN. */
         feedback('ok','Worker signed in: '+w[0],
           'New actions will be recorded under '+w[0]+'.','✓');

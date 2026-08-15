@@ -487,7 +487,7 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(pill.querySelector('.avatar')?.textContent).toBe('HN');
   expect(pill.querySelector('.val')?.textContent).toContain('H. Nguyen');
   expect(pill.querySelector('.sub')?.textContent).toMatch(
-    /^Worker session · \d+m remaining$/,
+    /^Session · \d+m remaining$/,
   );
   expect(pill.textContent).not.toContain('from');
   expect(pill.textContent).not.toContain('shift');
@@ -1776,7 +1776,7 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
     'V. Tran',
   );
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^Worker session · \d+m remaining$/,
+    /^Session · \d+m remaining$/,
   );
 });
 
@@ -3477,7 +3477,7 @@ test('the pill counts the sliding timeout down from the per-Area override value'
 
   const pill = document.querySelector('.ss-pill')!;
   expect(pill.querySelector('.sub')?.textContent).toBe(
-    'Worker session · 20m remaining',
+    'Session · 20m remaining',
   );
   // Full countdown tone: not yet near expiration.
   expect(pill.querySelector('.sub')?.className).not.toContain('warn');
@@ -3502,7 +3502,7 @@ test('the session expires after inactivity; invalid scans never refresh, valid i
   // Near-expiration warning tone on the countdown (~1 minute left).
   expect(document.querySelector('.ss-pill .sub')?.className).toContain('warn');
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^Worker session · (\d+s|1m) remaining$/,
+    /^Session · (\d+s|1m) remaining$/,
   );
 
   await act(async () => {
@@ -3610,10 +3610,16 @@ test('a Disabled Area shows the quiet marker and records no Worker', async () =>
   await renderStation('EXT-ST-01');
 
   expect(screen.queryByRole('dialog')).toBeNull();
+  // Same two-line pill structure and height as a signed-in pill —
+  // muted placeholder avatar, no worker-specific content.
   const pill = document.querySelector('.ss-pill')!;
   expect(pill.className).toContain('off');
-  expect(pill.textContent).toBe('Worker ID disabled');
-  expect(pill.querySelector('.avatar')).toBeNull();
+  expect(pill.querySelector('.val')?.textContent).toBe('Worker ID disabled');
+  expect(pill.querySelector('.sub')?.textContent).toBe(
+    'Not required in this Area',
+  );
+  expect(pill.querySelector('.avatar')?.textContent).toBe('—');
+  expect(pill.querySelector('.ss-pilltext')).not.toBeNull();
 
   // Badge scans: explanatory notice, no session.
   scan('100482');
@@ -3668,4 +3674,24 @@ test('Undo needs no extra badge scan; the reversal records the Worker active at 
   expect(
     screen.getByText(/Last action reversed — 118-052/),
   ).toBeInTheDocument();
+});
+
+test('clicking a demo badge in the sign-in modal signs in like a badge scan', async () => {
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01');
+  render(<App />);
+  const input = await screen.findByLabelText('Scan barcode');
+
+  const dialog = screen.getByRole('dialog', {
+    name: 'Worker sign-in required',
+  });
+  // Development-only demo badges are clickable and go through the SAME
+  // submit/exact-match path as a real badge scan.
+  fireEvent.click(within(dialog).getByRole('button', { name: '100517' }));
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
+  expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
+    'V. Tran',
+  );
+  await waitFor(() => expect(input).toBeEnabled());
 });
