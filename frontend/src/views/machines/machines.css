@@ -22,9 +22,19 @@
 .mg-toolbar {
   display: flex;
   gap: 9px;
-  flex-wrap: wrap;
+  /* One row at every width: the primary action never drops below the
+     search field (GUI_DESIGN §2.5) — the field shrinks and the button
+     label wraps instead. */
+  flex-wrap: nowrap;
   align-items: center;
   margin: 14px 0;
+}
+
+/* The primary action may compress to its widest word (`Machine`),
+   wrapping its label onto two lines before the search field is
+   squeezed away — never off the row. */
+.mg-toolbar .btn {
+  flex: 0 1 auto;
 }
 
 .mg-toolbar input[type='search'] {
@@ -36,7 +46,14 @@
   color: var(--text);
   outline: none;
   min-height: 42px;
-  min-width: 280px;
+  /* Fixed 280px basis on wide viewports (the previous presentation);
+     on narrow viewports the field shrinks into the remaining width
+     instead of pushing the primary action onto a second row —
+     `+ New Machine` always shares the search row (GUI_DESIGN §2.5),
+     wrapping its own label before the row ever breaks. */
+  width: 280px;
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .mg-toolbar input[type='search']:focus {
@@ -1229,41 +1246,45 @@
   }
 }
 
-/* Below ~960px even the Asset-less table (nowrap Machine / State /
-   Assigned / Maintenance columns) cannot fit: both tables collapse to
-   stacked rows — header row hidden, each row one vertical block,
-   non-self-evident cells carry their column label as a small inline
-   caption via data-label (GUI_DESIGN §2.5). Whole-row activation and
-   the Maintenance switch keep working unchanged; sorting is a
-   wide-layout convenience. */
+/* Below ~960px even the Asset-less active table (nowrap Machine /
+   State / Assigned / Maintenance columns) cannot fit: the Assigned
+   now column yields next — the active list keeps its remaining three
+   real columns (GUI_DESIGN §2.5 column shedding). The retired table
+   has no Assigned column and collapses to stacked rows here instead —
+   header row hidden, each row one vertical block, the Notes cell
+   carrying its column label via data-label. */
 @media (max-width: 960px) {
-  .mg-table,
-  .mg-table tbody,
-  .mg-table tr,
-  .mg-table td {
+  .mg-table .mg-assignedcol {
+    display: none;
+  }
+
+  .mg-retired .mg-table,
+  .mg-retired .mg-table tbody,
+  .mg-retired .mg-table tr,
+  .mg-retired .mg-table td {
     display: block;
     width: 100%;
   }
 
-  .mg-table thead {
+  .mg-retired .mg-table thead {
     display: none;
   }
 
-  .mg-table tr {
+  .mg-retired .mg-table tr {
     border-bottom: 1px solid var(--border);
     padding: 10px 0;
   }
 
-  .mg-table tr:last-child {
+  .mg-retired .mg-table tr:last-child {
     border-bottom: none;
   }
 
-  .mg-table td {
+  .mg-retired .mg-table td {
     border-bottom: none;
     padding: 3px 14px;
   }
 
-  .mg-table td[data-label]::before {
+  .mg-retired .mg-table td[data-label]::before {
     content: attr(data-label);
     display: inline-block;
     margin-right: 8px;
@@ -1272,5 +1293,51 @@
     letter-spacing: 0.8px;
     text-transform: uppercase;
     color: var(--faint);
+  }
+}
+
+/* Below ~600px even the three remaining columns (Machine / State /
+   Maintenance) cannot fit: the active list compacts — header row
+   hidden, each Machine ONE flex row that keeps its cells on a single
+   line and wraps only when the line genuinely cannot hold them
+   (GUI_DESIGN §2.5); never permanently stacked. Whole-row activation
+   and the Maintenance switch keep working unchanged. */
+@media (max-width: 600px) {
+  .mg-table.mg-active,
+  .mg-table.mg-active tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .mg-table.mg-active thead {
+    display: none;
+  }
+
+  .mg-table.mg-active tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 16px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mg-table.mg-active tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .mg-table.mg-active td {
+    display: block;
+    width: auto;
+    border-bottom: none;
+    padding: 0;
+  }
+
+  /* The generic cell rule above must never resurrect the shed Asset
+     and Assigned columns (equal specificity, later position — restate
+     the hides explicitly). */
+  .mg-table.mg-active td.mg-assignedcol,
+  .mg-table.mg-active td.mg-metacol {
+    display: none;
   }
 }

@@ -67,6 +67,36 @@ test('the wide Management tables collapse to stacked rows with inline captions',
   }
 });
 
+test('the active Machines list sheds columns, then compacts to single-line wrapping rows', () => {
+  const sheet = css('views/machines/machines.css');
+  // Column shedding: Asset first, then Assigned now — each inside its
+  // own max-width block.
+  expect(sheet).toMatch(
+    /@media \(max-width: \d+px\) \{[^@]*\.mg-table \.mg-metacol \{\s*display: none;/s,
+  );
+  expect(sheet).toMatch(
+    /@media \(max-width: \d+px\) \{[^@]*\.mg-table \.mg-assignedcol \{\s*display: none;/s,
+  );
+  // Compact mode: one flex row per Machine that wraps only when
+  // needed — never the permanently stacked block presentation (that
+  // stays scoped to the retired table).
+  expect(sheet).toMatch(
+    /\.mg-table\.mg-active tbody tr \{[^}]*display: flex;[^}]*flex-wrap: wrap;/s,
+  );
+  expect(sheet).toMatch(/\.mg-retired \.mg-table thead \{\s*display: none;/s);
+  // The toolbar keeps the primary action on the search row: the row
+  // never wraps, the search field shrinks instead.
+  const toolbar = /\.mg-toolbar \{[^}]*}/s.exec(sheet)![0];
+  expect(toolbar).toContain('flex-wrap: nowrap');
+});
+
+test('the Management sub-navigation shares the top-navigation glass surface', () => {
+  const shell = css('app/shell.css');
+  const nav = /\.mgmtnav \{[^}]*}/s.exec(shell)![0];
+  expect(nav).toContain('background: var(--navglass)');
+  expect(nav).toContain('backdrop-filter: blur');
+});
+
 test('the All Areas board stacks its Area columns at phone widths', () => {
   const board = css('views/area-board/area-board.css');
   const stack =

@@ -345,7 +345,7 @@ export function MachinesView() {
           }
         />
       ) : (
-        <table className="mg-table">
+        <table className="mg-table mg-active">
           <thead>
             <tr>
               {(
@@ -355,7 +355,7 @@ export function MachinesView() {
                   {
                     key: 'assigned',
                     label: 'Assigned now',
-                    className: undefined,
+                    className: 'mg-assignedcol',
                   },
                   { key: 'asset', label: 'Asset', className: 'mg-metacol' },
                   {
@@ -750,10 +750,10 @@ function ActiveMachineRow({
           </div>
         ) : null}
       </td>
-      {/* data-label: inline column caption in the collapsed stacked
-          layout (GUI_DESIGN §2.5) — a bare quantity line or `—` is not
-          self-evident without the header row. */}
-      <td data-label="Assigned now">
+      {/* The Assigned now column is the first real column to yield on
+          narrow viewports (hidden with the header cell — GUI_DESIGN
+          §2.5 column shedding). */}
+      <td className="mg-assignedcol">
         {assignments.length === 0 ? (
           <span className="mg-meta">—</span>
         ) : (

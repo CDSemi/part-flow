@@ -167,7 +167,10 @@ main {
      (GUI_DESIGN §2.5). */
   flex-wrap: wrap;
   gap: 4px;
-  background: var(--panel);
+  /*!* The same translucent glass surface as the top navigation — the*/
+  /*   two navigation bars read as one coherent chrome layer. *!*/
+  /*background: var(--navglass);*/
+  /*backdrop-filter: blur(8px);*/
   border-bottom: 1px solid var(--border);
   padding: 4px 16px;
   z-index: 99;
