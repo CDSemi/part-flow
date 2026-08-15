@@ -2,7 +2,7 @@ import './styles/tokens.css';
 import './styles/global.css';
 import './app/shell.css';
 
-import { Suspense } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
@@ -110,6 +110,50 @@ function ViewForRoute({ route }: { route: Route }) {
 
 function AppShell() {
   const { route } = useRouter();
+  // Phone-width top navigation (GUI_DESIGN §2.5): the nav links live
+  // behind an explicit menu button and open as a vertical panel. The
+  // state exists at every width — CSS decides whether the button is
+  // visible and whether the links render inline (desktop) or as the
+  // panel (phone), so the DOM and accessibility tree stay identical.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const navRef = useRef<HTMLElement>(null);
+  const mgmtNavRef = useRef<HTMLElement>(null);
+
+  // Any completed navigation closes the panel — the user is done with
+  // the menu; Escape and a click/tap outside the navigation close it
+  // without navigating.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [route]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setMenuOpen(false);
+    }
+    function onClick(event: MouseEvent) {
+      const nav = navRef.current;
+      if (nav && event.target instanceof Node && !nav.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('click', onClick);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('click', onClick);
+    };
+  }, [menuOpen]);
+
+  // Swipeable Management sub-nav (GUI_DESIGN §2.5): on phone widths
+  // the row pans horizontally with a hidden scrollbar, so the active
+  // sub view must be brought into view itself — scrollIntoView is a
+  // no-op wherever the row already fits (and absent in jsdom).
+  useEffect(() => {
+    if (route.view !== 'management') return;
+    const active = mgmtNavRef.current?.querySelector('[aria-current="page"]');
+    active?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+  }, [route]);
+
   // Scan Station production mode and Production Board kiosk mode hide
   // the top application navigation: production mode keeps operators on
   // the configured station, kiosk mode keeps a wall display clean.
@@ -124,23 +168,33 @@ function AppShell() {
   return (
     <>
       {chromeHidden ? null : (
-        <nav className="appnav" aria-label="Primary">
+        <nav className="appnav" aria-label="Primary" ref={navRef}>
           <span className="logo">
             <span className="mark" aria-hidden="true">
               ⇄
             </span>
             Part<span className="pf">Flow</span>
           </span>
-          {TOP_NAV.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className={`navbtn ${item.matches(route) ? 'active' : ''}`}
-              aria-current={item.matches(route) ? 'page' : undefined}
-            >
-              {item.label}
-            </Link>
-          ))}
+          <button
+            className="menubtn"
+            aria-label="Menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            ☰
+          </button>
+          <div className={`appnav-links${menuOpen ? ' open' : ''}`}>
+            {TOP_NAV.map((item) => (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={`navbtn ${item.matches(route) ? 'active' : ''}`}
+                aria-current={item.matches(route) ? 'page' : undefined}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </div>
           <span className="spacer" />
           {import.meta.env.DEV ? (
             <span className="mock-tag">
@@ -152,7 +206,11 @@ function AppShell() {
         </nav>
       )}
       {route.view === 'management' && (
-        <nav className="mgmtnav" aria-label="Management sub views">
+        <nav
+          className="mgmtnav"
+          aria-label="Management sub views"
+          ref={mgmtNavRef}
+        >
           <span className="subgrp">Management</span>
           {MANAGEMENT_NAV.map((item) => (
             <Link

@@ -15,10 +15,32 @@ import { expect, test } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const css = (relative: string) => readFileSync(join(here, relative), 'utf8');
 
-test('the Management sub-navigation wraps instead of widening the document', () => {
+test('the Management sub-navigation wraps on wide viewports and pans on phone widths', () => {
   const shell = css('app/shell.css');
   const nav = /\.mgmtnav \{[^}]*}/s.exec(shell)![0];
   expect(nav).toContain('flex-wrap: wrap');
+  // Phone: ONE swipeable row inside its own scroll region — no
+  // visible scrollbar, and never a widened document.
+  expect(shell).toMatch(
+    /@media \(max-width: \d+px\) \{[^@]*\.mgmtnav \{[^}]*flex-wrap: nowrap;[^}]*overflow-x: auto;[^}]*scrollbar-width: none;/s,
+  );
+});
+
+test('the top navigation collapses behind a menu button on phone widths', () => {
+  const shell = css('app/shell.css');
+  // Wide viewports: the button is hidden and the links wrapper is
+  // layout-transparent — the links stay direct flex items of the nav.
+  expect(shell).toMatch(/\.menubtn \{\s*display: none;/s);
+  expect(shell).toMatch(/\.appnav-links \{\s*display: contents;/s);
+  // Phone: links hidden until the menu opens as a vertical panel; the
+  // development preview tag disappears and the Dark/Light control
+  // keeps only its icon (mode word visually hidden, never removed).
+  expect(shell).toMatch(
+    /@media \(max-width: \d+px\) \{[^@]*\.appnav-links \{\s*display: none;/s,
+  );
+  expect(shell).toMatch(/\.appnav-links\.open \{[^}]*flex-direction: column;/s);
+  expect(shell).toMatch(/\.appnav \.mock-tag \{\s*display: none;/s);
+  expect(shell).toMatch(/\.appnav \.tlabel \{[^}]*clip: rect/s);
 });
 
 test('the wide Management tables collapse to stacked rows with inline captions', () => {

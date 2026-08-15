@@ -23,6 +23,22 @@ main {
   padding: 6px 16px;
   z-index: 100;
   flex-wrap: wrap;
+  /* Anchors the phone-width menu panel (.appnav-links.open). */
+  position: relative;
+}
+
+/* Phone-width top navigation (GUI_DESIGN §2.5): the menu button and
+   the links wrapper exist at every width — CSS alone decides the
+   presentation, so the DOM and the tests never change per width. On
+   wide viewports the wrapper is layout-transparent (display:
+   contents) and the links stay direct flex items of the nav exactly
+   as before; the menu button is hidden. */
+.menubtn {
+  display: none;
+}
+
+.appnav-links {
+  display: contents;
 }
 
 .appnav .logo {
@@ -301,4 +317,86 @@ main {
   font-size: 14px;
   margin: 12px 0 20px;
   line-height: 1.6;
+}
+
+/* ============ Phone-width navigation (GUI_DESIGN §2.5) ============ */
+/* Top navigation: the nav links collapse behind an explicit menu
+   button and open as a vertical panel under the nav bar; the
+   development preview tag is hidden and the Dark/Light control keeps
+   only its icon (the mode word stays visually hidden, never removed,
+   so the accessible name is unchanged). The connectivity chip must
+   stay visible at every width. The Management sub-navigation becomes
+   ONE swipeable row: horizontally pannable inside its own region with
+   no visible scrollbar — the document itself never scrolls
+   horizontally. */
+@media (max-width: 760px) {
+  .menubtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--touch-min);
+    min-width: var(--touch-min);
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 18px;
+    color: var(--muted);
+  }
+
+  .menubtn:hover,
+  .menubtn[aria-expanded='true'] {
+    background: var(--panel2);
+    color: var(--text);
+  }
+
+  .appnav-links {
+    display: none;
+  }
+
+  .appnav-links.open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    padding: 8px 12px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border2);
+    box-shadow: var(--shadow);
+  }
+
+  .appnav .mock-tag {
+    display: none;
+  }
+
+  /* Icon-only theme control: the mode word is visually hidden, not
+     removed — screen readers keep the full `🌙 Dark` / `☀️ Light`
+     name. */
+  .appnav .tlabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .mgmtnav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mgmtnav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mgmtnav .subbtn,
+  .mgmtnav .subgrp {
+    flex: none;
+    white-space: nowrap;
+  }
 }

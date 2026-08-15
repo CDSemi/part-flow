@@ -81,6 +81,32 @@ test('the primary navigation trails: preview tag → theme control → connectiv
   ]);
 });
 
+test('the menu button toggles the nav-links panel and navigating closes it', async () => {
+  stubFetch(healthOk);
+
+  render(<App />);
+  await screen.findByText('ONLINE');
+
+  // The button exists at every width (CSS shows it on phone widths
+  // only — GUI_DESIGN §2.5); its expanded state drives the panel.
+  const menu = screen.getByRole('button', { name: 'Menu' });
+  const links = menu.nextElementSibling!;
+  expect(links.className).toBe('appnav-links');
+  expect(menu).toHaveAttribute('aria-expanded', 'false');
+
+  fireEvent.click(menu);
+  expect(menu).toHaveAttribute('aria-expanded', 'true');
+  expect(links.className).toBe('appnav-links open');
+
+  // A completed navigation closes the panel; Escape closes it too.
+  fireEvent.click(screen.getByRole('link', { name: 'Production Board' }));
+  expect(menu).toHaveAttribute('aria-expanded', 'false');
+
+  fireEvent.click(menu);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(menu).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('shows OFFLINE with the persistent banner when the health request fails', async () => {
   const fetchMock = stubFetch(() =>
     Promise.reject(new TypeError('Failed to fetch')),

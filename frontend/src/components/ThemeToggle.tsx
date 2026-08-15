@@ -18,7 +18,12 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
       aria-pressed={theme === 'light'}
       title="Switch between Dark and Light mode — every view follows"
     >
-      {theme === 'dark' ? '🌙 Dark' : '☀️ Light'}
+      {/* The mode word is a separate span so narrow viewports can
+          reduce the top-nav control to the icon alone (visually
+          hidden, never removed — the accessible name stays
+          `🌙 Dark` / `☀️ Light` at every width; GUI_DESIGN §2.5). */}
+      {theme === 'dark' ? '🌙' : '☀️'}
+      <span className="tlabel"> {theme === 'dark' ? 'Dark' : 'Light'}</span>
     </button>
   );
 }
