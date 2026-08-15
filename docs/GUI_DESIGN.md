@@ -78,6 +78,19 @@ Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6e
 - All production actions reachable by scan or single tap. Mouse never required on shop-floor views.
 - Keyboard wedge support: the scan input is a plain text input terminated by Enter — no custom driver, no scan-mode selection (PROJECT_PROFILE §10 Barcode Model).
 
+## 2.5 Small screens — vertical-scroll-first
+
+Every view supports phone-width viewports (~390 px and up). The rules:
+
+- **Vertical scrolling is the only browsing gesture.** Every view must be fully browsable by vertical scrolling alone; the document never overflows horizontally on any supported viewport width.
+- **Navigation wraps.** The top application navigation and the Management sub-view navigation wrap onto additional rows instead of widening the page.
+- **Wide desktop tables collapse to stacked rows.** When the viewport cannot hold a table's desktop column layout (Machines, PN Tracking, the Work Orders list, Planned Routes, the Administration Areas table), the table collapses to a stacked presentation: the header row is hidden, each row renders as one vertical block, and cells whose meaning is not self-evident carry their column label as a small inline caption. Column sorting is a wide-layout convenience and is unavailable while collapsed; whole-row activation and in-row controls keep working unchanged. Collapse breakpoints derive from each table's real content width, not from one shared device breakpoint.
+- **The Area Board All Areas columns stack.** At phone widths the one-column-per-Area horizontal board (§6.2) becomes a single full-width vertical column list; the horizontal board remains the desktop/tablet presentation.
+- **Deliberate horizontal scrolling is a wide-layout tool only.** A horizontally scrolling region (the All Areas board on desktop) is never the only way to reach content on a phone.
+- **The Production Board is exempt.** It is a Department wall/kiosk display sized for reading at 3–5 m with measured content-driven columns (§2.3, §5), not a phone working surface; its layout is never compressed at the cost of the distance-readability rules, and on very narrow viewports it may scroll within its own region.
+- Existing narrow-viewport behaviors (near-full-screen workflow dialogs §11, demand-line cards, the Tracking overlay spanning the viewport §7) are unchanged and complement these rules.
+- The PN single-line rule (§2.3) and the Scan Station's scanner-first model (§2.4) are unchanged — phone support is a browsing/monitoring convenience and never weakens shop-floor rules.
+
 ---
 
 # 3. Global Interaction Rules
@@ -727,6 +740,8 @@ Post-v18 refinements (same round, updated in place — no version bump):
 
 7. **All seven §17 open questions resolved** (§2.1, §4.3, §4.5, new §4.12, §5, §8, §9; PROJECT_PROFILE v18 §8.13/§10/§16/§19/§21/§32): the open-decision round is closed and §17 is empty. The decisions: Priority Undo/Redo depth is **unlimited within the current application session** — no numeric limit, history ends with the session (§8); the theme persists **per User and per Scan Station** with precedence authenticated User → Scan Station → Dark default, Worker Sessions never affect it (§2.1); Priority Hot-add by PN barcode adds directly only with exactly one eligible WO Demand — zero adds nothing, several filter the list and require explicit selection, never a first-match guess (§8); **Workers are Scan-Station-scoped audit identity, separate from Users** — no employee number, profile = stable id + name + badge barcode + avatar + active status, the badge barcode is the company's existing employee badge exact-matched as a non-`PF:` value (no `PF:WORKER:` barcodes), the three per-Area Worker ID modes stay, and Scanned sessions use a **configurable sliding inactivity timeout** (Administration default + per-Area override, refreshed by valid production interactions only, immediate Worker switch on another badge) with the blocking `Worker session expired` / `Scan your badge to continue.` modal that blocks only the Scan Station and preserves open dialog drafts (§4.3, §4.12, §9) — **the `from … to shift end` session window and every shift-end concept are removed**; the Production Board stays Department-wide with **no per-Area filtered mode** — per-Area monitoring belongs to the Area Board (§5); Scan Station Undo requires no extra badge scan — Worker identity follows the Area mode, the `REVERSED` record uses the Worker active at Undo confirmation, and an expired Scanned session is already blocked by the badge modal (§4.5); Production Board rotation timing is configured **per Department** in Administration → Department display settings (§5, §9). Mockup v18 is updated in place (Worker pill with the two-line-tall avatar + `Session · 12m remaining` countdown, badge-value worker scans, no shift end).
 
+8. **Phone-width support — vertical-scroll-first** (new §2.5; §6.2, §16): mobile-phone layouts leave the deferred list (§16) — the views become browsable on phone-width viewports by vertical scrolling alone, with no horizontal document overflow. The Management sub-view navigation wraps onto additional rows; the wide tables (Machines, PN Tracking, the Work Orders list, Planned Routes, the Administration Areas table, the Tracking detail overlay's WO Demand table) collapse to stacked rows with inline column captions at content-derived narrow widths (column sorting stays a wide-layout convenience and is unavailable while collapsed); the Area Board All Areas board stacks its Area columns full-width at phone widths; Tracking's Movement history rows wrap their description onto its own line. The Production Board stays a distance-readable wall/kiosk display and is explicitly exempt. Desktop and tablet presentations above the collapse points are unchanged.
+
 ## 15.2 Changes from GUI Design v16
 
 The v16→v17 change adds the **direct-processing row-level `DONE` action** to the Scan Station. No other view behavior, movement semantics, quantity rules, backend APIs or database design changed; everything remains implemented against development-only mock state.
@@ -983,7 +998,7 @@ Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 # 16. Out of Scope for Phase 2 UI
 
-Deferred intentionally: localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
+Deferred intentionally: localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, administrative command barcodes.
 
 ---
 

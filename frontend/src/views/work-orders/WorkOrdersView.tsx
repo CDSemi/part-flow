@@ -401,13 +401,19 @@ function WorkOrderListPanel({
                       ) : null}
                     </button>
                   </td>
-                  <td className="mono-sm">{formatIsoDate(w.received)}</td>
-                  <td className="mono-sm">
+                  {/* data-label: inline column captions in the
+                      collapsed stacked layout (GUI_DESIGN §2.5) —
+                      bare dates and a line count are not self-evident
+                      without the header row. */}
+                  <td className="mono-sm" data-label="Received">
+                    {formatIsoDate(w.received)}
+                  </td>
+                  <td className="mono-sm" data-label="Due date">
                     <span className={`duetxt ${dueTone(w)}`}>
                       {formatIsoDate(w.due)}
                     </span>
                   </td>
-                  <td>
+                  <td data-label="Demand lines">
                     {w.lines.length}
                     <div className="sub mono-sm">{w.preview}</div>
                   </td>

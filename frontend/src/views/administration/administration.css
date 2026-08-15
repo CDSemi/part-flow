@@ -268,3 +268,52 @@
   line-height: 1.7;
   max-width: 720px;
 }
+
+/* Below ~800px the seven-column Areas table cannot hold its desktop
+   layout: it collapses to stacked rows — header row hidden, one block
+   per Area, non-self-evident cells carrying their column label via
+   data-label (GUI_DESIGN §2.5). */
+@media (max-width: 800px) {
+  .ad-table,
+  .ad-table tbody,
+  .ad-table tr,
+  .ad-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .ad-table thead {
+    display: none;
+  }
+
+  .ad-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+  }
+
+  .ad-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .ad-table td {
+    border-bottom: none;
+    padding: 3px 14px;
+  }
+
+  .ad-table td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* The empty Terminal cell of a non-terminal Area renders no pill —
+     collapse the leftover block line. */
+  .ad-table td:empty {
+    display: none;
+  }
+}

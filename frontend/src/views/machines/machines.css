@@ -1218,8 +1218,59 @@
   margin-top: 12px;
 }
 
-@media (max-width: 880px) {
+/* The content-sized Asset column is the first thing to yield: with
+   realistic asset/manufacturer values the full table needs ~1100px,
+   so the column hides as soon as the viewport cannot hold it —
+   before that width the table would overflow horizontally
+   (GUI_DESIGN §2.5: no horizontal browsing). */
+@media (max-width: 1100px) {
   .mg-table .mg-metacol {
     display: none;
+  }
+}
+
+/* Below ~960px even the Asset-less table (nowrap Machine / State /
+   Assigned / Maintenance columns) cannot fit: both tables collapse to
+   stacked rows — header row hidden, each row one vertical block,
+   non-self-evident cells carry their column label as a small inline
+   caption via data-label (GUI_DESIGN §2.5). Whole-row activation and
+   the Maintenance switch keep working unchanged; sorting is a
+   wide-layout convenience. */
+@media (max-width: 960px) {
+  .mg-table,
+  .mg-table tbody,
+  .mg-table tr,
+  .mg-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .mg-table thead {
+    display: none;
+  }
+
+  .mg-table tr {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+  }
+
+  .mg-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .mg-table td {
+    border-bottom: none;
+    padding: 3px 14px;
+  }
+
+  .mg-table td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
   }
 }

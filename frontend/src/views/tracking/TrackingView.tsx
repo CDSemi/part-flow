@@ -251,12 +251,23 @@ export function TrackingView() {
                         ))}
                       </div>
                     </td>
-                    <td className="mono">{row.activeQty}</td>
-                    <td className="mono">{row.stockedQty}</td>
-                    <td className={`mono ${row.scrappedQty ? 'scrapqty' : ''}`}>
+                    {/* data-label: inline column captions in the
+                        collapsed stacked layout (GUI_DESIGN §2.5) —
+                        bare quantities and dates are not self-evident
+                        without the header row. */}
+                    <td className="mono" data-label="Active qty">
+                      {row.activeQty}
+                    </td>
+                    <td className="mono" data-label="Stocked">
+                      {row.stockedQty}
+                    </td>
+                    <td
+                      className={`mono ${row.scrappedQty ? 'scrapqty' : ''}`}
+                      data-label="Scrapped"
+                    >
                       {row.scrappedQty || '—'}
                     </td>
-                    <td>{row.nextDue}</td>
+                    <td data-label="Due (next)">{row.nextDue}</td>
                     <td>
                       <span
                         className={`status ${
@@ -367,16 +378,27 @@ function TrackingDetail({ onClose }: { onClose: () => void }) {
           </thead>
           <tbody>
             {d.demand.map((row) => (
+              // data-label: inline column captions in the collapsed
+              // stacked layout (GUI_DESIGN §2.5) — bare numbers and
+              // dates are not self-evident without the header row.
               <tr key={row.workOrder}>
-                <td className="mono">{row.workOrder}</td>
+                <td className="mono" data-label="WO">
+                  {row.workOrder}
+                </td>
                 <td>
                   <TypeChip type={row.type} />
                 </td>
-                <td className="mono">{row.requested}</td>
-                <td className="mono zero">{row.allocated}</td>
-                <td className="mono short">{row.shortage}</td>
-                <td>{row.due}</td>
-                <td>{row.priority}</td>
+                <td className="mono" data-label="Req.">
+                  {row.requested}
+                </td>
+                <td className="mono zero" data-label="Alloc.">
+                  {row.allocated}
+                </td>
+                <td className="mono short" data-label="Shortage">
+                  {row.shortage}
+                </td>
+                <td data-label="Due">{row.due}</td>
+                <td data-label="Priority">{row.priority}</td>
               </tr>
             ))}
           </tbody>

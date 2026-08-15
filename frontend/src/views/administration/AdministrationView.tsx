@@ -257,10 +257,20 @@ function AreasTable({ empty }: { empty: boolean }) {
                 />{' '}
                 <b>{row.name}</b>
               </td>
-              <td>{row.operations}</td>
-              <td className="modecell">{row.machineMode}</td>
-              <td className="mono">{row.machines}</td>
-              <td className="modecell">{row.workerMode}</td>
+              {/* data-label: inline column captions in the collapsed
+                  stacked layout (GUI_DESIGN §2.5) — mode values and a
+                  bare Machine count are not self-evident without the
+                  header row. */}
+              <td data-label="Operations">{row.operations}</td>
+              <td className="modecell" data-label="Machine assignment">
+                {row.machineMode}
+              </td>
+              <td className="mono" data-label="Machines">
+                {row.machines}
+              </td>
+              <td className="modecell" data-label="Worker ID mode">
+                {row.workerMode}
+              </td>
               <td>
                 {row.terminal ? (
                   <span className="pillnav term">Terminal</span>

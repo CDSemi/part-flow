@@ -548,3 +548,55 @@
   color: var(--faint);
   font-size: 12.5px;
 }
+
+/* Below ~680px the Planned Routes tables cannot hold their desktop
+   column layout: both tables collapse to stacked rows — header row
+   hidden, each route one vertical block, the usage cell carrying its
+   column label as a small inline caption via data-label
+   (GUI_DESIGN §2.5). Whole-row editing, the usage dialog and the
+   archived Duplicate action are unchanged. */
+@media (max-width: 680px) {
+  .rt-table,
+  .rt-table tbody,
+  .rt-table tr,
+  .rt-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .rt-table thead {
+    display: none;
+  }
+
+  .rt-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+  }
+
+  .rt-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .rt-table td {
+    border-bottom: none;
+    padding: 3px 14px;
+  }
+
+  .rt-table td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* The search field gives up its desktop minimum and fills the
+     toolbar row instead of forcing horizontal overflow. */
+  .rt-toolbar input[type='search'] {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+}

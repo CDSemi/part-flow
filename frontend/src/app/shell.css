@@ -145,6 +145,11 @@ main {
 .mgmtnav {
   display: flex;
   align-items: center;
+  /* Wraps like .appnav: on narrow viewports the sub-view links flow
+     onto additional rows instead of widening the document — the page
+     must stay vertically browsable with no horizontal overflow
+     (GUI_DESIGN §2.5). */
+  flex-wrap: wrap;
   gap: 4px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);

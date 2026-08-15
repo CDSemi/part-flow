@@ -302,8 +302,12 @@ export function PlannedRoutesView() {
                     updated {template.updatedOn}
                   </div>
                 </td>
+                {/* data-label: inline column caption in the collapsed
+                    stacked layout (GUI_DESIGN §2.5) — a bare flow
+                    count is not self-evident without the header row. */}
                 <td
                   className="rt-usage"
+                  data-label="Used by"
                   onClick={(event) => event.stopPropagation()}
                 >
                   {template.usedBy.length > 0 ? (
@@ -356,7 +360,7 @@ export function PlannedRoutesView() {
                       since {template.archivedOn}
                     </div>
                   </td>
-                  <td className="rt-usage">
+                  <td className="rt-usage" data-label="Used by">
                     {template.usedBy.length > 0 ? (
                       <button
                         onClick={() => setDialog({ kind: 'usage', template })}

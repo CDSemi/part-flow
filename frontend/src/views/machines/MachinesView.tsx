@@ -478,7 +478,9 @@ export function MachinesView() {
                   <td className="mg-metacol">
                     <AssetMeta machine={machine} />
                   </td>
-                  <td className="mg-meta">{machine.notes ?? '—'}</td>
+                  <td className="mg-meta" data-label="Notes">
+                    {machine.notes ?? '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -748,7 +750,10 @@ function ActiveMachineRow({
           </div>
         ) : null}
       </td>
-      <td>
+      {/* data-label: inline column caption in the collapsed stacked
+          layout (GUI_DESIGN §2.5) — a bare quantity line or `—` is not
+          self-evident without the header row. */}
+      <td data-label="Assigned now">
         {assignments.length === 0 ? (
           <span className="mg-meta">—</span>
         ) : (

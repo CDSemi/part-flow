@@ -303,3 +303,19 @@
 .ab .stat .n.h {
   color: var(--err-t);
 }
+
+/* Phone widths: the one-column-per-Area board stacks its columns
+   full-width instead of scrolling horizontally — vertical scrolling is
+   the only browsing gesture (GUI_DESIGN §2.5). The desktop/tablet
+   horizontal board and the explicit wrap mode are unchanged above the
+   breakpoint. */
+@media (max-width: 720px) {
+  .ms-scroll {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .ms-col {
+    flex: 1 1 100%;
+  }
+}

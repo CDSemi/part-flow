@@ -37,6 +37,11 @@
 
 .wo-tools {
   display: flex;
+  /* Narrow viewports: the toolbar wraps (search row, then the
+     Completed link and the primary action) instead of pushing the
+     primary action past the page edge (GUI_DESIGN §2.5). One row
+     whenever it fits, as before. */
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 16px;
   align-items: center;
@@ -44,6 +49,7 @@
 
 .wo-tools input {
   flex: 1;
+  min-width: 0;
   max-width: 420px;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -1047,5 +1053,50 @@
     bottom: 0;
     background: var(--panel);
     z-index: 1;
+  }
+}
+
+/* Below ~560px the five-column Work Orders list cannot hold its
+   desktop layout: it collapses to stacked rows — header row hidden,
+   each Work Order one vertical block, the bare date/count cells
+   carrying their column label as a small inline caption via
+   data-label (GUI_DESIGN §2.5). Whole-row activation is unchanged;
+   the workflow dialogs keep their own narrow-viewport treatment. */
+@media (max-width: 560px) {
+  .wolist,
+  .wolist tbody,
+  .wolist tr,
+  .wolist td {
+    display: block;
+    width: 100%;
+  }
+
+  .wolist thead {
+    display: none;
+  }
+
+  .wolist tbody tr {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+  }
+
+  .wolist tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .wolist td {
+    border-bottom: none;
+    padding: 3px 14px;
+  }
+
+  .wolist td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
   }
 }

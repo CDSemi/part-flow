@@ -610,3 +610,121 @@
   color: var(--err-t);
   font-weight: 700;
 }
+
+/* Below ~960px the eight-column results table (PN sized to fit, §2.3)
+   cannot hold its desktop layout: it collapses to stacked rows —
+   header row hidden, each result one vertical block, the bare
+   numeric/date cells carrying their column label as a small inline
+   caption via data-label (GUI_DESIGN §2.5). Whole-row selection and
+   the floating detail overlay are unchanged. */
+@media (max-width: 960px) {
+  .tk-table,
+  .tk-table tbody,
+  .tk-table tr,
+  .tk-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .tk-table thead {
+    display: none;
+  }
+
+  .tk-table tr {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+  }
+
+  .tk-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .tk-table td {
+    border-bottom: none;
+    padding: 3px 14px;
+  }
+
+  .tk-table td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* The search field gives up its desktop minimum and fills the
+     toolbar row instead of forcing horizontal overflow. */
+  .tk-filters input {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+}
+
+/* Below ~560px the seven-column Active WO Demand table inside the
+   detail overlay cannot hold its column layout: it collapses to the
+   same stacked presentation as the results table — header row hidden,
+   one block per WO Demand row, bare values carrying their column
+   label via data-label (GUI_DESIGN §2.5). The overlay itself already
+   spans the viewport at these widths. */
+@media (max-width: 560px) {
+  .demand,
+  .demand tbody,
+  .demand tr,
+  .demand td {
+    display: block;
+    width: 100%;
+  }
+
+  .demand thead {
+    display: none;
+  }
+
+  .demand tbody tr {
+    border-bottom: 1px solid var(--border);
+    padding: 6px 0;
+  }
+
+  .demand tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .demand td {
+    border-bottom: none;
+    padding: 2px 0;
+  }
+
+  .demand td[data-label]::before {
+    content: attr(data-label);
+    display: inline-block;
+    margin-right: 8px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+}
+
+/* Below ~560px the fixed time/type tracks of a Movement history row
+   leave no room for the description: the row wraps — timestamp and
+   Movement type(s) inline on the first line, the description on its
+   own full-width line beneath (GUI_DESIGN §2.5). */
+@media (max-width: 560px) {
+  .mv li {
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+
+  .mv .t,
+  .mv .mtype {
+    width: auto;
+  }
+
+  .mv .desc {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+}
