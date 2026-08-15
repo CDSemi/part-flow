@@ -118,6 +118,11 @@ function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const navRef = useRef<HTMLElement>(null);
   const mgmtNavRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  // Scroll-direction condensing for the sticky sub-nav: scrolling
+  // down condenses the bar, the first upward scroll (or being near
+  // the top) restores it.
+  const [subnavShrunk, setSubnavShrunk] = useState(false);
 
   // Any completed navigation closes the panel — the user is done with
   // the menu; Escape and a click/tap outside the navigation close it
@@ -152,6 +157,34 @@ function AppShell() {
     if (route.view !== 'management') return;
     const active = mgmtNavRef.current?.querySelector('[aria-current="page"]');
     active?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+  }, [route]);
+
+  // Condense the sticky sub-nav by scroll DIRECTION inside <main>
+  // (the application's scroll container): downward movement condenses
+  // the bar, any upward movement — or being near the top — restores
+  // its full height. A small delta threshold absorbs sub-pixel
+  // scroll jitter; every navigation starts expanded.
+  useEffect(() => {
+    setSubnavShrunk(false);
+    if (route.view !== 'management') return;
+    const main = mainRef.current;
+    if (!main) return;
+    let last = main.scrollTop;
+    function onScroll() {
+      const y = main!.scrollTop;
+      // Asymmetric thresholds: condensing reacts quickly (+4), while
+      // restoring requires a deliberate upward scroll (−30) — larger
+      // than the bar's own height change, so the scrollTop clamp that
+      // can fire when the bar shrinks near the bottom edge never
+      // reads as an upward scroll (scroll anchoring itself is
+      // disabled on <main>).
+      if (y <= 8) setSubnavShrunk(false);
+      else if (y > last + 4) setSubnavShrunk(true);
+      else if (y < last - 30) setSubnavShrunk(false);
+      last = y;
+    }
+    main.addEventListener('scroll', onScroll, { passive: true });
+    return () => main.removeEventListener('scroll', onScroll);
   }, [route]);
 
   // Scan Station production mode and Production Board kiosk mode hide
@@ -206,7 +239,7 @@ function AppShell() {
         </nav>
       )}
       <OfflineBanner />
-      <main>
+      <main ref={mainRef}>
         {/* The sub-nav lives INSIDE the scrolling content area and
             sticks to its top, so Management view content actually
             passes beneath it — the frosted-glass surface has real
@@ -215,7 +248,7 @@ function AppShell() {
             outside the scroller above it. */}
         {route.view === 'management' && (
           <nav
-            className="mgmtnav"
+            className={`mgmtnav${subnavShrunk ? ' shrunk' : ''}`}
             aria-label="Management sub views"
             ref={mgmtNavRef}
           >

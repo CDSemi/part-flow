@@ -11,6 +11,12 @@ main {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* The sticky sub-nav condenses/expands with scroll direction; the
+     browser's scroll anchoring would counter-adjust scrollTop on each
+     height change, firing synthetic reverse-direction scroll events
+     and oscillating the bar. Direction detection needs raw user
+     scrolling only. */
+  overflow-anchor: none;
 }
 
 .appnav {
@@ -187,6 +193,32 @@ main {
   padding: 4px 16px;
   z-index: 99;
   box-shadow: var(--subnav-shadow);
+  transition: padding 0.18s ease;
+}
+
+/* Scroll-direction condensing (class set by AppShell): scrolling down
+   condenses the sticky bar to reclaim reading space, the first upward
+   scroll — or being near the top — restores the full height. Only
+   sizes change; the swipe/wrap behavior and the glass surface stay. */
+.mgmtnav.shrunk {
+  padding: 1px 16px;
+}
+
+.mgmtnav.shrunk .subbtn {
+  min-height: 30px;
+  padding: 3px 11px;
+  font-size: 12px;
+}
+
+.mgmtnav.shrunk .subgrp {
+  font-size: 8.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mgmtnav,
+  .subbtn {
+    transition: none;
+  }
 }
 
 .mgmtnav .subgrp {
@@ -210,6 +242,10 @@ main {
   font-size: 13px;
   font-weight: 650;
   text-decoration: none;
+  transition:
+    min-height 0.18s ease,
+    padding 0.18s ease,
+    font-size 0.18s ease;
 }
 
 .subbtn:hover {

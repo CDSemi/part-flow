@@ -104,6 +104,10 @@ test('the Management sub-navigation is a sticky frosted-glass bar on its own pan
   // natural height — the phone swipe mode's overflow-x drops the
   // automatic flex minimum to 0 and tall content would crush the row.
   expect(nav).toContain('flex: none');
+  // Scroll-direction condensing: a shrunk variant with reduced chip
+  // height exists (the class itself is driven by AppShell).
+  expect(shell).toMatch(/\.mgmtnav\.shrunk \{[^}]*padding/s);
+  expect(shell).toMatch(/\.mgmtnav\.shrunk \.subbtn \{[^}]*min-height/s);
 });
 
 test('the All Areas board stacks its Area columns at phone widths', () => {

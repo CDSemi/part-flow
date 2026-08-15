@@ -107,6 +107,36 @@ test('the menu button toggles the nav-links panel and navigating closes it', asy
   expect(menu).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('the Management sub-nav condenses on downward scroll and restores on upward scroll', async () => {
+  stubFetch(healthOk);
+  window.history.replaceState({}, '', '/management/machines');
+
+  render(<App />);
+  await screen.findByText('ONLINE');
+
+  const nav = screen.getByRole('navigation', { name: 'Management sub views' });
+  const main = document.querySelector('main')!;
+  expect(nav.className).toBe('mgmtnav');
+
+  // Downward movement condenses the sticky bar…
+  main.scrollTop = 120;
+  fireEvent.scroll(main);
+  expect(nav.className).toBe('mgmtnav shrunk');
+
+  // …any upward movement restores it…
+  main.scrollTop = 80;
+  fireEvent.scroll(main);
+  expect(nav.className).toBe('mgmtnav');
+
+  // …and near the top it is always expanded.
+  main.scrollTop = 200;
+  fireEvent.scroll(main);
+  expect(nav.className).toBe('mgmtnav shrunk');
+  main.scrollTop = 0;
+  fireEvent.scroll(main);
+  expect(nav.className).toBe('mgmtnav');
+});
+
 test('shows OFFLINE with the persistent banner when the health request fails', async () => {
   const fetchMock = stubFetch(() =>
     Promise.reject(new TypeError('Failed to fetch')),
