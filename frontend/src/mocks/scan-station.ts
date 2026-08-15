@@ -1,6 +1,5 @@
 import type { AreaKey, MockScanStation } from '../views/view-models';
 import { activeMachines } from './machines';
-import { minutesAgoIso } from './mock-time';
 
 // Scan Station mock registry: the station selector at /scan-station
 // lists these; /scan-station/:stationId loads one. LATHE-ST-01 is bound
@@ -39,14 +38,86 @@ export function stationById(stationId: string): MockScanStation | undefined {
   return MOCK_SCAN_STATIONS.find((s) => s.stationId === stationId && s.active);
 }
 
-// The Worker session shows `from <badge-scan time> to <shift end>`:
-// `since` is the fixed timestamp of the badge scan (mock: anchored
-// relative to load), `shiftEnd` the wall-clock end of the shift.
-export const MOCK_WORKER = {
-  name: 'H. Nguyen',
-  since: minutesAgoIso(154),
-  shiftEnd: '18:00',
+// Worker registry (mock). Workers are Scan-Station-scoped audit
+// identity, never application accounts (PROJECT_PROFILE §7/§8.13):
+// stable internal id, name, badge barcode, avatar, active status — no
+// employee number. The badge barcode is the barcode already printed on
+// the company's existing employee badge (non-PF; §10) and is
+// exact-matched; the mock avatar is initials (a real avatar image
+// arrives with the backend).
+export interface MockWorker {
+  id: string;
+  name: string;
+  badgeBarcode: string;
+  avatar: string;
+  active: boolean;
+}
+
+export const MOCK_WORKERS: MockWorker[] = [
+  {
+    id: 'wkr-01',
+    name: 'H. Nguyen',
+    badgeBarcode: '100482',
+    avatar: 'HN',
+    active: true,
+  },
+  {
+    id: 'wkr-02',
+    name: 'V. Tran',
+    badgeBarcode: '100517',
+    avatar: 'VT',
+    active: true,
+  },
+  // Inactive Worker: the badge matches nothing — scans are rejected.
+  {
+    id: 'wkr-03',
+    name: 'T. Pham',
+    badgeBarcode: '100290',
+    avatar: 'TP',
+    active: false,
+  },
+];
+
+/**
+ * Exact-match a scanned non-PF value against ACTIVE Worker badge
+ * barcodes (PROJECT_PROFILE §10). Unknown or inactive badges resolve
+ * to nothing — never guessed.
+ */
+export function workerByBadge(value: string): MockWorker | undefined {
+  return MOCK_WORKERS.find((w) => w.active && w.badgeBarcode === value);
+}
+
+export function workerById(id: string): MockWorker | undefined {
+  return MOCK_WORKERS.find((w) => w.id === id);
+}
+
+// Configured Worker of each Fixed-Worker Area (mock configuration).
+export const MOCK_FIXED_WORKERS: Partial<Record<AreaKey, string>> = {
+  cut: 'wkr-02',
+  manual: 'wkr-02',
+  deburr: 'wkr-01',
 };
+
+export function fixedWorkerFor(area: AreaKey): MockWorker | null {
+  const id = MOCK_FIXED_WORKERS[area];
+  return (id && workerById(id)) || null;
+}
+
+// Scanned Worker Sessions expire through a sliding inactivity timeout
+// (PROJECT_PROFILE §19): one Administration default with optional
+// per-Area overrides — never a shift schedule, never derived from the
+// number of Workers in an Area.
+export const MOCK_WORKER_SESSION_POLICY = {
+  defaultTimeoutMinutes: 15,
+  areaOverrides: { lathe: 20 } as Partial<Record<AreaKey, number>>,
+};
+
+export function workerSessionTimeoutMinutes(area: AreaKey): number {
+  return (
+    MOCK_WORKER_SESSION_POLICY.areaOverrides[area] ??
+    MOCK_WORKER_SESSION_POLICY.defaultTimeoutMinutes
+  );
+}
 
 // Machine barcode resolution (mock): PF:MACHINE:<asset-tag>, derived
 // from the shared Machine registry so the scanned value is always the
@@ -58,12 +129,6 @@ export const MOCK_MACHINE_BARCODES: Record<
 > = Object.fromEntries(
   activeMachines().map((m) => [m.barcode, { machine: m.name, area: m.area }]),
 );
-
-// Worker barcode ids (mock).
-export const MOCK_WORKER_BARCODES: Record<string, string> = {
-  '88': 'V. Tran',
-  '12': 'H. Nguyen',
-};
 
 // Downstream quantity that previously visited the station's Area and
 // may deliberately return for repair (mock presentation of the

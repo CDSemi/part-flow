@@ -350,13 +350,82 @@ test('adding a new Hot entry at the bottom needs no reorder confirmation', async
   await renderPriority();
 
   fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
-  fireEvent.click(screen.getByRole('button', { name: /0455-20-0118-03/ }));
+  // PN 0455-20-0118-03 has TWO active WO Demands — each is its own
+  // candidate row, selected explicitly by its Work Order.
+  fireEvent.click(screen.getByRole('button', { name: /WO 007003/ }));
 
   // Applied directly — existing ranks did not change.
   expect(
     screen.queryByRole('dialog', { name: 'Confirm Hot ranking change' }),
   ).toBeNull();
   expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
+});
+
+/* ============ Hot-add PN barcode resolution (post-v18) ============ */
+
+test('a scanned PN barcode with exactly one eligible WO Demand adds directly', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const search = screen.getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: 'PF:PN:78-04-0031' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+
+  // Added directly at the bottom — no extra selection step.
+  expect(
+    screen.queryByRole('dialog', { name: 'Add WO Demand to Hot list' }),
+  ).toBeNull();
+  expect(listedPns()).toEqual([...INITIAL, '78-04-0031']);
+});
+
+test('an ambiguous PN barcode never adds by guess — it filters for an explicit selection', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const search = screen.getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  // Two active WO Demands share this PN (WO 007003 and WO 007014).
+  fireEvent.change(search, { target: { value: 'PF:PN:0455-20-0118-03' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+
+  // Nothing was added; the dialog stays open, filtered to the PN, and
+  // asks for the explicit Work Order selection.
+  expect(listedPns()).toEqual(INITIAL);
+  const dialog = screen.getByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  expect(dialog).toHaveTextContent(
+    'Multiple active WO Demands use PN 0455-20-0118-03',
+  );
+  expect(screen.getByRole('button', { name: /WO 007003/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /WO 007014/ })).toBeInTheDocument();
+
+  // A repeated Enter on the ambiguous value still adds nothing.
+  fireEvent.keyDown(search, { key: 'Enter' });
+  expect(listedPns()).toEqual(INITIAL);
+
+  // The explicit selection completes the add at the bottom.
+  fireEvent.click(screen.getByRole('button', { name: /WO 007014/ }));
+  expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
+});
+
+test('a scanned PN barcode with no eligible WO Demand adds nothing', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const search = screen.getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: 'PF:PN:NOT-A-CANDIDATE' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+
+  expect(listedPns()).toEqual(INITIAL);
+  expect(
+    screen.getByRole('dialog', { name: 'Add WO Demand to Hot list' }),
+  ).toHaveTextContent('No matching active WO Demand');
 });
 
 /* ============ Snapshot alignment and impact/action block (GUI v14) ============ */

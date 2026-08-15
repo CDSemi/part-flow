@@ -45,10 +45,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * Sign in through the Scanned-session badge modal when it is present
+ * (a Scanned-session Area opened without an active Worker Session —
+ * GUI_DESIGN §4.12). Areas in Fixed or Disabled Worker ID mode never
+ * show it.
+ */
+function signInIfPrompted(badge = '100482') {
+  const field = screen.queryByLabelText('Scan Worker badge');
+  if (!field) return;
+  fireEvent.change(field, { target: { value: badge } });
+  fireEvent.keyDown(field, { key: 'Enter' });
+}
+
 async function renderStation(stationId = 'LATHE-ST-01', query = '') {
   window.history.replaceState({}, '', `/scan-station/${stationId}${query}`);
   render(<App />);
-  return await screen.findByLabelText('Scan barcode');
+  const input = await screen.findByLabelText('Scan barcode');
+  // LATHE is a Scanned-session Area: open the default Worker Session
+  // (H. Nguyen) so the station surface is usable, exactly like the
+  // first badge scan of a real session.
+  signInIfPrompted();
+  return input;
 }
 
 function scan(barcode: string) {
@@ -197,6 +215,7 @@ test('production mode hides the top navigation and keeps the station working', a
   window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
   render(<App />);
   const input = await screen.findByLabelText('Scan barcode');
+  signInIfPrompted();
 
   // No top application navigation, no Production Board / Management /
   // Administration links.
@@ -246,6 +265,7 @@ test('production mode offers the global theme control in the header actions grou
   window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
   render(<App />);
   await screen.findByLabelText('Scan barcode');
+  signInIfPrompted();
 
   // Connectivity chip and Dark/Light control form one header group.
   const actions = document.querySelector(
@@ -285,6 +305,7 @@ test('the production header wraps the Worker pill and header actions in one grou
   window.history.replaceState({}, '', '/scan-station/LATHE-ST-01/production');
   render(<App />);
   await screen.findByLabelText('Scan barcode');
+  signInIfPrompted();
   await screen.findByText('ONLINE');
 
   // v15: one shared `.ss-headgroup` cell holds the Worker pill and the
@@ -459,10 +480,17 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(lastPn.lastElementChild).toBe(undoRegion);
   expect(undoRegion.textContent).toContain('⟲ UNDO');
 
-  // Worker session window: `from <badge-scan time> to <shift end>`.
-  expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^from \d{2}:\d{2} to 18:00$/,
+  // Scanned-session Worker pill (post-v18): avatar + Worker name over
+  // the live remaining-session countdown — there is no shift-end
+  // session window anywhere.
+  const pill = document.querySelector('.ss-pill')!;
+  expect(pill.querySelector('.avatar')?.textContent).toBe('HN');
+  expect(pill.querySelector('.val')?.textContent).toContain('H. Nguyen');
+  expect(pill.querySelector('.sub')?.textContent).toMatch(
+    /^Worker session · \d+m remaining$/,
   );
+  expect(pill.textContent).not.toContain('from');
+  expect(pill.textContent).not.toContain('shift');
 
   // No permanently reserved feedback block below Last scanned PN.
   expect(document.querySelector('.ss .ss-feedback')).toBeNull();
@@ -478,7 +506,7 @@ test('scan feedback floats as a single closable notification', async () => {
   expect(toast?.textContent).toContain('Barcode not recognized');
 
   // Only the most recent notification shows.
-  scan('PF:WORKER:88');
+  scan('100517');
   expect(document.querySelectorAll('.ss-toast').length).toBe(1);
   expect(document.querySelector('.ss-toast.ok')).not.toBeNull();
   expect(document.querySelector('.ss-toast.ok')).toHaveAttribute(
@@ -496,7 +524,7 @@ test('notifications auto-dismiss (~4 s success, ~8 s error) and reset on replace
   vi.useFakeTimers();
 
   // Success: gone after ~4 s.
-  scan('PF:WORKER:88');
+  scan('100517');
   expect(document.querySelector('.ss-toast.ok')).not.toBeNull();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(3900);
@@ -519,11 +547,11 @@ test('notifications auto-dismiss (~4 s success, ~8 s error) and reset on replace
   expect(document.querySelector('.ss-toast')).toBeNull();
 
   // A replacing notification restarts its own timer.
-  scan('PF:WORKER:88');
+  scan('100517');
   await act(async () => {
     await vi.advanceTimersByTimeAsync(3000);
   });
-  scan('PF:WORKER:12');
+  scan('100482');
   await act(async () => {
     await vi.advanceTimersByTimeAsync(3000);
   });
@@ -938,7 +966,7 @@ test('Step 1 barcode selection: Machine and queued PN scans select; invalid scan
   expect(dialog.textContent).toContain('inactive (maintenance)');
   scanInside('PF:PN:118-052');
   expect(dialog.textContent).toContain('no queued quantity in this Area');
-  scanInside('PF:WORKER:88');
+  scanInside('100517');
   expect(dialog.textContent).toContain(
     'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
   );
@@ -1736,17 +1764,19 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
   enterThroughConfirmation();
   expect(lastPnText()).toBe('118-052');
 
-  scan('PF:WORKER:88');
+  // Scanning a different active Worker's badge (a non-PF value —
+  // the company's existing employee badge) switches immediately.
+  scan('100517');
   expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(lastPnText()).toBe('118-052');
 
-  // The badge scan opens a NEW session window: the pill shows the new
-  // Worker with `from <badge-scan time> to <shift end>`.
+  // The pill shows the new Worker with the live session countdown —
+  // no shift-end session window exists.
   expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
     'V. Tran',
   );
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^from \d{2}:\d{2} to 18:00$/,
+    /^Worker session · \d+m remaining$/,
   );
 });
 
@@ -2065,6 +2095,13 @@ test('recovery re-enables and refocuses the scan input', async () => {
   failing = false;
   fireEvent(window, new Event('online'));
 
+  // Reconnected — but this Scanned-session Area still needs its badge
+  // sign-in (the modal's own scan field re-enabled with recovery).
+  await waitFor(() =>
+    expect(screen.getByLabelText('Scan Worker badge')).toBeEnabled(),
+  );
+  signInIfPrompted();
+
   await waitFor(() => expect(input).toBeEnabled());
   await waitFor(() => expect(input).toHaveFocus());
   expect(input).toHaveAttribute(
@@ -2091,12 +2128,14 @@ test('a scan is captured while a non-input element has focus; the first characte
   expect(input.value).toBe('P');
   expect(input).toHaveFocus();
 
-  wedgeType('F:WORKER:88');
-  expect(input.value).toBe('PF:WORKER:88');
+  // 'P' was captured first; the rest of the burst completes the value.
+  wedgeType('F:PN:118-052');
+  expect(input.value).toBe('PF:PN:118-052');
   fireEvent.keyDown(document.body, { key: 'Enter' });
 
-  // Submitted exactly once.
-  expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
+  // Submitted exactly once — the resolved PN opened its dialog.
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   expect(document.querySelectorAll('.ss-toast').length).toBe(1);
   expect(input.value).toBe('');
 
@@ -2108,7 +2147,7 @@ test('a scan is captured while a non-input element has focus; the first characte
 test('scanning while the main input has focus keeps working (single submit)', async () => {
   await renderStation();
 
-  scan('PF:WORKER:88');
+  scan('100517');
   expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(document.querySelectorAll('.ss-toast').length).toBe(1);
 });
@@ -2134,12 +2173,12 @@ test('wedge capture never interferes with dialogs, other fields, or buttons', as
 
   // Enter on a focused button stays button activation — it never
   // submits the pending barcode value.
-  fireEvent.change(input, { target: { value: 'PF:WORKER:88' } });
+  fireEvent.change(input, { target: { value: '100517' } });
   const manual = screen.getByRole('button', { name: '⌨ Enter PN manually' });
   manual.focus();
   fireEvent.keyDown(manual, { key: 'Enter' });
   expect(screen.queryByText('Worker signed in: V. Tran')).toBeNull();
-  expect(input.value).toBe('PF:WORKER:88');
+  expect(input.value).toBe('100517');
 });
 
 /* ============ Scan → dialog focus and Enter routing (v16) ============ */
@@ -2152,7 +2191,7 @@ test('a scan that opens a dialog leaves focus inside the dialog after the refocu
   // its dialog before that timer fires. After flushing the delayed
   // refocus window, focus must sit INSIDE the dialog — a pending
   // refocus never pulls focus back out of an open dialog.
-  scan('PF:WORKER:88');
+  scan('100517');
   scan('PF:PN:2027-60-8114-00');
   const dialog = activeDialog();
   await act(async () => {
@@ -2218,8 +2257,8 @@ test('wedge capture keeps working after a dialog cycle: a full barcode lands int
   // No dialog open, the main input NOT focused: every character of
   // the wedge burst is captured, then Enter processes the scan once.
   (document.activeElement as HTMLElement | null)?.blur?.();
-  wedgeType('PF:WORKER:88');
-  expect(input.value).toBe('PF:WORKER:88');
+  wedgeType('100517');
+  expect(input.value).toBe('100517');
   fireEvent.keyDown(document.body, { key: 'Enter' });
   expect(screen.getByText('Worker signed in: V. Tran')).toBeInTheDocument();
   expect(input.value).toBe('');
@@ -3386,4 +3425,247 @@ test('the dialog grid label column is content-sized, never a fixed-width gap', a
   // still cap at the former fixed width.
   const rule = /\.ss-dlgrid \{[^}]*}/s.exec(css)![0];
   expect(rule).toContain('grid-template-columns: fit-content(170px) 1fr');
+});
+
+/* ============ Worker identification and sessions (post-v18) ============ */
+
+test('a Scanned-session Area opens behind the badge sign-in modal until a valid badge scan', async () => {
+  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01');
+  render(<App />);
+  const input = await screen.findByLabelText('Scan barcode');
+
+  // Blocking modal on open — no active Worker Session exists yet.
+  const dialog = screen.getByRole('dialog', {
+    name: 'Worker sign-in required',
+  });
+  expect(dialog).toHaveTextContent('Scan your badge to continue.');
+  // Never `unlock` wording.
+  expect(dialog.textContent?.toLowerCase()).not.toContain('unlock');
+  // The station surface behind it is inert.
+  expect(input).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '⌨ Enter PN manually' }),
+  ).toBeDisabled();
+
+  // Escape never dismisses it — a valid badge scan is the only way on.
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(
+    screen.getByRole('dialog', { name: 'Worker sign-in required' }),
+  ).toBeInTheDocument();
+
+  const badge = screen.getByLabelText('Scan Worker badge');
+  // Unknown badge: rejected in place, nothing recorded.
+  fireEvent.change(badge, { target: { value: 'NOT-A-BADGE' } });
+  fireEvent.keyDown(badge, { key: 'Enter' });
+  expect(dialog).toHaveTextContent('Badge not recognized');
+  // An INACTIVE Worker's badge matches nothing (exact match against
+  // active Workers only).
+  fireEvent.change(badge, { target: { value: '100290' } });
+  fireEvent.keyDown(badge, { key: 'Enter' });
+  expect(dialog).toHaveTextContent('Badge not recognized');
+
+  // A valid badge opens the session and unblocks the station.
+  fireEvent.change(badge, { target: { value: '100482' } });
+  fireEvent.keyDown(badge, { key: 'Enter' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() => expect(input).toBeEnabled());
+  expect(screen.getByText('Worker signed in: H. Nguyen')).toBeInTheDocument();
+});
+
+test('the pill counts the sliding timeout down from the per-Area override value', async () => {
+  await renderStation(); // LATHE — 20-minute per-Area override
+
+  const pill = document.querySelector('.ss-pill')!;
+  expect(pill.querySelector('.sub')?.textContent).toBe(
+    'Worker session · 20m remaining',
+  );
+  // Full countdown tone: not yet near expiration.
+  expect(pill.querySelector('.sub')?.className).not.toContain('warn');
+});
+
+test('the session expires after inactivity; invalid scans never refresh, valid interactions do', async () => {
+  const input = await renderStation();
+  vi.useFakeTimers();
+
+  // Re-arm the sliding deadline under fake timers with one valid
+  // interaction (a successfully resolved PN scan), then cancel the
+  // dialog — Cancel itself never writes.
+  scan('PF:PN:118-052');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // 19 of 20 minutes pass — an INVALID scan must not refresh.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(19 * 60_000);
+  });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  scan('NOT-A-PARTFLOW-BARCODE');
+  // Near-expiration warning tone on the countdown (~1 minute left).
+  expect(document.querySelector('.ss-pill .sub')?.className).toContain('warn');
+  expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
+    /^Worker session · (\d+s|1m) remaining$/,
+  );
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000 + 1_000);
+  });
+  // Expired: only the Scan Station is blocked, with the exact modal copy.
+  const expired = screen.getByRole('dialog', {
+    name: 'Worker session expired',
+  });
+  expect(expired).toHaveTextContent('Scan your badge to continue.');
+  expect(input).toBeDisabled();
+  expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
+    'No Worker signed in',
+  );
+
+  // A valid badge scan continues the session.
+  signInIfPrompted();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  vi.useRealTimers();
+  await waitFor(() => expect(input).toBeEnabled());
+});
+
+test('a valid production interaction slides the deadline — no expiry at the original time', async () => {
+  await renderStation();
+  vi.useFakeTimers();
+
+  scan('PF:PN:118-052');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // 19 minutes in, a VALID interaction refreshes the timeout…
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(19 * 60_000);
+  });
+  scan('PF:PN:118-052');
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
+
+  // …so 19 further minutes later the session is still alive.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(19 * 60_000);
+  });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
+    'H. Nguyen',
+  );
+});
+
+test('expiry with an open production dialog preserves the draft and blocks confirmation until a badge scan', async () => {
+  await renderStation();
+  vi.useFakeTimers();
+
+  // Open a transfer and edit the quantity — the draft to preserve.
+  scan('PF:PN:118-052');
+  const transfer = activeDialog();
+  fireEvent.keyDown(transfer, { key: 'Delete' });
+  fireEvent.keyDown(transfer, { key: '3' });
+  expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
+
+  // The session expires while the dialog is open: the badge modal
+  // renders ON TOP; the production dialog stays mounted underneath
+  // with its selections intact.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20 * 60_000 + 1_000);
+  });
+  const dialogs = screen.getAllByRole('dialog');
+  expect(dialogs.length).toBe(2);
+  expect(
+    screen.getByRole('dialog', { name: 'Worker session expired' }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
+
+  // Badge scan → the workflow continues where it was and records.
+  signInIfPrompted('100517');
+  expect(screen.getAllByRole('dialog').length).toBe(1);
+  expect(screen.getByLabelText('Quantity: 3')).toBeInTheDocument();
+  fireEvent.keyDown(activeDialog(), { key: 'Enter' });
+  fireEvent.keyDown(activeDialog(), { key: 'Enter' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(lastPnText()).toBe('118-052');
+  vi.useRealTimers();
+});
+
+test('a Fixed-Worker Area shows the configured Worker and never a badge modal', async () => {
+  await renderStation('CUT-ST-01');
+
+  // No sign-in modal, station immediately usable.
+  expect(screen.queryByRole('dialog')).toBeNull();
+  const pill = document.querySelector('.ss-pill')!;
+  expect(pill.querySelector('.avatar')?.textContent).toBe('VT');
+  expect(pill.querySelector('.val')?.textContent).toContain('V. Tran');
+  expect(pill.querySelector('.sub')?.textContent).toBe('Fixed Worker');
+
+  // A badge scan performs no sign-in here — explanatory notice only.
+  scan('100482');
+  const toast = document.querySelector('.ss-toast.warn')!;
+  expect(toast.textContent).toContain(
+    'Worker badge scans are not used in this Area',
+  );
+  expect(toast.textContent).toContain(
+    'This Area records its configured Worker automatically.',
+  );
+  expect(pill.querySelector('.val')?.textContent).toContain('V. Tran');
+});
+
+test('a Disabled Area shows the quiet marker and records no Worker', async () => {
+  await renderStation('EXT-ST-01');
+
+  expect(screen.queryByRole('dialog')).toBeNull();
+  const pill = document.querySelector('.ss-pill')!;
+  expect(pill.className).toContain('off');
+  expect(pill.textContent).toBe('Worker ID disabled');
+  expect(pill.querySelector('.avatar')).toBeNull();
+
+  // Badge scans: explanatory notice, no session.
+  scan('100482');
+  expect(document.querySelector('.ss-toast.warn')?.textContent).toContain(
+    'This Area does not record Worker identity.',
+  );
+
+  // A completed action carries NO Worker row in its confirmation.
+  fireEvent.click(
+    screen.getAllByRole('button', { name: 'Complete Area processing' })[0],
+  );
+  const dialog = activeDialog();
+  fireEvent.keyDown(dialog, { key: 'Enter' }); // quantity → confirmation
+  expect(dialog.textContent).not.toContain('Worker');
+  fireEvent.keyDown(dialog, { key: 'Enter' }); // confirm
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // Undo too: no Worker context anywhere.
+  fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
+  const undoDialog = await screen.findByRole('dialog', {
+    name: 'Reverse the last Part Number action?',
+  });
+  expect(undoDialog.textContent).not.toContain('Worker');
+  expect(undoDialog.textContent).not.toContain('Reversed by');
+});
+
+test('Undo needs no extra badge scan; the reversal records the Worker active at confirmation', async () => {
+  await renderStation(); // signed in as H. Nguyen
+
+  // Complete one operation under H. Nguyen.
+  scan('PF:PN:118-052');
+  enterThroughConfirmation();
+  expect(lastPnText()).toBe('118-052');
+
+  // Switch the active Worker, then Undo — no extra badge scan is
+  // required; the confirmation separates the original action's Worker
+  // from the reversing Worker.
+  scan('100517');
+  fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Reverse the last Part Number action?',
+  });
+  const rows = Array.from(dialog.querySelectorAll('.ss-confirm dt'), (dt) => [
+    dt.textContent,
+    (dt.nextElementSibling as HTMLElement | null)?.textContent,
+  ]);
+  expect(rows).toContainEqual(['Worker', 'H. Nguyen']);
+  expect(rows).toContainEqual(['Reversed by', 'V. Tran']);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    screen.getByText(/Last action reversed — 118-052/),
+  ).toBeInTheDocument();
 });

@@ -23,6 +23,26 @@ export interface MockAdminAreaRow {
   active: boolean;
 }
 
+/** The three per-Area Worker ID modes (PROJECT_PROFILE §8.13/§19). */
+export type WorkerIdMode = 'disabled' | 'fixed' | 'scanned';
+
+/**
+ * Typed Worker ID mode of one Area, derived from the same configuration
+ * rows the Administration Areas table displays — one source, no
+ * duplicate mode registry.
+ */
+export function workerIdModeFor(areaKey: string): WorkerIdMode {
+  const row = MOCK_ADMIN_AREAS.find((r) => r.areaKey === areaKey);
+  switch (row?.workerMode) {
+    case 'Fixed Worker':
+      return 'fixed';
+    case 'Scanned session':
+      return 'scanned';
+    default:
+      return 'disabled';
+  }
+}
+
 export const MOCK_ADMIN_AREAS: MockAdminAreaRow[] = [
   {
     areaKey: 'material',
@@ -148,7 +168,8 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     phase: 'full',
     group: 'Organization',
     label: 'Workers',
-    subtitle: 'Workers and badge barcodes',
+    subtitle:
+      'Worker profiles — name, badge barcode (existing employee badge), avatar, active status; separate from Users (§8.13)',
   },
   {
     id: 'scan-stations',
@@ -190,7 +211,8 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     phase: 'full',
     group: 'Policies',
     label: 'Worker sessions',
-    subtitle: 'Worker session lifetime policies (§19)',
+    subtitle:
+      'Scanned-session sliding inactivity timeout — one default value with per-Area overrides; no shift schedules (§19)',
   },
   {
     id: 'machine-assignment',
@@ -206,6 +228,14 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     group: 'Policies',
     label: 'Correction permissions',
     subtitle: 'Who may correct, with reasons (§16)',
+  },
+  {
+    id: 'department-display',
+    phase: 'full',
+    group: 'Policies',
+    label: 'Department display settings',
+    subtitle:
+      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
   },
   {
     id: 'data-retention',

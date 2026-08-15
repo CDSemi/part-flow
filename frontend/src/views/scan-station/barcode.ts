@@ -22,7 +22,6 @@
 export type ParsedScan =
   | { kind: 'pn'; pn: string }
   | { kind: 'machine'; id: string }
-  | { kind: 'worker'; id: string }
   | { kind: 'area'; id: string }
   | { kind: 'scrap' }
   | { kind: 'empty' }
@@ -69,9 +68,14 @@ export function normalizePartNumber(input: string): string | null {
 
 /**
  * Classify one scanned value. The `PF:` prefixes are exact (PartFlow
- * prints its own barcodes); anything else is unknown and rejected —
- * unrelated factory/vendor barcodes are never treated as PartFlow
- * entities, and raw PN text is never auto-accepted as a barcode.
+ * prints its own barcodes); anything else parses as `unknown` here.
+ * Worker badges are deliberately NOT a `PF:` format (PROJECT_PROFILE
+ * §10, v18): the badge barcode is the company's existing employee
+ * badge, so the Scan Station resolution layer exact-matches an
+ * `unknown` value against active Worker badge barcodes before
+ * rejecting it. Everything else stays rejected — unrelated
+ * factory/vendor barcodes are never treated as PartFlow entities, and
+ * raw PN text is never auto-accepted as a barcode.
  */
 export function parseScan(raw: string): ParsedScan {
   const value = normalizeScanInput(raw);
@@ -87,10 +91,6 @@ export function parseScan(raw: string): ParsedScan {
   if (value.startsWith('PF:MACHINE:')) {
     const id = value.slice('PF:MACHINE:'.length).trim();
     return id ? { kind: 'machine', id } : { kind: 'unknown', raw: value };
-  }
-  if (value.startsWith('PF:WORKER:')) {
-    const id = value.slice('PF:WORKER:'.length).trim();
-    return id ? { kind: 'worker', id } : { kind: 'unknown', raw: value };
   }
   if (value.startsWith('PF:AREA:')) {
     const id = value.slice('PF:AREA:'.length).trim();

@@ -1,4 +1,4 @@
-# PartFlow Project Profile v17
+# PartFlow Project Profile v18
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -540,6 +540,8 @@ Worker identity exists for accountability and reporting.
 
 Production correctness must not depend on Worker identity.
 
+A Worker exists only within the Scan Station scope and is a different concept from a User: a **User** is an application account for Management, Administration and the other non-Scan-Station views; a **Worker** is the audit identity of the person operating a Scan Station. A Worker badge never logs into PartFlow, and a Worker Session is never an authentication session. Workers and Users are never merged into one entity.
+
 ---
 
 # 8. Domain Model
@@ -939,15 +941,17 @@ Rules:
 
 ## 8.13 Worker
 
-Represents an operator.
+Represents an operator (§7 Worker — Scan-Station-scoped audit identity, never an application account).
 
-Typical attributes (illustrative only):
+Attributes:
 
-- `id`
-- `employee_number`
+- `id` — stable internal identity
 - `name`
-- `barcode_value`
+- `badge_barcode` — the barcode already printed on the company's existing employee badge (§10); unique among Workers
+- `avatar`
 - `is_active`
+
+Workers have **no employee number**.
 
 Worker identification is configurable per Area.
 
@@ -955,7 +959,7 @@ Supported modes:
 
 - disabled,
 - fixed Worker,
-- scanned Worker Session.
+- scanned Worker Session (§19 — sliding inactivity timeout).
 
 Worker identity must not control production business rules.
 
@@ -990,12 +994,13 @@ Logical formats:
 ```text
 PF:PN:<part-number>
 PF:MACHINE:<asset-tag>
-PF:WORKER:<stable-id>
 PF:AREA:<stable-id>
 PF:SCRAP
 ```
 
 The `PF:` namespace exists to identify PartFlow-owned barcodes, determine the entity type safely, and avoid confusing unrelated factory or vendor barcodes with PartFlow entities.
+
+**Worker badges are the one deliberate exception to the `PF:` namespace (v18 — supersedes the former `PF:WORKER:<stable-id>` format, which no longer exists):** the Worker badge barcode is the barcode already printed on the company's existing employee badge — PartFlow never prints or requires a dedicated Worker barcode. A scanned value outside the `PF:` namespace is **exact-matched** against the `badge_barcode` values of **active** Workers (§8.13); on exactly one match it identifies that Worker, otherwise it is an unknown barcode and is rejected with nothing recorded — never guessed. Badge barcodes must stay unique among Workers, and an inactive Worker's badge matches nothing.
 
 The Machine barcode carries the Machine's Asset Tag (§8.6) — the automatically assigned, immutable identity of the physical machine (`Asset Tag CD-0512` → scanned barcode `PF:MACHINE:CD-0512`). There is no independent Machine barcode identifier and no manual Machine barcode entry.
 
@@ -1417,6 +1422,8 @@ Instead, the system must:
 
 Undo targets the most recent eligible **completed PN operation** and always shows a summary confirmation first (PN, original action, quantity, source and destination, Machine where applicable, Worker, timestamp, and the effect of the reversal); Cancel performs no write. After a confirmed Undo the “last scanned PN” context advances to the next eligible previous operation; Undo disables when nothing is eligible.
 
+Undo never requires its own badge scan (v18). The Worker recorded on the reversal follows the Area's Worker ID mode (§19): disabled records no Worker; fixed Worker records the configured Worker; a valid scanned Worker Session records the **Worker active at the moment the Undo is confirmed**. In scanned-session mode with no active or an expired session, the Scan Station is already blocked until a valid badge scan (§19) — so Undo is only reachable with a valid session.
+
 Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row.
 
 Operators may undo only recent eligible actions when authorized.
@@ -1606,10 +1613,19 @@ Supported modes:
 
 When Worker scanning is enabled:
 
-- scanning a Worker barcode activates that Worker,
+- scanning a Worker badge activates that Worker,
 - subsequent scans use the active Worker,
 - a Worker scan never replaces the last-scanned-PN context,
+- scanning a different active Worker's badge switches the active Worker immediately — no sign-out step,
 - the session ends when another Worker signs in, the Worker signs out, or the session expires.
+
+**Expiration (v18 — the rules are decided):** a scanned Worker Session expires through a **sliding inactivity timeout**, never at a shift boundary — there is no shift-end concept and no shift-schedule management:
+
+- the timeout value is configured in Administration → Worker sessions: one default policy value with optional per-Area overrides; it is never inferred from the number of Workers in an Area;
+- every valid production interaction at the Scan Station refreshes the timeout — a successfully resolved scan, a confirmed production command, a valid badge scan; invalid or unknown scans never refresh it;
+- on expiration **only the Scan Station is blocked**: it shows a blocking badge-scan modal (`Worker session expired` / `Scan your badge to continue.`); every other application view is unaffected;
+- a Scan Station in scanned-session mode opened without an active session shows the same blocking badge-scan requirement before production interaction;
+- if a production dialog is open at expiration, its draft and selections are preserved, but production confirmation stays blocked until a valid badge scan; afterwards the workflow continues where it was.
 
 Worker identity is accountability metadata and must never determine business correctness.
 
@@ -1700,7 +1716,7 @@ Requirements:
 - immediate validation feedback,
 - visible Department, Area identity/color, and Operations,
 - visible Area statistics in the header, the single Area summary surface (Areas with Machines: Total PNs, Total pcs, Queued, On machines, Done, Hot — reconciling as Total pcs = Queued + On machines + Done; Areas without Machines: Total PNs, Total pcs, Processing, Done, Hot — reconciling as Total pcs = Processing + Done; semantic number tones: Queued warning, On machines/Processing information, Done success, Hot error),
-- visible active Worker,
+- visible active Worker per the Area's Worker ID mode (§19): the scanned session shows the active Worker with a live remaining-session countdown, a fixed-Worker Area its configured Worker, a disabled Area an explicit disabled marker; a scanned-session Area without an active session — on open or after expiration — blocks only the Scan Station behind a badge-scan modal, preserving any open dialog's draft while blocking production confirmation,
 - visible last scanned PN inside the scan card, with the Undo action anchored at its right edge (only completed PN operations become the last scanned PN; Worker scans and cancelled dialogs never replace it),
 - quantity entry only when required,
 - current Area quantity in the shared Area/Machine monitoring layout (§ Area Board) — the `In this Area now` card left, Machine cards in a right-side grid that wraps within itself; no Machine region for Areas without Machines; Machine cards show the derived operational state with its elapsed time in state (`running · 1h 24m`, derived from the state-change timestamp — §8.6) and, under maintenance, the maintenance note and expected return date,
@@ -1715,13 +1731,13 @@ There is no persistent Machine Session, no pending armed context, and no Recent 
 
 ## Production Board
 
-The Production Board is a read-only large-screen Department display.
+The Production Board is a read-only large-screen Department display. It is Department-wide only: there is **no per-Area filtered mode** (v18 — decided) — per-Area monitoring is the Area Board's responsibility, and the two views never duplicate each other.
 
 Requirements:
 
 - readable from a distance,
 - automatic pagination,
-- automatic page rotation with a dwell time **proportional to the rows displayed on the current page** (default 3 seconds per displayed row, with a 6-second minimum page dwell); the rotation countdown indicator uses the same deadline and the same per-page duration; the values are configuration (future Administration → Department display settings, §22) — never hard-coded UI constants,
+- automatic page rotation with a dwell time **proportional to the rows displayed on the current page** (default 3 seconds per displayed row, with a 6-second minimum page dwell); the rotation countdown indicator uses the same deadline and the same per-page duration; the values are configuration **per Department** (future Administration → Department display settings, §22 — never global, never hard-coded UI constants),
 - dynamic rows per page,
 - priority and due-date sorting following the canonical demand ordering (§18),
 - overdue highlighting,
@@ -1931,14 +1947,14 @@ Priority belongs to Work Order Demand.
 The Hot list is managed within the Department:
 
 1. Show Hot Work Order Demand sorted by explicit priority rank.
-2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode.
+2. Add Work Order Demand to the Hot list by searching and selecting, or by scanning the PN barcode. A scanned PN barcode resolves deterministically (v18): no eligible Work Order Demand adds nothing; exactly one is added directly; more than one filters the candidate list to that PN and requires an explicit selection of the specific Work Order Demand — never a first-match guess.
 3. If a PN has multiple active Work Order Demand records, each Work Order Demand is selected and ranked separately.
 4. Add new Hot entries at the bottom by default; adding at the bottom applies directly.
 5. Allow drag-and-drop reordering.
 6. Allow removing an entry from the Hot list only after an explicit confirmation that identifies the PN and Work Order Demand; cancelling changes nothing. After confirmation the remaining ranks close the gap.
 7. Require explicit confirmation before applying any operation that changes the order of existing Hot entries — drag-and-drop, Move Up, Move Down, Undo, and Redo. The confirmation identifies the affected PN and Work Order Demand, the previous rank, the proposed new rank, and the action type; cancelling leaves the list and both histories unchanged, and the visible list is never renumbered before confirmation.
 8. Apply every confirmed Hot list change and record it in the audit trail.
-9. Provide Undo and Redo for recent Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation.
+9. Provide Undo and Redo for Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation. Undo/Redo depth is unlimited within the current application session (v18) — no numeric limit; the history ends with the session.
 10. Use the stored rank as the highest work and allocation priority.
 
 Multiple Work Orders requesting the same PN may have different priorities.
@@ -1953,13 +1969,14 @@ Administration stays focused on system administration:
 - Areas,
 - Operations,
 - Scan Stations,
-- Workers,
+- Workers (profiles — name, badge barcode, avatar, active status; §8.13 — kept separate from user accounts, never merged),
 - users,
 - roles,
 - permissions,
 - barcode configuration (the `PF:` prefix scheme and the Machine Asset Tag format — prefix + zero-padded numeric sequence, §8.6, §10),
 - scan behavior,
-- Worker policies,
+- Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides, §19),
+- Department display settings (per Department — including the Production Board rotation timing, §21),
 - history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
 - application settings.
 
@@ -2288,10 +2305,9 @@ Do not introduce these responsibilities without an explicit project decision.
 Only the following unresolved decisions remain:
 
 1. Whether stocked quantity may be returned to active production through a controlled reversal.
-2. The exact expiration rules for Worker sessions.
-3. Whether offline scan synchronization will be included in a later release.
+2. Whether offline scan synchronization will be included in a later release.
 
-(The former scrap question is resolved: `SCRAPPED` is a first-class Movement type, §8.11/§11. Machine sessions no longer exist, so no expiration rule applies to them.)
+(The former scrap question is resolved: `SCRAPPED` is a first-class Movement type, §8.11/§11. Machine sessions no longer exist, so no expiration rule applies to them. The former Worker-session expiration question is resolved in v18: scanned Worker Sessions expire through a configurable sliding inactivity timeout — Administration default with per-Area overrides, §19.)
 
 Implementations must avoid assumptions that make these decisions difficult to change.
 

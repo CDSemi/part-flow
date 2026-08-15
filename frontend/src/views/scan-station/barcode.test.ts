@@ -41,13 +41,24 @@ test('an empty PN suffix is not a valid PN barcode', () => {
   expect(parseScan('PF:PN:   ')).toEqual({ kind: 'unknown', raw: 'PF:PN:' });
 });
 
-test('entity prefixes classify Machine, Worker and Area barcodes', () => {
+test('entity prefixes classify Machine and Area barcodes', () => {
   expect(parseScan('PF:MACHINE:CD-0105')).toEqual({
     kind: 'machine',
     id: 'CD-0105',
   });
-  expect(parseScan('PF:WORKER:88')).toEqual({ kind: 'worker', id: '88' });
   expect(parseScan('PF:AREA:LATHE')).toEqual({ kind: 'area', id: 'LATHE' });
+});
+
+test('there is no PF:WORKER format — Worker badges are non-PF values (v18)', () => {
+  // The former PF:WORKER namespace no longer exists: Worker badges are
+  // the company's existing employee badges, exact-matched against the
+  // Worker registry by the Scan Station resolution layer — parseScan
+  // itself classifies them (and any other non-PF value) as unknown.
+  expect(parseScan('PF:WORKER:88')).toEqual({
+    kind: 'unknown',
+    raw: 'PF:WORKER:88',
+  });
+  expect(parseScan('100482')).toEqual({ kind: 'unknown', raw: '100482' });
 });
 
 test('PF:SCRAP is its own dedicated barcode kind', () => {

@@ -5,8 +5,12 @@ import { ThemeContext } from './theme-context';
 import type { Theme } from './theme-context';
 
 // Dark is the default: PartFlow is shop-floor first (GUI_DESIGN §2.1).
-// The choice is session-only — persistence (per user / per station) is an
-// open decision (GUI_DESIGN §17) and is intentionally not invented here.
+// The decided persistence model (GUI_DESIGN §2.1, post-v18) is per User
+// AND per Scan Station, resolved authenticated User preference → Scan
+// Station preference → Dark default; Worker Sessions never affect the
+// theme. Users and Scan Station configuration do not exist in Phase 2,
+// so the mock keeps the choice session-only until they do
+// (IMPLEMENTATION_ROADMAP Phase 3.5 / Phase 13).
 const DEFAULT_THEME: Theme = 'dark';
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

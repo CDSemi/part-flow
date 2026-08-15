@@ -484,7 +484,8 @@ export interface MockCompletedAction {
   source: string;
   destination: string;
   machine?: string;
-  worker: string;
+  /** Recorded Worker, or null when the Area's Worker ID mode is Disabled. */
+  worker: string | null;
   time: string;
   /** What the compensating reversal restores. */
   reversalEffect: string;

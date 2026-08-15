@@ -18,8 +18,9 @@ export const FALLBACK_PAGE_SIZE = 10;
  * for every page — with a floor so a near-empty last page never
  * flashes past. These named defaults are deliberately NOT inlined in
  * the component: a future Administration page exposes them as
- * Department display settings (see GUI_DESIGN §5 / §9); the board
- * consumes only `rotationDurationMs`.
+ * Department display settings, configured PER DEPARTMENT — never
+ * globally (GUI_DESIGN §5 / §9, decided post-v18); the board consumes
+ * only `rotationDurationMs`.
  */
 /**
  * A location dwell of at least this long (3 days) is flagged as an

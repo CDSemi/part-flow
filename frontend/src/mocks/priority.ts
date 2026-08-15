@@ -42,6 +42,10 @@ export const MOCK_HOT_LIST: MockHotEntry[] = [
 ];
 
 export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
+  // TWO active WO Demands share PN 0455-20-0118-03: scanning its PN
+  // barcode is deliberately ambiguous — the add dialog filters to the
+  // PN and requires an explicit Work Order selection, never a
+  // first-match guess (PROJECT_PROFILE §21 Priority Management).
   {
     pn: '0455-20-0118-03',
     workOrder: 'WO 007003 · Job 18190',
@@ -55,6 +59,16 @@ export const MOCK_HOT_CANDIDATES: MockHotEntry[] = [
       'at Material 8 · Lathe 4',
     ],
     due: isoDateIn(9),
+    barcode: 'PF:PN:0455-20-0118-03',
+  },
+  {
+    pn: '0455-20-0118-03',
+    workOrder: 'WO 007014 · Job 18544',
+    workOrderNumber: '007014',
+    jobNumber: '18544',
+    type: 'MODIFY',
+    figures: ['requested 3', 'allocated 0', 'shortage 3', 'not yet released'],
+    due: isoDateIn(4),
     barcode: 'PF:PN:0455-20-0118-03',
   },
   {

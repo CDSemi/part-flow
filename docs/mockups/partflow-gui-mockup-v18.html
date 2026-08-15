@@ -253,9 +253,8 @@ body.prodmode #ssthemebtn{display:inline-flex}
 }
 .ss-pill{display:flex;flex-direction:column;gap:3px;background:var(--panel2);border:1px solid var(--border);
   border-radius:12px;padding:9px 14px;min-width:150px}
-.ss-pill .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:750}
 .ss-pill .val{font-size:16px;font-weight:750;display:flex;align-items:center;gap:7px}
-.ss-pill .val .sdot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.ss-pill .avatar{width:22px;height:22px;border-radius:50%;background:var(--info-surface,rgba(79,140,255,.12));color:var(--info-t,#4f8cff);border:1px solid var(--info-border,rgba(79,140,255,.25));font-size:9.5px;font-weight:800;letter-spacing:.5px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ss-pill .sub{font-size:10.5px;color:var(--faint)}
 #conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel2)}
 #conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok);
@@ -1447,10 +1446,12 @@ body.light{color-scheme:light}
            column stretches to match it. No enclosing frame and no
            separator. -->
       <div class="ss-headgroup">
+        <!-- post-v18: avatar + Worker name over the sliding-timeout
+             session countdown — the shift-end session window no longer
+             exists. -->
         <div class="ss-pill">
-          <span class="lbl">Worker session</span>
-          <span class="val" id="pill-worker"><span class="sdot"></span>H. Nguyen</span>
-          <span class="sub" id="pill-workersub">from 06:12 to 18:00</span>
+          <span class="val" id="pill-worker"><span class="avatar">HN</span>H. Nguyen</span>
+          <span class="sub" id="pill-workersub">Worker session · 12m remaining</span>
         </div>
         <div class="ss-headactions">
           <button id="conn" onclick="toggleOffline()" title="Click to simulate offline">
@@ -1479,7 +1480,7 @@ body.light{color-scheme:light}
                then Last scanned PN / Undo. DOM order = visual order. -->
           <div id="manualcap">Use manual entry only when the scanner is unavailable. The Part
             Number will be validated before any action is recorded.</div>
-          <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span><span class="dev-notice-content">Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>PF:WORKER:88</code> worker</span></p>
+          <p class="dev-notice" role="note"><span class="dev-notice-tag">DEV</span><span class="dev-notice-content">Demo barcodes (development build only) — <code>PF:PN:&lt;part-number&gt;</code> (e.g. <code>PF:PN:2027-60-8114-00</code> in this Area · <code>PF:PN:118-052</code> elsewhere · <code>PF:PN:NEW-PART-01</code> unknown → intake) · <code>PF:MACHINE:L2</code> assign to Machine · <code>100517</code> worker badge</span></p>
           <div class="ss-lastpnlabel">Last scanned PN</div>
           <!-- Two explicit regions (station-card division): info left,
                the Undo ACTION REGION is the block's right edge — its own
@@ -2393,7 +2394,9 @@ const SS_STATIONS=[
   {id:'DEBURR-ST-01',dept:'Machine Shop',area:'deburr'},
   {id:'EXT-ST-01',dept:'Machine Shop',area:'external'}
 ];
-const SS_WORKER_BARCODES={'88':'V. Tran','12':'H. Nguyen'};
+/* Worker badges are the company's existing employee badges (non-PF
+   values, PROJECT_PROFILE §10): exact-matched against active Workers. */
+const SS_WORKER_BADGES={'100517':['V. Tran','VT'],'100482':['H. Nguyen','HN']};
 const SS_MACHINE_BARCODES={L1:['Lathe 1','lathe'],L2:['Lathe 2','lathe'],L3:['Lathe 3','lathe'],L4:['Lathe 4','lathe'],S1:['Saw 1','cut']};
 const SCRAP_BARCODE='PF:SCRAP';
 /* Downstream quantity that previously visited the station's Area and may
@@ -2432,7 +2435,7 @@ function parseScan(raw){
     const pn=normalizePN(v.slice('PF:PN:'.length));
     return pn?{kind:'pn',value:pn}:{kind:'unknown',raw:v};
   }
-  const prefixes=[['PF:MACHINE:','machine'],['PF:WORKER:','worker'],['PF:AREA:','area']];
+  const prefixes=[['PF:MACHINE:','machine'],['PF:AREA:','area']];  /* PF:WORKER no longer exists (v18) */
   for(const [pre,kind] of prefixes){
     if(v.indexOf(pre)===0){
       const rest=v.slice(pre.length).trim();
@@ -2644,18 +2647,6 @@ function doScan(){
       feedback('err','Scrap barcode cannot be used here',
         'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.','✕');
       return;
-    case 'worker':{
-      const name=SS_WORKER_BARCODES[p.value];
-      if(!name){ feedback('err','Worker badge not recognized','Check the badge and scan again. No changes were recorded.','✕'); return; }
-      ssWorker=name;
-      document.getElementById('pill-worker').innerHTML='<span class="sdot"></span>'+name;
-      /* New badge scan opens a new session window: from <scan time> to <shift end>. */
-      document.getElementById('pill-workersub').textContent='from '+new Date().toTimeString().slice(0,5)+' to 18:00';
-      /* A Worker scan never replaces the Last Scanned PN. */
-      feedback('ok','Worker signed in: '+name,
-        'The previous worker was signed out. New scans will be recorded under '+name+'.','✓');
-      return;
-    }
     case 'machine':{
       const m=SS_MACHINE_BARCODES[p.value];
       if(!m){ feedback('err','Machine barcode not recognized','Check the Machine barcode and scan again. No changes were recorded.','✕'); return; }
@@ -2679,9 +2670,25 @@ function doScan(){
     case 'pn':
       ssOpenPnFlow(p.value);
       return;
-    default:
+    default:{
+      /* A non-PF value is first exact-matched against active Worker
+         badge barcodes (the company's existing employee badges) —
+         unknown or ambiguous values are rejected, never guessed. */
+      const w=SS_WORKER_BADGES[p.raw];
+      if(w){
+        ssWorker=w[0];
+        document.getElementById('pill-worker').innerHTML='<span class="avatar">'+w[1]+'</span>'+w[0];
+        /* Badge scan opens/switches the session and restarts the
+           sliding inactivity countdown (mock value). */
+        document.getElementById('pill-workersub').textContent='Worker session · 20m remaining';
+        /* A Worker scan never replaces the Last Scanned PN. */
+        feedback('ok','Worker signed in: '+w[0],
+          'New actions will be recorded under '+w[0]+'.','✓');
+        return;
+      }
       feedback('err','Barcode not recognized',
-        'Scan a PartFlow Part Number, Worker, or Machine barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.','✕');
+        'Scan a PartFlow Part Number or Machine barcode, or a registered Worker badge. To type a Part Number, select “Enter PN manually.” No changes were recorded.','✕');
+    }
   }
 }
 /* Route a resolved PN to the applicable one-shot dialog (§4.7). */

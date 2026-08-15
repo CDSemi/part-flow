@@ -35,18 +35,23 @@ import {
 } from '../../mocks/area-board';
 import { areaByKey } from '../../mocks/areas';
 import { activeMachines } from '../../mocks/machines';
+import { workerIdModeFor } from '../../mocks/administration';
+import type { WorkerIdMode } from '../../mocks/administration';
 import {
+  fixedWorkerFor,
   MOCK_MACHINE_BARCODES,
   MOCK_REPAIR_SOURCES,
   MOCK_SCAN_STATIONS,
-  MOCK_WORKER,
-  MOCK_WORKER_BARCODES,
   stationById,
+  workerByBadge,
+  workerSessionTimeoutMinutes,
 } from '../../mocks/scan-station';
+import type { MockWorker } from '../../mocks/scan-station';
 import { catalogPartNumber } from '../../mocks/work-orders';
 import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
-import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
+import { useUiClock } from '../../components/ui-clock';
+import { formatIsoDate, todayIso } from '../dates';
 import type {
   MockAreaCard,
   MockAreaMachine,
@@ -56,7 +61,12 @@ import type {
   RequestType,
   RouteMode,
 } from '../view-models';
-import { normalizePartNumber, parseScan, SCRAP_BARCODE } from './barcode';
+import {
+  normalizePartNumber,
+  normalizeScanInput,
+  parseScan,
+  SCRAP_BARCODE,
+} from './barcode';
 import {
   applyAssign,
   applyDone,
@@ -352,10 +362,52 @@ function StationView({
   // Decided once per station lifecycle — pointer capabilities do not
   // change while the station is open (same pattern as QuantityKeypad).
   const [touchPrimary] = useState(isTouchPrimaryDevice);
-  const [worker, setWorker] = useState(MOCK_WORKER.name);
-  // Fixed timestamp of the badge scan that opened the current Worker
-  // session — the pill shows `from <scan time> to <shift end>`.
-  const [workerSince, setWorkerSince] = useState(MOCK_WORKER.since);
+  // Worker identification follows the Area's configured Worker ID mode
+  // (PROJECT_PROFILE §19): Disabled records no Worker, Fixed Worker
+  // records the Area's configured Worker, Scanned session requires an
+  // active Worker Session opened by a badge scan.
+  const workerMode = workerIdModeFor(station.area);
+  const fixedWorker =
+    workerMode === 'fixed' ? fixedWorkerFor(station.area) : null;
+  const sessionTimeoutMs = workerSessionTimeoutMinutes(station.area) * 60_000;
+  // Scanned-session state: the sliding inactivity deadline moves
+  // forward with every VALID production interaction (refreshSession);
+  // invalid or unknown scans never refresh it. No session exists until
+  // the first badge scan.
+  const [session, setSession] = useState<{
+    worker: MockWorker;
+    expiresAt: number;
+  } | null>(null);
+  // Expiration flips through a timer aimed at the sliding deadline —
+  // the displayed countdown derives from the shared UI clock inside
+  // the Worker pill (§4.3), so the big station surface never
+  // re-renders per tick.
+  const [sessionExpired, setSessionExpired] = useState(false);
+  useEffect(() => {
+    if (workerMode !== 'scanned' || !session) return;
+    setSessionExpired(false);
+    const ms = session.expiresAt - Date.now();
+    if (ms <= 0) {
+      setSessionExpired(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setSessionExpired(true), ms);
+    return () => window.clearTimeout(timer);
+  }, [session, workerMode]);
+  // The station is session-blocked in Scanned-session mode until a
+  // valid badge scan: on open (no session yet) and after expiration.
+  // ONLY the Scan Station is blocked — the badge modal exists on this
+  // route alone, and an open production dialog keeps its draft
+  // underneath while confirmation stays blocked (§4.12).
+  const sessionBlocked =
+    workerMode === 'scanned' && (!session || sessionExpired);
+  const activeWorker: MockWorker | null =
+    workerMode === 'fixed'
+      ? fixedWorker
+      : workerMode === 'scanned' && session && !sessionExpired
+        ? session.worker
+        : null;
+  const workerName = activeWorker?.name ?? null;
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   // Session-local copy of the mock Area cards (all Areas): confirmed
@@ -417,6 +469,40 @@ function StationView({
   useEffect(() => {
     if (!writeBlocked) focusScan();
   }, [writeBlocked, focusScan]);
+
+  /**
+   * Slide the Scanned-session inactivity deadline forward — called on
+   * every VALID production interaction (a successfully resolved PN or
+   * Machine scan, a confirmed command, a valid badge scan). Invalid,
+   * unknown, or rejected scans never call this (§19).
+   */
+  const refreshSession = useCallback(() => {
+    setSession((current) =>
+      current ? { ...current, expiresAt: Date.now() + sessionTimeoutMs } : null,
+    );
+  }, [sessionTimeoutMs]);
+
+  /**
+   * Open (or switch to) a Worker Session from a valid badge scan.
+   * Scanning a different active Worker's badge switches the active
+   * Worker immediately — no sign-out step (§19).
+   */
+  const signInWorker = useCallback(
+    (worker: MockWorker) => {
+      const previous = session?.worker ?? null;
+      setSession({ worker, expiresAt: Date.now() + sessionTimeoutMs });
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `Worker signed in: ${worker.name}`,
+        detail:
+          previous && previous.id !== worker.id
+            ? `${previous.name} was signed out. New actions will be recorded under ${worker.name}.`
+            : `New actions will be recorded under ${worker.name}.`,
+      });
+    },
+    [session, sessionTimeoutMs],
+  );
 
   const areaCards = useMemo(
     () =>
@@ -486,8 +572,10 @@ function StationView({
     area,
     areaCards,
     hasMachines,
-    worker,
-    workerSince,
+    workerMode,
+    activeWorker,
+    session,
+    sessionExpired,
     productionMode,
     status,
   ]);
@@ -569,8 +657,11 @@ function StationView({
         { action: command.action, reversed: false, before },
         ...current,
       ]);
+      // A confirmed production command is a valid production
+      // interaction — it slides the Worker Session deadline (§19).
+      refreshSession();
     },
-    [allCards],
+    [allCards, refreshSession],
   );
 
   const blockedNotice = useCallback(() => {
@@ -618,7 +709,9 @@ function StationView({
   const openPnFlow = useCallback(
     (pn: string, parent?: Flow) => {
       // `pn` is already the canonical PN (parseScan / manual-entry
-      // normalization) — the PN string itself is the identity.
+      // normalization) — the PN string itself is the identity. A
+      // successfully resolved PN is a valid production interaction.
+      refreshSession();
       if (cardsFor(pn).length > 0) {
         setFlow({ kind: 'pn-actions', pn, parent });
         return;
@@ -637,7 +730,7 @@ function StationView({
       // defaults, both editable. The PN is created on first valid use.
       setFlow({ kind: 'intake', pn, parent });
     },
-    [cardsFor, sourcesFor],
+    [cardsFor, sourcesFor, refreshSession],
   );
 
   const handleScan = useCallback(() => {
@@ -667,29 +760,6 @@ function StationView({
             'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.',
         });
         return;
-      case 'worker': {
-        focusScan();
-        const name = MOCK_WORKER_BARCODES[parsed.id];
-        if (!name) {
-          setNotice({
-            kind: 'err',
-            icon: '✕',
-            title: 'Worker badge not recognized',
-            detail: 'Check the badge and scan again. No changes were recorded.',
-          });
-          return;
-        }
-        setWorker(name);
-        setWorkerSince(new Date().toISOString());
-        // A Worker scan never replaces the Last Scanned PN.
-        setNotice({
-          kind: 'ok',
-          icon: '✓',
-          title: `Worker signed in: ${name}`,
-          detail: `The previous worker was signed out. New scans will be recorded under ${name}.`,
-        });
-        return;
-      }
       case 'machine': {
         const machine = MOCK_MACHINE_BARCODES[parsed.id];
         if (!machine) {
@@ -728,6 +798,9 @@ function StationView({
         }
         // One-shot shortcut only: opens the Machine assignment dialog
         // with the Machine preselected. There is NO Machine Session.
+        // A successfully resolved Machine scan is a valid production
+        // interaction — it slides the Worker Session deadline.
+        refreshSession();
         setFlow({
           kind: 'machine-assign',
           machine: machine.machine,
@@ -749,16 +822,42 @@ function StationView({
         // Every PN resolution opens a dialog — no refocus here.
         openPnFlow(parsed.pn);
         return;
-      case 'unknown':
+      case 'unknown': {
         focusScan();
+        // Worker badges are non-PF values (the company's existing
+        // employee badge, PROJECT_PROFILE §10): an unrecognized value
+        // is first exact-matched against ACTIVE Worker badge barcodes.
+        // Unknown or inactive badges fall through to the rejection —
+        // never guessed, and a rejected scan never refreshes the
+        // Worker Session deadline.
+        const badgeWorker = workerByBadge(parsed.raw);
+        if (badgeWorker) {
+          if (workerMode !== 'scanned') {
+            setNotice({
+              kind: 'warn',
+              icon: '⚠',
+              title: 'Worker badge scans are not used in this Area',
+              detail:
+                workerMode === 'fixed'
+                  ? 'This Area records its configured Worker automatically. No changes were recorded.'
+                  : 'This Area does not record Worker identity. No changes were recorded.',
+            });
+            return;
+          }
+          // A Worker scan never replaces the Last Scanned PN; scanning
+          // a different Worker's badge switches immediately (§19).
+          signInWorker(badgeWorker);
+          return;
+        }
         setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Barcode not recognized',
           detail:
-            'Scan a PartFlow Part Number, Worker, or Machine barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
+            'Scan a PartFlow Part Number or Machine barcode, or a registered Worker badge. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
         });
         return;
+      }
     }
   }, [
     writeBlocked,
@@ -767,6 +866,9 @@ function StationView({
     machines,
     station.area,
     openPnFlow,
+    refreshSession,
+    signInWorker,
+    workerMode,
   ]);
 
   // Development-only: a click on a DemoBarcode in the DevNotice is the
@@ -793,7 +895,9 @@ function StationView({
   // active dialog workflow, modifier shortcuts, and normal button
   // activation are all left alone.
   useEffect(() => {
-    if (flow || writeBlocked) return;
+    // While session-blocked the badge modal owns scanning (its own
+    // input is focused); the main-input capture stays inert.
+    if (flow || writeBlocked || sessionBlocked) return;
     function onKeyDown(event: KeyboardEvent) {
       const input = inputRef.current;
       if (!input || event.defaultPrevented) return;
@@ -822,7 +926,7 @@ function StationView({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [flow, writeBlocked, handleScan]);
+  }, [flow, writeBlocked, sessionBlocked, handleScan]);
 
   // Ctrl+Shift+K — convenience toggle between this station's standard
   // and production routes for authorized users. The dedicated route and
@@ -931,7 +1035,7 @@ function StationView({
       className="rowact done"
       aria-label="Complete Area processing"
       title="Complete processing — move this quantity to the finished rack, ready to transfer"
-      disabled={writeBlocked}
+      disabled={writeBlocked || sessionBlocked}
       onClick={() =>
         setFlow({
           kind: 'done',
@@ -955,7 +1059,7 @@ function StationView({
         className="rowact"
         aria-label="Return to Area queue"
         title="Return unfinished or paused quantity to the Area queue"
-        disabled={writeBlocked}
+        disabled={writeBlocked || sessionBlocked}
         onClick={() =>
           setFlow({
             kind: 'queue-return',
@@ -1053,14 +1157,30 @@ function StationView({
             enclosing frame and no separator around the actions. */}
         {productionMode ? (
           <div className="ss-headgroup">
-            <WorkerPill worker={worker} since={workerSince} />
+            <WorkerPill
+              mode={workerMode}
+              worker={activeWorker}
+              expiresAt={
+                workerMode === 'scanned' && session && !sessionExpired
+                  ? session.expiresAt
+                  : null
+              }
+            />
             <div className="ss-headactions">
               <ConnectivityChip />
               <ThemeToggle compact />
             </div>
           </div>
         ) : (
-          <WorkerPill worker={worker} since={workerSince} />
+          <WorkerPill
+            mode={workerMode}
+            worker={activeWorker}
+            expiresAt={
+              workerMode === 'scanned' && session && !sessionExpired
+                ? session.expiresAt
+                : null
+            }
+          />
         )}
       </header>
 
@@ -1088,7 +1208,7 @@ function StationView({
                 // manual PN entry dialog, reasons, notes — keep their
                 // normal soft keyboard.
                 inputMode={touchPrimary ? 'none' : undefined}
-                disabled={writeBlocked}
+                disabled={writeBlocked || sessionBlocked}
                 placeholder={
                   disconnected
                     ? 'Disconnected — scanning disabled'
@@ -1104,7 +1224,7 @@ function StationView({
               <button
                 className="ss-manualbtn"
                 onClick={() => setFlow({ kind: 'manual-pn' })}
-                disabled={writeBlocked}
+                disabled={writeBlocked || sessionBlocked}
               >
                 ⌨ Enter PN manually
               </button>
@@ -1136,7 +1256,7 @@ function StationView({
               unknown → intake) ·{' '}
               <DemoBarcode value="PF:MACHINE:CD-0105" onScan={simulateScan} />{' '}
               assign to Machine ·{' '}
-              <DemoBarcode value="PF:WORKER:88" onScan={simulateScan} /> worker
+              <DemoBarcode value="100517" onScan={simulateScan} /> worker badge
             </DevNotice>
             {/* Compact section label OUTSIDE the block (uppercase via
                 CSS), then one quiet row: PN + movement summary, a
@@ -1159,7 +1279,7 @@ function StationView({
               </div>
               <button
                 className="ss-undo zone-action"
-                disabled={writeBlocked || !eligible}
+                disabled={writeBlocked || sessionBlocked || !eligible}
                 onClick={() => setFlow({ kind: 'undo' })}
               >
                 ⟲ UNDO
@@ -1204,7 +1324,7 @@ function StationView({
           initialPn={flow.pn}
           queuedQtyFor={queuedQtyFor}
           areaCards={areaCards}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1246,7 +1366,7 @@ function StationView({
           pn={flow.pn}
           source={flow.source}
           hasMachines={hasMachines}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1259,7 +1379,7 @@ function StationView({
           station={station}
           pn={flow.pn}
           hasMachines={hasMachines}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1272,7 +1392,7 @@ function StationView({
           station={station}
           pn={flow.pn}
           hasMachines={hasMachines}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1285,7 +1405,7 @@ function StationView({
           station={station}
           pn={flow.pn}
           sources={repairSourcesFor(flow.pn)}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1298,7 +1418,7 @@ function StationView({
           station={station}
           pn={flow.pn}
           available={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1312,7 +1432,7 @@ function StationView({
           pn={flow.pn}
           machine={flow.machine}
           max={flow.max}
-          worker={worker}
+          worker={workerName}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1325,7 +1445,7 @@ function StationView({
           pn={flow.pn}
           machine={flow.machine}
           max={flow.max}
-          worker={worker}
+          worker={workerName}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1336,6 +1456,7 @@ function StationView({
       {flow?.kind === 'undo' && undoTarget() && (
         <UndoConfirmDialog
           target={undoTarget()!}
+          reversedBy={workerName}
           onConfirm={confirmUndo}
           onCancel={cancelFlow}
         />
@@ -1355,6 +1476,24 @@ function StationView({
             // The resolved dialog can go Back to manual entry with the
             // canonical PN preserved for correction.
             openPnFlow(pn, { kind: 'manual-pn', initialPn: pn });
+          }}
+        />
+      )}
+
+      {/* Scanned-session badge modal (§4.12): rendered LAST so it sits
+          above any open production dialog — the dialog's draft and
+          selections stay preserved underneath while confirmation is
+          blocked. It blocks only the Scan Station; it cannot be
+          dismissed without a valid badge scan. */}
+      {sessionBlocked && (
+        <WorkerSignInDialog
+          expired={session !== null}
+          writeBlocked={writeBlocked}
+          onSignIn={(badgeWorker) => {
+            signInWorker(badgeWorker);
+            // Continue where the workflow was: focus returns into the
+            // open dialog if one exists, else the main barcode input.
+            focusScan();
           }}
         />
       )}
@@ -1427,7 +1566,8 @@ function FloatingNotice({
 
 interface ActionDialogProps {
   station: MockScanStation;
-  worker: string;
+  /** Recorded Worker per the Area's Worker ID mode; null = Disabled. */
+  worker: string | null;
   /** Apply one confirmed application command (atomic in mock state). */
   onApply: (command: Command) => void;
   onNotice: (n: Notice) => void;
@@ -1519,23 +1659,154 @@ function AreaChip({
 }
 
 /**
- * Worker Session pill — shared by both header layouts. The sub line is
- * the session window: `from <badge-scan time> to <shift end>` — the
- * from-time is the fixed timestamp of the Worker's badge scan, the
- * to-time the shift end.
+ * Worker pill — shared by both header layouts, following the Area's
+ * Worker ID mode (GUI_DESIGN §4.3, post-v18 — there is no shift-end
+ * concept): Scanned session shows the active Worker's avatar + name
+ * with the live `Worker session · 12m remaining` countdown; Fixed
+ * Worker shows the configured Worker with a static `Fixed Worker` sub
+ * line; Disabled is one quiet muted line.
  */
-function WorkerPill({ worker, since }: { worker: string; since: string }) {
+function WorkerPill({
+  mode,
+  worker,
+  expiresAt,
+}: {
+  mode: WorkerIdMode;
+  worker: MockWorker | null;
+  /** Sliding session deadline (scanned mode with a valid session). */
+  expiresAt: number | null;
+}) {
+  if (mode === 'disabled') {
+    return (
+      <div className="ss-pill off">
+        <span className="val muted">Worker ID disabled</span>
+      </div>
+    );
+  }
   return (
     <div className="ss-pill">
-      <span className="lbl">Worker session</span>
       <span className="val">
-        <span className="sdot" aria-hidden="true" />
-        {worker}
+        {worker ? (
+          <span className="avatar" aria-hidden="true">
+            {worker.avatar}
+          </span>
+        ) : null}
+        {worker?.name ?? 'No Worker signed in'}
       </span>
-      <span className="sub">
-        from {formatTimeOfDay(since)} to {MOCK_WORKER.shiftEnd}
-      </span>
+      {mode === 'fixed' ? (
+        <span className="sub">Fixed Worker</span>
+      ) : (
+        <SessionCountdown expiresAt={expiresAt} />
+      )}
     </div>
+  );
+}
+
+/**
+ * Blocking badge-scan modal of a Scanned-session Area (GUI_DESIGN
+ * §4.12): shown when the station is opened without an active Worker
+ * Session and when the session expires. Only the Scan Station is
+ * blocked; Escape and backdrop clicks never dismiss it — a valid badge
+ * scan is the only way through. Never `unlock` wording.
+ */
+function WorkerSignInDialog({
+  expired,
+  writeBlocked,
+  onSignIn,
+}: {
+  /** true after a session expired; false on first open (no session). */
+  expired: boolean;
+  writeBlocked: boolean;
+  onSignIn: (worker: MockWorker) => void;
+}) {
+  const fieldRef = useRef<HTMLInputElement>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  useEffect(() => {
+    fieldRef.current?.focus();
+  }, []);
+  const title = expired ? 'Worker session expired' : 'Worker sign-in required';
+  function submit() {
+    const value = normalizeScanInput(fieldRef.current?.value ?? '');
+    if (fieldRef.current) fieldRef.current.value = '';
+    if (!value) return;
+    // Exact match against ACTIVE Worker badge barcodes only — an
+    // unknown, inactive, or non-badge value is rejected with nothing
+    // recorded, and never refreshes anything.
+    const worker = workerByBadge(value);
+    if (!worker) {
+      setScanError(
+        'Badge not recognized. Check the badge and scan again — nothing was recorded.',
+      );
+      return;
+    }
+    onSignIn(worker);
+  }
+  return (
+    <ModalDialog
+      label={title}
+      // Deliberately not dismissable: the close request is ignored —
+      // the station stays blocked until a valid badge scan.
+      onClose={() => {}}
+    >
+      <h3>{title}</h3>
+      <div className="sub">Scan your badge to continue.</div>
+      <input
+        aria-label="Scan Worker badge"
+        ref={fieldRef}
+        className="field mono"
+        autoComplete="off"
+        disabled={writeBlocked}
+        placeholder={
+          writeBlocked
+            ? 'Disconnected — scanning disabled'
+            : 'Scan Worker badge · Press Enter'
+        }
+        onChange={() => setScanError(null)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit();
+        }}
+      />
+      {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
+      <DevNotice>
+        Demo badges (development build only) — type one and press Enter:{' '}
+        <code>100482</code> H. Nguyen · <code>100517</code> V. Tran
+      </DevNotice>
+    </ModalDialog>
+  );
+}
+
+/** Near-expiration warning threshold of the session countdown. */
+const SESSION_WARN_MS = 2 * 60_000;
+
+/**
+ * Live remaining-session line of the Worker pill, derived from the
+ * sliding deadline plus the ONE shared UI clock (§3.12) — never a
+ * component-owned timer. Isolated in a leaf component so only the pill
+ * re-renders per tick.
+ */
+function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
+  // The shared tick drives the per-second re-renders; the remaining
+  // time derives from the wall clock at render so a render triggered
+  // between ticks (badge scan, confirmed command) is never one stale
+  // tick behind — the §3.12 clamping rule for values newer than the
+  // tick.
+  const tick = useUiClock('second');
+  const now = Math.max(tick, Date.now());
+  if (expiresAt === null) {
+    return <span className="sub">Worker session · scan badge</span>;
+  }
+  const remaining = expiresAt - now;
+  if (remaining <= 0) {
+    return <span className="sub warn">Worker session · expired</span>;
+  }
+  const label =
+    remaining >= 60_000
+      ? `${Math.ceil(remaining / 60_000)}m remaining`
+      : `${Math.max(1, Math.ceil(remaining / 1_000))}s remaining`;
+  return (
+    <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
+      Worker session · {label}
+    </span>
   );
 }
 
@@ -3938,10 +4209,18 @@ function DoneDialog({
 
 function UndoConfirmDialog({
   target,
+  reversedBy,
   onConfirm,
   onCancel,
 }: {
   target: MockCompletedAction;
+  /**
+   * Worker recorded on the reversal — the Worker active at the moment
+   * the Undo is confirmed (§16, decided post-v18); null when the
+   * Area's Worker ID mode is Disabled. Shown separately from the
+   * original action's Worker.
+   */
+  reversedBy: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -3974,6 +4253,7 @@ function UndoConfirmDialog({
           ],
           ['Worker', target.worker, 'secondary'],
           ['Time', <span className="mono">{target.time}</span>, 'secondary'],
+          ['Reversed by', reversedBy, 'secondary'],
           ['Result after reversal', target.reversalEffect, 'primary', 'warn'],
         ]}
       />

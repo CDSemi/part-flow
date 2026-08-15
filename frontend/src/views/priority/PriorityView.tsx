@@ -142,6 +142,9 @@ export function PriorityView() {
   const { showNotice, noticeElement } = useMockNotice();
 
   const [hotList, setHotList] = useState<MockHotEntry[]>(MOCK_HOT_LIST);
+  // Undo/Redo depth is unlimited within the current application
+  // session (PROJECT_PROFILE §21, decided post-v18): no numeric cap is
+  // ever applied, and the histories simply end with the session.
   const [undoHistory, setUndoHistory] = useState<MockHotEntry[][]>([]);
   const [redoHistory, setRedoHistory] = useState<MockHotEntry[][]>([]);
   const [addOpen, setAddOpen] = useState(false);
@@ -748,6 +751,11 @@ function HotAddDialog({
   onAdd: (candidate: MockHotEntry) => void;
 }) {
   const [query, setQuery] = useState('');
+  // PN of the last ambiguous barcode scan (several active WO Demands
+  // share the scanned PN): the list is filtered to it and an explicit
+  // selection is required — cleared as soon as the user edits the
+  // search text.
+  const [ambiguousPn, setAmbiguousPn] = useState<string | null>(null);
   const now = useUiClock('minute');
   const q = query.trim().toLowerCase();
   const list = candidates.filter(
@@ -769,25 +777,46 @@ function HotAddDialog({
         autoComplete="off"
         autoFocus
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setAmbiguousPn(null);
+        }}
         onKeyDown={(e) => {
           if (e.key !== 'Enter') return;
           const value = e.currentTarget.value.trim().toUpperCase();
-          const byBarcode = candidates.find((c) => c.barcode === value);
-          if (byBarcode) {
-            onAdd(byBarcode);
+          // Deterministic barcode resolution (PROJECT_PROFILE §21):
+          // no eligible WO Demand adds nothing; exactly one adds
+          // directly; several NEVER add by guess — the list filters to
+          // the PN and an explicit selection is required.
+          const byBarcode = candidates.filter((c) => c.barcode === value);
+          if (byBarcode.length === 1) {
+            onAdd(byBarcode[0]);
+            return;
+          }
+          if (byBarcode.length > 1) {
+            setQuery(byBarcode[0].pn);
+            setAmbiguousPn(byBarcode[0].pn);
             return;
           }
           if (list.length === 1) onAdd(list[0]);
         }}
       />
-      <div className="sub">
-        If a PN has multiple active WO Demands, each is listed separately.
-      </div>
+      {ambiguousPn ? (
+        <div className="sub" role="status">
+          Multiple active WO Demands use PN <b>{ambiguousPn}</b> — select the
+          Work Order to add.
+        </div>
+      ) : (
+        <div className="sub">
+          If a PN has multiple active WO Demands, each is listed separately.
+        </div>
+      )}
       {import.meta.env.DEV ? (
         <div className="hotadd-hint">
-          Demo barcode (development build only):{' '}
-          <code>PF:PN:0455-20-0118-03</code> — Enter adds it directly.
+          Demo barcodes (development build only): <code>PF:PN:78-04-0031</code>{' '}
+          — Enter adds its one WO Demand directly;{' '}
+          <code>PF:PN:0455-20-0118-03</code> — two active WO Demands, Enter
+          filters the list for an explicit selection.
         </div>
       ) : null}
       <div className="hotaddlist">

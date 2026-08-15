@@ -8,8 +8,10 @@ import { App } from './App';
 
 beforeEach(() => {
   // A concrete station URL: /scan-station itself is the Station
-  // Selector and has no scan input.
-  window.history.replaceState({}, '', '/scan-station/LATHE-ST-01');
+  // Selector and has no scan input. DEBURR-ST-01 is a Fixed-Worker
+  // Area, so no Worker sign-in modal gates the main input — these
+  // tests assert pure connectivity enable/disable behavior.
+  window.history.replaceState({}, '', '/scan-station/DEBURR-ST-01');
 });
 
 afterEach(() => {

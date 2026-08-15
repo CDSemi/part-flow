@@ -199,9 +199,11 @@
   flex-wrap: nowrap;
 }
 
-/* Content-sized pill: no fixed or minimum width — the grid column /
-   head-group row is auto-sized, and nowrap keeps the label, Worker
-   name, and session-window lines from wrapping inside the pill. */
+/* Content-sized Worker pill: no fixed or minimum width — the grid
+   column / head-group row is auto-sized, and nowrap keeps the Worker
+   name and session-countdown lines from wrapping inside the pill
+   (GUI_DESIGN §4.3, post-v18 — avatar + name over the mode/countdown
+   sub line; no shift-end session window). */
 .ss-pill {
   display: flex;
   flex-direction: column;
@@ -213,14 +215,6 @@
   white-space: nowrap;
 }
 
-.ss-pill .lbl {
-  font-size: 10px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  font-weight: 750;
-}
-
 .ss-pill .val {
   font-size: 16px;
   font-weight: 750;
@@ -229,16 +223,44 @@
   gap: 7px;
 }
 
-.ss-pill .val .sdot {
-  width: 8px;
-  height: 8px;
+/* Disabled-mode pill: one quiet line, visually receded. */
+.ss-pill.off {
+  justify-content: center;
+}
+
+.ss-pill .val.muted {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+/* Mock avatar: Worker initials in a small circle (a real avatar image
+   arrives with the backend). */
+.ss-pill .avatar {
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: var(--ok);
+  background: var(--info-surface);
+  color: var(--info-t);
+  border: 1px solid var(--info-border);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
 }
 
 .ss-pill .sub {
   font-size: 10.5px;
   color: var(--faint);
+}
+
+/* Near-expiration countdown steps into the warning tone. */
+.ss-pill .sub.warn {
+  color: var(--warn-t);
+  font-weight: 700;
 }
 
 /* One column: the full-width Scan card first, then the shared
