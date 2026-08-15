@@ -90,11 +90,20 @@ test('the active Machines list sheds columns, then compacts to single-line wrapp
   expect(toolbar).toContain('flex-wrap: nowrap');
 });
 
-test('the Management sub-navigation shares the top-navigation glass surface', () => {
+test('the Management sub-navigation is a sticky frosted-glass bar on its own panel tone', () => {
   const shell = css('app/shell.css');
   const nav = /\.mgmtnav \{[^}]*}/s.exec(shell)![0];
-  expect(nav).toContain('background: var(--navglass)');
+  // Its own translucent panel surface — deliberately NOT the top
+  // navigation's --navglass — plus the backdrop blur, and sticky so
+  // scrolled content actually passes beneath it.
+  expect(nav).toContain('background: var(--panelglass)');
+  expect(nav).not.toContain('--navglass');
   expect(nav).toContain('backdrop-filter: blur');
+  expect(nav).toContain('position: sticky');
+  // Inside the scrolling <main> flex column the bar must keep its
+  // natural height — the phone swipe mode's overflow-x drops the
+  // automatic flex minimum to 0 and tall content would crush the row.
+  expect(nav).toContain('flex: none');
 });
 
 test('the All Areas board stacks its Area columns at phone widths', () => {

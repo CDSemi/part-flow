@@ -205,27 +205,35 @@ function AppShell() {
           <ConnectivityChip />
         </nav>
       )}
-      {route.view === 'management' && (
-        <nav
-          className="mgmtnav"
-          aria-label="Management sub views"
-          ref={mgmtNavRef}
-        >
-          <span className="subgrp">Management</span>
-          {MANAGEMENT_NAV.map((item) => (
-            <Link
-              key={item.subview}
-              to={`/management/${item.subview}`}
-              className={`subbtn ${route.subview === item.subview ? 'active' : ''}`}
-              aria-current={route.subview === item.subview ? 'page' : undefined}
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-      )}
       <OfflineBanner />
       <main>
+        {/* The sub-nav lives INSIDE the scrolling content area and
+            sticks to its top, so Management view content actually
+            passes beneath it — the frosted-glass surface has real
+            content to blur (a sibling of <main> never overlaps the
+            scrolled content). The persistent Offline banner stays
+            outside the scroller above it. */}
+        {route.view === 'management' && (
+          <nav
+            className="mgmtnav"
+            aria-label="Management sub views"
+            ref={mgmtNavRef}
+          >
+            <span className="subgrp">Management</span>
+            {MANAGEMENT_NAV.map((item) => (
+              <Link
+                key={item.subview}
+                to={`/management/${item.subview}`}
+                className={`subbtn ${route.subview === item.subview ? 'active' : ''}`}
+                aria-current={
+                  route.subview === item.subview ? 'page' : undefined
+                }
+              >
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+        )}
         <Suspense fallback={<LoadingState label="Loading view" />}>
           <ViewForRoute route={route} />
         </Suspense>

@@ -167,10 +167,22 @@ main {
      (GUI_DESIGN §2.5). */
   flex-wrap: wrap;
   gap: 4px;
-  /*!* The same translucent glass surface as the top navigation — the*/
-  /*   two navigation bars read as one coherent chrome layer. *!*/
-  /*background: var(--navglass);*/
-  /*backdrop-filter: blur(8px);*/
+  /* Frosted glass on the sub-nav's own panel surface: the bar sticks
+     to the top of the scrolling content area (it renders INSIDE
+     <main> for exactly this reason), so scrolled view content passes
+     beneath it and shows through faintly under the backdrop blur.
+     The color stays the sub-nav's own panel tone — deliberately not
+     reusing the top navigation's darker glass color. */
+  position: sticky;
+  top: 0;
+  /* As a flex child of the scrolling <main> the bar must never be
+     squeezed by tall view content: with the phone swipe mode's
+     overflow-x, the automatic flex minimum height drops to 0 and the
+     row gets crushed — flex: none pins it to its natural height. */
+  flex: none;
+  background: var(--panelglass);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
   padding: 4px 16px;
   z-index: 99;

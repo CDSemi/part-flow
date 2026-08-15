@@ -133,6 +133,9 @@ body.dark {
   --stk-t: #35c9a5;
   --dev-t: #ff9a5c;
   --navglass: rgba(7, 10, 15, 0.92);
+  /* Translucent --panel (#121926) — frosted sub-navigation surface:
+     scrolled content shows through faintly under the backdrop blur. */
+  --panelglass: rgba(18, 25, 38, 0.72);
   --shadow: 0 8px 28px rgba(3, 8, 18, 0.42);
   --active-nav-text: var(--on-info);
   --field-bg: var(--d-bg2);
@@ -170,6 +173,8 @@ body.light {
   --stk-t: #157a63;
   --dev-t: #c05a1e;
   --navglass: rgba(255, 255, 255, 0.95);
+  /* Translucent --panel (#ffffff) — frosted sub-navigation surface. */
+  --panelglass: rgba(255, 255, 255, 0.72);
   --shadow: 0 1px 2px rgba(20, 30, 43, 0.1), 0 6px 22px rgba(20, 30, 43, 0.12);
   --active-nav-text: var(--on-accent);
   /* text-entry surfaces stay white in light mode (a tinted fill reads
