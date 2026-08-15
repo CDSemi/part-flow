@@ -74,7 +74,7 @@ Initial palette: Material `#8b93a8`, Cut `#f5b83d`, Lathe `#3da5ff`, Mill `#9b6e
 
 ## 2.4 Touch and scanner ergonomics
 
-- Minimum touch target 48×48 px; primary Scan Station actions ≥ 56 px tall.
+- Touch-target sizing is a Scan Station / shop-floor requirement, not a global application rule: interactive controls an operator actually operates by touch on the Scan Station (and other shop-floor touch surfaces) have a minimum 48×48 px touch target (`--touch-min`); primary Scan Station actions are ≥ 56 px tall (`--touch-primary`). Desktop-oriented management and administration views keep normal desktop control sizing.
 - All production actions reachable by scan or single tap. Mouse never required on shop-floor views.
 - Keyboard wedge support: the scan input is a plain text input terminated by Enter — no custom driver, no scan-mode selection (PROJECT_PROFILE §10 Barcode Model).
 
@@ -981,7 +981,7 @@ Decisions in v1 that were superseded in v2, all aligned to PROJECT_PROFILE v5:
 
 ---
 
-# 16. Out of Scope for v5 UI
+# 16. Out of Scope for Phase 2 UI
 
 Deferred intentionally: localization framework (UI ships in English using PROJECT_PROFILE vocabulary), charts/analytics dashboards, mobile-phone layouts (tablet-first), administrative command barcodes.
 

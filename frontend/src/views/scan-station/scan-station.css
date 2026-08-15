@@ -409,6 +409,11 @@
   background: var(--panel2);
   border: 1px solid var(--border);
   overflow: hidden;
+  /* The stretched Undo action region inherits the block height — the
+     block minimum keeps it a valid shop-floor touch target
+     (GUI_DESIGN §2.4) without giving the button its own min-height
+     (it must stay flush full-height). */
+  min-height: var(--touch-min);
 }
 
 /* Information region: PN + movement summary on one row while space
@@ -606,11 +611,14 @@
   line-height: 1.5;
 }
 
+/* Dismiss stays visually quiet but keeps the shop-floor touch
+   minimum (GUI_DESIGN §2.4) — the negative margins absorb part of the
+   larger hit area so the toast layout stays compact. */
 .ss-toast .tclose {
   flex: none;
-  width: 34px;
-  height: 34px;
-  margin: -4px -6px 0 0;
+  width: var(--touch-min);
+  height: var(--touch-min);
+  margin: -8px -12px 0 0;
   border-radius: 9px;
   font-size: 20px;
   font-weight: 700;
@@ -835,6 +843,9 @@
   color: var(--text);
   font-size: 14px;
   padding: 9px 12px;
+  /* Wizard form controls (selects, dates) are touch targets in the
+     production dialogs (GUI_DESIGN §2.4). */
+  min-height: var(--touch-min);
 }
 
 .ss-choicerow {
@@ -890,6 +901,7 @@
 .pickbtn {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 2px;
   text-align: left;
   border: 2px solid var(--border);
@@ -898,6 +910,10 @@
   padding: 8px 14px;
   font-size: 14px;
   font-weight: 750;
+  /* Dialog selection buttons are operated by touch on the shop floor
+     (GUI_DESIGN §2.4): single-line variants would otherwise sit well
+     under the 48px minimum. */
+  min-height: var(--touch-min);
 }
 
 .pickbtn .s {

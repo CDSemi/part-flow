@@ -1,5 +1,5 @@
 /* ================================================================
-   PartFlow design tokens — GUI_DESIGN v5 §2.
+   PartFlow design tokens — GUI_DESIGN §2.
    One token set, two switchable themes. Components consume ONLY the
    semantic tokens (--bg, --panel, --text, --ok-t, …); body.dark /
    body.light supply the values. Never reference a --d-* / --l-* raw
