@@ -1664,9 +1664,8 @@ function AreaChip({
  * concept): Scanned session shows the active Worker's avatar + name
  * with the live `Session · 12m remaining` countdown; Fixed Worker
  * shows the configured Worker with a static `Fixed Worker` sub line;
- * Disabled keeps the identical two-line structure and height with a
- * muted placeholder avatar (`Worker ID disabled` / `Not required in
- * this Area`). The avatar spans both text lines.
+ * Disabled renders NO pill at all — Worker identity does not exist in
+ * such an Area. The avatar spans both text lines.
  */
 function WorkerPill({
   mode,
@@ -1678,30 +1677,17 @@ function WorkerPill({
   /** Sliding session deadline (scanned mode with a valid session). */
   expiresAt: number | null;
 }) {
-  // One shared two-line structure for every mode — the avatar spans
-  // both text lines and the Disabled pill keeps the exact same height
-  // as a signed-in pill (muted placeholder avatar, no worker-specific
-  // content).
-  if (mode === 'disabled') {
-    return (
-      <div className="ss-pill off">
-        <span className="avatar" aria-hidden="true">
-          —
-        </span>
-        <span className="ss-pilltext">
-          <span className="val muted">Worker ID disabled</span>
-          <span className="sub">Not required in this Area</span>
-        </span>
-      </div>
-    );
-  }
+  // Disabled Areas render NO Worker pill at all — Worker identity does
+  // not exist there, so the header simply has nothing to show (the
+  // mode itself stays visible in Administration → Areas).
+  if (mode === 'disabled') return null;
   return (
     <div className="ss-pill">
       <span className="avatar" aria-hidden="true">
         {worker ? worker.avatar : '?'}
       </span>
       <span className="ss-pilltext">
-        <span className="val">{worker?.name ?? 'No Worker signed in'}</span>
+        <span className="val">{worker?.name ?? 'No Worker'}</span>
         {mode === 'fixed' ? (
           <span className="sub">Fixed Worker</span>
         ) : (

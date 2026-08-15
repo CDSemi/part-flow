@@ -3515,7 +3515,7 @@ test('the session expires after inactivity; invalid scans never refresh, valid i
   expect(expired).toHaveTextContent('Scan your badge to continue.');
   expect(input).toBeDisabled();
   expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
-    'No Worker signed in',
+    'No Worker',
   );
 
   // A valid badge scan continues the session.
@@ -3606,20 +3606,13 @@ test('a Fixed-Worker Area shows the configured Worker and never a badge modal', 
   expect(pill.querySelector('.val')?.textContent).toContain('V. Tran');
 });
 
-test('a Disabled Area shows the quiet marker and records no Worker', async () => {
+test('a Disabled Area renders no Worker pill and records no Worker', async () => {
   await renderStation('EXT-ST-01');
 
   expect(screen.queryByRole('dialog')).toBeNull();
-  // Same two-line pill structure and height as a signed-in pill —
-  // muted placeholder avatar, no worker-specific content.
-  const pill = document.querySelector('.ss-pill')!;
-  expect(pill.className).toContain('off');
-  expect(pill.querySelector('.val')?.textContent).toBe('Worker ID disabled');
-  expect(pill.querySelector('.sub')?.textContent).toBe(
-    'Not required in this Area',
-  );
-  expect(pill.querySelector('.avatar')?.textContent).toBe('—');
-  expect(pill.querySelector('.ss-pilltext')).not.toBeNull();
+  // Worker identity does not exist here — the header shows no Worker
+  // pill at all (the mode stays visible in Administration → Areas).
+  expect(document.querySelector('.ss-pill')).toBeNull();
 
   // Badge scans: explanatory notice, no session.
   scan('100482');
