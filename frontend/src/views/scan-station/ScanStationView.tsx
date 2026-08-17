@@ -1893,10 +1893,10 @@ const SESSION_WARN_MS = 2 * 60_000;
  * Live remaining-session line of the Worker pill, derived from the
  * sliding deadline plus the ONE shared UI clock (§3.12) — never a
  * component-owned timer. Isolated in a leaf component so only the pill
- * re-renders per tick. The countdown reads `12m remaining` — no
- * `Session ·` prefix — with the remaining-time value emphasized in the
- * success tone while comfortably inside the timeout, stepping into the
- * warning tone near expiration; under a minute it counts in seconds.
+ * re-renders per tick. The countdown reads `Session: 10m 23s` —
+ * minutes and seconds ticking down every second, in plain (non-bold)
+ * weight — with the time value in the success tone while comfortably
+ * inside the timeout, stepping into the warning tone near expiration.
  */
 function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
   // The shared tick drives the per-second re-renders; the remaining
@@ -1913,13 +1913,11 @@ function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
   if (remaining <= 0) {
     return <span className="sub warn">Session · expired</span>;
   }
-  const value =
-    remaining >= 60_000
-      ? `${Math.ceil(remaining / 60_000)}m`
-      : `${Math.max(1, Math.ceil(remaining / 1_000))}s`;
+  const totalSeconds = Math.max(1, Math.ceil(remaining / 1_000));
+  const value = `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
   return (
     <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
-      <span className="num">{value}</span> remaining
+      Session: <span className="num">{value}</span>
     </span>
   );
 }

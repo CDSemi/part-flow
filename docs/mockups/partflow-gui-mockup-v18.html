@@ -262,11 +262,11 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .ss-pill .ss-pilltext{display:flex;flex-direction:column;gap:2px}
 .ss-pill .avatar{align-self:stretch;aspect-ratio:1;min-height:36px;border-radius:50%;background:var(--info-surface,rgba(79,140,255,.12));color:var(--info-t,#4f8cff);font-size:12.5px;font-weight:800;letter-spacing:.5px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ss-pill .sub{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
-/* Post-v18: the countdown reads `12m remaining` (no `Session ·` prefix) —
-   the emphasized remaining-time value leads in the success tone,
-   stepping into the warning tone near expiration */
-.ss-pill .sub .num{font-size:13px;font-weight:800;font-style:normal;color:var(--ok-t)}
-.ss-pill .sub.warn{color:var(--warn-t);font-weight:700}
+/* Post-v18: the countdown reads `Session: 10m 23s` — minutes and
+   seconds ticking down every second in plain weight, the time value
+   toned success → warning near expiration (color only) */
+.ss-pill .sub .num{color:var(--ok-t)}
+.ss-pill .sub.warn{color:var(--warn-t)}
 .ss-pill .sub.warn .num{color:var(--warn-t)}
 #conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel2)}
 #conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok);
@@ -1469,7 +1469,7 @@ body.light{color-scheme:light}
           <span class="avatar" id="pill-avatar" aria-hidden="true">HN</span>
           <span class="ss-pilltext">
             <span class="val" id="pill-worker">H. Nguyen</span>
-            <span class="sub" id="pill-workersub"><b class="num">12m</b> remaining</span>
+            <span class="sub" id="pill-workersub">Session: <span class="num">12m 23s</span></span>
           </span>
         </div>
         <div class="ss-headactions">
@@ -2726,7 +2726,7 @@ function doScan(){
         document.getElementById('pill-worker').textContent=w[0];
         /* Badge scan opens/switches the session and restarts the
            sliding inactivity countdown (mock value). */
-        document.getElementById('pill-workersub').innerHTML='<b class="num">20m</b> remaining';
+        document.getElementById('pill-workersub').innerHTML='Session: <span class="num">20m 0s</span>';
         /* A Worker scan never replaces the Last Scanned PN. */
         feedback('ok','Worker signed in: '+w[0],
           'New actions will be recorded under '+w[0]+'.','✓');

@@ -299,19 +299,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Near-expiration countdown steps into the warning tone. */
+/* Near-expiration countdown steps into the warning tone — color
+   only, never a weight change (the countdown stays non-bold). */
 .ss-pill .sub.warn {
   color: var(--warn-t);
-  font-weight: 700;
 }
 
-/* The remaining-time value leads the countdown line (`12m remaining`)
-   and carries the tone: success while comfortably inside the sliding
-   timeout, the warning tone near expiration; the quiet "remaining"
-   word keeps the sub color. */
+/* The time value of the countdown line (`Session: 10m 23s`) carries
+   the tone in the sub line's plain weight: success while comfortably
+   inside the sliding timeout, the warning tone near expiration; the
+   quiet `Session:` label keeps the sub color. */
 .ss-pill .sub .num {
-  font-size: 13px;
-  font-weight: 800;
   color: var(--ok-t);
 }
 

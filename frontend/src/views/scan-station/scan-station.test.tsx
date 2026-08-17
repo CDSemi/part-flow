@@ -481,15 +481,17 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(undoRegion.textContent).toContain('⟲ UNDO');
 
   // Scanned-session Worker pill (post-v18): avatar + Worker name over
-  // the live remaining-session countdown — no `Session ·` prefix, the
-  // emphasized remaining-time value leads the line, and there is no
-  // shift-end session window anywhere.
+  // the live `Session: 10m 23s` countdown — minutes and seconds
+  // ticking down every second, the time value toned by the remaining
+  // time — and there is no shift-end session window anywhere.
   const pill = document.querySelector('.ss-pill')!;
   expect(pill.querySelector('.avatar')?.textContent).toBe('HN');
   expect(pill.querySelector('.val')?.textContent).toContain('H. Nguyen');
-  expect(pill.querySelector('.sub')?.textContent).toMatch(/^\d+m remaining$/);
-  expect(pill.querySelector('.sub .num')?.textContent).toMatch(/^\d+m$/);
-  expect(pill.textContent).not.toContain('Session');
+  expect(pill.querySelector('.sub')?.textContent).toMatch(
+    /^Session: \d+m \d+s$/,
+  );
+  expect(pill.querySelector('.sub .num')?.textContent).toMatch(/^\d+m \d+s$/);
+  expect(pill.textContent).not.toContain('remaining');
   expect(pill.textContent).not.toContain('from');
   expect(pill.textContent).not.toContain('shift');
 
@@ -1777,7 +1779,7 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
     'V. Tran',
   );
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^\d+m remaining$/,
+    /^Session: \d+m \d+s$/,
   );
 });
 
@@ -3117,12 +3119,15 @@ test('the countdown value carries the success tone, stepping into warning near e
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
   const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
-  // The emphasized remaining-time value leads the sub line: success
-  // tone with comfortable time, the warning tone near expiration —
-  // semantic tokens only.
+  // The time value of the plain-weight countdown line carries the
+  // tone only: success with comfortable time, the warning tone near
+  // expiration — semantic tokens, never a bold weight step.
   const num = /\.ss-pill \.sub \.num \{[^}]*}/s.exec(css)![0];
   expect(num).toContain('color: var(--ok-t)');
+  expect(num).not.toMatch(/font-weight/);
   expect(css).toMatch(/\.ss-pill \.sub\.warn \.num \{[^}]*var\(--warn-t\)/s);
+  const warn = /\.ss-pill \.sub\.warn \{[^}]*}/s.exec(css)![0];
+  expect(warn).not.toMatch(/font-weight/);
 });
 
 test('the scan row compresses the manual-entry button before the barcode input', async () => {
@@ -3584,9 +3589,9 @@ test('the pill counts the sliding timeout down from the per-Area override value'
   await renderStation(); // LATHE — 20-minute per-Area override
 
   const pill = document.querySelector('.ss-pill')!;
-  expect(pill.querySelector('.sub')?.textContent).toBe('20m remaining');
-  // The remaining-time value is the emphasized leading element.
-  expect(pill.querySelector('.sub .num')?.textContent).toBe('20m');
+  expect(pill.querySelector('.sub')?.textContent).toBe('Session: 20m 0s');
+  // The time value is the toned element of the plain-weight line.
+  expect(pill.querySelector('.sub .num')?.textContent).toBe('20m 0s');
   // Full countdown tone: not yet near expiration.
   expect(pill.querySelector('.sub')?.className).not.toContain('warn');
 });
@@ -3607,11 +3612,11 @@ test('the session expires after inactivity; invalid scans never refresh, valid i
   });
   expect(screen.queryByRole('dialog')).toBeNull();
   scan('NOT-A-PARTFLOW-BARCODE');
-  // Near-expiration warning tone on the countdown (~1 minute left);
-  // under a minute the remaining time counts in seconds.
+  // Near-expiration warning tone on the countdown (~1 minute left) —
+  // the same minutes-and-seconds format at every remaining time.
   expect(document.querySelector('.ss-pill .sub')?.className).toContain('warn');
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^(\d+s|1m) remaining$/,
+    /^Session: (1m 0s|0m \d+s)$/,
   );
 
   await act(async () => {
