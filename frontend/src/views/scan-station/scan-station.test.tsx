@@ -3947,7 +3947,7 @@ test('the PN action dialog offers DONE for quantity running on a Machine', async
   fireEvent.keyDown(activeDialog(), { key: 'Escape' });
 });
 
-test('turning the Administration option off removes the badge gate for that action', async () => {
+test('turning the Administration option off replaces the badge gate with the final question', async () => {
   setBadgeConfirmRequirement('done', false);
   try {
     await renderStation();
@@ -3961,8 +3961,14 @@ test('turning the Administration option off removes the badge gate for that acti
     );
     fireEvent.keyDown(activeDialog(), { key: 'Enter' });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
-    // No gate — the confirmation records directly while the option is
-    // off; the other actions keep their gates independently.
+    // The final confirmation question still appears — the option only
+    // removes the badge-scan REQUIREMENT, never the gate itself.
+    const gate = screen.getByRole('dialog', {
+      name: 'Confirm finished quantity?',
+    });
+    expect(gate.className).toContain('tone-info');
+    expect(within(gate).queryByLabelText('Scan Worker badge')).toBeNull();
+    confirmFinalGate();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByText(/× \d+ finished at Lathe/)).toBeInTheDocument();
   } finally {
@@ -3970,17 +3976,22 @@ test('turning the Administration option off removes the badge gate for that acti
   }
 });
 
-test('the option governs every Area — off also removes the final question in a Fixed-Worker Area', async () => {
+test('the options only govern the badge scan — a Fixed-Worker Area keeps its final question with the option off', async () => {
   setBadgeConfirmRequirement('done', false);
   try {
-    await renderStation('DEBURR-ST-01'); // Fixed Worker
+    await renderStation('DEBURR-ST-01'); // Fixed Worker — never a badge
     fireEvent.click(
       screen.getAllByRole('button', { name: 'Complete Area processing' })[0],
     );
     fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
     fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
-    // No final question either — the SAME Administration option gates
-    // Fixed-Worker (and Disabled) Areas, just as a question when ON.
+    // The question is unconditional here — the option has no effect in
+    // an Area without scanned Worker Sessions.
+    const gate = screen.getByRole('dialog', {
+      name: 'Confirm finished quantity?',
+    });
+    expect(gate.className).toContain('tone-info');
+    confirmFinalGate();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByText(/× \d+ finished at Deburr/)).toBeInTheDocument();
   } finally {

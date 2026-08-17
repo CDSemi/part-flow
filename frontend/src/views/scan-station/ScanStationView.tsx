@@ -985,20 +985,20 @@ function StationView({
 
   /**
    * Final-confirmation gate of the three sensitive one-shot actions
-   * (post-v18, PROJECT_PROFILE §19): a Scanned-session Area requires a
-   * Worker badge scan as the LAST step after the confirmation summary
-   * whenever the Administration option for the action is ON (default).
-   * The SAME options govern Fixed-Worker and Disabled Areas — no badge
-   * exists there, so the gate is one final toned confirmation question
-   * instead (the Machines last-question pattern). Option off: no gate
-   * in any Area.
+   * (post-v18, PROJECT_PROFILE §19): every action ends in a
+   * final toned confirmation question (the Machines last-question
+   * pattern) restating the key facts — ALWAYS, in every Area. The
+   * Administration options only decide whether a Worker badge scan is
+   * REQUIRED as that final step where badges exist: in a
+   * Scanned-session Area with the action's option ON (default) the
+   * gate is a badge scan instead of the question; with the option OFF
+   * — and in Fixed-Worker and Disabled Areas, where no badge exists —
+   * the gate is the question. The gate itself is never optional.
    */
   const finalGateFor = (action: BadgeConfirmAction): FinalGate =>
-    requireBadgeConfirm(action)
-      ? workerMode === 'scanned'
-        ? 'badge'
-        : 'question'
-      : null;
+    workerMode === 'scanned' && requireBadgeConfirm(action)
+      ? 'badge'
+      : 'question';
 
   function undoTarget(): MockCompletedAction | null {
     return eligible?.action ?? null;
@@ -1609,13 +1609,13 @@ interface ActionDialogProps {
 }
 
 /**
- * Final-confirmation gate of a sensitive one-shot action (post-v18):
- * `badge` requires a Worker badge scan as the last step (Scanned
- * session + Administration option ON), `question` asks one final toned
- * confirmation question (Fixed Worker), null keeps the plain
- * confirmation step (Disabled, or the Administration option OFF).
+ * Final-confirmation gate of a sensitive one-shot action (post-v18) —
+ * every action carries one: `badge` requires a Worker badge scan as
+ * the last step (Scanned session + Administration option ON),
+ * `question` asks one final toned confirmation question (every other
+ * case — Fixed Worker, Disabled, or the Administration option OFF).
  */
-type FinalGate = 'badge' | 'question' | null;
+type FinalGate = 'badge' | 'question';
 
 /** Props the gated dialogs share on top of ActionDialogProps. */
 interface FinalGateProps {
@@ -4216,8 +4216,7 @@ function QueueReturnDialog({
 
   function requestConfirm() {
     if (!valid) return;
-    if (finalGate) setGate(true);
-    else confirm();
+    setGate(true);
   }
 
   function confirm(confirmedBy?: string) {
@@ -4450,8 +4449,7 @@ function DoneDialog({
 
   function requestConfirm() {
     if (!valid) return;
-    if (finalGate) setGate(true);
-    else confirm();
+    setGate(true);
   }
 
   function confirm(confirmedBy?: string) {
@@ -4690,8 +4688,7 @@ function UndoConfirmDialog({
   const [gate, setGate] = useState(false);
 
   function requestConfirm() {
-    if (finalGate) setGate(true);
-    else onConfirm();
+    setGate(true);
   }
 
   // The key facts of the pending reversal — shared by the

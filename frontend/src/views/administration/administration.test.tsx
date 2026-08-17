@@ -41,9 +41,9 @@ test('Worker sessions shows the timeout values and the three badge-confirmation 
     expect(sw.textContent).toContain('On');
   }
   for (const name of [
-    'Require final confirmation — DONE — Complete Area processing',
-    'Require final confirmation — QUEUE — Return unfinished quantity to queue',
-    'Require final confirmation — UNDO — Reverse the last action',
+    'Require badge scan — DONE — Complete Area processing',
+    'Require badge scan — QUEUE — Return unfinished quantity to queue',
+    'Require badge scan — UNDO — Reverse the last action',
   ]) {
     expect(screen.getByRole('switch', { name })).toBeInTheDocument();
   }
@@ -55,7 +55,7 @@ test('toggling a badge-confirmation switch updates the shared policy per action'
   openWorkerSessions();
 
   const undoSwitch = screen.getByRole('switch', {
-    name: 'Require final confirmation — UNDO — Reverse the last action',
+    name: 'Require badge scan — UNDO — Reverse the last action',
   });
   fireEvent.click(undoSwitch);
   expect(undoSwitch.getAttribute('aria-checked')).toBe('false');
