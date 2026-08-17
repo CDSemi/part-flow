@@ -552,7 +552,10 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .pb-head{display:flex;align-items:center;gap:18px;padding:20px 30px 10px;flex-wrap:wrap;row-gap:6px}
 .pb-head .pb-headid{display:flex;align-items:center;gap:16px;min-width:0}
 .pb-head h1{font-size:30px;font-weight:800;letter-spacing:.4px}
-.pb-head .live{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:14px;font-weight:650}
+/* Post-v18: the `● Live` status after the `Production` title carries the
+   CURRENT connection tone — success while healthy, warning while stale */
+.pb-head .live{display:inline-flex;align-items:center;gap:7px;color:var(--ok-t);font-size:14px;font-weight:800}
+.pb-head .live.stale{color:var(--warn-t)}
 /* v14: the ONE shared connected heartbeat (defined in the shared
    section) — the same "alive" behavior as the ONLINE connectivity dot */
 .pb-head .live .ld{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pf-heartbeat 2s infinite}

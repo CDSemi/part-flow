@@ -659,6 +659,10 @@ test('the board stylesheet owns its heartbeat and never clips Machine names or P
   expect(css).not.toContain('ss-pulse');
   expect(css).toContain('prefers-reduced-motion');
   expect(css).toMatch(/\.live\.stale \.ld \{[^}]*animation: none/);
+  // The `● Live` status carries the CURRENT connection tone (post-v18):
+  // success while healthy, warning while stale — semantic tokens only.
+  expect(css).toMatch(/\.live \.livestatus \{[^}]*var\(--ok-t\)/);
+  expect(css).toMatch(/\.live\.stale \.livestatus \{[^}]*var\(--warn-t\)/);
   expect(css).not.toMatch(/\.mchip \{[^}]*text-overflow/);
   expect(css).not.toMatch(/\.lname \{[^}]*text-overflow/);
   // Intrinsic 15ch PN minimum instead of an arbitrary pixel width.
@@ -676,15 +680,20 @@ test('the board stylesheet owns its heartbeat and never clips Machine names or P
 
 test('the identity group shows the Department line and the live board title', async () => {
   await renderBoard();
-  // Scan Station-style identity (v17): the Department line above the
-  // board title; the title itself is the heading and carries the live
-  // status dot (Area-indicator geometry, shared heartbeat via CSS).
+  // Scan Station-style identity (v17, restructured post-v18): the
+  // Department line above the `Production` title; the `● Live` status
+  // sits directly after the title in the connection tone and carries
+  // the status dot (Area-indicator geometry, shared heartbeat via
+  // CSS) — the dot lives inside the status, not before the title.
   const headid = document.querySelector('.pb-head .pb-headid');
   expect(headid?.querySelector('.dept')?.textContent).toBe('Machine Shop');
   const live = headid?.querySelector('h1.live');
-  expect(live?.textContent).toBe('Live Production');
+  expect(live?.childNodes[0]?.textContent).toBe('Production');
+  const status = live?.querySelector('.livestatus');
+  expect(status?.textContent).toBe('Live');
+  expect(status?.querySelector('.ld')).not.toBeNull();
+  expect(live?.textContent).not.toContain('Live Production');
   expect(live?.className).not.toContain('stale');
-  expect(live?.querySelector('.ld')).not.toBeNull();
   // Healthy state renders no stale note.
   expect(live?.querySelector('.stalenote')).toBeNull();
 });
@@ -900,6 +909,88 @@ test('keyboard navigation restarts the rotation timer and cleans up on unmount',
   fireEvent.keyDown(window, { key: 'ArrowRight' });
 });
 
+/* ============ Touch swipe page navigation (post-v18) ============ */
+
+function swipe(
+  el: Element,
+  from: [number, number],
+  to: [number, number],
+): void {
+  fireEvent.touchStart(el, {
+    touches: [{ clientX: from[0], clientY: from[1] }],
+  });
+  fireEvent.touchEnd(el, {
+    changedTouches: [{ clientX: to[0], clientY: to[1] }],
+  });
+}
+
+test('a horizontal swipe navigates pages without wrapping', async () => {
+  await renderBoard('/production-board?state=long');
+  const board = document.querySelector('.pb')!;
+
+  // Swipe left (finger travels left) → next page, like Next/ArrowRight.
+  swipe(board, [300, 200], [180, 210]);
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  swipe(board, [300, 200], [180, 190]);
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+  // No wrap on the last page.
+  swipe(board, [300, 200], [180, 200]);
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+
+  // Swipe right → previous page; no wrap on the first page.
+  swipe(board, [180, 200], [300, 200]);
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  swipe(board, [180, 200], [300, 200]);
+  swipe(board, [180, 200], [300, 200]);
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+});
+
+test('short, vertical, and multi-touch gestures never change pages', async () => {
+  await renderBoard('/production-board?state=long');
+  const board = document.querySelector('.pb')!;
+
+  // Below the minimum travel: a tap or slight drag.
+  swipe(board, [200, 200], [170, 200]);
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  // Predominantly vertical (scrolling), even with horizontal drift.
+  swipe(board, [200, 100], [120, 400]);
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  // A multi-touch gesture (pinch zoom) is ignored entirely.
+  fireEvent.touchStart(board, {
+    touches: [
+      { clientX: 100, clientY: 100 },
+      { clientX: 300, clientY: 100 },
+    ],
+  });
+  fireEvent.touchEnd(board, {
+    changedTouches: [{ clientX: 260, clientY: 100 }],
+  });
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+});
+
+test('a swipe restarts the auto-rotation timer like the other manual controls', async () => {
+  await renderBoard('/production-board?state=long');
+  const board = document.querySelector('.pb')!;
+
+  // 25 s into the 30 s page-1 cycle, a swipe navigates…
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(25_000);
+  });
+  swipe(board, [300, 200], [180, 200]);
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  // …so 25 s later — past the original deadline, inside the restarted
+  // one — nothing rotates yet.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(25_000);
+  });
+  expect(screen.getByText(/Page 2 \/ 3/)).toBeInTheDocument();
+  // The full page-2 interval after the swipe, rotation resumes.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(screen.getByText(/Page 3 \/ 3/)).toBeInTheDocument();
+});
+
 test('the active page clamps when the page structure changes', async () => {
   const view = await renderBoard('/production-board?state=long');
   await act(async () => {
@@ -1035,17 +1126,21 @@ test('the kiosk route renders the coherent board-owned kiosk header', async () =
   const head = document.querySelector('.pb-head.pbk-head');
   expect(head).not.toBeNull();
   expect(head?.querySelector('.pbk-actions')).toBeNull();
-  // Identity group (v17): the SAME Scan Station-style identity as the
-  // standard header — Department line + `Live Production` title with
-  // the live status dot; the kiosk header renders NO app brand.
+  // Identity group (v17, restructured post-v18): the SAME Scan
+  // Station-style identity as the standard header — Department line +
+  // `Production` title with the `● Live` status after it; the kiosk
+  // header renders NO app brand.
   const headid = head?.querySelector('.pb-headid');
   expect(headid?.querySelector('.pbk-brand')).toBeNull();
   expect(headid?.querySelector('.dept')?.textContent).toBe('Machine Shop');
-  expect(headid?.querySelector('h1')?.textContent).toBe('Live Production');
+  expect(headid?.querySelector('h1')?.childNodes[0]?.textContent).toBe(
+    'Production',
+  );
+  expect(headid?.querySelector('h1 .livestatus')?.textContent).toBe('Live');
   // The SAME live status as the standard header (shared meaning,
   // shared heartbeat) — never a second `ONLINE` chip repeating the
   // same connectivity in the board header.
-  expect(headid?.querySelector('.live .ld')).not.toBeNull();
+  expect(headid?.querySelector('.live .livestatus .ld')).not.toBeNull();
   expect(head?.querySelector('.connchip')).toBeNull();
   // Clock zone: the shared compact (borderless) theme control sits
   // INSIDE the clock's time row, centered on the time text (v17).

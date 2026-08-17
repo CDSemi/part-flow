@@ -65,9 +65,12 @@
   font-weight: 700;
 }
 
-/* Board title = live status (v17): the Scan Station Area-title
-   typography (.ss-head .area) with a leading Area-indicator-style
-   rounded-square dot carrying the live heartbeat. */
+/* Board title + status (v17, restructured post-v18): the Scan
+   Station Area-title typography (.ss-head .area) on the `Production`
+   title, with the `● Live` operational status directly after it —
+   slightly separated, in the CURRENT connection tone (success while
+   healthy, warning while stale; the dot carries the live
+   heartbeat). */
 .pb-head h1.live {
   font-size: 28px;
   font-weight: 800;
@@ -77,11 +80,28 @@
   line-height: 1.15;
 }
 
+.pb-head .live .livestatus {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: 2px;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  color: var(--ok-t);
+}
+
+/* Stale / reconnecting: the status text follows the warning tone. */
+.pb-head .live.stale .livestatus {
+  color: var(--warn-t);
+}
+
 .pb-head .live .ld {
   flex: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
   background: var(--ok);
   /* The shared connected heartbeat (styles/global.css) — the same
      "alive" behavior as the connectivity chip's ONLINE dot. */

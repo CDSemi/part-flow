@@ -47,13 +47,23 @@ export function rotationDurationMs(rowCount: number): number {
 const FIT_WIDTH_ALLOWANCE_PX = 8;
 
 /**
- * Automatic display scale (v18): the factor that makes the table's
- * intrinsic (max-content) width fill the available board width, so the
- * inter-column whitespace closes on large displays while every column
- * keeps its full unwrapped content. Never below 1 — a viewport
- * narrower than the content keeps the baseline size and the existing
- * wrapping behavior — and 1 whenever real measurements are unavailable
- * (first paint before layout, or DOM environments without layout).
+ * Minimum automatic display scale (post-v18): a deliberate near-zero
+ * guard against degenerate measurements only — small screens are
+ * MEANT to scale the board down as far as their width requires, so
+ * the floor is the smallest practical value rather than a legibility
+ * clamp.
+ */
+export const FIT_SCALE_MIN = 0.1;
+
+/**
+ * Automatic display scale (v18, scale-down added post-v18): the
+ * factor that makes the table's intrinsic (max-content) width fill
+ * the available board width, so the inter-column whitespace closes on
+ * large displays AND the whole board shrinks to fit small screens
+ * (phones/tablets) — every column keeps its full unwrapped content in
+ * both directions. Clamped only by the near-zero FIT_SCALE_MIN guard,
+ * and 1 whenever real measurements are unavailable (first paint
+ * before layout, or DOM environments without layout).
  */
 export function autoFitScale(
   boardWidth: number,
@@ -61,7 +71,7 @@ export function autoFitScale(
 ): number {
   if (boardWidth <= 0 || intrinsicTableWidth <= 0) return 1;
   return Math.max(
-    1,
+    FIT_SCALE_MIN,
     (boardWidth - FIT_WIDTH_ALLOWANCE_PX) / intrinsicTableWidth,
   );
 }

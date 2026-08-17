@@ -2,6 +2,7 @@ import { expect, test } from 'vitest';
 
 import type { MockBoardRow } from '../view-models';
 import {
+  FIT_SCALE_MIN,
   ROTATE_MS_MIN,
   ROTATE_MS_PER_ROW,
   autoFitScale,
@@ -47,15 +48,25 @@ test('the auto-fit scale fills the board width from the intrinsic table width', 
   // (3840 − allowance) / 1900 — the content grows until it fills the
   // width, minus the small fixed allowance for the Hot-row border.
   expect(autoFitScale(3840, 1900)).toBeCloseTo((3840 - 8) / 1900, 10);
-  // An exact-fit viewport stays at 1 (the allowance prevents a
-  // marginal overflow from wrapping the Job Numbers column).
+  // An exact fit lands on 1 (the allowance prevents a marginal
+  // overflow from wrapping the Job Numbers column).
   expect(autoFitScale(1908, 1900)).toBe(1);
 });
 
-test('the auto-fit scale never shrinks below the baseline', () => {
-  // A viewport narrower than the content keeps the baseline size and
-  // the existing wrapping behavior — never a downscale.
-  expect(autoFitScale(1200, 1900)).toBe(1);
+test('the auto-fit scale shrinks the board on small screens (post-v18)', () => {
+  // A viewport narrower than the content scales the whole board DOWN
+  // so the full table width fits phones and tablets — the same
+  // (width − allowance) / intrinsic factor, below 1.
+  expect(autoFitScale(1200, 1900)).toBeCloseTo((1200 - 8) / 1900, 10);
+  expect(autoFitScale(390, 1900)).toBeCloseTo((390 - 8) / 1900, 10);
+});
+
+test('the near-zero scale floor guards only degenerate measurements', () => {
+  // The floor is deliberately the smallest practical value — small
+  // screens are meant to shrink as far as their width requires, and
+  // the clamp exists only against degenerate measurements.
+  expect(FIT_SCALE_MIN).toBeLessThanOrEqual(0.1);
+  expect(autoFitScale(100, 1900)).toBe(FIT_SCALE_MIN);
 });
 
 test('the auto-fit scale is 1 when measurements are unavailable', () => {

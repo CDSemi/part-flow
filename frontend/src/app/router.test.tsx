@@ -135,7 +135,7 @@ test('/production-board/kiosk hides the navigation; the standard route keeps it'
   renderAt('/production-board/kiosk');
 
   expect(
-    await screen.findByRole('heading', { name: 'Live Production' }),
+    await screen.findByRole('heading', { name: /Production/ }),
   ).toBeInTheDocument();
   // Kiosk mode: no top application navigation, board-owned header
   // with one shared connectivity status instead.
@@ -161,7 +161,7 @@ test('top-level navigation switches views and updates the URL', async () => {
 
   expect(window.location.pathname).toBe('/production-board');
   expect(
-    await screen.findByRole('heading', { name: 'Live Production' }),
+    await screen.findByRole('heading', { name: /Production/ }),
   ).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('link', { name: 'Administration' }));
@@ -310,7 +310,7 @@ test('browser back and forward navigation works', async () => {
 
   fireEvent.click(screen.getByRole('link', { name: 'Production Board' }));
   expect(window.location.pathname).toBe('/production-board');
-  await screen.findByRole('heading', { name: 'Live Production' });
+  await screen.findByRole('heading', { name: /Production/ });
 
   window.history.back();
   await waitFor(() =>
@@ -323,7 +323,7 @@ test('browser back and forward navigation works', async () => {
   window.history.forward();
   await waitFor(() =>
     expect(
-      screen.getByRole('heading', { name: 'Live Production' }),
+      screen.getByRole('heading', { name: /Production/ }),
     ).toBeInTheDocument(),
   );
   expect(window.location.pathname).toBe('/production-board');

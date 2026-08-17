@@ -1,6 +1,6 @@
 import './production-board.css';
 
-import type { ReactNode } from 'react';
+import type { ReactNode, TouchEvent as ReactTouchEvent } from 'react';
 import {
   useCallback,
   useEffect,
@@ -88,22 +88,30 @@ function RotationProgress({
 }
 
 /**
- * Board title carrying the operational status (v17) — the same
- * presentation and meaning in the standard and kiosk headers, styled
- * like the Scan Station Area title: an Area-indicator-style rounded
- * square dot with the shared connected heartbeat (styles/global.css —
- * identical "alive" behavior to the ONLINE connectivity dot) while the
- * shared connectivity state is healthy, an explicit non-pulsing
- * warning dot plus a small stale note while it is not. One status per
- * header — never a second `ONLINE` chip.
+ * Board title carrying the operational status (v17, restructured
+ * post-v18) — the same presentation and meaning in the standard and
+ * kiosk headers, styled like the Scan Station Area title. The title
+ * reads `Production`; the `● Live` status sits directly after it,
+ * slightly separated, in the CURRENT connection tone: while the
+ * shared connectivity state is healthy the Area-indicator-style
+ * rounded-square dot pulses with the shared connected heartbeat
+ * (styles/global.css — identical "alive" behavior to the ONLINE
+ * connectivity dot) and the status reads in the success tone; while
+ * it is not, the dot stops in the warning tone, the status follows,
+ * and the explicit `Feed stale — reconnecting` note appears — status
+ * is never color-only. One status per header — never a second
+ * `ONLINE` chip.
  */
 function BoardTitle() {
   const { status } = useConnectivity();
   const stale = status !== 'connected';
   return (
     <h1 className={`live${stale ? ' stale' : ''}`}>
-      <span className="ld" aria-hidden="true" />
-      Live Production
+      Production
+      <span className="livestatus">
+        <span className="ld" aria-hidden="true" />
+        Live
+      </span>
       {stale ? (
         <span className="stalenote">Feed stale — reconnecting</span>
       ) : null}
@@ -329,6 +337,13 @@ function BoardColgroup() {
   );
 }
 
+/**
+ * Minimum horizontal travel of a touch gesture that counts as a page
+ * swipe (post-v18). Shorter gestures (taps, slight drags) and
+ * predominantly vertical gestures (scrolling) never change pages.
+ */
+const SWIPE_MIN_DISTANCE_PX = 48;
+
 // Column-header tooltips (v18): the former footer legend conventions
 // live with the columns they describe — a small key/description panel
 // shown on header hover (production-board.css .th-tip). Hover-only:
@@ -444,7 +459,10 @@ export function ProductionBoardView() {
     // width the board content needs with every column at its widest
     // real value and nothing newly wrapped. Scaling the board so
     // that width fills the actual board width closes the
-    // inter-column whitespace on large displays; CSS zoom multiplies
+    // inter-column whitespace on large displays AND shrinks the whole
+    // board on small screens (post-v18 — phones/tablets get the full
+    // table width at a reduced size instead of wrapping and
+    // scrolling); CSS zoom multiplies
     // every length in the subtree (header, table and footer text,
     // paddings, chips, dots), so the layout scales uniformly and
     // content that fits at zoom 1 can never start wrapping at the
@@ -632,6 +650,41 @@ export function ProductionBoardView() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [safePage, pageCount, goToPage]);
 
+  // Touch swipe page navigation (post-v18): a horizontal swipe
+  // anywhere on the board changes pages exactly like the footer
+  // buttons and the arrow keys — clamped, non-wrapping (goToPage
+  // ignores a page that does not exist), restarting the rotation
+  // timer. A short gesture, a predominantly vertical gesture
+  // (scrolling), and multi-touch gestures (pinch zoom) are ignored.
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    swipeStart.current =
+      event.touches.length === 1
+        ? { x: event.touches[0].clientX, y: event.touches[0].clientY }
+        : null;
+  }, []);
+  const onTouchCancel = useCallback(() => {
+    swipeStart.current = null;
+  }, []);
+  const onTouchEnd = useCallback(
+    (event: ReactTouchEvent<HTMLElement>) => {
+      const start = swipeStart.current;
+      swipeStart.current = null;
+      const touch = event.changedTouches[0];
+      if (!start || !touch) return;
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      if (
+        Math.abs(dx) < SWIPE_MIN_DISTANCE_PX ||
+        Math.abs(dx) <= Math.abs(dy)
+      ) {
+        return;
+      }
+      goToPage(safePage + (dx < 0 ? 1 : -1), pageCount);
+    },
+    [goToPage, safePage, pageCount],
+  );
+
   // Ctrl+Shift+K toggles between the standard and kiosk routes —
   // mirroring the Scan Station mode shortcut. Inert inside unrelated
   // text-entry controls and while a modal dialog is active; never an
@@ -697,6 +750,9 @@ export function ProductionBoardView() {
       className={`pb${kiosk ? ' kiosk' : ''}`}
       aria-label="Production Board"
       ref={sectionRef}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchCancel}
     >
       {/* Header (restructured v17): ONE identical identity group in
           both presentations, styled like the Scan Station header —
