@@ -167,11 +167,16 @@ main {
 .mgmtnav {
   display: flex;
   align-items: center;
-  /* Wraps like .appnav: on narrow viewports the sub-view links flow
-     onto additional rows instead of widening the document — the page
-     must stay vertically browsable with no horizontal overflow
-     (GUI_DESIGN §2.5). */
-  flex-wrap: wrap;
+  /* ONE row at EVERY width (post-v18 — supersedes the former
+     wrap-on-wide behavior): when the sub-view links do not fit, the
+     row pans horizontally with a hidden scrollbar and the active sub
+     view is brought into view (AppShell) — the links never flow onto
+     a second row at intermediate widths, and the document never
+     widens (GUI_DESIGN §2.5). */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
   gap: 4px;
   /* Frosted glass on the sub-nav's own panel surface: the bar sticks
      to the top of the scrolling content area (it renders INSIDE
@@ -182,9 +187,9 @@ main {
   position: sticky;
   top: 0;
   /* As a flex child of the scrolling <main> the bar must never be
-     squeezed by tall view content: with the phone swipe mode's
-     overflow-x, the automatic flex minimum height drops to 0 and the
-     row gets crushed — flex: none pins it to its natural height. */
+     squeezed by tall view content: with the swipe row's overflow-x,
+     the automatic flex minimum height drops to 0 and the row gets
+     crushed — flex: none pins it to its natural height. */
   flex: none;
   background: var(--panelglass);
   backdrop-filter: blur(10px);
@@ -194,6 +199,18 @@ main {
   z-index: 99;
   box-shadow: var(--subnav-shadow);
   transition: padding 0.18s ease;
+}
+
+.mgmtnav::-webkit-scrollbar {
+  display: none;
+}
+
+/* Every link and group label stays an unshrinkable one-line item —
+   the row pans instead of squeezing or wrapping them. */
+.mgmtnav .subbtn,
+.mgmtnav .subgrp {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* Scroll-direction condensing (class set by AppShell): scrolling down
@@ -434,20 +451,4 @@ main {
     white-space: nowrap;
   }
 
-  .mgmtnav {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .mgmtnav::-webkit-scrollbar {
-    display: none;
-  }
-
-  .mgmtnav .subbtn,
-  .mgmtnav .subgrp {
-    flex: none;
-    white-space: nowrap;
-  }
 }

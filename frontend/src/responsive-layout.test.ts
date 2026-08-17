@@ -1,6 +1,6 @@
 // Small-screen layout contracts (GUI_DESIGN §2.5): every view must be
 // browsable by vertical scrolling alone on phone-width viewports — the
-// navigation wraps instead of widening the document, the wide
+// navigation adapts instead of widening the document, the wide
 // Management tables collapse to stacked rows with inline column
 // captions, and the Area Board All Areas board stacks its columns.
 // jsdom applies no media queries, so these contracts are verified
@@ -15,14 +15,20 @@ import { expect, test } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const css = (relative: string) => readFileSync(join(here, relative), 'utf8');
 
-test('the Management sub-navigation wraps on wide viewports and pans on phone widths', () => {
+test('the Management sub-navigation keeps ONE swipeable row at every width', () => {
   const shell = css('app/shell.css');
   const nav = /\.mgmtnav \{[^}]*}/s.exec(shell)![0];
-  expect(nav).toContain('flex-wrap: wrap');
-  // Phone: ONE swipeable row inside its own scroll region — no
-  // visible scrollbar, and never a widened document.
+  // Post-v18: the links never flow onto a second row at intermediate
+  // widths — wherever the row does not fit it pans horizontally inside
+  // its own scroll region with no visible scrollbar.
+  expect(nav).toContain('flex-wrap: nowrap');
+  expect(nav).toContain('overflow-x: auto');
+  expect(nav).toContain('scrollbar-width: none');
+  expect(nav).not.toContain('flex-wrap: wrap');
+  expect(shell).toMatch(/\.mgmtnav::-webkit-scrollbar \{\s*display: none;/s);
+  // The links and group labels stay unshrinkable one-line items.
   expect(shell).toMatch(
-    /@media \(max-width: \d+px\) \{[^@]*\.mgmtnav \{[^}]*flex-wrap: nowrap;[^}]*overflow-x: auto;[^}]*scrollbar-width: none;/s,
+    /\.mgmtnav \.subbtn,\s*\.mgmtnav \.subgrp \{[^}]*flex: none;[^}]*white-space: nowrap;/s,
   );
 });
 
