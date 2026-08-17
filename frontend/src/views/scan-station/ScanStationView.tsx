@@ -641,6 +641,19 @@ function StationView({
     [cardsFor],
   );
 
+  /**
+   * Actively Machine-assigned portions of one PN, per Machine — the
+   * PN action dialog offers a DONE choice for each (post-v18),
+   * equivalent to the Machine card's DONE row action.
+   */
+  const machineAssignmentsFor = useCallback(
+    (pn: string) =>
+      splitAssignments(cardsFor(pn))
+        .assigned.filter((entry) => entry.qty > 0)
+        .map((entry) => ({ machine: entry.context, qty: entry.qty })),
+    [cardsFor],
+  );
+
   const repairSourcesFor = useCallback(
     (pn: string) => MOCK_REPAIR_SOURCES[pn] ?? [],
     [],
@@ -1350,6 +1363,7 @@ function StationView({
           hasMachines={hasMachines}
           queuedQty={queuedQtyFor(flow.pn)}
           directQty={hasMachines ? 0 : processingQtyFor(flow.pn)}
+          machineAssignments={hasMachines ? machineAssignmentsFor(flow.pn) : []}
           sources={sourcesFor(flow.pn)}
           repairSources={repairSourcesFor(flow.pn)}
           inAreaQty={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
@@ -1631,8 +1645,8 @@ function BadgeConfirmDialog({
   children,
 }: {
   title: string;
-  /** Attention tone of the gate — `warning` for QUEUE return and
-   * UNDO; DONE keeps the plain presentation. */
+  /** Attention tone of the gate — every badge gate uses the shared
+   * warning confirmation presentation (post-v18). */
   tone?: 'warning';
   writeBlocked: boolean;
   onConfirm: (worker: MockWorker) => void;
@@ -2765,6 +2779,7 @@ function PnActionsDialog({
   hasMachines,
   queuedQty,
   directQty,
+  machineAssignments,
   sources,
   repairSources,
   inAreaQty,
@@ -2778,6 +2793,10 @@ function PnActionsDialog({
   queuedQty: number;
   /** Directly processing quantity (no-Machine Areas) eligible for DONE. */
   directQty: number;
+  /** Actively Machine-assigned portions of this PN (post-v18): each
+   * gets its own DONE choice, equivalent to the Machine card's DONE
+   * row action. Empty in no-Machine Areas. */
+  machineAssignments: { machine: string; qty: number }[];
   sources: SourceOption[];
   repairSources: {
     areaLabel: string;
@@ -2850,6 +2869,38 @@ function PnActionsDialog({
           </span>
         </button>
       ) : null}
+      {machineAssignments.map((assignment, index) => (
+        // One DONE choice per actively assigned Machine (post-v18) —
+        // the same one-shot DONE wizard the Machine card's DONE row
+        // action opens, with MAX defaulting to the assigned quantity.
+        <button
+          key={`${assignment.machine}-${index}`}
+          className="choice"
+          onClick={() =>
+            onPick({
+              kind: 'done',
+              pn,
+              machine: assignment.machine,
+              max: assignment.qty,
+            })
+          }
+        >
+          <span className="cic run" aria-hidden="true">
+            DONE
+          </span>
+          <span>
+            <span className="ct1">
+              Complete Area processing on {assignment.machine}
+            </span>
+            <br />
+            <span className="ct2">
+              {assignment.qty} pcs on {assignment.machine}. The finished
+              quantity leaves the Machine and moves to the finished rack, ready
+              to transfer.
+            </span>
+          </span>
+        </button>
+      ))}
       {directQty > 0 ? (
         <button
           className="choice"
@@ -4209,8 +4260,8 @@ function QueueReturnDialog({
       <b>
         {parsedQty} of {max} pcs
       </b>{' '}
-      of <span className="mono">{pn}</span> running on <b>{machine}</b> back to
-      the {areaName} queue? The quantity stays unfinished.
+      of <b className="mono">{pn}</b> running on <b>{machine}</b> back to the{' '}
+      {areaName} queue? The quantity stays unfinished.
     </>
   );
 
@@ -4442,7 +4493,7 @@ function DoneDialog({
       <b>
         {parsedQty} of {max} pcs
       </b>{' '}
-      of <span className="mono">{pn}</span>? The finished quantity moves to the{' '}
+      of <b className="mono">{pn}</b>? The finished quantity moves to the{' '}
       {areaName} finished rack, ready to transfer.
     </>
   ) : (
@@ -4451,9 +4502,9 @@ function DoneDialog({
       <b>
         {parsedQty} of {max} pcs
       </b>{' '}
-      of <span className="mono">{pn}</span> have finished processing at{' '}
-      {areaName}? The finished quantity moves to the {areaName} finished rack,
-      ready to transfer.
+      of <b className="mono">{pn}</b> have finished processing at {areaName}?
+      The finished quantity moves to the {areaName} finished rack, ready to
+      transfer.
     </>
   );
 
@@ -4596,6 +4647,7 @@ function DoneDialog({
       return (
         <BadgeConfirmDialog
           title="Scan badge to confirm completion"
+          tone="warning"
           writeBlocked={writeBlocked}
           onConfirm={(badgeWorker) => {
             onBadgeWorker(badgeWorker);
@@ -4645,7 +4697,7 @@ function UndoConfirmDialog({
   const gateInfo = (
     <>
       Are you sure you want to reverse <b>{target.movements.join(' + ')}</b> —{' '}
-      <b>{target.qty} pcs</b> of <span className="mono">{target.pn}</span>?{' '}
+      <b>{target.qty} pcs</b> of <b className="mono">{target.pn}</b>?{' '}
       {target.reversalEffect} The original history stays recorded for audit.
     </>
   );

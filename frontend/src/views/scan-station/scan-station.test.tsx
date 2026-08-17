@@ -3849,11 +3849,12 @@ test('DONE asks for a badge scan as the final step and records the confirming Wo
   fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
 
-  // The plain-toned badge gate shows the key facts of the completion.
+  // The badge gate shares the warning confirmation presentation and
+  // shows the key facts of the completion.
   const gate = screen.getByRole('dialog', {
     name: 'Scan badge to confirm completion',
   });
-  expect(gate.className).not.toContain('alertdlg');
+  expect(gate.className).toContain('tone-warning');
   expect(gate.textContent).toMatch(/Are you sure .* has finished/);
   // Escape cancels the gate — back on the summary, nothing recorded.
   fireEvent.keyDown(gate, { key: 'Escape' });
@@ -3898,6 +3899,34 @@ test('QUEUE return asks for its badge scan with a warning-toned gate', async () 
   expect(
     screen.getByText(/× \d+ returned to the Lathe queue/),
   ).toBeInTheDocument();
+});
+
+test('the PN action dialog offers DONE for quantity running on a Machine', async () => {
+  await renderStation();
+
+  scan('PF:PN:0455-20-0118-03'); // 4 pcs actively assigned on Lathe 2
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  const choice = within(dialog).getByRole('button', {
+    name: /Complete Area processing on Lathe 2/,
+  });
+  expect(choice.textContent).toContain('4 pcs on Lathe 2');
+
+  // Equivalent to the Machine card's DONE row action: the same DONE
+  // wizard with the Machine preselected and MAX = the assigned qty.
+  fireEvent.click(choice);
+  const wizard = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  expect(wizard.textContent).toContain('are available on Lathe 2');
+  expect(screen.getByLabelText('Quantity: 4')).toBeInTheDocument();
+  // Back returns to the action dialog with its context preserved.
+  fireEvent.click(screen.getByRole('button', { name: '‹ Back' }));
+  expect(
+    await screen.findByRole('dialog', { name: 'Select an action' }),
+  ).toBeInTheDocument();
+  fireEvent.keyDown(activeDialog(), { key: 'Escape' });
 });
 
 test('turning the Administration option off removes the badge gate for that action', async () => {
