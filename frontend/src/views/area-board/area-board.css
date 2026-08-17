@@ -305,33 +305,17 @@
 }
 
 /* Phone/tablet widths (GUI_DESIGN §2.5, post-v18 — keep the 720px
-   breakpoint in sync with OVERVIEW_PAGED_MAX_WIDTH_PX in
-   AreaBoardView): the layout choice follows the Wrap columns toggle.
-   Wrap ON stacks the columns full-width — vertical scrolling only.
-   Wrap OFF pages the board — a swipeable one-card-per-page carousel:
-   native horizontal scrolling with mandatory snap, no visible
-   scrollbar, each card slightly narrower than the viewport so the
-   neighboring cards peek in at the edges — the built-in cue that more
-   pages exist (plus the page dots and floating ‹ › buttons below).
-   The desktop/tablet horizontal board is unchanged above the
-   breakpoint. */
+   breakpoint in sync with NARROW_BOARD_MAX_WIDTH_PX in AreaBoardView):
+   the tab strip is hidden and the `Summary` toggle decides the layout.
+   Summary ON stacks the All Areas overview full-width — vertical
+   scrolling only. Summary OFF (default) pages the PER-AREA DETAILS —
+   a swipeable one-detail-per-page carousel: native horizontal
+   scrolling with mandatory snap, no visible scrollbar, each page
+   slightly narrower than the viewport so the neighboring pages peek
+   in at the edges — the built-in cue that more pages exist (plus the
+   page dots and floating ‹ › buttons below). The desktop/tablet
+   presentation is unchanged above the breakpoint. */
 @media (max-width: 720px) {
-  .ms-scroll:not(.wrap) {
-    scroll-snap-type: x mandatory;
-    scrollbar-width: none;
-    gap: 10px;
-    padding-bottom: 8px;
-  }
-
-  .ms-scroll:not(.wrap)::-webkit-scrollbar {
-    display: none;
-  }
-
-  .ms-scroll:not(.wrap) .ms-col {
-    flex: 0 0 calc(100% - 44px);
-    scroll-snap-align: center;
-  }
-
   .ms-scroll.wrap {
     flex-wrap: wrap;
     overflow-x: visible;
@@ -340,12 +324,32 @@
   .ms-scroll.wrap .ms-col {
     flex: 1 1 100%;
   }
+
+  .abd-scroll {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    padding-bottom: 8px;
+  }
+
+  .abd-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .abd-scroll .abd-page {
+    flex: 0 0 calc(100% - 44px);
+    scroll-snap-align: center;
+    min-width: 0;
+  }
 }
 
-/* Paged-mode chrome (rendered only under the breakpoint with Wrap
-   columns off — see AllAreasOverview). Area-colored page dots above
-   the carousel: indicator and direct jump targets in one, mirroring
-   the card accent colors; a generous hit area around each small dot. */
+/* Paged-mode chrome (rendered only under the breakpoint with Summary
+   off — see AreaDetailPager). Area-colored page dots above the
+   carousel: indicator and direct jump targets in one, mirroring the
+   page accent colors; a generous hit area around each small dot. */
 .ms-pagedots {
   display: flex;
   justify-content: center;

@@ -317,33 +317,38 @@ test('the All Areas overview wraps columns via the slide toggle', () => {
   );
 });
 
-/* ============ Paged narrow presentation (post-v18) ============ */
+/* ============ Narrow presentation (post-v18) ============ */
 
-test('narrow screens with Wrap columns off page one Area card at a time', () => {
+test('narrow screens hide the tab strip and page the per-Area details (Summary off)', () => {
   stubNarrowViewport(true);
   render(<AreaBoardView />);
 
-  // Paged chrome: Area-colored page dots above the carousel plus the
-  // floating ‹ › edge buttons; the scroll region keeps the carousel
-  // (non-wrap) class for the stylesheet's snap rules.
+  // No tab strip — the pages ARE the navigation.
+  expect(document.querySelector('.ab-tabs')).toBeNull();
+  // The Summary switch (default OFF) replaces Wrap columns.
+  const summarySwitch = screen.getByRole('switch', { name: 'Summary' });
+  expect(summarySwitch.getAttribute('aria-checked')).toBe('false');
+  expect(screen.queryByRole('switch', { name: 'Wrap columns' })).toBeNull();
+
+  // Paged details: one per-Area detail (the shared summary-card
+  // layout) per page, Area-colored dots + floating edge buttons.
   expect(document.querySelector('.ms-board.paged')).not.toBeNull();
-  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
-    false,
+  const pages = Array.from(document.querySelectorAll('.abd-page'));
+  expect(pages.length).toBe(8);
+  expect(pages[0].querySelector('.abd-summary')?.textContent).toContain(
+    'In this Area now — Material',
   );
   const dots = Array.from(document.querySelectorAll('.ms-pagedot'));
-  expect(dots.length).toBe(8); // one dot per Area, in board order
+  expect(dots.length).toBe(8);
   expect(dots[0].getAttribute('aria-label')).toBe('Go to Material');
   expect(dots[0].getAttribute('aria-current')).toBe('true');
 
-  const prev = screen.getByRole('button', { name: 'Previous Area' });
-  const next = screen.getByRole('button', { name: 'Next Area' });
-  expect(prev).toBeDisabled(); // first page — paging never wraps
-  expect(next).toBeEnabled();
-
-  fireEvent.click(next);
+  // First page: Previous disabled — paging never wraps.
+  expect(screen.getByRole('button', { name: 'Previous Area' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Next Area' }));
   expect(dots[1].getAttribute('aria-current')).toBe('true');
-  expect(dots[0].getAttribute('aria-current')).toBeNull();
-  expect(screen.getByRole('button', { name: 'Previous Area' })).toBeEnabled();
+  // The meta line follows the current page's Area.
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('in Cut');
 
   // A dot jumps directly; the last page disables Next.
   fireEvent.click(screen.getByRole('button', { name: 'Go to Stockroom' }));
@@ -351,27 +356,47 @@ test('narrow screens with Wrap columns off page one Area card at a time', () => 
   expect(screen.getByRole('button', { name: 'Next Area' })).toBeDisabled();
 });
 
-test('Wrap columns on keeps the stacked list — no pager chrome', () => {
+test('Summary on stacks the overview; a card header jumps to that detail page', () => {
   stubNarrowViewport(true);
   render(<AreaBoardView />);
 
-  fireEvent.click(screen.getByRole('switch', { name: 'Wrap columns' }));
+  fireEvent.click(screen.getByRole('switch', { name: 'Summary' }));
+  // Stacked overview (wrap layout), no pager chrome, still no tabs.
   expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
     true,
   );
   expect(document.querySelector('.ms-board.paged')).toBeNull();
   expect(document.querySelector('.ms-pagedot')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Previous Area' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Next Area' })).toBeNull();
+  expect(document.querySelector('.ab-tabs')).toBeNull();
+  expect(document.querySelector('.ab-meta')?.textContent).toContain(
+    'across all Areas',
+  );
+
+  // Clicking an Area card header returns to the paged details ON that
+  // Area's page (the Summary toggle switches off).
+  fireEvent.click(screen.getByTitle('Open Lathe detail'));
+  expect(
+    screen
+      .getByRole('switch', { name: 'Summary' })
+      .getAttribute('aria-checked'),
+  ).toBe('false');
+  expect(document.querySelector('.ms-board.paged')).not.toBeNull();
+  const dots = Array.from(document.querySelectorAll('.ms-pagedot'));
+  expect(dots[2].getAttribute('aria-current')).toBe('true'); // Lathe
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('in Lathe');
 });
 
-test('wide viewports never render the pager chrome', () => {
+test('wide viewports keep the tab strip and Wrap columns — never the pager', () => {
   stubNarrowViewport(false);
   render(<AreaBoardView />);
 
+  expect(document.querySelector('.ab-tabs')).not.toBeNull();
+  expect(
+    screen.getByRole('switch', { name: 'Wrap columns' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('switch', { name: 'Summary' })).toBeNull();
   expect(document.querySelector('.ms-board.paged')).toBeNull();
-  expect(document.querySelector('.ms-pagedot')).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Previous Area' })).toBeNull();
+  expect(document.querySelector('.abd-page')).toBeNull();
 });
 
 test('queued, on-Machine, processing, and finished states stay distinguishable', () => {

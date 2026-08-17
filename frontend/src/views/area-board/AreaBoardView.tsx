@@ -1,6 +1,12 @@
 import './area-board.css';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
 import {
@@ -75,22 +81,49 @@ function matches(card: MockAreaCard, query: string): boolean {
   return (card.pn + card.workOrder + card.job).toLowerCase().includes(query);
 }
 
-// One view, two modes behind a single tab strip: the All Areas overview
-// (the §21 Manager Summary content — no separate route) and the
-// per-Area detail. Tab selection is presentation state within the view.
+/**
+ * Phone/tablet breakpoint of the narrow Area Board presentation — the
+ * same §2.5 collapse point as the stylesheet's narrow rules
+ * (area-board.css `@media (max-width: 720px)`; keep the two in sync).
+ */
+const NARROW_BOARD_MAX_WIDTH_PX = 720;
+
+// One view, two modes behind a single tab strip on wide viewports: the
+// All Areas overview (the §21 Manager Summary content — no separate
+// route) and the per-Area detail. Tab selection is presentation state
+// within the view. Narrow viewports (post-v18) hide the tab strip
+// entirely: a `Summary` toggle (default OFF) switches between the
+// swipeable per-Area detail pages and the stacked All Areas overview.
 export function AreaBoardView() {
   const preview = getViewStatePreview();
   const [activeTab, setActiveTab] = useState<'all' | string>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('due');
-  // All Areas layout choice: horizontal scroll (default, GUI §6.2) or
-  // wrapping columns onto additional rows within the page width.
+  // All Areas layout choice on WIDE viewports: horizontal scroll
+  // (default, GUI §6.2) or wrapping columns onto additional rows.
   // Presentation state within the view, like the active tab.
   const [wrapOverview, setWrapOverview] = useState(false);
+  // Narrow presentation state (post-v18): `summary` OFF (default)
+  // pages the per-Area details; ON stacks the All Areas overview.
+  // `detailPage` remembers the active detail page across the toggle.
+  const [narrow, setNarrow] = useState(false);
+  const [summary, setSummary] = useState(false);
+  const [detailPage, setDetailPage] = useState(0);
   // Shared minute clock: `Time in Area` sorting and every derived time
   // display stay current (and identical across views) while the board
   // stays open.
   const now = useUiClock('minute');
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(
+      `(max-width: ${NARROW_BOARD_MAX_WIDTH_PX}px)`,
+    );
+    const apply = () => setNarrow(query.matches);
+    apply();
+    query.addEventListener('change', apply);
+    return () => query.removeEventListener('change', apply);
+  }, []);
 
   if (preview === 'loading') {
     return (
@@ -123,31 +156,55 @@ export function AreaBoardView() {
     now,
   );
 
+  const safeDetailPage = Math.min(detailPage, MOCK_AREAS.length - 1);
+  const pageArea = MOCK_AREAS[safeDetailPage];
+  const metaFor = (areaKey: string | null) =>
+    areaKey === null ? (
+      <>
+        <b>{visible.length}</b> PN ·{' '}
+        <b>{visible.reduce((s, c) => s + c.qty, 0)}</b> pcs across all Areas
+      </>
+    ) : (
+      <>
+        <b>{visible.filter((c) => c.area === areaKey).length}</b> PN ·{' '}
+        <b>
+          {visible
+            .filter((c) => c.area === areaKey)
+            .reduce((s, c) => s + c.qty, 0)}
+        </b>{' '}
+        pcs in {MOCK_AREAS.find((a) => a.key === areaKey)?.name}
+      </>
+    );
+
   return (
     <section className="ab" aria-label="Area Board">
-      <div className="ab-tabs">
-        <button
-          className={`ab-tab all ${activeTab === 'all' ? 'active' : ''}`}
-          aria-pressed={activeTab === 'all'}
-          onClick={() => setActiveTab('all')}
-        >
-          All Areas <span className="cnt">{allCards.length}</span>
-        </button>
-        {MOCK_AREAS.map((area) => (
+      {/* Narrow viewports render NO tab strip — the detail pages (and
+          the Summary overview's card headers) are the navigation. */}
+      {!narrow ? (
+        <div className="ab-tabs">
           <button
-            key={area.key}
-            className={`ab-tab ${activeTab === area.key ? 'active' : ''}`}
-            aria-pressed={activeTab === area.key}
-            onClick={() => setActiveTab(area.key)}
+            className={`ab-tab all ${activeTab === 'all' ? 'active' : ''}`}
+            aria-pressed={activeTab === 'all'}
+            onClick={() => setActiveTab('all')}
           >
-            <AreaDot colorVar={area.colorVar} />
-            {area.name}{' '}
-            <span className="cnt">
-              {allCards.filter((c) => c.area === area.key).length}
-            </span>
+            All Areas <span className="cnt">{allCards.length}</span>
           </button>
-        ))}
-      </div>
+          {MOCK_AREAS.map((area) => (
+            <button
+              key={area.key}
+              className={`ab-tab ${activeTab === area.key ? 'active' : ''}`}
+              aria-pressed={activeTab === area.key}
+              onClick={() => setActiveTab(area.key)}
+            >
+              <AreaDot colorVar={area.colorVar} />
+              {area.name}{' '}
+              <span className="cnt">
+                {allCards.filter((c) => c.area === area.key).length}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="ab-tools">
         <input
@@ -166,7 +223,22 @@ export function AreaBoardView() {
           <option value="tia">Sort: Time in Area</option>
           <option value="qty">Sort: Quantity</option>
         </select>
-        {activeTab === 'all' ? (
+        {narrow ? (
+          // Narrow layout choice (post-v18): OFF (default) pages the
+          // per-Area details, ON stacks the All Areas overview — the
+          // same slide-toggle presentation as Wrap columns.
+          <button
+            type="button"
+            role="switch"
+            aria-checked={summary}
+            className={`ab-wrap ${summary ? 'on' : ''}`}
+            onClick={() => setSummary((s) => !s)}
+            title="Show the stacked All Areas summary instead of the per-Area pages"
+          >
+            <span className="knob" aria-hidden="true" />
+            Summary
+          </button>
+        ) : activeTab === 'all' ? (
           <button
             type="button"
             role="switch"
@@ -180,27 +252,41 @@ export function AreaBoardView() {
           </button>
         ) : null}
         <span className="ab-meta">
-          {activeTab === 'all' ? (
-            <>
-              <b>{visible.length}</b> PN ·{' '}
-              <b>{visible.reduce((s, c) => s + c.qty, 0)}</b> pcs across all
-              Areas
-            </>
-          ) : (
-            <>
-              <b>{visible.filter((c) => c.area === activeTab).length}</b> PN ·{' '}
-              <b>
-                {visible
-                  .filter((c) => c.area === activeTab)
-                  .reduce((s, c) => s + c.qty, 0)}
-              </b>{' '}
-              pcs in {MOCK_AREAS.find((a) => a.key === activeTab)?.name}
-            </>
-          )}
+          {narrow
+            ? summary
+              ? metaFor(null)
+              : metaFor(pageArea.key)
+            : activeTab === 'all'
+              ? metaFor(null)
+              : metaFor(activeTab)}
         </span>
       </div>
 
-      {activeTab === 'all' ? (
+      {narrow ? (
+        summary ? (
+          <AllAreasOverview
+            cards={visible}
+            wrap
+            onOpenArea={(key) => {
+              // A summary card header jumps straight to that Area's
+              // detail page (the Summary toggle switches off).
+              setSummary(false);
+              setDetailPage(
+                Math.max(
+                  0,
+                  MOCK_AREAS.findIndex((a) => a.key === key),
+                ),
+              );
+            }}
+          />
+        ) : (
+          <AreaDetailPager
+            cards={visible}
+            page={safeDetailPage}
+            onPageChange={setDetailPage}
+          />
+        )
+      ) : activeTab === 'all' ? (
         <AllAreasOverview
           cards={visible}
           wrap={wrapOverview}
@@ -217,62 +303,54 @@ export function AreaBoardView() {
 }
 
 /**
- * Phone/tablet breakpoint of the paged All Areas presentation — the
- * same §2.5 collapse point as the stylesheet's narrow rules
- * (area-board.css `@media (max-width: 720px)`; keep the two in sync).
+ * Narrow paged Area details (post-v18): ONE per-Area detail view per
+ * page — the same shared Area/Machine monitoring layout as the wide
+ * detail tabs — in a swipeable snap carousel: native horizontal
+ * scrolling with mandatory snap (each swipe lands centered on one
+ * Area's detail; the neighboring pages peek in at the edges as the
+ * built-in cue that more pages exist), Area-colored page dots above
+ * the pages, and floating ‹ › edge buttons. The active page derives
+ * from the scroll position, so swipe, momentum, snap, dots and
+ * buttons can never disagree; paging never wraps.
  */
-const OVERVIEW_PAGED_MAX_WIDTH_PX = 720;
-
-function AllAreasOverview({
+function AreaDetailPager({
   cards,
-  wrap,
-  onOpenArea,
+  page,
+  onPageChange,
 }: {
   cards: MockAreaCard[];
-  wrap: boolean;
-  onOpenArea: (key: string) => void;
+  page: number;
+  onPageChange: (page: number) => void;
 }) {
-  // Paged narrow presentation (post-v18): under the phone/tablet
-  // breakpoint with `Wrap columns` OFF the board becomes a swipeable
-  // one-card-per-page carousel — native horizontal scrolling with CSS
-  // snap (each swipe lands centered on one Area card; the neighboring
-  // cards peek in at the edges as the built-in cue that more pages
-  // exist), Area-colored page dots above the cards, and floating ‹ ›
-  // edge buttons. `Wrap columns` ON keeps the §2.5 stacked full-width
-  // column list; wide viewports keep the §6.2 horizontal scroll and
-  // never render the pager chrome.
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState(false);
-  const [page, setPage] = useState(0);
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const query = window.matchMedia(
-      `(max-width: ${OVERVIEW_PAGED_MAX_WIDTH_PX}px)`,
-    );
-    const apply = () => setNarrow(query.matches);
-    apply();
-    query.addEventListener('change', apply);
-    return () => query.removeEventListener('change', apply);
-  }, []);
-  const paged = narrow && !wrap;
   const pageCount = MOCK_AREAS.length;
 
-  /** Scroll one Area card into the centered snap position. */
+  const scrollToPage = useCallback((target: number, smooth: boolean) => {
+    const el = scrollRef.current;
+    const child = el?.children[target] as HTMLElement | undefined;
+    if (!el || !child) return;
+    const left = child.offsetLeft - (el.clientWidth - child.offsetWidth) / 2;
+    // Element scrolling is unavailable in DOM environments without
+    // layout — the page state still drives the indicator.
+    if (typeof el.scrollTo === 'function') {
+      el.scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
+    }
+  }, []);
+
+  // Entering the pager (mount, or a Summary-card jump that remounts
+  // it) starts on the requested page without animation.
+  const initialPage = useRef(page);
+  useLayoutEffect(() => {
+    scrollToPage(initialPage.current, false);
+  }, [scrollToPage]);
+
   const goTo = useCallback(
     (target: number) => {
       if (target < 0 || target >= pageCount) return;
-      const el = scrollRef.current;
-      const col = el?.children[target] as HTMLElement | undefined;
-      if (!el || !col) return;
-      const left = col.offsetLeft - (el.clientWidth - col.offsetWidth) / 2;
-      // Element scrolling is unavailable in DOM environments without
-      // layout — the page state below still drives the indicator.
-      if (typeof el.scrollTo === 'function') {
-        el.scrollTo({ left, behavior: 'smooth' });
-      }
-      setPage(target);
+      scrollToPage(target, true);
+      onPageChange(target);
     },
-    [pageCount],
+    [pageCount, scrollToPage, onPageChange],
   );
 
   // The active page derives from the scroll position, so a native
@@ -292,72 +370,74 @@ function AllAreasOverview({
         best = index;
       }
     });
-    setPage((current) => (current === best ? current : best));
-  }, []);
+    if (best !== page) onPageChange(best);
+  }, [page, onPageChange]);
 
   return (
-    <div className={`ms-board${paged ? ' paged' : ''}`}>
-      {paged ? (
-        // Area-colored page dots: position indicator AND direct jump
-        // targets — the stable Area identity colors (§2.2) mirror the
-        // card accents, so the dot row reads as a map of the pages.
-        <div className="ms-pagedots" aria-label="Area pages">
-          {MOCK_AREAS.map((area, index) => (
-            <button
-              key={area.key}
-              type="button"
-              className={`ms-pagedot${index === page ? ' on' : ''}`}
-              style={{ ['--acol' as string]: area.colorVar }}
-              aria-label={`Go to ${area.name}`}
-              aria-current={index === page ? 'true' : undefined}
-              onClick={() => goTo(index)}
-            />
-          ))}
-        </div>
-      ) : null}
-      <div
-        className={`ms-scroll ${wrap ? 'wrap' : ''}`}
-        ref={scrollRef}
-        onScroll={paged ? onScroll : undefined}
-      >
-        {renderColumns(cards, onOpenArea)}
+    <div className="ms-board paged">
+      {/* Area-colored page dots: position indicator AND direct jump
+          targets — the stable Area identity colors (§2.2) mirror the
+          page accents, so the dot row reads as a map of the pages. */}
+      <div className="ms-pagedots" aria-label="Area pages">
+        {MOCK_AREAS.map((area, index) => (
+          <button
+            key={area.key}
+            type="button"
+            className={`ms-pagedot${index === page ? ' on' : ''}`}
+            style={{ ['--acol' as string]: area.colorVar }}
+            aria-label={`Go to ${area.name}`}
+            aria-current={index === page ? 'true' : undefined}
+            onClick={() => goTo(index)}
+          />
+        ))}
       </div>
-      {paged ? (
-        // Floating ‹ › edge buttons: the always-visible affordance that
-        // the pages continue — pinned mid-viewport so they stay in
-        // reach while a tall card scrolls vertically. Disabled at the
-        // ends: paging never wraps.
-        <>
-          <button
-            type="button"
-            className="ms-pagebtn prev"
-            aria-label="Previous Area"
-            disabled={page === 0}
-            onClick={() => goTo(page - 1)}
-          >
-            ‹
-          </button>
-          <button
-            type="button"
-            className="ms-pagebtn next"
-            aria-label="Next Area"
-            disabled={page === pageCount - 1}
-            onClick={() => goTo(page + 1)}
-          >
-            ›
-          </button>
-        </>
-      ) : null}
+      <div className="abd-scroll" ref={scrollRef} onScroll={onScroll}>
+        {MOCK_AREAS.map((area) => (
+          <div className="abd-page" key={area.key}>
+            <AreaDetail
+              area={area}
+              cards={cards.filter((c) => c.area === area.key)}
+            />
+          </div>
+        ))}
+      </div>
+      {/* Floating ‹ › edge buttons: the always-visible affordance that
+          the pages continue — pinned mid-viewport so they stay in
+          reach while a tall page scrolls vertically. Disabled at the
+          ends: paging never wraps. */}
+      <button
+        type="button"
+        className="ms-pagebtn prev"
+        aria-label="Previous Area"
+        disabled={page === 0}
+        onClick={() => goTo(page - 1)}
+      >
+        ‹
+      </button>
+      <button
+        type="button"
+        className="ms-pagebtn next"
+        aria-label="Next Area"
+        disabled={page === pageCount - 1}
+        onClick={() => goTo(page + 1)}
+      >
+        ›
+      </button>
     </div>
   );
 }
 
-function renderColumns(
-  cards: MockAreaCard[],
-  onOpenArea: (key: string) => void,
-) {
+function AllAreasOverview({
+  cards,
+  wrap,
+  onOpenArea,
+}: {
+  cards: MockAreaCard[];
+  wrap: boolean;
+  onOpenArea: (key: string) => void;
+}) {
   return (
-    <>
+    <div className={`ms-scroll ${wrap ? 'wrap' : ''}`}>
       {MOCK_AREAS.map((area) => {
         const areaCards = cards.filter((c) => c.area === area.key);
         const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;
@@ -464,7 +544,7 @@ function renderColumns(
           </div>
         );
       })}
-    </>
+    </div>
   );
 }
 
