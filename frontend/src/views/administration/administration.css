@@ -317,3 +317,95 @@
     display: none;
   }
 }
+
+/* Worker sessions — badge-confirmation switches (post-v18): the shared
+   slide-control language (role="switch", track + knob + written state,
+   like the Production Board footer switches), one full-width row per
+   sensitive action with its label and a quiet explanation. */
+.ad-switchlist {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  max-width: 640px;
+}
+
+.ad-switch {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 12px 16px;
+  min-height: var(--touch-min);
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.ad-switch .swtext {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ad-switch .swlabel {
+  font-size: 14px;
+  font-weight: 750;
+  color: var(--text);
+}
+
+.ad-switch .swdesc {
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.45;
+}
+
+.ad-switch .track {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.ad-switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition:
+    transform 0.15s,
+    background 0.15s;
+}
+
+.ad-switch.on .track {
+  border-color: var(--info-t);
+  background: var(--info-surface);
+}
+
+.ad-switch.on .knob {
+  transform: translateX(16px);
+  background: var(--info-t);
+}
+
+.ad-switch .swstate {
+  flex: none;
+  width: 24px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.ad-switch.on .swstate {
+  color: var(--info-t);
+}

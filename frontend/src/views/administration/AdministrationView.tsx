@@ -16,6 +16,12 @@ import {
 } from '../../mocks/administration';
 import { areaByKey } from '../../mocks/areas';
 import { MOCK_MACHINES } from '../../mocks/machines';
+import {
+  MOCK_BADGE_CONFIRM_POLICY,
+  MOCK_WORKER_SESSION_POLICY,
+  setBadgeConfirmRequirement,
+} from '../../mocks/scan-station';
+import type { BadgeConfirmAction } from '../../mocks/scan-station';
 import { AreaDot } from '../../components/indicators';
 import {
   MACHINE_BARCODE_NAMESPACE,
@@ -89,9 +95,11 @@ export function AdministrationView() {
             <span className="spacer" />
             {/* Honest presentation: configuration editing does not
                 exist yet, so the entry action is disabled instead of
-                pretending to work. Barcode configuration is a settings
-                form, not an entry table — no entry action at all. */}
-            {section.id !== 'barcode-configuration' ? (
+                pretending to work. Barcode configuration and Worker
+                sessions are settings forms, not entry tables — no
+                entry action at all. */}
+            {section.id !== 'barcode-configuration' &&
+            section.id !== 'worker-sessions' ? (
               <button
                 className="btn primary"
                 disabled
@@ -102,7 +110,8 @@ export function AdministrationView() {
             ) : null}
           </div>
           <DevNotice>
-            {section.id === 'barcode-configuration'
+            {section.id === 'barcode-configuration' ||
+            section.id === 'worker-sessions'
               ? 'Development preview — configuration values shown are sample data, and changes affect only this preview.'
               : 'Development preview — configuration values shown are sample data, and editing is not available yet.'}
           </DevNotice>
@@ -110,6 +119,8 @@ export function AdministrationView() {
             <AreasTable empty={preview === 'empty'} />
           ) : section.id === 'barcode-configuration' ? (
             <BarcodeConfigurationPanel />
+          ) : section.id === 'worker-sessions' ? (
+            <WorkerSessionsPanel />
           ) : (
             <div className="ad-placeholder">
               {section.phase === 'minimum' ? (
@@ -225,6 +236,107 @@ function BarcodeConfigurationPanel() {
         A format change applies to Machines created afterwards only — existing
         Asset Tags are never renamed or regenerated.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Worker sessions (Policies): the Scanned-session sliding inactivity
+ * timeout values (read-only preview — one default plus per-Area
+ * overrides, §19) and the badge-confirmation options for the three
+ * sensitive Scan Station actions (post-v18). The three On/Off switches
+ * edit the shared mock policy session-only: ON requires a Worker badge
+ * scan as the final step after the action's confirmation summary in
+ * every Scanned-session Area; default ON for all three.
+ */
+const BADGE_CONFIRM_OPTIONS: {
+  action: BadgeConfirmAction;
+  label: string;
+  description: string;
+}[] = [
+  {
+    action: 'done',
+    label: 'DONE — Complete Area processing',
+    description:
+      'Require a Worker badge scan as the final step of every completion.',
+  },
+  {
+    action: 'queue',
+    label: 'QUEUE — Return unfinished quantity to queue',
+    description:
+      'Require a Worker badge scan as the final step of every queue return.',
+  },
+  {
+    action: 'undo',
+    label: 'UNDO — Reverse the last action',
+    description:
+      'Require a Worker badge scan as the final step of every reversal.',
+  },
+];
+
+function WorkerSessionsPanel() {
+  const [policy, setPolicy] = useState({ ...MOCK_BADGE_CONFIRM_POLICY });
+  function toggle(action: BadgeConfirmAction) {
+    const next = !policy[action];
+    setBadgeConfirmRequirement(action, next);
+    setPolicy((current) => ({ ...current, [action]: next }));
+  }
+  return (
+    <div className="ad-config">
+      <h2>Sliding inactivity timeout</h2>
+      <p className="ad-confighelp">
+        A scanned Worker Session ends after this period without a valid
+        production interaction — never at a shift boundary. One default value
+        with optional per-Area overrides.
+      </p>
+      <div className="ad-configpreview">
+        <div className="prow">
+          <span className="k">Default timeout</span>
+          <span className="v">
+            {MOCK_WORKER_SESSION_POLICY.defaultTimeoutMinutes} minutes
+          </span>
+        </div>
+        {Object.entries(MOCK_WORKER_SESSION_POLICY.areaOverrides).map(
+          ([area, minutes]) => (
+            <div className="prow" key={area}>
+              <span className="k">
+                {areaByKey(area)?.name ?? area} override
+              </span>
+              <span className="v">{minutes} minutes</span>
+            </div>
+          ),
+        )}
+      </div>
+      <h2>Badge confirmation for sensitive actions</h2>
+      <p className="ad-confighelp">
+        In an Area with scanned Worker Sessions, each option below adds a final
+        step after the action’s confirmation summary: a Worker badge scan
+        records the confirming Worker and completes the action. Areas with a
+        fixed Worker ask a final confirmation question instead — no badge exists
+        there.
+      </p>
+      <div className="ad-switchlist">
+        {BADGE_CONFIRM_OPTIONS.map(({ action, label, description }) => (
+          <button
+            key={action}
+            type="button"
+            role="switch"
+            aria-checked={policy[action]}
+            aria-label={`Require badge scan — ${label}`}
+            className={`ad-switch${policy[action] ? ' on' : ''}`}
+            onClick={() => toggle(action)}
+          >
+            <span className="swtext">
+              <span className="swlabel">{label}</span>
+              <span className="swdesc">{description}</span>
+            </span>
+            <span className="track" aria-hidden="true">
+              <span className="knob" />
+            </span>
+            <span className="swstate">{policy[action] ? 'On' : 'Off'}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

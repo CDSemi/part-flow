@@ -119,6 +119,36 @@ export function workerSessionTimeoutMinutes(area: AreaKey): number {
   );
 }
 
+/**
+ * Badge confirmation of sensitive actions (post-v18, PROJECT_PROFILE
+ * §19): in a Scanned-session Area each of the three sensitive one-shot
+ * actions can require a Worker badge scan as the FINAL step after the
+ * confirmation summary — DONE (Complete Area processing), QUEUE
+ * (Return unfinished quantity to queue) and UNDO each carry their own
+ * option, default ON. Mock configuration: Administration → Worker
+ * sessions edits the values session-only (never persisted); the Scan
+ * Station reads them when the final step opens. Fixed-Worker Areas ask
+ * a final toned confirmation question instead — no badge exists there.
+ */
+export type BadgeConfirmAction = 'done' | 'queue' | 'undo';
+
+export const MOCK_BADGE_CONFIRM_POLICY: Record<BadgeConfirmAction, boolean> = {
+  done: true,
+  queue: true,
+  undo: true,
+};
+
+export function requireBadgeConfirm(action: BadgeConfirmAction): boolean {
+  return MOCK_BADGE_CONFIRM_POLICY[action];
+}
+
+export function setBadgeConfirmRequirement(
+  action: BadgeConfirmAction,
+  required: boolean,
+): void {
+  MOCK_BADGE_CONFIRM_POLICY[action] = required;
+}
+
 // Machine barcode resolution (mock): PF:MACHINE:<asset-tag>, derived
 // from the shared Machine registry so the scanned value is always the
 // Machine's Asset Tag — there is no independent barcode registry.

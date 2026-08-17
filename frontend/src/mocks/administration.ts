@@ -212,7 +212,7 @@ export const MOCK_ADMIN_SECTIONS: MockAdminSection[] = [
     group: 'Policies',
     label: 'Worker sessions',
     subtitle:
-      'Scanned-session sliding inactivity timeout — one default value with per-Area overrides; no shift schedules (§19)',
+      'Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)',
   },
   {
     id: 'machine-assignment',

@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { setBadgeConfirmRequirement } from '../../mocks/scan-station';
 
 // Scan Station regressions for the PN-centric one-shot redesign and
 // the multi-step confirmation wizards: station selection routing, no
@@ -87,6 +88,24 @@ function enterThroughConfirmation() {
 
 function lastPnText() {
   return document.querySelector('.ss-lastpn .p')?.textContent;
+}
+
+/**
+ * Complete the post-v18 final-confirmation gate of a sensitive action
+ * (DONE / QUEUE return / UNDO): a Worker badge scan in a
+ * Scanned-session Area (the Administration options default to ON), the
+ * final toned question in a Fixed-Worker Area. No-op when no gate is
+ * configured (Disabled Areas, or the option turned off).
+ */
+function confirmFinalGate(badge = '100482') {
+  const field = screen.queryByLabelText('Scan Worker badge');
+  if (field) {
+    fireEvent.change(field, { target: { value: badge } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    return;
+  }
+  const yes = screen.queryByRole('button', { name: /^Yes — / });
+  if (yes) fireEvent.click(yes);
 }
 
 /* ============ Routing and station identity ============ */
@@ -729,6 +748,7 @@ test('row DONE opens the existing DONE wizard without a Machine field; partial D
   expect(dialog.textContent).toContain('Finished — ready to move');
   expect(dialog.textContent).toContain('AREA_COMPLETED');
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate();
 
   // Only the confirmed 2 pcs moved to `Finished — ready to move`; the
   // remaining 4 pcs keep processing and keep their DONE action. The
@@ -783,9 +803,11 @@ test('a fully completed row leaves In processing and shows no DONE anywhere', as
   const dialog = await screen.findByRole('dialog', {
     name: 'Complete Area processing',
   });
-  // MAX (6) is the default — Enter advances, Enter confirms.
+  // MAX (6) is the default — Enter advances, Enter confirms; the
+  // Fixed-Worker final question completes the confirmation.
   fireEvent.keyDown(dialog, { key: 'Enter' });
   fireEvent.keyDown(dialog, { key: 'Enter' });
+  confirmFinalGate();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
   const summary = document.querySelector('.abd-summary')! as HTMLElement;
@@ -1752,6 +1774,7 @@ test('QUEUE return uses quantity then a dedicated confirmation view', async () =
   fireEvent.click(
     screen.getByRole('button', { name: 'Confirm return to queue' }),
   );
+  confirmFinalGate();
   expect(
     screen.getByText(/× \d+ returned to the Lathe queue/),
   ).toBeInTheDocument();
@@ -1821,6 +1844,7 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   // Confirmed Undo reverses and advances to the next eligible action.
   fireEvent.click(undoButton());
   fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  confirmFinalGate();
   expect(
     screen.getByText('Last action reversed — 78-04-0031'),
   ).toBeInTheDocument();
@@ -1829,6 +1853,7 @@ test('Undo shows a summary confirmation, reverses, then advances to the previous
   // Undo the remaining operation; afterwards nothing is eligible.
   fireEvent.click(undoButton());
   fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  confirmFinalGate();
   expect(lastPnText()).toBe('—');
   expect(undoButton()).toBeDisabled();
 });
@@ -2587,6 +2612,7 @@ test('manual DONE moves the selected quantity to Finished — ready to move', as
   expect(lastPnText()).toBe('—');
 
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate();
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(
     screen.getByText(/2027-60-8114-00 × 3 finished at Lathe/),
@@ -2634,6 +2660,7 @@ test('QUEUE returns quantity to the queue and never marks it DONE', async () => 
   fireEvent.click(
     screen.getByRole('button', { name: 'Confirm return to queue' }),
   );
+  confirmFinalGate();
 
   // The quantity is queued again — not finished.
   const lathe2After = document.querySelectorAll(
@@ -2724,6 +2751,7 @@ test('QUEUE return keeps Running while quantity remains; a full return flips Idl
   fireEvent.click(
     screen.getByRole('button', { name: 'Confirm return to queue' }),
   );
+  confirmFinalGate();
   expect(machineCard(2).classList.contains('running')).toBe(true);
   expect(machineStat(2)).toContain('running');
   expect(machineStat(2)).not.toContain('<1m');
@@ -2742,6 +2770,7 @@ test('QUEUE return keeps Running while quantity remains; a full return flips Idl
   fireEvent.click(
     screen.getByRole('button', { name: 'Confirm return to queue' }),
   );
+  confirmFinalGate();
   expect(machineCard(2).classList.contains('idle')).toBe(true);
   expect(machineStat(2)).toContain('idle · <1m');
   expect(machineCard(2).textContent).toContain('No production assigned');
@@ -2765,6 +2794,7 @@ test('DONE keeps Running while assigned quantity remains; completing all of it f
   fireEvent.keyDown(dialog, { key: '2' });
   fireEvent.keyDown(dialog, { key: 'Enter' });
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate();
   expect(machineCard(2).classList.contains('running')).toBe(true);
   expect(machineStat(2)).not.toContain('<1m');
 
@@ -2780,6 +2810,7 @@ test('DONE keeps Running while assigned quantity remains; completing all of it f
   });
   fireEvent.keyDown(dialog, { key: 'Enter' });
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate();
   expect(machineCard(2).classList.contains('idle')).toBe(true);
   expect(machineStat(2)).toContain('idle · <1m');
   expect(machineCard(2).textContent).toContain('No production assigned');
@@ -2803,6 +2834,7 @@ test('the assignment dialog checks Machine availability against the session stat
   fireEvent.click(
     screen.getByRole('button', { name: 'Confirm return to queue' }),
   );
+  confirmFinalGate();
   expect(machineCard(1).classList.contains('idle')).toBe(true);
 
   scan('PF:MACHINE:CD-0512');
@@ -2840,6 +2872,7 @@ test('a direct-processing Area can also mark quantity DONE', async () => {
   expect(dialog.textContent).toContain('Finished — ready to move');
   expect(dialog.textContent).not.toContain('Machine');
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate();
 
   const stats = new Map(
     Array.from(document.querySelectorAll('.ss-stats .stat'), (el) => [
@@ -2954,6 +2987,7 @@ test('whole-command Undo reverses completion-plus-transfer together', async () =
   // The Undo summary names the COMPLETE command, not one arbitrary row.
   expect(dialog).toHaveTextContent('AREA_COMPLETED + TRANSFERRED');
   fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  confirmFinalGate();
 
   // Both effects reverse together: the quantity left this Area again …
   expect(document.querySelector('.abd-summary')?.textContent).not.toContain(
@@ -3753,7 +3787,7 @@ test('a Disabled Area renders no Worker pill and records no Worker', async () =>
   expect(undoDialog.textContent).not.toContain('Reversed by');
 });
 
-test('Undo needs no extra badge scan; the reversal records the Worker active at confirmation', async () => {
+test('the reversal separates Workers and its badge gate identifies the confirming Worker', async () => {
   await renderStation(); // signed in as H. Nguyen
 
   // Complete one operation under H. Nguyen.
@@ -3761,9 +3795,8 @@ test('Undo needs no extra badge scan; the reversal records the Worker active at 
   enterThroughConfirmation();
   expect(lastPnText()).toBe('118-052');
 
-  // Switch the active Worker, then Undo — no extra badge scan is
-  // required; the confirmation separates the original action's Worker
-  // from the reversing Worker.
+  // Switch the active Worker, then Undo — the confirmation separates
+  // the original action's Worker from the reversing Worker.
   scan('100517');
   fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
   const dialog = await screen.findByRole('dialog', {
@@ -3776,11 +3809,179 @@ test('Undo needs no extra badge scan; the reversal records the Worker active at 
   expect(rows).toContainEqual(['Worker', 'H. Nguyen']);
   expect(rows).toContainEqual(['Reversed by', 'V. Tran']);
 
+  // Confirm reversal opens the badge gate (Scanned session, option ON
+  // by default): the warning-toned gate shows the key facts and ANY
+  // active Worker badge confirms — the badge identifies the confirming
+  // Worker (§19).
   fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  const gate = screen.getByRole('dialog', {
+    name: 'Scan badge to confirm the reversal',
+  });
+  expect(gate.className).toContain('tone-warning');
+  expect(gate.textContent).toContain('Are you sure you want to reverse');
+  expect(gate.textContent).toContain('118-052');
+  // Unknown badges are rejected in place — nothing recorded.
+  const field = within(gate).getByLabelText('Scan Worker badge');
+  fireEvent.change(field, { target: { value: 'NOT-A-BADGE' } });
+  fireEvent.keyDown(field, { key: 'Enter' });
+  expect(gate.textContent).toContain('Badge not recognized');
+  expect(lastPnText()).toBe('118-052');
+  // A valid badge completes the reversal.
+  fireEvent.change(field, { target: { value: '100517' } });
+  fireEvent.keyDown(field, { key: 'Enter' });
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(
     screen.getByText(/Last action reversed — 118-052/),
   ).toBeInTheDocument();
+});
+
+/* ============ Final-confirmation gates (post-v18) ============ */
+
+test('DONE asks for a badge scan as the final step and records the confirming Worker', async () => {
+  await renderStation(); // LATHE — Scanned session, options default ON
+
+  const machineRegion = document.querySelector('.am-machines')! as HTMLElement;
+  fireEvent.click(
+    within(machineRegion).getAllByRole('button', {
+      name: 'Complete Area processing',
+    })[0],
+  );
+  fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+
+  // The plain-toned badge gate shows the key facts of the completion.
+  const gate = screen.getByRole('dialog', {
+    name: 'Scan badge to confirm completion',
+  });
+  expect(gate.className).not.toContain('alertdlg');
+  expect(gate.textContent).toMatch(/Are you sure .* has finished/);
+  // Escape cancels the gate — back on the summary, nothing recorded.
+  fireEvent.keyDown(gate, { key: 'Escape' });
+  expect(
+    screen.queryByRole('dialog', { name: 'Scan badge to confirm completion' }),
+  ).toBeNull();
+  expect(activeDialog().textContent).toContain('AREA_COMPLETED');
+
+  // Confirm again; a DIFFERENT active Worker's badge confirms — the
+  // action completes and that Worker is signed in (recorded per §19).
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  confirmFinalGate('100517');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByText(/× \d+ finished at Lathe/)).toBeInTheDocument();
+  expect(document.querySelector('.ss-pill .val')?.textContent).toContain(
+    'V. Tran',
+  );
+});
+
+test('QUEUE return asks for its badge scan with a warning-toned gate', async () => {
+  await renderStation();
+
+  const machineRegion = document.querySelector('.am-machines')! as HTMLElement;
+  fireEvent.click(
+    within(machineRegion).getAllByRole('button', {
+      name: 'Return to Area queue',
+    })[0],
+  );
+  fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Confirm return to queue' }),
+  );
+  const gate = screen.getByRole('dialog', {
+    name: 'Scan badge to confirm the queue return',
+  });
+  expect(gate.className).toContain('tone-warning');
+  expect(gate.textContent).toMatch(
+    /Are you sure you want to return .* back to the Lathe queue\?/,
+  );
+  confirmFinalGate();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    screen.getByText(/× \d+ returned to the Lathe queue/),
+  ).toBeInTheDocument();
+});
+
+test('turning the Administration option off removes the badge gate for that action', async () => {
+  setBadgeConfirmRequirement('done', false);
+  try {
+    await renderStation();
+    const machineRegion = document.querySelector(
+      '.am-machines',
+    )! as HTMLElement;
+    fireEvent.click(
+      within(machineRegion).getAllByRole('button', {
+        name: 'Complete Area processing',
+      })[0],
+    );
+    fireEvent.keyDown(activeDialog(), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+    // No gate — the confirmation records directly while the option is
+    // off; the other actions keep their gates independently.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByText(/× \d+ finished at Lathe/)).toBeInTheDocument();
+  } finally {
+    setBadgeConfirmRequirement('done', true);
+  }
+});
+
+test('a Fixed-Worker Area asks a final question instead — plain for DONE, warning for UNDO', async () => {
+  await renderStation('DEBURR-ST-01'); // Fixed Worker — no badge gate
+
+  // DONE via the direct-processing row action.
+  fireEvent.click(
+    screen.getAllByRole('button', { name: 'Complete Area processing' })[0],
+  );
+  fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  // Plain-toned final question with the key facts; Cancel returns to
+  // the summary without recording.
+  const question = screen.getByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  expect(question.className).not.toContain('alertdlg');
+  expect(question.textContent).toMatch(
+    /Are you sure .* have finished processing at Deburr\?/,
+  );
+  fireEvent.click(
+    within(question).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(activeDialog().textContent).toContain('AREA_COMPLETED');
+  // Confirming the question records the completion.
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Yes — finished' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByText(/× \d+ finished at Deburr/)).toBeInTheDocument();
+
+  // UNDO asks the warning-toned final question.
+  fireEvent.click(screen.getByRole('button', { name: '⟲ UNDO' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+  const undoQuestion = screen.getByRole('dialog', {
+    name: 'Reverse this action?',
+  });
+  expect(undoQuestion.className).toContain('tone-warning');
+  expect(undoQuestion.textContent).toContain(
+    'Are you sure you want to reverse',
+  );
+  fireEvent.click(
+    within(undoQuestion).getByRole('button', { name: 'Yes — reverse it' }),
+  );
+  expect(screen.getByText(/Last action reversed/)).toBeInTheDocument();
+});
+
+test('Receive Quantity opens with no field focused; Enter advances to the quantity step', async () => {
+  await renderStation();
+
+  scan('PF:PN:NEW-PART-01');
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Receive Quantity',
+  });
+  // No input or select holds initial focus — the dialog root does, so
+  // an immediate Enter is never swallowed by a focused field and moves
+  // straight to the next step.
+  expect(document.activeElement).toBe(dialog);
+  fireEvent.keyDown(dialog, { key: 'Enter' });
+  expect(dialog.textContent).toContain(
+    'Enter the physical quantity received. No default quantity is assumed.',
+  );
 });
 
 test('clicking a demo badge in the sign-in modal signs in like a badge scan', async () => {

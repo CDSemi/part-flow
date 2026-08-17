@@ -19,6 +19,7 @@ import {
   AreaSummaryCard,
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ConnectivityChip } from '../../components/ConnectivityChip';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot, RouteModeChip, TypeChip } from '../../components/indicators';
@@ -42,11 +43,12 @@ import {
   MOCK_MACHINE_BARCODES,
   MOCK_REPAIR_SOURCES,
   MOCK_SCAN_STATIONS,
+  requireBadgeConfirm,
   stationById,
   workerByBadge,
   workerSessionTimeoutMinutes,
 } from '../../mocks/scan-station';
-import type { MockWorker } from '../../mocks/scan-station';
+import type { BadgeConfirmAction, MockWorker } from '../../mocks/scan-station';
 import { catalogPartNumber } from '../../mocks/work-orders';
 import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
@@ -968,6 +970,24 @@ function StationView({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [flow, navigate, productionMode, station.stationId]);
 
+  /**
+   * Final-confirmation gate of the three sensitive one-shot actions
+   * (post-v18, PROJECT_PROFILE §19): a Scanned-session Area requires a
+   * Worker badge scan as the LAST step after the confirmation summary
+   * whenever the Administration option for the action is ON (default);
+   * a Fixed-Worker Area asks one final toned confirmation question
+   * instead (the Machines last-question pattern — no badge exists
+   * there). Disabled Areas keep the plain confirmation step.
+   */
+  const finalGateFor = (action: BadgeConfirmAction): FinalGate =>
+    workerMode === 'scanned'
+      ? requireBadgeConfirm(action)
+        ? 'badge'
+        : null
+      : workerMode === 'fixed'
+        ? 'question'
+        : null;
+
   function undoTarget(): MockCompletedAction | null {
     return eligible?.action ?? null;
   }
@@ -1424,6 +1444,9 @@ function StationView({
           machine={flow.machine}
           max={flow.max}
           worker={workerName}
+          finalGate={finalGateFor('queue')}
+          writeBlocked={writeBlocked}
+          onBadgeWorker={signInWorker}
           onApply={applyCommand}
           onNotice={setNotice}
           onClose={closeFlow}
@@ -1437,6 +1460,9 @@ function StationView({
           machine={flow.machine}
           max={flow.max}
           worker={workerName}
+          finalGate={finalGateFor('done')}
+          writeBlocked={writeBlocked}
+          onBadgeWorker={signInWorker}
           onBack={backTo(flow.parent)}
           onApply={applyCommand}
           onNotice={setNotice}
@@ -1448,6 +1474,9 @@ function StationView({
         <UndoConfirmDialog
           target={undoTarget()!}
           reversedBy={workerName}
+          finalGate={finalGateFor('undo')}
+          writeBlocked={writeBlocked}
+          onBadgeWorker={signInWorker}
           onConfirm={confirmUndo}
           onCancel={cancelFlow}
         />
@@ -1564,6 +1593,128 @@ interface ActionDialogProps {
   onNotice: (n: Notice) => void;
   onClose: (message?: string) => void;
   onCancel: () => void;
+}
+
+/**
+ * Final-confirmation gate of a sensitive one-shot action (post-v18):
+ * `badge` requires a Worker badge scan as the last step (Scanned
+ * session + Administration option ON), `question` asks one final toned
+ * confirmation question (Fixed Worker), null keeps the plain
+ * confirmation step (Disabled, or the Administration option OFF).
+ */
+type FinalGate = 'badge' | 'question' | null;
+
+/** Props the gated dialogs share on top of ActionDialogProps. */
+interface FinalGateProps {
+  finalGate: FinalGate;
+  writeBlocked: boolean;
+  /** A badge-gate scan signs that Worker in (switch + refresh) before
+   * the action records — the confirming Worker per §19. */
+  onBadgeWorker: (worker: MockWorker) => void;
+}
+
+/**
+ * Badge-scan final confirmation (post-v18, §4.12/§19): the last step of
+ * a sensitive action in a Scanned-session Area when the Administration
+ * option requires it. The key facts of the pending action stay
+ * visible; ANY active Worker badge confirms — the badge identifies the
+ * confirming Worker, who is recorded on the action (and signed in,
+ * exactly like a normal badge scan). Unknown or inactive badges are
+ * rejected with nothing recorded. Cancel returns to the summary.
+ */
+function BadgeConfirmDialog({
+  title,
+  tone,
+  writeBlocked,
+  onConfirm,
+  onCancel,
+  children,
+}: {
+  title: string;
+  /** Attention tone of the gate — `warning` for QUEUE return and
+   * UNDO; DONE keeps the plain presentation. */
+  tone?: 'warning';
+  writeBlocked: boolean;
+  onConfirm: (worker: MockWorker) => void;
+  onCancel: () => void;
+  children: ReactNode;
+}) {
+  const fieldRef = useRef<HTMLInputElement>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  useEffect(() => {
+    fieldRef.current?.focus();
+  }, []);
+  function submit() {
+    const value = normalizeScanInput(fieldRef.current?.value ?? '');
+    if (fieldRef.current) fieldRef.current.value = '';
+    if (!value) return;
+    // Exact match against ACTIVE Worker badge barcodes only — an
+    // unknown, inactive, or non-badge value is rejected with nothing
+    // recorded.
+    const badgeWorker = workerByBadge(value);
+    if (!badgeWorker) {
+      setScanError(
+        'Badge not recognized. Check the badge and scan again — nothing was recorded.',
+      );
+      return;
+    }
+    onConfirm(badgeWorker);
+  }
+  // Development-only: a click on a demo badge is the exact equivalent
+  // of a wedge badge scan ending in Enter. Inert while writes are
+  // blocked, like the field itself.
+  function simulateBadge(value: string) {
+    if (writeBlocked || !fieldRef.current) return;
+    fieldRef.current.value = value;
+    setScanError(null);
+    submit();
+  }
+  return (
+    <ModalDialog
+      label={title}
+      onClose={onCancel}
+      className={`msgdlg${tone ? ` alertdlg tone-${tone}` : ''}`}
+    >
+      {tone ? (
+        <span className="alertbadge" aria-hidden="true">
+          !
+        </span>
+      ) : null}
+      <h3>{title}</h3>
+      <div className="sub">{children}</div>
+      <Guidance tone="action">
+        Scan a Worker badge to confirm — the badge identifies the confirming
+        Worker and completes the action.
+      </Guidance>
+      <input
+        aria-label="Scan Worker badge"
+        ref={fieldRef}
+        className="field mono"
+        autoComplete="off"
+        disabled={writeBlocked}
+        placeholder={
+          writeBlocked
+            ? 'Disconnected — scanning disabled'
+            : 'Scan Worker badge · Press Enter'
+        }
+        onChange={() => setScanError(null)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') submit();
+        }}
+      />
+      {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
+      <DevNotice>
+        Demo badges (development build only) — click one to simulate a badge
+        scan: <DemoBarcode value="100482" onScan={simulateBadge} /> H. Nguyen ·{' '}
+        <DemoBarcode value="100517" onScan={simulateBadge} /> V. Tran
+      </DevNotice>
+      <div className="row">
+        <button className="bigbtn ghost" onClick={onCancel}>
+          Cancel (Esc)
+        </button>
+      </div>
+    </ModalDialog>
+  );
 }
 
 /** Optional row emphasis for the shared confirmation summary. */
@@ -3069,10 +3220,10 @@ function IntakeDialog({
   const [operation, setOperation] = useState(
     operations[0] ? `${areaName} — ${operations[0]}` : '',
   );
-  const firstFieldRef = useRef<HTMLSelectElement>(null);
-  useEffect(() => {
-    if (step === 'settings') firstFieldRef.current?.focus();
-  }, [step]);
+  // No field receives initial focus (post-v18): the dialog root keeps
+  // the focus ModalDialog gives it, so Enter advances to the next step
+  // immediately (a focused select would swallow Enter). Every field
+  // stays reachable by Tab or tap.
   const parsedQty = parseInt(qty || '0', 10);
   const settingsValid = routeMode === 'FLOATING' || plannedRoute !== '';
   const valid = parsedQty >= 1 && settingsValid;
@@ -3184,7 +3335,6 @@ function IntakeDialog({
             <label htmlFor="in-type">Request Type</label>
             <select
               id="in-type"
-              ref={firstFieldRef}
               value={requestType}
               onChange={(e) => setRequestType(e.target.value as RequestType)}
             >
@@ -3991,14 +4141,21 @@ function QueueReturnDialog({
   machine,
   max,
   worker,
+  finalGate,
+  writeBlocked,
+  onBadgeWorker,
   onApply,
   onNotice,
   onClose,
   onCancel,
-}: ActionDialogProps & { pn: string; machine: string; max: number }) {
+}: ActionDialogProps &
+  FinalGateProps & { pn: string; machine: string; max: number }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   const [qty, setQty] = useState(String(max)); // MAX default
+  // Final-confirmation gate (post-v18): opened by the summary's
+  // confirming action; Cancel returns to the summary unchanged.
+  const [gate, setGate] = useState(false);
   const parsedQty = parseInt(qty || '0', 10);
   const valid = parsedQty >= 1 && parsedQty <= max;
 
@@ -4006,7 +4163,13 @@ function QueueReturnDialog({
     if (valid) setStep('confirm');
   }
 
-  function confirm() {
+  function requestConfirm() {
+    if (!valid) return;
+    if (finalGate) setGate(true);
+    else confirm();
+  }
+
+  function confirm(confirmedBy?: string) {
     if (!valid) return;
     onApply({
       action: {
@@ -4017,7 +4180,7 @@ function QueueReturnDialog({
         source: machine,
         destination: 'Area queue',
         machine,
-        worker,
+        worker: confirmedBy ?? worker,
         time: MOCK_SCAN_TIME,
         reversalEffect: `Re-assigns ${parsedQty} pcs to ${machine}.`,
       },
@@ -4038,98 +4201,153 @@ function QueueReturnDialog({
     onClose();
   }
 
-  return (
-    <ModalDialog
-      label="Return unfinished quantity to queue"
-      onClose={onCancel}
-      onKeyDown={
-        step === 'qty'
-          ? quantityKeyHandler(qty, setQty, goConfirm)
-          : enterKeyHandler(confirm)
-      }
-    >
-      <h3>Return unfinished quantity to queue</h3>
-      {step === 'qty' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <StepRecap
-            lines={[
-              <>
-                <EntityChip>{machine}</EntityChip> →{' '}
-                <EntityChip>{areaName} queue</EntityChip>
-              </>,
-            ]}
-          />
-          <Guidance tone="info">
-            <b>{max} pcs</b> are assigned to {machine}. Enter a lower quantity
-            to return only part of them.
-          </Guidance>
-          {(() => {
-            const v = quantityValidation(
-              parsedQty,
-              max,
-              `Quantity cannot exceed the ${max} pcs currently assigned on ${machine}.`,
-            );
-            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-          })()}
-          <QuantityKeypad value={qty} onChange={setQty} max={max} />
-          <StepButtons
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the queue return, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Return unfinished quantity to queue', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
-                'primary',
-              ],
-              ['Source Machine', <EntityChip>{machine}</EntityChip>, 'primary'],
-              [
-                'Destination',
-                <AreaChip
-                  areaKey={station.area}
-                >{`${areaName} queue`}</AreaChip>,
-                'primary',
-              ],
-              [
-                'Remaining on Machine',
-                <span className="mono">{max - parsedQty} pcs</span>,
-              ],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'RELEASED_FROM_MACHINE', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('qty')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm return to queue',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      )}
-    </ModalDialog>
+  // The key facts of the pending return — shared by the final-question
+  // and badge-scan gates.
+  const gateInfo = (
+    <>
+      Are you sure you want to return{' '}
+      <b>
+        {parsedQty} of {max} pcs
+      </b>{' '}
+      of <span className="mono">{pn}</span> running on <b>{machine}</b> back to
+      the {areaName} queue? The quantity stays unfinished.
+    </>
   );
+
+  return (
+    <>
+      <ModalDialog
+        label="Return unfinished quantity to queue"
+        onClose={onCancel}
+        onKeyDown={
+          step === 'qty'
+            ? quantityKeyHandler(qty, setQty, goConfirm)
+            : enterKeyHandler(requestConfirm)
+        }
+      >
+        <h3>Return unfinished quantity to queue</h3>
+        {step === 'qty' ? (
+          <div>
+            <div className="big mono" title={pn}>
+              {pn}
+            </div>
+            <StepRecap
+              lines={[
+                <>
+                  <EntityChip>{machine}</EntityChip> →{' '}
+                  <EntityChip>{areaName} queue</EntityChip>
+                </>,
+              ]}
+            />
+            <Guidance tone="info">
+              <b>{max} pcs</b> are assigned to {machine}. Enter a lower quantity
+              to return only part of them.
+            </Guidance>
+            {(() => {
+              const v = quantityValidation(
+                parsedQty,
+                max,
+                `Quantity cannot exceed the ${max} pcs currently assigned on ${machine}.`,
+              );
+              return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+            })()}
+            <QuantityKeypad value={qty} onChange={setQty} max={max} />
+            <StepButtons
+              onCancel={onCancel}
+              primary={{
+                label: 'Next',
+                onClick: goConfirm,
+                disabled: !valid,
+              }}
+            />
+          </div>
+        ) : (
+          <div>
+            <div className="big mono" title={pn}>
+              {pn}
+            </div>
+            <div className="sub">Review the queue return, then confirm.</div>
+            <ConfirmationSummary
+              rows={[
+                ['Action', 'Return unfinished quantity to queue', 'primary'],
+                ['PN', <span className="mono">{pn}</span>, 'primary'],
+                [
+                  'Quantity',
+                  <span className="mono">{parsedQty} pcs</span>,
+                  'primary',
+                ],
+                [
+                  'Source Machine',
+                  <EntityChip>{machine}</EntityChip>,
+                  'primary',
+                ],
+                [
+                  'Destination',
+                  <AreaChip
+                    areaKey={station.area}
+                  >{`${areaName} queue`}</AreaChip>,
+                  'primary',
+                ],
+                [
+                  'Remaining on Machine',
+                  <span className="mono">{max - parsedQty} pcs</span>,
+                ],
+                ['Worker', worker, 'secondary'],
+                ['Scan Station', station.stationId, 'secondary'],
+                ['Recorded event', 'RELEASED_FROM_MACHINE', 'secondary'],
+              ]}
+            />
+            <StepButtons
+              onBack={() => setStep('qty')}
+              onCancel={onCancel}
+              primary={{
+                label: 'Confirm return to queue',
+                onClick: requestConfirm,
+                disabled: !valid,
+                autoFocus: true,
+              }}
+            />
+          </div>
+        )}
+      </ModalDialog>
+      {renderGate()}
+    </>
+  );
+
+  function renderGate() {
+    if (!gate) return null;
+    if (finalGate === 'question') {
+      return (
+        <ConfirmDialog
+          title="Return unfinished quantity?"
+          tone="warning"
+          confirmLabel="Yes — return to queue"
+          cancelLabel="Cancel (Esc)"
+          onConfirm={() => confirm()}
+          onCancel={() => setGate(false)}
+        >
+          {gateInfo}
+        </ConfirmDialog>
+      );
+    }
+    if (finalGate === 'badge') {
+      return (
+        <BadgeConfirmDialog
+          title="Scan badge to confirm the queue return"
+          tone="warning"
+          writeBlocked={writeBlocked}
+          onConfirm={(badgeWorker) => {
+            onBadgeWorker(badgeWorker);
+            confirm(badgeWorker.name);
+          }}
+          onCancel={() => setGate(false)}
+        >
+          {gateInfo}
+        </BadgeConfirmDialog>
+      );
+    }
+    return null;
+  }
 }
 
 /**
@@ -4146,25 +4364,32 @@ function DoneDialog({
   machine,
   max,
   worker,
+  finalGate,
+  writeBlocked,
+  onBadgeWorker,
   onBack,
   onApply,
   onNotice,
   onClose,
   onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  /** Machine currently processing the quantity, or null for direct
-   * Area processing (Areas without Machines). */
-  machine: string | null;
-  max: number;
-  /** Back from the quantity view to the parent PN action dialog;
-   * absent for the DONE row actions, which have no previous dialog. */
-  onBack?: () => void;
-}) {
+}: ActionDialogProps &
+  FinalGateProps & {
+    pn: string;
+    /** Machine currently processing the quantity, or null for direct
+     * Area processing (Areas without Machines). */
+    machine: string | null;
+    max: number;
+    /** Back from the quantity view to the parent PN action dialog;
+     * absent for the DONE row actions, which have no previous dialog. */
+    onBack?: () => void;
+  }) {
   const areaName = areaByKey(station.area)?.name ?? station.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   // MAX defaults to the quantity at the current source position.
   const [qty, setQty] = useState(String(max));
+  // Final-confirmation gate (post-v18): opened by the summary's
+  // confirming action; Cancel returns to the summary unchanged.
+  const [gate, setGate] = useState(false);
   const parsedQty = parseInt(qty || '0', 10);
   const valid = parsedQty >= 1 && parsedQty <= max;
 
@@ -4172,7 +4397,13 @@ function DoneDialog({
     if (valid) setStep('confirm');
   }
 
-  function confirm() {
+  function requestConfirm() {
+    if (!valid) return;
+    if (finalGate) setGate(true);
+    else confirm();
+  }
+
+  function confirm(confirmedBy?: string) {
     if (!valid) return;
     onApply({
       action: {
@@ -4183,7 +4414,7 @@ function DoneDialog({
         source: machine ?? `${areaName} processing`,
         destination: `${areaName} — finished rack`,
         machine: machine ?? undefined,
-        worker,
+        worker: confirmedBy ?? worker,
         time: MOCK_SCAN_TIME,
         reversalEffect: machine
           ? `Returns ${parsedQty} pcs to ${machine} as active processing.`
@@ -4203,128 +4434,192 @@ function DoneDialog({
     onClose();
   }
 
+  // The key facts of the pending completion — shared by the
+  // final-question and badge-scan gates.
+  const gateInfo = machine ? (
+    <>
+      Are you sure <b>{machine}</b> has finished{' '}
+      <b>
+        {parsedQty} of {max} pcs
+      </b>{' '}
+      of <span className="mono">{pn}</span>? The finished quantity moves to the{' '}
+      {areaName} finished rack, ready to transfer.
+    </>
+  ) : (
+    <>
+      Are you sure{' '}
+      <b>
+        {parsedQty} of {max} pcs
+      </b>{' '}
+      of <span className="mono">{pn}</span> have finished processing at{' '}
+      {areaName}? The finished quantity moves to the {areaName} finished rack,
+      ready to transfer.
+    </>
+  );
+
   return (
-    <ModalDialog
-      label="Complete Area processing"
-      onClose={onCancel}
-      onKeyDown={
-        step === 'qty'
-          ? quantityKeyHandler(qty, setQty, goConfirm)
-          : enterKeyHandler(confirm)
-      }
-    >
-      <h3>Complete Area processing</h3>
-      {step === 'qty' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <StepRecap
-            lines={[
-              machine ? (
+    <>
+      <ModalDialog
+        label="Complete Area processing"
+        onClose={onCancel}
+        onKeyDown={
+          step === 'qty'
+            ? quantityKeyHandler(qty, setQty, goConfirm)
+            : enterKeyHandler(requestConfirm)
+        }
+      >
+        <h3>Complete Area processing</h3>
+        {step === 'qty' ? (
+          <div>
+            <div className="big mono" title={pn}>
+              {pn}
+            </div>
+            <StepRecap
+              lines={[
+                machine ? (
+                  <>
+                    <EntityChip>{machine}</EntityChip> →{' '}
+                    <EntityChip>{areaName} finished rack</EntityChip>
+                  </>
+                ) : (
+                  <>
+                    <EntityChip>{areaName} processing</EntityChip> →{' '}
+                    <EntityChip>{areaName} finished rack</EntityChip>
+                  </>
+                ),
+              ]}
+            />
+            <Guidance tone="info">
+              {machine ? (
                 <>
-                  <EntityChip>{machine}</EntityChip> →{' '}
-                  <EntityChip>{areaName} finished rack</EntityChip>
+                  <b>{max} pcs</b> are available on {machine}. The full quantity
+                  is selected by default. Enter a smaller quantity to complete
+                  only part of it.
                 </>
               ) : (
                 <>
-                  <EntityChip>{areaName} processing</EntityChip> →{' '}
-                  <EntityChip>{areaName} finished rack</EntityChip>
+                  <b>{max} pcs</b> in process. The full quantity is selected by
+                  default. Enter a smaller quantity to complete only part of it.
                 </>
-              ),
-            ]}
-          />
-          <Guidance tone="info">
-            {machine ? (
-              <>
-                <b>{max} pcs</b> are available on {machine}. The full quantity
-                is selected by default. Enter a smaller quantity to complete
-                only part of it.
-              </>
-            ) : (
-              <>
-                <b>{max} pcs</b> in process. The full quantity is selected by
-                default. Enter a smaller quantity to complete only part of it.
-              </>
-            )}
-          </Guidance>
-          {(() => {
-            const v = quantityValidation(
-              parsedQty,
-              max,
-              machine
-                ? `Quantity cannot exceed the ${max} pcs currently on ${machine}.`
-                : `Quantity cannot exceed the ${max} pcs currently in processing.`,
-            );
-            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-          })()}
-          <QuantityKeypad value={qty} onChange={setQty} max={max} />
-          <StepButtons
-            onBack={onBack}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
+              )}
+            </Guidance>
+            {(() => {
+              const v = quantityValidation(
+                parsedQty,
+                max,
+                machine
+                  ? `Quantity cannot exceed the ${max} pcs currently on ${machine}.`
+                  : `Quantity cannot exceed the ${max} pcs currently in processing.`,
+              );
+              return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
+            })()}
+            <QuantityKeypad value={qty} onChange={setQty} max={max} />
+            <StepButtons
+              onBack={onBack}
+              onCancel={onCancel}
+              primary={{
+                label: 'Next',
+                onClick: goConfirm,
+                disabled: !valid,
+              }}
+            />
           </div>
-          <div className="sub">
-            Confirm the completed quantity. It will remain on the {areaName}{' '}
-            finished rack until transferred.
+        ) : (
+          <div>
+            <div className="big mono" title={pn}>
+              {pn}
+            </div>
+            <div className="sub">
+              Confirm the completed quantity. It will remain on the {areaName}{' '}
+              finished rack until transferred.
+            </div>
+            <ConfirmationSummary
+              rows={[
+                ['Action', 'Complete Area processing', 'primary'],
+                ['PN', <span className="mono">{pn}</span>, 'primary'],
+                [
+                  'Quantity',
+                  <span className="mono">{parsedQty} pcs</span>,
+                  'primary',
+                ],
+                [
+                  'Area',
+                  <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
+                  'primary',
+                ],
+                [
+                  'Machine',
+                  machine ? <EntityChip>{machine}</EntityChip> : null,
+                  'primary',
+                ],
+                ['Result', 'Finished — ready to move', 'primary', 'ok'],
+                ['Worker', worker, 'secondary'],
+                ['Scan Station', station.stationId, 'secondary'],
+                ['Recorded event', 'AREA_COMPLETED', 'secondary'],
+              ]}
+            />
+            <StepButtons
+              onBack={() => setStep('qty')}
+              onCancel={onCancel}
+              primary={{
+                label: 'Confirm completion',
+                onClick: requestConfirm,
+                disabled: !valid,
+                autoFocus: true,
+              }}
+            />
           </div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Complete Area processing', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
-                'primary',
-              ],
-              [
-                'Area',
-                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
-                'primary',
-              ],
-              [
-                'Machine',
-                machine ? <EntityChip>{machine}</EntityChip> : null,
-                'primary',
-              ],
-              ['Result', 'Finished — ready to move', 'primary', 'ok'],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'AREA_COMPLETED', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('qty')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm completion',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      )}
-    </ModalDialog>
+        )}
+      </ModalDialog>
+      {renderGate()}
+    </>
   );
+
+  function renderGate() {
+    if (!gate) return null;
+    if (finalGate === 'question') {
+      // DONE keeps the plain confirmation presentation — completing
+      // work is the normal outcome, unlike a queue return or reversal.
+      return (
+        <ConfirmDialog
+          title="Confirm finished quantity?"
+          confirmLabel="Yes — finished"
+          cancelLabel="Cancel (Esc)"
+          onConfirm={() => confirm()}
+          onCancel={() => setGate(false)}
+        >
+          {gateInfo}
+        </ConfirmDialog>
+      );
+    }
+    if (finalGate === 'badge') {
+      return (
+        <BadgeConfirmDialog
+          title="Scan badge to confirm completion"
+          writeBlocked={writeBlocked}
+          onConfirm={(badgeWorker) => {
+            onBadgeWorker(badgeWorker);
+            confirm(badgeWorker.name);
+          }}
+          onCancel={() => setGate(false)}
+        >
+          {gateInfo}
+        </BadgeConfirmDialog>
+      );
+    }
+    return null;
+  }
 }
 
 function UndoConfirmDialog({
   target,
   reversedBy,
+  finalGate,
+  writeBlocked,
+  onBadgeWorker,
   onConfirm,
   onCancel,
-}: {
+}: FinalGateProps & {
   target: MockCompletedAction;
   /**
    * Worker recorded on the reversal — the Worker active at the moment
@@ -4336,48 +4631,97 @@ function UndoConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  return (
-    <ModalDialog
-      label="Reverse the last Part Number action?"
-      onClose={onCancel}
-    >
-      <h3>Reverse the last Part Number action?</h3>
-      <div className="big mono">{target.pn}</div>
-      <div className="sub">
-        This will reverse the complete last action. The original history will
-        remain available for audit.
-      </div>
-      <ConfirmationSummary
-        rows={[
-          ['Original action', target.movements.join(' + '), 'primary'],
-          ['Quantity', <span className="mono">{target.qty}</span>, 'primary'],
-          [
-            'Source → destination',
-            <>
-              <EntityChip>{target.source}</EntityChip> →{' '}
-              <EntityChip>{target.destination}</EntityChip>
-            </>,
-            'primary',
-          ],
-          [
-            'Machine',
-            target.machine ? <EntityChip>{target.machine}</EntityChip> : null,
-          ],
-          ['Worker', target.worker, 'secondary'],
-          ['Time', <span className="mono">{target.time}</span>, 'secondary'],
-          ['Reversed by', reversedBy, 'secondary'],
-          ['Result after reversal', target.reversalEffect, 'primary', 'warn'],
-        ]}
-      />
-      <StepButtons
-        onCancel={onCancel}
-        primary={{
-          label: 'Confirm reversal',
-          onClick: onConfirm,
-          danger: true,
+  // Final-confirmation gate (post-v18): opened by `Confirm reversal`;
+  // Cancel returns to the reversal summary unchanged.
+  const [gate, setGate] = useState(false);
+
+  function requestConfirm() {
+    if (finalGate) setGate(true);
+    else onConfirm();
+  }
+
+  // The key facts of the pending reversal — shared by the
+  // final-question and badge-scan gates.
+  const gateInfo = (
+    <>
+      Are you sure you want to reverse <b>{target.movements.join(' + ')}</b> —{' '}
+      <b>{target.qty} pcs</b> of <span className="mono">{target.pn}</span>?{' '}
+      {target.reversalEffect} The original history stays recorded for audit.
+    </>
+  );
+
+  const gateDialog =
+    gate && finalGate === 'question' ? (
+      <ConfirmDialog
+        title="Reverse this action?"
+        tone="warning"
+        confirmLabel="Yes — reverse it"
+        cancelLabel="Cancel (Esc)"
+        onConfirm={onConfirm}
+        onCancel={() => setGate(false)}
+      >
+        {gateInfo}
+      </ConfirmDialog>
+    ) : gate && finalGate === 'badge' ? (
+      <BadgeConfirmDialog
+        title="Scan badge to confirm the reversal"
+        tone="warning"
+        writeBlocked={writeBlocked}
+        onConfirm={(badgeWorker) => {
+          onBadgeWorker(badgeWorker);
+          onConfirm();
         }}
-      />
-    </ModalDialog>
+        onCancel={() => setGate(false)}
+      >
+        {gateInfo}
+      </BadgeConfirmDialog>
+    ) : null;
+
+  return (
+    <>
+      <ModalDialog
+        label="Reverse the last Part Number action?"
+        onClose={onCancel}
+      >
+        <h3>Reverse the last Part Number action?</h3>
+        <div className="big mono">{target.pn}</div>
+        <div className="sub">
+          This will reverse the complete last action. The original history will
+          remain available for audit.
+        </div>
+        <ConfirmationSummary
+          rows={[
+            ['Original action', target.movements.join(' + '), 'primary'],
+            ['Quantity', <span className="mono">{target.qty}</span>, 'primary'],
+            [
+              'Source → destination',
+              <>
+                <EntityChip>{target.source}</EntityChip> →{' '}
+                <EntityChip>{target.destination}</EntityChip>
+              </>,
+              'primary',
+            ],
+            [
+              'Machine',
+              target.machine ? <EntityChip>{target.machine}</EntityChip> : null,
+            ],
+            ['Worker', target.worker, 'secondary'],
+            ['Time', <span className="mono">{target.time}</span>, 'secondary'],
+            ['Reversed by', reversedBy, 'secondary'],
+            ['Result after reversal', target.reversalEffect, 'primary', 'warn'],
+          ]}
+        />
+        <StepButtons
+          onCancel={onCancel}
+          primary={{
+            label: 'Confirm reversal',
+            onClick: requestConfirm,
+            danger: true,
+          }}
+        />
+      </ModalDialog>
+      {gateDialog}
+    </>
   );
 }
 
