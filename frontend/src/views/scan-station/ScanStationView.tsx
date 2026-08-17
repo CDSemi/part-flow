@@ -1645,9 +1645,10 @@ function BadgeConfirmDialog({
   children,
 }: {
   title: string;
-  /** Attention tone of the gate — every badge gate uses the shared
-   * warning confirmation presentation (post-v18). */
-  tone?: 'warning';
+  /** Attention tone of the gate — the shared attention presentation
+   * (global.css tone family): `info` (blue) for DONE, `warning` for
+   * QUEUE return and UNDO. */
+  tone?: 'warning' | 'info';
   writeBlocked: boolean;
   onConfirm: (worker: MockWorker) => void;
   onCancel: () => void;
@@ -1691,7 +1692,7 @@ function BadgeConfirmDialog({
     >
       {tone ? (
         <span className="alertbadge" aria-hidden="true">
-          !
+          {tone === 'info' ? 'i' : '!'}
         </span>
       ) : null}
       <h3>{title}</h3>
@@ -2843,32 +2844,6 @@ function PnActionsDialog({
           </span>
         </button>
       ) : null}
-      {sources.length > 0 ? (
-        <button
-          className="choice"
-          onClick={() =>
-            sources.length === 1
-              ? onPick({
-                  kind: 'transfer',
-                  pn,
-                  source: sources[0],
-                })
-              : onPick({ kind: 'source-select', pn, sources })
-          }
-        >
-          <span className="cic run" aria-hidden="true">
-            MOVE
-          </span>
-          <span>
-            <span className="ct1">Receive more quantity from another Area</span>
-            <br />
-            <span className="ct2">
-              {sources.map((s) => `${s.qty} pcs at ${s.areaLabel}`).join(' · ')}
-              {'. '}Select the source Area before entering the quantity.
-            </span>
-          </span>
-        </button>
-      ) : null}
       {machineAssignments.map((assignment, index) => (
         // One DONE choice per actively assigned Machine (post-v18) —
         // the same one-shot DONE wizard the Machine card's DONE row
@@ -2917,6 +2892,32 @@ function PnActionsDialog({
             <span className="ct2">
               {directQty} pcs in processing. The finished quantity moves to the
               finished rack, ready to transfer to another Area.
+            </span>
+          </span>
+        </button>
+      ) : null}
+      {sources.length > 0 ? (
+        <button
+          className="choice"
+          onClick={() =>
+            sources.length === 1
+              ? onPick({
+                  kind: 'transfer',
+                  pn,
+                  source: sources[0],
+                })
+              : onPick({ kind: 'source-select', pn, sources })
+          }
+        >
+          <span className="cic run" aria-hidden="true">
+            MOVE
+          </span>
+          <span>
+            <span className="ct1">Receive more quantity from another Area</span>
+            <br />
+            <span className="ct2">
+              {sources.map((s) => `${s.qty} pcs at ${s.areaLabel}`).join(' · ')}
+              {'. '}Select the source Area before entering the quantity.
             </span>
           </span>
         </button>
@@ -4647,7 +4648,7 @@ function DoneDialog({
       return (
         <BadgeConfirmDialog
           title="Scan badge to confirm completion"
-          tone="warning"
+          tone="info"
           writeBlocked={writeBlocked}
           onConfirm={(badgeWorker) => {
             onBadgeWorker(badgeWorker);

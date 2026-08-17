@@ -10,10 +10,12 @@ import { ModalDialog } from './ModalDialog';
  * confirmations change local mock state at most.
  *
  * `tone` opts into the ATTENTION variant for final, permanent
- * decisions (adding / retiring / reactivating a Machine): a centered
- * icon badge and an emphasized title in the decision's semantic tone
- * interrupt reflexive confirmation without adding steps. `danger`
- * (color of the confirming action) is implied by `tone="danger"`.
+ * decisions (adding / retiring / reactivating a Machine) and final
+ * gates: a centered icon badge and an emphasized title in the
+ * decision's semantic tone interrupt reflexive confirmation without
+ * adding steps. `danger` (color of the confirming action) is implied
+ * by `tone="danger"`; `info` (post-v18) is the blue informational
+ * variant of the same shared presentation.
  */
 export function ConfirmDialog({
   title,
@@ -32,8 +34,9 @@ export function ConfirmDialog({
   cancelLabel: string;
   danger?: boolean;
   /** Attention variant: `danger` for destructive finals, `warning`
-   * for permanent-but-constructive finals. */
-  tone?: 'danger' | 'warning';
+   * for permanent-but-constructive finals, `info` for informational
+   * final gates (blue — the shared tone family in global.css). */
+  tone?: 'danger' | 'warning' | 'info';
   /** External gate on the confirming action (e.g. offline write-block)
    * — the caller decides the condition, this component only reflects
    * it. Cancel is never affected: closing/backing out always works. */
@@ -51,7 +54,7 @@ export function ConfirmDialog({
     >
       {tone ? (
         <span className="alertbadge" aria-hidden="true">
-          !
+          {tone === 'info' ? 'i' : '!'}
         </span>
       ) : null}
       <h3 id={headingId}>{title}</h3>

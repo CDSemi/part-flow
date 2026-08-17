@@ -855,6 +855,31 @@ select {
   color: var(--warn-t);
 }
 
+/* Informational final gates (post-v18 — e.g. the DONE badge-scan
+   confirmation): the SAME attention presentation in the information
+   tone — blue. Part of the shared family, available to every view
+   that adds an info-toned gate, never a Scan Station-local style. */
+.dlg.alertdlg.tone-info {
+  border-color: var(--info-border);
+  background:
+    linear-gradient(var(--info-surface-weak), var(--info-surface-weak)),
+    var(--panel);
+}
+
+.dlg.alertdlg.tone-info .alertbadge {
+  background: var(--info);
+  color: var(--on-info);
+  box-shadow: 0 0 0 8px var(--info-surface);
+}
+
+.dlg.alertdlg.tone-info .sub {
+  color: color-mix(in srgb, var(--info-t) 62%, var(--muted));
+}
+
+.dlg.alertdlg.tone-info .sub b {
+  color: var(--info-t);
+}
+
 /* ============ Danger-toned workflow dialogs (dangerdlg) ============ */
 /* Retirement keeps the user in a visibly dangerous context for the
    WHOLE dialog (typed confirmation and final summary) — error border,

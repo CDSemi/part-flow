@@ -3849,12 +3849,12 @@ test('DONE asks for a badge scan as the final step and records the confirming Wo
   fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
 
-  // The badge gate shares the warning confirmation presentation and
-  // shows the key facts of the completion.
+  // The badge gate shares the attention confirmation presentation in
+  // the blue information tone and shows the key facts.
   const gate = screen.getByRole('dialog', {
     name: 'Scan badge to confirm completion',
   });
-  expect(gate.className).toContain('tone-warning');
+  expect(gate.className).toContain('tone-info');
   expect(gate.textContent).toMatch(/Are you sure .* has finished/);
   // Escape cancels the gate — back on the summary, nothing recorded.
   fireEvent.keyDown(gate, { key: 'Escape' });
@@ -3912,6 +3912,16 @@ test('the PN action dialog offers DONE for quantity running on a Machine', async
     name: /Complete Area processing on Lathe 2/,
   });
   expect(choice.textContent).toContain('4 pcs on Lathe 2');
+  // Choice order: DONE sits directly after the queued-assignment
+  // choice (none here) and BEFORE `Receive more quantity…`.
+  const choiceTitles = Array.from(
+    dialog.querySelectorAll('.choice .ct1'),
+    (el) => el.textContent,
+  );
+  expect(choiceTitles.indexOf('Complete Area processing on Lathe 2')).toBe(0);
+  expect(choiceTitles.indexOf('Receive more quantity from another Area')).toBe(
+    1,
+  );
 
   // Equivalent to the Machine card's DONE row action: the same DONE
   // wizard with the Machine preselected and MAX = the assigned qty.
