@@ -660,6 +660,52 @@ tr.hotrow2 td:first-child {
   }
 }
 
+/* Page-change transition (post-v18): the visible table is remounted
+   per page (keyed by the page index), and the direction class replays
+   a one-shot entry animation — a short fade while sliding in from the
+   travel direction (forward = from the right). Deliberately brief and
+   subtle: the board is a hands-off wall display and a page change
+   must never feel like content flashing. */
+.pb-table.pb-pagefwd {
+  animation: pb-pagefwd 0.28s ease-out;
+}
+
+.pb-table.pb-pageback {
+  animation: pb-pageback 0.28s ease-out;
+}
+
+@keyframes pb-pagefwd {
+  from {
+    opacity: 0;
+    transform: translateX(26px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pb-pageback {
+  from {
+    opacity: 0;
+    transform: translateX(-26px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Reduced motion: pages change instantly with no slide or fade. */
+@media (prefers-reduced-motion: reduce) {
+  .pb-table.pb-pagefwd,
+  .pb-table.pb-pageback {
+    animation: none;
+  }
+}
+
 /* Hidden measurement copy for height-aware pagination: identical
    classes → identical metrics; never visible, never interactive. */
 .pb-measure {

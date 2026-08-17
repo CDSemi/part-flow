@@ -245,9 +245,10 @@ function BarcodeConfigurationPanel() {
  * timeout values (read-only preview — one default plus per-Area
  * overrides, §19) and the badge-confirmation options for the three
  * sensitive Scan Station actions (post-v18). The three On/Off switches
- * edit the shared mock policy session-only: ON requires a Worker badge
- * scan as the final step after the action's confirmation summary in
- * every Scanned-session Area; default ON for all three.
+ * edit the shared mock policy session-only: ON adds a final gate after
+ * the action's confirmation summary in EVERY Area — a Worker badge
+ * scan where Sessions are scanned, a final confirmation question in
+ * Fixed-Worker and Disabled Areas; default ON for all three.
  */
 const BADGE_CONFIRM_OPTIONS: {
   action: BadgeConfirmAction;
@@ -257,20 +258,17 @@ const BADGE_CONFIRM_OPTIONS: {
   {
     action: 'done',
     label: 'DONE — Complete Area processing',
-    description:
-      'Require a Worker badge scan as the final step of every completion.',
+    description: 'Require a final confirmation gate for every completion.',
   },
   {
     action: 'queue',
     label: 'QUEUE — Return unfinished quantity to queue',
-    description:
-      'Require a Worker badge scan as the final step of every queue return.',
+    description: 'Require a final confirmation gate for every queue return.',
   },
   {
     action: 'undo',
     label: 'UNDO — Reverse the last action',
-    description:
-      'Require a Worker badge scan as the final step of every reversal.',
+    description: 'Require a final confirmation gate for every reversal.',
   },
 ];
 
@@ -309,11 +307,11 @@ function WorkerSessionsPanel() {
       </div>
       <h2>Badge confirmation for sensitive actions</h2>
       <p className="ad-confighelp">
-        In an Area with scanned Worker Sessions, each option below adds a final
-        step after the action’s confirmation summary: a Worker badge scan
-        records the confirming Worker and completes the action. Areas with a
-        fixed Worker ask a final confirmation question instead — no badge exists
-        there.
+        Each option below adds a final step after the action’s confirmation
+        summary in every Area. Where Worker Sessions are scanned, a Worker badge
+        scan records the confirming Worker and completes the action; Areas with
+        a fixed or disabled Worker ask a final confirmation question instead —
+        no badge exists there.
       </p>
       <div className="ad-switchlist">
         {BADGE_CONFIRM_OPTIONS.map(({ action, label, description }) => (
@@ -322,7 +320,7 @@ function WorkerSessionsPanel() {
             type="button"
             role="switch"
             aria-checked={policy[action]}
-            aria-label={`Require badge scan — ${label}`}
+            aria-label={`Require final confirmation — ${label}`}
             className={`ad-switch${policy[action] ? ' on' : ''}`}
             onClick={() => toggle(action)}
           >

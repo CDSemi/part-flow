@@ -588,6 +588,10 @@ export function ProductionBoardView() {
     setPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
   const safePage = Math.min(page, pageCount - 1);
+  // Page-change transition bookkeeping (see the visible-table render):
+  // the previously displayed page and the current direction class.
+  const prevPageRef = useRef(safePage);
+  const pageDirRef = useRef('');
   // Rows displayed on the CURRENT page — the rotation duration derives
   // from it (v15): 3 s per displayed row with a 6 s floor
   // (board-logic.ts), recomputed per page instead of one constant for
@@ -736,6 +740,23 @@ export function ProductionBoardView() {
   const start = breaks[safePage] ?? 0;
   const end = breaks[safePage + 1] ?? allRows.length;
   const rows = allRows.slice(start, end);
+  // Direction-aware page-change transition (post-v18): the visible
+  // table is keyed by the page, so every page change remounts it and
+  // replays a one-shot entry animation sliding in from the travel
+  // direction — forward toward a higher page, backward toward a lower
+  // one, and the auto-rotation's wrap from the last page back to the
+  // first stays forward (the rotation keeps cycling in one
+  // direction). The class persists until the NEXT change (the key
+  // remount is what replays it), so unrelated re-renders never cancel
+  // a running animation.
+  if (prevPageRef.current !== safePage) {
+    pageDirRef.current =
+      safePage > prevPageRef.current ||
+      (prevPageRef.current === pageCount - 1 && safePage === 0)
+        ? ' pb-pagefwd'
+        : ' pb-pageback';
+    prevPageRef.current = safePage;
+  }
   const activePns = allRows.filter((r) => !r.totalStocked).length;
   const inProduction = allRows
     .filter((r) => !r.totalStocked)
@@ -777,7 +798,7 @@ export function ProductionBoardView() {
       {rows.length === 0 ? (
         <EmptyState message="No active production in this Department." />
       ) : (
-        <table className="pb-table">
+        <table key={safePage} className={`pb-table${pageDirRef.current}`}>
           <BoardColgroup />
           <thead>
             <BoardHeadRow />

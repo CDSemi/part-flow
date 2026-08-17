@@ -821,6 +821,50 @@ test('manual Previous/Next and page dots navigate without wrapping', async () =>
   ).toBeNull();
 });
 
+test('page changes replay a direction-aware entry transition on the visible table', async () => {
+  await renderBoard('/production-board?state=long');
+
+  const visibleTable = () =>
+    Array.from(document.querySelectorAll('table.pb-table')).find(
+      (el) => !el.closest('.pb-measure'),
+    )!;
+  // Initial mount: no transition class — nothing slides in on load.
+  expect(visibleTable().className).toBe('pb-table');
+
+  // Forward navigation slides in from the right…
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(visibleTable().className).toContain('pb-pagefwd');
+  // …and backward from the left.
+  fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+  expect(visibleTable().className).toContain('pb-pageback');
+
+  // A direct dot jump to a higher page is forward too…
+  fireEvent.click(screen.getByRole('button', { name: 'Go to page 3' }));
+  expect(visibleTable().className).toContain('pb-pagefwd');
+  // …and the auto-rotation wrap (last page → first) stays forward:
+  // the rotation keeps cycling in one direction.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15_000);
+  });
+  expect(screen.getByText(/Page 1 \/ 3/)).toBeInTheDocument();
+  expect(visibleTable().className).toContain('pb-pagefwd');
+
+  // The stylesheet owns the one-shot entry animations, disabled under
+  // prefers-reduced-motion (pages then change instantly).
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  expect(css).toContain('@keyframes pb-pagefwd');
+  expect(css).toContain('@keyframes pb-pageback');
+  expect(css).toMatch(
+    /prefers-reduced-motion[^{]*\{\s*\.pb-table\.pb-pagefwd,\s*\.pb-table\.pb-pageback \{[^}]*animation: none/,
+  );
+});
+
 test('manual navigation restarts the auto-rotation timer', async () => {
   await renderBoard('/production-board?state=long');
 

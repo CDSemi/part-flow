@@ -3768,14 +3768,22 @@ test('a Disabled Area renders no Worker pill and records no Worker', async () =>
     'This Area does not record Worker identity.',
   );
 
-  // A completed action carries NO Worker row in its confirmation.
+  // A completed action carries NO Worker row in its confirmation. The
+  // final gate still applies (the Administration options govern every
+  // Area) — as a question, since no badge exists here.
   fireEvent.click(
     screen.getAllByRole('button', { name: 'Complete Area processing' })[0],
   );
   const dialog = activeDialog();
   fireEvent.keyDown(dialog, { key: 'Enter' }); // quantity → confirmation
   expect(dialog.textContent).not.toContain('Worker');
-  fireEvent.keyDown(dialog, { key: 'Enter' }); // confirm
+  fireEvent.keyDown(dialog, { key: 'Enter' }); // confirm → final question
+  const gate = screen.getByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  expect(gate.className).toContain('tone-info');
+  expect(gate.textContent).not.toContain('Worker');
+  confirmFinalGate();
   expect(screen.queryByRole('dialog')).toBeNull();
 
   // Undo too: no Worker context anywhere.
@@ -3962,7 +3970,25 @@ test('turning the Administration option off removes the badge gate for that acti
   }
 });
 
-test('a Fixed-Worker Area asks a final question instead — plain for DONE, warning for UNDO', async () => {
+test('the option governs every Area — off also removes the final question in a Fixed-Worker Area', async () => {
+  setBadgeConfirmRequirement('done', false);
+  try {
+    await renderStation('DEBURR-ST-01'); // Fixed Worker
+    fireEvent.click(
+      screen.getAllByRole('button', { name: 'Complete Area processing' })[0],
+    );
+    fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
+    // No final question either — the SAME Administration option gates
+    // Fixed-Worker (and Disabled) Areas, just as a question when ON.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByText(/× \d+ finished at Deburr/)).toBeInTheDocument();
+  } finally {
+    setBadgeConfirmRequirement('done', true);
+  }
+});
+
+test('a Fixed-Worker Area asks a final question instead — info for DONE, warning for UNDO', async () => {
   await renderStation('DEBURR-ST-01'); // Fixed Worker — no badge gate
 
   // DONE via the direct-processing row action.
@@ -3971,12 +3997,13 @@ test('a Fixed-Worker Area asks a final question instead — plain for DONE, warn
   );
   fireEvent.keyDown(activeDialog(), { key: 'Enter' }); // quantity → confirmation
   fireEvent.click(screen.getByRole('button', { name: 'Confirm completion' }));
-  // Plain-toned final question with the key facts; Cancel returns to
-  // the summary without recording.
+  // Info-toned final question (matching the badge gate's calm tone)
+  // with the key facts; Cancel returns to the summary without
+  // recording.
   const question = screen.getByRole('dialog', {
     name: 'Confirm finished quantity?',
   });
-  expect(question.className).not.toContain('alertdlg');
+  expect(question.className).toContain('tone-info');
   expect(question.textContent).toMatch(
     /Are you sure .* have finished processing at Deburr\?/,
   );

@@ -987,19 +987,18 @@ function StationView({
    * Final-confirmation gate of the three sensitive one-shot actions
    * (post-v18, PROJECT_PROFILE §19): a Scanned-session Area requires a
    * Worker badge scan as the LAST step after the confirmation summary
-   * whenever the Administration option for the action is ON (default);
-   * a Fixed-Worker Area asks one final toned confirmation question
-   * instead (the Machines last-question pattern — no badge exists
-   * there). Disabled Areas keep the plain confirmation step.
+   * whenever the Administration option for the action is ON (default).
+   * The SAME options govern Fixed-Worker and Disabled Areas — no badge
+   * exists there, so the gate is one final toned confirmation question
+   * instead (the Machines last-question pattern). Option off: no gate
+   * in any Area.
    */
   const finalGateFor = (action: BadgeConfirmAction): FinalGate =>
-    workerMode === 'scanned'
-      ? requireBadgeConfirm(action)
+    requireBadgeConfirm(action)
+      ? workerMode === 'scanned'
         ? 'badge'
-        : null
-      : workerMode === 'fixed'
-        ? 'question'
-        : null;
+        : 'question'
+      : null;
 
   function undoTarget(): MockCompletedAction | null {
     return eligible?.action ?? null;
@@ -4630,11 +4629,13 @@ function DoneDialog({
   function renderGate() {
     if (!gate) return null;
     if (finalGate === 'question') {
-      // DONE keeps the plain confirmation presentation — completing
-      // work is the normal outcome, unlike a queue return or reversal.
+      // DONE keeps the calm INFO tone (matching the badge gate) —
+      // completing work is the normal outcome, unlike a queue return
+      // or reversal, which warn.
       return (
         <ConfirmDialog
           title="Confirm finished quantity?"
+          tone="info"
           confirmLabel="Yes — finished"
           cancelLabel="Cancel (Esc)"
           onConfirm={() => confirm()}
