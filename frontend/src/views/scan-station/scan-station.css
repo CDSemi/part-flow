@@ -36,6 +36,8 @@
 
 .ss-head .ss-id {
   min-width: 0;
+  /* Anchors the absolutely-positioned Operations ghost row below. */
+  position: relative;
 }
 
 .ss-head .dept {
@@ -61,6 +63,12 @@
   border-radius: 5px;
 }
 
+/* The header Operations row keeps ONE line at every width (§4.3): the
+   fit measurement in HeaderOperations sheds presentation in tiers
+   (label dropped, then trailing chips replaced by one `…` chip, then
+   the row hidden) instead of ever wrapping the chips. nowrap +
+   overflow hidden also keep a resize's brief pre-measurement frame
+   from wrapping or widening the document. */
 .ss-head .op {
   font-size: 13px;
   color: var(--muted);
@@ -68,7 +76,32 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.ss-head .op .opchips {
+  flex-wrap: nowrap;
+}
+
+/* Natural-width ghost copy of the Operations row — the `Operations:`
+   label plus EVERY chip on one line: invisible and out of flow. The
+   tiered fit measurement reads its widths, and the header fit probe
+   below displays it in place of the (possibly shortened) visible row,
+   so the Area totals always drop before the Operations row sheds
+   anything. */
+.ss-head .op-ghost {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ss-head .op-ghost .opchips {
+  flex-wrap: nowrap;
 }
 
 /* Operations render as light informational chips — labels, not
@@ -192,11 +225,21 @@
   display: flex;
 }
 
-/* max-content already lays text and chips on one line; the explicit
-   nowrap pins that intent for the wrap-enabled chip rows. */
-.ss-head.measuring .op,
-.ss-head.measuring .opchips {
-  flex-wrap: nowrap;
+/* During the fit probe the Operations ghost stands in for the visible
+   row: the probe must measure the identity cell at its FULL natural
+   width — label + every chip on one line — regardless of the tier the
+   visible row currently shows, so the totals drop first. The `…` chip
+   is truncation chrome, never part of the natural width. */
+.ss-head.measuring .op {
+  display: none;
+}
+
+.ss-head.measuring .op-ghost {
+  position: static;
+}
+
+.ss-head.measuring .op-ghost .opchip-more {
+  display: none;
 }
 
 /* Content-sized Worker pill: no fixed or minimum width — the grid
@@ -262,6 +305,20 @@
   font-weight: 700;
 }
 
+/* The remaining-time value leads the countdown line (`12m remaining`)
+   and carries the tone: success while comfortably inside the sliding
+   timeout, the warning tone near expiration; the quiet "remaining"
+   word keeps the sub color. */
+.ss-pill .sub .num {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--ok-t);
+}
+
+.ss-pill .sub.warn .num {
+  color: var(--warn-t);
+}
+
 /* One column: the full-width Scan card first, then the shared
    Area/Machine monitoring layout (components/area-monitoring.css). */
 .ss-body {
@@ -284,7 +341,14 @@
 }
 
 .ss-scaninput {
-  flex: 1;
+  /* The flex-basis floor keeps the barcode input the priority control
+     on narrow screens: once the row cannot hold the input's basis plus
+     the manual-entry button's natural width, both compress — the
+     button down to roughly half its natural width (its label wraps,
+     see .ss-manualbtn) — leaving the remaining width to the input.
+     Wide layouts are unchanged (the input grows into the free space).
+     Continuous flex behavior, no hard-coded breakpoint. */
+  flex: 1 1 240px;
   min-width: 0;
   background: var(--field-bg);
   border: 2px solid var(--border2);
@@ -353,14 +417,19 @@
 /* Manual PN entry — the secondary action inside the scan row itself:
    visibly secondary to scanning (panel surface, no accent fill) but
    sized for shop-floor use. The scanner submits with Enter — there is
-   no dedicated ENTER button. */
+   no dedicated ENTER button. On narrow screens the button compresses
+   before the barcode input does (see .ss-scaninput's basis floor):
+   it shrinks to roughly half its natural width, wrapping its label
+   onto two lines, and never below its widest word — the input keeps
+   the remaining row width. */
 .ss-manualbtn {
-  flex: none;
+  flex: 0 1 auto;
   border: 2px solid var(--border2);
   background: var(--panel2);
   color: var(--info-t);
   font-weight: 750;
   font-size: 15px;
+  line-height: 1.25;
   border-radius: 12px;
   padding: 0 18px;
   min-height: var(--touch-primary);

@@ -481,14 +481,15 @@ test('the Scan Barcode card has no ENTER button; manual entry sits in the scan r
   expect(undoRegion.textContent).toContain('⟲ UNDO');
 
   // Scanned-session Worker pill (post-v18): avatar + Worker name over
-  // the live remaining-session countdown — there is no shift-end
-  // session window anywhere.
+  // the live remaining-session countdown — no `Session ·` prefix, the
+  // emphasized remaining-time value leads the line, and there is no
+  // shift-end session window anywhere.
   const pill = document.querySelector('.ss-pill')!;
   expect(pill.querySelector('.avatar')?.textContent).toBe('HN');
   expect(pill.querySelector('.val')?.textContent).toContain('H. Nguyen');
-  expect(pill.querySelector('.sub')?.textContent).toMatch(
-    /^Session · \d+m remaining$/,
-  );
+  expect(pill.querySelector('.sub')?.textContent).toMatch(/^\d+m remaining$/);
+  expect(pill.querySelector('.sub .num')?.textContent).toMatch(/^\d+m$/);
+  expect(pill.textContent).not.toContain('Session');
   expect(pill.textContent).not.toContain('from');
   expect(pill.textContent).not.toContain('shift');
 
@@ -1776,7 +1777,7 @@ test('a Worker scan switches the session and never replaces the Last Scanned PN'
     'V. Tran',
   );
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^Session · \d+m remaining$/,
+    /^\d+m remaining$/,
   );
 });
 
@@ -2412,6 +2413,75 @@ test('the Area totals drop to the second row only when the measured row cannot f
   expect(head.classList.contains('measuring')).toBe(false);
 });
 
+test('the Operations row sheds its label, then chips behind an ellipsis, then hides — fit-measured', async () => {
+  await renderStation('EXT-ST-01'); // External — three Operations chips
+
+  // jsdom performs no layout: install the ghost row's natural widths
+  // and the identity cell's available width, then let the resize
+  // listener re-run the tier measurement (the established pattern of
+  // the header-wrap test above).
+  const ghost = document.querySelector('.ss-head .op-ghost') as HTMLElement;
+  const cell = ghost.parentElement as HTMLElement;
+  const install = (el: Element | null, width: number) => {
+    (el as HTMLElement).getBoundingClientRect = () => ({ width }) as DOMRect;
+  };
+  install(ghost.querySelector('.oplabel'), 80);
+  const ghostChips = ghost.querySelectorAll('.opchip:not(.opchip-more)');
+  expect(ghostChips.length).toBe(3);
+  install(ghostChips[0], 60);
+  install(ghostChips[1], 70);
+  install(ghostChips[2], 50);
+  install(ghost.querySelector('.opchip-more'), 20);
+  const setAvailable = (width: number) => {
+    Object.defineProperty(cell, 'clientWidth', {
+      value: width,
+      configurable: true,
+    });
+    fireEvent(window, new Event('resize'));
+  };
+  const visible = () => document.querySelector('.ss-head .op');
+  const visibleChips = () =>
+    Array.from(
+      document.querySelectorAll('.ss-head .op .opchip:not(.opchip-more)'),
+      (el) => el.textContent,
+    );
+  const moreChip = () => document.querySelector('.ss-head .op .opchip-more');
+
+  // Everything fits: label + all chips, no ellipsis.
+  setAvailable(300);
+  expect(visible()?.textContent).toContain('Operations:');
+  expect(visibleChips()).toEqual(['Plating', 'Painting', 'Testing']);
+  expect(moreChip()).toBeNull();
+
+  // The label no longer fits: the chips keep the row alone.
+  setAvailable(200);
+  expect(visible()?.textContent).not.toContain('Operations:');
+  expect(visibleChips()).toEqual(['Plating', 'Painting', 'Testing']);
+  expect(moreChip()).toBeNull();
+
+  // Not every chip fits: trailing chips collapse into one `…` chip
+  // that names the hidden Operations.
+  setAvailable(150);
+  expect(visibleChips()).toEqual(['Plating', 'Painting']);
+  expect(moreChip()?.textContent).toBe('…');
+  expect(moreChip()?.getAttribute('title')).toBe('Testing');
+
+  setAvailable(100);
+  expect(visibleChips()).toEqual(['Plating']);
+  expect(moreChip()?.getAttribute('title')).toBe('Painting, Testing');
+
+  // Not even the first chip fits beside the ellipsis: the row hides
+  // entirely — the ghost stays for measurement.
+  setAvailable(50);
+  expect(visible()).toBeNull();
+  expect(document.querySelector('.ss-head .op-ghost')).not.toBeNull();
+
+  // Space returns: the full presentation is restored (no sticky tier).
+  setAvailable(300);
+  expect(visible()?.textContent).toContain('Operations:');
+  expect(visibleChips()).toEqual(['Plating', 'Painting', 'Testing']);
+});
+
 test('header totals use semantic tones, include Done, and reconcile', async () => {
   await renderStation();
 
@@ -3011,15 +3081,21 @@ test('the header wrap is measurement-driven and the Worker pill is content-sized
   expect(wrapped).toContain('grid-row: 2');
   // The probe state restores single-row placement for the measurement
   // pass (declared after the wrapped rules so it wins while both
-  // classes apply) on FULL natural column widths — the identity floor
-  // keeps the Operations chips unwrapped, so chips never wrap before
-  // the totals drop.
+  // classes apply) on FULL natural column widths — the Operations
+  // ghost (label + every chip, one line) stands in for the possibly
+  // shortened visible row, so the totals drop before the Operations
+  // row sheds anything, and the `…` truncation chip never inflates
+  // the natural width.
   const probeCols = /\.ss-head\.measuring \{[^}]*}/s.exec(css)![0];
   expect(probeCols).toContain(
     'grid-template-columns: max-content max-content max-content',
   );
+  expect(css).toMatch(/\.ss-head\.measuring \.op \{[^}]*display: none/s);
   expect(css).toMatch(
-    /\.ss-head\.measuring \.op,\s*\.ss-head\.measuring \.opchips \{[^}]*flex-wrap: nowrap/s,
+    /\.ss-head\.measuring \.op-ghost \{[^}]*position: static/s,
+  );
+  expect(css).toMatch(
+    /\.ss-head\.measuring \.op-ghost \.opchip-more \{[^}]*display: none/s,
   );
   const probe = /\.ss-head\.measuring \.ss-stats \{[^}]*}/s.exec(css)![0];
   expect(probe).toContain('grid-column: auto');
@@ -3033,6 +3109,38 @@ test('the header wrap is measurement-driven and the Worker pill is content-sized
   expect(pill).not.toMatch(/min-width\s*:/);
   expect(pill).not.toMatch(/(^|[^-])width\s*:/m);
   expect(pill).toContain('white-space: nowrap');
+});
+
+test('the countdown value carries the success tone, stepping into warning near expiration', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+  // The emphasized remaining-time value leads the sub line: success
+  // tone with comfortable time, the warning tone near expiration —
+  // semantic tokens only.
+  const num = /\.ss-pill \.sub \.num \{[^}]*}/s.exec(css)![0];
+  expect(num).toContain('color: var(--ok-t)');
+  expect(css).toMatch(/\.ss-pill \.sub\.warn \.num \{[^}]*var\(--warn-t\)/s);
+});
+
+test('the scan row compresses the manual-entry button before the barcode input', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(join(here, 'scan-station.css'), 'utf8');
+  // The input's flex-basis floor creates the shrink pressure; the
+  // button gives way (flex-shrink), wrapping its label down to its
+  // widest word — roughly half its natural width — so the input keeps
+  // the remaining row width. Continuous flex behavior, no hard-coded
+  // breakpoint and no forced nowrap on the button label.
+  const input = /\.ss-scaninput \{[^}]*}/s.exec(css)![0];
+  expect(input).toMatch(/flex: 1 1 \d+px/);
+  const button = /\.ss-manualbtn \{[^}]*}/s.exec(css)![0];
+  expect(button).toContain('flex: 0 1 auto');
+  expect(button).not.toContain('white-space: nowrap');
 });
 
 test('the shared DevNotice fills its parent width with one content flow', async () => {
@@ -3476,9 +3584,9 @@ test('the pill counts the sliding timeout down from the per-Area override value'
   await renderStation(); // LATHE — 20-minute per-Area override
 
   const pill = document.querySelector('.ss-pill')!;
-  expect(pill.querySelector('.sub')?.textContent).toBe(
-    'Session · 20m remaining',
-  );
+  expect(pill.querySelector('.sub')?.textContent).toBe('20m remaining');
+  // The remaining-time value is the emphasized leading element.
+  expect(pill.querySelector('.sub .num')?.textContent).toBe('20m');
   // Full countdown tone: not yet near expiration.
   expect(pill.querySelector('.sub')?.className).not.toContain('warn');
 });
@@ -3499,10 +3607,11 @@ test('the session expires after inactivity; invalid scans never refresh, valid i
   });
   expect(screen.queryByRole('dialog')).toBeNull();
   scan('NOT-A-PARTFLOW-BARCODE');
-  // Near-expiration warning tone on the countdown (~1 minute left).
+  // Near-expiration warning tone on the countdown (~1 minute left);
+  // under a minute the remaining time counts in seconds.
   expect(document.querySelector('.ss-pill .sub')?.className).toContain('warn');
   expect(document.querySelector('.ss-pill .sub')?.textContent).toMatch(
-    /^Session · (\d+s|1m) remaining$/,
+    /^(\d+s|1m) remaining$/,
   );
 
   await act(async () => {

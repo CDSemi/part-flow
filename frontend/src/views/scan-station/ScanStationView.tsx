@@ -1124,16 +1124,7 @@ function StationView({
             <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={16} />
             {area?.name}
           </div>
-          <div className="op">
-            Operations:{' '}
-            <span className="opchips">
-              {(area?.operations ?? []).map((op) => (
-                <span className="opchip" key={op}>
-                  {op}
-                </span>
-              ))}
-            </span>
-          </div>
+          <HeaderOperations operations={area?.operations ?? []} />
         </div>
         <div className="ss-stats" aria-label="Area statistics">
           {(area ? areaStats(area, areaCards, hasMachines) : []).map((s) => (
@@ -1699,6 +1690,119 @@ function WorkerPill({
 }
 
 /**
+ * Header Operations row (§4.3) — always one line, fit-measured against
+ * the identity cell (never a hard-coded breakpoint), shedding
+ * presentation in tiers only when the full `Operations: <chips>` line
+ * genuinely cannot fit: first the `Operations:` label is dropped
+ * (chips only), then trailing chips are replaced by one `…` chip, and
+ * when not even the first chip fits the row hides entirely. A hidden
+ * natural-width ghost copy (label + every chip) provides the
+ * measurements — and stands in for the visible row during the header
+ * fit probe, so the Area totals still drop to their second row before
+ * the Operations row ever sheds anything.
+ */
+function HeaderOperations({ operations }: { operations: readonly string[] }) {
+  const ghostRef = useRef<HTMLDivElement>(null);
+  // `label`: the `Operations:` prefix is visible; `chips`: how many
+  // chips render (operations.length = all of them, no `…` chip).
+  const [fit, setFit] = useState({ label: true, chips: operations.length });
+  const measure = useCallback(() => {
+    const ghost = ghostRef.current;
+    const cell = ghost?.parentElement; // the .ss-id identity cell
+    if (!ghost || !cell) return;
+    const available = cell.clientWidth;
+    const rowGap = Number.parseFloat(getComputedStyle(ghost).columnGap) || 0;
+    const chipsWrap = ghost.querySelector('.opchips');
+    const chipGap = chipsWrap
+      ? Number.parseFloat(getComputedStyle(chipsWrap).columnGap) || 0
+      : 0;
+    const width = (el: Element | null) =>
+      el ? el.getBoundingClientRect().width : 0;
+    const labelWidth = width(ghost.querySelector('.oplabel'));
+    const moreWidth = width(ghost.querySelector('.opchip-more'));
+    const chipWidths = Array.from(
+      ghost.querySelectorAll('.opchip:not(.opchip-more)'),
+      width,
+    );
+    const chipsWidth = (count: number) =>
+      chipWidths.slice(0, count).reduce((sum, w) => sum + w, 0) +
+      chipGap * Math.max(0, count - 1);
+    const all = chipWidths.length;
+    // Half-pixel tolerance so subpixel rounding never flips a tier.
+    const fits = (required: number) => required <= available + 0.5;
+    let next: { label: boolean; chips: number };
+    if (fits(labelWidth + rowGap + chipsWidth(all))) {
+      next = { label: true, chips: all };
+    } else if (fits(chipsWidth(all))) {
+      next = { label: false, chips: all };
+    } else {
+      let count = all - 1;
+      while (count > 0 && !fits(chipsWidth(count) + chipGap + moreWidth)) {
+        count -= 1;
+      }
+      next = { label: false, chips: count };
+    }
+    setFit((current) =>
+      current.label === next.label && current.chips === next.chips
+        ? current
+        : next,
+    );
+  }, []);
+  useLayoutEffect(() => {
+    measure();
+  }, [measure, operations]);
+  useEffect(() => {
+    window.addEventListener('resize', measure);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => measure());
+      const cell = ghostRef.current?.parentElement;
+      if (cell) observer.observe(cell);
+    }
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, [measure]);
+  const truncated = fit.chips < operations.length;
+  return (
+    <>
+      {(fit.chips > 0 || !truncated) && (
+        <div className="op">
+          {fit.label && 'Operations:'}
+          <span className="opchips">
+            {operations.slice(0, fit.chips).map((op) => (
+              <span className="opchip" key={op}>
+                {op}
+              </span>
+            ))}
+            {truncated && (
+              <span
+                className="opchip opchip-more"
+                title={operations.slice(fit.chips).join(', ')}
+              >
+                …
+              </span>
+            )}
+          </span>
+        </div>
+      )}
+      <div className="op-ghost" aria-hidden="true" ref={ghostRef}>
+        <span className="oplabel">Operations:</span>
+        <span className="opchips">
+          {operations.map((op) => (
+            <span className="opchip" key={op}>
+              {op}
+            </span>
+          ))}
+          <span className="opchip opchip-more">…</span>
+        </span>
+      </div>
+    </>
+  );
+}
+
+/**
  * Blocking badge-scan modal of a Scanned-session Area (GUI_DESIGN
  * §4.12): shown when the station is opened without an active Worker
  * Session and when the session expires. Only the Scan Station is
@@ -1789,7 +1893,10 @@ const SESSION_WARN_MS = 2 * 60_000;
  * Live remaining-session line of the Worker pill, derived from the
  * sliding deadline plus the ONE shared UI clock (§3.12) — never a
  * component-owned timer. Isolated in a leaf component so only the pill
- * re-renders per tick.
+ * re-renders per tick. The countdown reads `12m remaining` — no
+ * `Session ·` prefix — with the remaining-time value emphasized in the
+ * success tone while comfortably inside the timeout, stepping into the
+ * warning tone near expiration; under a minute it counts in seconds.
  */
 function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
   // The shared tick drives the per-second re-renders; the remaining
@@ -1806,13 +1913,13 @@ function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
   if (remaining <= 0) {
     return <span className="sub warn">Session · expired</span>;
   }
-  const label =
+  const value =
     remaining >= 60_000
-      ? `${Math.ceil(remaining / 60_000)}m remaining`
-      : `${Math.max(1, Math.ceil(remaining / 1_000))}s remaining`;
+      ? `${Math.ceil(remaining / 60_000)}m`
+      : `${Math.max(1, Math.ceil(remaining / 1_000))}s`;
   return (
     <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
-      Session · {label}
+      <span className="num">{value}</span> remaining
     </span>
   );
 }

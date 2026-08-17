@@ -224,7 +224,12 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .ss-head .loc .dept{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1.6px;font-weight:700}
 .ss-head .loc .area{font-size:28px;font-weight:800;display:flex;align-items:center;gap:10px;line-height:1.15}
 .ss-head .loc .area .dot{width:16px;height:16px;border-radius:5px;flex:none}
-.ss-head .loc .op{font-size:13px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+/* Post-v18: the header Operations row keeps ONE line at every width —
+   the fit measurement (ssFitOps) sheds presentation in tiers (label
+   dropped, trailing chips behind one `…` chip, then hidden) instead of
+   wrapping the chips */
+.ss-head .loc .op{font-size:13px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:7px;flex-wrap:nowrap;overflow:hidden}
+.ss-head .loc .op .opchips{flex-wrap:nowrap}
 /* v10: Operations render as light informational chips — labels, not controls */
 .opchips{display:inline-flex;flex-wrap:wrap;gap:5px;vertical-align:middle}
 .ss-stats{display:flex;border:1px solid var(--border);border-radius:12px;background:var(--panel2);overflow:hidden}
@@ -257,6 +262,12 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .ss-pill .ss-pilltext{display:flex;flex-direction:column;gap:2px}
 .ss-pill .avatar{align-self:stretch;aspect-ratio:1;min-height:36px;border-radius:50%;background:var(--info-surface,rgba(79,140,255,.12));color:var(--info-t,#4f8cff);font-size:12.5px;font-weight:800;letter-spacing:.5px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ss-pill .sub{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+/* Post-v18: the countdown reads `12m remaining` (no `Session ·` prefix) —
+   the emphasized remaining-time value leads in the success tone,
+   stepping into the warning tone near expiration */
+.ss-pill .sub .num{font-size:13px;font-weight:800;font-style:normal;color:var(--ok-t)}
+.ss-pill .sub.warn{color:var(--warn-t);font-weight:700}
+.ss-pill .sub.warn .num{color:var(--warn-t)}
 #conn{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel2)}
 #conn .cdot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok);
   /* v14: the shared connected heartbeat — identical to the Production
@@ -287,7 +298,9 @@ body.prodmode #ssthemebtn{display:inline-flex}
 /* Scan input */
 #scanwrap{padding:20px 18px 14px}
 #scanrow{display:flex;gap:12px}
-#scaninput{flex:1;background:var(--bg2);border:2px solid var(--border2);border-radius:12px;color:var(--text);
+/* Post-v18: the flex-basis floor keeps the barcode input the priority
+   control on narrow screens — the manual-entry button compresses first */
+#scaninput{flex:1 1 240px;min-width:0;background:var(--bg2);border:2px solid var(--border2);border-radius:12px;color:var(--text);
   font-size:27px;font-family:var(--mono);padding:17px 20px;outline:none;transition:border-color .15s, box-shadow .15s}
 #scaninput:focus{border-color:var(--info-t);box-shadow:0 0 0 4px rgba(79,140,255,.16)}
 #scaninput::placeholder{color:var(--faint);font-family:var(--font);font-size:20px}
@@ -298,15 +311,14 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .dev-notice .dev-notice-content{flex:1 1 auto;min-width:0}
 .dev-notice .dev-notice-tag{flex:none;font-size:9.5px;font-weight:800;letter-spacing:1.2px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
 .dev-notice code{color:var(--muted);font-family:var(--mono),monospace;font-weight:600;background:var(--panel2);border-radius:5px;padding:1px 6px;white-space:nowrap}
-/* v9: manual PN entry sits in the scan row itself — secondary to scanning */
-#scanrow .manualbtn{flex:none;border:2px solid var(--border2);background:var(--panel2);color:var(--info-t);
-  border-radius:12px;padding:0 18px;font-size:15px;font-weight:750;min-height:56px}
+/* v9: manual PN entry sits in the scan row itself — secondary to scanning.
+   Post-v18: on narrow screens the button compresses BEFORE the input —
+   down to roughly half its natural width, its label wrapping onto two
+   lines and never below its widest word; it never drops below the input */
+#scanrow .manualbtn{flex:0 1 auto;border:2px solid var(--border2);background:var(--panel2);color:var(--info-t);
+  border-radius:12px;padding:0 18px;font-size:15px;font-weight:750;line-height:1.25;min-height:56px}
 #scanrow .manualbtn:hover:not(:disabled){background:rgba(79,140,255,.10)}
-/* narrow widths: the secondary manual-entry action wraps below the scan
-   input instead of overflowing it (tablet-first; phones out of scope) */
 @media (max-width:720px){
-  #scanrow{flex-wrap:wrap}
-  #scanrow .manualbtn{flex:1}
   #appnav{flex-wrap:wrap}
 }
 #manualcap{margin-top:6px;font-size:12px;color:var(--faint);line-height:1.5}
@@ -1437,7 +1449,7 @@ body.light{color-scheme:light}
       <div class="loc">
         <div class="dept" id="ss-dept">Machine Shop</div>
         <div class="area"><span class="dot" id="ss-areadot"></span><span id="ss-areaname">Lathe</span></div>
-        <div class="op">Operations: <span class="opchips" id="ss-ops"><span class="opchip">Turning</span></span></div>
+        <div class="op" id="ss-oprow">Operations: <span class="opchips" id="ss-ops"><span class="opchip">Turning</span></span></div>
       </div>
       <div class="ss-stats" id="ss-stats" aria-label="Area totals"></div>
       <!-- v16: ONE shared `.ss-headgroup` cell — the Worker Session
@@ -1454,7 +1466,7 @@ body.light{color-scheme:light}
           <span class="avatar" id="pill-avatar" aria-hidden="true">HN</span>
           <span class="ss-pilltext">
             <span class="val" id="pill-worker">H. Nguyen</span>
-            <span class="sub" id="pill-workersub">Session · 12m remaining</span>
+            <span class="sub" id="pill-workersub"><b class="num">12m</b> remaining</span>
           </span>
         </div>
         <div class="ss-headactions">
@@ -2318,7 +2330,7 @@ function showView(v){
     b.classList.toggle('active', b.dataset.v===v || (b.dataset.v==='mgmt'&&isMgmt)));
   document.getElementById('mgmtnav').classList.toggle('show',isMgmt);
   document.querySelectorAll('#mgmtnav .subbtn').forEach(b=>b.classList.toggle('active',b.dataset.v===v));
-  if(v==='scan') focusScan();
+  if(v==='scan'){ focusScan(); ssFitOps(); }
   if(v==='area') renderArea();
   if(v==='machines') renderMachines();
   if(v==='pn') renderPartNumbers();
@@ -2351,6 +2363,7 @@ function alignBoardLoc(){
 }
 window.addEventListener('resize',()=>{
   if(document.getElementById('view-board').classList.contains('active')) alignBoardLoc();
+  if(document.getElementById('view-scan').classList.contains('active')) ssFitOps();
 });
 /* ================= Theme mode (v5) =================
    Global user-switchable Dark/Light mode — every view follows.
@@ -2499,6 +2512,30 @@ function ssShowSelector(){
       '</div></li>';
   }).join('');
 }
+/* Post-v18 (§4.3): the header Operations row keeps ONE line — when the
+   identity cell cannot hold `Operations: <chips>`, presentation sheds
+   in tiers: label dropped, then trailing chips behind one `…` chip
+   (its tooltip names the hidden Operations), then the row hidden.
+   Re-measured on resize; the Area totals still drop to their second
+   row first (the header collapse above). */
+function ssFitOps(){
+  const row=document.getElementById('ss-oprow');
+  if(!row||!ssStation) return;
+  const ops=ssArea().ops;
+  const render=(label,count,more)=>{
+    row.style.display='';
+    row.innerHTML=(label?'Operations: ':'')+
+      '<span class="opchips" id="ss-ops">'+
+      ops.slice(0,count).map(o=>'<span class="opchip">'+o+'</span>').join('')+
+      (more?'<span class="opchip" title="'+ops.slice(count).join(', ')+'">…</span>':'')+
+      '</span>';
+    return row.scrollWidth<=row.clientWidth+0.5;
+  };
+  if(render(true,ops.length,false)) return;
+  if(render(false,ops.length,false)) return;
+  for(let n=ops.length-1;n>0;n--) if(render(false,n,true)) return;
+  row.style.display='none';
+}
 let ssProduction=false;   // presentation mode only — never a security boundary
 function ssLoadStation(id,production){
   const st=SS_STATIONS.find(x=>x.id===id);
@@ -2512,8 +2549,9 @@ function ssLoadStation(id,production){
   document.getElementById('ss-dept').textContent=st.dept;
   document.getElementById('ss-areadot').style.background=a.color;
   document.getElementById('ss-areaname').textContent=a.name;
-  // v10: Operations render as light informational chips — labels, not controls
-  document.getElementById('ss-ops').innerHTML=a.ops.map(o=>'<span class="opchip">'+o+'</span>').join('');
+  // v10: Operations render as light informational chips — labels, not
+  // controls. Post-v18: one line at every width, fit-measured tiers.
+  ssFitOps();
   ssRenderFoot();
   ssToastClose();
   ssRenderStation();
@@ -2685,7 +2723,7 @@ function doScan(){
         document.getElementById('pill-worker').textContent=w[0];
         /* Badge scan opens/switches the session and restarts the
            sliding inactivity countdown (mock value). */
-        document.getElementById('pill-workersub').textContent='Session · 20m remaining';
+        document.getElementById('pill-workersub').innerHTML='<b class="num">20m</b> remaining';
         /* A Worker scan never replaces the Last Scanned PN. */
         feedback('ok','Worker signed in: '+w[0],
           'New actions will be recorded under '+w[0]+'.','✓');
