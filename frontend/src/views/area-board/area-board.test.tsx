@@ -5,7 +5,7 @@ import {
   screen,
   within,
 } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { AreaBoardView } from './AreaBoardView';
 
@@ -17,7 +17,31 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/management/area-board');
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+/**
+ * Simulate the phone/tablet media state: the paged All Areas
+ * presentation reads ONE media query (the §2.5 collapse point) via
+ * matchMedia — jsdom applies no real media queries.
+ */
+function stubNarrowViewport(matches: boolean) {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn(() => ({
+      matches,
+      media: '',
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
 
 function openArea(name: RegExp) {
   // Click the Area TAB specifically — the overview column headers are
@@ -291,6 +315,63 @@ test('the All Areas overview wraps columns via the slide toggle', () => {
   expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
     true,
   );
+});
+
+/* ============ Paged narrow presentation (post-v18) ============ */
+
+test('narrow screens with Wrap columns off page one Area card at a time', () => {
+  stubNarrowViewport(true);
+  render(<AreaBoardView />);
+
+  // Paged chrome: Area-colored page dots above the carousel plus the
+  // floating ‹ › edge buttons; the scroll region keeps the carousel
+  // (non-wrap) class for the stylesheet's snap rules.
+  expect(document.querySelector('.ms-board.paged')).not.toBeNull();
+  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
+    false,
+  );
+  const dots = Array.from(document.querySelectorAll('.ms-pagedot'));
+  expect(dots.length).toBe(8); // one dot per Area, in board order
+  expect(dots[0].getAttribute('aria-label')).toBe('Go to Material');
+  expect(dots[0].getAttribute('aria-current')).toBe('true');
+
+  const prev = screen.getByRole('button', { name: 'Previous Area' });
+  const next = screen.getByRole('button', { name: 'Next Area' });
+  expect(prev).toBeDisabled(); // first page — paging never wraps
+  expect(next).toBeEnabled();
+
+  fireEvent.click(next);
+  expect(dots[1].getAttribute('aria-current')).toBe('true');
+  expect(dots[0].getAttribute('aria-current')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Previous Area' })).toBeEnabled();
+
+  // A dot jumps directly; the last page disables Next.
+  fireEvent.click(screen.getByRole('button', { name: 'Go to Stockroom' }));
+  expect(dots[7].getAttribute('aria-current')).toBe('true');
+  expect(screen.getByRole('button', { name: 'Next Area' })).toBeDisabled();
+});
+
+test('Wrap columns on keeps the stacked list — no pager chrome', () => {
+  stubNarrowViewport(true);
+  render(<AreaBoardView />);
+
+  fireEvent.click(screen.getByRole('switch', { name: 'Wrap columns' }));
+  expect(document.querySelector('.ms-scroll')!.classList.contains('wrap')).toBe(
+    true,
+  );
+  expect(document.querySelector('.ms-board.paged')).toBeNull();
+  expect(document.querySelector('.ms-pagedot')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Previous Area' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Next Area' })).toBeNull();
+});
+
+test('wide viewports never render the pager chrome', () => {
+  stubNarrowViewport(false);
+  render(<AreaBoardView />);
+
+  expect(document.querySelector('.ms-board.paged')).toBeNull();
+  expect(document.querySelector('.ms-pagedot')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Previous Area' })).toBeNull();
 });
 
 test('queued, on-Machine, processing, and finished states stay distinguishable', () => {

@@ -110,12 +110,23 @@ test('the Management sub-navigation is a sticky frosted-glass bar on its own pan
   expect(shell).toMatch(/\.mgmtnav\.shrunk \.subbtn \{[^}]*min-height/s);
 });
 
-test('the All Areas board stacks its Area columns at phone widths', () => {
+test('the All Areas board stacks (Wrap on) or pages with snap (Wrap off) at phone widths', () => {
   const board = css('views/area-board/area-board.css');
+  // Wrap columns ON: the stacked full-width column list — vertical
+  // scrolling only.
   const stack =
-    /@media \(max-width: \d+px\) \{[^@]*\.ms-scroll \{[^}]*flex-wrap: wrap;[^}]*overflow-x: visible;/s.exec(
+    /@media \(max-width: \d+px\) \{[^@]*\.ms-scroll\.wrap \{[^}]*flex-wrap: wrap;[^}]*overflow-x: visible;/s.exec(
       board,
     );
   expect(stack).not.toBeNull();
-  expect(board).toMatch(/\.ms-col \{\s*flex: 1 1 100%;/s);
+  expect(board).toMatch(/\.ms-scroll\.wrap \.ms-col \{\s*flex: 1 1 100%;/s);
+  // Wrap columns OFF (post-v18): a swipeable one-card-per-page
+  // carousel — mandatory horizontal snap, no visible scrollbar, and
+  // near-full-width cards so the neighbors peek in at the edges.
+  expect(board).toMatch(
+    /@media \(max-width: \d+px\) \{[^@]*\.ms-scroll:not\(\.wrap\) \{[^}]*scroll-snap-type: x mandatory;[^}]*scrollbar-width: none;/s,
+  );
+  expect(board).toMatch(
+    /\.ms-scroll:not\(\.wrap\) \.ms-col \{[^}]*scroll-snap-align: center/s,
+  );
 });

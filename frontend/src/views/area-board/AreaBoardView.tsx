@@ -1,6 +1,6 @@
 import './area-board.css';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getViewStatePreview } from '../../app/view-state';
 import {
@@ -216,6 +216,13 @@ export function AreaBoardView() {
   );
 }
 
+/**
+ * Phone/tablet breakpoint of the paged All Areas presentation — the
+ * same §2.5 collapse point as the stylesheet's narrow rules
+ * (area-board.css `@media (max-width: 720px)`; keep the two in sync).
+ */
+const OVERVIEW_PAGED_MAX_WIDTH_PX = 720;
+
 function AllAreasOverview({
   cards,
   wrap,
@@ -225,8 +232,132 @@ function AllAreasOverview({
   wrap: boolean;
   onOpenArea: (key: string) => void;
 }) {
+  // Paged narrow presentation (post-v18): under the phone/tablet
+  // breakpoint with `Wrap columns` OFF the board becomes a swipeable
+  // one-card-per-page carousel — native horizontal scrolling with CSS
+  // snap (each swipe lands centered on one Area card; the neighboring
+  // cards peek in at the edges as the built-in cue that more pages
+  // exist), Area-colored page dots above the cards, and floating ‹ ›
+  // edge buttons. `Wrap columns` ON keeps the §2.5 stacked full-width
+  // column list; wide viewports keep the §6.2 horizontal scroll and
+  // never render the pager chrome.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [narrow, setNarrow] = useState(false);
+  const [page, setPage] = useState(0);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(
+      `(max-width: ${OVERVIEW_PAGED_MAX_WIDTH_PX}px)`,
+    );
+    const apply = () => setNarrow(query.matches);
+    apply();
+    query.addEventListener('change', apply);
+    return () => query.removeEventListener('change', apply);
+  }, []);
+  const paged = narrow && !wrap;
+  const pageCount = MOCK_AREAS.length;
+
+  /** Scroll one Area card into the centered snap position. */
+  const goTo = useCallback(
+    (target: number) => {
+      if (target < 0 || target >= pageCount) return;
+      const el = scrollRef.current;
+      const col = el?.children[target] as HTMLElement | undefined;
+      if (!el || !col) return;
+      const left = col.offsetLeft - (el.clientWidth - col.offsetWidth) / 2;
+      // Element scrolling is unavailable in DOM environments without
+      // layout — the page state below still drives the indicator.
+      if (typeof el.scrollTo === 'function') {
+        el.scrollTo({ left, behavior: 'smooth' });
+      }
+      setPage(target);
+    },
+    [pageCount],
+  );
+
+  // The active page derives from the scroll position, so a native
+  // swipe, momentum scrolling and the snap all update the indicator
+  // through the same path as the buttons.
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const center = el.scrollLeft + el.clientWidth / 2;
+    let best = 0;
+    let bestDistance = Infinity;
+    Array.from(el.children).forEach((child, index) => {
+      const col = child as HTMLElement;
+      const distance = Math.abs(col.offsetLeft + col.offsetWidth / 2 - center);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    });
+    setPage((current) => (current === best ? current : best));
+  }, []);
+
   return (
-    <div className={`ms-scroll ${wrap ? 'wrap' : ''}`}>
+    <div className={`ms-board${paged ? ' paged' : ''}`}>
+      {paged ? (
+        // Area-colored page dots: position indicator AND direct jump
+        // targets — the stable Area identity colors (§2.2) mirror the
+        // card accents, so the dot row reads as a map of the pages.
+        <div className="ms-pagedots" aria-label="Area pages">
+          {MOCK_AREAS.map((area, index) => (
+            <button
+              key={area.key}
+              type="button"
+              className={`ms-pagedot${index === page ? ' on' : ''}`}
+              style={{ ['--acol' as string]: area.colorVar }}
+              aria-label={`Go to ${area.name}`}
+              aria-current={index === page ? 'true' : undefined}
+              onClick={() => goTo(index)}
+            />
+          ))}
+        </div>
+      ) : null}
+      <div
+        className={`ms-scroll ${wrap ? 'wrap' : ''}`}
+        ref={scrollRef}
+        onScroll={paged ? onScroll : undefined}
+      >
+        {renderColumns(cards, onOpenArea)}
+      </div>
+      {paged ? (
+        // Floating ‹ › edge buttons: the always-visible affordance that
+        // the pages continue — pinned mid-viewport so they stay in
+        // reach while a tall card scrolls vertically. Disabled at the
+        // ends: paging never wraps.
+        <>
+          <button
+            type="button"
+            className="ms-pagebtn prev"
+            aria-label="Previous Area"
+            disabled={page === 0}
+            onClick={() => goTo(page - 1)}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            className="ms-pagebtn next"
+            aria-label="Next Area"
+            disabled={page === pageCount - 1}
+            onClick={() => goTo(page + 1)}
+          >
+            ›
+          </button>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function renderColumns(
+  cards: MockAreaCard[],
+  onOpenArea: (key: string) => void,
+) {
+  return (
+    <>
       {MOCK_AREAS.map((area) => {
         const areaCards = cards.filter((c) => c.area === area.key);
         const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;
@@ -333,7 +464,7 @@ function AllAreasOverview({
           </div>
         );
       })}
-    </div>
+    </>
   );
 }
 

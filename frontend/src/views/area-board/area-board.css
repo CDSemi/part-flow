@@ -304,18 +304,120 @@
   color: var(--err-t);
 }
 
-/* Phone widths: the one-column-per-Area board stacks its columns
-   full-width instead of scrolling horizontally — vertical scrolling is
-   the only browsing gesture (GUI_DESIGN §2.5). The desktop/tablet
-   horizontal board and the explicit wrap mode are unchanged above the
+/* Phone/tablet widths (GUI_DESIGN §2.5, post-v18 — keep the 720px
+   breakpoint in sync with OVERVIEW_PAGED_MAX_WIDTH_PX in
+   AreaBoardView): the layout choice follows the Wrap columns toggle.
+   Wrap ON stacks the columns full-width — vertical scrolling only.
+   Wrap OFF pages the board — a swipeable one-card-per-page carousel:
+   native horizontal scrolling with mandatory snap, no visible
+   scrollbar, each card slightly narrower than the viewport so the
+   neighboring cards peek in at the edges — the built-in cue that more
+   pages exist (plus the page dots and floating ‹ › buttons below).
+   The desktop/tablet horizontal board is unchanged above the
    breakpoint. */
 @media (max-width: 720px) {
-  .ms-scroll {
+  .ms-scroll:not(.wrap) {
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    gap: 10px;
+    padding-bottom: 8px;
+  }
+
+  .ms-scroll:not(.wrap)::-webkit-scrollbar {
+    display: none;
+  }
+
+  .ms-scroll:not(.wrap) .ms-col {
+    flex: 0 0 calc(100% - 44px);
+    scroll-snap-align: center;
+  }
+
+  .ms-scroll.wrap {
     flex-wrap: wrap;
     overflow-x: visible;
   }
 
-  .ms-col {
+  .ms-scroll.wrap .ms-col {
     flex: 1 1 100%;
   }
+}
+
+/* Paged-mode chrome (rendered only under the breakpoint with Wrap
+   columns off — see AllAreasOverview). Area-colored page dots above
+   the carousel: indicator and direct jump targets in one, mirroring
+   the card accent colors; a generous hit area around each small dot. */
+.ms-pagedots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.ms-pagedot {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ms-pagedot::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--acol, var(--faint));
+  opacity: 0.35;
+  transition:
+    opacity 0.15s,
+    transform 0.15s,
+    box-shadow 0.15s;
+}
+
+.ms-pagedot.on::after {
+  opacity: 1;
+  transform: scale(1.3);
+  box-shadow: 0 0 0 3px var(--info-ring);
+}
+
+/* Floating ‹ › edge buttons: half-pill handles pinned mid-viewport at
+   the screen edges on the frosted panel surface — always visible
+   while a tall card scrolls, clearly above the peeking neighbor
+   cards, below modal overlays. Disabled at the ends (no wrap). */
+.ms-pagebtn {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  width: 42px;
+  height: 58px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--info-t);
+  background: var(--panelglass);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.ms-pagebtn.prev {
+  left: 0;
+  border-left: none;
+  border-radius: 0 16px 16px 0;
+}
+
+.ms-pagebtn.next {
+  right: 0;
+  border-right: none;
+  border-radius: 16px 0 0 16px;
+}
+
+.ms-pagebtn:disabled {
+  opacity: 0.35;
 }
