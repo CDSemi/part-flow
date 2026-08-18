@@ -121,10 +121,19 @@ Scope — configuration management for exactly:
   Phase 4 and scoped to WorkOrder, WorkOrderDemand, and PartNumber
   (SLICE1_DATA_MODEL §16) — Machine never becomes an `audit_events` entity
   type, and Phase 3.5 creates no `audit_events` table. Actor identity on
-  lifecycle events stays a nullable, reference-free value until the phases
-  that introduce Workers (Phase 13) and authenticated Users (Phase 14).
-- the required active/inactive flags and barcode/configuration fields of
-  these entities (entity barcodes per the PF: scheme), including the
+  lifecycle events stays a nullable, reference-free value in Phase 3.5 — no
+  Worker or User foreign key. Machine retire/reactivate is a Management
+  action, so any future authenticated actor linkage belongs to Users and
+  authentication (Phase 14); Workers are Scan-Station-scoped production
+  audit identity, separate from Users, and are never associated with
+  Machine lifecycle events.
+- the required active/inactive flags and the exact barcode ownership
+  PROJECT_PROFILE §10 defines — no other barcode namespace is invented:
+  Areas carry `PF:AREA:<stable-id>`; Machines carry
+  `PF:MACHINE:<asset-tag>`, always derived from the immutable Asset Tag;
+  Departments have no barcode; Operations get no barcode field; Scan
+  Stations are identified by their stable Station ID and Area binding —
+  there is no `PF:STATION` or any other station barcode. This includes the
   Administration → Barcode configuration Asset Tag format (prefix +
   zero-padded numeric sequence, PROJECT_PROFILE §8.6) that Machine creation
   requires in order to auto-assign Asset Tags
@@ -153,6 +162,7 @@ The first business vertical slice, presented in the UI as the Work Orders view (
 - save a confirmed blank external WO Number as `NULL` on an internal Work Order (rendered `—`, never persisted as a placeholder; replaceable later through an audited edit — PROJECT_PROFILE §7 Work Order; no temporary number is generated),
 - accept null WorkOrder and WorkOrderDemand due dates as valid data (PROJECT_PROFILE §8.2/§8.3),
 - create/find the PartNumber master for the canonical PN (uppercase, whitespace-free normalization; create-on-first-use),
+- provide the minimal operational capability to view/print the derived `PF:PN:<canonical-part-number>` barcode label (PROJECT_PROFILE §10) for a PartNumber created/found during intake — Phase 5 production scanning requires physical PN barcodes. This is the only Part Numbers capability in this phase: it does not make the full Management → Part Numbers screen real (Phase 13),
 - create/update WorkOrderDemand,
 - save demand separately from production quantity,
 - explicitly release production,
@@ -277,9 +287,11 @@ Machines and their active/barcode fields configurable):
   through **Management → Part Numbers** (GUI_DESIGN §14), permission-based
   for authorized production roles; Administration keeps no duplicate Part
   Numbers screen. Phase 4 already creates/finds PartNumber master records as
-  part of Work Order Intake (create-on-first-use), but that does not make
-  this management screen real: metadata editing, hard deletion per
-  PROJECT_PROFILE §28, and barcode labels arrive only here
+  part of Work Order Intake (create-on-first-use) and already offers the
+  minimal derived `PF:PN:` label view/print that Phase 5 scanning depends
+  on, but neither makes this management screen real: metadata editing,
+  image management, hard deletion per PROJECT_PROFILE §28, and the full
+  management screen (including its label surface) arrive only here
 - Users and roles / authorization management (enforced in Phase 14)
 - Worker session policies — the scanned-session sliding inactivity timeout:
   one default value with per-Area overrides (PROJECT_PROFILE §19)
