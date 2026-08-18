@@ -24,5 +24,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/setupTests.ts'],
+    // Headroom over Vitest's 5 s default for slow environments — the
+    // Docker dev container transforms bind-mounted sources several
+    // times slower than a native checkout; setupTests.ts raises the
+    // testing-library async-utility timeout to match. Only genuinely
+    // hung tests are affected: they fail slower.
+    testTimeout: 15_000,
   },
 });

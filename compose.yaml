@@ -65,6 +65,11 @@ services:
             # image's /app/node_modules).
             - ./frontend:/app
             - /app/node_modules
+            # The rendered-copy audit (src/rendered-copy.test.ts) also
+            # scans the current mockup in the repository's docs/mockups.
+            # From /app/src that path resolves to /docs/mockups, so the
+            # docs tree is mounted read-only for in-container test runs.
+            - ./docs:/docs:ro
         depends_on:
             backend:
                 condition: service_healthy
