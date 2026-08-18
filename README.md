@@ -84,13 +84,17 @@ Frontend structure:
 
 ### Previewing UI states (development only)
 
-Append `?state=…` to any view URL in a development build to force that
-view's deterministic state:
+Append `?state=…` to a view URL in a development build to force a
+deterministic state (each view implements the preview states that are
+meaningful for it):
 
 - `?state=loading` — skeleton loading state
 - `?state=empty` — empty state
 - `?state=error` — error state
-- `?state=long` — long-data set (over-long PNs, many rows)
+- `?state=long` — long-data set (over-long PNs, many rows) on the
+  data-heavy views that define a deterministic long-data fixture; a
+  view without one (e.g. Administration, Priority) renders its normal
+  sample data
 
 Example: `http://localhost:5173/management/tracking?state=long`. The
 override is gated by `import.meta.env.DEV` and does not exist in a
