@@ -85,7 +85,11 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin-left: 2px;
+  /* Clearly separated from the title (the h1 gap plus this margin)
+     so the glowing dot never reads as part of the word `Production`,
+     and nudged down a touch to sit on the title's optical baseline. */
+  margin-left: 4px;
+  margin-top: 3px;
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.6px;
@@ -99,12 +103,14 @@
 
 .pb-head .live .ld {
   flex: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
   background: var(--ok);
-  /* The shared connected heartbeat (styles/global.css) — the same
-     "alive" behavior as the connectivity chip's ONLINE dot. */
+  box-shadow: 0 0 10px var(--ok);
+  /* One-to-one with the connectivity chip's ONLINE dot: same round
+     shape, size, glow, and the shared connected heartbeat
+     (styles/global.css). */
   animation: pf-heartbeat 2s infinite;
 }
 
@@ -119,6 +125,7 @@
 /* Stale / reconnecting: solid warning dot, no heartbeat. */
 .pb-head .live.stale .ld {
   background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
   animation: none;
 }
 

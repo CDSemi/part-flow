@@ -777,9 +777,10 @@ export function ProductionBoardView() {
     >
       {/* Header (restructured v17): ONE identical identity group in
           both presentations, styled like the Scan Station header —
-          the Department line above the `Live Production` board title
-          (BoardTitle: Area-indicator-style dot with the shared
-          heartbeat, never a second `ONLINE` chip); a flexible
+          the Department line above the `Production` board title
+          (BoardTitle: the `● Live` status with the connectivity
+          chip's round glowing dot and the shared heartbeat, never a
+          second `ONLINE` chip); a flexible
           center; then the clock zone. Kiosk mode renders the shared
           borderless Dark/Light control inside the clock's time row
           (centered on the time text — what the hidden navigation
