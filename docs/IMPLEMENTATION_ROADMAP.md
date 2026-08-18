@@ -106,16 +106,44 @@ Scope — configuration management for exactly:
   production roles rather than an Administration panel, but still part of this
   minimum setup prerequisite: Machines must be configured before real
   production runs
+- Machine lifecycle event history — the dedicated append-only
+  **`machine_lifecycle_events`** table (canonical name) persisting the
+  `RETIRED` and `REACTIVATED` lifecycle events PROJECT_PROFILE §8.6 requires,
+  created in this phase together with `machines`. A retirement or
+  reactivation and its lifecycle event commit atomically — one transaction,
+  no lifecycle change without its event and no event without its change —
+  and recorded events are immutable/append-only. Each event records the
+  canonical lifecycle context: event type, Machine identity, occurred time,
+  reason, before/after state, and the previous and current Area when the
+  Machine moved while retired. This is Machine lifecycle/history
+  persistence, deliberately **not** a generic audit framework and **not**
+  the Slice 1 `audit_events` mechanism: `audit_events` stays owned by
+  Phase 4 and scoped to WorkOrder, WorkOrderDemand, and PartNumber
+  (SLICE1_DATA_MODEL §16) — Machine never becomes an `audit_events` entity
+  type, and Phase 3.5 creates no `audit_events` table. Actor identity on
+  lifecycle events stays a nullable, reference-free value until the phases
+  that introduce Workers (Phase 13) and authenticated Users (Phase 14).
 - the required active/inactive flags and barcode/configuration fields of
-  these entities (entity barcodes per the PF: scheme)
+  these entities (entity barcodes per the PF: scheme), including the
+  Administration → Barcode configuration Asset Tag format (prefix +
+  zero-padded numeric sequence, PROJECT_PROFILE §8.6) that Machine creation
+  requires in order to auto-assign Asset Tags
 
-Explicitly NOT in this prerequisite (they remain in Phase 13 and Phase 14):
-Users and roles, authorization management, Worker-session policies beyond the
-immediate workflow requirements, correction permissions, retention/archive/
-purge policies, general settings, and every other nonessential administration
-capability. The Phase 2 Administration view remains a development-only visual
-shell/reference until this prerequisite and later Phase 13 make its sections
-real.
+Explicitly NOT in this prerequisite: no production workflow and no
+production write of any kind — no Work Order intake or production release,
+no QuantityFlow creation, no PartMovement workflow or movement-type
+widening, and no transfer or Machine-assignment workflows (Phases 4–6 own
+those); not the generic `audit_events` table (Phase 4, SLICE1_DATA_MODEL
+§16); not the real Planned Routes management and not the real Part Numbers
+management (both Phase 13, through Management → Planned Routes and
+Management → Part Numbers); and none of the remaining administration
+capability, which stays in Phase 13 and Phase 14: Workers, Users and roles,
+authorization management, Worker-session policies beyond the immediate
+workflow requirements, correction permissions, retention/archive/purge
+policies, general settings, and every other nonessential administration
+capability. The Phase 2 Administration view remains a development-only
+visual shell/reference until this prerequisite and later Phase 13 make its
+sections real.
 
 ## Phase 4 — Manual Work Order Intake and Production Release
 
@@ -245,6 +273,13 @@ Machines and their active/barcode fields configurable):
   **Management → Planned Routes** (GUI_DESIGN §13), permission-based for
   authorized production roles; Administration keeps no duplicate Route
   Templates screen
+- Part Numbers — real management of the optional PartNumber master metadata
+  through **Management → Part Numbers** (GUI_DESIGN §14), permission-based
+  for authorized production roles; Administration keeps no duplicate Part
+  Numbers screen. Phase 4 already creates/finds PartNumber master records as
+  part of Work Order Intake (create-on-first-use), but that does not make
+  this management screen real: metadata editing, hard deletion per
+  PROJECT_PROFILE §28, and barcode labels arrive only here
 - Users and roles / authorization management (enforced in Phase 14)
 - Worker session policies — the scanned-session sliding inactivity timeout:
   one default value with per-Area overrides (PROJECT_PROFILE §19)
