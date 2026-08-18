@@ -654,3 +654,12 @@ class TestPartMovementImmutability:
             connection.execute(
                 sa.delete(models.PartMovement).where(models.PartMovement.id == movement_id)
             )
+
+    def test_truncate_is_rejected_by_postgresql(self, connection: Connection) -> None:
+        # The statement-level trigger also guards the TRUNCATE path, so
+        # even a bulk wipe of history is impossible for the application.
+        area_id, operation_id = _create_production_context(connection)
+        flow_id = _create_flow(connection, area_id)
+        _insert_movement(connection, flow_id, area_id, operation_id)
+        with pytest.raises(DBAPIError, match="append-only"), connection.begin_nested():
+            connection.execute(sa.text("TRUNCATE part_movements"))
