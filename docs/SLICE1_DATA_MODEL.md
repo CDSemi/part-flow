@@ -2,7 +2,7 @@
 
 > **Status:** Analysis and design only. No migrations or application code.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.
-> **Basis:** `docs/PROJECT_PROFILE.md` (v16, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3–4), `docs/GUI_DESIGN.md` §14, `CLAUDE.md`.
+> **Basis:** `docs/PROJECT_PROFILE.md` (v19, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3, 3.5, 4), `docs/GUI_DESIGN.md` §11 Work Orders, `CLAUDE.md`.
 
 ---
 
@@ -33,12 +33,12 @@
 | 7 | `RouteTemplate` | Reusable route definition selectable at release. |
 | 8 | `RouteStep` | Ordered step of a RouteTemplate: sequence, Area, Operation, expected duration, instructions. |
 | 9 | `AssignedRoute` | Independent snapshot of a Route assigned to one **PLANNED** QuantityFlow at release; template changes never alter it. Optional — Floating flows (the default) have none. |
-| 10 | `QuantityFlow` | Traceable portion of physical PN quantity created by release; the unit that will later move. Carries its `route_mode` (`FLOATING` default / `PLANNED`) and derived current-position projection fields. |
+| 10 | `QuantityFlow` | Traceable portion of physical PN quantity created by release; the unit that will later move. Carries its `route_mode` (`FLOATING` default / `PLANNED`), its nullable `assigned_route_id` snapshot reference (set only for `PLANNED`, PROJECT_PROFILE §8.7), and derived current-position projection fields. |
 | 11 | `PartMovement` | Immutable event record; this slice produces only `RECEIVED`. The sole source of truth for production state. |
 | 12 | Current-position projection | Maintained, rebuildable derived state on `QuantityFlow` (`current_area_id`; `current_machine_id` arrives with Phase 6). |
 | 13 | Audit event | Generic append-only audit row for master-data and business-demand changes (§16). Persistence infrastructure, not a domain aggregate. |
 
-Scan Station configuration (`scan_stations`) is stable application/infrastructure configuration, **not** a core domain aggregate (PROJECT_PROFILE §15 Scan Station Persistence). Management-initiated release does not involve a Scan Station, so this slice creates neither the `scan_stations` table nor the `station_id` column; `station_id` remains the canonical column name, added by the Phase 5 migration that introduces `scan_stations`.
+Scan Station configuration (`scan_stations`) is stable application/infrastructure configuration, **not** a core domain aggregate (PROJECT_PROFILE §15 Scan Station Persistence). Management-initiated release does not involve a Scan Station, so this slice creates neither the `scan_stations` table nor the `station_id` column. The `scan_stations` table is created by the Phase 3.5 minimum environment setup (IMPLEMENTATION_ROADMAP Phase 3.5); `station_id` remains the canonical name of the Movement column, added by the Phase 5 migration that introduces station-recorded transfers.
 
 ---
 
@@ -49,7 +49,7 @@ Department   1 ──── *  Area
 Area         1 ──── *  Operation
 WorkOrder 1 ─── *  WorkOrderDemand
 RouteTemplate 1 ─── *  RouteStep
-QuantityFlow 1 ──── 0..1 AssignedRoute      (snapshot; only for PLANNED flows)
+QuantityFlow 1 ──── 0..1 AssignedRoute      (snapshot; via quantity_flows.assigned_route_id, PLANNED only)
 AssignedRoute 1 ─── *  AssignedRouteStep    (snapshot rows)
 QuantityFlow 1 ──── *  PartMovement
 Area         1 ──── *  PartMovement (to)    (required; `RECEIVED` has from_area_id NULL)
@@ -126,8 +126,8 @@ Steps (one transaction, §13):
 
 1. Validate the canonical PN (normalized: trimmed, uppercase, no internal whitespace), Area active and configured as a starting Area, Operation valid for that Area, RouteTemplate active **when `PLANNED`**, quantity > 0. The PartNumber master has no active/inactive state and its existence is never a release precondition.
 2. If the PN has active flows, require the request to carry the explicit confirmation flag set by the UI after showing the existing distribution; otherwise reject. Never auto-create or auto-merge.
-3. Create the QuantityFlow with its `route_mode` and its initial projection: `current_area_id` = the confirmed starting Area (§9, §15).
-4. Snapshot the AssignedRoute **only for a `PLANNED` release** (§10); a `FLOATING` release creates none.
+3. Snapshot the AssignedRoute **only for a `PLANNED` release** (§10); a `FLOATING` release creates none.
+4. Create the QuantityFlow with its `route_mode`, its `assigned_route_id` (the snapshot's id for `PLANNED`, NULL for `FLOATING` — PROJECT_PROFILE §8.7) and its initial projection: `current_area_id` = the confirmed starting Area (§9, §15).
 5. Append the `RECEIVED` PartMovement — referencing the snapshot's first step for a `PLANNED` flow (`assigned_route_step_id` stays NULL for `FLOATING`) — and recording the resolved Operation; its `metadata` carries the request fingerprint (§14) plus, informationally, the initiating actor and optional WorkOrderDemand context (§11).
 6. Commit and return: flow id, route mode, route snapshot id when planned, starting Area, Operation, quantity, Movement id.
 
@@ -137,7 +137,7 @@ The release transaction appends **no** generic `audit_events` row: the `RECEIVED
 
 ## 9. QuantityFlow Creation
 
-- Columns per PROJECT_PROFILE §8.7, restricted to those this slice uses: `id`, `part_number` (the canonical uppercase PN, kept by the flow itself), `quantity`, `status` (`ACTIVE` on creation), `route_mode` (`FLOATING` default / `PLANNED`), `created_at`, `closed_at` (NULL). `parent_flow_id` is the canonical name of the SPLIT lineage column; it is **not** created in this slice and arrives with the Phase 8 migration (§18).
+- Columns per PROJECT_PROFILE §8.7, restricted to those this slice uses: `id`, `part_number` (the canonical uppercase PN, kept by the flow itself), `quantity`, `status` (`ACTIVE` on creation), `route_mode` (`FLOATING` default / `PLANNED`), `assigned_route_id` (nullable snapshot reference — set to the AssignedRoute's id exactly when `route_mode = 'PLANNED'`, NULL for `FLOATING`), `created_at`, `closed_at` (NULL). `parent_flow_id` is the canonical name of the SPLIT lineage column; it is **not** created in this slice and arrives with the Phase 8 migration (§18).
 - Plus maintained projection columns: `current_area_id` (NOT NULL; set by the INSERT itself to the confirmed starting Area — a QuantityFlow row never exists without a valid current Area) and `updated_at`. `current_machine_id` is the canonical name of the Machine projection column; it is **not** created in this slice and arrives with the Phase 6 migration (§18).
 - Flow quantity is immutable within this slice (no SPLIT/MERGED/QUANTITY_ADJUSTED yet), so conservation is verifiable as Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
 
@@ -147,7 +147,7 @@ The release transaction appends **no** generic `audit_events` row: the `RECEIVED
 
 - A `PLANNED` release copies the selected RouteTemplate's steps into `assigned_routes` + `assigned_route_steps` (sequence, area_id, operation_id, expected_duration, instructions). A `FLOATING` release creates no snapshot — the flow's route trace is derived from Movement history (PROJECT_PROFILE §17).
 - The snapshot references its source template (`source_route_template_id`, informational) but is independent: later template edits never alter it (PROJECT_PROFILE §8.10).
-- At most one AssignedRoute per QuantityFlow in this slice (`UNIQUE (quantity_flow_id)`), present exactly when `route_mode = 'PLANNED'`; route editing and deviations arrive with later phases.
+- The flow references its snapshot through `quantity_flows.assigned_route_id` (PROJECT_PROFILE §8.7) — the only FK between the two tables; `assigned_routes` carries no reverse `quantity_flow_id` column. At most one flow per snapshot (`UNIQUE (assigned_route_id)`), and the reference is present exactly when `route_mode = 'PLANNED'` (CHECK, §17); route editing and deviations arrive with later phases.
 - The snapshot's first step must match the confirmed starting Area (and Operation where the step specifies one); mismatch is a validation failure, not a silent adjustment.
 
 ---
@@ -161,7 +161,7 @@ Columns per PROJECT_PROFILE §8.11, with slice-relevant shape:
 - `quantity` = flow quantity; composite FK guarantees PN agreement.
 - `assigned_route_step_id` → `assigned_route_steps.id`, the **immutable snapshot** step — never the mutable `route_steps` template row, so template edits can never alter the route context recorded by an existing Movement. **Nullable**: it is set for a `PLANNED` flow's `RECEIVED` (the snapshot's first step, which §10 requires to match the confirmed starting Area) and NULL for a `FLOATING` flow, which has no AssignedRoute. A CHECK ties it to the flow's mode via the release protocol (§13) and reconciliation. The name is deliberately not a generic `route_step_id`, which would be ambiguous between `route_steps` and `assigned_route_steps`; it refines the illustrative `route_step_id` attribute of PROJECT_PROFILE §8.11.
 - `movement_reason` is the canonical column name for the typed movement intent (first value `REPAIR`, PROJECT_PROFILE §8.11); it is **not** created in this slice and arrives with the Phase 9 migration (§18).
-- `station_id`, `worker_id`, `scan_session_id` are canonical column names for later phases (§18); they are **not** created in this slice because their owning tables do not exist yet. Management-initiated release requires none of them.
+- `station_id`, `worker_id`, `scan_session_id` are canonical column names for later phases (§18); they are **not** created in this slice because their owning tables do not exist yet at this migration point (`scan_stations` arrives with the Phase 3.5 environment setup, the Worker/session tables later still). Management-initiated release requires none of them.
 - `occurred_at`, `server_received_at` — see §14.
 - `device_event_id` NOT NULL UNIQUE — idempotency key (§14).
 - `metadata` carries the deterministic request fingerprint (§14) and may informationally capture the initiating actor (until authentication exists, Phase 14) and the initiating WorkOrderDemand context for audit display; none of this creates ownership — WorkOrderDemand never owns Movement (§3).
@@ -186,8 +186,10 @@ BEGIN
   idempotency check on device_event_id + request fingerprint (§14)
   validate PN / Area / Operation / RouteTemplate / quantity
   active-quantity confirmation check
-  INSERT quantity_flows            (route_mode; current_area_id = confirmed starting Area)
   INSERT assigned_routes + assigned_route_steps   -- PLANNED releases only
+  INSERT quantity_flows            (route_mode; assigned_route_id = snapshot id
+                                    for PLANNED, NULL for FLOATING;
+                                    current_area_id = confirmed starting Area)
   INSERT part_movements (RECEIVED; assigned_route_step_id = snapshot first
                          step for PLANNED, NULL for FLOATING)
 COMMIT
@@ -263,25 +265,25 @@ Rules:
 
 **`part_numbers`** — optional current-metadata master. PK `part_number text` (the canonical uppercase PN — natural key, no surrogate id) with `CHECK (part_number = upper(part_number) AND part_number !~ '\s' AND part_number <> '')` enforcing the canonical form; `created_at`, `updated_at` (no `is_active` — the PN master has no active/inactive lifecycle). The PN barcode is derived (`'PF:PN:' || part_number`, PROJECT_PROFILE §10) — no stored `barcode_value` column and no `lower(...)` expression indexes (canonical uppercase makes them unnecessary). No production table references this table by FK, so a master row can be hard-deleted (and recreated later for the same canonical PN) per PROJECT_PROFILE §28.
 
-**`work_orders`** — PK `id` (stable internal identity — never the user-facing identifier); `work_order_number` **nullable** with a **partial unique index** (`UNIQUE (work_order_number) WHERE work_order_number IS NOT NULL`) so many internal Work Orders may hold `NULL` while non-null numbers stay unique (§5); `received_date NOT NULL`; `due_date` nullable (a missing Work Order due date is valid data, §5); `status`; `created_at`, `updated_at`.
+**`work_orders`** — PK `id` (stable internal identity — never the user-facing identifier); `work_order_number` **nullable** with a **partial unique index** (`UNIQUE (work_order_number) WHERE work_order_number IS NOT NULL`) so many internal Work Orders may hold `NULL` while non-null numbers stay unique (§5); `received_date NOT NULL`; `due_date` nullable (a missing Work Order due date is valid data, §5); `status`; `created_at`, `updated_at`. `completed_at` is the canonical done-date column (PROJECT_PROFILE §8.2 — derived from allocation events, never entered by hand); it is **not** created in this slice and arrives with the Phase 10 allocation migration (§18).
 
 **`work_order_demands`** — PK `id`; FK `work_order_id NOT NULL`; `part_number text NOT NULL` (canonical uppercase PN kept by the demand — same canonical-form CHECK as `part_numbers`, **no FK** to the master); `request_type NOT NULL CHECK (request_type IN ('NEW','MODIFY'))`; `requested_quantity int NOT NULL CHECK (requested_quantity > 0)`; `allocated_quantity int NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0)`; `due_date` nullable (a missing due date is valid data per §5 — never required by validation rule or constraint; undated demand orders after dated demand per the canonical demand ordering key, §5); `priority_rank` nullable; `job_numbers text[] NOT NULL DEFAULT '{}'` (arbitrary external strings preserved verbatim; empty list valid; metadata only — no `Job` aggregate, no FK, and no GIN index in this slice because Slice 1 includes no Job Number search); `requester`, `reason`, `notes` nullable; `created_at`, `updated_at`; index `(work_order_id)`, index `(part_number)`.
 
 **`route_templates`** — PK `id`; `name NOT NULL`; `description` nullable; `archived_at timestamptz` nullable (`NULL` = active; an archived template is never offered for new route assignments). There is **no `version` column and no template-versioning framework** (PROJECT_PROFILE v11 §8.8): existing `assigned_routes` snapshots preserve historical route definitions. A template ever referenced by an `assigned_routes` row is archived instead of deleted; hard `DELETE` is legitimate only for a never-referenced template. `created_at`, `updated_at`.
 
-**`route_steps`** — PK `id`; `route_template_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (route_template_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable.
+**`route_steps`** — PK `id`; `route_template_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (route_template_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable. `preferred_machine_id` is the canonical name of the preferred-Machine reference (PROJECT_PROFILE §8.9; `preferredMachineId` in the GUI mock) — **not** created in this slice: it references `machines` (created by Phase 3.5) and arrives with the migration of the phase that first uses it.
 
-**`assigned_routes`** — PK `id`; `quantity_flow_id NOT NULL UNIQUE` FK (at most one snapshot per flow; a row exists only for `PLANNED` flows); `source_route_template_id` FK nullable (informational); `created_at` (snapshot time).
+**`assigned_routes`** — PK `id`; `source_route_template_id` FK nullable (informational); `created_at` (snapshot time). The snapshot carries **no** `quantity_flow_id` back-reference: the owning flow references it through `quantity_flows.assigned_route_id` (PROJECT_PROFILE §8.7), the single FK between the two tables.
 
 **`assigned_route_steps`** — PK `id`; `assigned_route_id NOT NULL` FK; `sequence NOT NULL`, `UNIQUE (assigned_route_id, sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duration` nullable; `instructions` nullable (snapshot copies of the template step fields, §10).
 
-**`quantity_flows`** — PK `id`; `part_number text NOT NULL` (canonical uppercase PN kept by the flow — same canonical-form CHECK, **no FK** to the master); `quantity int NOT NULL CHECK (quantity > 0)`; `status NOT NULL DEFAULT 'ACTIVE'`; `route_mode NOT NULL DEFAULT 'FLOATING' CHECK (route_mode IN ('FLOATING','PLANNED'))`; `current_area_id NOT NULL` FK (set at INSERT, §13); `UNIQUE (id, part_number)` (composite-FK target); `created_at`, `updated_at`, `closed_at` nullable; index `(part_number) WHERE status = 'ACTIVE'`; index `(current_area_id)`. `parent_flow_id` is not created in this slice (§9, §18).
+**`quantity_flows`** — PK `id`; `part_number text NOT NULL` (canonical uppercase PN kept by the flow — same canonical-form CHECK, **no FK** to the master); `quantity int NOT NULL CHECK (quantity > 0)`; `status NOT NULL DEFAULT 'ACTIVE'`; `route_mode NOT NULL DEFAULT 'FLOATING' CHECK (route_mode IN ('FLOATING','PLANNED'))`; `assigned_route_id` FK nullable → `assigned_routes (id)` with `UNIQUE (assigned_route_id)` (at most one flow per snapshot) and `CHECK ((route_mode = 'PLANNED') = (assigned_route_id IS NOT NULL))` (a `PLANNED` flow always references its snapshot, a `FLOATING` flow never does — PROJECT_PROFILE §8.7); `current_area_id NOT NULL` FK (set at INSERT, §13); `UNIQUE (id, part_number)` (composite-FK target); `created_at`, `updated_at`, `closed_at` nullable; index `(part_number) WHERE status = 'ACTIVE'`; index `(current_area_id)`. `parent_flow_id` is not created in this slice (§9, §18).
 
 **`part_movements`** — PK `id BIGSERIAL` (event order); `quantity_flow_id NOT NULL`, `part_number text NOT NULL` (canonical uppercase PN kept by the Movement — the history identifies its PN without any join to the master) with composite FK `(quantity_flow_id, part_number)` → `quantity_flows (id, part_number)`; `movement_type NOT NULL CHECK (movement_type IN ('RECEIVED'))` (widens additively); `quantity int NOT NULL CHECK (quantity > 0)`; `from_area_id` FK nullable, `to_area_id NOT NULL` FK; shape check `(movement_type = 'RECEIVED' AND from_area_id IS NULL)`; `operation_id NOT NULL` FK; `assigned_route_step_id` FK nullable → `assigned_route_steps (id)` (set for `PLANNED` flows, NULL for `FLOATING` flows, §11); `occurred_at timestamptz NOT NULL`; `server_received_at timestamptz NOT NULL`; `device_event_id NOT NULL`, `UNIQUE (device_event_id)`; `metadata jsonb`; index `(quantity_flow_id, id)`; immutability guard (revoke UPDATE/DELETE + raise trigger).
 
 **`audit_events`** — PK `id BIGSERIAL`; `event_type NOT NULL CHECK (event_type IN ('CREATED','UPDATED'))` (widens additively); `entity_type NOT NULL CHECK (entity_type IN ('WorkOrder','WorkOrderDemand','PartNumber'))` (widens additively); `entity_id NOT NULL` (no FK — polymorphic, §16); `actor_reference` nullable; `occurred_at timestamptz NOT NULL`; `before_data jsonb` nullable; `after_data jsonb` nullable; `metadata jsonb`; index `(entity_type, entity_id, id)`; append-only guard (revoke UPDATE/DELETE + raise trigger), per §16.
 
-Every table above exists in and is used by this slice; the Slice 1 migration contains **no** foreign keys to tables it does not create. `scan_stations` remains documented Phase 5 configuration (§2) and is created by the Phase 5 migration together with `part_movements.station_id`.
+Every table above exists in and is used by this slice; the Slice 1 migration contains **no** foreign keys to tables it does not create. `scan_stations` and `machines` are environment-setup configuration created by the Phase 3.5 migration (§2, §18); `part_movements.station_id` still arrives with Phase 5 and the Machine columns with Phase 6.
 
 Cross-row invariants PostgreSQL cannot express declaratively (projection agrees with latest Movement; first Movement of a flow is `RECEIVED`; every audited change commits with its audit row) are enforced by the transaction protocol (§13, §16) and verified by replay/reconciliation checks (§15).
 
@@ -291,16 +293,17 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 
 | Deferred | Arrives | Additive path |
 |---|---|---|
-| Scan Station transfer, `TRANSFERRED` | Phase 5 | widen movement-type check; migration adds `scan_stations` + `part_movements.station_id` (canonical name documented, §2) |
-| Machine assignment, sessions, `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` | Phase 6 | migration adds `machines` table plus `quantity_flows.current_machine_id` and Movement machine columns (canonical names documented, §9) |
+| Environment setup: `scan_stations` and `machines` tables, `areas.is_terminal` and related configuration fields | Phase 3.5 | additive configuration migrations (minimum environment setup, IMPLEMENTATION_ROADMAP Phase 3.5); Phases 5–7 keep the production workflows that use them |
+| Scan Station transfer, `TRANSFERRED` | Phase 5 | widen movement-type check; migration adds `part_movements.station_id` (canonical name documented, §2); the `scan_stations` table itself is created by Phase 3.5 |
+| Machine assignment, sessions, `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` | Phase 6 | migration adds `quantity_flows.current_machine_id` and the Movement machine columns (canonical names documented, §9); the `machines` table itself is created by Phase 3.5 |
 | Area completion — `AREA_COMPLETED`, derived `READY_TO_TRANSFER` holding state (PROJECT_PROFILE v10 §7 Area Completion) | Phase 6 (Machine Areas) / Phase 7 (direct processing) | widen movement-type check; `AREA_COMPLETED` clears `quantity_flows.current_machine_id` while `current_area_id` stays; a transfer from actively processing quantity appends `AREA_COMPLETED` + `TRANSFERRED` in ONE transaction (one atomic application command — all Movement records or none); the projection replay derives `READY_TO_TRANSFER` from the latest Movement |
 | Direct Area processing (no Machines) | Phase 7 | migration adds `areas.worker_identification_mode` (canonical name documented, §17); no `machine_assignment_mode` exists — behavior follows from the Area's Machines |
 | SPLIT / MERGED, partial movement | Phase 8 | migration adds `quantity_flows.parent_flow_id` (self-reference; canonical name documented, §9); widen type check |
 | Undo / corrections, `REVERSED`, `reverses_movement_id`; Repair (`movement_reason = REPAIR`), `SCRAPPED`, `QUANTITY_ADJUSTED` additions | Phase 9 | append-only model already assumes it; migration adds `reverses_movement_id` and `movement_reason`; widens the movement-type check |
-| Stockroom, `STOCKED`, WorkOrderAllocation | Phase 10 | new tables; migration adds `areas.is_terminal` (canonical name documented, §17); Allocation already separate from Movement by design |
+| Stockroom, `STOCKED`, WorkOrderAllocation | Phase 10 | new tables; migration adds `work_orders.completed_at` (canonical name documented, §17); `areas.is_terminal` is created by Phase 3.5; Allocation already separate from Movement by design |
 | Monitoring read models | Phase 11 | movement-derived queries |
 | Priority / Hot management UI | Phase 12 | `priority_rank` column already present |
-| Administration UI | Phase 13 | master-data tables already present |
+| Administration UI | Phase 3.5 (minimum environment setup) / Phase 13 (full Administration) | master-data tables already present |
 | Authentication and roles | Phase 14 | no schema coupling to Movement; `audit_events.actor_reference` may migrate to a real user reference (§16) |
 | File-based Work Order import | Phase 15 | reuses §5 validation idempotently |
 | Worker identification, ScanSession persistence | Phase 6+ | migration adds `worker_id`, `scan_session_id` (canonical names documented, §11) |
@@ -312,7 +315,7 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 
 1. Saving a Work Order with WorkOrderDemand creates no QuantityFlow, no PartMovement, and no projection change.
 2. Creating a new PN (on first valid use) normalizes the entered value to the canonical PN: `abc-123`, `AbC-123`, `ABC-123`, `" ABC-123 "` all resolve to the single canonical PN `ABC-123` (surrounding whitespace trimmed; constraint-verified — a second master row for the same canonical PN is impossible), and any value with internal whitespace after trimming (`"ABC 123"`, `"ABC\t123"`, `"ABC\n123"`) is rejected with no write. The barcode is derived as `PF:PN:<part-number>` from the canonical PN. The master creation appends a `CREATED` audit event.
-3. A release creates exactly one QuantityFlow (with its route mode), one `RECEIVED` Movement, and — for a `PLANNED` release only — one AssignedRoute snapshot, atomically and with no generic audit event. A `FLOATING` release (the default) creates no AssignedRoute. If any part fails, nothing commits: no committed state can contain a QuantityFlow without its `RECEIVED` Movement, no `PLANNED` flow without its snapshot, no `FLOATING` flow with one, and no partial release state is ever observable.
+3. A release creates exactly one QuantityFlow (with its route mode), one `RECEIVED` Movement, and — for a `PLANNED` release only — one AssignedRoute snapshot, atomically and with no generic audit event. A `FLOATING` release (the default) creates no AssignedRoute. If any part fails, nothing commits: no committed state can contain a QuantityFlow without its `RECEIVED` Movement, no `PLANNED` flow without its snapshot, no `FLOATING` flow with one (constraint-verified via the flow's `assigned_route_id` CHECK, §17), and no partial release state is ever observable.
 4. `current_area_id` is set to the confirmed starting Area by the QuantityFlow INSERT itself; the column is NOT NULL and no post-insert projection update is required for release.
 5. Every `RECEIVED` Movement records a resolved Operation (`operation_id NOT NULL`, constraint-verified). For a `PLANNED` flow it references the AssignedRoute snapshot's first step (`assigned_route_step_id` set to an `assigned_route_steps` row, never a `route_steps` row); for a `FLOATING` flow `assigned_route_step_id` is NULL.
 6. Releasing with an invalid PN, an inactive Area, Operation, or RouteTemplate (when `PLANNED`), or quantity ≤ 0 is rejected with no write.
@@ -325,7 +328,7 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 13. Every WorkOrder and WorkOrderDemand creation or edit appends an `audit_events` row (`CREATED`/`UPDATED` with `before_data`/`after_data`) in the same transaction as the change; edits preserve all prior audit rows unchanged (append-only history, verified by test).
 14. `audit_events` contains rows only for `WorkOrder`, `WorkOrderDemand`, and `PartNumber` — never for production release or any other production activity (constraint- and test-verified).
 15. Conservation holds: Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
-16. No Slice 1 migration contains a foreign key to any table it does not create, nor any unused deferred column: no `machines`, `workers`, `scan_sessions`, `scan_stations`, or user-table references, and no `current_machine_id`, `parent_flow_id`, `station_id`, `worker_id`, `scan_session_id`, `reverses_movement_id`, `movement_reason`, `is_terminal`, or `worker_identification_mode`. (There is no `machine_assignment_mode` at all anymore — Area behavior follows from its Machines, PROJECT_PROFILE §12.)
+16. No Slice 1 migration contains a foreign key to any table it does not create, nor any unused deferred column: no `machines`, `workers`, `scan_sessions`, `scan_stations`, or user-table references, and no `current_machine_id`, `parent_flow_id`, `station_id`, `worker_id`, `scan_session_id`, `reverses_movement_id`, `movement_reason`, `is_terminal`, `worker_identification_mode`, `preferred_machine_id`, or `completed_at`. (There is no `machine_assignment_mode` at all anymore — Area behavior follows from its Machines, PROJECT_PROFILE §12.)
 
 ---
 
@@ -334,5 +337,5 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 Only items already tracked in PROJECT_PROFILE §32 touch this slice, and none blocks it:
 
 - **§32.1** (return from stock to active production) may later widen the movement-type enum — additive. (`SCRAPPED` is already canonical, PROJECT_PROFILE v9 §8.11, and arrives with Phase 9.)
-- **§32.3** (offline scan synchronization) — this slice assumes synchronous online semantics (§14); `device_event_id` was chosen so a future approved offline design would not require renaming.
+- **§32.2** (offline scan synchronization) — this slice assumes synchronous online semantics (§14); `device_event_id` was chosen so a future approved offline design would not require renaming.
 - The former due-date uncertainty is resolved: PROJECT_PROFILE v8 (§8.2, §8.3) fixes both `work_orders.due_date` and `work_order_demands.due_date` as nullable — a missing due date is valid data, never a validation error — with undated demand ordered after dated demand by the canonical demand ordering key (§5). No policy toggle or migration is needed.
