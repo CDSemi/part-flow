@@ -19,6 +19,13 @@ object behind fails the module before any test runs. Every test runs in
 its own rolled-back transaction against isolated data; the development
 database configured in DATABASE_URL is never touched beyond CREATE/DROP
 of the dedicated test databases.
+
+This module is the Phase 3 boundary: it migrates to the Phase 3
+revision `0002_phase3_domain` — never to `head` — so its exact-table-set
+and absent-deferred-column assertions keep guarding what Phase 3 itself
+created even as later migrations (Phase 3.5+) extend the schema.
+Head-level coverage (models↔migration parity, Phase 3.5 invariants)
+lives in test_phase35_schema.py.
 """
 
 import datetime
@@ -39,6 +46,9 @@ from alembic import command
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# The Phase 3 boundary revision this module migrates to (never head).
+_PHASE3_REVISION = "0002_phase3_domain"
 
 _PHASE3_TABLES = {
     "departments",
@@ -92,11 +102,11 @@ def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE3_REVISION)
     # Reversibility gate: the downgrade must remove everything it
     # created (tables, trigger, function) or the second upgrade fails.
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE3_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -314,17 +324,9 @@ class TestMigrationSchema:
         doubled = {name for name in names if name.count("ck_") > 1}
         assert doubled == set()
 
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        # The SQLAlchemy mappings and the hand-written migration must
-        # describe the same schema, or later autogenerate runs and ORM
-        # usage would silently disagree with the database.
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
+    # NOTE: models↔migration metadata parity is asserted at head in
+    # test_phase35_schema.py — the model metadata describes the full
+    # current schema, which this Phase-3-boundary database predates.
 
     def test_downgrade_removes_every_created_object(self, admin_engine: Engine) -> None:
         name = "partflow_test_phase3_downgrade"
@@ -332,7 +334,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE3_REVISION)
             command.downgrade(config, "base")
             engine = create_engine(url)
             try:

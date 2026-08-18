@@ -1,9 +1,14 @@
-"""SQLAlchemy mappings for the Phase 3 minimum canonical data foundation.
+"""SQLAlchemy mappings for the Phase 3 data foundation and the
+Phase 3.5 minimum environment setup.
 
 Infrastructure-only persistence mappings for the canonical domain shape
-defined by PROJECT_PROFILE §8 and SLICE1_DATA_MODEL §17. Business rules
-stay in the Domain/Application layers; this module owns table shape and
-the invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
+defined by PROJECT_PROFILE §8 and SLICE1_DATA_MODEL §17, plus the
+Phase 3.5 environment configuration (IMPLEMENTATION_ROADMAP Phase 3.5):
+completed Area/Operation configuration fields, `scan_stations`,
+`machines`, the append-only `machine_lifecycle_events` history, and the
+Machine Asset Tag format configuration. Business rules stay in the
+Domain/Application layers; this module owns table shape and the
+invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
 Deliberate canonical decisions encoded here:
 
@@ -19,8 +24,10 @@ Deliberate canonical decisions encoded here:
   AssignedRoute snapshot: nullable, unique (at most one flow per
   snapshot), present exactly when `route_mode = 'PLANNED'`. There is no
   reverse `assigned_routes.quantity_flow_id`.
-- `part_movements` append-only enforcement (raise-on-write trigger) is
-  database DDL owned by the Alembic migration, not by this metadata.
+- `part_movements` and `machine_lifecycle_events` append-only
+  enforcement (raise-on-write triggers) and the `machines.asset_tag`
+  immutability trigger are database DDL owned by the Alembic
+  migrations, not by this metadata.
 
 Every constraint and index carries an explicit deterministic name so
 database errors are debuggable and migrations stay reviewable.
@@ -50,7 +57,14 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.elements import conv
 
-from app.domain.enums import MovementType, QuantityFlowStatus, RequestType, RouteMode
+from app.domain.enums import (
+    MachineLifecycleEventType,
+    MachineLifecycleState,
+    MovementType,
+    QuantityFlowStatus,
+    RequestType,
+    RouteMode,
+)
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, and free
 # of any whitespace. Reused verbatim by every table that keeps a PN by
@@ -61,6 +75,28 @@ from app.domain.enums import MovementType, QuantityFlowStatus, RequestType, Rout
 CANONICAL_PART_NUMBER_SQL = (
     "part_number = upper(part_number) AND part_number !~ '[[:space:]]' AND part_number <> ''"
 )
+
+# Area barcode ownership (PROJECT_PROFILE §10): an assigned Area
+# barcode is always `PF:AREA:<stable-id>` with a non-empty,
+# whitespace-free stable-id suffix. NULL (no barcode assigned) passes a
+# CHECK, so the expression needs no explicit NULL branch.
+AREA_BARCODE_SQL = "barcode_value ~ '^PF:AREA:[^[:space:]]+$'"
+
+# Stable Scan Station identity (PROJECT_PROFILE §15): the Station ID is
+# a non-empty, whitespace-free opaque value — it addresses the station
+# route (`/scan-station/<station-id>`) and is recorded on Movements
+# from Phase 5 on.
+SCAN_STATION_ID_SQL = "station_id ~ '^[^[:space:]]+$'"
+
+# Machine Asset Tag shape (PROJECT_PROFILE §8.6/§10): generated from a
+# configured prefix (whitespace and ':' rejected) plus a zero-padded
+# numeric sequence, so a stored tag is always non-empty and free of
+# whitespace and ':' — keeping `PF:MACHINE:<asset-tag>` deterministic.
+MACHINE_ASSET_TAG_SQL = "asset_tag ~ '^[^[:space:]:]+$'"
+
+# Asset Tag format prefix rule (GUI_DESIGN §9 Barcode configuration):
+# whitespace and ':' are rejected; an empty prefix stays valid.
+ASSET_TAG_PREFIX_SQL = "prefix !~ '[[:space:]:]'"
 
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
@@ -110,6 +146,14 @@ class Area(Base):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     barcode_value: Mapped[str | None] = mapped_column(Text)
+    # Display properties (Phase 3.5): they may change freely — Area
+    # identity and barcode stay stable and history is unaffected.
+    description: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str | None] = mapped_column(Text)
+    icon_url: Mapped[str | None] = mapped_column(Text)
+    # Terminal Areas (Stockroom) end the normal flow; the Stockroom
+    # workflow itself arrives with Phase 10.
+    is_terminal: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -118,9 +162,13 @@ class Area(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    # Unique where assigned; PostgreSQL UNIQUE ignores NULLs, so many
-    # rows without a barcode stay valid.
-    __table_args__ = (UniqueConstraint("barcode_value", name="uq_areas_barcode_value"),)
+    __table_args__ = (
+        # Unique where assigned; PostgreSQL UNIQUE ignores NULLs, so
+        # many rows without a barcode stay valid.
+        UniqueConstraint("barcode_value", name="uq_areas_barcode_value"),
+        # PF:AREA namespace ownership (Phase 3.5, PROJECT_PROFILE §10).
+        CheckConstraint(AREA_BARCODE_SQL, name=conv("ck_areas_barcode_value_namespace")),
+    )
 
 
 class Operation(Base):
@@ -136,6 +184,14 @@ class Operation(Base):
     )
     code: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    # Informational planning default (PROJECT_PROFILE §8.5); duration
+    # semantics stay with the routing phases.
+    default_expected_duration: Mapped[datetime.timedelta | None] = mapped_column(Interval)
+    # External processing (plating, painting, testing) performed
+    # outside the shop; no barcode field — an Operation is resolved
+    # from Area configuration (PROJECT_PROFILE §8.5, §10).
+    is_external: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -145,6 +201,229 @@ class Operation(Base):
     )
 
     __table_args__ = (UniqueConstraint("area_id", "code", name="uq_operations_area_id_code"),)
+
+
+class ScanStation(Base):
+    """Stable Scan Station configuration (PROJECT_PROFILE §15).
+
+    Application/infrastructure configuration, not a domain aggregate:
+    the stable Station ID is the natural key (`/scan-station/<id>` and,
+    from Phase 5 on, the Movement audit column `station_id` reference
+    it), bound to exactly one Area. An inactive station accepts no
+    production use; the Station Selector never substitutes another.
+    """
+
+    __tablename__ = "scan_stations"
+
+    station_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    area_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("areas.id", name="fk_scan_stations_area_id_areas"),
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(SCAN_STATION_ID_SQL, name=conv("ck_scan_stations_station_id_canonical")),
+    )
+
+
+class Machine(Base):
+    """Physical production resource inside one Area (PROJECT_PROFILE §8.6).
+
+    The immutable, never-reused Asset Tag is the human-readable
+    identity of the physical asset and fully determines the Machine
+    barcode (`PF:MACHINE:<asset-tag>`, PROJECT_PROFILE §10) — no
+    independent barcode column exists. Immutability is enforced by a
+    raise-on-change trigger owned by the Phase 3.5 migration.
+
+    Lifecycle: active until `retired_on` is set; reactivation of the
+    same physical machine clears it again. Retire/reactivate and their
+    `machine_lifecycle_events` rows commit atomically — a transaction
+    protocol owned by the Application layer, not expressible as a
+    declarative constraint. The operational Running/Idle state is
+    derived (assignment arrives with Phase 6) and never stored; only
+    the explicit maintenance override and `state_changed_at` persist.
+    """
+
+    __tablename__ = "machines"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    area_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("areas.id", name="fk_machines_area_id_areas"),
+        nullable=False,
+    )
+    # Operator-facing display name: reusable across time and
+    # replacements, unique among the ACTIVE Machines of one Area only
+    # (partial unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    asset_tag: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    # Optional asset metadata — production tracking never depends on it.
+    manufacturer: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    serial_number: Mapped[str | None] = mapped_column(Text)
+    installed_on: Mapped[datetime.date | None] = mapped_column(Date)
+    notes: Mapped[str | None] = mapped_column(Text)
+    # Explicit maintenance override: active while maintenance_since is
+    # set; note and expected return exist only inside an override.
+    maintenance_since: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    maintenance_note: Mapped[str | None] = mapped_column(Text)
+    maintenance_expected_return: Mapped[datetime.date | None] = mapped_column(Date)
+    # When the derived operational state last changed; every surface
+    # derives elapsed time in state from it — no duration is stored.
+    state_changed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # NULL = active. Set by retirement, cleared by reactivation of the
+    # same physical machine on the same record.
+    retired_on: Mapped[datetime.date | None] = mapped_column(Date)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Never reused — uniqueness spans retired Machines forever.
+        UniqueConstraint("asset_tag", name="uq_machines_asset_tag"),
+        CheckConstraint(MACHINE_ASSET_TAG_SQL, name=conv("ck_machines_asset_tag_canonical")),
+        # Maintenance note/expected return never exist outside an
+        # active maintenance override.
+        CheckConstraint(
+            "maintenance_since IS NOT NULL"
+            " OR (maintenance_note IS NULL AND maintenance_expected_return IS NULL)",
+            name=conv("ck_machines_maintenance_shape"),
+        ),
+        # Display-name uniqueness constrains only simultaneously active
+        # Machines of the same Area — retired records keep their names.
+        Index(
+            "uq_machines_area_id_name_active",
+            "area_id",
+            "name",
+            unique=True,
+            postgresql_where=text("retired_on IS NULL"),
+        ),
+    )
+
+
+class MachineLifecycleEvent(Base):
+    """Append-only Machine lifecycle history (PROJECT_PROFILE §8.6).
+
+    Dedicated RETIRED/REACTIVATED persistence created with `machines`
+    (IMPLEMENTATION_ROADMAP Phase 3.5) — deliberately NOT the Phase 4
+    `audit_events` mechanism and never a generic audit framework.
+    Events are immutable (raise-on-write trigger owned by the
+    migration) and commit atomically with the lifecycle change they
+    record. `actor` stays a nullable, reference-free value: Machine
+    lifecycle is a Management action, future authenticated actor
+    linkage belongs to Users/authentication (Phase 14), and Workers are
+    never associated with these events.
+    """
+
+    __tablename__ = "machine_lifecycle_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    machine_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("machines.id", name="fk_machine_lifecycle_events_machine_id_machines"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    actor: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    before_state: Mapped[str] = mapped_column(Text, nullable=False)
+    after_state: Mapped[str] = mapped_column(Text, nullable=False)
+    # Set only when the physical machine moved while retired
+    # (reactivation with a forward-only Area change): previous and
+    # current Area — historical Movements keep their recorded Areas.
+    from_area_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("areas.id", name="fk_machine_lifecycle_events_from_area_id_areas"),
+    )
+    to_area_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("areas.id", name="fk_machine_lifecycle_events_to_area_id_areas"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            f"event_type IN ('{MachineLifecycleEventType.RETIRED}',"
+            f" '{MachineLifecycleEventType.REACTIVATED}')",
+            name=conv("ck_machine_lifecycle_events_event_type"),
+        ),
+        # The before/after pair is fully determined by the event type —
+        # this also pins the state vocabulary itself.
+        CheckConstraint(
+            f"(event_type = '{MachineLifecycleEventType.RETIRED}'"
+            f" AND before_state = '{MachineLifecycleState.ACTIVE}'"
+            f" AND after_state = '{MachineLifecycleState.RETIRED}')"
+            f" OR (event_type = '{MachineLifecycleEventType.REACTIVATED}'"
+            f" AND before_state = '{MachineLifecycleState.RETIRED}'"
+            f" AND after_state = '{MachineLifecycleState.ACTIVE}')",
+            name=conv("ck_machine_lifecycle_events_state_shape"),
+        ),
+        # An Area move is recorded as a complete previous→current pair
+        # of distinct Areas, and only a reactivation can carry one.
+        CheckConstraint(
+            "(from_area_id IS NULL) = (to_area_id IS NULL)"
+            f" AND (event_type = '{MachineLifecycleEventType.REACTIVATED}'"
+            " OR from_area_id IS NULL)"
+            " AND (from_area_id IS NULL OR from_area_id <> to_area_id)",
+            name=conv("ck_machine_lifecycle_events_area_move_shape"),
+        ),
+        Index("ix_machine_lifecycle_events_machine_id_id", "machine_id", "id"),
+    )
+
+
+class MachineAssetTagConfig(Base):
+    """Machine Asset Tag format configuration (PROJECT_PROFILE §8.6).
+
+    Administration → Barcode configuration: a prefix plus a zero-padded
+    numeric sequence (`CD-` + 4 digits → `CD-0001`) — deliberately no
+    template engine. Single row (CHECK id = 1); no row is seeded — the
+    format is explicit deployment configuration and Machine creation
+    requires it to exist. `next_sequence` is the persisted monotonic
+    counter: allocating from it (atomic UPDATE … RETURNING) guarantees
+    Asset Tags are never reused even across format changes, and a
+    format change applies to Machines created afterwards only —
+    existing tags are never renamed or regenerated. `digits` is a
+    minimum width: a sequence that outgrows it renders unpadded, never
+    truncated.
+    """
+
+    __tablename__ = "machine_asset_tag_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    digits: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name=conv("ck_machine_asset_tag_config_singleton")),
+        CheckConstraint(ASSET_TAG_PREFIX_SQL, name=conv("ck_machine_asset_tag_config_prefix")),
+        CheckConstraint(
+            "digits BETWEEN 1 AND 8", name=conv("ck_machine_asset_tag_config_digits_range")
+        ),
+        CheckConstraint(
+            "next_sequence >= 1", name=conv("ck_machine_asset_tag_config_next_sequence_positive")
+        ),
+    )
 
 
 class PartNumber(Base):

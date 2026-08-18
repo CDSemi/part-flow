@@ -4,8 +4,9 @@ Internal manufacturing tracking system for barcode-driven movement of
 production quantities through the factory.
 
 This repository currently contains the **Phase 1 Repository Foundation**,
-the **Phase 2 Frontend Design System and Application Shell**, and the
-**Phase 3 Minimum Canonical Domain and Data Foundation**:
+the **Phase 2 Frontend Design System and Application Shell**, the
+**Phase 3 Minimum Canonical Domain and Data Foundation**, and the
+**Phase 3.5 Minimum Environment Setup** persistence foundation:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -14,17 +15,21 @@ the **Phase 2 Frontend Design System and Application Shell**, and the
 - `backend/` — FastAPI with one operational health endpoint
   (`GET /api/health`), the framework-independent domain vocabulary
   (`app/domain/`), and the SQLAlchemy mappings of the canonical Phase 3
-  schema (`app/infrastructure/models.py`)
+  and Phase 3.5 schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
   QuantityFlows, and the append-only `part_movements` event table
-  guarded by a database trigger)
+  guarded by a database trigger) plus the Phase 3.5 environment
+  configuration (completed Area/Operation configuration fields,
+  `scan_stations`, `machines` with immutable auto-assigned Asset Tags,
+  the append-only `machine_lifecycle_events` history, and the singleton
+  Machine Asset Tag format configuration)
 - Docker Compose development stack with health checks
 
 **No business workflows and no business APIs exist yet**: the Phase 3
-schema is migrated, but nothing writes production data. All view content
-is development-only mock data; barcode
+and Phase 3.5 schema is migrated, but nothing writes production data.
+All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
@@ -165,8 +170,9 @@ docker compose up --build -V
 
 ## Database migrations (Alembic)
 
-Apply migrations (the Phase 3 canonical domain schema on top of the
-no-op repository-foundation baseline):
+Apply migrations (the Phase 3 canonical domain schema and the
+Phase 3.5 environment setup on top of the no-op repository-foundation
+baseline):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -273,14 +279,16 @@ The pytest suite contains three kinds of tests:
   `ping_database` (success and safe 503 responses; no database needed).
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
-- `tests/test_database_connectivity.py` and
-  `tests/test_phase3_schema.py` — **integration** tests that require the
-  PostgreSQL service to be reachable via `DATABASE_URL`: the
-  connectivity test calls `GET /api/health` through the real application
-  wiring with no mocking, and the Phase 3 schema tests run the real
-  Alembic migrations (upgrade → downgrade → upgrade) against dedicated
-  temporary databases (`partflow_test_phase3_*`), so the configured
-  database role must be allowed to create databases (the Compose and CI
+- `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
+  and `tests/test_phase35_schema.py` — **integration** tests that
+  require the PostgreSQL service to be reachable via `DATABASE_URL`:
+  the connectivity test calls `GET /api/health` through the real
+  application wiring with no mocking, and the schema tests run the real
+  Alembic migrations (upgrade → downgrade → upgrade; the Phase 3 module
+  stops at its own boundary revision `0002_phase3_domain`, the
+  Phase 3.5 module migrates to head) against dedicated temporary
+  databases (`partflow_test_phase3*`), so the configured database role
+  must be allowed to create databases (the Compose and CI
   `partflow_user` is).
 
 ### Frontend
@@ -309,8 +317,8 @@ for host runs:
 - The pytest integration tests need the Compose `db` service running
   (its port 5432 is published to the host): the connectivity test
   performs a real database check through `GET /api/health`, and the
-  Phase 3 schema tests create and drop temporary
-  `partflow_test_phase3_*` databases with the configured role. If your
+  schema tests create and drop temporary `partflow_test_phase3*`
+  databases with the configured role. If your
   `.env` uses custom credentials, set `DATABASE_URL` to match before
   running pytest on the host.
 
@@ -377,7 +385,7 @@ backend/
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

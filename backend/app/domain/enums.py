@@ -53,3 +53,28 @@ class QuantityFlowStatus(StrEnum):
     """
 
     ACTIVE = "ACTIVE"
+
+
+class MachineLifecycleEventType(StrEnum):
+    """Append-only Machine lifecycle event types (PROJECT_PROFILE §8.6).
+
+    Exactly the two events the canonical lifecycle history records:
+    retirement and return-to-service of the same physical machine.
+    Activation at creation stays implicit — it is never an event.
+    """
+
+    RETIRED = "RETIRED"
+    REACTIVATED = "REACTIVATED"
+
+
+class MachineLifecycleState(StrEnum):
+    """Lifecycle state of a Machine (PROJECT_PROFILE §7/§8.6).
+
+    A Machine is ACTIVE until retired; `machines.retired_on` carries
+    the state, and lifecycle events record the before/after pair. The
+    operational Running/Idle/Maintenance state is derived presentation,
+    never a lifecycle state and never stored.
+    """
+
+    ACTIVE = "ACTIVE"
+    RETIRED = "RETIRED"
