@@ -1,5 +1,5 @@
 # Development image for the PartFlow frontend (Phase 1).
-FROM node:22-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 

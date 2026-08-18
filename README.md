@@ -101,7 +101,7 @@ banner with a Retry action while production-write mock controls disable.
 ## Prerequisites
 
 - Docker with Docker Compose v2 (`docker compose`)
-- For development outside Docker (optional): Node.js 22+, Python 3.12+, [uv](https://docs.astral.sh/uv/)
+- For development outside Docker (optional): Node.js 24+, Python 3.12+, [uv](https://docs.astral.sh/uv/)
 
 ## Environment setup
 
@@ -196,7 +196,7 @@ docker compose exec frontend npm run build         # type check + production bui
 ### Running directly on the host (optional, best effort)
 
 The same commands can be run without the `docker compose exec …` prefix
-from `backend/` (with uv) or `frontend/` (with Node 22), but the host is
+from `backend/` (with uv) or `frontend/` (with Node 24), but the host is
 not the canonical environment: toolchain versions and OS behavior may
 differ from the Linux containers used by Docker and CI. Backend notes
 for host runs:
