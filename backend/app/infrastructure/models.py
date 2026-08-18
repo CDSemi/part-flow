@@ -48,15 +48,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.elements import conv
 
 from app.domain.enums import MovementType, QuantityFlowStatus, RequestType, RouteMode
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, and free
 # of any whitespace. Reused verbatim by every table that keeps a PN by
 # value, so the database rejects non-canonical values even if a caller
-# bypasses domain normalization.
+# bypasses domain normalization. The POSIX class [[:space:]] is used
+# instead of the \s shorthand so the expression contains no backslash
+# and never depends on string-literal escaping semantics.
 CANONICAL_PART_NUMBER_SQL = (
-    r"part_number = upper(part_number) AND part_number !~ '\s' AND part_number <> ''"  # noqa: E501
+    "part_number = upper(part_number) AND part_number !~ '[[:space:]]' AND part_number <> ''"
 )
 
 # Fallback naming convention for anything created without an explicit
@@ -164,7 +167,9 @@ class PartNumber(Base):
     )
 
     __table_args__ = (
-        CheckConstraint(CANONICAL_PART_NUMBER_SQL, name="ck_part_numbers_part_number_canonical"),
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL, name=conv("ck_part_numbers_part_number_canonical")
+        ),
     )
 
 
@@ -236,17 +241,18 @@ class WorkOrderDemand(Base):
 
     __table_args__ = (
         CheckConstraint(
-            CANONICAL_PART_NUMBER_SQL, name="ck_work_order_demands_part_number_canonical"
+            CANONICAL_PART_NUMBER_SQL, name=conv("ck_work_order_demands_part_number_canonical")
         ),
         CheckConstraint(
             f"request_type IN ('{RequestType.NEW}', '{RequestType.MODIFY}')",
-            name="ck_work_order_demands_request_type",
+            name=conv("ck_work_order_demands_request_type"),
         ),
         CheckConstraint(
-            "requested_quantity > 0", name="ck_work_order_demands_requested_quantity_positive"
+            "requested_quantity > 0", name=conv("ck_work_order_demands_requested_quantity_positive")
         ),
         CheckConstraint(
-            "allocated_quantity >= 0", name="ck_work_order_demands_allocated_quantity_non_negative"
+            "allocated_quantity >= 0",
+            name=conv("ck_work_order_demands_allocated_quantity_non_negative"),
         ),
         Index("ix_work_order_demands_work_order_id", "work_order_id"),
         Index("ix_work_order_demands_part_number", "part_number"),
@@ -403,17 +409,19 @@ class QuantityFlow(Base):
     closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        CheckConstraint(CANONICAL_PART_NUMBER_SQL, name="ck_quantity_flows_part_number_canonical"),
-        CheckConstraint("quantity > 0", name="ck_quantity_flows_quantity_positive"),
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL, name=conv("ck_quantity_flows_part_number_canonical")
+        ),
+        CheckConstraint("quantity > 0", name=conv("ck_quantity_flows_quantity_positive")),
         CheckConstraint(
             f"route_mode IN ('{RouteMode.FLOATING}', '{RouteMode.PLANNED}')",
-            name="ck_quantity_flows_route_mode",
+            name=conv("ck_quantity_flows_route_mode"),
         ),
         # A PLANNED flow always references its snapshot; a FLOATING flow
         # never does (PROJECT_PROFILE §8.7).
         CheckConstraint(
             f"(route_mode = '{RouteMode.PLANNED}') = (assigned_route_id IS NOT NULL)",
-            name="ck_quantity_flows_route_mode_assigned_route",
+            name=conv("ck_quantity_flows_route_mode_assigned_route"),
         ),
         # At most one flow per snapshot (one-to-one ownership).
         UniqueConstraint("assigned_route_id", name="uq_quantity_flows_assigned_route_id"),
@@ -491,14 +499,14 @@ class PartMovement(Base):
         ),
         CheckConstraint(
             f"movement_type IN ('{MovementType.RECEIVED}')",
-            name="ck_part_movements_movement_type",
+            name=conv("ck_part_movements_movement_type"),
         ),
-        CheckConstraint("quantity > 0", name="ck_part_movements_quantity_positive"),
+        CheckConstraint("quantity > 0", name=conv("ck_part_movements_quantity_positive")),
         # Movement-shape rule: RECEIVED introduces quantity, so it has
         # no source Area. Widens per movement type in later phases.
         CheckConstraint(
             f"movement_type = '{MovementType.RECEIVED}' AND from_area_id IS NULL",
-            name="ck_part_movements_received_shape",
+            name=conv("ck_part_movements_received_shape"),
         ),
         UniqueConstraint("device_event_id", name="uq_part_movements_device_event_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),

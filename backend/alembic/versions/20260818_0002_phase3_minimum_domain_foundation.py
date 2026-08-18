@@ -39,8 +39,11 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, no
-# whitespace anywhere in the value.
-_CANONICAL_PN = r"part_number = upper(part_number) AND part_number !~ '\s' AND part_number <> ''"
+# whitespace anywhere in the value. POSIX class [[:space:]] instead of
+# the \s shorthand: no backslash, no string-escaping ambiguity.
+_CANONICAL_PN = (
+    "part_number = upper(part_number) AND part_number !~ '[[:space:]]' AND part_number <> ''"
+)
 
 _FORBID_MUTATION_FUNCTION = """
 CREATE FUNCTION partflow_part_movements_forbid_mutation() RETURNS trigger
@@ -128,7 +131,7 @@ def upgrade() -> None:
             "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.PrimaryKeyConstraint("part_number", name="pk_part_numbers"),
-        sa.CheckConstraint(_CANONICAL_PN, name="ck_part_numbers_part_number_canonical"),
+        sa.CheckConstraint(_CANONICAL_PN, name=op.f("ck_part_numbers_part_number_canonical")),
     )
 
     op.create_table(
@@ -189,15 +192,16 @@ def upgrade() -> None:
             ["work_orders.id"],
             name="fk_work_order_demands_work_order_id_work_orders",
         ),
-        sa.CheckConstraint(_CANONICAL_PN, name="ck_work_order_demands_part_number_canonical"),
+        sa.CheckConstraint(_CANONICAL_PN, name=op.f("ck_work_order_demands_part_number_canonical")),
         sa.CheckConstraint(
-            "request_type IN ('NEW', 'MODIFY')", name="ck_work_order_demands_request_type"
+            "request_type IN ('NEW', 'MODIFY')", name=op.f("ck_work_order_demands_request_type")
         ),
         sa.CheckConstraint(
-            "requested_quantity > 0", name="ck_work_order_demands_requested_quantity_positive"
+            "requested_quantity > 0", name=op.f("ck_work_order_demands_requested_quantity_positive")
         ),
         sa.CheckConstraint(
-            "allocated_quantity >= 0", name="ck_work_order_demands_allocated_quantity_non_negative"
+            "allocated_quantity >= 0",
+            name=op.f("ck_work_order_demands_allocated_quantity_non_negative"),
         ),
     )
     op.create_index("ix_work_order_demands_work_order_id", "work_order_demands", ["work_order_id"])
@@ -317,16 +321,16 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["current_area_id"], ["areas.id"], name="fk_quantity_flows_current_area_id_areas"
         ),
-        sa.CheckConstraint(_CANONICAL_PN, name="ck_quantity_flows_part_number_canonical"),
-        sa.CheckConstraint("quantity > 0", name="ck_quantity_flows_quantity_positive"),
+        sa.CheckConstraint(_CANONICAL_PN, name=op.f("ck_quantity_flows_part_number_canonical")),
+        sa.CheckConstraint("quantity > 0", name=op.f("ck_quantity_flows_quantity_positive")),
         sa.CheckConstraint(
-            "route_mode IN ('FLOATING', 'PLANNED')", name="ck_quantity_flows_route_mode"
+            "route_mode IN ('FLOATING', 'PLANNED')", name=op.f("ck_quantity_flows_route_mode")
         ),
         # A PLANNED flow always references its snapshot; a FLOATING flow
         # never does.
         sa.CheckConstraint(
             "(route_mode = 'PLANNED') = (assigned_route_id IS NOT NULL)",
-            name="ck_quantity_flows_route_mode_assigned_route",
+            name=op.f("ck_quantity_flows_route_mode_assigned_route"),
         ),
         # At most one flow per snapshot.
         sa.UniqueConstraint("assigned_route_id", name="uq_quantity_flows_assigned_route_id"),
@@ -382,13 +386,15 @@ def upgrade() -> None:
             ["assigned_route_steps.id"],
             name="fk_part_movements_assigned_route_step_id_assigned_route_steps",
         ),
-        sa.CheckConstraint("movement_type IN ('RECEIVED')", name="ck_part_movements_movement_type"),
-        sa.CheckConstraint("quantity > 0", name="ck_part_movements_quantity_positive"),
+        sa.CheckConstraint(
+            "movement_type IN ('RECEIVED')", name=op.f("ck_part_movements_movement_type")
+        ),
+        sa.CheckConstraint("quantity > 0", name=op.f("ck_part_movements_quantity_positive")),
         # RECEIVED introduces quantity: no source Area. Widens per
         # movement type in later phases.
         sa.CheckConstraint(
             "movement_type = 'RECEIVED' AND from_area_id IS NULL",
-            name="ck_part_movements_received_shape",
+            name=op.f("ck_part_movements_received_shape"),
         ),
         sa.UniqueConstraint("device_event_id", name="uq_part_movements_device_event_id"),
     )

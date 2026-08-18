@@ -1,9 +1,12 @@
 """Canonical domain value enumerations (PROJECT_PROFILE §7/§8).
 
-Framework-independent: these enums define the business vocabulary that
-the Infrastructure layer enforces with PostgreSQL CHECK constraints.
-Each enumeration widens additively in the phase that introduces new
-values — no future value is pre-declared here.
+Framework-independent business vocabulary. Where the canonical Slice 1
+schema defines a CHECK constraint (request_type, route_mode,
+movement_type), the Infrastructure layer enforces these values in
+PostgreSQL; QuantityFlowStatus is not CHECK-constrained — ACTIVE is
+only the creation default. Each enumeration widens additively in the
+phase that introduces new values — no future value is pre-declared
+here.
 """
 
 from enum import StrEnum

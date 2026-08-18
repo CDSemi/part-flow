@@ -293,6 +293,27 @@ class TestMigrationSchema:
         }
         assert "quantity_flow_id" not in columns
 
+    def test_check_constraint_names_are_deterministic_and_not_doubled(
+        self, migrated_engine: Engine
+    ) -> None:
+        # Explicit names are marked as already conventionalized
+        # (conv()/op.f()), so the ck_%(table_name)s_%(constraint_name)s
+        # naming convention must not wrap them a second time.
+        with migrated_engine.connect() as conn:
+            names = {
+                row[0]
+                for row in conn.execute(
+                    sa.text(
+                        "SELECT conname FROM pg_constraint WHERE conname LIKE 'ck!_%' ESCAPE '!'"
+                    )
+                )
+            }
+        assert "ck_part_numbers_part_number_canonical" in names
+        assert "ck_quantity_flows_route_mode_assigned_route" in names
+        assert "ck_part_movements_received_shape" in names
+        doubled = {name for name in names if name.count("ck_") > 1}
+        assert doubled == set()
+
     def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
         # The SQLAlchemy mappings and the hand-written migration must
         # describe the same schema, or later autogenerate runs and ORM
@@ -335,8 +356,10 @@ class TestPartNumberMaster:
         connection.execute(sa.insert(models.PartNumber).values(part_number="ABC-123"))
         _rejected(connection, sa.insert(models.PartNumber).values(part_number="ABC-123"))
 
-    @pytest.mark.parametrize("invalid", ["abc-123", "ABC 123", "ABC\t123", ""])
+    @pytest.mark.parametrize("invalid", ["abc-123", "ABC 123", "ABC\t123", "ABC\n123", ""])
     def test_non_canonical_values_are_rejected(self, connection: Connection, invalid: str) -> None:
+        # Internal space, tab, and newline must each be rejected by the
+        # database CHECK itself, independent of domain normalization.
         _rejected(connection, sa.insert(models.PartNumber).values(part_number=invalid))
 
     def test_production_rows_never_depend_on_the_master(self, connection: Connection) -> None:
