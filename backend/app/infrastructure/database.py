@@ -1,7 +1,8 @@
 """Database engine lifecycle and connectivity checks.
 
-Phase 1 has no domain schema. This module only owns the SQLAlchemy engine
-and the health-check ping used by the operational health endpoint.
+This module owns the SQLAlchemy engine and the health-check ping used by
+the operational health endpoint. The domain schema mappings live in
+app/infrastructure/models.py and are migrated by Alembic.
 """
 
 import logging
