@@ -6,11 +6,17 @@ verifies the environment-setup invariants PostgreSQL must enforce:
 
 - exact Phase 3.5 table boundary (no audit_events, no Workers/Users, no
   Phase 4–6 production columns pre-implemented);
-- Area display/terminal configuration and PF:AREA barcode ownership;
+- Area display/terminal configuration and PF:AREA barcode ownership,
+  including assign-once barcode stability (assignable from NULL, never
+  changed or cleared afterwards);
 - Operation configuration fields;
-- Scan Station stable identity, Area binding, and active flag;
+- Scan Station stable identity, Area binding, and active flag (no
+  database freeze of the binding — rebinding is an Application-layer
+  configuration workflow);
 - Machine Asset Tag uniqueness/canonical shape/immutability, active
-  display-name uniqueness per Area, and the maintenance-override shape;
+  display-name uniqueness per Area, the maintenance-override shape, and
+  the fixed Area of an active Machine (area_id changes only inside the
+  RETIRED → ACTIVE reactivation update);
 - machine_lifecycle_events RETIRED/REACTIVATED shape checks and
   trigger-enforced append-only immutability;
 - the singleton Machine Asset Tag format configuration;
@@ -304,6 +310,8 @@ class TestMigrationSchema:
                         sa.text(
                             "SELECT proname FROM pg_proc WHERE proname IN"
                             " ('partflow_machines_forbid_asset_tag_change',"
+                            "  'partflow_machines_forbid_area_change',"
+                            "  'partflow_areas_forbid_barcode_change',"
                             "  'partflow_machine_lifecycle_events_forbid_mutation')"
                         )
                     ).all()
@@ -372,6 +380,38 @@ class TestAreaConfiguration:
                 department_id=department_id, name=_unique("AREA"), barcode_value=barcode
             ),
         )
+
+    def test_barcode_may_be_assigned_once_from_null(self, connection: Connection) -> None:
+        # NULL → a valid value is the normal configuration step, and an
+        # UPDATE rewriting the identical value is a harmless no-op.
+        area_id = _create_area(connection)
+        barcode = f"PF:AREA:{_unique('dock')}"
+        connection.execute(
+            sa.update(models.Area).where(models.Area.id == area_id).values(barcode_value=barcode)
+        )
+        connection.execute(
+            sa.update(models.Area).where(models.Area.id == area_id).values(barcode_value=barcode)
+        )
+        stored = connection.execute(
+            sa.select(models.Area.barcode_value).where(models.Area.id == area_id)
+        ).scalar_one()
+        assert stored == barcode
+
+    def test_assigned_barcode_is_never_changed(self, connection: Connection) -> None:
+        area_id = _create_area(connection, barcode_value=f"PF:AREA:{_unique('dock')}")
+        with pytest.raises(DBAPIError, match="stable once assigned"), connection.begin_nested():
+            connection.execute(
+                sa.update(models.Area)
+                .where(models.Area.id == area_id)
+                .values(barcode_value=f"PF:AREA:{_unique('other')}")
+            )
+
+    def test_assigned_barcode_is_never_cleared(self, connection: Connection) -> None:
+        area_id = _create_area(connection, barcode_value=f"PF:AREA:{_unique('dock')}")
+        with pytest.raises(DBAPIError, match="stable once assigned"), connection.begin_nested():
+            connection.execute(
+                sa.update(models.Area).where(models.Area.id == area_id).values(barcode_value=None)
+            )
 
 
 class TestOperationConfiguration:
@@ -444,7 +484,7 @@ class TestScanStation:
             sa.insert(models.ScanStation).values(station_id=_unique("ST"), area_id=999_999_999),
         )
 
-    def test_is_active_defaults_to_true(self, connection: Connection) -> None:
+    def test_is_active_defaults_to_true_and_stays_editable(self, connection: Connection) -> None:
         area_id = _create_area(connection)
         station_id = _unique("ST")
         connection.execute(
@@ -456,6 +496,15 @@ class TestScanStation:
             )
         ).scalar_one()
         assert stored is True
+        # Deactivation is a normal configuration change. Rebinding a
+        # station (station_id/area_id) is deliberately NOT frozen by a
+        # database trigger — it is a configuration workflow controlled
+        # at the Application layer.
+        connection.execute(
+            sa.update(models.ScanStation)
+            .where(models.ScanStation.station_id == station_id)
+            .values(is_active=False)
+        )
 
 
 class TestMachine:
@@ -562,6 +611,57 @@ class TestMachine:
             sa.insert(models.Machine).values(
                 area_id=999_999_999, name=_unique("Machine"), asset_tag=_unique("CD")
             ),
+        )
+
+    def test_active_machine_area_is_fixed(self, connection: Connection) -> None:
+        # Moving capacity is a replacement (retire + new record), never
+        # an edit of an active Machine.
+        area_id = _create_area(connection)
+        other_area_id = _create_area(connection)
+        machine_id = _create_machine(connection, area_id)
+        with pytest.raises(DBAPIError, match="reactivation"), connection.begin_nested():
+            connection.execute(
+                sa.update(models.Machine)
+                .where(models.Machine.id == machine_id)
+                .values(area_id=other_area_id)
+            )
+
+    def test_retired_machine_area_stays_fixed_while_retired(self, connection: Connection) -> None:
+        # The Area change is permitted only INSIDE the reactivation
+        # update — a retired record that stays retired never moves.
+        area_id = _create_area(connection)
+        other_area_id = _create_area(connection)
+        machine_id = _create_machine(connection, area_id, retired_on=datetime.date(2026, 2, 14))
+        with pytest.raises(DBAPIError, match="reactivation"), connection.begin_nested():
+            connection.execute(
+                sa.update(models.Machine)
+                .where(models.Machine.id == machine_id)
+                .values(area_id=other_area_id)
+            )
+
+    def test_reactivation_update_may_change_the_area(self, connection: Connection) -> None:
+        # RETIRED → ACTIVE in one UPDATE may carry the forward-looking
+        # Area change of the physical machine that moved while retired.
+        area_id = _create_area(connection)
+        other_area_id = _create_area(connection)
+        moved_id = _create_machine(connection, area_id, retired_on=datetime.date(2026, 2, 14))
+        connection.execute(
+            sa.update(models.Machine)
+            .where(models.Machine.id == moved_id)
+            .values(retired_on=None, area_id=other_area_id)
+        )
+        row = connection.execute(
+            sa.select(models.Machine.area_id, models.Machine.retired_on).where(
+                models.Machine.id == moved_id
+            )
+        ).one()
+        assert (row.area_id, row.retired_on) == (other_area_id, None)
+        # Reactivation in place (no move) stays valid as well.
+        in_place_id = _create_machine(connection, area_id, retired_on=datetime.date(2025, 11, 3))
+        connection.execute(
+            sa.update(models.Machine)
+            .where(models.Machine.id == in_place_id)
+            .values(retired_on=None)
         )
 
 

@@ -167,6 +167,9 @@ class Area(Base):
         # many rows without a barcode stay valid.
         UniqueConstraint("barcode_value", name="uq_areas_barcode_value"),
         # PF:AREA namespace ownership (Phase 3.5, PROJECT_PROFILE §10).
+        # Once assigned, the barcode is stable — it may be assigned
+        # from NULL but never changed or cleared afterwards
+        # (raise-on-change trigger owned by the Phase 3.5 migration).
         CheckConstraint(AREA_BARCODE_SQL, name=conv("ck_areas_barcode_value_namespace")),
     )
 
@@ -211,6 +214,9 @@ class ScanStation(Base):
     from Phase 5 on, the Movement audit column `station_id` reference
     it), bound to exactly one Area. An inactive station accepts no
     production use; the Station Selector never substitutes another.
+    No database trigger freezes the binding: rebinding a Scan Station
+    is a configuration workflow controlled at the Application layer.
+    Scan Stations carry no barcode namespace (PROJECT_PROFILE §10).
     """
 
     __tablename__ = "scan_stations"
@@ -247,7 +253,11 @@ class Machine(Base):
     same physical machine clears it again. Retire/reactivate and their
     `machine_lifecycle_events` rows commit atomically — a transaction
     protocol owned by the Application layer, not expressible as a
-    declarative constraint. The operational Running/Idle state is
+    declarative constraint. The Area of an active Machine is fixed:
+    `area_id` may change only inside the same UPDATE that performs the
+    RETIRED → ACTIVE reactivation (raise-on-change trigger owned by the
+    Phase 3.5 migration) — every other capacity move is a replacement
+    (retire + new record). The operational Running/Idle state is
     derived (assignment arrives with Phase 6) and never stored; only
     the explicit maintenance override and `state_changed_at` persist.
     """

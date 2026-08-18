@@ -11,12 +11,23 @@ numeric sequence) Machine creation requires.
 
 Database-enforced invariants added here:
 
-- Area barcodes own exactly the `PF:AREA:<stable-id>` namespace.
+- Area barcodes own exactly the `PF:AREA:<stable-id>` namespace, and an
+  assigned Area barcode is stable: it may be assigned once (NULL → a
+  valid value) but never changed or cleared afterwards (raise-on-change
+  trigger).
 - Scan Station identity is a stable, whitespace-free natural key bound
-  to one Area.
+  to one Area. No database trigger freezes the binding: rebinding a
+  Scan Station is a configuration workflow controlled at the
+  Application layer, and Scan Stations carry no barcode namespace.
 - Machine Asset Tags are unique forever (retired Machines keep theirs)
   and immutable (raise-on-change trigger); there is no independent
   Machine barcode column — the barcode is always derived.
+- The Area of an active Machine is fixed: `machines.area_id` may change
+  only inside the same UPDATE that performs the RETIRED → ACTIVE
+  reactivation (`OLD.retired_on IS NOT NULL AND NEW.retired_on IS
+  NULL`) — the forward-looking move of the same physical machine while
+  it was retired. The atomic reactivation transition together with its
+  lifecycle event remains an Application-layer transaction protocol.
 - Active Machine display names are unique per Area (partial unique
   index over `retired_on IS NULL` only).
 - Maintenance note/expected return exist only inside an active
@@ -71,6 +82,54 @@ _MACHINE_ASSET_TAG = "asset_tag ~ '^[^[:space:]:]+$'"
 # empty prefix valid.
 _ASSET_TAG_PREFIX = "prefix !~ '[[:space:]:]'"
 
+_FORBID_AREA_BARCODE_CHANGE_FUNCTION = """
+CREATE FUNCTION partflow_areas_forbid_barcode_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'areas.barcode_value is stable once assigned: it is never changed or cleared';
+END;
+$$;
+"""
+
+# Row-level: assigning a barcode to an Area that has none (NULL → a
+# valid value) stays a normal configuration step, and rewriting the
+# same value is a no-op — only changing or clearing an assigned
+# barcode raises.
+_FORBID_AREA_BARCODE_CHANGE_TRIGGER = """
+CREATE TRIGGER trg_areas_forbid_barcode_change
+BEFORE UPDATE OF barcode_value ON areas
+FOR EACH ROW
+WHEN (OLD.barcode_value IS NOT NULL AND NEW.barcode_value IS DISTINCT FROM OLD.barcode_value)
+EXECUTE FUNCTION partflow_areas_forbid_barcode_change();
+"""
+
+_FORBID_MACHINE_AREA_CHANGE_FUNCTION = """
+CREATE FUNCTION partflow_machines_forbid_area_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'machines.area_id is fixed: an Area change is allowed only inside the'
+        ' RETIRED -> ACTIVE reactivation update of the same physical machine';
+END;
+$$;
+"""
+
+# Row-level: moving production capacity is a replacement (retire + new
+# record), never an edit. The single exception is reactivation of the
+# same physical machine that moved while retired — the Area change is
+# permitted only inside the same UPDATE that clears retired_on
+# (PROJECT_PROFILE §8.6). The atomic reactivation + lifecycle-event
+# transaction remains an Application-layer protocol.
+_FORBID_MACHINE_AREA_CHANGE_TRIGGER = """
+CREATE TRIGGER trg_machines_forbid_area_change
+BEFORE UPDATE OF area_id ON machines
+FOR EACH ROW
+WHEN (
+    NEW.area_id IS DISTINCT FROM OLD.area_id
+    AND NOT (OLD.retired_on IS NOT NULL AND NEW.retired_on IS NULL)
+)
+EXECUTE FUNCTION partflow_machines_forbid_area_change();
+"""
+
 _FORBID_ASSET_TAG_CHANGE_FUNCTION = """
 CREATE FUNCTION partflow_machines_forbid_asset_tag_change() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -120,6 +179,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         op.f("ck_areas_barcode_value_namespace"), "areas", sa.text(_AREA_BARCODE)
     )
+    op.execute(_FORBID_AREA_BARCODE_CHANGE_FUNCTION)
+    op.execute(_FORBID_AREA_BARCODE_CHANGE_TRIGGER)
 
     # --- Operations: description, planning default, external flag.
     op.add_column("operations", sa.Column("description", sa.Text(), nullable=True))
@@ -203,6 +264,8 @@ def upgrade() -> None:
     )
     op.execute(_FORBID_ASSET_TAG_CHANGE_FUNCTION)
     op.execute(_FORBID_ASSET_TAG_CHANGE_TRIGGER)
+    op.execute(_FORBID_MACHINE_AREA_CHANGE_FUNCTION)
+    op.execute(_FORBID_MACHINE_AREA_CHANGE_TRIGGER)
 
     # --- Machine lifecycle history: dedicated append-only persistence
     # of RETIRED/REACTIVATED, created together with machines.
@@ -298,6 +361,8 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION partflow_machine_lifecycle_events_forbid_mutation();")
     op.drop_table("machine_lifecycle_events")
 
+    op.execute("DROP TRIGGER trg_machines_forbid_area_change ON machines;")
+    op.execute("DROP FUNCTION partflow_machines_forbid_area_change();")
     op.execute("DROP TRIGGER trg_machines_forbid_asset_tag_change ON machines;")
     op.execute("DROP FUNCTION partflow_machines_forbid_asset_tag_change();")
     op.drop_table("machines")
@@ -308,6 +373,8 @@ def downgrade() -> None:
     op.drop_column("operations", "default_expected_duration")
     op.drop_column("operations", "description")
 
+    op.execute("DROP TRIGGER trg_areas_forbid_barcode_change ON areas;")
+    op.execute("DROP FUNCTION partflow_areas_forbid_barcode_change();")
     op.drop_constraint(op.f("ck_areas_barcode_value_namespace"), "areas")
     op.drop_column("areas", "is_terminal")
     op.drop_column("areas", "icon_url")
