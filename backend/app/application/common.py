@@ -1,0 +1,67 @@
+"""Shared Application-layer helpers.
+
+Input normalization and the commit protocol used by every configuration
+service: uniqueness is pre-checked for friendly messages, but the
+database constraint stays the authority — a race lost at COMMIT maps
+back to the same user-facing ``ConflictError`` through the constraint
+name. These helpers carry no business rules of their own.
+"""
+
+from typing import Final
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.application.errors import ConflictError, InvalidInputError
+
+
+class UnsetType:
+    """Sentinel marking a partial-update field that was not provided."""
+
+    __slots__ = ()
+
+
+UNSET: Final = UnsetType()
+
+
+def required_text(value: object, label: str) -> str:
+    """Normalize a required text field: strip and reject empty/None."""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError(f"{label} must not be empty.")
+    return value.strip()
+
+
+def optional_text(value: str | None) -> str | None:
+    """Normalize an optional text field: strip; empty becomes NULL."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def required_flag(value: object, label: str) -> bool:
+    """Reject an explicit ``null`` sent for a boolean field."""
+    if not isinstance(value, bool):
+        raise InvalidInputError(f"{label} must be true or false.")
+    return value
+
+
+def commit(session: Session, conflict_messages: dict[str, str]) -> None:
+    """Commit, translating known constraint violations into ConflictError.
+
+    Uniqueness is pre-checked for friendly messages, but a concurrent
+    writer can still win the race — the database constraint is the
+    authority, and its deterministic name maps back to the same
+    user-facing message. Unknown integrity failures are re-raised: they
+    indicate a programming error, not an expected outcome.
+    """
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        diagnostics = getattr(exc.orig, "diag", None)
+        constraint = getattr(diagnostics, "constraint_name", None)
+        message = conflict_messages.get(constraint or "")
+        if message is None:
+            raise
+        raise ConflictError(message) from exc

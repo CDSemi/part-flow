@@ -16,7 +16,11 @@ the **Phase 2 Frontend Design System and Application Shell**, the
   (`GET /api/health`), the Phase 3.5 environment configuration API
   (Departments, Areas with derived `PF:AREA` barcodes, Operations,
   Scan Stations, and the Machine Asset Tag format under
-  `/api/barcode-configuration`; Application-layer services in
+  `/api/barcode-configuration`), the Phase 3.5 Machines management API
+  (`/api/machines` — automatic Asset Tag assignment with derived
+  `PF:MACHINE` barcodes, metadata editing, the maintenance override,
+  and retirement/reactivation committing atomically with their
+  append-only lifecycle events; Application-layer services in
   `app/application/`), the framework-independent domain vocabulary
   (`app/domain/`), and the SQLAlchemy mappings of the canonical Phase 3
   and Phase 3.5 schema (`app/infrastructure/models.py`)
@@ -32,8 +36,9 @@ the **Phase 2 Frontend Design System and Application Shell**, the
 - Docker Compose development stack with health checks
 
 **No production workflows exist yet**: the Phase 3 and Phase 3.5
-schema is migrated and the Phase 3.5 environment configuration API
-reads and writes configuration, but nothing writes production data.
+schema is migrated and the Phase 3.5 configuration APIs (environment
+and Machines management) read and write configuration and Machine
+master data, but nothing writes production data.
 All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
@@ -286,15 +291,19 @@ integration):
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
 - `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
-  `tests/test_phase35_schema.py`, and `tests/test_environment_api.py` —
-  **integration** tests that require the PostgreSQL service to be
+  `tests/test_phase35_schema.py`, `tests/test_environment_api.py`, and
+  `tests/test_machines_api.py` — **integration** tests that require the
+  PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
   mocking, the schema tests run the real Alembic migrations
   (upgrade → downgrade → upgrade; the Phase 3 module stops at its own
   boundary revision `0002_phase3_domain`, the Phase 3.5 module migrates
-  to head), and the environment-API tests exercise the Phase 3.5
-  configuration endpoints end-to-end — all against dedicated temporary
+  to head), and the environment-API and Machines-API tests exercise
+  the Phase 3.5 configuration and Machine management endpoints
+  end-to-end (Asset Tag allocation, maintenance, retirement and
+  reactivation with their atomic lifecycle events) — all against
+  dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`
   is).
@@ -388,8 +397,8 @@ frontend/          Vite + React + TypeScript app (Phase 2 shell + mock views)
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components
 backend/
-  app/api/         HTTP routes (health + environment configuration endpoints)
-  app/application/ application services (environment configuration rules and transactions)
+  app/api/         HTTP routes (health, environment configuration, and Machines management endpoints)
+  app/application/ application services (environment configuration and Machine management rules and transactions)
   app/core/        configuration (pydantic-settings)
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings

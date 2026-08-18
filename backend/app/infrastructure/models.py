@@ -99,6 +99,11 @@ MACHINE_ASSET_TAG_SQL = "asset_tag ~ '^[^[:space:]:]+$'"
 # whitespace and ':' are rejected; an empty prefix stays valid.
 ASSET_TAG_PREFIX_SQL = "prefix !~ '[[:space:]:]'"
 
+# Machine barcode namespace (PROJECT_PROFILE §10): the barcode is
+# always the Asset Tag in the PF:MACHINE namespace — derived, never
+# stored and never entered.
+MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
+
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
 NAMING_CONVENTION = {
@@ -302,6 +307,16 @@ class Machine(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    @property
+    def barcode_value(self) -> str:
+        """Derived Machine barcode: the Asset Tag in the PF:MACHINE namespace.
+
+        PROJECT_PROFILE §8.6/§10: ``barcode_value`` is always equal to
+        the Asset Tag — there is no independent barcode identifier and
+        no stored column, so the derivation lives with the mapping.
+        """
+        return f"{MACHINE_BARCODE_PREFIX}{self.asset_tag}"
 
     __table_args__ = (
         # Never reused — uniqueness spans retired Machines forever.

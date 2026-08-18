@@ -50,9 +50,16 @@ import re
 from typing import Final
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application.common import (
+    UNSET,
+    UnsetType,
+    commit,
+    optional_text,
+    required_flag,
+    required_text,
+)
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.domain.enums import QuantityFlowStatus
 from app.infrastructure.models import (
@@ -64,15 +71,6 @@ from app.infrastructure.models import (
     ScanStation,
 )
 
-
-class _UnsetType:
-    """Sentinel marking a partial-update field that was not provided."""
-
-    __slots__ = ()
-
-
-UNSET: Final = _UnsetType()
-
 # PF:AREA namespace (PROJECT_PROFILE §10): the barcode is derived from
 # the stable database id at creation and never entered or edited.
 AREA_BARCODE_PREFIX: Final = "PF:AREA:"
@@ -80,49 +78,6 @@ AREA_BARCODE_PREFIX: Final = "PF:AREA:"
 _MACHINE_ASSET_TAG_CONFIG_ID: Final = 1
 _ASSET_TAG_DIGITS_MIN: Final = 1
 _ASSET_TAG_DIGITS_MAX: Final = 8
-
-
-def _required_text(value: object, label: str) -> str:
-    """Normalize a required text field: strip and reject empty/None."""
-    if not isinstance(value, str) or not value.strip():
-        raise InvalidInputError(f"{label} must not be empty.")
-    return value.strip()
-
-
-def _optional_text(value: str | None) -> str | None:
-    """Normalize an optional text field: strip; empty becomes NULL."""
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _required_flag(value: object, label: str) -> bool:
-    """Reject an explicit ``null`` sent for a boolean field."""
-    if not isinstance(value, bool):
-        raise InvalidInputError(f"{label} must be true or false.")
-    return value
-
-
-def _commit(session: Session, conflict_messages: dict[str, str]) -> None:
-    """Commit, translating known constraint violations into ConflictError.
-
-    Uniqueness is pre-checked for friendly messages, but a concurrent
-    writer can still win the race — the database constraint is the
-    authority, and its deterministic name maps back to the same
-    user-facing message. Unknown integrity failures are re-raised: they
-    indicate a programming error, not an expected outcome.
-    """
-    try:
-        session.commit()
-    except IntegrityError as exc:
-        session.rollback()
-        diagnostics = getattr(exc.orig, "diag", None)
-        constraint = getattr(diagnostics, "constraint_name", None)
-        message = conflict_messages.get(constraint or "")
-        if message is None:
-            raise
-        raise ConflictError(message) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +112,11 @@ _DEPARTMENT_CONFLICTS: Final = {
 
 
 def create_department(session: Session, *, name: object) -> Department:
-    clean_name = _required_text(name, "Department name")
+    clean_name = required_text(name, "Department name")
     _reject_duplicate_department_name(session, clean_name)
     department = Department(name=clean_name)
     session.add(department)
-    _commit(session, _DEPARTMENT_CONFLICTS)
+    commit(session, _DEPARTMENT_CONFLICTS)
     return department
 
 
@@ -175,15 +130,15 @@ def update_department(
     department = _get_department(session, department_id)
     changed = False
 
-    if not isinstance(name, _UnsetType):
-        clean_name = _required_text(name, "Department name")
+    if not isinstance(name, UnsetType):
+        clean_name = required_text(name, "Department name")
         if clean_name != department.name:
             _reject_duplicate_department_name(session, clean_name, exclude_id=department.id)
             department.name = clean_name
             changed = True
 
-    if not isinstance(is_active, _UnsetType):
-        active = _required_flag(is_active, "Department active status")
+    if not isinstance(is_active, UnsetType):
+        active = required_flag(is_active, "Department active status")
         if active != department.is_active:
             if not active:
                 has_active_area = session.scalar(
@@ -201,7 +156,7 @@ def update_department(
 
     if changed:
         department.updated_at = func.now()
-        _commit(session, _DEPARTMENT_CONFLICTS)
+        commit(session, _DEPARTMENT_CONFLICTS)
     return department
 
 
@@ -221,7 +176,7 @@ def _get_area(session: Session, area_id: int) -> Area:
     return area
 
 
-def _require_active_area(session: Session, area_id: int, purpose: str) -> Area:
+def require_active_area(session: Session, area_id: int, purpose: str) -> Area:
     area = session.get(Area, area_id)
     if area is None:
         raise InvalidInputError(f"Area {area_id} does not exist.")
@@ -245,7 +200,7 @@ def create_area(
     icon_url: str | None = None,
     is_terminal: bool = False,
 ) -> Area:
-    clean_name = _required_text(name, "Area name")
+    clean_name = required_text(name, "Area name")
     department = session.get(Department, department_id)
     if department is None:
         raise InvalidInputError(f"Department {department_id} does not exist.")
@@ -257,9 +212,9 @@ def create_area(
     area = Area(
         department_id=department.id,
         name=clean_name,
-        description=_optional_text(description),
-        color=_optional_text(color),
-        icon_url=_optional_text(icon_url),
+        description=optional_text(description),
+        color=optional_text(color),
+        icon_url=optional_text(icon_url),
         is_terminal=is_terminal,
     )
     session.add(area)
@@ -268,7 +223,7 @@ def create_area(
     # trigger permits exactly this NULL → value transition.
     session.flush()
     area.barcode_value = f"{AREA_BARCODE_PREFIX}{area.id}"
-    _commit(session, _AREA_CONFLICTS)
+    commit(session, _AREA_CONFLICTS)
     return area
 
 
@@ -277,43 +232,43 @@ def update_area(
     area_id: int,
     *,
     name: object = UNSET,
-    description: str | None | _UnsetType = UNSET,
-    color: str | None | _UnsetType = UNSET,
-    icon_url: str | None | _UnsetType = UNSET,
+    description: str | None | UnsetType = UNSET,
+    color: str | None | UnsetType = UNSET,
+    icon_url: str | None | UnsetType = UNSET,
     is_terminal: object = UNSET,
     is_active: object = UNSET,
 ) -> Area:
     area = _get_area(session, area_id)
     changed = False
 
-    if not isinstance(name, _UnsetType):
-        clean_name = _required_text(name, "Area name")
+    if not isinstance(name, UnsetType):
+        clean_name = required_text(name, "Area name")
         if clean_name != area.name:
             area.name = clean_name
             changed = True
-    if not isinstance(description, _UnsetType):
-        value = _optional_text(description)
+    if not isinstance(description, UnsetType):
+        value = optional_text(description)
         if value != area.description:
             area.description = value
             changed = True
-    if not isinstance(color, _UnsetType):
-        value = _optional_text(color)
+    if not isinstance(color, UnsetType):
+        value = optional_text(color)
         if value != area.color:
             area.color = value
             changed = True
-    if not isinstance(icon_url, _UnsetType):
-        value = _optional_text(icon_url)
+    if not isinstance(icon_url, UnsetType):
+        value = optional_text(icon_url)
         if value != area.icon_url:
             area.icon_url = value
             changed = True
-    if not isinstance(is_terminal, _UnsetType):
-        terminal = _required_flag(is_terminal, "Area terminal flag")
+    if not isinstance(is_terminal, UnsetType):
+        terminal = required_flag(is_terminal, "Area terminal flag")
         if terminal != area.is_terminal:
             area.is_terminal = terminal
             changed = True
 
-    if not isinstance(is_active, _UnsetType):
-        active = _required_flag(is_active, "Area active status")
+    if not isinstance(is_active, UnsetType):
+        active = required_flag(is_active, "Area active status")
         if active != area.is_active:
             if active:
                 department = _get_department(session, area.department_id)
@@ -342,7 +297,7 @@ def update_area(
 
     if changed:
         area.updated_at = func.now()
-        _commit(session, _AREA_CONFLICTS)
+        commit(session, _AREA_CONFLICTS)
     return area
 
 
@@ -395,19 +350,19 @@ def create_operation(
     default_expected_duration: datetime.timedelta | None = None,
     is_external: bool = False,
 ) -> Operation:
-    clean_code = _required_text(code, "Operation code")
-    area = _require_active_area(session, area_id, "receive new Operations")
+    clean_code = required_text(code, "Operation code")
+    area = require_active_area(session, area_id, "receive new Operations")
     _reject_duplicate_operation_code(session, area.id, clean_code)
     operation = Operation(
         area_id=area.id,
         code=clean_code,
-        name=_optional_text(name),
-        description=_optional_text(description),
+        name=optional_text(name),
+        description=optional_text(description),
         default_expected_duration=_require_positive_duration(default_expected_duration),
         is_external=is_external,
     )
     session.add(operation)
-    _commit(session, _OPERATION_CONFLICTS)
+    commit(session, _OPERATION_CONFLICTS)
     return operation
 
 
@@ -416,9 +371,9 @@ def update_operation(
     operation_id: int,
     *,
     code: object = UNSET,
-    name: str | None | _UnsetType = UNSET,
-    description: str | None | _UnsetType = UNSET,
-    default_expected_duration: datetime.timedelta | None | _UnsetType = UNSET,
+    name: str | None | UnsetType = UNSET,
+    description: str | None | UnsetType = UNSET,
+    default_expected_duration: datetime.timedelta | None | UnsetType = UNSET,
     is_external: object = UNSET,
     is_active: object = UNSET,
 ) -> Operation:
@@ -428,43 +383,43 @@ def update_operation(
     operation = _get_operation(session, operation_id)
     changed = False
 
-    if not isinstance(code, _UnsetType):
-        clean_code = _required_text(code, "Operation code")
+    if not isinstance(code, UnsetType):
+        clean_code = required_text(code, "Operation code")
         if clean_code != operation.code:
             _reject_duplicate_operation_code(
                 session, operation.area_id, clean_code, exclude_id=operation.id
             )
             operation.code = clean_code
             changed = True
-    if not isinstance(name, _UnsetType):
-        value = _optional_text(name)
+    if not isinstance(name, UnsetType):
+        value = optional_text(name)
         if value != operation.name:
             operation.name = value
             changed = True
-    if not isinstance(description, _UnsetType):
-        value = _optional_text(description)
+    if not isinstance(description, UnsetType):
+        value = optional_text(description)
         if value != operation.description:
             operation.description = value
             changed = True
-    if not isinstance(default_expected_duration, _UnsetType):
+    if not isinstance(default_expected_duration, UnsetType):
         duration = _require_positive_duration(default_expected_duration)
         if duration != operation.default_expected_duration:
             operation.default_expected_duration = duration
             changed = True
-    if not isinstance(is_external, _UnsetType):
-        external = _required_flag(is_external, "Operation external flag")
+    if not isinstance(is_external, UnsetType):
+        external = required_flag(is_external, "Operation external flag")
         if external != operation.is_external:
             operation.is_external = external
             changed = True
-    if not isinstance(is_active, _UnsetType):
-        active = _required_flag(is_active, "Operation active status")
+    if not isinstance(is_active, UnsetType):
+        active = required_flag(is_active, "Operation active status")
         if active != operation.is_active:
             operation.is_active = active
             changed = True
 
     if changed:
         operation.updated_at = func.now()
-        _commit(session, _OPERATION_CONFLICTS)
+        commit(session, _OPERATION_CONFLICTS)
     return operation
 
 
@@ -490,7 +445,7 @@ _STATION_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+\Z")
 
 
 def _canonical_station_id(value: object) -> str:
-    station_id = _required_text(value, "Station ID")
+    station_id = required_text(value, "Station ID")
     if not _STATION_ID_PATTERN.fullmatch(station_id):
         raise InvalidInputError("Station ID may only contain letters, digits, '.', '_' and '-'.")
     return station_id
@@ -511,10 +466,10 @@ def create_scan_station(
     clean_station_id = _canonical_station_id(station_id)
     if session.get(ScanStation, clean_station_id) is not None:
         raise ConflictError(f"A Scan Station with Station ID '{clean_station_id}' already exists.")
-    area = _require_active_area(session, area_id, "receive new Scan Stations")
+    area = require_active_area(session, area_id, "receive new Scan Stations")
     station = ScanStation(station_id=clean_station_id, area_id=area.id, is_active=is_active)
     session.add(station)
-    _commit(session, _SCAN_STATION_CONFLICTS)
+    commit(session, _SCAN_STATION_CONFLICTS)
     return station
 
 
@@ -531,22 +486,22 @@ def update_scan_station(
     station = get_scan_station(session, station_id)
     changed = False
 
-    if not isinstance(area_id, _UnsetType):
+    if not isinstance(area_id, UnsetType):
         if not isinstance(area_id, int) or isinstance(area_id, bool):
             raise InvalidInputError("Area reference must be an Area id.")
         if area_id != station.area_id:
-            area = _require_active_area(session, area_id, "receive Scan Stations")
+            area = require_active_area(session, area_id, "receive Scan Stations")
             station.area_id = area.id
             changed = True
-    if not isinstance(is_active, _UnsetType):
-        active = _required_flag(is_active, "Scan Station active status")
+    if not isinstance(is_active, UnsetType):
+        active = required_flag(is_active, "Scan Station active status")
         if active != station.is_active:
             station.is_active = active
             changed = True
 
     if changed:
         station.updated_at = func.now()
-        _commit(session, _SCAN_STATION_CONFLICTS)
+        commit(session, _SCAN_STATION_CONFLICTS)
     return station
 
 
@@ -585,7 +540,7 @@ def upsert_machine_asset_tag_format(
             id=_MACHINE_ASSET_TAG_CONFIG_ID, prefix=prefix, digits=digits
         )
         session.add(config)
-        _commit(session, {})
+        commit(session, {})
     elif prefix != config.prefix or digits != config.digits:
         # A format change applies to Machines created afterwards only —
         # existing Asset Tags are never renamed or regenerated, and the
@@ -593,5 +548,5 @@ def upsert_machine_asset_tag_format(
         config.prefix = prefix
         config.digits = digits
         config.updated_at = func.now()
-        _commit(session, {})
+        commit(session, {})
     return config
