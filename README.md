@@ -12,8 +12,12 @@ the **Phase 2 Frontend Design System and Application Shell**, the
   Dark/Light themes (Dark default), application shell with routing, the
   ten approved GUI views with development-only mock data, and the real
   `/api/health` connectivity integration
-- `backend/` — FastAPI with one operational health endpoint
-  (`GET /api/health`), the framework-independent domain vocabulary
+- `backend/` — FastAPI with the operational health endpoint
+  (`GET /api/health`), the Phase 3.5 environment configuration API
+  (Departments, Areas with derived `PF:AREA` barcodes, Operations,
+  Scan Stations, and the Machine Asset Tag format under
+  `/api/barcode-configuration`; Application-layer services in
+  `app/application/`), the framework-independent domain vocabulary
   (`app/domain/`), and the SQLAlchemy mappings of the canonical Phase 3
   and Phase 3.5 schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
@@ -27,8 +31,9 @@ the **Phase 2 Frontend Design System and Application Shell**, the
   Machine Asset Tag format configuration)
 - Docker Compose development stack with health checks
 
-**No business workflows and no business APIs exist yet**: the Phase 3
-and Phase 3.5 schema is migrated, but nothing writes production data.
+**No production workflows exist yet**: the Phase 3 and Phase 3.5
+schema is migrated and the Phase 3.5 environment configuration API
+reads and writes configuration, but nothing writes production data.
 All view content is development-only mock data; barcode
 resolution, Work Order intake, and all tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
@@ -273,23 +278,26 @@ docker compose exec backend uv run pytest                  # tests (see below)
 docker compose exec backend uv run alembic upgrade head    # migrations
 ```
 
-The pytest suite contains three kinds of tests:
+The pytest suite contains three kinds of tests (behavior, unit, and
+integration):
 
 - `tests/test_health.py` — health-endpoint **behavior** tests that mock
   `ping_database` (success and safe 503 responses; no database needed).
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
 - `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
-  and `tests/test_phase35_schema.py` — **integration** tests that
-  require the PostgreSQL service to be reachable via `DATABASE_URL`:
-  the connectivity test calls `GET /api/health` through the real
-  application wiring with no mocking, and the schema tests run the real
-  Alembic migrations (upgrade → downgrade → upgrade; the Phase 3 module
-  stops at its own boundary revision `0002_phase3_domain`, the
-  Phase 3.5 module migrates to head) against dedicated temporary
-  databases (`partflow_test_phase3*`), so the configured database role
-  must be allowed to create databases (the Compose and CI
-  `partflow_user` is).
+  `tests/test_phase35_schema.py`, and `tests/test_environment_api.py` —
+  **integration** tests that require the PostgreSQL service to be
+  reachable via `DATABASE_URL`: the connectivity test calls
+  `GET /api/health` through the real application wiring with no
+  mocking, the schema tests run the real Alembic migrations
+  (upgrade → downgrade → upgrade; the Phase 3 module stops at its own
+  boundary revision `0002_phase3_domain`, the Phase 3.5 module migrates
+  to head), and the environment-API tests exercise the Phase 3.5
+  configuration endpoints end-to-end — all against dedicated temporary
+  databases (`partflow_test_*`), so the configured database role must
+  be allowed to create databases (the Compose and CI `partflow_user`
+  is).
 
 ### Frontend
 
@@ -380,7 +388,8 @@ frontend/          Vite + React + TypeScript app (Phase 2 shell + mock views)
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components
 backend/
-  app/api/         HTTP routes (health endpoint)
+  app/api/         HTTP routes (health + environment configuration endpoints)
+  app/application/ application services (environment configuration rules and transactions)
   app/core/        configuration (pydantic-settings)
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings

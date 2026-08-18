@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.environment import router as environment_router
+from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
@@ -28,6 +30,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(title="PartFlow API", lifespan=lifespan)
     app.include_router(health_router)
+    app.include_router(environment_router)
+    register_exception_handlers(app)
     return app
 
 
