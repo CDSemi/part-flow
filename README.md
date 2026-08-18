@@ -172,6 +172,86 @@ no-op repository-foundation baseline):
 docker compose exec backend uv run alembic upgrade head
 ```
 
+### Creating, resetting, and inspecting the development database
+
+The `postgres` image applies `POSTGRES_USER` / `POSTGRES_PASSWORD` /
+`POSTGRES_DB` from `.env` **only once — when the data volume is first
+initialized**. Changing `.env` later does not change the roles inside an
+existing volume, so a mismatched `psql -U …` or IDE data source fails
+with `FATAL: role "…" does not exist`. Always connect with the user your
+`.env` actually declares, and reset the volume when credentials changed:
+
+```bash
+# connect with the user from YOUR .env (defaults are in .env.example)
+docker compose exec db psql -U <POSTGRES_USER> -d partflow
+
+# create/update the development schema
+docker compose up -d db backend
+docker compose exec backend uv run alembic upgrade head
+
+# verify the schema
+docker compose exec db psql -U <POSTGRES_USER> -d partflow -c "\dt"
+docker compose exec db psql -U <POSTGRES_USER> -d partflow -c "\d part_movements"
+
+# full reset — DESTRUCTIVE: deletes the postgres_data volume and all
+# development data (everything is recreated by `alembic upgrade head`)
+docker compose down -v
+docker compose up -d db backend
+docker compose exec backend uv run alembic upgrade head
+```
+
+Two more caveats:
+
+- Re-applying a migration that was edited **before it was ever
+  committed/shared** requires `alembic downgrade base` +
+  `alembic upgrade head` (or the full reset above). Run that only
+  against the disposable development database. A migration that has
+  been committed or shared is never edited in place — write a new
+  revision instead.
+- A `$` inside `POSTGRES_PASSWORD` can collide with Docker Compose
+  variable interpolation in `.env`; escape it as `$$` if Compose warns
+  about an unset variable.
+
+## IntelliJ IDEA / PyCharm setup (database tools and SQL inspections)
+
+Optional, but recommended when working in a JetBrains IDE (verified
+with IntelliJ IDEA 2026.2.1). Without these settings the IDE reports
+misleading SQL "errors" in the Alembic migrations and database tests
+and may block commits on them.
+
+1. **Data source.** Database tool window → `+` → Data Source →
+   PostgreSQL: host `localhost`, port `5432`, database `partflow`, user
+   and password **from your `.env`** (see the credential caveat above).
+   In the schema selection, introspect `public` **and `pg_catalog`** —
+   the schema tests query `pg_proc` to verify the append-only trigger
+   function, and `pg_catalog` is not introspected by default.
+2. **SQL dialect.** Settings → Languages & Frameworks → SQL Dialects →
+   set the Project SQL Dialect to **PostgreSQL**, so SQL embedded in
+   Python strings is parsed with the right syntax.
+3. **SQL resolution scope.** Settings → Languages & Frameworks → SQL
+   Resolution Scopes → map the project (or the `backend` directory) to
+   your data source's `partflow.public` schema, so table/function names
+   in embedded SQL resolve against the real development database.
+4. **Refresh after migrating.** The IDE resolves names against its last
+   introspection snapshot — refresh the data source (Ctrl+F5) after
+   every `alembic upgrade`/reset, or new tables stay "unresolved".
+
+Expected residual warnings that are safe to ignore:
+
+- In the migration's `CREATE TRIGGER` string, the IDE may still report
+  the trigger function or `part_movements` as unresolved: each embedded
+  SQL fragment is analyzed independently, and those objects are created
+  by this very migration (partly via Python `op.create_table`, which
+  the SQL resolver cannot see).
+- pytest test classes legitimately have no `__init__`; the "Class has
+  no `__init__` method" inspection is noise for this codebase.
+
+These are IDE code-analysis findings, not project quality gates — the
+canonical gates are the Docker commands under "Quality commands". If
+the commit dialog's "Analyze code" check blocks a commit on them, use
+"Commit Anyway" or disable that check (Settings → Version Control →
+Commit).
+
 ## Quality commands
 
 The Linux containers are the canonical environment for all quality
