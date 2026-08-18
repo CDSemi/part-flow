@@ -82,11 +82,12 @@ CANONICAL_PART_NUMBER_SQL = (
 # CHECK, so the expression needs no explicit NULL branch.
 AREA_BARCODE_SQL = "barcode_value ~ '^PF:AREA:[^[:space:]]+$'"
 
-# Stable Scan Station identity (PROJECT_PROFILE §15): the Station ID is
-# a non-empty, whitespace-free opaque value — it addresses the station
-# route (`/scan-station/<station-id>`) and is recorded on Movements
-# from Phase 5 on.
-SCAN_STATION_ID_SQL = "station_id ~ '^[^[:space:]]+$'"
+# Stable Scan Station identity (PROJECT_PROFILE §15): the Station ID
+# addresses the station route (`/scan-station/<station-id>`) and the
+# configuration API as one URL path segment and is recorded on
+# Movements from Phase 5 on — so it is a simple URL-safe identifier:
+# ASCII letters, digits, '.', '_' and '-' only.
+SCAN_STATION_ID_SQL = "station_id ~ '^[A-Za-z0-9._-]+$'"
 
 # Machine Asset Tag shape (PROJECT_PROFILE §8.6/§10): generated from a
 # configured prefix (whitespace and ':' rejected) plus a zero-padded

@@ -10,7 +10,9 @@ verifies the environment-setup invariants PostgreSQL must enforce:
   including assign-once barcode stability (assignable from NULL, never
   changed or cleared afterwards);
 - Operation configuration fields;
-- Scan Station stable identity, Area binding, and active flag (no
+- Scan Station stable URL-safe identity (one URL path segment:
+  ASCII letters, digits, '.', '_' and '-' only), Area binding, and
+  active flag (no
   database freeze of the binding — rebinding is an Application-layer
   configuration workflow);
 - Machine Asset Tag uniqueness/canonical shape/immutability, active
@@ -464,7 +466,25 @@ class TestScanStation:
             sa.insert(models.ScanStation).values(station_id=station_id, area_id=area_id),
         )
 
-    @pytest.mark.parametrize("invalid", ["", "HAS SPACE", "TAB\tID", "LINE\nID"])
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            "",
+            "HAS SPACE",
+            "TAB\tID",
+            "LINE\nID",
+            # URL-unsafe: the Station ID travels verbatim as one URL
+            # path segment (/scan-station/<station-id>).
+            "ST/1",
+            "ST?1",
+            "ST#1",
+            "ST:1",
+            "ST%1",
+            "ST&1",
+            "ST+1",
+            "STÄ-1",
+        ],
+    )
     def test_non_canonical_station_ids_are_rejected(
         self, connection: Connection, invalid: str
     ) -> None:
@@ -473,6 +493,15 @@ class TestScanStation:
             connection,
             sa.insert(models.ScanStation).values(station_id=invalid, area_id=area_id),
         )
+
+    def test_url_safe_station_ids_are_accepted(self, connection: Connection) -> None:
+        # Exactly the simple URL-safe identifier charset is storable:
+        # ASCII letters, digits, '.', '_' and '-'.
+        area_id = _create_area(connection)
+        for station_id in ("LATHE-ST-01", "st_0.9-A"):
+            connection.execute(
+                sa.insert(models.ScanStation).values(station_id=station_id, area_id=area_id)
+            )
 
     def test_station_requires_a_real_area_binding(self, connection: Connection) -> None:
         _rejected(

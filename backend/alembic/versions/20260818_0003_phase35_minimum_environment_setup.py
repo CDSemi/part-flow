@@ -15,9 +15,12 @@ Database-enforced invariants added here:
   assigned Area barcode is stable: it may be assigned once (NULL → a
   valid value) but never changed or cleared afterwards (raise-on-change
   trigger).
-- Scan Station identity is a stable, whitespace-free natural key bound
-  to one Area. No database trigger freezes the binding: rebinding a
-  Scan Station is a configuration workflow controlled at the
+- Scan Station identity is a stable, URL-safe natural key bound to
+  one Area: the Station ID travels as one URL path segment
+  (`/scan-station/<station-id>` and the configuration API), so it
+  allows ASCII letters, digits, `.`, `_` and `-` only. No database
+  trigger freezes the binding: rebinding a Scan Station is a
+  configuration workflow controlled at the
   Application layer, and Scan Stations carry no barcode namespace.
 - Machine Asset Tags are unique forever (retired Machines keep theirs)
   and immutable (raise-on-change trigger); there is no independent
@@ -70,8 +73,10 @@ depends_on: str | Sequence[str] | None = None
 # NULL (no barcode) passes the CHECK.
 _AREA_BARCODE = "barcode_value ~ '^PF:AREA:[^[:space:]]+$'"
 
-# Stable, whitespace-free Station ID (PROJECT_PROFILE §15).
-_SCAN_STATION_ID = "station_id ~ '^[^[:space:]]+$'"
+# Stable, URL-safe Station ID (PROJECT_PROFILE §15): used verbatim as
+# one URL path segment, so only ASCII letters, digits, '.', '_' and
+# '-' are allowed.
+_SCAN_STATION_ID = "station_id ~ '^[A-Za-z0-9._-]+$'"
 
 # Generated Asset Tags are non-empty and free of whitespace and ':'
 # (prefix rules + numeric sequence), keeping PF:MACHINE:<asset-tag>

@@ -7,7 +7,7 @@ scope (Departments, Areas, Operations, Scan Stations, Machine Asset
 Tag format):
 
 - shape validation (unknown/server-owned request fields rejected) and
-  value validation (blank names, whitespace Station IDs, invalid
+  value validation (blank names, non-URL-safe Station IDs, invalid
   durations, invalid Asset Tag prefix/digits);
 - uniqueness (Department name, Operation code per Area, Station ID)
   reported as conflicts;
@@ -442,7 +442,7 @@ def test_scan_station_create_and_resolve_by_station_id(client: TestClient) -> No
     assert unknown.status_code == 404
 
 
-def test_scan_station_id_is_trimmed_and_whitespace_free(client: TestClient) -> None:
+def test_scan_station_id_canonical_url_safe_form(client: TestClient) -> None:
     area = _create_area(client)
 
     trimmed = client.post(
@@ -451,11 +451,30 @@ def test_scan_station_id_is_trimmed_and_whitespace_free(client: TestClient) -> N
     assert trimmed.status_code == 201
     assert trimmed.json()["station_id"] == "ST-TRIM-1"
 
-    for bad_station_id in ("ST 1", "   "):
+    # The full URL-safe identifier charset is accepted — including
+    # the intended floor naming style.
+    for good_station_id in ("LATHE-ST-01", "st_0.9-A"):
+        response = client.post(
+            "/api/scan-stations", json={"station_id": good_station_id, "area_id": area["id"]}
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["station_id"] == good_station_id
+
+    # Anything outside [A-Za-z0-9._-] is rejected and never
+    # persisted: the Station ID is one URL path segment.
+    for bad_station_id in ("ST 1", "   ", "ST/1", "ST?1", "ST#1", "ST:1", "ST%1", "STÄ-1"):
         response = client.post(
             "/api/scan-stations", json={"station_id": bad_station_id, "area_id": area["id"]}
         )
-        assert response.status_code == 422
+        assert response.status_code == 422, bad_station_id
+        assert (
+            "letters, digits" in response.json()["detail"]
+            or "must not be empty" in (response.json()["detail"])
+        )
+
+    listed = client.get("/api/scan-stations")
+    station_ids = [row["station_id"] for row in listed.json()]
+    assert "ST/1" not in station_ids and "ST 1" not in station_ids
 
 
 def test_scan_station_duplicate_station_id_conflict(client: TestClient) -> None:

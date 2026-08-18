@@ -14,7 +14,12 @@ IMPLEMENTATION_ROADMAP Phase 3.5, GUI_DESIGN §9):
   id) and afterwards protected by the assign-once trigger. No other
   environment entity owns a barcode: Departments have none, Operations
   have no barcode field, and Scan Stations are identified by their
-  stable Station ID — no ``PF:STATION`` namespace exists.
+  stable Station ID — no ``PF:STATION`` namespace exists. The
+  Station ID travels verbatim as one URL path segment
+  (``/scan-station/<station-id>`` and
+  ``/api/scan-stations/{station_id}``), so its canonical form is a
+  simple URL-safe identifier: ASCII letters, digits, ``.``, ``_``
+  and ``-`` only.
 - Deactivating an Area that still holds active quantity is blocked
   with an explanation (GUI_DESIGN §9); deactivation is the lifecycle
   end state — no configuration service hard-deletes anything.
@@ -479,10 +484,15 @@ def get_scan_station(session: Session, station_id: str) -> ScanStation:
     return station
 
 
+# Station ID canonical form: one URL-safe path segment (matches the
+# ck_scan_stations_station_id_canonical CHECK in migration 0003).
+_STATION_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+\Z")
+
+
 def _canonical_station_id(value: object) -> str:
     station_id = _required_text(value, "Station ID")
-    if re.search(r"\s", station_id):
-        raise InvalidInputError("Station ID must not contain whitespace.")
+    if not _STATION_ID_PATTERN.fullmatch(station_id):
+        raise InvalidInputError("Station ID may only contain letters, digits, '.', '_' and '-'.")
     return station_id
 
 
