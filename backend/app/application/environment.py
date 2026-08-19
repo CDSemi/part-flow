@@ -241,6 +241,19 @@ def update_area(
     area = _get_area(session, area_id)
     changed = False
 
+    # An explicit deactivation locks the Area row FIRST — before any
+    # field mutation. Serialization with production release requires
+    # the lock plus a re-read of the latest committed state, and
+    # Session.refresh() reloads every attribute, so taking it after
+    # edits were applied would silently discard them. With the lock
+    # (and refresh) up front, the metadata edits below always apply on
+    # the latest row and survive to COMMIT.
+    requested_active: bool | None = None
+    if not isinstance(is_active, UnsetType):
+        requested_active = required_flag(is_active, "Area active status")
+        if not requested_active:
+            session.refresh(area, with_for_update=True)
+
     if not isinstance(name, UnsetType):
         clean_name = required_text(name, "Area name")
         if clean_name != area.name:
@@ -267,47 +280,45 @@ def update_area(
             area.is_terminal = terminal
             changed = True
 
-    if not isinstance(is_active, UnsetType):
-        active = required_flag(is_active, "Area active status")
-        if active != area.is_active:
-            if active:
-                department = _get_department(session, area.department_id)
-                if not department.is_active:
-                    raise ConflictError(
-                        f"Department '{department.name}' is inactive."
-                        " Activate the Department before activating this Area."
-                    )
-            else:
-                # Serialize with production release: the release
-                # transaction holds this Area row lock from before its
-                # own active check until COMMIT, so exactly one serial
-                # outcome exists — either the release commits first and
-                # the active-quantity check below blocks deactivation,
-                # or the deactivation commits first and the release
-                # sees the inactive Area. An inactive Area can never
-                # end up holding a freshly released ACTIVE flow.
-                session.refresh(area, with_for_update=True)
-                # After the lock, the row may already be inactive (a
-                # concurrent writer won): then nothing is left to
-                # change for this field and no check is needed.
-                if area.is_active:
-                    holds_quantity = session.scalar(
-                        select(QuantityFlow.id)
-                        .where(
-                            QuantityFlow.current_area_id == area.id,
-                            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-                        )
-                        .limit(1)
-                    )
-                    if holds_quantity is not None:
-                        raise ConflictError(
-                            "This Area still holds active quantity."
-                            " Move or complete the quantity through the normal production"
-                            " workflow before deactivating the Area."
-                        )
-            if active != area.is_active:
-                area.is_active = active
-                changed = True
+    # requested_active was validated (and, for a deactivation, the row
+    # was locked and re-read) before any mutation above, so
+    # area.is_active is the latest committed state here.
+    if requested_active is not None and requested_active != area.is_active:
+        if requested_active:
+            department = _get_department(session, area.department_id)
+            if not department.is_active:
+                raise ConflictError(
+                    f"Department '{department.name}' is inactive."
+                    " Activate the Department before activating this Area."
+                )
+        else:
+            # Serialize with production release: the release
+            # transaction holds this Area row lock from before its
+            # own active check until COMMIT, so exactly one serial
+            # outcome exists — either the release commits first and
+            # the check below blocks deactivation, or the
+            # deactivation commits first and the release sees the
+            # inactive Area. An inactive Area can never end up
+            # holding a freshly released ACTIVE flow.
+            holds_quantity = session.scalar(
+                select(QuantityFlow.id)
+                .where(
+                    QuantityFlow.current_area_id == area.id,
+                    QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+                )
+                .limit(1)
+            )
+            if holds_quantity is not None:
+                raise ConflictError(
+                    "This Area still holds active quantity."
+                    " Move or complete the quantity through the normal production"
+                    " workflow before deactivating the Area."
+                )
+        area.is_active = requested_active
+        changed = True
+    # A concurrent writer already deactivated the locked row: the
+    # deactivation stage is a no-op, while the metadata edits above
+    # still apply and commit normally.
 
     if changed:
         area.updated_at = func.now()

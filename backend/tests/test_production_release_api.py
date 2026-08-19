@@ -1301,3 +1301,47 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
             )
         ).scalar_one()
     assert violations == 0
+
+
+def test_area_deactivation_patch_applies_metadata_edits_atomically(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """One PATCH with metadata edits AND is_active=false persists all.
+
+    Regression: the deactivation branch locks the Area row via
+    ``Session.refresh(with_for_update=True)``, which reloads every
+    attribute — taken after the field mutations it would silently
+    discard them. The lock must come first, so the combined request
+    commits the new name/description/color/is_terminal together with
+    the inactive state in one transaction.
+    """
+    area = _create_area(client)  # active, holds no quantity
+    new_name = _unique("AREA-RENAMED")
+    response = client.patch(
+        f"/api/areas/{area['id']}",
+        json={
+            "name": new_name,
+            "description": "combined-edit description",
+            "color": "#123456",
+            "is_terminal": True,
+            "is_active": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["name"] == new_name
+    assert body["description"] == "combined-edit description"
+    assert body["color"] == "#123456"
+    assert body["is_terminal"] is True
+    assert body["is_active"] is False
+
+    # Committed state, not just the response echo.
+    with db_engine.connect() as connection:
+        row = connection.execute(
+            sa.select(models.Area.__table__).where(models.Area.__table__.c.id == area["id"])
+        ).one()
+    assert row.name == new_name
+    assert row.description == "combined-edit description"
+    assert row.color == "#123456"
+    assert row.is_terminal is True
+    assert row.is_active is False
