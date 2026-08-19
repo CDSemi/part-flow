@@ -29,11 +29,13 @@ Deliberate surface decisions:
   edits + ``line_edits`` + ``new_lines``) — each all-or-nothing with
   its audit rows.
 - ``DELETE /work-orders/{id}/demands/{id}`` enforces the canonical
-  removal rule (PROJECT_PROFILE §13) in the backend, never only in
-  the UI: a saved demand deletes only while no production quantity
-  has ever been released for it — afterwards the request is a 409
-  that removes nothing. There is still no Completed Work Orders
-  surface (Phase 10+).
+  removal rules (PROJECT_PROFILE §13, §8.2) in the backend, never
+  only in the UI: a saved demand deletes only while no production
+  quantity has ever been released for it, and the last demand line
+  of a Work Order is never removable (a Work Order contains one or
+  more demand records; nothing auto-deletes the Work Order) — either
+  violation is a 409 that removes nothing. There is still no
+  Completed Work Orders surface (Phase 10+).
 - ``priority_rank`` and ``allocated_quantity`` appear only in
   responses: Hot ranking (Phase 12) and allocation (Phase 10) own
   those values.
@@ -239,10 +241,11 @@ def update_work_order(
 
 @router.delete("/work-orders/{work_order_id}/demands/{demand_id}", status_code=204)
 def delete_work_order_demand(work_order_id: int, demand_id: int, session: SessionDep) -> None:
-    """Remove one saved demand line (PROJECT_PROFILE §13).
+    """Remove one saved demand line (PROJECT_PROFILE §13, §8.2).
 
     Blocked with 409 once any quantity for the demand has been
-    released; removal never cascades to the PartNumber master,
+    released, and blocked with 409 for the Work Order's last demand
+    line; removal never cascades to the PartNumber master,
     QuantityFlows, PartMovements, release history, or other demand
     lines for the same PN.
     """

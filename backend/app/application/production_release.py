@@ -14,6 +14,21 @@ Rules owned here:
   returns the original result even if entities changed state since),
   then validation, then the active-quantity confirmation check, then
   the inserts. Any failure before COMMIT leaves zero writes.
+- Releases of one canonical PN are SERIALIZED by a transaction-scoped
+  PostgreSQL advisory lock keyed on the PN string itself: two
+  concurrent unconfirmed releases of the same PN (any demand, any
+  Work Order) can never both pass the active-quantity check. The key
+  deliberately never references the optional, hard-deletable
+  PartNumber master and needs no new table. After the blocking lock
+  is acquired, the ``device_event_id`` + fingerprint check runs AGAIN:
+  a concurrent identical retry that was in flight while the original
+  committed replays the original result instead of tripping over the
+  now-active quantity.
+- The result of a release is built from the immutable ``RECEIVED``
+  Movement (plus its immutable snapshot step for ``PLANNED``), never
+  from the mutable QuantityFlow projection: an idempotent replay
+  returns the ORIGINAL release result — release-time starting Area
+  included — even after the flow has since moved on.
 - The deterministic request fingerprint (SLICE1 §14) covers the
   canonical PN, quantity, Route Mode, RouteTemplate when `PLANNED`,
   starting Area, Operation, and the initiating WorkOrderDemand
@@ -34,6 +49,7 @@ Rules owned here:
   record (SLICE1 §16).
 """
 
+import datetime
 import hashlib
 import json
 import uuid
@@ -44,7 +60,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.application.common import flush, required_flag
-from app.application.environment import require_active_area
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
     ConflictError,
@@ -77,13 +92,32 @@ _ACTOR_KEY: Final = "actor"
 
 _DEVICE_EVENT_ID_CONSTRAINT: Final = "uq_part_movements_device_event_id"
 
+# Namespace of the per-PN advisory lock key, hashed together with the
+# canonical PN so release serialization never collides with any other
+# future advisory lock use.
+_RELEASE_LOCK_NAMESPACE: Final = "partflow:production-release:part-number:"
+
 
 class ProductionRelease(NamedTuple):
-    """One committed release: the flow, its RECEIVED Movement, and
-    whether this call created it (False = idempotent replay)."""
+    """One committed release result (SLICE1 §8.6), immutable by source.
 
-    flow: QuantityFlow
-    movement: PartMovement
+    Every field is read from the ``RECEIVED`` Movement (and, for
+    ``PLANNED``, its immutable AssignedRoute snapshot step) — never
+    from the mutable QuantityFlow projection — so a fresh release and
+    every later idempotent replay carry the identical original values.
+    ``created`` is False for an idempotent replay.
+    """
+
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    route_mode: RouteMode
+    assigned_route_id: int | None
+    starting_area_id: int
+    operation_id: int
+    movement_id: int
+    device_event_id: str
+    occurred_at: datetime.datetime
     created: bool
 
 
@@ -152,6 +186,30 @@ def _request_fingerprint(
 
 
 # ---------------------------------------------------------------------------
+# Per-PN serialization (transaction-scoped advisory lock)
+# ---------------------------------------------------------------------------
+
+
+def _acquire_part_number_release_lock(session: Session, part_number: str) -> None:
+    """Serialize releases of one canonical PN for this transaction.
+
+    ``pg_advisory_xact_lock`` blocks until the concurrent release of
+    the same PN commits or rolls back, and releases automatically with
+    this transaction — no new table, and no dependency on the optional
+    PartNumber master (the key is derived from the PN string itself).
+    A hash collision between two different PNs merely serializes them
+    too — harmless.
+    """
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"{_RELEASE_LOCK_NAMESPACE}{part_number}", 0)
+            )
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # Idempotency (SLICE1 §14) — the committed Movement is the record
 # ---------------------------------------------------------------------------
 
@@ -159,6 +217,42 @@ def _request_fingerprint(
 def _committed_release(session: Session, device_event_id: str) -> PartMovement | None:
     return session.scalar(
         select(PartMovement).where(PartMovement.device_event_id == device_event_id)
+    )
+
+
+def _result_from_movement(
+    session: Session, movement: PartMovement, *, created: bool
+) -> ProductionRelease:
+    """Build the release result from immutable rows only.
+
+    The ``RECEIVED`` Movement carries the release-time PN, quantity,
+    starting Area (``to_area_id``), Operation, Movement id,
+    ``device_event_id`` and ``occurred_at``; the route mode and the
+    snapshot reference derive from its ``assigned_route_step_id``
+    against the immutable ``assigned_route_steps`` snapshot. Nothing
+    here reads the mutable QuantityFlow projection, so a replay is
+    byte-identical to the original response whatever happened to the
+    flow since.
+    """
+    assigned_route_id: int | None = None
+    if movement.assigned_route_step_id is not None:
+        assigned_route_id = session.scalar(
+            select(AssignedRouteStep.assigned_route_id).where(
+                AssignedRouteStep.id == movement.assigned_route_step_id
+            )
+        )
+    return ProductionRelease(
+        quantity_flow_id=movement.quantity_flow_id,
+        part_number=movement.part_number,
+        quantity=movement.quantity,
+        route_mode=RouteMode.PLANNED if assigned_route_id is not None else RouteMode.FLOATING,
+        assigned_route_id=assigned_route_id,
+        starting_area_id=movement.to_area_id,
+        operation_id=movement.operation_id,
+        movement_id=movement.id,
+        device_event_id=movement.device_event_id,
+        occurred_at=movement.occurred_at,
+        created=created,
     )
 
 
@@ -173,8 +267,35 @@ def _replay_or_conflict(
             " request. Nothing was created — a new release intent needs a"
             " new device_event_id."
         )
-    flow = session.get_one(QuantityFlow, movement.quantity_flow_id)
-    return ProductionRelease(flow=flow, movement=movement, created=False)
+    return _result_from_movement(session, movement, created=False)
+
+
+# ---------------------------------------------------------------------------
+# Active-quantity distribution (SLICE1 §8.2)
+# ---------------------------------------------------------------------------
+
+
+def _existing_active_distribution(session: Session, part_number: str) -> list[dict[str, Any]]:
+    """The PN's current ACTIVE distribution, as shown for confirmation."""
+    active_rows = session.execute(
+        select(QuantityFlow, Area.name)
+        .join(Area, Area.id == QuantityFlow.current_area_id)
+        .where(
+            QuantityFlow.part_number == part_number,
+            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+        )
+        .order_by(QuantityFlow.id)
+    ).all()
+    return [
+        {
+            "quantity_flow_id": flow.id,
+            "quantity": flow.quantity,
+            "route_mode": flow.route_mode,
+            "current_area_id": flow.current_area_id,
+            "current_area_name": area_name,
+        }
+        for flow, area_name in active_rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +350,22 @@ def release_to_production(
         work_order_demand_id=work_order_demand_id,
     )
 
-    # -- Idempotency check FIRST (SLICE1 §13/§14) ----------------------
+    # -- Idempotency fast path (SLICE1 §13/§14) -------------------------
+    # A committed retry replays without ever waiting on the PN lock.
+    committed = _committed_release(session, event_id)
+    if committed is not None:
+        return _replay_or_conflict(session, committed, fingerprint)
+
+    # -- Serialize per canonical PN --------------------------------------
+    # Blocks until any concurrent release of this PN finishes, so two
+    # unconfirmed releases can never both pass the active-quantity
+    # check below.
+    _acquire_part_number_release_lock(session, pn)
+
+    # -- Idempotency RE-CHECK after the blocking lock --------------------
+    # A concurrent identical retry may have waited here while the
+    # original committed: it must replay the original result, not trip
+    # over the now-active quantity of its own release.
     committed = _committed_release(session, event_id)
     if committed is not None:
         return _replay_or_conflict(session, committed, fingerprint)
@@ -251,7 +387,18 @@ def release_to_production(
             " demand's own PN."
         )
 
-    area = require_active_area(session, starting_area_id, "accept a production release")
+    # The starting Area row is locked until COMMIT: Area deactivation
+    # takes the same row lock before its active-quantity check, so a
+    # concurrent release-vs-deactivation always has exactly one serial
+    # outcome and an inactive Area can never end up holding a fresh
+    # ACTIVE flow.
+    area = session.get(Area, starting_area_id, with_for_update=True)
+    if area is None:
+        raise InvalidInputError(f"Area {starting_area_id} does not exist.")
+    if not area.is_active:
+        raise ConflictError(
+            f"Area '{area.name}' is inactive and cannot accept a production release."
+        )
     operation = session.get(Operation, operation_id)
     if operation is None:
         raise InvalidInputError(f"Operation {operation_id} does not exist.")
@@ -302,31 +449,16 @@ def release_to_production(
             )
 
     # -- Active-quantity safety (SLICE1 §8.2) ---------------------------
-    active_rows = session.execute(
-        select(QuantityFlow, Area.name)
-        .join(Area, Area.id == QuantityFlow.current_area_id)
-        .where(
-            QuantityFlow.part_number == pn,
-            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-        )
-        .order_by(QuantityFlow.id)
-    ).all()
-    if active_rows and not confirmed:
+    # Serialized by the PN advisory lock above: no concurrent release
+    # of this PN can commit between this check and our own COMMIT.
+    distribution = _existing_active_distribution(session, pn)
+    if distribution and not confirmed:
         raise ActiveQuantityConfirmationRequiredError(
             f"Part Number '{pn}' already has active production quantity."
             " Review the existing distribution and confirm the intent to"
             " release a separate Quantity Flow — existing quantity is never"
             " merged.",
-            existing_active_quantity=[
-                {
-                    "quantity_flow_id": flow.id,
-                    "quantity": flow.quantity,
-                    "route_mode": flow.route_mode,
-                    "current_area_id": flow.current_area_id,
-                    "current_area_name": area_name,
-                }
-                for flow, area_name in active_rows
-            ],
+            existing_active_quantity=distribution,
         )
 
     # -- Writes (SLICE1 §13) — all inside the one open transaction ------
@@ -403,7 +535,9 @@ def release_to_production(
             if winner is not None:
                 return _replay_or_conflict(session, winner, fingerprint)
         raise
-    return ProductionRelease(flow=flow, movement=movement, created=True)
+    # Built from the committed Movement — the same immutable source a
+    # later replay reads — so fresh and replay responses are identical.
+    return _result_from_movement(session, movement, created=True)
 
 
 # ---------------------------------------------------------------------------
@@ -426,8 +560,12 @@ def demand_has_released_quantity(session: Session, work_order_demand_id: int) ->
         session.scalar(
             select(PartMovement.id)
             .where(
+                # Only a RECEIVED Movement is release evidence: later
+                # movement types may carry demand context for other
+                # reasons without meaning "this demand released".
+                PartMovement.movement_type == MovementType.RECEIVED,
                 PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
-                == work_order_demand_id
+                == work_order_demand_id,
             )
             .limit(1)
         )

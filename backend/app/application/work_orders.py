@@ -510,31 +510,57 @@ def update_work_order(
 def delete_work_order_demand(session: Session, work_order_id: int, demand_id: int) -> None:
     """Delete one saved demand line, blocked once quantity has released.
 
-    The backend enforces the rule — never only the UI: once any
-    quantity for this demand has been released to production, deletion
-    is refused (later adjustments go through correction and production
-    workflows, PROJECT_PROFILE §16 — removal is not a correction
-    mechanism). Removal deletes exactly the one demand row: the
-    PartNumber master, QuantityFlows, PartMovements, release history,
-    the demand's own audit history, and other demand lines for the
-    same PN are untouched.
+    The backend enforces the rules — never only the UI:
 
-    The row lock serializes this check against a release in flight for
-    the same demand (`release_to_production` locks the demand row for
-    its whole transaction), so the released-quantity evidence cannot
-    appear between the check and the DELETE. No audit row is appended:
-    the Slice 1 audit vocabulary records creations and edits only
-    (SLICE1_DATA_MODEL §16) and the demand's existing CREATED/UPDATED
-    history remains — historical records never disappear.
+    - once any quantity for this demand has been released to
+      production, deletion is refused (later adjustments go through
+      correction and production workflows, PROJECT_PROFILE §16 —
+      removal is not a correction mechanism);
+    - the LAST demand line of a Work Order is never removable: a Work
+      Order contains one or more Work Order Demand records
+      (PROJECT_PROFILE §8.2), and removal never auto-deletes the Work
+      Order.
+
+    Removal deletes exactly the one demand row: the PartNumber master,
+    QuantityFlows, PartMovements, release history, the demand's own
+    audit history, and other demand lines for the same PN are
+    untouched.
+
+    Locking: the demand row lock serializes this check against a
+    release in flight for the same demand (`release_to_production`
+    locks the demand row for its whole transaction), so the
+    released-quantity evidence cannot appear between the check and the
+    DELETE; the parent Work Order row lock serializes sibling
+    deletions, so two concurrent removals can never both pass the
+    last-line check and leave a zero-demand Work Order. No audit row
+    is appended: the Slice 1 audit vocabulary records creations and
+    edits only (SLICE1_DATA_MODEL §16) and the demand's existing
+    CREATED/UPDATED history remains — historical records never
+    disappear.
     """
     demand = session.get(WorkOrderDemand, demand_id, with_for_update=True)
     if demand is None or demand.work_order_id != work_order_id:
         raise NotFoundError(
             f"Demand line {demand_id} does not exist on Work Order {work_order_id}."
         )
+    session.get(WorkOrder, work_order_id, with_for_update=True)
     if production_release.demand_has_released_quantity(session, demand.id):
         # GUI_DESIGN §11.2 wording — the UI disables the action, the
         # backend still refuses.
         raise ConflictError("Cannot remove: production quantity has already been released.")
+    siblings_remaining = session.scalar(
+        select(func.count())
+        .select_from(WorkOrderDemand)
+        .where(
+            WorkOrderDemand.work_order_id == work_order_id,
+            WorkOrderDemand.id != demand.id,
+        )
+    )
+    if not siblings_remaining:
+        raise ConflictError(
+            "Cannot remove the last demand line: a Work Order always contains"
+            " at least one Work Order Demand. Add the replacement line first,"
+            " or leave the Work Order as it is."
+        )
     session.delete(demand)
     commit(session, _WORK_ORDER_CONFLICTS)

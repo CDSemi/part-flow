@@ -63,7 +63,15 @@ class ProductionReleaseRequest(BaseModel):
 
 
 class ProductionReleaseResponse(BaseModel):
-    """The committed release result (SLICE1 §8.6)."""
+    """The committed release result (SLICE1 §8.6).
+
+    Every value is the immutable ORIGINAL release result, read from
+    the ``RECEIVED`` Movement (and its snapshot step for ``PLANNED``)
+    — never the mutable QuantityFlow projection — so an idempotent
+    replay body is identical to the fresh 201 body even after the flow
+    has moved on. ``starting_area_id`` is the release-time starting
+    Area, not the flow's current position.
+    """
 
     quantity_flow_id: int
     part_number: str
@@ -72,7 +80,7 @@ class ProductionReleaseResponse(BaseModel):
     # The AssignedRoute snapshot id for a PLANNED release, null for
     # FLOATING.
     assigned_route_id: int | None
-    current_area_id: int
+    starting_area_id: int
     operation_id: int
     movement_id: int
     device_event_id: str
@@ -80,19 +88,17 @@ class ProductionReleaseResponse(BaseModel):
 
 
 def _response(result: ProductionRelease) -> ProductionReleaseResponse:
-    flow = result.flow
-    movement = result.movement
     return ProductionReleaseResponse(
-        quantity_flow_id=flow.id,
-        part_number=flow.part_number,
-        quantity=flow.quantity,
-        route_mode=RouteMode(flow.route_mode),
-        assigned_route_id=flow.assigned_route_id,
-        current_area_id=flow.current_area_id,
-        operation_id=movement.operation_id,
-        movement_id=movement.id,
-        device_event_id=movement.device_event_id,
-        occurred_at=movement.occurred_at,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        route_mode=result.route_mode,
+        assigned_route_id=result.assigned_route_id,
+        starting_area_id=result.starting_area_id,
+        operation_id=result.operation_id,
+        movement_id=result.movement_id,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
     )
 
 

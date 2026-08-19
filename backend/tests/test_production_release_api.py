@@ -34,6 +34,8 @@ PNs/Work Orders; the module database is dropped afterwards.
 
 import datetime
 import os
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -48,8 +50,12 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import production_release, projections
+from app.application import environment, production_release, projections
 from app.application.common import flush as translated_flush
+from app.application.errors import (
+    ActiveQuantityConfirmationRequiredError,
+    ConflictError,
+)
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -258,7 +264,7 @@ def test_floating_release_exact_shape_and_no_generic_audit(
     assert body["quantity"] == 25
     assert body["route_mode"] == "FLOATING"
     assert body["assigned_route_id"] is None
-    assert body["current_area_id"] == area["id"]
+    assert body["starting_area_id"] == area["id"]
     assert body["operation_id"] == operation["id"]
     assert body["device_event_id"] == event_id
 
@@ -659,11 +665,11 @@ def test_duplicate_device_event_id_race_lost_at_commit(
 ) -> None:
     """A concurrent duplicate that wins at COMMIT resolves like a replay.
 
-    The pre-check is blinded for one call so the request reaches the
-    unique ``device_event_id`` constraint at COMMIT — the whole staged
-    release (flow + Movement) rolls back and the committed original is
-    returned unchanged; a mismatched fingerprint is the explicit
-    conflict instead.
+    The pre-lock check AND the post-lock re-check are blinded (two
+    calls) so the request reaches the unique ``device_event_id``
+    constraint at COMMIT — the whole staged release (flow + Movement)
+    rolls back and the committed original is returned unchanged; a
+    mismatched fingerprint is the explicit conflict instead.
     """
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
@@ -681,7 +687,7 @@ def test_duplicate_device_event_id_race_lost_at_commit(
     before = _counts(db_engine)
 
     real = production_release._committed_release
-    blind = {"remaining": 1}
+    blind = {"remaining": 2}
 
     def blinded(session: Session, device_event_id: str) -> Any:
         if blind["remaining"]:
@@ -695,7 +701,7 @@ def test_duplicate_device_event_id_race_lost_at_commit(
     assert race_replay.json() == first.json()
     assert _counts(db_engine) == before
 
-    blind["remaining"] = 1
+    blind["remaining"] = 2
     race_mismatch = _release(client, work_order_id, demand_id, **{**payload, "quantity": 99})
     assert race_mismatch.status_code == 409, race_mismatch.text
     assert _counts(db_engine) == before
@@ -924,8 +930,21 @@ def test_demand_deletion_blocked_after_release(client: TestClient, db_engine: En
     assert released.status_code == 201, released.text
 
     # Another demand for the SAME PN that never released stays
-    # removable: the rule is per demand, not per PN.
-    other_work_order_id, other_demand_id, _ = _create_demand(client, part_number=pn)
+    # removable: the rule is per demand, not per PN. The other Work
+    # Order carries a second line so the removal is not the last-line
+    # case.
+    other = client.post(
+        "/api/work-orders",
+        json={
+            "lines": [
+                {"part_number": pn, "requested_quantity": 5},
+                {"part_number": _unique("PN"), "requested_quantity": 5},
+            ]
+        },
+    )
+    assert other.status_code == 201, other.text
+    other_work_order_id = other.json()["id"]
+    other_demand_id = other.json()["demands"][0]["id"]
 
     before = _counts(db_engine)
     blocked = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
@@ -943,3 +962,342 @@ def test_demand_deletion_blocked_after_release(client: TestClient, db_engine: En
     assert after["quantity_flows"] == before["quantity_flows"]
     assert after["part_movements"] == before["part_movements"]
     assert after["part_numbers"] == before["part_numbers"]
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — replay immutability, last-line removal, concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_replay_returns_original_result_after_projection_change(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The replay body is the immutable ORIGINAL release result.
+
+    A later change of ``QuantityFlow.current_area_id`` (the mutable
+    projection) must not leak into the response of a retried old
+    release: everything is read from the immutable ``RECEIVED``
+    Movement, and the response's ``starting_area_id`` stays the
+    release-time starting Area.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    other_area = _create_area(client)
+    work_order_id, demand_id, pn = _create_demand(client)
+    payload = {
+        "part_number": pn,
+        "starting_area_id": area["id"],
+        "operation_id": operation["id"],
+        "device_event_id": str(uuid.uuid4()),
+    }
+    first = _release(client, work_order_id, demand_id, **payload)
+    assert first.status_code == 201, first.text
+    original = first.json()
+    assert original["starting_area_id"] == area["id"]
+
+    # Simulate the flow moving on (a later phase's transfer would do
+    # this inside a Movement transaction): the projection changes, the
+    # RECEIVED Movement does not.
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.update(models.QuantityFlow)
+            .where(models.QuantityFlow.id == original["quantity_flow_id"])
+            .values(current_area_id=other_area["id"])
+        )
+
+    replay = _release(client, work_order_id, demand_id, **payload)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == original
+    assert replay.json()["starting_area_id"] == area["id"]
+
+
+def test_last_demand_line_cannot_be_removed(client: TestClient, db_engine: Engine) -> None:
+    """A Work Order always keeps at least one demand line (PP §8.2)."""
+    work_order_id, demand_id, _ = _create_demand(client)
+    before = _counts(db_engine)
+
+    blocked = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    assert blocked.status_code == 409, blocked.text
+    assert "last demand line" in blocked.json()["detail"]
+    assert _counts(db_engine) == before  # zero writes
+    remaining = client.get(f"/api/work-orders/{work_order_id}").json()
+    assert [demand["id"] for demand in remaining["demands"]] == [demand_id]
+
+    # With a sibling present the same unreleased line deletes fine —
+    # until it IS the last one.
+    two_line = client.post(
+        "/api/work-orders",
+        json={
+            "lines": [
+                {"part_number": _unique("PN"), "requested_quantity": 5},
+                {"part_number": _unique("PN"), "requested_quantity": 5},
+            ]
+        },
+    )
+    assert two_line.status_code == 201, two_line.text
+    wo_id = two_line.json()["id"]
+    first_id, second_id = (demand["id"] for demand in two_line.json()["demands"])
+    assert client.delete(f"/api/work-orders/{wo_id}/demands/{first_id}").status_code == 204
+    assert client.delete(f"/api/work-orders/{wo_id}/demands/{second_id}").status_code == 409
+
+
+class _PauseFirstActiveCheck:
+    """Test seam: pause the FIRST release inside its active-quantity
+    check — after it holds the PN advisory lock (and the starting-Area
+    row lock) — so a competing transaction can be started and observed
+    blocking, then released deterministically."""
+
+    def __init__(self) -> None:
+        self.real = production_release._existing_active_distribution
+        self.first_inside = threading.Event()
+        self.let_first_finish = threading.Event()
+        self._pause_taken = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, part_number: str) -> list[dict[str, Any]]:
+        result = self.real(session, part_number)
+        with self._pause_taken:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.first_inside.set()
+            assert self.let_first_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+def test_concurrent_same_pn_releases_cannot_both_pass_active_check(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two unconfirmed concurrent releases of one PN — two demands, two
+    event ids — serialize on the PN lock: exactly one creates, the
+    other must see the active quantity and require confirmation."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    pn = _unique("PN")
+    wo_1, demand_1, _ = _create_demand(client, part_number=pn)
+    wo_2, demand_2, _ = _create_demand(client, part_number=pn)
+
+    pause = _PauseFirstActiveCheck()
+    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+
+    results: dict[str, Any] = {}
+
+    def run(name: str, work_order_id: int, demand_id: int) -> None:
+        with Session(db_engine) as session:
+            try:
+                results[name] = production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    quantity=10,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results[name] = exc
+
+    first = threading.Thread(target=run, args=("first", wo_1, demand_1), daemon=True)
+    second = threading.Thread(target=run, args=("second", wo_2, demand_2), daemon=True)
+    try:
+        first.start()
+        assert pause.first_inside.wait(timeout=20)  # holds the PN lock, paused
+        second.start()
+        time.sleep(1.0)  # the second release is now blocked on the PN lock
+        assert "second" not in results  # ...really blocked, not failed
+    finally:
+        pause.let_first_finish.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+    assert not first.is_alive() and not second.is_alive()
+
+    winner = results["first"]
+    loser = results["second"]
+    assert isinstance(winner, production_release.ProductionRelease) and winner.created
+    assert isinstance(loser, ActiveQuantityConfirmationRequiredError)
+    assert [entry["quantity_flow_id"] for entry in loser.existing_active_quantity] == [
+        winner.quantity_flow_id
+    ]
+    with db_engine.connect() as connection:
+        flow_count = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(models.QuantityFlow.__table__)
+            .where(models.QuantityFlow.__table__.c.part_number == pn)
+        ).scalar_one()
+    assert flow_count == 1  # exactly one release passed unconfirmed
+
+
+def test_concurrent_identical_retries_one_creates_one_replays(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent identical submissions — same demand, same
+    device_event_id, confirm_active_quantity=false — resolve as one
+    created release and one replay of the original result. The replay
+    must NOT trip the active-quantity confirmation over the original's
+    own flow: the idempotency re-check runs after the PN lock."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)
+    event_id = str(uuid.uuid4())
+
+    pause = _PauseFirstActiveCheck()
+    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+
+    results: dict[str, Any] = {}
+
+    def run(name: str) -> None:
+        with Session(db_engine) as session:
+            try:
+                results[name] = production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    quantity=25,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=event_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results[name] = exc
+
+    first = threading.Thread(target=run, args=("first",), daemon=True)
+    second = threading.Thread(target=run, args=("second",), daemon=True)
+    try:
+        first.start()
+        assert pause.first_inside.wait(timeout=20)
+        second.start()  # pre-lock check sees nothing yet, blocks on the PN lock
+        time.sleep(1.0)
+        assert "second" not in results
+    finally:
+        pause.let_first_finish.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+    assert not first.is_alive() and not second.is_alive()
+
+    outcomes = [results["first"], results["second"]]
+    for outcome in outcomes:
+        assert isinstance(outcome, production_release.ProductionRelease), outcome
+    created = [outcome for outcome in outcomes if outcome.created]
+    replayed = [outcome for outcome in outcomes if not outcome.created]
+    assert len(created) == 1 and len(replayed) == 1
+    # The replay carries the ORIGINAL committed result, field by field.
+    assert replayed[0] == created[0]._replace(created=False)
+    with db_engine.connect() as connection:
+        movement_count = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(models.PartMovement.__table__)
+            .where(models.PartMovement.__table__.c.part_number == pn)
+        ).scalar_one()
+    assert movement_count == 1  # at-most-once recording held
+
+
+def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release and Area deactivation serialize on the Area row lock.
+
+    Release wins → the deactivation sees the fresh active quantity and
+    is blocked. (Deactivation wins → the release sees the inactive
+    Area — asserted sequentially below.) Either way no inactive Area
+    ever holds an ACTIVE flow.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)
+
+    pause = _PauseFirstActiveCheck()
+    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+
+    results: dict[str, Any] = {}
+
+    def run_release() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["release"] = production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    quantity=10,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["release"] = exc
+
+    def run_deactivation() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["deactivation"] = environment.update_area(
+                    session, int(area["id"]), is_active=False
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["deactivation"] = exc
+
+    release_thread = threading.Thread(target=run_release, daemon=True)
+    deactivation_thread = threading.Thread(target=run_deactivation, daemon=True)
+    try:
+        release_thread.start()
+        # Paused inside the active check: the release transaction now
+        # holds the starting-Area row lock until COMMIT.
+        assert pause.first_inside.wait(timeout=20)
+        deactivation_thread.start()
+        time.sleep(1.0)  # deactivation is blocked on the Area row lock
+        assert "deactivation" not in results
+    finally:
+        pause.let_first_finish.set()
+    release_thread.join(timeout=20)
+    deactivation_thread.join(timeout=20)
+    assert not release_thread.is_alive() and not deactivation_thread.is_alive()
+
+    released = results["release"]
+    blocked = results["deactivation"]
+    assert isinstance(released, production_release.ProductionRelease) and released.created
+    assert isinstance(blocked, ConflictError)
+    assert "still holds active quantity" in blocked.message
+
+    # The other serial order: a committed deactivation blocks release.
+    empty_area = _create_area(client)
+    empty_operation = _create_operation(client, int(empty_area["id"]))
+    assert (
+        client.patch(f"/api/areas/{empty_area['id']}", json={"is_active": False}).status_code == 200
+    )
+    wo_2, demand_2, pn_2 = _create_demand(client)
+    late_release = _release(
+        client,
+        wo_2,
+        demand_2,
+        part_number=pn_2,
+        starting_area_id=empty_area["id"],
+        operation_id=empty_operation["id"],
+    )
+    assert late_release.status_code == 409, late_release.text
+
+    # Invariant: no inactive Area holds ACTIVE quantity — ever.
+    with db_engine.connect() as connection:
+        violations = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(
+                models.QuantityFlow.__table__.join(
+                    models.Area.__table__,
+                    models.Area.__table__.c.id == models.QuantityFlow.__table__.c.current_area_id,
+                )
+            )
+            .where(
+                models.QuantityFlow.__table__.c.status == "ACTIVE",
+                sa.not_(models.Area.__table__.c.is_active),
+            )
+        ).scalar_one()
+    assert violations == 0

@@ -278,22 +278,36 @@ def update_area(
                         " Activate the Department before activating this Area."
                     )
             else:
-                holds_quantity = session.scalar(
-                    select(QuantityFlow.id)
-                    .where(
-                        QuantityFlow.current_area_id == area.id,
-                        QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+                # Serialize with production release: the release
+                # transaction holds this Area row lock from before its
+                # own active check until COMMIT, so exactly one serial
+                # outcome exists — either the release commits first and
+                # the active-quantity check below blocks deactivation,
+                # or the deactivation commits first and the release
+                # sees the inactive Area. An inactive Area can never
+                # end up holding a freshly released ACTIVE flow.
+                session.refresh(area, with_for_update=True)
+                # After the lock, the row may already be inactive (a
+                # concurrent writer won): then nothing is left to
+                # change for this field and no check is needed.
+                if area.is_active:
+                    holds_quantity = session.scalar(
+                        select(QuantityFlow.id)
+                        .where(
+                            QuantityFlow.current_area_id == area.id,
+                            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                )
-                if holds_quantity is not None:
-                    raise ConflictError(
-                        "This Area still holds active quantity."
-                        " Move or complete the quantity through the normal production"
-                        " workflow before deactivating the Area."
-                    )
-            area.is_active = active
-            changed = True
+                    if holds_quantity is not None:
+                        raise ConflictError(
+                            "This Area still holds active quantity."
+                            " Move or complete the quantity through the normal production"
+                            " workflow before deactivating the Area."
+                        )
+            if active != area.is_active:
+                area.is_active = active
+                changed = True
 
     if changed:
         area.updated_at = func.now()
