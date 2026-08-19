@@ -46,10 +46,13 @@ class PartNumberResponse(BaseModel):
 
 
 class PartNumberCreateRequest(BaseModel):
+    """Only the PN itself — the audit ``actor_reference`` is never
+    client-writable: it stays NULL from this HTTP surface until an
+    authenticated identity exists (Phase 14)."""
+
     model_config = ConfigDict(extra="forbid")
 
     part_number: str
-    actor: str | None = None
 
 
 @router.get("/part-numbers")
@@ -72,6 +75,6 @@ def list_part_numbers(
 def create_part_number(
     body: PartNumberCreateRequest, session: SessionDep, response: Response
 ) -> PartNumberResponse:
-    master, created = part_numbers.create_part_number(session, body.part_number, actor=body.actor)
+    master, created = part_numbers.create_part_number(session, body.part_number)
     response.status_code = 201 if created else 200
     return PartNumberResponse.model_validate(master)

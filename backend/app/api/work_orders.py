@@ -33,6 +33,9 @@ Deliberate surface decisions:
 - ``priority_rank`` and ``allocated_quantity`` appear only in
   responses: Hot ranking (Phase 12) and allocation (Phase 10) own
   those values.
+- The audit ``actor_reference`` is never client-writable: no request
+  carries an actor, so audit rows from this surface stay NULL until an
+  authenticated (or server-configured) identity exists (Phase 14).
 """
 
 import datetime
@@ -143,8 +146,6 @@ class WorkOrderCreateRequest(BaseModel):
     received_date: datetime.date | None = None
     due_date: datetime.date | None = None
     lines: list[WorkOrderDemandCreateRequest]
-    # Nullable, reference-free audit actor until Phase 14.
-    actor: str | None = None
 
 
 class WorkOrderUpdateRequest(BaseModel):
@@ -158,7 +159,6 @@ class WorkOrderUpdateRequest(BaseModel):
     due_date: datetime.date | None = None
     line_edits: list[WorkOrderDemandEditRequest] = Field(default_factory=list)
     new_lines: list[WorkOrderDemandCreateRequest] = Field(default_factory=list)
-    actor: str | None = None
 
 
 def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
@@ -211,7 +211,6 @@ def create_work_order(body: WorkOrderCreateRequest, session: SessionDep) -> Work
         received_date=body.received_date,
         due_date=body.due_date,
         lines=[line.model_dump() for line in body.lines],
-        actor=body.actor,
     )
     return _detail_response(detail)
 
@@ -230,6 +229,5 @@ def update_work_order(
         due_date=provided.get("due_date", UNSET),
         line_edits=[edit.model_dump(exclude_unset=True) for edit in body.line_edits],
         new_lines=[line.model_dump() for line in body.new_lines],
-        actor=body.actor,
     )
     return _detail_response(detail)

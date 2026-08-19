@@ -525,6 +525,105 @@ def test_server_owned_fields_are_rejected(client: TestClient) -> None:
     )
 
 
+def test_explicit_null_request_type_on_edit_is_rejected(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The NEW default applies to creating a line only: an edit that
+    sends request_type null is rejected with zero writes — never
+    silently reinterpreted as NEW."""
+    body = _create_work_order(client, lines=[_line(request_type="MODIFY")])
+    line = body["demands"][0]
+    events_before = _audit_rows(db_engine, "WorkOrderDemand", str(line["id"]))
+
+    rejected = client.patch(
+        f"/api/work-orders/{body['id']}",
+        json={"line_edits": [{"id": line["id"], "request_type": None}]},
+    )
+    assert rejected.status_code == 422
+    assert "Request Type cannot be cleared" in rejected.json()["detail"]
+
+    detail = client.get(f"/api/work-orders/{body['id']}").json()
+    assert detail["demands"][0]["request_type"] == "MODIFY"
+    assert _audit_rows(db_engine, "WorkOrderDemand", str(line["id"])) == events_before
+
+    # Omitted keeps the value; an explicit value still updates normally.
+    updated = client.patch(
+        f"/api/work-orders/{body['id']}",
+        json={"line_edits": [{"id": line["id"], "request_type": "NEW"}]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["demands"][0]["request_type"] == "NEW"
+
+
+def test_client_supplied_audit_actor_is_rejected(client: TestClient, db_engine: Engine) -> None:
+    """No HTTP request carries an audit actor: `actor` is rejected by
+    extra="forbid" everywhere, and audit rows written by these
+    workflows keep actor_reference NULL until Phase 14."""
+    assert (
+        client.post(
+            "/api/work-orders",
+            json={"lines": [_line()], "actor": "mallory"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/api/part-numbers",
+            json={"part_number": _unique("PN"), "actor": "mallory"},
+        ).status_code
+        == 422
+    )
+    body = _create_work_order(client)
+    assert (
+        client.patch(
+            f"/api/work-orders/{body['id']}",
+            json={"due_date": "2026-11-01", "actor": "mallory"},
+        ).status_code
+        == 422
+    )
+
+    # The rows the clean create/edit produced all carry a NULL actor.
+    edited = client.patch(f"/api/work-orders/{body['id']}", json={"due_date": "2026-11-01"})
+    assert edited.status_code == 200
+    wo_events = _audit_rows(db_engine, "WorkOrder", str(body["id"]))
+    line_events = _audit_rows(db_engine, "WorkOrderDemand", str(body["demands"][0]["id"]))
+    pn_events = _audit_rows(db_engine, "PartNumber", body["demands"][0]["part_number"])
+    assert [event.event_type for event in wo_events] == ["CREATED", "UPDATED"]
+    for event in [*wo_events, *line_events, *pn_events]:
+        assert event.actor_reference is None
+
+
+def test_duplicate_demand_ids_in_one_save_are_rejected(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """One demand line may appear at most once per Save: duplicates are
+    rejected with zero writes and zero audit rows — no intermediate
+    states, no multiple UPDATED events for one Save."""
+    body = _create_work_order(client, lines=[_line(requested_quantity=5)])
+    line = body["demands"][0]
+    counts_before = _write_counts(db_engine)
+    events_before = _audit_rows(db_engine, "WorkOrderDemand", str(line["id"]))
+
+    rejected = client.patch(
+        f"/api/work-orders/{body['id']}",
+        json={
+            "due_date": "2026-12-01",
+            "line_edits": [
+                {"id": line["id"], "requested_quantity": 7},
+                {"id": line["id"], "requested_quantity": 9},
+            ],
+        },
+    )
+    assert rejected.status_code == 422
+    assert "appears more than once" in rejected.json()["detail"]
+
+    assert _write_counts(db_engine) == counts_before
+    assert _audit_rows(db_engine, "WorkOrderDemand", str(line["id"])) == events_before
+    detail = client.get(f"/api/work-orders/{body['id']}").json()
+    assert detail["demands"][0]["requested_quantity"] == 5
+    assert detail["due_date"] is None
+
+
 def test_unknown_work_order_and_foreign_line_are_not_found(client: TestClient) -> None:
     assert client.get("/api/work-orders/999999").status_code == 404
     first = _create_work_order(client)

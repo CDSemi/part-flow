@@ -285,6 +285,14 @@ def _apply_line_edit(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> bool:
     """
     changed = False
     if "request_type" in edit:
+        # The NEW default exists for creating a line only; an explicit
+        # null on an edit is not reinterpreted — a saved demand always
+        # has a Request Type, so clearing it is rejected with no write.
+        if edit["request_type"] is None:
+            raise InvalidInputError(
+                "Request Type cannot be cleared: a demand line is always NEW or"
+                " MODIFY. Omit the field to keep the current value."
+            )
         request_type = _validated_request_type(edit["request_type"])
         if request_type != demand.request_type:
             demand.request_type = request_type
@@ -418,6 +426,19 @@ def update_work_order(
     if not isinstance(due_date, UnsetType) and due_date != work_order.due_date:
         work_order.due_date = due_date
         header_changed = True
+
+    # One demand line may appear at most once per save: intermediate
+    # states inside one Save would produce misleading multiple UPDATED
+    # audit rows for what the user experienced as one edit.
+    seen_edit_ids: set[object] = set()
+    for edit in line_edits:
+        edit_id = edit.get("id")
+        if edit_id in seen_edit_ids:
+            raise InvalidInputError(
+                f"Demand line {edit_id} appears more than once in this save."
+                " Combine the changes into one entry per demand line."
+            )
+        seen_edit_ids.add(edit_id)
 
     audited: list[tuple[WorkOrderDemand, dict[str, Any]]] = []
     for edit in line_edits:
