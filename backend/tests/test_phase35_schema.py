@@ -1,6 +1,6 @@
 """Integration tests for the Phase 3.5 minimum environment setup schema.
 
-Runs the real Alembic migrations to head against an isolated, temporary
+Runs the real Alembic migrations against an isolated, temporary
 PostgreSQL database (created and dropped by the module fixture), then
 verifies the environment-setup invariants PostgreSQL must enforce:
 
@@ -22,14 +22,21 @@ verifies the environment-setup invariants PostgreSQL must enforce:
 - machine_lifecycle_events RETIRED/REACTIVATED shape checks and
   trigger-enforced append-only immutability;
 - the singleton Machine Asset Tag format configuration;
-- models↔migration metadata parity at head;
 - clean downgrade back to the Phase 3 boundary and to base.
 
-The module fixture migrates head → base → head, so a Phase 3.5
-downgrade that leaves any object behind fails the module before any
-test runs. Every test runs in its own rolled-back transaction against
-isolated data; the development database configured in DATABASE_URL is
-never touched beyond CREATE/DROP of the dedicated test databases.
+The module fixture migrates up → base → up, so a Phase 3.5 downgrade
+that leaves any object behind fails the module before any test runs.
+Every test runs in its own rolled-back transaction against isolated
+data; the development database configured in DATABASE_URL is never
+touched beyond CREATE/DROP of the dedicated test databases.
+
+This module is the Phase 3.5 boundary: it migrates to the Phase 3.5
+revision `0003_phase35_environment` — never to `head` — so its
+exact-table-set and absent-deferred-column assertions keep guarding
+what Phase 3.5 itself created even as later migrations (Phase 4+)
+extend the schema, exactly like test_phase3_schema.py pins
+`0002_phase3_domain`. Head-level coverage (models↔migration parity,
+Phase 4 invariants) lives in test_phase4_schema.py.
 """
 
 import datetime
@@ -52,6 +59,9 @@ from app.infrastructure import models
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 _PHASE3_REVISION = "0002_phase3_domain"
+
+# The Phase 3.5 boundary revision this module migrates to (never head).
+_PHASE35_REVISION = "0003_phase35_environment"
 
 _PHASE3_TABLES = {
     "departments",
@@ -105,17 +115,17 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated up → base → up through real Alembic runs."""
     name = "partflow_test_phase35_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE35_REVISION)
     # Reversibility gate: the full downgrade must remove everything the
     # chain created (tables, triggers, functions, columns) or the
     # second upgrade fails.
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE35_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -188,7 +198,7 @@ def _rejected(connection: Connection, statement: sa.Insert | sa.Update | sa.Dele
 
 
 class TestMigrationSchema:
-    def test_head_creates_exactly_the_phase35_boundary(self, migrated_engine: Engine) -> None:
+    def test_migration_creates_exactly_the_phase35_boundary(self, migrated_engine: Engine) -> None:
         tables = set(inspect(migrated_engine).get_table_names())
         expected = _PHASE3_TABLES | _PHASE35_TABLES
         assert tables >= expected
@@ -249,17 +259,9 @@ class TestMigrationSchema:
         )
         assert actor["nullable"] is True
 
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        # The SQLAlchemy mappings and the hand-written migrations must
-        # describe the same schema at head, or later autogenerate runs
-        # and ORM usage would silently disagree with the database.
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
+    # NOTE: models↔migration metadata parity is asserted at head in
+    # test_phase4_schema.py — the model metadata describes the full
+    # current schema, which this Phase-3.5-boundary database predates.
 
     def test_check_constraint_names_are_deterministic_and_not_doubled(
         self, migrated_engine: Engine
@@ -292,7 +294,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE35_REVISION)
             command.downgrade(config, _PHASE3_REVISION)
             engine = create_engine(url)
             try:
@@ -320,7 +322,7 @@ class TestMigrationSchema:
                 assert leftover_functions == []
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE35_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 

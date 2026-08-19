@@ -55,6 +55,31 @@ class QuantityFlowStatus(StrEnum):
     ACTIVE = "ACTIVE"
 
 
+class AuditEventType(StrEnum):
+    """Generic audit event types (SLICE1_DATA_MODEL §16).
+
+    Slice 1 records exactly creation and edit; the vocabulary widens
+    additively in the phases that introduce new auditable actions.
+    """
+
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+
+
+class AuditEntityType(StrEnum):
+    """Entity types the generic audit table records (SLICE1_DATA_MODEL §16).
+
+    Exactly the master-data and business-demand entities — never
+    production activity (PartMovement is the production audit record)
+    and never Machine (machine_lifecycle_events owns that history).
+    Widens additively in later phases.
+    """
+
+    WORK_ORDER = "WorkOrder"
+    WORK_ORDER_DEMAND = "WorkOrderDemand"
+    PART_NUMBER = "PartNumber"
+
+
 class MachineLifecycleEventType(StrEnum):
     """Append-only Machine lifecycle event types (PROJECT_PROFILE §8.6).
 

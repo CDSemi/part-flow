@@ -1,12 +1,14 @@
-"""SQLAlchemy mappings for the Phase 3 data foundation and the
-Phase 3.5 minimum environment setup.
+"""SQLAlchemy mappings for the Phase 3 data foundation, the Phase 3.5
+minimum environment setup, and the Phase 4 audit persistence.
 
 Infrastructure-only persistence mappings for the canonical domain shape
 defined by PROJECT_PROFILE §8 and SLICE1_DATA_MODEL §17, plus the
 Phase 3.5 environment configuration (IMPLEMENTATION_ROADMAP Phase 3.5):
 completed Area/Operation configuration fields, `scan_stations`,
 `machines`, the append-only `machine_lifecycle_events` history, and the
-Machine Asset Tag format configuration. Business rules stay in the
+Machine Asset Tag format configuration; plus the Phase 4 generic
+append-only `audit_events` table for master-data and business-demand
+changes (SLICE1_DATA_MODEL §16). Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -24,10 +26,10 @@ Deliberate canonical decisions encoded here:
   AssignedRoute snapshot: nullable, unique (at most one flow per
   snapshot), present exactly when `route_mode = 'PLANNED'`. There is no
   reverse `assigned_routes.quantity_flow_id`.
-- `part_movements` and `machine_lifecycle_events` append-only
-  enforcement (raise-on-write triggers) and the `machines.asset_tag`
-  immutability trigger are database DDL owned by the Alembic
-  migrations, not by this metadata.
+- `part_movements`, `machine_lifecycle_events`, and `audit_events`
+  append-only enforcement (raise-on-write triggers) and the
+  `machines.asset_tag` immutability trigger are database DDL owned by
+  the Alembic migrations, not by this metadata.
 
 Every constraint and index carries an explicit deterministic name so
 database errors are debuggable and migrations stay reviewable.
@@ -58,6 +60,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.elements import conv
 
 from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
     MachineLifecycleEventType,
     MachineLifecycleState,
     MovementType,
@@ -815,4 +819,53 @@ class PartMovement(Base):
         ),
         UniqueConstraint("device_event_id", name="uq_part_movements_device_event_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
+    )
+
+
+class AuditEvent(Base):
+    """Generic append-only audit row (SLICE1_DATA_MODEL §16).
+
+    Records master-data and business-demand changes only — WorkOrder,
+    WorkOrderDemand, and PartNumber. Rows are descriptive history for
+    display and accountability: never replayed to build state, never
+    describing production actions (the `RECEIVED` PartMovement is the
+    production audit record), and deliberately not an event-sourcing
+    framework. `entity_id` is polymorphic text with no FK — the
+    internal PK for WorkOrder/WorkOrderDemand, the canonical PN string
+    for PartNumber; integrity is guaranteed by writing the audit row in
+    the same transaction as the audited change (an Application-layer
+    transaction protocol, Phase 4 workflows). `actor_reference` stays a
+    nullable, reference-free value until authentication exists
+    (Phase 14). Append-only enforcement is the raise-on-write trigger
+    owned by the Phase 4 migration.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_reference: Mapped[str | None] = mapped_column(Text)
+    occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # jsonb snapshots of the audited fields; before_data is NULL for
+    # creation events. Edits append a new UPDATED row — prior rows are
+    # never rewritten.
+    before_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    after_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    __table_args__ = (
+        # Both vocabularies widen additively in later phases.
+        CheckConstraint(
+            f"event_type IN ('{AuditEventType.CREATED}', '{AuditEventType.UPDATED}')",
+            name=conv("ck_audit_events_event_type"),
+        ),
+        CheckConstraint(
+            f"entity_type IN ('{AuditEntityType.WORK_ORDER}',"
+            f" '{AuditEntityType.WORK_ORDER_DEMAND}', '{AuditEntityType.PART_NUMBER}')",
+            name=conv("ck_audit_events_entity_type"),
+        ),
+        # Per-entity history in write order.
+        Index("ix_audit_events_entity_type_entity_id_id", "entity_type", "entity_id", "id"),
     )
