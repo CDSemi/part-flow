@@ -108,6 +108,11 @@ ASSET_TAG_PREFIX_SQL = "prefix !~ '[[:space:]:]'"
 # stored and never entered.
 MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
 
+# PN barcode namespace (PROJECT_PROFILE §10): the reusable folder
+# barcode carries the canonical uppercase PN itself — fully derived,
+# never stored and never separately unique.
+PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
+
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
 NAMING_CONVENTION = {
@@ -474,6 +479,17 @@ class PartNumber(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    @property
+    def barcode_value(self) -> str:
+        """Derived PN barcode: the canonical PN in the PF:PN namespace.
+
+        PROJECT_PROFILE §8.1/§10: the folder barcode identifies only the
+        PN and carries the canonical uppercase PN itself — there is no
+        stored barcode column and no separate barcode key, so the
+        derivation lives with the mapping (same pattern as Machine).
+        """
+        return f"{PART_NUMBER_BARCODE_PREFIX}{self.part_number}"
 
     __table_args__ = (
         CheckConstraint(

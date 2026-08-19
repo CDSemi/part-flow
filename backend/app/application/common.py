@@ -7,7 +7,7 @@ back to the same user-facing ``ConflictError`` through the constraint
 name. These helpers carry no business rules of their own.
 """
 
-from typing import Final
+from typing import Final, NoReturn
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -59,9 +59,30 @@ def commit(session: Session, conflict_messages: dict[str, str]) -> None:
         session.commit()
     except IntegrityError as exc:
         session.rollback()
-        diagnostics = getattr(exc.orig, "diag", None)
-        constraint = getattr(diagnostics, "constraint_name", None)
-        message = conflict_messages.get(constraint or "")
-        if message is None:
-            raise
-        raise ConflictError(message) from exc
+        _raise_translated(exc, conflict_messages)
+
+
+def flush(session: Session, conflict_messages: dict[str, str]) -> None:
+    """Flush with the same constraint translation as ``commit``.
+
+    A multi-step transaction (for example one demand save staging PN
+    masters, demand rows, and audit rows) flushes between steps to
+    obtain generated keys; a constraint race lost at such a flush must
+    surface as the same user-facing ``ConflictError`` as one lost at
+    COMMIT. The rollback discards the whole staged transaction — no
+    partial state survives.
+    """
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        session.rollback()
+        _raise_translated(exc, conflict_messages)
+
+
+def _raise_translated(exc: IntegrityError, conflict_messages: dict[str, str]) -> NoReturn:
+    diagnostics = getattr(exc.orig, "diag", None)
+    constraint = getattr(diagnostics, "constraint_name", None)
+    message = conflict_messages.get(constraint or "")
+    if message is None:
+        raise exc
+    raise ConflictError(message) from exc

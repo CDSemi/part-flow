@@ -55,6 +55,18 @@ class QuantityFlowStatus(StrEnum):
     ACTIVE = "ACTIVE"
 
 
+class WorkOrderStatus(StrEnum):
+    """Stored status of a WorkOrder (PROJECT_PROFILE §8.2).
+
+    OPEN is the manual-intake initial state and matches the database
+    creation default. The vocabulary widens additively with production
+    release; completion stays derived from allocation records
+    (`completed_at`, Phase 10) and is never a stored status value.
+    """
+
+    OPEN = "OPEN"
+
+
 class AuditEventType(StrEnum):
     """Generic audit event types (SLICE1_DATA_MODEL §16).
 
