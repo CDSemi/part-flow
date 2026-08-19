@@ -261,10 +261,15 @@ function OperationDialog({
   const [serverError, setServerError] = useState<string | null>(null);
 
   const trimmedCode = code.trim();
-  const parsedMinutes = Number.parseInt(minutesText, 10);
+  // The COMPLETE entered value must be a whole minute count above zero
+  // — a fractional or otherwise malformed entry is rejected, never
+  // silently truncated to some other number (blank stays valid and
+  // persists no duration).
+  const trimmedMinutes = minutesText.trim();
+  const parsedMinutes = trimmedMinutes === '' ? null : Number(trimmedMinutes);
   const minutesInvalid =
-    minutesText.trim() !== '' &&
-    (Number.isNaN(parsedMinutes) || parsedMinutes <= 0);
+    parsedMinutes !== null &&
+    (!Number.isInteger(parsedMinutes) || parsedMinutes <= 0);
   const fixedArea = operation ? areaById.get(operation.areaId) : undefined;
 
   const submit = async () => {
@@ -281,9 +286,7 @@ function OperationDialog({
         name: name.trim() || null,
         description: description.trim() || null,
         defaultExpectedDuration:
-          minutesText.trim() === ''
-            ? null
-            : minutesToIsoDuration(parsedMinutes),
+          parsedMinutes === null ? null : minutesToIsoDuration(parsedMinutes),
         isExternal,
         isActive,
       });
@@ -388,7 +391,7 @@ function OperationDialog({
             placeholder="e.g. 30"
           />
         </AdminField>
-        {minutesInvalid && attempted ? (
+        {minutesInvalid ? (
           <div className="err" role="alert">
             The expected duration must be a whole number of minutes above zero.
           </div>

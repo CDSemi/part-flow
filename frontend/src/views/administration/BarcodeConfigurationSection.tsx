@@ -86,29 +86,41 @@ function FormatPanel({
   const [serverError, setServerError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState(false);
 
-  const parsedDigits = Number.parseInt(digitsText, 10);
-  const digits = Number.isNaN(parsedDigits)
-    ? (saved?.digits ?? 4)
-    : Math.min(8, Math.max(1, parsedDigits));
-  const trimmedPrefix = prefix.trim();
-  const prefixError = /[\s:]/.test(trimmedPrefix)
+  // The prefix travels exactly as entered (the backend contract: any
+  // whitespace or “:” anywhere is invalid, an empty prefix is valid)
+  // — an invalid entry is never trimmed into validity.
+  const prefixError = /[\s:]/.test(prefix)
     ? 'The prefix cannot contain spaces or “:”.'
     : null;
-  const format = { prefix: trimmedPrefix, digits };
+  // The COMPLETE digits value must be a whole number from 1 through 8
+  // — an out-of-range or fractional entry is rejected, never clamped,
+  // rounded, or substituted with another value.
+  const parsedDigits =
+    digitsText.trim() === '' ? Number.NaN : Number(digitsText);
+  const digitsValid =
+    Number.isInteger(parsedDigits) && parsedDigits >= 1 && parsedDigits <= 8;
+  const digitsError = digitsValid
+    ? null
+    : 'The number length must be a whole number from 1 to 8.';
+  const format =
+    prefixError === null && digitsValid
+      ? { prefix, digits: parsedDigits }
+      : null;
   // The next tag against the server's persisted counter — a format
   // change never resets the sequence, so the preview under an edited
-  // format still uses the same next number.
-  const next = formatAssetTag(format, saved?.nextSequence ?? 1);
+  // format still uses the same next number. No preview renders for an
+  // invalid format.
+  const next = format ? formatAssetTag(format, saved?.nextSequence ?? 1) : null;
   const dirty =
-    saved === null || trimmedPrefix !== saved.prefix || digits !== saved.digits;
+    saved === null || prefix !== saved.prefix || parsedDigits !== saved.digits;
 
   const submit = async () => {
-    if (prefixError) return;
+    if (prefixError !== null || !digitsValid) return;
     setBusy(true);
     setServerError(null);
     setSavedNote(false);
     try {
-      await putMachineAssetTagFormat({ prefix: trimmedPrefix, digits });
+      await putMachineAssetTagFormat({ prefix, digits: parsedDigits });
       setSavedNote(true);
       onSaved();
     } catch (error) {
@@ -168,21 +180,30 @@ function FormatPanel({
           {prefixError}
         </div>
       ) : null}
+      {digitsError ? (
+        <div className="err" role="alert">
+          {digitsError}
+        </div>
+      ) : null}
       <div className="ad-configpreview">
         <div className="prow">
           <span className="k">Asset Tags</span>
           <span className="v">
-            {formatAssetTag(format, 1)}, {formatAssetTag(format, 2)}, …
+            {format
+              ? `${formatAssetTag(format, 1)}, ${formatAssetTag(format, 2)}, …`
+              : '—'}
           </span>
         </div>
         <div className="prow">
           <span className="k">Next Asset Tag</span>
-          <span className="v">{next}</span>
+          <span className="v">{next ?? '—'}</span>
         </div>
         <div className="prow">
           <span className="k">Scanned barcode</span>
           {/* Shared app-wide barcode reading tone (global .barcodeval). */}
-          <span className="v barcodeval">{machineBarcode(next)}</span>
+          <span className="v barcodeval">
+            {next ? machineBarcode(next) : '—'}
+          </span>
         </div>
       </div>
       <p className="ad-confighelp">
@@ -198,7 +219,13 @@ function FormatPanel({
       <div className="row">
         <button
           className="bigbtn primary"
-          disabled={writeBlocked || busy || !dirty || prefixError !== null}
+          disabled={
+            writeBlocked ||
+            busy ||
+            !dirty ||
+            prefixError !== null ||
+            !digitsValid
+          }
           onClick={() => void submit()}
         >
           Save format

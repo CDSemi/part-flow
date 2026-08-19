@@ -524,6 +524,65 @@ test('Operations edit durations as minutes and send the ISO 8601 wire value', as
   expect(edit.textContent).toContain('The Area binding is fixed');
 });
 
+test('a fractional expected duration is rejected in place and never written', async () => {
+  renderAdmin();
+  openSection('Operations');
+  await screen.findByRole('button', { name: 'Edit Turning' });
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Operation' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Operation' });
+  fireEvent.change(within(dialog).getByLabelText('Code'), {
+    target: { value: 'GRIND' },
+  });
+  // A fractional value must be rejected as entered — never silently
+  // truncated to 1 minute.
+  fireEvent.change(
+    within(dialog).getByLabelText(/Expected duration in minutes/),
+    { target: { value: '1.5' } },
+  );
+  expect(within(dialog).getByRole('alert').textContent).toContain(
+    'whole number of minutes above zero',
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Operation' }),
+  );
+  // The dialog stays open and no write reached the API.
+  expect(
+    screen.getByRole('dialog', { name: 'New Operation' }),
+  ).toBeInTheDocument();
+  expect(writes).toHaveLength(0);
+
+  // Zero and negative values are rejected the same way.
+  fireEvent.change(
+    within(dialog).getByLabelText(/Expected duration in minutes/),
+    { target: { value: '0' } },
+  );
+  expect(within(dialog).getByRole('alert').textContent).toContain(
+    'whole number of minutes above zero',
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Operation' }),
+  );
+  expect(writes).toHaveLength(0);
+
+  // A whole minute count saves and travels as the ISO 8601 value.
+  fireEvent.change(
+    within(dialog).getByLabelText(/Expected duration in minutes/),
+    { target: { value: '30' } },
+  );
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Operation' }),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toHaveLength(1);
+  expect(writes[0].method).toBe('POST');
+  expect(writes[0].body).toMatchObject({
+    code: 'GRIND',
+    default_expected_duration: 'PT30M',
+  });
+});
+
 /* ============ Scan Stations ============ */
 
 test('Scan Stations validate the canonical Station ID and create through the API', async () => {
@@ -608,6 +667,75 @@ test('an unconfigured Asset Tag format states that Machines cannot be created ye
   expect(
     screen.getByText(/Machines cannot be created until it is saved/),
   ).toBeInTheDocument();
+});
+
+test('invalid Asset Tag digits are rejected in place — no clamping, no PUT', async () => {
+  renderAdmin();
+  openSection('Barcode configuration');
+  const digits = await screen.findByLabelText('Number length (digits)');
+
+  // Out of range: never clamped to 8.
+  fireEvent.change(digits, { target: { value: '12' } });
+  expect(
+    screen.getByText('The number length must be a whole number from 1 to 8.'),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save format' })).toBeDisabled();
+  // No preview renders for an invalid format — no substituted value.
+  expect(screen.queryByText(/^CD-\d/)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Save format' }));
+  expect(writes).toHaveLength(0);
+
+  // Fractional: never rounded or truncated.
+  fireEvent.change(digits, { target: { value: '2.5' } });
+  expect(
+    screen.getByText('The number length must be a whole number from 1 to 8.'),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save format' })).toBeDisabled();
+
+  // Blank: no silent fallback to the saved value.
+  fireEvent.change(digits, { target: { value: '' } });
+  expect(
+    screen.getByText('The number length must be a whole number from 1 to 8.'),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save format' })).toBeDisabled();
+  expect(writes).toHaveLength(0);
+
+  // A valid whole number from 1 through 8 clears the error and saves
+  // exactly the entered value.
+  fireEvent.change(digits, { target: { value: '6' } });
+  expect(
+    screen.queryByText('The number length must be a whole number from 1 to 8.'),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Save format' }));
+  await screen.findByText('✓ Format saved.');
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body).toEqual({ prefix: 'CD-', digits: 6 });
+});
+
+test('a prefix containing whitespace is invalid and is never trimmed into validity', async () => {
+  renderAdmin();
+  openSection('Barcode configuration');
+  const prefix = await screen.findByLabelText('Prefix');
+
+  // Trailing whitespace is part of the entered value — invalid, not
+  // trimmed away to make the entry valid.
+  fireEvent.change(prefix, { target: { value: 'CD- ' } });
+  expect(
+    screen.getByText('The prefix cannot contain spaces or “:”.'),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save format' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save format' }));
+  expect(writes).toHaveLength(0);
+
+  // An empty prefix is valid — tags are the bare zero-padded number.
+  fireEvent.change(prefix, { target: { value: '' } });
+  expect(
+    screen.queryByText('The prefix cannot contain spaces or “:”.'),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Save format' }));
+  await screen.findByText('✓ Format saved.');
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body).toEqual({ prefix: '', digits: 4 });
 });
 
 /* ============ Later-phase sections stay honest ============ */
