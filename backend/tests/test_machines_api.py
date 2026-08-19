@@ -14,11 +14,20 @@ scope (PROJECT_PROFILE §8.6, GUI_DESIGN §12):
   active Machine is not editable;
 - display-name uniqueness among the active Machines of one Area only
   (reuse across Areas and after retirement stays allowed);
-- the maintenance override lifecycle: start/update-in-place/clear with
-  the documented ``maintenance_since``/``state_changed_at`` semantics;
+- the maintenance override lifecycle: start/clear plus the in-place
+  context update through the ONE Edit Machine transaction, with the
+  documented ``maintenance_since``/``state_changed_at`` semantics;
+- Edit Machine as one Application transaction: metadata and — while
+  the override is active — the maintenance context save together or
+  not at all;
 - retirement and reactivation: blockers, the forward-only Area change,
   and the append-only lifecycle events committing atomically with the
-  change they record — blocked actions record neither.
+  change they record — blocked actions record neither; a retirement
+  carrying a recorded Save draft applies draft + retirement + event
+  in one transaction and rolls all three back on any failure;
+- the ``expected_asset_tag`` optimistic precondition: a stale
+  Confirm-new-Machine preview creates nothing and consumes no
+  sequence number.
 
 The API commits real transactions, so tests isolate through unique
 names instead of rollbacks; the module database is dropped afterwards.
@@ -269,6 +278,43 @@ def test_failed_creation_rolls_back_the_allocated_sequence(
     assert recovered["asset_tag"] == f"CD-{sequence + 1:04d}"
 
 
+def test_expected_asset_tag_is_a_precondition_never_an_identity(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Stale Confirm-new-Machine preview: 409, no Machine, no counter use."""
+    area = _create_area(client)
+    previewed = f"CD-{_next_sequence(db_engine):04d}"
+    # Another Machine is created between preview and confirmation, so
+    # the previewed tag is consumed by someone else.
+    interloper = _create_machine(client)
+    assert interloper["asset_tag"] == previewed
+
+    sequence_before = _next_sequence(db_engine)
+    stale_name = _unique("MACHINE")
+    stale = client.post(
+        "/api/machines",
+        json={"area_id": area["id"], "name": stale_name, "expected_asset_tag": previewed},
+    )
+    assert stale.status_code == 409
+    assert "out of date" in stale.json()["detail"]
+    # Nothing was consumed or created: the counter rolled back and no
+    # Machine row exists for the attempted name.
+    assert _next_sequence(db_engine) == sequence_before
+    assert stale_name not in [row["name"] for row in client.get("/api/machines").json()]
+
+    # A refreshed preview matches the very tag the failed attempt would
+    # have consumed — proof the allocation rolled back.
+    refreshed = f"CD-{sequence_before:04d}"
+    created = client.post(
+        "/api/machines",
+        json={"area_id": area["id"], "name": stale_name, "expected_asset_tag": refreshed},
+    )
+    assert created.status_code == 201, created.text
+    # The server derived the tag itself; the precondition only agreed.
+    assert created.json()["asset_tag"] == refreshed
+    assert created.json()["barcode_value"] == f"PF:MACHINE:{refreshed}"
+
+
 # ---------------------------------------------------------------------------
 # Server-owned identity and validation
 # ---------------------------------------------------------------------------
@@ -400,9 +446,11 @@ def test_maintenance_start_update_in_place_and_clear(client: TestClient) -> None
     assert again.status_code == 409
     assert "already under maintenance" in again.json()["detail"]
 
+    # The in-place context update is part of the ONE Edit Machine
+    # Save-changes transaction (no maintenance PATCH sub-resource).
     updated = client.patch(
-        f"/api/machines/{machine['id']}/maintenance",
-        json={"note": "Waiting for parts", "expected_return": "2026-09-01"},
+        f"/api/machines/{machine['id']}",
+        json={"maintenance_note": "Waiting for parts", "maintenance_expected_return": "2026-09-01"},
     )
     assert updated.status_code == 200
     updated_body = updated.json()
@@ -427,7 +475,10 @@ def test_maintenance_requires_an_active_override_and_an_active_record(
     machine = _create_machine(client)
 
     for response in (
-        client.patch(f"/api/machines/{machine['id']}/maintenance", json={"note": "x"}),
+        client.patch(f"/api/machines/{machine['id']}", json={"maintenance_note": "x"}),
+        client.patch(
+            f"/api/machines/{machine['id']}", json={"maintenance_expected_return": "2026-09-01"}
+        ),
         client.delete(f"/api/machines/{machine['id']}/maintenance"),
     ):
         assert response.status_code == 409
@@ -437,6 +488,57 @@ def test_maintenance_requires_an_active_override_and_an_active_record(
     retired_start = client.post(f"/api/machines/{machine['id']}/maintenance", json={})
     assert retired_start.status_code == 409
     assert "retired" in retired_start.json()["detail"]
+
+
+def test_edit_saves_metadata_and_maintenance_context_in_one_transaction(
+    client: TestClient,
+) -> None:
+    machine = _create_machine(client)
+    assert (
+        client.post(
+            f"/api/machines/{machine['id']}/maintenance",
+            json={"note": "old note", "expected_return": "2026-08-30"},
+        ).status_code
+        == 201
+    )
+    under_maintenance = client.get(f"/api/machines/{machine['id']}").json()
+
+    # One Save changes: metadata and maintenance context together.
+    new_name = _unique("MACHINE")
+    saved = client.patch(
+        f"/api/machines/{machine['id']}",
+        json={
+            "name": new_name,
+            "model": "VF-4",
+            "maintenance_note": "new note",
+            "maintenance_expected_return": "2026-09-15",
+        },
+    )
+    assert saved.status_code == 200
+    body = saved.json()
+    assert body["name"] == new_name
+    assert body["model"] == "VF-4"
+    assert body["maintenance_note"] == "new note"
+    assert body["maintenance_expected_return"] == "2026-09-15"
+    # The in-place context update changes neither the override start
+    # time nor the derived-state age.
+    assert body["maintenance_since"] == under_maintenance["maintenance_since"]
+    assert body["state_changed_at"] == under_maintenance["state_changed_at"]
+
+    # Atomicity: a draft mixing valid metadata with maintenance context
+    # while NO override is active fails as a whole — the metadata part
+    # is not applied either.
+    plain = _create_machine(client, notes="untouched")
+    blocked = client.patch(
+        f"/api/machines/{plain['id']}",
+        json={"name": _unique("MACHINE"), "notes": "changed", "maintenance_note": "z"},
+    )
+    assert blocked.status_code == 409
+    assert "not under maintenance" in blocked.json()["detail"]
+    fresh = client.get(f"/api/machines/{plain['id']}").json()
+    assert fresh["name"] == plain["name"]
+    assert fresh["notes"] == "untouched"
+    assert fresh["updated_at"] == plain["updated_at"]
 
 
 def test_retirement_keeps_maintenance_context_until_reactivation(
@@ -495,6 +597,91 @@ def test_retire_records_the_atomic_lifecycle_event(client: TestClient) -> None:
     assert again.status_code == 409
     assert "already retired" in again.json()["detail"]
     # The blocked retirement recorded nothing.
+    assert len(_lifecycle_events(client, int(machine["id"]))) == 1
+
+
+def test_retire_applies_the_recorded_save_draft_atomically(client: TestClient) -> None:
+    """GUI_DESIGN §12.4: the recorded Save decision executes only at the
+    final retirement confirmation — draft, retirement and event are one
+    transaction."""
+    machine = _create_machine(client)
+    assert (
+        client.post(
+            f"/api/machines/{machine['id']}/maintenance", json={"note": "pre-retire note"}
+        ).status_code
+        == 201
+    )
+    under_maintenance = client.get(f"/api/machines/{machine['id']}").json()
+
+    new_name = _unique("MACHINE")
+    retired = client.post(
+        f"/api/machines/{machine['id']}/retire",
+        json={
+            "reason": "End of life",
+            "edits": {
+                "name": new_name,
+                "notes": "Final condition recorded.",
+                "maintenance_note": "was mid-repair",
+            },
+        },
+    )
+    assert retired.status_code == 200, retired.text
+    body = retired.json()
+    # The record is retired exactly as it was saved — with the edits.
+    assert body["name"] == new_name
+    assert body["notes"] == "Final condition recorded."
+    assert body["maintenance_note"] == "was mid-repair"
+    assert body["maintenance_since"] == under_maintenance["maintenance_since"]
+    assert body["retired_on"] is not None
+
+    events = _lifecycle_events(client, int(machine["id"]))
+    assert [event["event_type"] for event in events] == ["RETIRED"]
+    assert events[0]["reason"] == "End of life"
+
+
+def test_failed_retire_draft_rolls_back_edits_retirement_and_event(
+    client: TestClient,
+) -> None:
+    area = _create_area(client)
+    occupant = _create_machine(client, area_id=int(area["id"]))
+    machine = _create_machine(client, area_id=int(area["id"]), notes="original notes")
+
+    # Draft collides with an active Machine of the Area: the whole
+    # command fails — no edits, no retirement, no lifecycle event.
+    blocked = client.post(
+        f"/api/machines/{machine['id']}/retire",
+        json={
+            "reason": "Replaced",
+            "edits": {"name": occupant["name"], "notes": "changed"},
+        },
+    )
+    assert blocked.status_code == 409
+    assert "already exists" in blocked.json()["detail"]
+
+    # A draft touching maintenance context without an active override
+    # fails the same all-or-nothing way.
+    invalid_context = client.post(
+        f"/api/machines/{machine['id']}/retire",
+        json={"reason": "Replaced", "edits": {"maintenance_note": "x", "notes": "changed"}},
+    )
+    assert invalid_context.status_code == 409
+    assert "not under maintenance" in invalid_context.json()["detail"]
+
+    fresh = client.get(f"/api/machines/{machine['id']}").json()
+    assert fresh["name"] == machine["name"]
+    assert fresh["notes"] == "original notes"
+    assert fresh["retired_on"] is None
+    assert fresh["updated_at"] == machine["updated_at"]
+    assert _lifecycle_events(client, int(machine["id"])) == []
+
+    # Without the failing draft parts the same retirement succeeds.
+    succeeded = client.post(
+        f"/api/machines/{machine['id']}/retire",
+        json={"reason": "Replaced", "edits": {"notes": "changed"}},
+    )
+    assert succeeded.status_code == 200
+    assert succeeded.json()["notes"] == "changed"
+    assert succeeded.json()["retired_on"] is not None
     assert len(_lifecycle_events(client, int(machine["id"]))) == 1
 
 

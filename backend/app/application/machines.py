@@ -18,8 +18,16 @@ IMPLEMENTATION_ROADMAP Phase 3.5):
   width: a sequence that outgrows it renders unpadded, never
   truncated. The Machine barcode is always derived
   (``PF:MACHINE:<asset-tag>``) — no barcode is stored or accepted.
+  Creation accepts the previewed tag as an optimistic precondition
+  only (stale preview → conflict, counter not consumed) — the client
+  value is never the assigned identity.
 - Display names are unique among the ACTIVE Machines of one Area;
   reuse across time and replacements stays allowed.
+- Save changes of the Edit dialog is ONE transaction: editable
+  metadata and — while the override is active — the maintenance
+  note/expected return apply together or not at all. A retirement may
+  carry the same draft as a recorded Save decision (GUI_DESIGN §12.4)
+  and applies it atomically with the retirement and its event.
 - The Area of an active Machine is fixed (moving capacity is a
   replacement); metadata editing never touches it. A retired record is
   never renamed or mutated — reactivation is the only door back.
@@ -54,7 +62,7 @@ duplicate.
 """
 
 import datetime
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -190,14 +198,37 @@ def create_machine(
     serial_number: str | None = None,
     installed_on: datetime.date | None = None,
     notes: str | None = None,
+    expected_asset_tag: str | None = None,
 ) -> Machine:
+    """Create a Machine with its automatically assigned Asset Tag.
+
+    ``expected_asset_tag`` is an optimistic precondition only — never
+    an identity: the Confirm-new-Machine summary (GUI_DESIGN §12.3)
+    shows the exact Asset Tag/barcode before creation, and the
+    frontend may submit that previewed value so a preview gone stale
+    (another Machine created, or the format changed, in between) is
+    rejected instead of silently assigning a different tag. The server
+    always derives and allocates the tag itself; on a mismatch the
+    transaction rolls back — the counter is not consumed and no
+    Machine is created — so the UI can refresh the confirmation.
+    """
     clean_name = required_text(name, "Machine name")
     area = require_active_area(session, area_id, "receive new Machines")
     _reject_duplicate_active_name(session, area, clean_name)
+    asset_tag = _allocate_asset_tag(session)
+    if expected_asset_tag is not None and expected_asset_tag != asset_tag:
+        # Roll back explicitly: the allocation UPDATE above returns the
+        # unissued sequence number with the transaction.
+        session.rollback()
+        raise ConflictError(
+            f"The previewed Asset Tag '{expected_asset_tag}' is out of date:"
+            f" the next Asset Tag is now '{asset_tag}'."
+            " Refresh the confirmation and try again."
+        )
     machine = Machine(
         area_id=area.id,
         name=clean_name,
-        asset_tag=_allocate_asset_tag(session),
+        asset_tag=asset_tag,
         description=optional_text(description),
         manufacturer=optional_text(manufacturer),
         model=optional_text(model),
@@ -224,9 +255,9 @@ def _require_not_retired(machine: Machine, action: str) -> None:
         )
 
 
-def update_machine(
+def _apply_edits(
     session: Session,
-    machine_id: int,
+    machine: Machine,
     *,
     name: object = UNSET,
     description: str | None | UnsetType = UNSET,
@@ -235,13 +266,19 @@ def update_machine(
     serial_number: str | None | UnsetType = UNSET,
     installed_on: datetime.date | None | UnsetType = UNSET,
     notes: str | None | UnsetType = UNSET,
-) -> Machine:
-    # The Area binding and the Asset Tag are deliberately not updatable:
-    # the Area of an active Machine is fixed (a capacity move is a
-    # replacement, or a forward-only change during reactivation), and
-    # Asset Tags are immutable forever.
-    machine = get_machine(session, machine_id)
-    _require_not_retired(machine, "be edited")
+    maintenance_note: str | None | UnsetType = UNSET,
+    maintenance_expected_return: datetime.date | None | UnsetType = UNSET,
+) -> bool:
+    """Validate and apply an Edit Machine draft to the loaded record.
+
+    The single Save-changes surface of the Edit dialog (GUI_DESIGN
+    §12.3): editable metadata plus — only while a maintenance override
+    is active — the maintenance note/expected return, updated in place
+    without touching ``maintenance_since`` or ``state_changed_at``.
+    Mutates the ORM object only; the caller owns the transaction, so
+    the same draft applies inside a plain update or atomically inside
+    a retirement. Returns whether anything changed.
+    """
     changed = False
 
     if not isinstance(name, UnsetType):
@@ -280,6 +317,72 @@ def update_machine(
             machine.notes = value
             changed = True
 
+    # Maintenance context is editable only inside an active override
+    # (the ck_machines_maintenance_shape rule); the in-place update
+    # deliberately changes neither the start time nor the state.
+    context_provided = not isinstance(maintenance_note, UnsetType) or not isinstance(
+        maintenance_expected_return, UnsetType
+    )
+    if context_provided and machine.maintenance_since is None:
+        raise ConflictError(
+            f"Machine '{machine.name}' is not under maintenance."
+            " Start maintenance before editing its note or expected return."
+        )
+    if not isinstance(maintenance_note, UnsetType):
+        value = optional_text(maintenance_note)
+        if value != machine.maintenance_note:
+            machine.maintenance_note = value
+            changed = True
+    if (
+        not isinstance(maintenance_expected_return, UnsetType)
+        and maintenance_expected_return != machine.maintenance_expected_return
+    ):
+        machine.maintenance_expected_return = maintenance_expected_return
+        changed = True
+
+    return changed
+
+
+def update_machine(
+    session: Session,
+    machine_id: int,
+    *,
+    name: object = UNSET,
+    description: str | None | UnsetType = UNSET,
+    manufacturer: str | None | UnsetType = UNSET,
+    model: str | None | UnsetType = UNSET,
+    serial_number: str | None | UnsetType = UNSET,
+    installed_on: datetime.date | None | UnsetType = UNSET,
+    notes: str | None | UnsetType = UNSET,
+    maintenance_note: str | None | UnsetType = UNSET,
+    maintenance_expected_return: datetime.date | None | UnsetType = UNSET,
+) -> Machine:
+    """Save changes of the Edit Machine dialog as one transaction.
+
+    Editable metadata and — while the override is active — the
+    maintenance note/expected return commit together or not at all.
+    The Area binding and the Asset Tag are deliberately not updatable:
+    the Area of an active Machine is fixed (a capacity move is a
+    replacement, or a forward-only change during reactivation), and
+    Asset Tags are immutable forever. ``maintenance_since``,
+    ``state_changed_at`` and the lifecycle fields stay server-owned.
+    """
+    machine = get_machine(session, machine_id)
+    _require_not_retired(machine, "be edited")
+    changed = _apply_edits(
+        session,
+        machine,
+        name=name,
+        description=description,
+        manufacturer=manufacturer,
+        model=model,
+        serial_number=serial_number,
+        installed_on=installed_on,
+        notes=notes,
+        maintenance_note=maintenance_note,
+        maintenance_expected_return=maintenance_expected_return,
+    )
+
     if changed:
         machine.updated_at = func.now()
         commit(session, _MACHINE_CONFLICTS)
@@ -314,46 +417,6 @@ def start_maintenance(
     return machine
 
 
-def update_maintenance(
-    session: Session,
-    machine_id: int,
-    *,
-    note: str | None | UnsetType = UNSET,
-    expected_return: datetime.date | None | UnsetType = UNSET,
-) -> Machine:
-    """Update the note/expected return of an active override in place.
-
-    Deliberately touches neither ``maintenance_since`` nor
-    ``state_changed_at``: the context changes, the state does not
-    (PROJECT_PROFILE §8.6).
-    """
-    machine = get_machine(session, machine_id)
-    _require_not_retired(machine, "update maintenance")
-    if machine.maintenance_since is None:
-        raise ConflictError(
-            f"Machine '{machine.name}' is not under maintenance."
-            " Start maintenance before updating its note or expected return."
-        )
-    changed = False
-
-    if not isinstance(note, UnsetType):
-        value = optional_text(note)
-        if value != machine.maintenance_note:
-            machine.maintenance_note = value
-            changed = True
-    if (
-        not isinstance(expected_return, UnsetType)
-        and expected_return != machine.maintenance_expected_return
-    ):
-        machine.maintenance_expected_return = expected_return
-        changed = True
-
-    if changed:
-        machine.updated_at = func.now()
-        commit(session, _MACHINE_CONFLICTS)
-    return machine
-
-
 def clear_maintenance(session: Session, machine_id: int) -> Machine:
     machine = get_machine(session, machine_id)
     _require_not_retired(machine, "clear maintenance")
@@ -381,10 +444,23 @@ def retire_machine(
     *,
     reason: str | None = None,
     actor: str | None = None,
+    edits: dict[str, Any] | None = None,
 ) -> Machine:
+    """Retire a Machine, optionally applying a recorded Edit draft first.
+
+    GUI_DESIGN §12.4: a retirement started with unsaved edits records a
+    Save/Discard decision that is executed only at the final
+    confirmation. A recorded Save arrives here as ``edits`` — the same
+    draft shape the Edit dialog saves — and the draft, the retirement
+    date, and the ``RETIRED`` lifecycle event commit in ONE
+    transaction: if any validation or write fails, none of the three
+    persists. A recorded Discard simply sends no draft.
+    """
     machine = get_machine(session, machine_id)
     if machine.retired_on is not None:
         raise ConflictError(f"Machine '{machine.name}' is already retired.")
+    if edits:
+        _apply_edits(session, machine, **edits)
     # The assigned-quantity blocker (PROJECT_PROFILE §8.6) has nothing
     # to check in Phase 3.5: assignment persistence arrives with
     # Phase 6, so no quantity can be assigned yet. Phase 6 must add the

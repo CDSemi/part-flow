@@ -19,17 +19,27 @@ Deliberate surface decisions:
 - ``asset_tag`` and the derived ``barcode_value``
   (``PF:MACHINE:<asset-tag>``) appear only in responses — they are
   never client-writable, and no independent barcode field exists.
+  Creation optionally carries ``expected_asset_tag``, the exact value
+  the Confirm-new-Machine summary previewed, as an optimistic
+  precondition only: the server still allocates the tag itself, and a
+  stale preview is a 409 with nothing consumed.
+- ``PATCH /machines/{id}`` is the ONE Save-changes transaction of the
+  Edit dialog: editable metadata plus — while the override is
+  active — the maintenance note/expected return, updated in place
+  without touching ``maintenance_since`` or ``state_changed_at``.
 - The Area binding is absent from the update schema: the Area of an
   active Machine is fixed; only reactivation may carry a forward-only
   ``area_id`` for a physical machine that moved while retired.
-- The maintenance override is its own sub-resource: ``POST`` starts
-  it, ``PATCH`` updates note/expected return in place, ``DELETE``
-  clears the override (the override is removed — the Machine record
-  itself is never deleted, and environment configuration stays
-  deactivate-only).
+- The maintenance override keeps two sub-resource actions: ``POST``
+  starts it and ``DELETE`` clears it (the override is removed — the
+  Machine record itself is never deleted, and environment
+  configuration stays deactivate-only).
 - Retirement and reactivation are explicit lifecycle actions
   (``POST …/retire``, ``POST …/reactivate``), each committing
-  atomically with its ``machine_lifecycle_events`` row. The optional
+  atomically with its ``machine_lifecycle_events`` row. A retirement
+  may carry ``edits`` — the recorded Save decision of GUI_DESIGN
+  §12.4 — applied in the same transaction as the retirement and its
+  event; a recorded Discard sends no draft. The optional
   ``actor`` travels as the nullable, reference-free value Phase 3.5
   defines — authenticated actor identity arrives with Phase 14.
 """
@@ -102,11 +112,24 @@ class MachineCreateRequest(BaseModel):
     serial_number: str | None = None
     installed_on: datetime.date | None = None
     notes: str | None = None
+    # Optimistic precondition only (GUI_DESIGN §12.3 Confirm new
+    # Machine): the exact previewed Asset Tag. The server still derives
+    # and allocates the tag itself — this value is never the assigned
+    # identity; a stale preview is a 409 that consumes nothing.
+    expected_asset_tag: str | None = None
 
 
 class MachineUpdateRequest(BaseModel):
-    # No area_id (fixed while active), no asset_tag (immutable), no
-    # lifecycle or maintenance fields (own endpoints).
+    """One Save-changes draft of the Edit Machine dialog.
+
+    No area_id (fixed while active), no asset_tag (immutable), no
+    lifecycle fields and no ``maintenance_since`` (server-owned). The
+    maintenance note/expected return are editable in place — only
+    while the override is active — without touching the start time or
+    the state. Also the draft shape a retirement may carry as its
+    recorded Save decision.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
@@ -116,16 +139,11 @@ class MachineUpdateRequest(BaseModel):
     serial_number: str | None = None
     installed_on: datetime.date | None = None
     notes: str | None = None
+    maintenance_note: str | None = None
+    maintenance_expected_return: datetime.date | None = None
 
 
 class MaintenanceStartRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    note: str | None = None
-    expected_return: datetime.date | None = None
-
-
-class MaintenanceUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     note: str | None = None
@@ -137,6 +155,10 @@ class MachineRetireRequest(BaseModel):
 
     reason: str | None = None
     actor: str | None = None
+    # Recorded Save decision (GUI_DESIGN §12.4): an Edit draft applied
+    # atomically with the retirement and its lifecycle event. A
+    # recorded Discard sends no draft.
+    edits: MachineUpdateRequest | None = None
 
 
 class MachineReactivateRequest(BaseModel):
@@ -182,6 +204,7 @@ def create_machine(body: MachineCreateRequest, session: SessionDep) -> MachineRe
         serial_number=body.serial_number,
         installed_on=body.installed_on,
         notes=body.notes,
+        expected_asset_tag=body.expected_asset_tag,
     )
     return _machine_response(machine)
 
@@ -204,16 +227,6 @@ def start_maintenance(
     return _machine_response(machine)
 
 
-@router.patch("/machines/{machine_id}/maintenance")
-def update_maintenance(
-    machine_id: int, body: MaintenanceUpdateRequest, session: SessionDep
-) -> MachineResponse:
-    machine = machines.update_maintenance(
-        session, machine_id, **body.model_dump(exclude_unset=True)
-    )
-    return _machine_response(machine)
-
-
 @router.delete("/machines/{machine_id}/maintenance")
 def clear_maintenance(machine_id: int, session: SessionDep) -> MachineResponse:
     return _machine_response(machines.clear_maintenance(session, machine_id))
@@ -223,7 +236,13 @@ def clear_maintenance(machine_id: int, session: SessionDep) -> MachineResponse:
 def retire_machine(
     machine_id: int, body: MachineRetireRequest, session: SessionDep
 ) -> MachineResponse:
-    machine = machines.retire_machine(session, machine_id, reason=body.reason, actor=body.actor)
+    machine = machines.retire_machine(
+        session,
+        machine_id,
+        reason=body.reason,
+        actor=body.actor,
+        edits=body.edits.model_dump(exclude_unset=True) if body.edits is not None else None,
+    )
     return _machine_response(machine)
 
 
