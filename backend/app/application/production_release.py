@@ -1,0 +1,435 @@
+"""Explicit production release (Phase 4 — the Slice 1 release command).
+
+The one Application command that introduces physical production
+quantity (PROJECT_PROFILE §13; SLICE1_DATA_MODEL §8–§14): it creates a
+QuantityFlow with its route mode, snapshots an AssignedRoute **only**
+for a `PLANNED` release, appends the immutable `RECEIVED` PartMovement,
+and establishes the current-position projection — one submission, ONE
+database transaction, idempotent per `device_event_id`.
+
+Rules owned here:
+
+- Order of operations follows SLICE1_DATA_MODEL §13 exactly:
+  idempotency check first (a transport retry of a committed release
+  returns the original result even if entities changed state since),
+  then validation, then the active-quantity confirmation check, then
+  the inserts. Any failure before COMMIT leaves zero writes.
+- The deterministic request fingerprint (SLICE1 §14) covers the
+  canonical PN, quantity, Route Mode, RouteTemplate when `PLANNED`,
+  starting Area, Operation, and the initiating WorkOrderDemand
+  context. It is persisted in the `RECEIVED` metadata: the Movement
+  row, found via `UNIQUE (device_event_id)`, IS the idempotency record
+  — no separate idempotency table or framework exists.
+- The WorkOrderDemand context is informational release context for
+  audit display (SLICE1 §3/§11): no `work_order_demand_id` FK exists
+  on Movement and WorkOrderDemand never owns Movement. The immutable
+  metadata context is also the canonical evidence that a demand has
+  released quantity — the basis of the removal rule of PROJECT_PROFILE
+  §13 (`demand_has_released_quantity`).
+- Releasing a PN with ACTIVE flows requires the explicit confirmation
+  flag set by the UI after showing the existing distribution; a
+  confirmed release creates a separate flow and NEVER merges.
+- The release transaction appends **no** generic `audit_events` row:
+  the `RECEIVED` PartMovement is itself the immutable production audit
+  record (SLICE1 §16).
+"""
+
+import hashlib
+import json
+import uuid
+from typing import Any, Final, NamedTuple
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.application.common import flush, required_flag
+from app.application.environment import require_active_area
+from app.application.errors import (
+    ActiveQuantityConfirmationRequiredError,
+    ConflictError,
+    IdempotencyConflictError,
+    InvalidInputError,
+    NotFoundError,
+)
+from app.application.part_numbers import canonical_part_number
+from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
+from app.infrastructure.models import (
+    Area,
+    AssignedRoute,
+    AssignedRouteStep,
+    Operation,
+    PartMovement,
+    QuantityFlow,
+    RouteStep,
+    RouteTemplate,
+    WorkOrderDemand,
+)
+
+# Keys of the immutable RECEIVED metadata (SLICE1 §11/§14). The
+# fingerprint is the idempotency comparison value; the context block
+# carries the informational initiating WorkOrderDemand (and actor,
+# until authentication exists — Phase 14).
+_FINGERPRINT_KEY: Final = "request_fingerprint"
+_CONTEXT_KEY: Final = "context"
+_DEMAND_ID_KEY: Final = "work_order_demand_id"
+_ACTOR_KEY: Final = "actor"
+
+_DEVICE_EVENT_ID_CONSTRAINT: Final = "uq_part_movements_device_event_id"
+
+
+class ProductionRelease(NamedTuple):
+    """One committed release: the flow, its RECEIVED Movement, and
+    whether this call created it (False = idempotent replay)."""
+
+    flow: QuantityFlow
+    movement: PartMovement
+    created: bool
+
+
+# ---------------------------------------------------------------------------
+# Input normalization — pure shape checks, no database access
+# ---------------------------------------------------------------------------
+
+
+def _validated_release_quantity(value: object) -> int:
+    # bool is an int subclass — an explicit true/false is never a
+    # quantity.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise InvalidInputError("Release quantity must be a positive whole number.")
+    return value
+
+
+def _validated_route_mode(value: object) -> RouteMode:
+    if isinstance(value, RouteMode):
+        return value
+    if isinstance(value, str):
+        try:
+            return RouteMode(value)
+        except ValueError:
+            pass
+    raise InvalidInputError("Route Mode must be FLOATING or PLANNED.")
+
+
+def _normalized_device_event_id(value: object) -> str:
+    """Normalize the client-generated idempotency key (SLICE1 §14).
+
+    The client generates one UUID per release submission and reuses it
+    on every transport retry. Normalizing to the canonical hyphenated
+    lowercase form keeps 'same id' deterministic whatever textual UUID
+    variant a client sends.
+    """
+    if not isinstance(value, str):
+        raise InvalidInputError("device_event_id must be text.")
+    try:
+        return str(uuid.UUID(value.strip()))
+    except ValueError:
+        raise InvalidInputError("device_event_id must be a UUID.") from None
+
+
+def _request_fingerprint(
+    *,
+    part_number: str,
+    quantity: int,
+    route_mode: RouteMode,
+    route_template_id: int | None,
+    starting_area_id: int,
+    operation_id: int,
+    work_order_demand_id: int,
+) -> str:
+    """Deterministic canonical hash of the normalized request (SLICE1 §14)."""
+    normalized = {
+        "part_number": part_number,
+        "quantity": quantity,
+        "route_mode": str(route_mode),
+        "route_template_id": route_template_id,
+        "starting_area_id": starting_area_id,
+        "operation_id": operation_id,
+        "work_order_demand_id": work_order_demand_id,
+    }
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Idempotency (SLICE1 §14) — the committed Movement is the record
+# ---------------------------------------------------------------------------
+
+
+def _committed_release(session: Session, device_event_id: str) -> PartMovement | None:
+    return session.scalar(
+        select(PartMovement).where(PartMovement.device_event_id == device_event_id)
+    )
+
+
+def _replay_or_conflict(
+    session: Session, movement: PartMovement, fingerprint: str
+) -> ProductionRelease:
+    """Resolve a duplicate ``device_event_id`` against the committed row."""
+    stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
+    if stored != fingerprint:
+        raise IdempotencyConflictError(
+            "This device_event_id was already used for a different release"
+            " request. Nothing was created — a new release intent needs a"
+            " new device_event_id."
+        )
+    flow = session.get_one(QuantityFlow, movement.quantity_flow_id)
+    return ProductionRelease(flow=flow, movement=movement, created=False)
+
+
+# ---------------------------------------------------------------------------
+# The release command
+# ---------------------------------------------------------------------------
+
+
+def release_to_production(
+    session: Session,
+    *,
+    work_order_id: int,
+    work_order_demand_id: int,
+    part_number: object,
+    quantity: object,
+    route_mode: object,
+    route_template_id: int | None,
+    starting_area_id: int,
+    operation_id: int,
+    confirm_active_quantity: object,
+    device_event_id: object,
+    actor: str | None = None,
+) -> ProductionRelease:
+    """Release production quantity as ONE idempotent transaction.
+
+    Validates everything before any write; a replayed submission (same
+    ``device_event_id`` + same normalized request) returns the original
+    committed result and creates nothing, a mismatched reuse is an
+    explicit idempotency conflict that creates nothing.
+    """
+    # -- Pure input shape (no database) -------------------------------
+    pn = canonical_part_number(part_number)
+    release_quantity = _validated_release_quantity(quantity)
+    mode = _validated_route_mode(route_mode)
+    confirmed = required_flag(confirm_active_quantity, "confirm_active_quantity")
+    if mode is RouteMode.PLANNED:
+        if route_template_id is None:
+            raise InvalidInputError("A PLANNED release requires a Route Template.")
+    elif route_template_id is not None:
+        raise InvalidInputError(
+            "A FLOATING release takes no Route Template — it has no"
+            " AssignedRoute; its route trace is derived from Movement"
+            " history."
+        )
+    event_id = _normalized_device_event_id(device_event_id)
+    fingerprint = _request_fingerprint(
+        part_number=pn,
+        quantity=release_quantity,
+        route_mode=mode,
+        route_template_id=route_template_id if mode is RouteMode.PLANNED else None,
+        starting_area_id=starting_area_id,
+        operation_id=operation_id,
+        work_order_demand_id=work_order_demand_id,
+    )
+
+    # -- Idempotency check FIRST (SLICE1 §13/§14) ----------------------
+    committed = _committed_release(session, event_id)
+    if committed is not None:
+        return _replay_or_conflict(session, committed, fingerprint)
+
+    # -- Validation before write ---------------------------------------
+    # The demand row is locked for the duration of the transaction so a
+    # concurrent demand removal serializes against this release: the
+    # removal rule (PROJECT_PROFILE §13) can never race past a release
+    # in flight for the same demand.
+    demand = session.get(WorkOrderDemand, work_order_demand_id, with_for_update=True)
+    if demand is None or demand.work_order_id != work_order_id:
+        raise NotFoundError(
+            f"Demand line {work_order_demand_id} does not exist on Work Order {work_order_id}."
+        )
+    if demand.part_number != pn:
+        raise InvalidInputError(
+            f"Part Number '{pn}' does not match demand line {demand.id}"
+            f" ('{demand.part_number}'). A release is initiated from the"
+            " demand's own PN."
+        )
+
+    area = require_active_area(session, starting_area_id, "accept a production release")
+    operation = session.get(Operation, operation_id)
+    if operation is None:
+        raise InvalidInputError(f"Operation {operation_id} does not exist.")
+    if operation.area_id != area.id:
+        raise InvalidInputError(
+            f"Operation '{operation.code}' does not belong to Area '{area.name}'."
+        )
+    if not operation.is_active:
+        raise ConflictError(
+            f"Operation '{operation.code}' is inactive and cannot accept a production release."
+        )
+
+    template_steps: list[RouteStep] = []
+    template: RouteTemplate | None = None
+    if mode is RouteMode.PLANNED:
+        template = session.get(RouteTemplate, route_template_id)
+        if template is None:
+            raise InvalidInputError(f"Route Template {route_template_id} does not exist.")
+        if template.archived_at is not None:
+            raise ConflictError(
+                f"Route Template '{template.name}' is archived and is never"
+                " offered for new route assignments."
+            )
+        template_steps = list(
+            session.scalars(
+                select(RouteStep)
+                .where(RouteStep.route_template_id == template.id)
+                .order_by(RouteStep.sequence)
+            )
+        )
+        if not template_steps:
+            raise InvalidInputError(
+                f"Route Template '{template.name}' has no steps to release against."
+            )
+        first_step = template_steps[0]
+        # Mismatch is a validation failure, never a silent adjustment
+        # (SLICE1 §10).
+        if first_step.area_id != area.id:
+            raise InvalidInputError(
+                f"The first step of Route Template '{template.name}' does not"
+                f" start in Area '{area.name}'. The snapshot's first step"
+                " must match the confirmed starting Area."
+            )
+        if first_step.operation_id is not None and first_step.operation_id != operation.id:
+            raise InvalidInputError(
+                f"The first step of Route Template '{template.name}' defines"
+                " a different Operation than the confirmed one."
+            )
+
+    # -- Active-quantity safety (SLICE1 §8.2) ---------------------------
+    active_rows = session.execute(
+        select(QuantityFlow, Area.name)
+        .join(Area, Area.id == QuantityFlow.current_area_id)
+        .where(
+            QuantityFlow.part_number == pn,
+            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+        )
+        .order_by(QuantityFlow.id)
+    ).all()
+    if active_rows and not confirmed:
+        raise ActiveQuantityConfirmationRequiredError(
+            f"Part Number '{pn}' already has active production quantity."
+            " Review the existing distribution and confirm the intent to"
+            " release a separate Quantity Flow — existing quantity is never"
+            " merged.",
+            existing_active_quantity=[
+                {
+                    "quantity_flow_id": flow.id,
+                    "quantity": flow.quantity,
+                    "route_mode": flow.route_mode,
+                    "current_area_id": flow.current_area_id,
+                    "current_area_name": area_name,
+                }
+                for flow, area_name in active_rows
+            ],
+        )
+
+    # -- Writes (SLICE1 §13) — all inside the one open transaction ------
+    snapshot: AssignedRoute | None = None
+    first_snapshot_step: AssignedRouteStep | None = None
+    if template is not None:
+        snapshot = AssignedRoute(source_route_template_id=template.id)
+        session.add(snapshot)
+        flush(session, {})
+        snapshot_steps = [
+            AssignedRouteStep(
+                assigned_route_id=snapshot.id,
+                sequence=step.sequence,
+                area_id=step.area_id,
+                operation_id=step.operation_id,
+                expected_duration=step.expected_duration,
+                instructions=step.instructions,
+            )
+            for step in template_steps
+        ]
+        session.add_all(snapshot_steps)
+        flush(session, {})
+        first_snapshot_step = snapshot_steps[0]
+
+    flow = QuantityFlow(
+        part_number=pn,
+        quantity=release_quantity,
+        status=QuantityFlowStatus.ACTIVE,
+        route_mode=mode,
+        assigned_route_id=snapshot.id if snapshot is not None else None,
+        # The projection is set by the INSERT itself: no projection-less
+        # row ever exists (SLICE1 §9/§15).
+        current_area_id=area.id,
+    )
+    session.add(flow)
+    flush(session, {})
+
+    context: dict[str, Any] = {_DEMAND_ID_KEY: demand.id}
+    if actor is not None:
+        context[_ACTOR_KEY] = actor
+    movement = PartMovement(
+        quantity_flow_id=flow.id,
+        part_number=pn,
+        movement_type=MovementType.RECEIVED,
+        quantity=release_quantity,
+        from_area_id=None,
+        to_area_id=area.id,
+        operation_id=operation.id,
+        assigned_route_step_id=(
+            first_snapshot_step.id if first_snapshot_step is not None else None
+        ),
+        # Synchronous online semantics: both server-assigned and equal
+        # (SLICE1 §14).
+        occurred_at=func.now(),
+        server_received_at=func.now(),
+        device_event_id=event_id,
+        metadata_={_FINGERPRINT_KEY: fingerprint, _CONTEXT_KEY: context},
+    )
+    session.add(movement)
+
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        diagnostics = getattr(exc.orig, "diag", None)
+        if getattr(diagnostics, "constraint_name", None) == _DEVICE_EVENT_ID_CONSTRAINT:
+            # A concurrent submission with the same device_event_id won
+            # the race at COMMIT: resolve it exactly like a pre-checked
+            # duplicate — original result on a matching fingerprint,
+            # explicit conflict otherwise. Nothing of this attempt
+            # persisted (the rollback discarded flow, snapshot, and
+            # Movement together).
+            winner = _committed_release(session, event_id)
+            if winner is not None:
+                return _replay_or_conflict(session, winner, fingerprint)
+        raise
+    return ProductionRelease(flow=flow, movement=movement, created=True)
+
+
+# ---------------------------------------------------------------------------
+# Released-quantity evidence for the demand removal rule
+# ---------------------------------------------------------------------------
+
+
+def demand_has_released_quantity(session: Session, work_order_demand_id: int) -> bool:
+    """True when any committed release recorded this demand as its context.
+
+    The removal rule of PROJECT_PROFILE §13 needs "has this demand ever
+    released" without a Movement→Demand foreign key (which is
+    deliberately forbidden — WorkOrderDemand never owns Movement). The
+    canonical evidence is the immutable `RECEIVED` metadata context
+    (SLICE1 §3/§11/§14): the release command always records the
+    initiating demand id there, and `part_movements` rows can never be
+    updated or deleted, so the answer never regresses.
+    """
+    return (
+        session.scalar(
+            select(PartMovement.id)
+            .where(
+                PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
+                == work_order_demand_id
+            )
+            .limit(1)
+        )
+        is not None
+    )

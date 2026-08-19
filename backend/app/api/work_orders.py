@@ -3,8 +3,9 @@
 HTTP surface for the Work Orders management view (GUI_DESIGN
 §11.1–§11.3): listing/searching the WO list, loading Work Order
 Details with demand lines, creating a Work Order with its demand
-draft, and saving edits. Business demand only — production release is
-a separate, later capability and no endpoint here can touch
+draft, saving edits, and removing demand lines. Business demand only —
+production release lives on its own surface
+(``app.api.production_release``) and no endpoint here can touch
 QuantityFlows, PartMovements, or the current-position projection.
 
 Routes stay thin orchestration: request schemas validate shape only
@@ -27,9 +28,12 @@ Deliberate surface decisions:
   /work-orders/{id}`` saves the Work Order Details draft (header
   edits + ``line_edits`` + ``new_lines``) — each all-or-nothing with
   its audit rows.
-- There is no demand-line DELETE (removal is deferred with release,
-  whose released-quantity rule it depends on), no release endpoint,
-  and no Completed Work Orders surface yet (Phase 10+).
+- ``DELETE /work-orders/{id}/demands/{id}`` enforces the canonical
+  removal rule (PROJECT_PROFILE §13) in the backend, never only in
+  the UI: a saved demand deletes only while no production quantity
+  has ever been released for it — afterwards the request is a 409
+  that removes nothing. There is still no Completed Work Orders
+  surface (Phase 10+).
 - ``priority_rank`` and ``allocated_quantity`` appear only in
   responses: Hot ranking (Phase 12) and allocation (Phase 10) own
   those values.
@@ -231,3 +235,15 @@ def update_work_order(
         new_lines=[line.model_dump() for line in body.new_lines],
     )
     return _detail_response(detail)
+
+
+@router.delete("/work-orders/{work_order_id}/demands/{demand_id}", status_code=204)
+def delete_work_order_demand(work_order_id: int, demand_id: int, session: SessionDep) -> None:
+    """Remove one saved demand line (PROJECT_PROFILE §13).
+
+    Blocked with 409 once any quantity for the demand has been
+    released; removal never cascades to the PartNumber master,
+    QuantityFlows, PartMovements, release history, or other demand
+    lines for the same PN.
+    """
+    work_orders.delete_work_order_demand(session, work_order_id, demand_id)

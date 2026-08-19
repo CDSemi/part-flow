@@ -35,9 +35,15 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   new and edited demand lines, any first-use PN masters, and every
   ``audit_events`` row commit together or roll back together — no
   partial business draft can persist (SLICE1_DATA_MODEL §16).
-- Demand-line removal is deliberately absent (deferred with the
-  release workflow that its released-quantity rule depends on), as are
-  release, allocation, and Completed Work Orders.
+- Demand-line removal follows the canonical rule (PROJECT_PROFILE §13):
+  a saved demand may be deleted only while no production quantity has
+  ever been released for it — the released-quantity evidence lives in
+  the immutable ``RECEIVED`` metadata context
+  (``production_release.demand_has_released_quantity``). Removal never
+  touches the PartNumber master, QuantityFlows, PartMovements, release
+  history, or other demand lines; an unsaved draft is a frontend
+  concern and never reaches this layer. Release itself, allocation,
+  and Completed Work Orders stay outside this module.
 """
 
 import datetime
@@ -48,7 +54,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
-from app.application import audit
+from app.application import audit, production_release
 from app.application.common import UNSET, UnsetType, commit, flush, optional_text
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.part_numbers import PART_NUMBER_CONFLICTS, ensure_part_number
@@ -494,3 +500,41 @@ def update_work_order(
     if header_changed or audited or created:
         commit(session, _WORK_ORDER_CONFLICTS)
     return WorkOrderDetail(work_order, [*detail.demands, *created])
+
+
+# ---------------------------------------------------------------------------
+# Demand-line removal — the canonical rule of PROJECT_PROFILE §13
+# ---------------------------------------------------------------------------
+
+
+def delete_work_order_demand(session: Session, work_order_id: int, demand_id: int) -> None:
+    """Delete one saved demand line, blocked once quantity has released.
+
+    The backend enforces the rule — never only the UI: once any
+    quantity for this demand has been released to production, deletion
+    is refused (later adjustments go through correction and production
+    workflows, PROJECT_PROFILE §16 — removal is not a correction
+    mechanism). Removal deletes exactly the one demand row: the
+    PartNumber master, QuantityFlows, PartMovements, release history,
+    the demand's own audit history, and other demand lines for the
+    same PN are untouched.
+
+    The row lock serializes this check against a release in flight for
+    the same demand (`release_to_production` locks the demand row for
+    its whole transaction), so the released-quantity evidence cannot
+    appear between the check and the DELETE. No audit row is appended:
+    the Slice 1 audit vocabulary records creations and edits only
+    (SLICE1_DATA_MODEL §16) and the demand's existing CREATED/UPDATED
+    history remains — historical records never disappear.
+    """
+    demand = session.get(WorkOrderDemand, demand_id, with_for_update=True)
+    if demand is None or demand.work_order_id != work_order_id:
+        raise NotFoundError(
+            f"Demand line {demand_id} does not exist on Work Order {work_order_id}."
+        )
+    if production_release.demand_has_released_quantity(session, demand.id):
+        # GUI_DESIGN §11.2 wording — the UI disables the action, the
+        # backend still refuses.
+        raise ConflictError("Cannot remove: production quantity has already been released.")
+    session.delete(demand)
+    commit(session, _WORK_ORDER_CONFLICTS)
