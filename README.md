@@ -6,12 +6,17 @@ production quantities through the factory.
 This repository currently contains the **Phase 1 Repository Foundation**,
 the **Phase 2 Frontend Design System and Application Shell**, the
 **Phase 3 Minimum Canonical Domain and Data Foundation**, and the
-**Phase 3.5 Minimum Environment Setup** persistence foundation:
+completed **Phase 3.5 Minimum Environment Setup** (persistence, the
+configuration APIs, and the real Administration/Machines frontend):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
-  ten approved GUI views with development-only mock data, and the real
-  `/api/health` connectivity integration
+  real `/api/health` connectivity integration, and the ten approved GUI
+  views — the Phase 3.5 views (Administration's minimum-environment
+  sections and Management → Machines) read and write the real `/api`
+  surface through the shared client layer in `src/api/` and ship in
+  every build, while the remaining views stay development-only mock
+  views until their backend slices exist
 - `backend/` — FastAPI with the operational health endpoint
   (`GET /api/health`), the Phase 3.5 environment configuration API
   (Departments, Areas with derived `PF:AREA` barcodes, Operations,
@@ -36,11 +41,13 @@ the **Phase 2 Frontend Design System and Application Shell**, the
 - Docker Compose development stack with health checks
 
 **No production workflows exist yet**: the Phase 3 and Phase 3.5
-schema is migrated and the Phase 3.5 configuration APIs (environment
-and Machines management) read and write configuration and Machine
-master data, but nothing writes production data.
-All view content is development-only mock data; barcode
-resolution, Work Order intake, and all tracking behavior arrive in later phases.
+schema is migrated and the Phase 3.5 configuration surfaces
+(Administration → Departments/Areas/Operations/Scan Stations/Barcode
+configuration and Management → Machines) read and write real
+configuration and Machine master data end to end, but nothing writes
+production data. Every other view renders development-only mock data;
+barcode resolution, Work Order intake, Machine assignments, and all
+tracking behavior arrive in later phases.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
@@ -86,17 +93,30 @@ Frontend structure:
   request timeout below the probe interval, recheck on tab
   focus/visibility, explicit Retry; no optimistic writes — a write is
   recorded only after the server confirms it), dev state preview.
-- `src/mocks/` — the development-only mock datasets. Views read from
-  here and pass data to components via props; nothing in `src/mocks`
-  encodes production business rules or is written to the backend.
-  Mock views and datasets are reachable only through the dev-only
-  registry `src/app/dev-views.ts` (`import.meta.env.DEV`), so a
-  production build excludes them entirely and every route renders an
-  explicit "not connected to a production data source yet" state.
-  `npm run build` verifies this by scanning the generated assets for
-  known mock sentinel values (`scripts/check-production-boundary.mjs`).
-  Shared view-model types live in `src/views/view-models.ts` (types
-  only — production-safe).
+- `src/api/` — the shared API client layer of the real Phase 3.5
+  views: a thin typed fetch core translating the backend's
+  `{"detail": …}` errors into user-facing messages, the environment
+  configuration and Machines endpoints with snake_case ↔ camelCase
+  mapping, the ISO 8601 duration helpers, and the `useApiData`
+  loading/error/reload hook. Production-safe — never imports from
+  `src/mocks/`.
+- `src/mocks/` — the development-only mock datasets. The remaining
+  mock views read from here and pass data to components via props;
+  nothing in `src/mocks` encodes production business rules or is
+  written to the backend. Mock views and datasets are reachable only
+  through the dev-only registry `src/app/dev-views.ts`
+  (`import.meta.env.DEV`), so a production build excludes them
+  entirely: the real Phase 3.5 views (`src/app/real-views.ts` —
+  Machines and Administration) ship in every build against the live
+  `/api` surface, and every other route renders an explicit "not
+  connected to a production data source yet" state. `npm run build`
+  verifies the boundary by scanning the generated assets for known
+  mock sentinel values (`scripts/check-production-boundary.mjs`), and
+  `src/production-boundary.test.ts` additionally verifies at the
+  source level that no production module imports from `src/mocks/`
+  (the development-only Worker sessions preview stays behind an
+  `import.meta.env.DEV`-guarded lazy import). Shared view-model types
+  live in `src/views/view-models.ts` (types only — production-safe).
 - `src/views/<view>/` — one folder per GUI view. `src/views/scan-station/barcode.ts`
   holds the deterministic `PF:` barcode parsing and PN normalization (PN
   barcodes carry the canonical uppercase, whitespace-free PN itself —
@@ -390,9 +410,10 @@ format check, lint, typecheck, tests, and production build. A separate
 ## Repository layout
 
 ```text
-frontend/          Vite + React + TypeScript app (Phase 2 shell + mock views)
+frontend/          Vite + React + TypeScript app (shell + real Phase 3.5 views + mock views)
   src/styles/      semantic design tokens and shared primitives
-  src/app/         router, theme, connectivity, dev state preview
+  src/app/         router, theme, connectivity, real/dev view registries, dev state preview
+  src/api/         typed API client layer of the real views (production-safe)
   src/mocks/       development-only mock datasets (excluded from production builds)
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components

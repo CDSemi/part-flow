@@ -1,12 +1,42 @@
 import './machines.css';
 
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from 'react';
 import type { ReactNode } from 'react';
 
+import { errorMessage } from '../../api/client';
+import {
+  areaColor,
+  getMachineAssetTagFormat,
+  listAreas,
+} from '../../api/environment';
+import type { Area } from '../../api/environment';
+import {
+  clearMaintenance,
+  createMachine,
+  listLifecycleEvents,
+  listMachines,
+  reactivateMachine,
+  retireMachine,
+  startMaintenance,
+  updateMachine,
+} from '../../api/machines';
+import type {
+  Machine,
+  MachineEditDraft,
+  MachineLifecycleEvent,
+} from '../../api/machines';
+import { useApiData } from '../../api/use-api-data';
+import type { ApiDataState } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { DevNotice } from '../../components/DevNotice';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -18,20 +48,14 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { MOCK_AREA_CARDS } from '../../mocks/area-board';
-import { MOCK_ASSET_TAG_FORMAT } from '../../mocks/administration';
-import { MOCK_AREAS, areaByKey } from '../../mocks/areas';
-import { MOCK_MACHINE_ACTOR, MOCK_MACHINES } from '../../mocks/machines';
-import { machineBarcode, nextAssetTag } from '../asset-tags';
+import { formatAssetTag, machineBarcode } from '../asset-tags';
 import { code128ModuleCount, encodeCode128B } from '../code128';
 import {
   LIFECYCLE_EVENT_LABEL,
   MACHINE_STATE_LABEL,
   effectiveMachineStatus,
   formatStateAge,
-  machineAssignments,
 } from '../machine-state';
-import type { AreaKey, MockMachine } from '../view-models';
 
 // Management → Machines: the single place for operational Machine
 // monitoring and authorized Machine configuration. Access is
@@ -41,14 +65,20 @@ import type { AreaKey, MockMachine } from '../view-models';
 // duplicate Machine screen. Focused scope: lifecycle, maintenance and
 // asset identification only — PartFlow is not a CMMS (no spare parts,
 // no maintenance schedules, no service contracts, no cost accounting).
+//
+// Phase 3.5: this view reads and writes the real Machine registry
+// through /api/machines. Machine ASSIGNMENTS (the quantity portions on
+// a Machine) arrive with the Phase 6 production workflows — until
+// then no quantity is assigned anywhere, so the Assigned now column is
+// empty and the derived state is Idle unless Maintenance overrides it.
 
 type PendingDialog =
   | { kind: 'new' }
-  | { kind: 'edit'; machine: MockMachine }
-  | { kind: 'start-maintenance'; machine: MockMachine }
-  | { kind: 'clear-maintenance'; machine: MockMachine }
-  | { kind: 'retired-details'; machine: MockMachine }
-  | { kind: 'reactivate'; machine: MockMachine };
+  | { kind: 'edit'; machine: Machine }
+  | { kind: 'start-maintenance'; machine: Machine }
+  | { kind: 'clear-maintenance'; machine: Machine }
+  | { kind: 'retired-details'; machine: Machine }
+  | { kind: 'reactivate'; machine: Machine };
 
 /** Sortable columns of the active Machines table. */
 type SortKey = 'machine' | 'state' | 'assigned' | 'asset' | 'maintenance';
@@ -65,10 +95,10 @@ const STATE_SORT_RANK = { running: 0, idle: 1, maintenance: 2 } as const;
  * renders.
  */
 function sortMachines(
-  rows: MockMachine[],
+  rows: Machine[],
   dir: SortDir,
-  value: (m: MockMachine) => string | number,
-): MockMachine[] {
+  value: (m: Machine) => string | number,
+): Machine[] {
   return rows
     .map((machine, index) => ({ machine, index }))
     .sort((a, b) => {
@@ -120,57 +150,76 @@ function SortHeader({
 
 /** Typed-confirmation identifier: always the Asset Tag (required on
  * every Machine) — never the reusable display name. */
-function confirmIdentifier(machine: MockMachine): {
+function confirmIdentifier(machine: Machine): {
   value: string;
   label: string;
 } {
   return { value: machine.assetTag, label: 'Asset Tag' };
 }
 
-// Long-data preview Machines (?state=long): many rows plus over-long
-// display names, manufacturer/model/serial and notes, to exercise
-// dense-table and truncation behavior. Never part of the editable
-// `machines` state — added to the rendered list only, like the other
-// views' long-preview rows.
-const LONG_PREVIEW_MACHINES: MockMachine[] = [
-  ...Array.from({ length: 15 }, (_, i): MockMachine => {
-    const n = i + 1;
-    return {
-      id: `MC-long-${n}`,
-      area: 'mill',
-      name: `Long preview Machine ${n} — extended qualification cell`,
-      barcode: `CD-LONG-${String(n).padStart(4, '0')}`,
-      stateChangedAt: '2026-07-01T00:00:00.000Z',
-      manufacturer: 'Long-Preview Manufacturing Equipment Co.',
-      model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
-      assetTag: `CD-LONG-${String(n).padStart(4, '0')}`,
-      serialNumber: `LONG-PREVIEW-SERIAL-${String(100000 + n)}`,
-      installedOn: '2020-01-01',
-    };
-  }),
-  {
-    id: 'MC-long-supplemental',
-    area: 'lathe',
-    name: 'Supplemental long-preview Machine — extended display name for dense-table layout testing only',
-    barcode: 'CD-LONG-SUPPLEMENTAL',
-    stateChangedAt: '2026-07-01T00:00:00.000Z',
-    manufacturer: 'Supplemental Long-Preview Precision Machinery Manufacturing',
-    model: 'SUPPLEMENTAL-LONG-PREVIEW-MODEL-DESIGNATION-EXTENDED-2026',
-    assetTag: 'CD-LONG-SUPPLEMENTAL',
-    serialNumber: 'SUPPLEMENTAL-LONG-PREVIEW-SERIAL-NUMBER-000001',
-    installedOn: '2020-01-01',
-    notes:
-      'Auto-generated long-data preview Machine with an over-long notes field, used only to exercise layout and truncation in the Machines table — not real equipment.',
-  },
-];
+/**
+ * Machine assignments (PN portions with quantities on one Machine)
+ * arrive with the Phase 6 production workflows. Until then the system
+ * holds no assigned quantity, so every Machine's assignment list is
+ * empty and its assigned quantity is 0.
+ */
+type Assignment = { pn: string; qty: number };
+const NO_ASSIGNMENTS: Assignment[] = [];
+
+// Long-data preview Machines (?state=long, development builds only):
+// many rows plus over-long display names, manufacturer/model/serial
+// and notes, to exercise dense-table and truncation behavior. Never
+// part of the server data — added to the rendered list only.
+const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
+  .env.DEV
+  ? (areaId: number) => [
+      ...Array.from({ length: 15 }, (_, i): Machine => {
+        const n = i + 1;
+        const tag = `CD-LONG-${String(n).padStart(4, '0')}`;
+        return {
+          id: -n,
+          areaId,
+          name: `Long preview Machine ${n} — extended qualification cell`,
+          assetTag: tag,
+          barcode: machineBarcode(tag),
+          stateChangedAt: '2026-07-01T00:00:00.000Z',
+          manufacturer: 'Long-Preview Manufacturing Equipment Co.',
+          model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
+          serialNumber: `LONG-PREVIEW-SERIAL-${String(100000 + n)}`,
+          installedOn: '2020-01-01',
+        };
+      }),
+      {
+        id: -16,
+        areaId,
+        name: 'Supplemental long-preview Machine — extended display name for dense-table layout testing only',
+        assetTag: 'CD-LONG-SUPPLEMENTAL',
+        barcode: machineBarcode('CD-LONG-SUPPLEMENTAL'),
+        stateChangedAt: '2026-07-01T00:00:00.000Z',
+        manufacturer:
+          'Supplemental Long-Preview Precision Machinery Manufacturing',
+        model: 'SUPPLEMENTAL-LONG-PREVIEW-MODEL-DESIGNATION-EXTENDED-2026',
+        serialNumber: 'SUPPLEMENTAL-LONG-PREVIEW-SERIAL-NUMBER-000001',
+        installedOn: '2020-01-01',
+        notes:
+          'Auto-generated long-data preview Machine with an over-long notes field, used only to exercise layout and truncation in the Machines table — not real equipment.',
+      },
+    ]
+  : null;
 
 export function MachinesView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
-  const [machines, setMachines] = useState<MockMachine[]>(MOCK_MACHINES);
+  const machinesData = useApiData(listMachines);
+  const areasData = useApiData(listAreas);
+  const formatData = useApiData(getMachineAssetTagFormat);
   const [search, setSearch] = useState('');
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  // Clear maintenance runs through the generic ConfirmDialog, so its
+  // request state lives here with the dialog selection.
+  const [clearBusy, setClearBusy] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   // Per-table sort: null = the registry order. Each header cycles
   // ascending → descending → unsorted; the two tables sort
   // independently.
@@ -196,20 +245,23 @@ export function MachinesView() {
           : null,
     );
 
-  const assignmentsById = useMemo(
-    () =>
-      new Map(
-        machines.map((machine) => [
-          machine.id,
-          machineAssignments(MOCK_AREA_CARDS, machine),
-        ]),
-      ),
-    [machines],
-  );
-  const assignedQty = (machine: MockMachine): number =>
-    (assignmentsById.get(machine.id) ?? []).reduce((s, a) => s + a.qty, 0);
+  const openDialog = (next: PendingDialog | null) => {
+    setClearError(null);
+    setDialog(next);
+  };
 
-  if (preview === 'loading') {
+  const reloadAll = () => {
+    machinesData.reload();
+    areasData.reload();
+    formatData.reload();
+  };
+
+  if (
+    preview === 'loading' ||
+    machinesData.state.status === 'loading' ||
+    areasData.state.status === 'loading' ||
+    formatData.state.status === 'loading'
+  ) {
     return (
       <section className="mg" aria-label="Machines">
         <LoadingState label="Loading Machines" />
@@ -226,13 +278,58 @@ export function MachinesView() {
       </section>
     );
   }
+  if (machinesData.state.status === 'error') {
+    return (
+      <section className="mg" aria-label="Machines">
+        <ErrorState
+          message="Machine data could not be loaded."
+          detail={machinesData.state.message}
+          onRetry={reloadAll}
+        />
+      </section>
+    );
+  }
+  if (areasData.state.status === 'error') {
+    return (
+      <section className="mg" aria-label="Machines">
+        <ErrorState
+          message="Machine data could not be loaded."
+          detail={areasData.state.message}
+          onRetry={reloadAll}
+        />
+      </section>
+    );
+  }
+  if (formatData.state.status === 'error') {
+    return (
+      <section className="mg" aria-label="Machines">
+        <ErrorState
+          message="Machine data could not be loaded."
+          detail={formatData.state.message}
+          onRetry={reloadAll}
+        />
+      </section>
+    );
+  }
+
+  const machines = machinesData.state.data;
+  const areas = areasData.state.data;
+  const format = formatData.state.data;
+  const areaById = new Map(areas.map((area) => [area.id, area]));
+  // New Machines and reactivations choose among active non-terminal
+  // Areas — a terminal Area holds completed quantity, never Machines.
+  const areaChoices = areas.filter((area) => area.isActive && !area.isTerminal);
+  const assetTagPreview = format
+    ? formatAssetTag(format, format.nextSequence)
+    : null;
+  const canCreate = assetTagPreview !== null && areaChoices.length > 0;
 
   const query = search.trim().toLowerCase();
-  const matches = (machine: MockMachine): boolean =>
+  const matches = (machine: Machine): boolean =>
     !query ||
     [
       machine.name,
-      areaByKey(machine.area)?.name ?? '',
+      areaById.get(machine.areaId)?.name ?? '',
       machine.assetTag,
       machine.model ?? '',
       machine.manufacturer ?? '',
@@ -242,20 +339,23 @@ export function MachinesView() {
       .includes(query);
 
   const baseMachines =
-    preview === 'long' ? [...machines, ...LONG_PREVIEW_MACHINES] : machines;
+    preview === 'long' && longPreviewMachines
+      ? [...machines, ...longPreviewMachines(areas[0]?.id ?? 0)]
+      : machines;
   const visible = preview === 'empty' ? [] : baseMachines.filter(matches);
   const unsortedActive = visible.filter((m) => m.retiredOn === undefined);
   const unsortedRetired = visible.filter((m) => m.retiredOn !== undefined);
 
   /** Active-table column value driving the current sort. */
-  const sortValue = (m: MockMachine, key: SortKey): string | number => {
+  const sortValue = (m: Machine, key: SortKey): string | number => {
     switch (key) {
       case 'machine':
         return m.name.toLowerCase();
       case 'state':
-        return STATE_SORT_RANK[effectiveMachineStatus(m, assignedQty(m))];
+        return STATE_SORT_RANK[effectiveMachineStatus(m, 0)];
       case 'assigned':
-        return assignedQty(m);
+        // No assigned quantity exists before the Phase 6 workflows.
+        return 0;
       case 'asset':
         return m.assetTag.toLowerCase();
       case 'maintenance':
@@ -268,7 +368,7 @@ export function MachinesView() {
 
   /** Retired-table column value driving the current sort. */
   const retiredSortValue = (
-    m: MockMachine,
+    m: Machine,
     key: RetiredSortKey,
   ): string | number => {
     switch (key) {
@@ -288,22 +388,11 @@ export function MachinesView() {
       )
     : unsortedRetired;
 
-  const update = (id: string, change: (m: MockMachine) => MockMachine) =>
-    setMachines((current) => current.map((m) => (m.id === id ? change(m) : m)));
-
-  /** Finalize a retirement: current state + append-only lifecycle. */
-  const retireMachine = (machine: MockMachine) => {
-    const now = new Date().toISOString();
-    update(machine.id, (m) => ({
-      ...m,
-      retiredOn: now.slice(0, 10),
-      maintenance: undefined,
-      stateChangedAt: now,
-      lifecycle: [
-        ...(m.lifecycle ?? []),
-        { event: 'RETIRED' as const, at: now, by: MOCK_MACHINE_ACTOR },
-      ],
-    }));
+  /** Complete one successful write: fresh server state, dialog closed.
+   * The Asset Tag counter reloads too — creation consumes it. */
+  const completeWrite = () => {
+    machinesData.reload();
+    formatData.reload();
     setDialog(null);
   };
 
@@ -314,10 +403,6 @@ export function MachinesView() {
         Monitor Machine status, assignments, maintenance, and configuration.
         Running and Idle are based on assigned quantity.
       </p>
-      <DevNotice>
-        Development preview — Machines shown are sample data and changes affect
-        only this preview.
-      </DevNotice>
       <div className="mg-toolbar">
         <input
           type="search"
@@ -329,12 +414,19 @@ export function MachinesView() {
         <span className="spacer" />
         <button
           className="btn primary"
-          disabled={writeBlocked}
-          onClick={() => setDialog({ kind: 'new' })}
+          disabled={writeBlocked || !canCreate}
+          onClick={() => openDialog({ kind: 'new' })}
         >
           + New Machine
         </button>
       </div>
+      {!canCreate ? (
+        <PageNote>
+          {assetTagPreview === null
+            ? 'New Machines need the Machine Asset Tag format. Configure it in Administration → Barcode configuration first.'
+            : 'New Machines need at least one active non-terminal Area. Configure Areas in Administration first.'}
+        </PageNote>
+      ) : null}
 
       {active.length === 0 ? (
         <EmptyState
@@ -391,11 +483,12 @@ export function MachinesView() {
               <ActiveMachineRow
                 key={machine.id}
                 machine={machine}
-                assignments={assignmentsById.get(machine.id) ?? []}
+                area={areaById.get(machine.areaId)}
+                assignments={NO_ASSIGNMENTS}
                 writeBlocked={writeBlocked}
-                onOpenEdit={() => setDialog({ kind: 'edit', machine })}
+                onOpenEdit={() => openDialog({ kind: 'edit', machine })}
                 onToggleMaintenance={() =>
-                  setDialog({
+                  openDialog({
                     kind: machine.maintenance
                       ? 'clear-maintenance'
                       : 'start-maintenance',
@@ -459,7 +552,7 @@ export function MachinesView() {
                   key={machine.id}
                   className="selrow"
                   onClick={() =>
-                    setDialog({ kind: 'retired-details', machine })
+                    openDialog({ kind: 'retired-details', machine })
                   }
                 >
                   <td>
@@ -467,7 +560,10 @@ export function MachinesView() {
                       className="rowbtn"
                       aria-label={`Machine details — ${machine.name}`}
                     >
-                      <MachineIdentityCell machine={machine} />
+                      <MachineIdentityCell
+                        machine={machine}
+                        area={areaById.get(machine.areaId)}
+                      />
                     </button>
                   </td>
                   <td>
@@ -497,52 +593,56 @@ export function MachinesView() {
       {dialog?.kind === 'new' ? (
         <MachineEditDialog
           machines={machines}
+          areaById={areaById}
+          areaChoices={areaChoices}
+          assetTagPreview={assetTagPreview ?? undefined}
           assignedQty={0}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
-          onSave={(machine) => {
-            setMachines((current) => [...current, machine]);
-            setDialog(null);
+          onCreate={async (input) => {
+            try {
+              await createMachine(input);
+            } catch (error) {
+              // A stale Asset Tag preview (409) consumed nothing — the
+              // refreshed counter feeds the corrected preview.
+              formatData.reload();
+              throw error;
+            }
+            completeWrite();
           }}
-          onApplyChanges={() => undefined}
-          onRetire={() => undefined}
         />
       ) : null}
       {dialog?.kind === 'edit' ? (
         <MachineEditDialog
           machines={machines}
           machine={dialog.machine}
-          assignedQty={assignedQty(dialog.machine)}
+          areaById={areaById}
+          areaChoices={areaChoices}
+          assignedQty={0}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
-          onSave={(machine) => {
-            update(machine.id, () => machine);
-            setDialog(null);
+          onSave={async (draft) => {
+            await updateMachine(dialog.machine.id, draft);
+            completeWrite();
           }}
-          onApplyChanges={(machine) => {
-            update(machine.id, () => machine);
+          onRetire={async (edits) => {
+            await retireMachine(dialog.machine.id, { edits });
+            completeWrite();
           }}
-          onRetire={() => retireMachine(dialog.machine)}
         />
       ) : null}
       {dialog?.kind === 'start-maintenance' ? (
         <StartMaintenanceDialog
           machine={dialog.machine}
-          assignedQty={assignedQty(dialog.machine)}
+          assignedQty={0}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
-          onConfirm={(note, expectedReturn) => {
-            const now = new Date().toISOString();
-            update(dialog.machine.id, (m) => ({
-              ...m,
-              maintenance: {
-                since: now,
-                note: note || undefined,
-                expectedReturn: expectedReturn || undefined,
-              },
-              stateChangedAt: now,
-            }));
-            setDialog(null);
+          onConfirm={async (note, expectedReturn) => {
+            await startMaintenance(dialog.machine.id, {
+              note: note || null,
+              expectedReturn: expectedReturn || null,
+            });
+            completeWrite();
           }}
         />
       ) : null}
@@ -551,32 +651,41 @@ export function MachinesView() {
           title="Clear maintenance"
           confirmLabel="Clear maintenance"
           cancelLabel="Cancel (Esc)"
-          confirmDisabled={writeBlocked}
+          confirmDisabled={writeBlocked || clearBusy}
           onCancel={() => setDialog(null)}
           onConfirm={() => {
-            const now = new Date().toISOString();
-            update(dialog.machine.id, (m) => ({
-              ...m,
-              maintenance: undefined,
-              stateChangedAt: now,
-            }));
-            setDialog(null);
+            setClearBusy(true);
+            setClearError(null);
+            clearMaintenance(dialog.machine.id).then(
+              () => {
+                setClearBusy(false);
+                completeWrite();
+              },
+              (error: unknown) => {
+                setClearBusy(false);
+                setClearError(errorMessage(error));
+              },
+            );
           }}
         >
-          <b>{dialog.machine.name}</b> will return to{' '}
-          <b>{assignedQty(dialog.machine) > 0 ? 'Running' : 'Idle'}</b> —{' '}
-          {assignedQty(dialog.machine) > 0
-            ? 'quantity is still assigned to it.'
-            : 'no quantity is currently assigned to it.'}
+          <b>{dialog.machine.name}</b> will return to <b>Idle</b> — no quantity
+          is currently assigned to it.
+          {clearError ? (
+            <div className="err" role="alert">
+              {clearError}
+            </div>
+          ) : null}
         </ConfirmDialog>
       ) : null}
       {dialog?.kind === 'retired-details' ? (
         <RetiredMachineDetailsDialog
           machine={dialog.machine}
+          area={areaById.get(dialog.machine.areaId)}
+          areaById={areaById}
           writeBlocked={writeBlocked}
           onClose={() => setDialog(null)}
           onReactivate={() =>
-            setDialog({ kind: 'reactivate', machine: dialog.machine })
+            openDialog({ kind: 'reactivate', machine: dialog.machine })
           }
         />
       ) : null}
@@ -587,34 +696,20 @@ export function MachinesView() {
         <ReactivateMachineDialog
           machine={dialog.machine}
           machines={machines}
+          areaById={areaById}
+          areaChoices={areaChoices}
           writeBlocked={writeBlocked}
           cancelLabel="‹ Back"
           onCancel={() =>
-            setDialog({ kind: 'retired-details', machine: dialog.machine })
+            openDialog({ kind: 'retired-details', machine: dialog.machine })
           }
-          onConfirm={({ name, area, reason }) => {
-            const now = new Date().toISOString();
-            const moved = area !== dialog.machine.area;
-            update(dialog.machine.id, (m) => ({
-              ...m,
-              retiredOn: undefined,
+          onConfirm={async ({ name, areaId, reason }) => {
+            await reactivateMachine(dialog.machine.id, {
               name,
-              area,
-              maintenance: undefined,
-              stateChangedAt: now,
-              lifecycle: [
-                ...(m.lifecycle ?? []),
-                {
-                  event: 'REACTIVATED' as const,
-                  at: now,
-                  by: MOCK_MACHINE_ACTOR,
-                  reason,
-                  fromArea: moved ? dialog.machine.area : undefined,
-                  toArea: moved ? area : undefined,
-                },
-              ],
-            }));
-            setDialog(null);
+              areaId,
+              reason,
+            });
+            completeWrite();
           }}
         />
       ) : null}
@@ -622,20 +717,25 @@ export function MachinesView() {
   );
 }
 
-function MachineIdentityCell({ machine }: { machine: MockMachine }) {
-  const area = areaByKey(machine.area);
+function MachineIdentityCell({
+  machine,
+  area,
+}: {
+  machine: Machine;
+  area: Area | undefined;
+}) {
   return (
     <>
       <div className="mgname">{machine.name}</div>
       <div className="mgarea">
-        <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={9} />
-        {area?.name ?? machine.area}
+        <AreaDot colorVar={areaColor(area)} size={9} />
+        {area?.name ?? '—'}
       </div>
     </>
   );
 }
 
-function AssetMeta({ machine }: { machine: MockMachine }) {
+function AssetMeta({ machine }: { machine: Machine }) {
   return (
     <div className="mg-meta">
       <div className="mg-assetline">
@@ -674,9 +774,10 @@ function MaintenanceSwitch({
   writeBlocked = false,
   onToggle,
 }: {
-  machine: MockMachine;
+  machine: Machine;
   /** Disables the switch while the backend is unreachable — starting
-   * or clearing Maintenance changes mock state (offline write-block). */
+   * or clearing Maintenance is a production-configuration write
+   * (offline write-block). */
   writeBlocked?: boolean;
   onToggle: () => void;
 }) {
@@ -701,13 +802,15 @@ function MaintenanceSwitch({
 
 function ActiveMachineRow({
   machine,
+  area,
   assignments,
   writeBlocked = false,
   onOpenEdit,
   onToggleMaintenance,
 }: {
-  machine: MockMachine;
-  assignments: { pn: string; qty: number }[];
+  machine: Machine;
+  area: Area | undefined;
+  assignments: Assignment[];
   /** Disables the row's Maintenance switch while the backend is
    * unreachable (offline write-block); opening Edit Machine to read
    * stays available. */
@@ -729,7 +832,7 @@ function ActiveMachineRow({
     <tr className="selrow" onClick={onOpenEdit}>
       <td>
         <button className="rowbtn" aria-label={`Edit ${machine.name}`}>
-          <MachineIdentityCell machine={machine} />
+          <MachineIdentityCell machine={machine} area={area} />
         </button>
       </td>
       <td className="mg-statecol">
@@ -805,30 +908,30 @@ function AreaSelectField({
   onChange,
 }: {
   label: string;
-  value: AreaKey;
-  choices: { key: AreaKey; name: string }[];
-  onChange: (area: AreaKey) => void;
+  value: number;
+  choices: Area[];
+  onChange: (areaId: number) => void;
 }) {
   const fieldId = useId();
-  const selected = areaByKey(value);
+  const selected = choices.find((choice) => choice.id === value);
   return (
     <>
       <label className="mg-arealabelrow" htmlFor={fieldId}>
         {label}
         <span
           className="mg-arealine"
-          style={{ background: selected?.colorVar ?? 'var(--faint)' }}
+          style={{ background: areaColor(selected) }}
           aria-hidden="true"
         />
       </label>
       <select
         id={fieldId}
         className="field"
-        value={value}
-        onChange={(event) => onChange(event.target.value as AreaKey)}
+        value={String(value)}
+        onChange={(event) => onChange(Number(event.target.value))}
       >
         {choices.map((choice) => (
-          <option key={choice.key} value={choice.key}>
+          <option key={choice.id} value={String(choice.id)}>
             {choice.name}
           </option>
         ))}
@@ -881,29 +984,56 @@ function BarcodeValue({ value }: { value: string }) {
   return <span className="barcodeval">{value}</span>;
 }
 
+/** Load one Machine's append-only lifecycle history from the API. */
+function useLifecycleEvents(machineId: number | undefined) {
+  const load = useCallback(
+    () =>
+      machineId === undefined
+        ? Promise.resolve([] as MachineLifecycleEvent[])
+        : listLifecycleEvents(machineId),
+    [machineId],
+  );
+  return useApiData(load);
+}
+
 /**
  * Append-only lifecycle audit (RETIRED / REACTIVATED) as the ONE
  * shared vertical-timeline presentation — tone-ringed markers on a
  * hairline rail (error for RETIRED, success for REACTIVATED; the event
  * name always renders — color is never the only distinction), with
- * date, actor, reason, and the previous → current Area on a move.
- * Used by Edit Machine, Reactivate Machine and the Retired Machine
- * Details dialog. `compact` keeps the rail and markers but renders
- * each event on ONE line (Edit Machine — the audit stays present
- * without claiming form height). Without events it renders `emptyText`
- * when given, nothing otherwise.
+ * date, actor (when recorded), reason, and the previous → current Area
+ * on a move. Used by Edit Machine, Reactivate Machine and the Retired
+ * Machine Details dialog. `compact` keeps the rail and markers but
+ * renders each event on ONE line (Edit Machine — the audit stays
+ * present without claiming form height). Without events it renders
+ * `emptyText` when given, nothing otherwise.
  */
 function LifecycleTimeline({
-  machine,
+  state,
+  areaById,
   emptyText,
   compact = false,
 }: {
-  machine: MockMachine;
+  state: ApiDataState<MachineLifecycleEvent[]>;
+  areaById: Map<number, Area>;
   emptyText?: string;
   compact?: boolean;
 }) {
-  const events = machine.lifecycle ?? [];
+  if (state.status === 'loading') return null;
+  if (state.status === 'error') {
+    return (
+      <div className={`mg-timeline${compact ? ' compact' : ''}`}>
+        <div className="mg-lifetitle">Machine History</div>
+        <p className="tl-empty">
+          Machine history could not be loaded. {state.message}
+        </p>
+      </div>
+    );
+  }
+  const events = state.data;
   if (events.length === 0 && !emptyText) return null;
+  const areaName = (id: number | undefined) =>
+    id === undefined ? undefined : (areaById.get(id)?.name ?? `Area ${id}`);
   return (
     <div className={`mg-timeline${compact ? ' compact' : ''}`}>
       <div className="mg-lifetitle">Machine History</div>
@@ -911,12 +1041,12 @@ function LifecycleTimeline({
         <p className="tl-empty">{emptyText}</p>
       ) : (
         <ol>
-          {events.map((event, index) => (
+          {events.map((event) => (
             <li
               className={`mg-tlevent ${
                 event.event === 'RETIRED' ? 'ev-retired' : 'ev-reactivated'
               }`}
-              key={`${event.event}-${event.at}-${index}`}
+              key={event.id}
             >
               <span className="dot" aria-hidden="true" />
               {compact ? (
@@ -924,15 +1054,15 @@ function LifecycleTimeline({
                   <span className="ev">
                     {LIFECYCLE_EVENT_LABEL[event.event]}
                   </span>{' '}
-                  <span className="at">{event.at.slice(0, 10)}</span> ·{' '}
-                  {event.by}
+                  <span className="at">{event.at.slice(0, 10)}</span>
+                  {event.actor ? <> · {event.actor}</> : null}
                   {event.reason ? <> — {event.reason}</> : null}
-                  {event.fromArea && event.toArea ? (
+                  {event.fromAreaId !== undefined &&
+                  event.toAreaId !== undefined ? (
                     <>
                       {' '}
-                      · {areaByKey(event.fromArea)?.name ??
-                        event.fromArea} →{' '}
-                      {areaByKey(event.toArea)?.name ?? event.toArea}
+                      · {areaName(event.fromAreaId)} →{' '}
+                      {areaName(event.toAreaId)}
                     </>
                   ) : null}
                 </div>
@@ -944,14 +1074,16 @@ function LifecycleTimeline({
                     </span>
                     <span className="at">{event.at.slice(0, 10)}</span>
                   </div>
-                  <div className="tl-meta">{event.by}</div>
+                  {event.actor ? (
+                    <div className="tl-meta">{event.actor}</div>
+                  ) : null}
                   {event.reason ? (
                     <div className="tl-reason">{event.reason}</div>
                   ) : null}
-                  {event.fromArea && event.toArea ? (
+                  {event.fromAreaId !== undefined &&
+                  event.toAreaId !== undefined ? (
                     <div className="tl-meta">
-                      {areaByKey(event.fromArea)?.name ?? event.fromArea} →{' '}
-                      {areaByKey(event.toArea)?.name ?? event.toArea}
+                      {areaName(event.fromAreaId)} → {areaName(event.toAreaId)}
                     </div>
                   ) : null}
                 </>
@@ -975,13 +1107,14 @@ function LifecycleTimeline({
 function IdentityHeader({
   assetTag,
   machine,
+  area,
   onOpenLabel,
 }: {
   assetTag: string;
-  machine?: MockMachine;
+  machine?: Machine;
+  area?: Area;
   onOpenLabel?: () => void;
 }) {
-  const area = machine ? areaByKey(machine.area) : undefined;
   return (
     <div className="mg-idhead">
       <div className="idcol">
@@ -1003,13 +1136,13 @@ function IdentityHeader({
             <span className="idlabel">Area</span>
             <span
               className="mg-arealine"
-              style={{ background: area?.colorVar ?? 'var(--faint)' }}
+              style={{ background: areaColor(area) }}
               aria-hidden="true"
             />
           </div>
           <div className="mg-areafixedvalue">
-            <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={11} />
-            {area?.name ?? machine.area}
+            <AreaDot colorVar={areaColor(area)} size={11} />
+            {area?.name ?? '—'}
           </div>
           <p className="idareahelp">
             The Area cannot be changed while the Machine is active. If the
@@ -1032,7 +1165,7 @@ function BarcodeLabelDialog({
   machine,
   onClose,
 }: {
-  machine: MockMachine;
+  machine: Machine;
   onClose: () => void;
 }) {
   const value = machineBarcode(machine.assetTag);
@@ -1100,35 +1233,55 @@ function BarcodeLabelDialog({
  * Editing also hosts the Danger Zone (v15): Retire lives here instead
  * of a table button. Starting Retire with unsaved edits never saves
  * them silently — an explicit Save / Discard / Cancel decision comes
- * first. The decision is only RECORDED (v17): it is applied when the
- * retirement completes, so cancelling the typed confirmation or the
- * final summary returns to the form with the edits intact.
+ * first. The decision is only RECORDED (v17): it travels with the
+ * retirement request and the server applies it in the same transaction
+ * as the retirement and its lifecycle event, so cancelling the typed
+ * confirmation or the final summary returns to the form with the edits
+ * intact.
  */
 function MachineEditDialog({
   machines,
   machine,
+  areaById,
+  areaChoices,
+  assetTagPreview,
   assignedQty,
   writeBlocked = false,
   onCancel,
+  onCreate,
   onSave,
-  onApplyChanges,
   onRetire,
 }: {
-  machines: MockMachine[];
-  machine?: MockMachine;
+  machines: Machine[];
+  machine?: Machine;
+  areaById: Map<number, Area>;
+  areaChoices: Area[];
+  /** The next Asset Tag the server will assign (new Machine only). */
+  assetTagPreview?: string;
   assignedQty: number;
   /** Disables Save and Retire… while the backend is unreachable
    * (Management → Machines offline write-block). */
   writeBlocked?: boolean;
   onCancel: () => void;
-  onSave: (machine: MockMachine) => void;
-  /** Persist edits without closing (Save inside the retire flow). */
-  onApplyChanges: (machine: MockMachine) => void;
-  onRetire: () => void;
+  /** Create the Machine (new only). Rejects with the server message. */
+  onCreate?: (input: {
+    areaId: number;
+    name: string;
+    manufacturer: string | null;
+    model: string | null;
+    serialNumber: string | null;
+    installedOn: string | null;
+    notes: string | null;
+    expectedAssetTag: string | null;
+  }) => Promise<void>;
+  /** Save the edit draft (existing only). Rejects with the message. */
+  onSave?: (draft: MachineEditDraft) => Promise<void>;
+  /** Retire with the recorded edits decision (existing only). */
+  onRetire?: (edits: MachineEditDraft | null) => Promise<void>;
 }) {
   const initial = {
     name: machine?.name ?? '',
-    area: machine?.area ?? ('lathe' as AreaKey),
+    areaId: machine?.areaId ?? areaChoices[0]?.id ?? 0,
     manufacturer: machine?.manufacturer ?? '',
     model: machine?.model ?? '',
     serialNumber: machine?.serialNumber ?? '',
@@ -1138,7 +1291,7 @@ function MachineEditDialog({
     maintenanceReturn: machine?.maintenance?.expectedReturn ?? '',
   };
   const [name, setName] = useState(initial.name);
-  const [area, setArea] = useState<AreaKey>(initial.area);
+  const [areaId, setAreaId] = useState(initial.areaId);
   const [manufacturer, setManufacturer] = useState(initial.manufacturer);
   const [model, setModel] = useState(initial.model);
   const [serialNumber, setSerialNumber] = useState(initial.serialNumber);
@@ -1172,6 +1325,11 @@ function MachineEditDialog({
   // decision comes first (§3.10: cancel never silently saves, and
   // entered input is never silently lost either).
   const [leaveConfirm, setLeaveConfirm] = useState(false);
+  // One write request at a time; a rejected write shows the server's
+  // message where the user currently is instead of closing anything.
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const events = useLifecycleEvents(machine?.id);
   // A NEW Machine starts with the Display name focused — the one
   // required field. Edit keeps the dialog-root focus (no field claims
   // it: the whole record is equally editable).
@@ -1193,89 +1351,29 @@ function MachineEditDialog({
     maintenanceReturn !== initial.maintenanceReturn;
 
   // The Asset Tag shown in the dialog: the Machine's own on edit, the
-  // next tag to assign on create (deterministic against the current
-  // list — the same value the save assigns).
-  const dialogAssetTag = useMemo(
-    () =>
-      machine?.assetTag ??
-      nextAssetTag(
-        MOCK_ASSET_TAG_FORMAT,
-        machines.map((m) => m.assetTag),
-      ),
-    [machine, machines],
-  );
+  // next tag the server will assign on create (sent along as the
+  // optimistic precondition, so a stale preview can never silently
+  // become a different tag).
+  const dialogAssetTag = machine?.assetTag ?? assetTagPreview ?? '—';
 
-  /** Pure validation + record assembly (no state changes). */
-  const build = (): { machine: MockMachine } | { error: string } => {
-    const trimmedName = name.trim();
-    if (!trimmedName) return { error: 'A display name is required.' };
-    const targetArea = machine?.area ?? area;
-    // Display names stay unique among the active Machines of one Area
-    // (reuse across time and replacements stays allowed).
-    const nameCollision = machines.some(
-      (m) =>
-        m.id !== machine?.id &&
-        m.retiredOn === undefined &&
-        m.area === targetArea &&
-        m.name === trimmedName,
-    );
-    if (nameCollision) {
-      return {
-        error: `An active Machine named “${trimmedName}” already exists in ${
-          areaByKey(targetArea)?.name ?? targetArea
-        }. Display names stay unique among the active Machines of one Area.`,
-      };
-    }
-    return {
-      machine: {
-        ...(machine ?? {
-          id: `MC-${String(Date.now()).slice(-4)}`,
-          stateChangedAt: new Date().toISOString(),
-          // Assigned automatically, never entered: the Asset Tag is
-          // the Machine's stable physical identity and its barcode.
-          assetTag: dialogAssetTag,
-          barcode: dialogAssetTag,
-        }),
-        area: targetArea,
-        name: trimmedName,
-        manufacturer: manufacturer.trim() || undefined,
-        model: model.trim() || undefined,
-        serialNumber: serialNumber.trim() || undefined,
-        installedOn: installedOn || undefined,
-        notes: notes.trim() || undefined,
-        // Update the maintenance context in place — `since` and the
-        // Maintenance state itself never change here.
-        ...(machine?.maintenance
-          ? {
-              maintenance: {
-                ...machine.maintenance,
-                note: maintenanceNote.trim() || undefined,
-                expectedReturn: maintenanceReturn || undefined,
-              },
-            }
-          : {}),
-      },
-    };
-  };
-
-  // Live Display-name feedback (same behavior as the Reactivate
-  // dialog): the collision error — and, after a save attempt, the
-  // missing-name error — render AT the name field; a valid entered
-  // name shows the availability confirmation.
   const trimmedName = name.trim();
-  const targetArea = machine?.area ?? area;
+  const targetAreaId = machine?.areaId ?? areaId;
+  const targetArea = areaById.get(targetAreaId);
+  const targetAreaName = targetArea?.name ?? '—';
+  // Display names stay unique among the active Machines of one Area
+  // (reuse across time and replacements stays allowed). The check here
+  // is live field feedback; the server enforces it authoritatively.
   const nameCollision = machines.some(
     (m) =>
       m.id !== machine?.id &&
       m.retiredOn === undefined &&
-      m.area === targetArea &&
+      m.areaId === targetAreaId &&
       m.name === trimmedName,
   );
   const [nameAttempted, setNameAttempted] = useState(false);
   const nameFeedback = nameCollision ? (
     <div className="err" role="alert">
-      ✕ “{trimmedName}” already exists in{' '}
-      {areaByKey(targetArea)?.name ?? targetArea}.
+      ✕ “{trimmedName}” already exists in {targetAreaName}.
     </div>
   ) : !trimmedName && nameAttempted ? (
     <div className="err" role="alert">
@@ -1283,10 +1381,68 @@ function MachineEditDialog({
     </div>
   ) : trimmedName && trimmedName !== (machine?.name ?? '') ? (
     <div className="mg-fieldok">
-      ✓ “{trimmedName}” is available in{' '}
-      {areaByKey(targetArea)?.name ?? targetArea}.
+      ✓ “{trimmedName}” is available in {targetAreaName}.
     </div>
   ) : null;
+
+  /** The one Save-changes draft (Edit) / retire edits payload. */
+  const buildDraft = (): MachineEditDraft => ({
+    name: trimmedName,
+    manufacturer: manufacturer.trim() || null,
+    model: model.trim() || null,
+    serialNumber: serialNumber.trim() || null,
+    installedOn: installedOn || null,
+    notes: notes.trim() || null,
+    // Update the maintenance context in place — `since` and the
+    // Maintenance state itself never change here.
+    ...(machine?.maintenance
+      ? {
+          maintenanceNote: maintenanceNote.trim() || null,
+          maintenanceExpectedReturn: maintenanceReturn || null,
+        }
+      : {}),
+  });
+  const draftError = !trimmedName
+    ? 'A display name is required.'
+    : nameCollision
+      ? `An active Machine named “${trimmedName}” already exists in ${targetAreaName}. Display names stay unique among the active Machines of one Area.`
+      : null;
+
+  const submitSave = async () => {
+    if (!onSave) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      await onSave(buildDraft());
+    } catch (error) {
+      setServerError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitCreate = async () => {
+    if (!onCreate) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      await onCreate({
+        areaId: targetAreaId,
+        name: trimmedName,
+        manufacturer: manufacturer.trim() || null,
+        model: model.trim() || null,
+        serialNumber: serialNumber.trim() || null,
+        installedOn: installedOn || null,
+        notes: notes.trim() || null,
+        expectedAssetTag: assetTagPreview ?? null,
+      });
+    } catch (error) {
+      setServerError(errorMessage(error));
+      setAddStage('summary');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /** Edit: save immediately. New: validate, then enter the summary.
    * Name problems already render at the field — save only blocks. */
@@ -1296,12 +1452,11 @@ function MachineEditDialog({
       return;
     }
     if (nameCollision) return;
-    const built = build();
-    if ('error' in built) return; // covered by the field feedback
     if (machine) {
-      onSave(built.machine);
+      void submitSave();
       return;
     }
+    setServerError(null);
     setAddStage('summary');
   };
 
@@ -1325,6 +1480,7 @@ function MachineEditDialog({
       setRetireStage('blocked');
       return;
     }
+    setServerError(null);
     setRetireEditsIntent(null);
     setRetireStage(dirty ? 'unsaved' : 'confirm');
   };
@@ -1335,26 +1491,37 @@ function MachineEditDialog({
     setRetireEditsIntent(null);
   };
 
-  /** The retirement really happens HERE: apply the recorded edits
-   * decision first, then retire. */
-  const finalizeRetire = () => {
-    if (retireEditsIntent === 'save') {
-      const built = build();
-      if ('error' in built) return; // validated when the decision was made
-      onApplyChanges(built.machine);
+  /** The retirement really happens HERE: the recorded edits decision
+   * travels with the request and commits in ONE transaction with the
+   * retirement and its lifecycle event. */
+  const finalizeRetire = async () => {
+    if (!onRetire) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      await onRetire(retireEditsIntent === 'save' ? buildDraft() : null);
+    } catch (error) {
+      setServerError(errorMessage(error));
+      setRetireStage('summary');
+    } finally {
+      setBusy(false);
     }
-    onRetire();
   };
 
-  const builtRecord = build();
   const identifier = machine ? confirmIdentifier(machine) : null;
-  const selectedArea = areaByKey(area);
+  const selectedArea = areaById.get(targetAreaId);
   // The summary shows the record as it will be retired: with the
   // edits when the recorded decision is Save, as last saved otherwise.
-  const summaryRecord =
-    retireEditsIntent === 'save' && !('error' in builtRecord)
-      ? builtRecord.machine
-      : machine;
+  const summaryName =
+    retireEditsIntent === 'save' && !draftError
+      ? trimmedName
+      : (machine?.name ?? trimmedName);
+
+  const serverErrorBlock = serverError ? (
+    <div className="err" role="alert">
+      {serverError}
+    </div>
+  ) : null;
 
   return (
     <ModalDialog
@@ -1369,6 +1536,7 @@ function MachineEditDialog({
       <IdentityHeader
         assetTag={dialogAssetTag}
         machine={machine}
+        area={machine ? areaById.get(machine.areaId) : undefined}
         onOpenLabel={() => setLabelOpen(true)}
       />
       <div className="mg-form">
@@ -1423,9 +1591,9 @@ function MachineEditDialog({
             <div className="mg-areacell">
               <AreaSelectField
                 label="Area"
-                value={area}
-                choices={MOCK_AREAS.filter((a) => !a.terminal)}
-                onChange={setArea}
+                value={areaId}
+                choices={areaChoices}
+                onChange={setAreaId}
               />
             </div>
             <Field
@@ -1544,7 +1712,9 @@ function MachineEditDialog({
             </div>
           </div>
         ) : null}
-        {machine ? <LifecycleTimeline machine={machine} compact /> : null}
+        {machine ? (
+          <LifecycleTimeline state={events.state} areaById={areaById} compact />
+        ) : null}
         {!machine ? (
           <div className="mg-note">
             Replacing a physical Machine? Retire the old Machine record and
@@ -1554,13 +1724,14 @@ function MachineEditDialog({
           </div>
         ) : null}
       </div>
+      {retireStage === null && addStage === null ? serverErrorBlock : null}
       <div className="row">
         <button className="bigbtn ghost" onClick={requestClose}>
           Cancel (Esc)
         </button>
         <button
           className="bigbtn primary"
-          disabled={writeBlocked}
+          disabled={writeBlocked || busy}
           onClick={save}
         >
           {machine ? 'Save changes' : 'Continue'}
@@ -1591,7 +1762,7 @@ function MachineEditDialog({
             )}
             <button
               className="dz-retire"
-              disabled={assignedQty > 0 || writeBlocked}
+              disabled={assignedQty > 0 || writeBlocked || busy}
               onClick={startRetire}
             >
               Retire…
@@ -1605,15 +1776,16 @@ function MachineEditDialog({
           saveLabel="Save changes"
           discardLabel="Discard changes"
           saveDisabledReason={
-            'error' in builtRecord
-              ? `The edits cannot be saved yet: ${builtRecord.error}`
+            draftError
+              ? `The edits cannot be saved yet: ${draftError}`
               : undefined
           }
-          saveDisabled={writeBlocked}
+          saveDisabled={writeBlocked || busy}
           onCancel={() => setLeaveConfirm(false)}
           onSave={() => {
-            if ('error' in builtRecord) return;
-            onSave(builtRecord.machine);
+            if (draftError) return;
+            setLeaveConfirm(false);
+            void submitSave();
           }}
           onDiscard={onCancel}
         >
@@ -1659,13 +1831,13 @@ function MachineEditDialog({
           saveLabel="Save changes"
           discardLabel="Discard changes"
           saveDisabledReason={
-            'error' in builtRecord
-              ? `The edits cannot be saved yet: ${builtRecord.error}`
+            draftError
+              ? `The edits cannot be saved yet: ${draftError}`
               : undefined
           }
           onCancel={cancelRetire}
           onSave={() => {
-            if ('error' in builtRecord) return;
+            if (draftError) return;
             setRetireEditsIntent('save');
             setRetireStage('confirm');
           }}
@@ -1688,7 +1860,7 @@ function MachineEditDialog({
           expectedValue={identifier.value}
           valueLabel={identifier.label}
           confirmLabel="Continue"
-          confirmDisabled={writeBlocked}
+          confirmDisabled={writeBlocked || busy}
           onCancel={cancelRetire}
           onConfirm={() => setRetireStage('summary')}
         >
@@ -1713,9 +1885,7 @@ function MachineEditDialog({
           </ul>
         </TypedConfirmDialog>
       ) : null}
-      {(retireStage === 'summary' || retireStage === 'final') &&
-      machine &&
-      summaryRecord ? (
+      {(retireStage === 'summary' || retireStage === 'final') && machine ? (
         <ModalDialog
           label="Confirm retirement"
           onClose={cancelRetire}
@@ -1730,31 +1900,26 @@ function MachineEditDialog({
             rows={[
               {
                 label: 'Machine',
-                value: summaryRecord.name,
+                value: summaryName,
                 emphasis: 'primary',
               },
               {
                 label: 'Area',
                 value: (
                   <>
-                    <AreaDot
-                      colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-                      size={10}
-                    />
-                    {areaByKey(summaryRecord.area)?.name ?? summaryRecord.area}
+                    <AreaDot colorVar={areaColor(selectedArea)} size={10} />
+                    {areaById.get(machine.areaId)?.name ?? '—'}
                   </>
                 ),
               },
               {
                 label: 'Asset Tag',
-                value: <span className="mono">{summaryRecord.assetTag}</span>,
+                value: <span className="mono">{machine.assetTag}</span>,
               },
               {
                 label: 'Barcode',
                 value: (
-                  <BarcodeValue
-                    value={machineBarcode(summaryRecord.assetTag)}
-                  />
+                  <BarcodeValue value={machineBarcode(machine.assetTag)} />
                 ),
                 emphasis: 'secondary',
               },
@@ -1778,12 +1943,14 @@ function MachineEditDialog({
             accepting assignment scans. All history is preserved — the record
             moves to Retired Machines and is never deleted.
           </div>
+          {serverErrorBlock}
           <div className="row">
             <button className="bigbtn ghost" onClick={cancelRetire}>
               Cancel (Esc)
             </button>
             <button
               className="bigbtn danger"
+              disabled={busy}
               onClick={() => setRetireStage('final')}
             >
               Retire Machine
@@ -1798,9 +1965,9 @@ function MachineEditDialog({
               confirmLabel="Retire Machine"
               cancelLabel="Cancel (Esc)"
               tone="danger"
-              confirmDisabled={writeBlocked}
+              confirmDisabled={writeBlocked || busy}
               onCancel={() => setRetireStage('summary')}
-              onConfirm={finalizeRetire}
+              onConfirm={() => void finalizeRetire()}
             >
               <b>{machine.name}</b> will be retired. This retirement is
               permanently recorded in Machine history. If the same Machine is
@@ -1809,97 +1976,84 @@ function MachineEditDialog({
           ) : null}
         </ModalDialog>
       ) : null}
-      {!machine && addStage !== null && !('error' in builtRecord) ? (
+      {!machine && addStage !== null && !draftError ? (
         <ModalDialog
           label="Confirm new Machine"
           onClose={() => setAddStage(null)}
         >
           <h3>Confirm new Machine</h3>
           <div className="sub">
-            Final check — nothing has been added yet.{' '}
-            <b>{builtRecord.machine.name}</b> is added only when you confirm
-            below.
+            Final check — nothing has been added yet. <b>{trimmedName}</b> is
+            added only when you confirm below.
           </div>
           <SummaryList
             rows={[
               {
                 label: 'Machine',
-                value: builtRecord.machine.name,
+                value: trimmedName,
                 emphasis: 'primary',
               },
               {
                 label: 'Area',
                 value: (
                   <>
-                    <AreaDot
-                      colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-                      size={10}
-                    />
-                    {areaByKey(builtRecord.machine.area)?.name ??
-                      builtRecord.machine.area}
+                    <AreaDot colorVar={areaColor(selectedArea)} size={10} />
+                    {selectedArea?.name ?? '—'}
                   </>
                 ),
               },
               {
                 label: 'Asset Tag',
-                value: (
-                  <span className="mono">{builtRecord.machine.assetTag}</span>
-                ),
+                value: <span className="mono">{dialogAssetTag}</span>,
               },
               {
                 label: 'Barcode',
-                value: (
-                  <BarcodeValue
-                    value={machineBarcode(builtRecord.machine.assetTag)}
-                  />
-                ),
+                value: <BarcodeValue value={machineBarcode(dialogAssetTag)} />,
                 emphasis: 'secondary',
               },
-              ...(builtRecord.machine.manufacturer
+              ...(manufacturer.trim()
                 ? [
                     {
                       label: 'Manufacturer',
-                      value: builtRecord.machine.manufacturer,
+                      value: manufacturer.trim(),
                       emphasis: 'secondary',
                     } as const,
                   ]
                 : []),
-              ...(builtRecord.machine.model
+              ...(model.trim()
                 ? [
                     {
                       label: 'Model',
-                      value: builtRecord.machine.model,
+                      value: model.trim(),
                       emphasis: 'secondary',
                     } as const,
                   ]
                 : []),
-              ...(builtRecord.machine.serialNumber
+              ...(serialNumber.trim()
                 ? [
                     {
                       label: 'Serial number',
                       value: (
-                        <span className="mono">
-                          {builtRecord.machine.serialNumber}
-                        </span>
+                        <span className="mono">{serialNumber.trim()}</span>
                       ),
                       emphasis: 'secondary',
                     } as const,
                   ]
                 : []),
-              ...(builtRecord.machine.installedOn
+              ...(installedOn
                 ? [
                     {
                       label: 'Installed',
-                      value: builtRecord.machine.installedOn,
+                      value: installedOn,
                       emphasis: 'secondary',
                     } as const,
                   ]
                 : []),
-              ...(builtRecord.machine.notes
+              ...(notes.trim()
                 ? [
                     {
                       label: 'Notes',
-                      value: builtRecord.machine.notes,
+                      value: notes.trim(),
                       emphasis: 'secondary',
                     } as const,
                   ]
@@ -1911,12 +2065,14 @@ function MachineEditDialog({
             never change afterwards. A Machine record is permanent — it can be
             retired, never deleted.
           </div>
+          {serverErrorBlock}
           <div className="row">
             <button className="bigbtn ghost" onClick={() => setAddStage(null)}>
               Back
             </button>
             <button
               className="bigbtn primary"
+              disabled={busy}
               onClick={() => setAddStage('confirm')}
             >
               Add Machine
@@ -1930,14 +2086,13 @@ function MachineEditDialog({
               confirmLabel="Add Machine"
               cancelLabel="Cancel (Esc)"
               tone="warning"
-              confirmDisabled={writeBlocked}
+              confirmDisabled={writeBlocked || busy}
               onCancel={() => setAddStage('summary')}
-              onConfirm={() => onSave(builtRecord.machine)}
+              onConfirm={() => void submitCreate()}
             >
-              Add <b>{builtRecord.machine.name}</b> with Asset Tag{' '}
-              <b>{builtRecord.machine.assetTag}</b>? A Machine record is
-              permanent and <b>cannot be deleted or undone</b> once added — it
-              can only be retired later.
+              Add <b>{trimmedName}</b> with Asset Tag <b>{dialogAssetTag}</b>? A
+              Machine record is permanent and <b>cannot be deleted or undone</b>{' '}
+              once added — it can only be retired later.
             </ConfirmDialog>
           ) : null}
         </ModalDialog>
@@ -1962,18 +2117,22 @@ function MachineEditDialog({
  */
 function RetiredMachineDetailsDialog({
   machine,
+  area,
+  areaById,
   writeBlocked = false,
   onClose,
   onReactivate,
 }: {
-  machine: MockMachine;
+  machine: Machine;
+  area: Area | undefined;
+  areaById: Map<number, Area>;
   /** Disables Reactivate while the backend is unreachable (Management
    * → Machines offline write-block); viewing history stays available. */
   writeBlocked?: boolean;
   onClose: () => void;
   onReactivate: () => void;
 }) {
-  const area = areaByKey(machine.area);
+  const events = useLifecycleEvents(machine.id);
   return (
     <ModalDialog label="Retired Machine Details" onClose={onClose} size="wide">
       <h3>Retired Machine Details</h3>
@@ -1981,8 +2140,8 @@ function RetiredMachineDetailsDialog({
         <div className="rdid">
           <span className="nm">{machine.name}</span>
           <span className="rdarea">
-            <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={9} />
-            {area?.name ?? machine.area}
+            <AreaDot colorVar={areaColor(area)} size={9} />
+            {area?.name ?? '—'}
           </span>
         </div>
         <span className="mg-retiredtag">Retired on {machine.retiredOn}</span>
@@ -2022,7 +2181,8 @@ function RetiredMachineDetailsDialog({
         </div>
       ) : null}
       <LifecycleTimeline
-        machine={machine}
+        state={events.state}
+        areaById={areaById}
         emptyText="No Machine history recorded."
       />
       <div className="row">
@@ -2053,16 +2213,30 @@ function StartMaintenanceDialog({
   onCancel,
   onConfirm,
 }: {
-  machine: MockMachine;
+  machine: Machine;
   assignedQty: number;
   /** Disables Start maintenance while the backend is unreachable
    * (Management → Machines offline write-block). */
   writeBlocked?: boolean;
   onCancel: () => void;
-  onConfirm: (note: string, expectedReturn: string) => void;
+  /** Start the override. Rejects with the server's message. */
+  onConfirm: (note: string, expectedReturn: string) => Promise<void>;
 }) {
   const [note, setNote] = useState('');
   const [expectedReturn, setExpectedReturn] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const submit = async () => {
+    setBusy(true);
+    setServerError(null);
+    try {
+      await onConfirm(note.trim(), expectedReturn);
+    } catch (error) {
+      setServerError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <ModalDialog label="Start maintenance" onClose={onCancel}>
       <h3>Start maintenance</h3>
@@ -2102,6 +2276,11 @@ function StartMaintenanceDialog({
             onChange={(e) => setExpectedReturn(e.target.value)}
           />
         </Field>
+        {serverError ? (
+          <div className="err" role="alert">
+            {serverError}
+          </div>
+        ) : null}
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>
@@ -2109,8 +2288,8 @@ function StartMaintenanceDialog({
         </button>
         <button
           className="bigbtn primary"
-          disabled={writeBlocked}
-          onClick={() => onConfirm(note.trim(), expectedReturn)}
+          disabled={writeBlocked || busy}
+          onClick={() => void submit()}
         >
           Start maintenance
         </button>
@@ -2121,15 +2300,16 @@ function StartMaintenanceDialog({
 
 /**
  * Return-to-service of the SAME physical machine (v15): the record,
- * identity, barcode, asset metadata and history stay untouched;
- * `retiredOn` clears and one REACTIVATED lifecycle event is appended.
- * The machine normally returns as Idle (running stays derived from
- * assigned quantity — reactivation never invents an assignment).
- * Blocked while its Asset Tag (which is also its barcode) or serial
- * number has been reissued to another active Machine, and while the display name would
- * collide with an active Machine in the target Area (names must stay
- * unique among active Machines of one Area — assignment displays rely
- * on them); a rename inside this dialog resolves the collision. If the
+ * identity, barcode, asset metadata and history stay untouched; the
+ * retirement date clears and one REACTIVATED lifecycle event is
+ * appended — atomically, by the server. The machine normally returns
+ * as Idle (running stays derived from assigned quantity —
+ * reactivation never invents an assignment). Blocked while its Asset
+ * Tag (which is also its barcode) or serial number has been reissued
+ * to another active Machine, and while the display name would collide
+ * with an active Machine in the target Area (names must stay unique
+ * among active Machines of one Area — assignment displays rely on
+ * them); a rename inside this dialog resolves the collision. If the
  * physical machine moved while retired, a new active Area may be
  * chosen here — forward-looking only, historical Movements keep their
  * recorded Areas.
@@ -2137,13 +2317,17 @@ function StartMaintenanceDialog({
 function ReactivateMachineDialog({
   machine,
   machines,
+  areaById,
+  areaChoices,
   cancelLabel = 'Cancel (Esc)',
   writeBlocked = false,
   onCancel,
   onConfirm,
 }: {
-  machine: MockMachine;
-  machines: MockMachine[];
+  machine: Machine;
+  machines: Machine[];
+  areaById: Map<number, Area>;
+  areaChoices: Area[];
   /** Label of the leave-the-workflow action — `‹ Back` when the dialog
    * is entered from the Retired Machine Details dialog. */
   cancelLabel?: string;
@@ -2151,10 +2335,19 @@ function ReactivateMachineDialog({
    * unreachable (Management → Machines offline write-block). */
   writeBlocked?: boolean;
   onCancel: () => void;
-  onConfirm: (result: { name: string; area: AreaKey; reason: string }) => void;
+  /** Reactivate the Machine. Rejects with the server's message. */
+  onConfirm: (result: {
+    name: string;
+    areaId: number;
+    reason: string;
+  }) => Promise<void>;
 }) {
   const [name, setName] = useState(machine.name);
-  const [area, setArea] = useState<AreaKey>(machine.area);
+  const [areaId, setAreaId] = useState(
+    areaChoices.some((choice) => choice.id === machine.areaId)
+      ? machine.areaId
+      : (areaChoices[0]?.id ?? machine.areaId),
+  );
   const [reason, setReason] = useState('');
   const [samePhysical, setSamePhysical] = useState(false);
   // Validation errors render AT the failing field, never as one
@@ -2169,6 +2362,9 @@ function ReactivateMachineDialog({
   // summary recap follows, and a final explicit question confirms
   // before the Machine really reactivates.
   const [stage, setStage] = useState<'form' | 'summary' | 'final'>('form');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const events = useLifecycleEvents(machine.id);
   // The Display name is the field most likely to need attention (the
   // reused floor-position name may collide) — it takes initial focus.
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -2181,7 +2377,8 @@ function ReactivateMachineDialog({
   );
   // Hard blockers: identity conflicts that make a safe reactivation
   // impossible without fixing other records first. The Asset Tag check
-  // also covers the barcode — the barcode IS the Asset Tag.
+  // also covers the barcode — the barcode IS the Asset Tag. The server
+  // enforces the same blockers authoritatively.
   const blockers: string[] = [];
   if (activeOnes.some((m) => m.assetTag === machine.assetTag)) {
     blockers.push(
@@ -2197,12 +2394,12 @@ function ReactivateMachineDialog({
     );
   }
 
-  const areaChoices = MOCK_AREAS.filter((a) => !a.terminal);
-  const selectedArea = areaByKey(area);
+  const selectedArea = areaById.get(areaId);
+  const selectedAreaName = selectedArea?.name ?? '—';
   const nameCollision = activeOnes.some(
-    (m) => m.area === area && m.name === name.trim(),
+    (m) => m.areaId === areaId && m.name === name.trim(),
   );
-  const moved = area !== machine.area;
+  const moved = areaId !== machine.areaId;
 
   const continueToSummary = () => {
     // Collect every failing field at once — each message renders at
@@ -2220,7 +2417,21 @@ function ReactivateMachineDialog({
     }
     setFieldErrors(errors);
     if (nameCollision || Object.keys(errors).length > 0) return;
+    setServerError(null);
     setStage('summary');
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    setServerError(null);
+    try {
+      await onConfirm({ name: name.trim(), areaId, reason: reason.trim() });
+    } catch (error) {
+      setServerError(errorMessage(error));
+      setStage('summary');
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (stage === 'summary' || stage === 'final') {
@@ -2238,17 +2449,14 @@ function ReactivateMachineDialog({
               label: 'Area',
               value: (
                 <>
-                  <AreaDot
-                    colorVar={selectedArea?.colorVar ?? 'var(--faint)'}
-                    size={10}
-                  />
+                  <AreaDot colorVar={areaColor(selectedArea)} size={10} />
                   {moved ? (
                     <>
-                      {areaByKey(machine.area)?.name ?? machine.area} →{' '}
-                      {selectedArea?.name ?? area}
+                      {areaById.get(machine.areaId)?.name ?? '—'} →{' '}
+                      {selectedAreaName}
                     </>
                   ) : (
-                    (selectedArea?.name ?? area)
+                    selectedAreaName
                   )}
                 </>
               ),
@@ -2286,11 +2494,20 @@ function ReactivateMachineDialog({
           barcode. Previous production history is preserved.
           {moved ? ' The Area change applies from reactivation onward.' : ''}
         </div>
+        {serverError ? (
+          <div className="err" role="alert">
+            {serverError}
+          </div>
+        ) : null}
         <div className="row">
           <button className="bigbtn ghost" onClick={() => setStage('form')}>
             Back
           </button>
-          <button className="bigbtn primary" onClick={() => setStage('final')}>
+          <button
+            className="bigbtn primary"
+            disabled={busy}
+            onClick={() => setStage('final')}
+          >
             Reactivate Machine
           </button>
         </div>
@@ -2303,11 +2520,9 @@ function ReactivateMachineDialog({
             confirmLabel="Reactivate Machine"
             cancelLabel="Cancel (Esc)"
             tone="warning"
-            confirmDisabled={writeBlocked}
+            confirmDisabled={writeBlocked || busy}
             onCancel={() => setStage('summary')}
-            onConfirm={() =>
-              onConfirm({ name: name.trim(), area, reason: reason.trim() })
-            }
+            onConfirm={() => void submit()}
           >
             <b>{machine.name}</b> will return to service. This reactivation is
             permanently recorded in Machine history. The previous retirement
@@ -2394,8 +2609,7 @@ function ReactivateMachineDialog({
             </Field>
             {nameCollision ? (
               <div className="err" role="alert">
-                ✕ “{name.trim()}” already exists in {selectedArea?.name ?? area}
-                .
+                ✕ “{name.trim()}” already exists in {selectedAreaName}.
               </div>
             ) : !name.trim() && fieldErrors.name ? (
               <div className="err" role="alert">
@@ -2403,16 +2617,16 @@ function ReactivateMachineDialog({
               </div>
             ) : name.trim() ? (
               <div className="mg-fieldok">
-                ✓ “{name.trim()}” is available in {selectedArea?.name ?? area}.
+                ✓ “{name.trim()}” is available in {selectedAreaName}.
               </div>
             ) : null}
           </div>
           <div className="mg-areacell">
             <AreaSelectField
               label="Return Area"
-              value={area}
+              value={areaId}
               choices={areaChoices}
-              onChange={setArea}
+              onChange={setAreaId}
             />
             <p className="mg-areahelp">
               Change only if the physical Machine moved while retired. Previous
@@ -2475,7 +2689,7 @@ function ReactivateMachineDialog({
             </div>
           ) : null}
         </div>
-        <LifecycleTimeline machine={machine} />
+        <LifecycleTimeline state={events.state} areaById={areaById} />
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>

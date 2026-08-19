@@ -1,6 +1,6 @@
 // Development-only mock view boundary.
 //
-// The ten approved GUI views are Phase 2 mock views: they render
+// The views listed here are Phase 2 mock views: they render
 // development-only sample data from src/mocks/ and mock interactions.
 // They are reachable ONLY through this registry, and the registry is
 // populated ONLY when `import.meta.env.DEV` is true. Vite replaces
@@ -11,20 +11,24 @@
 // verifies this against the built assets with known mock sentinel
 // values as part of `npm run build`.
 //
+// The Phase 3.5 views (Management → Machines and Administration) are
+// REAL views against the /api surface — they live in real-views.ts and
+// ship in every build, so they are deliberately absent here.
+//
 // Production builds keep the application shell (routes, navigation,
-// themes, connectivity) and show an explicit not-connected state per
-// route instead (see UnconnectedView).
+// themes, connectivity) and the real views, and show an explicit
+// not-connected state for every remaining route (see UnconnectedView).
 
 import { lazy } from 'react';
 import type { ComponentType, LazyExoticComponent } from 'react';
 
-import type { ManagementSubview } from './router-core';
+import type { AppViewKey } from './view-keys';
 
-export type AppViewKey =
-  'scan-station' | 'production-board' | 'administration' | ManagementSubview;
+/** The view keys still served by development-only mock views. */
+export type DevMockViewKey = Exclude<AppViewKey, 'machines' | 'administration'>;
 
 type ViewRegistry = Readonly<
-  Record<AppViewKey, LazyExoticComponent<ComponentType>>
+  Record<DevMockViewKey, LazyExoticComponent<ComponentType>>
 >;
 
 export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
@@ -42,11 +46,6 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
       'area-board': lazy(() =>
         import('../views/area-board/AreaBoardView').then((m) => ({
           default: m.AreaBoardView,
-        })),
-      ),
-      machines: lazy(() =>
-        import('../views/machines/MachinesView').then((m) => ({
-          default: m.MachinesView,
         })),
       ),
       'planned-routes': lazy(() =>
@@ -72,11 +71,6 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
       priority: lazy(() =>
         import('../views/priority/PriorityView').then((m) => ({
           default: m.PriorityView,
-        })),
-      ),
-      administration: lazy(() =>
-        import('../views/administration/AdministrationView').then((m) => ({
-          default: m.AdministrationView,
         })),
       ),
     }

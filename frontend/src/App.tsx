@@ -8,7 +8,9 @@ import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
 import { ConnectivityChip } from './components/ConnectivityChip';
 import { DEV_MOCK_VIEWS } from './app/dev-views';
-import type { AppViewKey } from './app/dev-views';
+import type { DevMockViewKey } from './app/dev-views';
+import { REAL_VIEWS } from './app/real-views';
+import type { AppViewKey } from './app/view-keys';
 import { Link } from './app/link';
 import { NotFoundView } from './app/NotFoundView';
 import { useRouter } from './app/router-context';
@@ -99,9 +101,15 @@ function ViewForRoute({ route }: { route: Route }) {
   }
   const key: AppViewKey =
     route.view === 'management' ? route.subview : route.view;
-  // Mock views exist only in development builds (see dev-views.ts). A
-  // production build renders the explicit not-connected state instead.
-  const DevView = DEV_MOCK_VIEWS?.[key];
+  // Real Phase 3.5 views (real-views.ts) ship in every build; the
+  // remaining mock views exist only in development builds
+  // (dev-views.ts). A production build renders the explicit
+  // not-connected state for every route without a real view.
+  const RealView = REAL_VIEWS[key];
+  if (RealView) {
+    return <RealView />;
+  }
+  const DevView = DEV_MOCK_VIEWS?.[key as DevMockViewKey];
   if (!DevView) {
     return <UnconnectedView title={VIEW_TITLES[key]} />;
   }

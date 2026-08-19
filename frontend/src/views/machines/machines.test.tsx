@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
@@ -10,33 +11,446 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { MachinesView } from './MachinesView';
 
-// Management → Machines (GUI_DESIGN §12, v15): operational monitoring
-// plus permission-based configuration — lifecycle (active/retired)
-// stays separate from the derived operational state, maintenance never
-// moves quantity, and retirement is blocked while quantity is
-// assigned. v15: the whole active row opens Edit Machine, maintenance
-// toggles through a switch that only opens the existing dialogs,
-// Retire lives in the Edit dialog's Danger Zone behind a typed
-// confirmation plus a final summary (v17), and retired records offer
-// Reactivate for the SAME physical machine — also behind a final
-// summary (v17).
+// Management → Machines (GUI_DESIGN §12, Phase 3.5): operational
+// monitoring plus permission-based configuration against the REAL
+// /api/machines surface — lifecycle (active/retired) stays separate
+// from the derived operational state, maintenance never moves
+// quantity, and every write round-trips through the API. These tests
+// run the view against an in-memory fake of the backend API with the
+// same route surface and semantics; Machine assignments (and with
+// them the Running state and the assigned-quantity retire blocker)
+// arrive with the Phase 6 production workflows, so every active
+// Machine is Idle unless Maintenance overrides it.
+
+interface FakeMachine {
+  id: number;
+  area_id: number;
+  name: string;
+  asset_tag: string;
+  description: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  serial_number: string | null;
+  installed_on: string | null;
+  notes: string | null;
+  maintenance_since: string | null;
+  maintenance_note: string | null;
+  maintenance_expected_return: string | null;
+  state_changed_at: string;
+  retired_on: string | null;
+}
+
+interface FakeEvent {
+  id: number;
+  machine_id: number;
+  event_type: 'RETIRED' | 'REACTIVATED';
+  occurred_at: string;
+  actor: string | null;
+  reason: string | null;
+  from_area_id: number | null;
+  to_area_id: number | null;
+}
+
+interface FakeState {
+  areas: {
+    id: number;
+    department_id: number;
+    name: string;
+    barcode_value: string;
+    description: string | null;
+    color: string | null;
+    icon_url: null;
+    is_terminal: boolean;
+    is_active: boolean;
+    created_at: string;
+    updated_at: string;
+  }[];
+  machines: FakeMachine[];
+  events: FakeEvent[];
+  format: { prefix: string; digits: number; next_sequence: number };
+  nextMachineId: number;
+  nextEventId: number;
+}
+
+const T0 = '2026-08-01T00:00:00.000Z';
+const NOW = '2026-08-19T00:00:00.000Z';
+const TODAY = '2026-08-19';
+
+function fakeArea(
+  id: number,
+  name: string,
+  extra?: { is_terminal?: boolean; is_active?: boolean },
+) {
+  return {
+    id,
+    department_id: 1,
+    name,
+    barcode_value: `PF:AREA:${id}`,
+    description: null,
+    color: '#4f8cff',
+    icon_url: null,
+    is_terminal: extra?.is_terminal ?? false,
+    is_active: extra?.is_active ?? true,
+    created_at: T0,
+    updated_at: T0,
+  };
+}
+
+function fakeMachine(
+  id: number,
+  area_id: number,
+  name: string,
+  asset_tag: string,
+  extra?: Partial<FakeMachine>,
+): FakeMachine {
+  return {
+    id,
+    area_id,
+    name,
+    asset_tag,
+    description: null,
+    manufacturer: null,
+    model: null,
+    serial_number: null,
+    installed_on: null,
+    notes: null,
+    maintenance_since: null,
+    maintenance_note: null,
+    maintenance_expected_return: null,
+    state_changed_at: T0,
+    retired_on: null,
+    ...extra,
+  };
+}
+
+/** The seeded environment mirrors the familiar shop-floor sample. */
+function seedState(): FakeState {
+  return {
+    areas: [
+      fakeArea(1, 'Cut'),
+      fakeArea(2, 'Lathe'),
+      fakeArea(3, 'Mill'),
+      fakeArea(4, 'Stockroom', { is_terminal: true }),
+    ],
+    machines: [
+      fakeMachine(201, 1, 'Saw 1', 'CD-0201', {
+        manufacturer: 'Amada',
+        model: 'HFA-250W',
+        serial_number: 'HF25-33017',
+        installed_on: '2018-03-12',
+      }),
+      fakeMachine(512, 2, 'Lathe 1', 'CD-0512', {
+        manufacturer: 'Mazak',
+        model: 'QT-250',
+        serial_number: 'Q25-90412',
+        installed_on: '2026-02-16',
+      }),
+      fakeMachine(105, 2, 'Lathe 2', 'CD-0105', {
+        manufacturer: 'Mazak',
+        model: 'QT-15',
+        serial_number: 'Q15-88472',
+        installed_on: '2014-09-20',
+      }),
+      fakeMachine(106, 2, 'Lathe 3', 'CD-0106', {
+        manufacturer: 'Haas',
+        model: 'ST-20',
+        serial_number: 'ST20-51230',
+        installed_on: '2019-05-02',
+      }),
+      fakeMachine(107, 2, 'Lathe 4', 'CD-0107', {
+        manufacturer: 'Haas',
+        model: 'ST-20',
+        serial_number: 'ST20-51301',
+        installed_on: '2019-05-02',
+        maintenance_since: '2026-07-28T00:00:00.000Z',
+        maintenance_note: 'Spindle bearing replacement',
+        maintenance_expected_return: '2026-08-06',
+      }),
+      fakeMachine(301, 3, 'Mill 1', 'CD-0301', {
+        manufacturer: 'Haas',
+        model: 'VF-2',
+        serial_number: 'VF2-77841',
+      }),
+      fakeMachine(302, 3, 'Mill 2', 'CD-0302', {
+        manufacturer: 'Haas',
+        model: 'VF-4',
+        serial_number: 'VF4-80233',
+      }),
+      fakeMachine(303, 3, 'Mill 3 — Horizontal Boring', 'CD-0303', {
+        manufacturer: 'Toshiba',
+        model: 'BTD-110',
+        serial_number: 'BT11-40518',
+      }),
+      // Retired predecessor of machine 512 — same display name,
+      // different physical asset with its own untouched identity.
+      fakeMachine(104, 2, 'Lathe 1', 'CD-0104', {
+        manufacturer: 'Mazak',
+        model: 'QT-10',
+        serial_number: 'Q10-61208',
+        installed_on: '2012-06-01',
+        notes:
+          'Replaced by asset CD-0512 — display name reused for the floor position.',
+        retired_on: '2026-02-14',
+        state_changed_at: '2026-02-14T16:00:00.000Z',
+      }),
+      fakeMachine(202, 1, 'Saw 2', 'CD-0202', {
+        manufacturer: 'Behringer',
+        model: 'HBP-263A',
+        installed_on: '2011-04-08',
+        notes: 'Kept in storage — may return to service after overhaul.',
+        retired_on: '2025-11-03',
+        state_changed_at: '2025-11-03T09:30:00.000Z',
+      }),
+    ],
+    events: [
+      {
+        id: 1,
+        machine_id: 104,
+        event_type: 'RETIRED',
+        occurred_at: '2026-02-14T16:00:00.000Z',
+        actor: 'M. Chen (Production Manager)',
+        reason: 'Replaced by asset CD-0512',
+        from_area_id: null,
+        to_area_id: null,
+      },
+      {
+        id: 2,
+        machine_id: 202,
+        event_type: 'RETIRED',
+        occurred_at: '2025-11-03T09:30:00.000Z',
+        actor: 'M. Chen (Production Manager)',
+        reason: 'Gearbox failure — not economical to repair',
+        from_area_id: null,
+        to_area_id: null,
+      },
+    ],
+    // Highest seeded sequence is CD-0512 → the counter stands at 513.
+    format: { prefix: 'CD-', digits: 4, next_sequence: 513 },
+    nextMachineId: 1000,
+    nextEventId: 100,
+  };
+}
+
+let state: FakeState;
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function detail(message: string, status: number): Response {
+  return json({ detail: message }, status);
+}
+
+function nextTag(): string {
+  return `${state.format.prefix}${String(state.format.next_sequence).padStart(
+    state.format.digits,
+    '0',
+  )}`;
+}
+
+function applyEdits(machine: FakeMachine, edits: Record<string, unknown>) {
+  const text = (value: unknown) =>
+    typeof value === 'string' && value.trim() ? value.trim() : null;
+  if ('name' in edits) machine.name = String(edits.name).trim();
+  if ('manufacturer' in edits) machine.manufacturer = text(edits.manufacturer);
+  if ('model' in edits) machine.model = text(edits.model);
+  if ('serial_number' in edits)
+    machine.serial_number = text(edits.serial_number);
+  if ('installed_on' in edits) machine.installed_on = text(edits.installed_on);
+  if ('notes' in edits) machine.notes = text(edits.notes);
+  if ('maintenance_note' in edits) {
+    machine.maintenance_note = text(edits.maintenance_note);
+  }
+  if ('maintenance_expected_return' in edits) {
+    machine.maintenance_expected_return = text(
+      edits.maintenance_expected_return,
+    );
+  }
+}
+
+function machineWire(machine: FakeMachine) {
+  return {
+    ...machine,
+    barcode_value: `PF:MACHINE:${machine.asset_tag}`,
+    created_at: T0,
+    updated_at: T0,
+  };
+}
+
+function nameCollision(machine: FakeMachine): boolean {
+  return state.machines.some(
+    (other) =>
+      other.id !== machine.id &&
+      other.retired_on === null &&
+      other.area_id === machine.area_id &&
+      other.name === machine.name,
+  );
+}
+
+/** In-memory fake of the /api surface the Machines view uses. */
+async function handle(url: string, init?: RequestInit): Promise<Response> {
+  const method = init?.method ?? 'GET';
+  const body =
+    typeof init?.body === 'string'
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : {};
+  if (url === '/api/health') return json({ status: 'ok' });
+  if (url === '/api/areas') return json(state.areas);
+  if (url === '/api/barcode-configuration/machine-asset-tag-format') {
+    return json({ ...state.format, created_at: T0, updated_at: T0 });
+  }
+  if (url === '/api/machines' && method === 'GET') {
+    return json(state.machines.map(machineWire));
+  }
+  if (url === '/api/machines' && method === 'POST') {
+    const expected = body.expected_asset_tag;
+    if (typeof expected === 'string' && expected !== nextTag()) {
+      return detail(
+        `The previewed Asset Tag is out of date — the next Asset Tag is now ${nextTag()}.`,
+        409,
+      );
+    }
+    const machine = fakeMachine(
+      state.nextMachineId++,
+      Number(body.area_id),
+      String(body.name).trim(),
+      nextTag(),
+      { state_changed_at: NOW },
+    );
+    applyEdits(machine, body);
+    if (nameCollision(machine)) {
+      return detail(
+        `An active Machine named “${machine.name}” already exists in this Area.`,
+        409,
+      );
+    }
+    state.format.next_sequence += 1;
+    state.machines.push(machine);
+    return json(machineWire(machine), 201);
+  }
+  const machineMatch = /^\/api\/machines\/(\d+)(\/.*)?$/.exec(url);
+  if (machineMatch) {
+    const machine = state.machines.find(
+      (m) => m.id === Number(machineMatch[1]),
+    );
+    if (!machine) return detail('Machine not found.', 404);
+    const rest = machineMatch[2] ?? '';
+    if (rest === '' && method === 'PATCH') {
+      const before = { ...machine };
+      applyEdits(machine, body);
+      if (nameCollision(machine)) {
+        Object.assign(machine, before);
+        return detail(
+          `An active Machine named “${String(body.name)}” already exists in this Area.`,
+          409,
+        );
+      }
+      return json(machineWire(machine));
+    }
+    if (rest === '/maintenance' && method === 'POST') {
+      machine.maintenance_since = NOW;
+      machine.maintenance_note =
+        typeof body.note === 'string' && body.note ? body.note : null;
+      machine.maintenance_expected_return =
+        typeof body.expected_return === 'string' && body.expected_return
+          ? body.expected_return
+          : null;
+      machine.state_changed_at = NOW;
+      return json(machineWire(machine), 201);
+    }
+    if (rest === '/maintenance' && method === 'DELETE') {
+      machine.maintenance_since = null;
+      machine.maintenance_note = null;
+      machine.maintenance_expected_return = null;
+      machine.state_changed_at = NOW;
+      return json(machineWire(machine));
+    }
+    if (rest === '/retire' && method === 'POST') {
+      if (body.edits && typeof body.edits === 'object') {
+        applyEdits(machine, body.edits as Record<string, unknown>);
+      }
+      machine.retired_on = TODAY;
+      machine.maintenance_since = null;
+      machine.maintenance_note = null;
+      machine.maintenance_expected_return = null;
+      machine.state_changed_at = NOW;
+      state.events.push({
+        id: state.nextEventId++,
+        machine_id: machine.id,
+        event_type: 'RETIRED',
+        occurred_at: NOW,
+        actor: null,
+        reason: null,
+        from_area_id: null,
+        to_area_id: null,
+      });
+      return json(machineWire(machine));
+    }
+    if (rest === '/reactivate' && method === 'POST') {
+      const fromArea = machine.area_id;
+      const toArea =
+        body.area_id !== undefined && body.area_id !== null
+          ? Number(body.area_id)
+          : machine.area_id;
+      machine.retired_on = null;
+      machine.area_id = toArea;
+      if (typeof body.name === 'string') machine.name = body.name.trim();
+      machine.maintenance_since = null;
+      machine.maintenance_note = null;
+      machine.maintenance_expected_return = null;
+      machine.state_changed_at = NOW;
+      state.events.push({
+        id: state.nextEventId++,
+        machine_id: machine.id,
+        event_type: 'REACTIVATED',
+        occurred_at: NOW,
+        actor: null,
+        reason: typeof body.reason === 'string' ? body.reason : null,
+        from_area_id: fromArea !== toArea ? fromArea : null,
+        to_area_id: fromArea !== toArea ? toArea : null,
+      });
+      return json(machineWire(machine));
+    }
+    if (rest === '/lifecycle-events' && method === 'GET') {
+      return json(state.events.filter((e) => e.machine_id === machine.id));
+    }
+  }
+  return detail(`Unhandled fake route: ${method} ${url}`, 500);
+}
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/machines');
+  state = seedState();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      handle(String(input), init),
+    ),
+  );
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
-/** Render Machines with a fixed connectivity status — deterministic,
- * no fetch/timer polling. Defaults to `connected` so the existing
- * behavioral tests exercise a fully-enabled view; offline-specific
- * tests pass `'unavailable'` explicitly. */
-function renderMachines(status: 'connected' | 'unavailable' = 'connected') {
-  return render(
+/** Render Machines with a fixed connectivity status and wait for the
+ * server data to arrive. Defaults to `connected` so the behavioral
+ * tests exercise a fully-enabled view; offline-specific tests pass
+ * `'unavailable'` explicitly (reading stays available offline). */
+async function renderMachines(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  const utils = render(
     <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
       <MachinesView />
     </ConnectivityContext.Provider>,
   );
+  await screen.findByText('Saw 1');
+  return utils;
 }
 
 /** The active-Machines table row whose first cell names the Machine. */
@@ -68,23 +482,15 @@ function openEdit(name: string): HTMLElement {
   return screen.getByRole('dialog', { name: 'Edit Machine' });
 }
 
-test('active Machines list derived states with the time in state', () => {
-  renderMachines();
+test('active Machines list the derived state with the time in state', async () => {
+  await renderMachines();
 
-  // Running derives from assigned quantity; the age derives from the
-  // shared stateChangedAt timestamp.
+  // No assignment exists before the Phase 6 workflows → every Machine
+  // without a maintenance override is Idle (derived, never chosen),
+  // with the age derived from the shared stateChangedAt timestamp.
   const lathe2 = activeRow('Lathe 2');
-  expect(lathe2.querySelector('.mg-state')?.textContent).toMatch(
-    /^Running · \d/,
-  );
-  // v16 mock data: Lathe 2 runs 0455-20-0118-03 (area-board.ts).
-  expect(lathe2.textContent).toContain('0455-20-0118-03');
-
-  // No assignment → Idle (derived, never chosen).
-  expect(
-    activeRow('Mill 3 — Horizontal Boring').querySelector('.mg-state')
-      ?.textContent,
-  ).toMatch(/^Idle · /);
+  expect(lathe2.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  expect(within(lathe2).getByRole('cell', { name: '—' })).toBeInTheDocument();
 
   // Explicit maintenance override with its note and expected return.
   const lathe4 = activeRow('Lathe 4');
@@ -95,8 +501,8 @@ test('active Machines list derived states with the time in state', () => {
   expect(lathe4.textContent).toContain('Expected back 2026-08-06');
 });
 
-test('the replacement pair stays distinguishable: retired records keep their identity', () => {
-  renderMachines();
+test('the replacement pair stays distinguishable: retired records keep their identity', async () => {
+  await renderMachines();
 
   // The active `Lathe 1` is the replacement asset…
   expect(activeRow('Lathe 1').textContent).toContain('CD-0512');
@@ -135,8 +541,8 @@ test('the replacement pair stays distinguishable: retired records keep their ide
   );
 });
 
-test('the whole active row opens Edit Machine with the Area fixed', () => {
-  renderMachines();
+test('the whole active row opens Edit Machine with the Area fixed', async () => {
+  await renderMachines();
 
   const dialog = openEdit('Lathe 2');
   expect(within(dialog).getByLabelText('Display name')).toHaveValue('Lathe 2');
@@ -163,8 +569,8 @@ test('the whole active row opens Edit Machine with the Area fixed', () => {
   expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-test('the Maintenance switch mirrors the real state and only opens the dialogs', () => {
-  renderMachines();
+test('the Maintenance switch mirrors the real state and only opens the dialogs', async () => {
+  await renderMachines();
 
   // aria-checked reflects the real state only.
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'false');
@@ -182,13 +588,16 @@ test('the Maintenance switch mirrors the real state and only opens the dialogs',
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'false');
 });
 
-test('starting maintenance keeps the assigned quantity in place', () => {
-  renderMachines();
+test('starting maintenance persists the override with its note', async () => {
+  await renderMachines();
 
   fireEvent.click(maintenanceSwitch('Lathe 2'));
   const dialog = screen.getByRole('dialog', { name: 'Start maintenance' });
-  // The dialog states explicitly that nothing moves.
-  expect(dialog.textContent).toContain('4 pcs stay assigned');
+  // No production quantity exists before Phase 6 — the dialog states
+  // the current truth (nothing is assigned, nothing moves).
+  expect(dialog.textContent).toContain(
+    'No quantity is currently assigned to it.',
+  );
   fireEvent.change(within(dialog).getByLabelText(/Reason \/ note/), {
     target: { value: 'Coolant leak' },
   });
@@ -196,56 +605,37 @@ test('starting maintenance keeps the assigned quantity in place', () => {
     within(dialog).getByRole('button', { name: 'Start maintenance' }),
   );
 
-  const row = activeRow('Lathe 2');
-  expect(row.querySelector('.mg-state')?.textContent).toMatch(
-    /^Maintenance · /,
-  );
-  expect(row.textContent).toContain('Coolant leak');
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => {
+    const row = activeRow('Lathe 2');
+    expect(row.querySelector('.mg-state')?.textContent).toMatch(
+      /^Maintenance · /,
+    );
+    expect(row.textContent).toContain('Coolant leak');
+  });
   expect(maintenanceSwitch('Lathe 2')).toHaveAttribute('aria-checked', 'true');
-  // The assigned PN portions are untouched by the state change.
-  expect(row.textContent).toContain('0455-20-0118-03');
 });
 
-test('clearing maintenance returns to Running with quantity, Idle without', () => {
-  renderMachines();
+test('clearing maintenance returns the Machine to Idle', async () => {
+  await renderMachines();
 
-  // Lathe 4 has no assigned quantity → clears to Idle.
   fireEvent.click(maintenanceSwitch('Lathe 4'));
   const dialog = screen.getByRole('dialog', { name: 'Clear maintenance' });
   expect(dialog.textContent).toContain('Idle');
   fireEvent.click(
     within(dialog).getByRole('button', { name: 'Clear maintenance' }),
   );
-  expect(activeRow('Lathe 4').querySelector('.mg-state')?.textContent).toMatch(
-    /^Idle · /,
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() =>
+    expect(
+      activeRow('Lathe 4').querySelector('.mg-state')?.textContent,
+    ).toMatch(/^Idle · /),
   );
   expect(maintenanceSwitch('Lathe 4')).toHaveAttribute('aria-checked', 'false');
 });
 
-test('retirement is blocked in place while quantity is assigned', () => {
-  renderMachines();
-
-  // The Danger Zone states the blocked truth itself (neutral tone) and
-  // disables Retire — no dialog is needed to find out.
-  const edit = openEdit('Lathe 2');
-  expect(edit.textContent).toContain(
-    'cannot be retired while 4 pcs are still assigned',
-  );
-  expect(edit.textContent).toContain('normal production workflow');
-  expect(edit.querySelector('.dz-live')).toBeNull();
-  const retire = within(edit).getByRole('button', { name: 'Retire…' });
-  expect(retire).toBeDisabled();
-  fireEvent.click(retire);
-  expect(
-    screen.queryByRole('dialog', { name: 'Cannot retire Machine' }),
-  ).toBeNull();
-
-  fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(activeRow('Lathe 2')).toBeTruthy();
-});
-
-test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', () => {
-  renderMachines();
+test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', async () => {
+  await renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   // Nothing assigned: the Danger Zone shows the consequences in its
@@ -297,17 +687,19 @@ test('an idle Machine retires after typing its Asset Tag and a final summary —
   fireEvent.click(within(ask).getByRole('button', { name: 'Retire Machine' }));
 
   // Gone from the active table…
-  expect(screen.queryByRole('dialog')).toBeNull();
-  const activeTable = document.querySelectorAll('.mg-table')[0];
-  expect(activeTable.textContent).not.toContain('Mill 3 — Horizontal Boring');
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => {
+    const activeTable = document.querySelectorAll('.mg-table')[0];
+    expect(activeTable.textContent).not.toContain('Mill 3 — Horizontal Boring');
+  });
   // …and present under Retired Machines with its asset metadata.
   const retired = retiredTable();
   expect(retired.textContent).toContain('Mill 3 — Horizontal Boring');
   expect(retired.textContent).toContain('CD-0303');
 });
 
-test('the retire edits decision is recorded, not applied — cancelling later keeps the edits', () => {
-  renderMachines();
+test('the retire edits decision is recorded, not applied — cancelling later keeps the edits', async () => {
+  await renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -336,10 +728,12 @@ test('the retire edits decision is recorded, not applied — cancelling later ke
     'Pending disposal review',
   );
   expect(editAgain.textContent).toContain('● Unsaved changes');
+  // Nothing reached the server.
+  expect(state.machines.find((m) => m.id === 303)?.notes).toBeNull();
 });
 
-test('a recorded Save decision applies the edits only when the retirement completes', () => {
-  renderMachines();
+test('a recorded Save decision travels with the retirement and commits with it', async () => {
+  await renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -360,18 +754,26 @@ test('a recorded Save decision applies the edits only when the retirement comple
   // The summary names the recorded decision before anything happens.
   const summary = screen.getByRole('dialog', { name: 'Confirm retirement' });
   expect(summary.textContent).toContain('Saved with the retirement');
+  // The edits are still only recorded — not sent.
+  expect(state.machines.find((m) => m.id === 303)?.notes).toBeNull();
   fireEvent.click(
     within(summary).getByRole('button', { name: 'Retire Machine' }),
   );
   const ask = screen.getByRole('dialog', { name: 'Retire this Machine?' });
   fireEvent.click(within(ask).getByRole('button', { name: 'Retire Machine' }));
 
-  // The edit was applied together with the retirement.
-  expect(retiredTable().textContent).toContain('Sold for scrap');
+  // The edits were applied together with the retirement (one request).
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() =>
+    expect(retiredTable().textContent).toContain('Sold for scrap'),
+  );
+  const mill3 = state.machines.find((m) => m.id === 303)!;
+  expect(mill3.notes).toBe('Sold for scrap');
+  expect(mill3.retired_on).not.toBeNull();
 });
 
-test('reactivation blocks on a name collision until a rename, then returns the Machine as Idle', () => {
-  renderMachines();
+test('reactivation blocks on a name collision until a rename, then returns the Machine as Idle', async () => {
+  await renderMachines();
 
   // Reactivate is entered through the Retired Machine Details dialog.
   const lathe1Row = within(retiredTable())
@@ -402,8 +804,8 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   // likely to need attention.
   expect(within(dialog).getByLabelText('Display name')).toHaveFocus();
   // The reused floor-position name collides with the active replacement
-  // MC-512 `Lathe 1` in the same Area — the error sits in the name
-  // column, marked with the ✕ glyph.
+  // `Lathe 1` in the same Area — the error sits in the name column,
+  // marked with the ✕ glyph.
   expect(dialog.textContent).toContain('✕ “Lathe 1” already exists in Lathe');
 
   // A required reason alone is not enough while the collision stands —
@@ -459,26 +861,31 @@ test('reactivation blocks on a name collision until a rename, then returns the M
   );
 
   // The Machine returns as Idle (running stays derived).
-  expect(screen.queryByRole('dialog')).toBeNull();
-  const row = activeRow('Lathe 1B');
-  expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => {
+    const row = activeRow('Lathe 1B');
+    expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  });
 
   // The lifecycle audit keeps both events, append-only — presented in
   // the shared timeline style, in its compact one-line-per-event
-  // variant inside Edit Machine.
-  fireEvent.click(row);
+  // variant inside Edit Machine. The reactivation reason is recorded;
+  // actor identity arrives with authentication (Phase 14).
+  fireEvent.click(activeRow('Lathe 1B'));
   const edit = screen.getByRole('dialog', { name: 'Edit Machine' });
+  await waitFor(() =>
+    expect(edit.querySelectorAll('.mg-tlevent').length).toBe(2),
+  );
   expect(edit.querySelector('.mg-timeline')).toHaveClass('compact');
   const events = edit.querySelectorAll('.mg-tlevent');
-  expect(events).toHaveLength(2);
   expect(events[0].textContent).toContain('Retired');
+  expect(events[0].textContent).toContain('M. Chen (Production Manager)');
   expect(events[1].textContent).toContain('Reactivated');
-  expect(events[1].textContent).toContain('M. Chen (Production Manager)');
   expect(events[1].textContent).toContain('Returned from overhaul');
 });
 
-test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', () => {
-  renderMachines();
+test('a reactivated Machine keeps its Asset Tag and confirms retirement with it', async () => {
+  await renderMachines();
 
   // Reactivate Saw 2 first (no identity conflicts, no name collision)
   // — entered through the Retired Machine Details dialog.
@@ -514,8 +921,11 @@ test('a reactivated Machine keeps its Asset Tag and confirms retirement with it'
   fireEvent.click(
     within(reactAsk).getByRole('button', { name: 'Reactivate Machine' }),
   );
-  expect(activeRow('Saw 2').querySelector('.mg-state')?.textContent).toMatch(
-    /^Idle · /,
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() =>
+    expect(activeRow('Saw 2').querySelector('.mg-state')?.textContent).toMatch(
+      /^Idle · /,
+    ),
   );
 
   // Retire it again: the typed confirmation is always the Asset Tag —
@@ -545,17 +955,19 @@ test('a reactivated Machine keeps its Asset Tag and confirms retirement with it'
     within(retireAsk).getByRole('button', { name: 'Retire Machine' }),
   );
 
-  expect(retiredTable().textContent).toContain('Saw 2');
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => expect(retiredTable().textContent).toContain('Saw 2'));
 });
 
-test('a new Machine receives the next Asset Tag automatically and is added only after summary + confirmation', () => {
-  renderMachines();
+test('a new Machine previews the next Asset Tag and is added only after summary + confirmation', async () => {
+  await renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
-  // No manual identity entry exists: the Asset Tag is assigned from
-  // the configured format (highest existing sequence is CD-0512) and
-  // the barcode derives from it. The identity header leads the dialog.
+  // No manual identity entry exists: the preview shows the next tag of
+  // the configured format (the server-persisted counter stands at 513)
+  // and the barcode derives from it. The identity header leads the
+  // dialog.
   expect(within(dialog).queryByLabelText('Barcode value')).toBeNull();
   expect(within(dialog).queryByLabelText(/Asset tag/)).toBeNull();
   const identity = dialog.querySelector('.mg-idhead') as HTMLElement;
@@ -588,15 +1000,22 @@ test('a new Machine receives the next Asset Tag automatically and is added only 
   expect(ask.textContent).toContain('can only be retired later');
   fireEvent.click(within(ask).getByRole('button', { name: 'Add Machine' }));
 
-  // The new Machine starts Idle (no assignment yet) and carries the
-  // assigned Asset Tag.
-  const row = activeRow('Lathe 5');
-  expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
-  expect(row.querySelector('.mg-assetline')?.textContent).toContain('CD-0513');
+  // The new Machine starts Idle and carries the server-assigned tag —
+  // the previewed value travelled as the optimistic precondition.
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => {
+    const row = activeRow('Lathe 5');
+    expect(row.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+    expect(row.querySelector('.mg-assetline')?.textContent).toContain(
+      'CD-0513',
+    );
+  });
+  // The counter advanced server-side.
+  expect(state.format.next_sequence).toBe(514);
 });
 
-test('cancelling the add confirmation returns to the summary, then the form — nothing added', () => {
-  renderMachines();
+test('cancelling the add confirmation returns to the summary, then the form — nothing added', async () => {
+  await renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -622,10 +1041,11 @@ test('cancelling the add confirmation returns to the summary, then the form — 
   // Nothing was added.
   const activeTable = document.querySelectorAll('.mg-table')[0];
   expect(activeTable.textContent).not.toContain('Lathe 5');
+  expect(state.machines.some((m) => m.name === 'Lathe 5')).toBe(false);
 });
 
-test('the New Machine dialog focuses Display name; Edit Machine claims no field', () => {
-  renderMachines();
+test('the New Machine dialog focuses Display name; Edit Machine claims no field', async () => {
+  await renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
@@ -637,8 +1057,8 @@ test('the New Machine dialog focuses Display name; Edit Machine claims no field'
   fireEvent.click(within(edit).getByRole('button', { name: 'Cancel (Esc)' }));
 });
 
-test('cancelling Edit Machine with unsaved edits asks to save first', () => {
-  renderMachines();
+test('cancelling Edit Machine with unsaved edits asks to save first', async () => {
+  await renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -654,7 +1074,8 @@ test('cancelling Edit Machine with unsaved edits asks to save first', () => {
     'Coolant flushed 2026',
   );
 
-  // Save changes saves and closes; reopening shows the saved value.
+  // Save changes saves through the API and closes; reopening shows the
+  // persisted value.
   fireEvent.click(
     within(editAgain).getByRole('button', { name: 'Cancel (Esc)' }),
   );
@@ -664,15 +1085,21 @@ test('cancelling Edit Machine with unsaved edits asks to save first', () => {
       { name: 'Save changes' },
     ),
   );
-  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(state.machines.find((m) => m.id === 303)?.notes).toBe(
+    'Coolant flushed 2026',
+  );
+  await waitFor(() =>
+    expect(activeRow('Mill 3 — Horizontal Boring')).toBeTruthy(),
+  );
   const reopened = openEdit('Mill 3 — Horizontal Boring');
   expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue(
     'Coolant flushed 2026',
   );
 });
 
-test('discarding on cancel never saves; a dirty New Machine confirms the discard', () => {
-  renderMachines();
+test('discarding on cancel never saves; a dirty New Machine confirms the discard', async () => {
+  await renderMachines();
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
@@ -686,6 +1113,7 @@ test('discarding on cancel never saves; a dirty New Machine confirms the discard
     ),
   );
   expect(screen.queryByRole('dialog')).toBeNull();
+  expect(state.machines.find((m) => m.id === 303)?.notes).toBeNull();
   const reopened = openEdit('Mill 3 — Horizontal Boring');
   expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue('');
   fireEvent.click(
@@ -729,14 +1157,19 @@ test('discarding on cancel never saves; a dirty New Machine confirms the discard
   expect(screen.queryByRole('dialog')).toBeNull();
   const activeTable = document.querySelectorAll('.mg-table')[0];
   expect(activeTable.textContent).not.toContain('Lathe 9');
+  expect(state.machines.some((m) => m.name === 'Lathe 9')).toBe(false);
 });
 
-test('a new Machine cannot reuse an active display name of the same Area', () => {
-  renderMachines();
+test('a new Machine cannot reuse an active display name of the same Area', async () => {
+  await renderMachines();
 
   fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
   const dialog = screen.getByRole('dialog', { name: 'New Machine' });
-  // The default Area is Lathe, where an active `Lathe 2` exists.
+  // The default Area is Cut (first active non-terminal Area) — pick
+  // Lathe, where an active `Lathe 2` exists.
+  fireEvent.change(within(dialog).getByRole('combobox'), {
+    target: { value: '2' },
+  });
   fireEvent.change(within(dialog).getByLabelText('Display name'), {
     target: { value: 'Lathe 2' },
   });
@@ -749,6 +1182,39 @@ test('a new Machine cannot reuse an active display name of the same Area', () =>
   ).toBeNull();
 });
 
+test('a stale Asset Tag preview is rejected by the server and consumes nothing', async () => {
+  await renderMachines();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Machine' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Machine' });
+  expect(dialog.textContent).toContain('CD-0513');
+
+  // Another client consumes the previewed tag while the dialog is open.
+  state.format.next_sequence = 514;
+
+  fireEvent.change(within(dialog).getByLabelText('Display name'), {
+    target: { value: 'Lathe 5' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  const summary = screen.getByRole('dialog', { name: 'Confirm new Machine' });
+  fireEvent.click(within(summary).getByRole('button', { name: 'Add Machine' }));
+  fireEvent.click(
+    within(screen.getByRole('dialog', { name: 'Add this Machine?' })).getByRole(
+      'button',
+      { name: 'Add Machine' },
+    ),
+  );
+
+  // The server rejects the stale precondition — the summary stays open
+  // with the server's message, and nothing was created or consumed.
+  const message = await within(
+    screen.getByRole('dialog', { name: 'Confirm new Machine' }),
+  ).findByRole('alert');
+  expect(message.textContent).toContain('out of date');
+  expect(state.machines.some((m) => m.name === 'Lathe 5')).toBe(false);
+  expect(state.format.next_sequence).toBe(514);
+});
+
 /** Display names of the active table, in row order. */
 function activeNames(): (string | null)[] {
   const table = document.querySelectorAll('.mg-table')[0];
@@ -757,8 +1223,8 @@ function activeNames(): (string | null)[] {
   );
 }
 
-test('column headers sort the active table and cycle ascending → descending → unsorted', () => {
-  renderMachines();
+test('column headers sort the active table and cycle ascending → descending → unsorted', async () => {
+  await renderMachines();
 
   const original = [
     'Saw 1',
@@ -813,51 +1279,38 @@ test('column headers sort the active table and cycle ascending → descending �
   expect(byMachine.closest('th')).not.toHaveAttribute('aria-sort');
 });
 
-test('Assigned now sorts by quantity and State by derived state — ties stay in name order', () => {
-  renderMachines();
+test('State sorts the derived state — working machines first, Maintenance last, ties in name order', async () => {
+  await renderMachines();
 
-  // Assigned quantities (mock): Saw 1 = 4, Lathe 2 = 4, Lathe 3 = 3,
-  // Mill 1 = 3, Mill 2 = 2, others 0.
-  fireEvent.click(screen.getByRole('button', { name: 'Sort by Assigned now' }));
-  expect(activeNames()).toEqual([
-    'Lathe 1',
-    'Lathe 4',
-    'Mill 3 — Horizontal Boring',
-    'Mill 2',
-    'Lathe 3',
-    'Mill 1',
-    'Lathe 2',
-    'Saw 1',
-  ]);
-  fireEvent.click(screen.getByRole('button', { name: 'Sort by Assigned now' }));
-  expect(activeNames()).toEqual([
-    'Lathe 2',
-    'Saw 1',
-    'Lathe 3',
-    'Mill 1',
-    'Mill 2',
-    'Lathe 1',
-    'Lathe 4',
-    'Mill 3 — Horizontal Boring',
-  ]);
-
-  // Switching to another column starts a fresh ascending sort:
-  // Running first, then Idle, Maintenance last (ties by name).
+  // Without Phase 6 assignments every non-maintenance Machine is Idle
+  // — ascending groups the Idle machines by name and puts the
+  // Maintenance override last.
   fireEvent.click(screen.getByRole('button', { name: 'Sort by State' }));
   expect(activeNames()).toEqual([
+    'Lathe 1',
     'Lathe 2',
     'Lathe 3',
     'Mill 1',
     'Mill 2',
-    'Saw 1',
-    'Lathe 1',
     'Mill 3 — Horizontal Boring',
+    'Saw 1',
     'Lathe 4',
+  ]);
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by State' }));
+  expect(activeNames()).toEqual([
+    'Lathe 4',
+    'Lathe 1',
+    'Lathe 2',
+    'Lathe 3',
+    'Mill 1',
+    'Mill 2',
+    'Mill 3 — Horizontal Boring',
+    'Saw 1',
   ]);
 });
 
-test('the Retired Machines table sorts independently through its own headers', () => {
-  renderMachines();
+test('the Retired Machines table sorts independently through its own headers', async () => {
+  await renderMachines();
 
   /** Display names of the retired table, in row order. */
   const retiredNames = () =>
@@ -891,8 +1344,8 @@ test('the Retired Machines table sorts independently through its own headers', (
   ).not.toHaveClass('on');
 });
 
-test('the Retired Machines columns order Machine, Retired, Asset, Notes — no action column', () => {
-  renderMachines();
+test('the Retired Machines columns order Machine, Retired, Asset, Notes — no action column', async () => {
+  await renderMachines();
 
   const headers = Array.from(
     retiredTable().querySelectorAll('thead th'),
@@ -901,8 +1354,8 @@ test('the Retired Machines columns order Machine, Retired, Asset, Notes — no a
   expect(headers).toEqual(['Machine', 'Retired', 'Asset', 'Notes']);
 });
 
-test('a retired row opens the read-only Retired Machine Details dialog with the lifecycle', () => {
-  renderMachines();
+test('a retired row opens the read-only Retired Machine Details dialog with the lifecycle', async () => {
+  await renderMachines();
 
   const lathe1Row = within(retiredTable())
     .getByText('Retired on 2026-02-14')
@@ -923,9 +1376,12 @@ test('a retired row opens the read-only Retired Machine Details dialog with the 
   expect(dialog.textContent).toContain(
     'display name reused for the floor position',
   );
-  // The lifecycle timeline presents the append-only audit events.
+  // The lifecycle timeline presents the append-only audit events,
+  // loaded from the lifecycle-history endpoint.
+  await waitFor(() =>
+    expect(dialog.querySelectorAll('.mg-tlevent').length).toBe(1),
+  );
   const events = dialog.querySelectorAll('.mg-tlevent');
-  expect(events).toHaveLength(1);
   expect(events[0].textContent).toContain('Retired');
   expect(events[0].textContent).toContain('2026-02-14');
   expect(events[0].textContent).toContain('M. Chen (Production Manager)');
@@ -939,8 +1395,8 @@ test('a retired row opens the read-only Retired Machine Details dialog with the 
   expect(retiredTable().textContent).toContain('Retired on 2026-02-14');
 });
 
-test('the details dialog leads to Reactivate and ‹ Back returns to the details', () => {
-  renderMachines();
+test('the details dialog leads to Reactivate and ‹ Back returns to the details', async () => {
+  await renderMachines();
 
   const saw2Row = within(retiredTable())
     .getByText('Retired on 2025-11-03')
@@ -961,8 +1417,8 @@ test('the details dialog leads to Reactivate and ‹ Back returns to the details
   ).toBeInTheDocument();
 });
 
-test('the maintenance note and expected return date are editable from Edit Machine', () => {
-  renderMachines();
+test('the maintenance note and expected return date are editable from Edit Machine', async () => {
+  await renderMachines();
 
   // A Machine that is NOT under maintenance shows no maintenance
   // fields in the Edit dialog.
@@ -987,16 +1443,23 @@ test('the maintenance note and expected return date are editable from Edit Machi
   fireEvent.click(within(edit).getByRole('button', { name: 'Save changes' }));
 
   // The row shows the updated context; the state itself is untouched.
-  const row = activeRow('Lathe 4');
-  expect(row.querySelector('.mg-state')?.textContent).toMatch(
-    /^Maintenance · /,
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => {
+    const row = activeRow('Lathe 4');
+    expect(row.querySelector('.mg-state')?.textContent).toMatch(
+      /^Maintenance · /,
+    );
+    expect(row.textContent).toContain('Spindle rebuilt — waiting on parts');
+    expect(row.textContent).toContain('Expected back 2026-08-20');
+  });
+  // The maintenance start time was NOT touched by the context edit.
+  expect(state.machines.find((m) => m.id === 107)?.maintenance_since).toBe(
+    '2026-07-28T00:00:00.000Z',
   );
-  expect(row.textContent).toContain('Spindle rebuilt — waiting on parts');
-  expect(row.textContent).toContain('Expected back 2026-08-20');
 });
 
-test('the barcode label dialog renders the scannable Asset Tag barcode', () => {
-  renderMachines();
+test('the barcode label dialog renders the scannable Asset Tag barcode', async () => {
+  await renderMachines();
 
   const dialog = openEdit('Lathe 2');
   fireEvent.click(
@@ -1022,10 +1485,39 @@ test('the barcode label dialog renders the scannable Asset Tag barcode', () => {
   ).toBeInTheDocument();
 });
 
+test('a rejected save keeps the Edit dialog open with the server message', async () => {
+  await renderMachines();
+
+  // Rename Lathe 3 to collide with the active Lathe 2 — the live field
+  // feedback catches this locally, so simulate the authoritative
+  // server rejection instead through a name that only the server
+  // refuses (a concurrent rename): force the fake to reject.
+  const edit = openEdit('Lathe 3');
+  fireEvent.change(within(edit).getByLabelText('Notes (optional)'), {
+    target: { value: 'Updated notes' },
+  });
+  // Another client renames Lathe 2 → the collision only exists
+  // server-side.
+  state.machines.find((m) => m.id === 105)!.name = 'Lathe 3X';
+  fireEvent.change(within(edit).getByLabelText('Display name'), {
+    target: { value: 'Lathe 3X' },
+  });
+  fireEvent.click(within(edit).getByRole('button', { name: 'Save changes' }));
+
+  const message = await within(
+    screen.getByRole('dialog', { name: 'Edit Machine' }),
+  ).findAllByRole('alert');
+  expect(message.some((m) => m.textContent?.includes('already exists'))).toBe(
+    true,
+  );
+  // Nothing was persisted.
+  expect(state.machines.find((m) => m.id === 106)?.notes).toBeNull();
+});
+
 /* ============ Offline write-block ============ */
 
-test('offline disables New Machine and the Maintenance switch; reading stays available', () => {
-  renderMachines('unavailable');
+test('offline disables New Machine and the Maintenance switch; reading stays available', async () => {
+  await renderMachines('unavailable');
 
   expect(screen.getByRole('button', { name: '+ New Machine' })).toBeDisabled();
   expect(maintenanceSwitch('Lathe 2')).toBeDisabled();
@@ -1036,8 +1528,8 @@ test('offline disables New Machine and the Maintenance switch; reading stays ava
   expect(edit).toBeInTheDocument();
 });
 
-test('offline disables Save and Retire… inside Edit Machine', () => {
-  renderMachines('unavailable');
+test('offline disables Save and Retire… inside Edit Machine', async () => {
+  await renderMachines('unavailable');
 
   const edit = openEdit('Mill 3 — Horizontal Boring');
   expect(
@@ -1046,8 +1538,8 @@ test('offline disables Save and Retire… inside Edit Machine', () => {
   expect(within(edit).getByRole('button', { name: 'Retire…' })).toBeDisabled();
 });
 
-test('offline disables Reactivate inside Retired Machine Details', () => {
-  renderMachines('unavailable');
+test('offline disables Reactivate inside Retired Machine Details', async () => {
+  await renderMachines('unavailable');
 
   const lathe1Row = within(retiredTable())
     .getByText('Retired on 2026-02-14')
@@ -1061,8 +1553,8 @@ test('offline disables Reactivate inside Retired Machine Details', () => {
   ).toBeDisabled();
 });
 
-test('reconnecting re-enables the write actions', () => {
-  const { rerender } = renderMachines('unavailable');
+test('reconnecting re-enables the write actions', async () => {
+  const { rerender } = await renderMachines('unavailable');
   expect(screen.getByRole('button', { name: '+ New Machine' })).toBeDisabled();
 
   rerender(
@@ -1075,12 +1567,12 @@ test('reconnecting re-enables the write actions', () => {
   expect(screen.getByRole('button', { name: '+ New Machine' })).toBeEnabled();
 });
 
-test('offline mid-flow disables the Retire workflow’s typed-confirm Continue and the final question — nothing retires', () => {
+test('offline mid-flow disables the Retire workflow’s typed-confirm Continue and the final question — nothing retires', async () => {
   // The realistic sequence: open the workflow while CONNECTED, then
   // lose connectivity with it already open. Entry-point blocking alone
   // (Retire… disabled) is not enough — every write-capable step
   // already reachable inside the open dialog must gate too.
-  const { rerender } = renderMachines('connected');
+  const { rerender } = await renderMachines('connected');
   const reconnectAs = (status: 'connected' | 'unavailable') =>
     rerender(
       <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
@@ -1146,10 +1638,11 @@ test('offline mid-flow disables the Retire workflow’s typed-confirm Continue a
   expect(retiredTable().textContent).not.toContain(
     'Mill 3 — Horizontal Boring',
   );
+  expect(state.machines.find((m) => m.id === 303)?.retired_on).toBeNull();
 });
 
-test('offline mid-flow disables the Start maintenance confirm — the switch stays off', () => {
-  const { rerender } = renderMachines('connected');
+test('offline mid-flow disables the Start maintenance confirm — the switch stays off', async () => {
+  const { rerender } = await renderMachines('connected');
   const reconnectAs = (status: 'connected' | 'unavailable') =>
     rerender(
       <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
@@ -1182,10 +1675,13 @@ test('offline mid-flow disables the Start maintenance confirm — the switch sta
   expect(
     screen.getByRole('dialog', { name: 'Start maintenance' }),
   ).toBeInTheDocument();
+  expect(
+    state.machines.find((m) => m.id === 105)?.maintenance_since,
+  ).toBeNull();
 });
 
-test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard changes available — nothing is saved', () => {
-  const { rerender } = renderMachines('connected');
+test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard changes available — nothing is saved', async () => {
+  const { rerender } = await renderMachines('connected');
   const reconnectAs = (status: 'connected' | 'unavailable') =>
     rerender(
       <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
@@ -1205,7 +1701,7 @@ test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard
 
   reconnectAs('unavailable');
   const stillUnsaved = screen.getByRole('dialog', { name: 'Unsaved changes' });
-  // Save writes immediately here (it calls onSave directly) — it must
+  // Save writes immediately here (it calls the API directly) — it must
   // gate on writeBlocked. Discard never persists anything — it must
   // keep working offline (§ read-only/close actions stay available).
   expect(
@@ -1221,17 +1717,16 @@ test('offline mid-flow disables the unsaved-edits Save changes but keeps Discard
   );
   expect(screen.queryByRole('dialog')).toBeNull();
   // Notes were never saved.
-  const reopened = openEdit('Mill 3 — Horizontal Boring');
-  expect(within(reopened).getByLabelText('Notes (optional)')).toHaveValue('');
+  expect(state.machines.find((m) => m.id === 303)?.notes).toBeNull();
 });
 
 /* ============ ?state=long ============ */
 
-test('?state=long renders many long-identifier Machines alongside the sample data', () => {
+test('?state=long renders many long-identifier Machines alongside the server data', async () => {
   window.history.replaceState({}, '', '/management/machines?state=long');
-  renderMachines();
+  await renderMachines();
 
-  // Sample data is still present…
+  // Server data is still present…
   expect(activeRow('Lathe 2')).toBeTruthy();
   // …plus the long-preview rows, including the over-long display name
   // and asset metadata.

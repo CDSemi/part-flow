@@ -409,3 +409,144 @@
 .ad-switch.on .swstate {
   color: var(--info-t);
 }
+
+/* --- Phase 3.5 real configuration tables and editors ------------------- */
+
+/* Whole-row activation (the same pattern as the Machines and Part
+   Numbers tables): the complete row opens the editor dialog and the
+   name-cell button is the keyboard and screen-reader entry point. */
+.ad-table tr.selrow {
+  cursor: pointer;
+}
+
+.ad-table tr.selrow:hover td {
+  background: var(--row-hover);
+}
+
+.ad-table .rowbtn {
+  display: inline-block;
+  width: 100%;
+  text-align: left;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ad-table .rowbtn:focus-visible {
+  outline: none;
+}
+
+/* Quiet mono Operation code beside the display name. */
+.ad-opcode {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+/* Editor dialog form: stacked label + control rows, one shared
+   control height (mirrors the Machines dialog form rhythm). */
+.ad-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 14px 0 4px;
+}
+
+.ad-form label:not(.ad-check) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+.ad-form .field {
+  height: 44px;
+}
+
+.ad-form .err,
+.ad-config .row + .err {
+  color: var(--err-t);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin: -4px 0 0;
+}
+
+/* Native color input: keep the shared field frame, let the swatch
+   fill it. */
+.ad-form .ad-color {
+  padding: 4px 6px;
+  width: 120px;
+}
+
+/* Labeled Active/Terminal checkbox row of the editor dialogs. */
+.ad-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ad-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--info);
+}
+
+/* Read-only identity panel of an editor dialog (Area barcode and
+   Department, Operation Area binding, Station ID): quiet key/value
+   rows on the secondary surface with the stable-identity note. */
+.ad-identity {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 12px 0 2px;
+}
+
+.ad-identity .idrow {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+.ad-identity .k {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  min-width: 96px;
+}
+
+.ad-identity .v {
+  font-size: 13.5px;
+}
+
+.ad-idnote {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 8px 0 0;
+}
+
+/* Saved confirmation of the Barcode configuration settings form. */
+.ad-savednote {
+  color: var(--ok-t);
+  font-size: 12.5px;
+  font-weight: 700;
+  margin: 10px 0 0;
+}
+
+/* The settings form's action row sits inside the panel. */
+.ad-config .row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}

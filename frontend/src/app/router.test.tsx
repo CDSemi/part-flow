@@ -10,13 +10,31 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from '../App';
 
 beforeEach(() => {
+  // Health answers ok; the real Phase 3.5 views (Machines,
+  // Administration) additionally load their configuration lists — an
+  // empty environment keeps these routing tests focused on navigation.
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
-      Promise.resolve(
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/barcode-configuration/')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: 'Not configured.' }), {
+            status: 404,
+          }),
+        );
+      }
+      if (
+        /\/api\/(machines|areas|departments|operations|scan-stations)/.test(url)
+      ) {
+        return Promise.resolve(
+          new Response(JSON.stringify([]), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
         new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      ),
-    ),
+      );
+    }),
   );
 });
 
