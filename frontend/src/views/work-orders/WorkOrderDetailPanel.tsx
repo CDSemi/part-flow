@@ -12,6 +12,8 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
+import { PnBarcodeChip } from '../../components/PnBarcodeChip';
+import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import {
   EmptyState,
   ErrorState,
@@ -115,6 +117,8 @@ export function WorkOrderDetailPanel({
   const [lines, setLines] = useState<DemandLineDraft[]>([]);
   const [dirty, setDirty] = useState(false);
   const [addPartOpen, setAddPartOpen] = useState(false);
+  // Presentation-only: the PN whose printable label is open.
+  const [labelPn, setLabelPn] = useState<string | null>(null);
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
   const [confirmRemove, setConfirmRemove] = useState<DemandLineDraft | null>(
     null,
@@ -255,13 +259,10 @@ export function WorkOrderDetailPanel({
     setDirty(true);
   }
 
-  function addScannedLine(pn: string, barcode: string, isNewPn: boolean) {
+  function addScannedLine(pn: string, isNewPn: boolean) {
     const line = createDraftLine({
       pn,
       isNewPn,
-      barcodeNote: isNewPn
-        ? `new PN — barcode ${barcode}`
-        : `existing PN · barcode ${barcode}`,
       due,
     });
     setLines((current) => [...current, line]);
@@ -297,7 +298,7 @@ export function WorkOrderDetailPanel({
       return;
     }
     void resolvePartNumber(result.pn).then(
-      (master) => addScannedLine(result.pn, result.barcode, master === null),
+      (master) => addScannedLine(result.pn, master === null),
       (error: unknown) => showNotice(`✕ ${errorMessage(error)}`),
     );
   }
@@ -595,7 +596,6 @@ export function WorkOrderDetailPanel({
                               clearLineError(line.id, 'pn');
                               updateLine(line.id, {
                                 pn,
-                                barcodeNote: `new PN — barcode PF:PN:${pn}`,
                                 isNewPn: true,
                               });
                               setFocusField({
@@ -614,9 +614,22 @@ export function WorkOrderDetailPanel({
                             —
                           </div>
                         )}
-                        <div className={`bc ${line.isNewPn ? 'newpn' : ''}`}>
-                          {line.barcodeNote}
-                        </div>
+                        {line.pn ? (
+                          <div className="pnbc">
+                            <PnBarcodeChip
+                              pn={line.pn}
+                              onOpen={() => setLabelPn(line.pn)}
+                            />
+                            {line.isNewPn ? (
+                              <span className="bc newpn">new PN</span>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <div className="bc">
+                            PN lookup — an unknown PN is created inline with its
+                            barcode
+                          </div>
+                        )}
                         {line.notes ? (
                           <div className="bc">notes: {line.notes}</div>
                         ) : null}
@@ -964,6 +977,10 @@ export function WorkOrderDetailPanel({
           onDuplicate={handleAddPartDuplicate}
           onComplete={handleAddPartComplete}
         />
+      ) : null}
+
+      {labelPn !== null ? (
+        <PnBarcodeLabelDialog pn={labelPn} onClose={() => setLabelPn(null)} />
       ) : null}
 
       {confirmMissing ? (

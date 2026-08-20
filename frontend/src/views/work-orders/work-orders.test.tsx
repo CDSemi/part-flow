@@ -950,18 +950,28 @@ test('a PN barcode carries the PN itself; an unknown PN is created on first use'
 
 test('scanned lines reflect the real master lookup — existing PN reuse vs. create-on-first-use', async () => {
   await renderWorkOrders();
-  // The Work Order Details table renders each line's barcode note.
+  // Every line carries the same barcode chip; only the `new PN`
+  // marker distinguishes a PN that has no master record yet.
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
   scanBarcode('PF:PN:309-127');
   expect(
-    await within(dialog).findByText('existing PN · barcode PF:PN:309-127'),
-  ).toBeInTheDocument();
+    await within(dialog).findByRole('button', {
+      name: 'Open barcode label for 309-127',
+    }),
+  ).toHaveTextContent('PF:PN:309-127');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
-  expect(
-    await within(dialog).findByText('new PN — barcode PF:PN:NEW-PLATE-9'),
-  ).toBeInTheDocument();
+  const newLine = (
+    await within(dialog).findByRole('button', {
+      name: 'Open barcode label for NEW-PLATE-9',
+    })
+  ).closest('td') as HTMLElement;
+  expect(within(newLine).getByText('new PN')).toBeInTheDocument();
+
+  // The barcode is never a sentence in the row any more.
+  expect(within(dialog).queryByText(/existing PN · barcode/)).toBeNull();
+  expect(within(dialog).queryByText(/new PN — barcode/)).toBeNull();
 });
 
 test('scanning a duplicate PN focuses the existing line instead of adding one', async () => {
@@ -2314,11 +2324,14 @@ test('the Add Part intake offers a printable Code 128 label for a new canonical 
   // The label derives from the canonical PN identity — no master
   // record exists for PL-88 and none is needed.
   fireEvent.click(screen.getByRole('button', { name: 'Barcode label…' }));
-  const label = await screen.findByRole('dialog', { name: 'PN barcode label' });
+  const label = await screen.findByRole('dialog', {
+    name: 'Part Number barcode label',
+  });
   expect(
     within(label).getByRole('img', { name: 'Barcode PF:PN:PL-88' }),
   ).toBeInTheDocument();
-  expect(label).toHaveTextContent('PL-88 · PF:PN:PL-88');
+  expect(label.querySelector('.lpn')?.textContent).toBe('PL-88');
+  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:PL-88');
   expect(
     within(label).getByRole('button', { name: 'Print Label' }),
   ).toBeInTheDocument();
@@ -2330,19 +2343,93 @@ test('the Add Part intake offers a printable Code 128 label for a new canonical 
   ).toBeInTheDocument();
 });
 
-test('an entered demand line offers the label for an existing PN master too', async () => {
+test('a New Work Order demand line opens the shared label through the barcode chip', async () => {
   await renderWorkOrders();
-  openNewWorkOrderDialog();
+  const dialog = openNewWorkOrderDialog();
 
   scanBarcode('PF:PN:309-127');
   await screen.findByLabelText('Quantity for 309-127');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Barcode label…' }));
-  const label = await screen.findByRole('dialog', { name: 'PN barcode label' });
+  // The per-line text link is gone — the chip carrying the scanned
+  // value is the ONE entry, identical to Work Order Details.
+  expect(
+    within(dialog).queryByRole('button', { name: 'Barcode label…' }),
+  ).toBeNull();
+  const chip = within(dialog).getByRole('button', {
+    name: 'Open barcode label for 309-127',
+  });
+  expect(chip).toHaveClass('pnb-chip');
+  expect(chip).toHaveTextContent('PF:PN:309-127');
+
+  fireEvent.click(chip);
+  const label = await screen.findByRole('dialog', {
+    name: 'Part Number barcode label',
+  });
   expect(
     within(label).getByRole('img', { name: 'Barcode PF:PN:309-127' }),
   ).toBeInTheDocument();
-  expect(label).toHaveTextContent('309-127 · PF:PN:309-127');
+  expect(label.querySelector('.lpn')?.textContent).toBe('309-127');
+  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:309-127');
+});
+
+test('a saved Work Order Details line carries the barcode chip and opens the shared label', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  // No barcode sentence in the PN column any more.
+  expect(within(dialog).queryByText(/existing PN · barcode/)).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Barcode label…' }),
+  ).toBeNull();
+
+  const chip = within(dialog).getByRole('button', {
+    name: 'Open barcode label for A-100',
+  });
+  expect(chip).toHaveAttribute('type', 'button');
+  expect(chip).toHaveClass('pnb-chip');
+  expect(chip).toHaveTextContent('PF:PN:A-100');
+  // Opening the label is presentation only — the draft stays clean.
+  expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+
+  fireEvent.click(chip);
+  const label = await screen.findByRole('dialog', {
+    name: 'Part Number barcode label',
+  });
+  expect(
+    within(label).getByRole('img', { name: 'Barcode PF:PN:A-100' }),
+  ).toBeInTheDocument();
+  expect(label.querySelector('.lpn')?.textContent).toBe('A-100');
+  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:A-100');
+  expect(
+    within(label).getByRole('button', { name: 'Print Label' }),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+
+  // Closing the label returns to the Work Order Details dialog.
+  fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+});
+
+test('a draft line for a new PN carries the same chip — the label derives from the PN alone', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  const chip = await within(dialog).findByRole('button', {
+    name: 'Open barcode label for NEW-PLATE-9',
+  });
+  expect(chip).toHaveClass('pnb-chip');
+
+  fireEvent.click(chip);
+  const label = await screen.findByRole('dialog', {
+    name: 'Part Number barcode label',
+  });
+  expect(
+    within(label).getByRole('img', { name: 'Barcode PF:PN:NEW-PLATE-9' }),
+  ).toBeInTheDocument();
+  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:NEW-PLATE-9');
 });
 
 /* ============ Saved-line removal vs. unsaved demand edits ============ */

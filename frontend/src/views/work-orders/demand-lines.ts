@@ -25,7 +25,8 @@ export interface DemandLineDraft {
   demandId: number | null;
   /** null while a manual row still needs its PN lookup / inline create. */
   pn: string | null;
-  barcodeNote: string;
+  /** True for a PN with no PartNumber master yet — the line still
+   * carries its barcode, which derives from the canonical PN alone. */
   isNewPn: boolean;
   type: RequestType;
   qty: string;
@@ -84,7 +85,6 @@ export function createDraftLine(
     id: nextDraftId++,
     demandId: null,
     pn: null,
-    barcodeNote: 'PN lookup — an unknown PN is created inline with its barcode',
     isNewPn: false,
     type: 'NEW',
     qty: '',
@@ -125,7 +125,6 @@ export function draftFromDemand(
     remainingQuantity: demand.remainingQuantity,
     demandId: demand.id,
     pn: demand.partNumber,
-    barcodeNote: `barcode PF:PN:${demand.partNumber}`,
     isNewPn: false,
     type: demand.requestType,
     qty: String(demand.requestedQuantity),

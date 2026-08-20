@@ -267,6 +267,19 @@
   color: var(--info-t);
 }
 
+/* Demand-line PN cell: the shared barcode chip and, for a PN with no
+   master record yet, the quiet `new PN` marker beside it. */
+.wo-table .pnbc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wo-table .pnbc .bc {
+  margin-top: 0;
+}
+
 .wo-table input,
 .wo-table select {
   background-color: var(--panel);
@@ -937,42 +950,8 @@
   border-color: var(--info-t);
 }
 
-/* PN barcode label: a light, printable label card — always a white
-   surface with black ink so the printed label scans in both UI
-   themes (the shared label idiom of the Machine asset label). */
-.pn-label {
-  background: #fff;
-  color: #111;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 18px 12px;
-  margin: 6px 0 2px;
-  text-align: center;
-}
-
-.pn-label .lname {
-  font-size: 22px;
-  font-weight: 850;
-  line-height: 1.2;
-  margin-bottom: 6px;
-}
-
-.pn-label .lbarcode {
-  display: block;
-  width: 100%;
-  max-width: 340px;
-  height: 64px;
-  margin: 0 auto;
-  fill: #111;
-}
-
-.pn-label .lvalue {
-  font-family: var(--mono), monospace;
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-/* Quiet per-line / in-dialog entry to the printable PN label. */
+/* Quiet in-dialog entry to the printable PN label (the Add Part
+   selected-PN header). Demand lines use the shared `PnBarcodeChip`. */
 .pn-labellink {
   background: none;
   border: none;
@@ -983,28 +962,6 @@
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-/* Print Label: print exactly the label — everything else on the page
-   is hidden while the label fills the sheet's top-left corner. */
-@media print {
-  body * {
-    visibility: hidden;
-  }
-
-  .pn-labelprint,
-  .pn-labelprint * {
-    visibility: visible;
-  }
-
-  .pn-labelprint {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 90mm;
-    border: none;
-    margin: 0;
-  }
 }
 
 /* ============ Add Part multi-step dialog ============ */

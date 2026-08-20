@@ -257,7 +257,9 @@ test('the barcode label dialog renders the scannable PN barcode with the PN bene
     name: 'Part Number barcode label',
   });
   // Simple label: the Code 128 barcode with the PN text beneath it and
-  // the full scanned value as the verification line.
+  // the full scanned value as the verification line — rendered by the
+  // ONE shared PN label component (no per-view copy).
+  expect(label.querySelector('.pnb-label.pnb-labelprint')).not.toBeNull();
   const svg = label.querySelector('svg.lbarcode') as SVGElement;
   expect(svg).not.toBeNull();
   expect(svg.getAttribute('aria-label')).toBe('Barcode PF:PN:118-052');

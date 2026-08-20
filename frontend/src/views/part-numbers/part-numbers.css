@@ -334,66 +334,6 @@
   max-width: 60ch;
 }
 
-/* PN barcode label: a light, printable label card — always a white
-   surface with black ink so the printed label scans in both UI
-   themes. The PN text is the label's primary text beneath the
-   barcode; the full scanned value stays the quiet verification line. */
-.pnm-label {
-  background: #fff;
-  color: #111;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px 18px 12px;
-  margin: 6px 0 2px;
-  text-align: center;
-}
-
-.pnm-label .lbarcode {
-  display: block;
-  width: 100%;
-  max-width: 340px;
-  height: 64px;
-  margin: 0 auto;
-  fill: #111;
-}
-
-.pnm-label .lpn {
-  font-family: var(--mono), monospace;
-  font-size: 21px;
-  font-weight: 850;
-  line-height: 1.25;
-  margin-top: 8px;
-  overflow-wrap: anywhere;
-}
-
-.pnm-label .lvalue {
-  font-family: var(--mono), monospace;
-  font-size: 12px;
-  color: #555;
-  margin-top: 2px;
-  overflow-wrap: anywhere;
-}
-
-@media print {
-  body * {
-    visibility: hidden;
-  }
-
-  .pnm-labelprint,
-  .pnm-labelprint * {
-    visibility: visible;
-  }
-
-  .pnm-labelprint {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 90mm;
-    border: none;
-    margin: 0;
-  }
-}
-
 /* Danger Zone (Edit dialog): the Machines presentation — deletion is
    scoped to the metadata record and the zone states that in place. */
 .pnm-dangerzone {

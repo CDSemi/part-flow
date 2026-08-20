@@ -7,6 +7,8 @@ import { resolvePartNumber } from '../../api/part-numbers';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PnBarcodeChip } from '../../components/PnBarcodeChip';
+import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { todayIso } from '../dates';
 import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
@@ -26,7 +28,6 @@ import type {
   LineField,
   MissingDemandInfo,
 } from './demand-lines';
-import { PnBarcodeLabelDialog } from './PnBarcodeLabelDialog';
 
 interface HeaderErrors {
   received?: string;
@@ -133,13 +134,10 @@ export function NewWorkOrderDialog({
     );
   }
 
-  function addScannedLine(pn: string, barcode: string, isNewPn: boolean) {
+  function addScannedLine(pn: string, isNewPn: boolean) {
     const line = createDraftLine({
       pn,
       isNewPn,
-      barcodeNote: isNewPn
-        ? `new PN — barcode ${barcode}`
-        : `existing PN · barcode ${barcode}`,
       due,
     });
     setLines((current) => [...current, line]);
@@ -169,7 +167,7 @@ export function NewWorkOrderDialog({
     // Whether the PN already has a master record is a server lookup —
     // a miss means create-on-first-use with the Save transaction.
     void resolvePartNumber(result.pn).then(
-      (master) => addScannedLine(result.pn, result.barcode, master === null),
+      (master) => addScannedLine(result.pn, master === null),
       (error: unknown) => showNotice(`✕ ${errorMessage(error)}`),
     );
   }
@@ -426,12 +424,10 @@ export function NewWorkOrderDialog({
                           {line.pn}
                         </div>
                         {line.pn ? (
-                          <button
-                            className="pn-labellink"
-                            onClick={() => setLabelPn(line.pn)}
-                          >
-                            Barcode label…
-                          </button>
+                          <PnBarcodeChip
+                            pn={line.pn}
+                            onOpen={() => setLabelPn(line.pn)}
+                          />
                         ) : null}
                         {errorFor(line.id, 'pn') ? (
                           <div className="rowerr">

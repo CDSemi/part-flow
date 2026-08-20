@@ -3,18 +3,17 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { resolvePartNumber, searchPartNumbers } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
 import { isPositiveInteger } from './demand-lines';
-import { PnBarcodeLabelDialog } from './PnBarcodeLabelDialog';
 
 export interface AddPartResult {
   pn: string;
   isNewPn: boolean;
-  barcodeNote: string;
   qty: string;
   /** ISO `YYYY-MM-DD`, or '' when the line has no due date. */
   due: string;
@@ -72,7 +71,6 @@ export function AddPartDialog({
   const [query, setQuery] = useState('');
   const [pn, setPn] = useState<string | null>(null);
   const [isNewPn, setIsNewPn] = useState(false);
-  const [barcodeNote, setBarcodeNote] = useState('');
   const [qty, setQty] = useState('');
   const [dueMode, setDueMode] = useState<DueMode>('inherit');
   const [customDue, setCustomDue] = useState('');
@@ -129,7 +127,7 @@ export function AddPartDialog({
     canonical !== null &&
     matches.some((entry) => entry.partNumber === canonical);
 
-  function choosePn(value: string, asNewPn: boolean, barcodeNote: string) {
+  function choosePn(value: string, asNewPn: boolean) {
     // `value` is a canonical PN; existing line PNs are canonical too.
     const duplicate = existingPns.find((existing) => existing === value);
     if (duplicate) {
@@ -138,7 +136,6 @@ export function AddPartDialog({
     }
     setPn(value);
     setIsNewPn(asNewPn);
-    setBarcodeNote(barcodeNote);
     setStep(1);
   }
 
@@ -171,7 +168,6 @@ export function AddPartDialog({
     onComplete({
       pn,
       isNewPn,
-      barcodeNote,
       qty,
       ...resolvedDue(),
       type,
@@ -269,13 +265,7 @@ export function AddPartDialog({
                 <button
                   key={entry.partNumber}
                   className="ap-item"
-                  onClick={() =>
-                    choosePn(
-                      entry.partNumber,
-                      false,
-                      `existing PN · barcode ${entry.barcodeValue}`,
-                    )
-                  }
+                  onClick={() => choosePn(entry.partNumber, false)}
                 >
                   <span className="mono ap-pn">{entry.partNumber}</span>
                   <span className="ap-name mono">{entry.barcodeValue}</span>
@@ -306,13 +296,7 @@ export function AddPartDialog({
             {canonical && !exactMatch ? (
               <button
                 className="btn ghost ap-create"
-                onClick={() =>
-                  choosePn(
-                    canonical,
-                    true,
-                    `new PN — barcode PF:PN:${canonical}`,
-                  )
-                }
+                onClick={() => choosePn(canonical, true)}
               >
                 ＋ Create new PN “{canonical}”
               </button>

@@ -1,0 +1,105 @@
+/* The ONE printable PN barcode label presentation, plus the ONE entry
+   chip that opens it. Every surface that offers a PN label (Management
+   → Part Numbers, New Work Order, Work Order Details, Add Part) renders
+   these classes — no per-surface label card and no second chip style
+   exists. */
+
+/* The label card is always a white surface with black ink so the
+   printed label scans in both UI themes. The barcode leads, the
+   canonical PN is the label's primary text beneath it, and the full
+   scanned value stays the quiet verification line. */
+.pnb-label {
+  background: #fff;
+  color: #111;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px 12px;
+  margin: 6px 0 2px;
+  text-align: center;
+}
+
+.pnb-label .lbarcode {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  height: 64px;
+  margin: 0 auto;
+  fill: #111;
+}
+
+.pnb-label .lpn {
+  font-family: var(--mono), monospace;
+  font-size: 21px;
+  font-weight: 850;
+  line-height: 1.25;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.pnb-label .lvalue {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  color: #555;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* Print Label: print exactly the label — everything else on the page
+   is hidden while the label fills the sheet's top-left corner. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .pnb-labelprint,
+  .pnb-labelprint * {
+    visibility: visible;
+  }
+
+  .pnb-labelprint {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 90mm;
+    border: none;
+    margin: 0;
+  }
+}
+
+/* The label entry: a quiet secondary chip carrying the scanned value
+   itself. It reads as identification data (the shared barcode reading
+   tone), never as a primary action. */
+.pnb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin-top: 3px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--chip);
+  color: var(--muted);
+  font-family: var(--mono), monospace;
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.pnb-chip .pnb-chipicon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.pnb-chip:hover {
+  border-color: var(--border);
+  color: var(--info-t);
+}
+
+.pnb-chip:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}

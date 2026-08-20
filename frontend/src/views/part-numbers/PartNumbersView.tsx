@@ -8,6 +8,7 @@ import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { DevNotice } from '../../components/DevNotice';
 import { ModalDialog } from '../../components/ModalDialog';
+import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { PnImage } from '../../components/PnImage';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
@@ -16,7 +17,6 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { MOCK_PART_NUMBERS } from '../../mocks/part-numbers';
-import { code128ModuleCount, encodeCode128B } from '../code128';
 import { normalizePartNumber, pnBarcode } from '../scan-station/barcode';
 import type { MockPartNumberMaster } from '../view-models';
 
@@ -245,72 +245,6 @@ function IdentityHeader({
         Barcode label…
       </button>
     </div>
-  );
-}
-
-/**
- * Printable PN barcode label: the Code 128 barcode of the scanned
- * value (`PF:PN:<part-number>`) with the PN text beneath it, plus the
- * full value as the quiet verification line. Print Label prints
- * exactly the label area (print styles hide the rest of the page).
- * Deliberately simple — no barcode configuration exists here.
- */
-function BarcodeLabelDialog({
-  pn,
-  onClose,
-}: {
-  pn: string;
-  onClose: () => void;
-}) {
-  const value = pnBarcode(pn);
-  const runs = encodeCode128B(value);
-  const quiet = 10;
-  const moduleWidth = 2;
-  const barHeight = 64;
-  const totalModules = runs ? code128ModuleCount(runs) + quiet * 2 : 0;
-  let x = quiet;
-  return (
-    <ModalDialog label="Part Number barcode label" onClose={onClose}>
-      <h3>Part Number barcode label</h3>
-      <div className="sub">
-        Scan this label to identify Part Number <b>{pn}</b>.
-      </div>
-      <div className="pnm-label pnm-labelprint">
-        {runs ? (
-          <svg
-            className="lbarcode"
-            viewBox={`0 0 ${totalModules * moduleWidth} ${barHeight}`}
-            preserveAspectRatio="xMidYMid meet"
-            role="img"
-            aria-label={`Barcode ${value}`}
-          >
-            {runs.map((run, index) => {
-              const rect = run.bar ? (
-                <rect
-                  key={index}
-                  x={x * moduleWidth}
-                  y={0}
-                  width={run.width * moduleWidth}
-                  height={barHeight}
-                />
-              ) : null;
-              x += run.width;
-              return rect;
-            })}
-          </svg>
-        ) : null}
-        <div className="lpn">{pn}</div>
-        <div className="lvalue">{value}</div>
-      </div>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onClose}>
-          Cancel (Esc)
-        </button>
-        <button className="bigbtn primary" onClick={() => window.print()}>
-          Print Label
-        </button>
-      </div>
-    </ModalDialog>
   );
 }
 
@@ -591,7 +525,7 @@ function PartNumberEditDialog({
         </div>
       ) : null}
       {labelOpen && record ? (
-        <BarcodeLabelDialog
+        <PnBarcodeLabelDialog
           pn={record.pn}
           onClose={() => setLabelOpen(false)}
         />
