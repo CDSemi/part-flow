@@ -1,19 +1,22 @@
 import { useEffect, useId, useRef, useState } from 'react';
 
+import { errorMessage } from '../../api/client';
+import { createWorkOrder, resolveWorkOrderNumber } from '../../api/work-orders';
+import type { WorkOrderDetail, WorkOrderSummary } from '../../api/work-orders';
+import { resolvePartNumber } from '../../api/part-numbers';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { todayIso } from '../dates';
-import type { MockWorkOrder, RequestType } from '../view-models';
+import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
 import type { AddPartResult } from './AddPartDialog';
 import {
   applyWorkOrderDueDateChange,
   collectMissingDemandInfo,
   createDraftLine,
-  draftsToSavedLines,
+  draftToNewLine,
   isPositiveInteger,
-  linesPreview,
   processScan,
   validateDemandLines,
 } from './demand-lines';
@@ -23,8 +26,6 @@ import type {
   LineField,
   MissingDemandInfo,
 } from './demand-lines';
-
-let nextInternalWorkOrderId = 1;
 
 interface HeaderErrors {
   received?: string;
@@ -39,23 +40,24 @@ interface HeaderErrors {
  * audited edit). Manual Part addition (multi-step Add Part dialog) is
  * the primary workflow; barcode scanning stays available as a
  * secondary method. The URL never changes; closing with entered data
- * requires explicit confirmation. Phase 2: saving changes local mock
- * state only.
+ * requires explicit confirmation. Save demand is ONE POST — one
+ * all-or-nothing backend transaction; a failed save keeps the whole
+ * draft and every entered value.
  */
 export function NewWorkOrderDialog({
-  existing,
   writeBlocked,
   onClose,
   onOpenExisting,
-  onSave,
+  onSaved,
   onDirtyChange,
   showNotice,
 }: {
-  existing: string[];
   writeBlocked: boolean;
   onClose: () => void;
-  onOpenExisting: (workOrderNumber: string) => void;
-  onSave: (workOrder: MockWorkOrder) => void;
+  /** An entered WO Number already exists — open it, never duplicate. */
+  onOpenExisting: (existing: WorkOrderSummary) => void;
+  /** The Work Order was committed by the backend. */
+  onSaved: (detail: WorkOrderDetail) => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
@@ -68,10 +70,16 @@ export function NewWorkOrderDialog({
   const [headerErrors, setHeaderErrors] = useState<HeaderErrors>({});
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const [confirmExisting, setConfirmExisting] = useState<string | null>(null);
+  const [confirmExisting, setConfirmExisting] =
+    useState<WorkOrderSummary | null>(null);
   const [confirmMissing, setConfirmMissing] =
     useState<MissingDemandInfo | null>(null);
   const [addPartOpen, setAddPartOpen] = useState(false);
+  // One in-flight server interaction at a time (duplicate resolution
+  // or the save itself); a failed write keeps the draft and shows the
+  // server's message here.
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
 
   const workOrderNumRef = useRef<HTMLInputElement>(null);
   const receivedRef = useRef<HTMLInputElement>(null);
@@ -121,6 +129,22 @@ export function NewWorkOrderDialog({
     );
   }
 
+  function addScannedLine(pn: string, barcode: string, isNewPn: boolean) {
+    const line = createDraftLine({
+      pn,
+      isNewPn,
+      barcodeNote: isNewPn
+        ? `new PN — barcode ${barcode}`
+        : `existing PN · barcode ${barcode}`,
+      due,
+    });
+    setLines((current) => [...current, line]);
+    showNotice(
+      `✓ ${pn} added — Request Type NEW · due date from WO due date. Type the quantity.`,
+    );
+    setFocusField({ id: line.id, field: 'qty' });
+  }
+
   function handleScan(value: string) {
     const result = processScan(value, lines);
     if (!result) return;
@@ -138,19 +162,12 @@ export function NewWorkOrderDialog({
       setFocusField({ id: result.lineId, field: 'qty' });
       return;
     }
-    const line = createDraftLine({
-      pn: result.pn,
-      isNewPn: result.isNewPn,
-      barcodeNote: result.isNewPn
-        ? `new PN — barcode ${result.barcode}`
-        : `existing PN · barcode ${result.barcode}`,
-      due,
-    });
-    setLines((current) => [...current, line]);
-    showNotice(
-      `✓ ${result.pn} added — Request Type NEW · due date from WO due date. Type the quantity.`,
+    // Whether the PN already has a master record is a server lookup —
+    // a miss means create-on-first-use with the Save transaction.
+    void resolvePartNumber(result.pn).then(
+      (master) => addScannedLine(result.pn, result.barcode, master === null),
+      (error: unknown) => showNotice(`✕ ${errorMessage(error)}`),
     );
-    setFocusField({ id: line.id, field: 'qty' });
   }
 
   function handleAddPartComplete(result: AddPartResult) {
@@ -187,35 +204,69 @@ export function NewWorkOrderDialog({
     el?.focus();
   }
 
-  function saveWorkOrder() {
+  async function saveWorkOrder() {
     // Entered Work Order Numbers stay opaque strings (never
     // reformatted). A blank number is saved as NULL — displayed as `—`
     // (the placeholder itself is never persisted); multiple Work
     // Orders may have a null number while non-null numbers stay
-    // unique.
+    // unique. The POST is one all-or-nothing transaction.
     const entered = workOrderNumber.trim();
-    const savedLines = draftsToSavedLines(lines);
-    onSave({
-      id: `wo-manual-${nextInternalWorkOrderId++}`,
-      workOrderNumber: entered || null,
-      received,
-      due: due || null,
-      status: 'Open',
-      internal: entered ? undefined : true,
-      preview: linesPreview(savedLines),
-      lines: savedLines,
-    });
+    setBusy(true);
+    setServerError(null);
+    try {
+      const detail = await createWorkOrder({
+        workOrderNumber: entered || null,
+        receivedDate: received,
+        dueDate: due || null,
+        lines: lines.map(draftToNewLine),
+      });
+      onSaved(detail);
+    } catch (error) {
+      // A lost duplicate race commits nothing — resolve and open the
+      // existing Work Order exactly like the pre-check would have.
+      if (entered) {
+        try {
+          const existing = await resolveWorkOrderNumber(entered);
+          if (existing) {
+            setBusy(false);
+            setConfirmExisting(existing);
+            return;
+          }
+        } catch {
+          // fall through to the original error
+        }
+      }
+      setBusy(false);
+      setServerError(errorMessage(error));
+      showNotice(`✕ ${errorMessage(error)} The entered draft was kept.`);
+    }
   }
 
-  function handleSave() {
+  async function handleSave() {
+    if (busy) return;
     const number = workOrderNumber.trim();
-    if (number && existing.includes(number)) {
+    if (number) {
       // An entered WO Number that already exists is opened, never
-      // duplicated. With entered lines, opening discards them —
-      // confirm explicitly. (Does not apply to blank WO Numbers.)
-      if (lines.length === 0) onOpenExisting(number);
-      else setConfirmExisting(number);
-      return;
+      // duplicated (exact verbatim resolution on the server). With
+      // entered lines, opening discards them — confirm explicitly.
+      // (Does not apply to blank WO Numbers.)
+      setBusy(true);
+      setServerError(null);
+      let existing: WorkOrderSummary | null;
+      try {
+        existing = await resolveWorkOrderNumber(number);
+      } catch (error) {
+        setBusy(false);
+        setServerError(errorMessage(error));
+        showNotice(`✕ ${errorMessage(error)} The entered draft was kept.`);
+        return;
+      }
+      setBusy(false);
+      if (existing) {
+        if (lines.length === 0) onOpenExisting(existing);
+        else setConfirmExisting(existing);
+        return;
+      }
     }
     const headerErr: HeaderErrors = {};
     if (!received) headerErr.received = 'received date is required';
@@ -240,7 +291,7 @@ export function NewWorkOrderDialog({
       setConfirmMissing(missing);
       return;
     }
-    saveWorkOrder();
+    await saveWorkOrder();
   }
 
   function requestClose() {
@@ -490,16 +541,21 @@ export function NewWorkOrderDialog({
             </table>
           </div>
 
+          {serverError ? (
+            <div className="rowerr" role="alert">
+              {serverError}
+            </div>
+          ) : null}
           <div className="row nwo-actions">
             <button className="bigbtn ghost" onClick={requestClose}>
               Cancel (Esc)
             </button>
             <button
               className="bigbtn primary"
-              disabled={writeBlocked}
-              onClick={handleSave}
+              disabled={writeBlocked || busy}
+              onClick={() => void handleSave()}
             >
-              Save demand
+              {busy ? 'Saving…' : 'Save demand'}
             </button>
           </div>
         </div>
@@ -522,7 +578,7 @@ export function NewWorkOrderDialog({
           cancelLabel="Cancel — keep editing"
           onConfirm={() => {
             setConfirmMissing(null);
-            saveWorkOrder();
+            void saveWorkOrder();
           }}
           onCancel={() => setConfirmMissing(null)}
         >
@@ -580,14 +636,15 @@ export function NewWorkOrderDialog({
 
       {confirmExisting ? (
         <ConfirmDialog
-          title={`${confirmExisting} already exists`}
+          title={`${confirmExisting.workOrderNumber ?? ''} already exists`}
           confirmLabel="Open existing Work Order"
           cancelLabel="Keep editing"
           onConfirm={() => onOpenExisting(confirmExisting)}
           onCancel={() => setConfirmExisting(null)}
         >
-          A WO Number is never duplicated — <b>{confirmExisting}</b> will be
-          opened instead. The {lines.length} line
+          A WO Number is never duplicated —{' '}
+          <b>{confirmExisting.workOrderNumber}</b> will be opened instead. The{' '}
+          {lines.length} line
           {lines.length === 1 ? '' : 's'} entered here will be discarded.
         </ConfirmDialog>
       ) : null}

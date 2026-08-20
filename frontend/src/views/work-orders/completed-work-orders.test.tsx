@@ -1,31 +1,56 @@
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  within,
-} from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
+import { RouterProvider } from '../../app/router-provider';
 import { MOCK_COMPLETED_WORK_ORDERS } from '../../mocks/work-orders';
+import { CompletedWorkOrdersUnavailable } from './CompletedWorkOrdersUnavailable';
 
-// Completed Work Orders page regression tests (GUI_DESIGN §11.5): the
-// dedicated read-only history route, the Done-range default, search
+// Completed Work Orders page tests (GUI_DESIGN §11.5). The completion
+// workflow has no backend yet (completion = full allocation, Phase
+// 10): production builds render the honest unavailable page, while
+// development builds keep the approved visual preview of the history
+// page — generated mock data behind the DEV-gated lazy boundary
+// (verified by src/production-boundary.test.ts). These tests cover
+// the preview's presentation contract (Done-range default, search
 // with the all-history escape, the Due-outcome filter, Show-more
-// paging, the read-only details dialog with the Done date, and the
-// active list's completed-history entry points (toolbar link, search
-// miss, New Work Order duplicate handling across completed numbers).
-// Everything exercises Phase 2 development mock state only.
+// paging, the read-only details dialog with the Done date), the
+// active list's entry points, and the production placeholder.
 
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
-      Promise.resolve(
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      // The real active Work Orders list loads from the API; one open
+      // Work Order keeps these tests focused on the completed page.
+      if (url === '/api/work-orders') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: 1,
+                work_order_number: '007201',
+                received_date: '2026-08-01',
+                due_date: null,
+                status: 'OPEN',
+                demand_line_count: 1,
+                part_numbers: ['A-100'],
+              },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (/\/api\/(work-orders|part-numbers|route-templates)/.test(url)) {
+        return Promise.resolve(
+          new Response(JSON.stringify([]), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
         new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      ),
-    ),
+      );
+    }),
   );
 });
 
@@ -179,14 +204,42 @@ test('Show more pages the full history in slices of 50', async () => {
 
 /* ============ Entry points on the active list ============ */
 
-test('a completed Work Order never appears in the active list', async () => {
+test('the active list reads real server state — the mock completed history never appears in it', async () => {
   await renderActiveList();
 
+  // The list shows exactly the stubbed server state; the mock
+  // completed history must not leak into the real list.
+  expect(await screen.findByText('007201')).toBeInTheDocument();
   expect(
     screen.queryByRole('button', { name: 'Open Work Order 006996' }),
   ).not.toBeInTheDocument();
-  // The active statuses reduce to Open / Released.
   expect(document.querySelector('.wostat.complete')).toBeNull();
+});
+
+test('the production route without the DEV preview states the workflow honestly', () => {
+  // Production builds compile the DEV preview away and render this
+  // page instead: no mock history, no fake toolbar — the truth that
+  // completion (full allocation) is not part of this release.
+  window.history.replaceState({}, '', '/management/work-orders/completed');
+  render(
+    <RouterProvider>
+      <CompletedWorkOrdersUnavailable />
+    </RouterProvider>,
+  );
+
+  expect(
+    screen.getByRole('heading', { name: 'Completed Work Orders' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/No Work Order can be completed yet/),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: '‹ Work Orders' })).toHaveAttribute(
+    'href',
+    '/management/work-orders',
+  );
+  // No mock rows and no history toolbar render here.
+  expect(screen.queryByText('006996')).toBeNull();
+  expect(screen.queryByLabelText('Done date range')).toBeNull();
 });
 
 test('the active toolbar links to the Completed Work Orders page', async () => {
@@ -219,28 +272,10 @@ test('an active-list search miss points at the completed history', async () => {
   expect(historyLink).toBeDefined();
 });
 
-test('entering a completed WO Number in New Work Order opens its read-only details', async () => {
-  await renderActiveList();
-
-  fireEvent.click(screen.getByRole('button', { name: '＋ New Work Order' }));
-  const newDialog = await screen.findByRole('dialog', {
-    name: 'New Work Order',
-  });
-  fireEvent.change(within(newDialog).getByLabelText(/WO Number/), {
-    target: { value: '006996' },
-  });
-  fireEvent.click(
-    within(newDialog).getByRole('button', { name: 'Save demand' }),
-  );
-
-  // Never duplicated: the completed Work Order's details open
-  // read-only instead.
-  expect(newDialog).not.toBeInTheDocument();
-  const details = await screen.findByRole('dialog', {
-    name: 'Work Order Details',
-  });
-  expect(details).toHaveTextContent('006996');
-  expect(details).toHaveTextContent('Complete');
-  expect(details).toHaveTextContent('demand lines are read-only');
-  expect(screen.queryByRole('button', { name: 'Save demand' })).toBeNull();
-});
+// NOTE: the former "entering a completed WO Number in New Work Order
+// opens its read-only details" scenario is unreachable in Phase 4 —
+// no Work Order can complete before the allocation workflow exists,
+// and the New Work Order duplicate resolution runs against the real
+// server history (covered in work-orders.test.tsx). The rule itself
+// (uniqueness spans the WHOLE history, completed included) lives in
+// the backend's uniqueness constraint and returns with Phase 10.

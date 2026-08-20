@@ -13,11 +13,13 @@ import { REAL_VIEWS } from './app/real-views';
 //  2. this suite keeps that sentinel list honest — every sentinel must
 //     exist in the development mock sources, so the build check can
 //     never silently rot into scanning for values that no longer exist;
-//  3. the real Phase 3.5 modules (the API layer, Management → Machines,
-//     Administration) ship in production builds, so this suite verifies
-//     at the source level that none of them imports from src/mocks/ —
-//     the one deliberate exception is the development-only Worker
-//     sessions preview, reachable only through an
+//  3. the real modules (the API layer, Management → Machines,
+//     Administration since Phase 3.5, Management → Work Orders since
+//     Phase 4) ship in production builds, so this suite verifies at
+//     the source level that none of them imports from src/mocks/ —
+//     the deliberate exceptions are the development-only previews
+//     (the Worker sessions policy preview and the Completed Work
+//     Orders visual preview), each reachable only through an
 //     `import.meta.env.DEV`-guarded lazy import.
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
@@ -80,19 +82,19 @@ test('development builds expose the remaining mock views through the dev-only re
       'planned-routes',
       'priority',
       'production-board',
-      'work-orders',
       'scan-station',
       'tracking',
     ].sort(),
   );
 });
 
-test('the Phase 3.5 real views ship in every build', () => {
-  // Management → Machines and Administration read real server state —
-  // they live in the always-available registry, never behind the
-  // development-only boundary.
+test('the real views ship in every build', () => {
+  // Management → Machines, Administration (Phase 3.5) and Management →
+  // Work Orders (Phase 4) read real server state — they live in the
+  // always-available registry, never behind the development-only
+  // boundary.
   expect(Object.keys(REAL_VIEWS).sort()).toEqual(
-    ['administration', 'machines'].sort(),
+    ['administration', 'machines', 'work-orders'].sort(),
   );
 });
 
@@ -102,13 +104,15 @@ const PRODUCTION_MODULE_DIRS = [
   'api',
   join('views', 'machines'),
   join('views', 'administration'),
+  join('views', 'work-orders'),
 ];
 
-/** The one development-only module inside a production view folder —
- * reachable only through an `import.meta.env.DEV`-guarded lazy
- * import, so production builds drop it from the module graph. */
+/** The development-only modules inside production view folders —
+ * each reachable only through an `import.meta.env.DEV`-guarded lazy
+ * import, so production builds drop them from the module graph. */
 const DEV_ONLY_MODULES = new Set([
   join('views', 'administration', 'WorkerSessionsPreview.tsx'),
+  join('views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
 ]);
 
 test('production modules do not import from src/mocks/', () => {
@@ -140,4 +144,19 @@ test('the dev-only Worker sessions preview stays behind the DEV boundary', () =>
   expect(adminView).not.toMatch(/^import .*WorkerSessionsPreview/m);
   expect(adminView).toContain('import.meta.env.DEV');
   expect(adminView).toContain("import('./WorkerSessionsPreview')");
+});
+
+test('the dev-only Completed Work Orders preview stays behind the DEV boundary', () => {
+  // §11.5 has no backend yet (completion = full allocation, Phase 10):
+  // production builds render the honest unavailable page, and the mock
+  // visual preview is reachable only through the guarded lazy import —
+  // never through a static import that would pull the mock completed
+  // history into the production module graph.
+  const workOrdersView = readFileSync(
+    join(srcDir, 'views', 'work-orders', 'WorkOrdersView.tsx'),
+    'utf8',
+  );
+  expect(workOrdersView).not.toMatch(/^import .*CompletedWorkOrdersView'/m);
+  expect(workOrdersView).toContain('import.meta.env.DEV');
+  expect(workOrdersView).toContain("import('./CompletedWorkOrdersView')");
 });

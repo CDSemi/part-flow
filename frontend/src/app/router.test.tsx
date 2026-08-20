@@ -25,7 +25,9 @@ beforeEach(() => {
         );
       }
       if (
-        /\/api\/(machines|areas|departments|operations|scan-stations)/.test(url)
+        /\/api\/(machines|areas|departments|operations|scan-stations|work-orders|part-numbers|route-templates)/.test(
+          url,
+        )
       ) {
         return Promise.resolve(
           new Response(JSON.stringify([]), { status: 200 }),

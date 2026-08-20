@@ -1,9 +1,10 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
+import { searchPartNumbers } from '../../api/part-numbers';
+import { useApiData } from '../../api/use-api-data';
 import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
-import { MOCK_PN_CATALOG } from '../../mocks/work-orders';
 import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
@@ -73,24 +74,22 @@ export function AddPartDialog({
     if (step === 0) searchRef.current?.focus();
   }, [step]);
 
-  // Search matching is case-insensitive. Creating a new PN uses the
+  // Search runs against the real PartNumber masters (contains-match,
+  // case-insensitive on the server). Creating a new PN uses the
   // canonical form (PROJECT_PROFILE §7): surrounding whitespace is
   // trimmed, the entry is canonicalized to uppercase, and a value with
   // internal whitespace is not a valid PN — internal whitespace is
-  // never silently removed.
+  // never silently removed. The master record itself is created by the
+  // Save demand transaction (create-on-first-valid-use).
   const trimmed = query.trim();
-  const upper = trimmed.toUpperCase();
-  const matches = MOCK_PN_CATALOG.filter(
-    (entry) =>
-      !upper ||
-      `${entry.pn} ${entry.name} ${entry.barcode}`
-        .toUpperCase()
-        .includes(upper),
-  );
+  const searchLoader = useCallback(() => searchPartNumbers(query), [query]);
+  const searchData = useApiData(searchLoader);
+  const matches =
+    searchData.state.status === 'ready' ? searchData.state.data : [];
   const canonical = normalizePartNumber(query);
   const exactMatch =
     canonical !== null &&
-    MOCK_PN_CATALOG.some((entry) => entry.pn === canonical);
+    matches.some((entry) => entry.partNumber === canonical);
 
   function choosePn(value: string, asNewPn: boolean, barcodeNote: string) {
     // `value` is a canonical PN; existing line PNs are canonical too.
@@ -108,12 +107,10 @@ export function AddPartDialog({
   const qtyValid = isPositiveInteger(qty);
   const dueValid = dueMode !== 'custom' || customDue !== '';
 
-  // Header context for the selected PN: the catalog description for an
-  // existing PN, a `new Part Number` marker otherwise; the final step
-  // adds the entered quantity and due-date choice.
-  const catalogName = pn
-    ? MOCK_PN_CATALOG.find((entry) => entry.pn === pn)?.name
-    : undefined;
+  // Header context for the selected PN: the derived barcode for an
+  // existing PN master, a `new Part Number` marker otherwise; the
+  // final step adds the entered quantity and due-date choice. (PN
+  // master metadata such as a description arrives with Phase 13.)
 
   function dueSummary(): string {
     if (dueMode === 'none') return 'no due date';
@@ -192,7 +189,7 @@ export function AddPartDialog({
               {isNewPn ? (
                 <span className="ap-pnnew">new Part Number</span>
               ) : (
-                <span>{catalogName}</span>
+                <span className="mono">{pn ? `PF:PN:${pn}` : ''}</span>
               )}
               {step === 3 ? (
                 <span>
@@ -223,21 +220,27 @@ export function AddPartDialog({
             <div className="ap-list">
               {matches.map((entry) => (
                 <button
-                  key={entry.pn}
+                  key={entry.partNumber}
                   className="ap-item"
                   onClick={() =>
                     choosePn(
-                      entry.pn,
+                      entry.partNumber,
                       false,
-                      `existing PN · barcode ${entry.barcode}`,
+                      `existing PN · barcode ${entry.barcodeValue}`,
                     )
                   }
                 >
-                  <span className="mono ap-pn">{entry.pn}</span>
-                  <span className="ap-name">{entry.name}</span>
+                  <span className="mono ap-pn">{entry.partNumber}</span>
+                  <span className="ap-name mono">{entry.barcodeValue}</span>
                 </button>
               ))}
-              {matches.length === 0 ? (
+              {searchData.state.status === 'error' ? (
+                <div className="ap-empty" role="alert">
+                  {searchData.state.message}
+                </div>
+              ) : searchData.state.status === 'loading' ? (
+                <div className="ap-empty">Searching Part Numbers…</div>
+              ) : matches.length === 0 ? (
                 <div className="ap-empty">
                   No existing PN matches “{query.trim()}”.
                 </div>

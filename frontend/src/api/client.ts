@@ -14,10 +14,19 @@
 export class ApiError extends Error {
   readonly status: number;
 
-  constructor(status: number, message: string) {
+  /**
+   * The parsed JSON error body, when there was one. Almost every
+   * caller only needs `message`; the release flow additionally reads
+   * the confirmation-required payload (`confirmation_required` +
+   * `existing_active_quantity`) the backend attaches to its 409.
+   */
+  readonly body: unknown;
+
+  constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -44,14 +53,18 @@ function detailToMessage(detail: unknown, status: number): string {
   return `The request failed (HTTP ${status}).`;
 }
 
-/** Perform one JSON API request and parse the JSON response body. */
-export async function apiRequest<T>(
+/**
+ * Perform one JSON API request; the result keeps the HTTP status
+ * beside the parsed body for the rare caller that distinguishes
+ * statuses (created 201 vs. idempotent replay 200).
+ */
+export async function apiRequestWithStatus<T>(
   path: string,
   init?: {
     method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
     body?: unknown;
   },
-): Promise<T> {
+): Promise<{ status: number; data: T }> {
   const response = await fetch(path, {
     method: init?.method ?? 'GET',
     headers:
@@ -61,16 +74,36 @@ export async function apiRequest<T>(
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
   if (!response.ok) {
-    let detail: unknown;
+    let body: unknown;
     try {
-      detail = ((await response.json()) as { detail?: unknown }).detail;
+      body = await response.json();
     } catch {
-      detail = undefined;
+      body = undefined;
     }
+    const detail =
+      body && typeof body === 'object'
+        ? (body as { detail?: unknown }).detail
+        : undefined;
     throw new ApiError(
       response.status,
       detailToMessage(detail, response.status),
+      body,
     );
   }
-  return (await response.json()) as T;
+  // 204 No Content (e.g. a demand-line removal) has no body to parse.
+  if (response.status === 204) {
+    return { status: response.status, data: undefined as T };
+  }
+  return { status: response.status, data: (await response.json()) as T };
+}
+
+/** Perform one JSON API request and parse the JSON response body. */
+export async function apiRequest<T>(
+  path: string,
+  init?: {
+    method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+    body?: unknown;
+  },
+): Promise<T> {
+  return (await apiRequestWithStatus<T>(path, init)).data;
 }

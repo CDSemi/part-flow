@@ -11,9 +11,10 @@
 // verifies this against the built assets with known mock sentinel
 // values as part of `npm run build`.
 //
-// The Phase 3.5 views (Management → Machines and Administration) are
-// REAL views against the /api surface — they live in real-views.ts and
-// ship in every build, so they are deliberately absent here.
+// The Phase 3.5 views (Management → Machines and Administration) and
+// the Phase 4 view (Management → Work Orders) are REAL views against
+// the /api surface — they live in real-views.ts and ship in every
+// build, so they are deliberately absent here.
 //
 // Production builds keep the application shell (routes, navigation,
 // themes, connectivity) and the real views, and show an explicit
@@ -25,7 +26,10 @@ import type { ComponentType, LazyExoticComponent } from 'react';
 import type { AppViewKey } from './view-keys';
 
 /** The view keys still served by development-only mock views. */
-export type DevMockViewKey = Exclude<AppViewKey, 'machines' | 'administration'>;
+export type DevMockViewKey = Exclude<
+  AppViewKey,
+  'machines' | 'administration' | 'work-orders'
+>;
 
 type ViewRegistry = Readonly<
   Record<DevMockViewKey, LazyExoticComponent<ComponentType>>
@@ -61,11 +65,6 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
       tracking: lazy(() =>
         import('../views/tracking/TrackingView').then((m) => ({
           default: m.TrackingView,
-        })),
-      ),
-      'work-orders': lazy(() =>
-        import('../views/work-orders/WorkOrdersView').then((m) => ({
-          default: m.WorkOrdersView,
         })),
       ),
       priority: lazy(() =>

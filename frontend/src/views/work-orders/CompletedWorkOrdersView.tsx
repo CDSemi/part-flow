@@ -1,12 +1,10 @@
 import './work-orders.css';
 
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 
-import { useConnectivity } from '../../app/connectivity-context';
 import { Link } from '../../app/link';
 import { getViewStatePreview } from '../../app/view-state';
 import { DevNotice } from '../../components/DevNotice';
-import { useMockNotice } from '../../components/mock-notice';
 import { PageNote } from '../../components/PageNote';
 import { useUiClock } from '../../components/ui-clock';
 import {
@@ -15,9 +13,10 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { MOCK_COMPLETED_WORK_ORDERS } from '../../mocks/work-orders';
+import { TypeChip } from '../../components/indicators';
+import { ModalDialog } from '../../components/ModalDialog';
 import { daysBetweenIso, formatIsoDate, todayIso } from '../dates';
 import type { MockWorkOrder } from '../view-models';
-import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
 // Completed Work Orders — the read-only history page on
 // `/management/work-orders/completed` (GUI_DESIGN §11.5). Completed
@@ -173,9 +172,6 @@ function SortHeader({
 
 export function CompletedWorkOrdersView() {
   const preview = getViewStatePreview();
-  const { status } = useConnectivity();
-  const writeBlocked = status !== 'connected';
-  const { showNotice, noticeElement } = useMockNotice();
   const now = useUiClock('minute');
 
   const [search, setSearch] = useState('');
@@ -475,22 +471,112 @@ export function CompletedWorkOrdersView() {
         Orders list; nothing is ever deleted.
       </PageNote>
       {detail !== null && (
-        <WorkOrderDetailPanel
+        <CompletedDetailDialog
           key={detail.id}
           workOrder={detail}
-          releasedLines={EMPTY_RELEASED}
-          writeBlocked={writeBlocked}
           onClose={() => setDetail(null)}
-          onRelease={() => {}}
-          onSaveDetail={() => {}}
-          onDirtyChange={() => {}}
-          showNotice={showNotice}
         />
       )}
-      {noticeElement}
     </section>
   );
 }
 
-/** A completed Work Order is read-only — no release state exists. */
-const EMPTY_RELEASED: Set<string> = new Set();
+/**
+ * Read-only Work Order Details for the completed-history preview
+ * (§11.5 row activation): the same dialog title and meta-line shape as
+ * the real Work Order Details, with `Done <date>` added — but purely
+ * presentational over the mock history (the real details dialog reads
+ * live server state, and no Work Order can complete before the
+ * allocation workflow exists).
+ */
+function CompletedDetailDialog({
+  workOrder,
+  onClose,
+}: {
+  workOrder: MockWorkOrder;
+  onClose: () => void;
+}) {
+  const headingId = useId();
+  return (
+    <ModalDialog labelledBy={headingId} onClose={onClose} size="xwide">
+      <div className="wo-head">
+        <h2 id={headingId} className="nwo-title">
+          Work Order Details
+        </h2>
+      </div>
+      <div className="big mono">{woDisplay(workOrder.workOrderNumber)}</div>
+      <p className="wo-sub">
+        received <b className="mono">{formatIsoDate(workOrder.received)}</b> ·
+        WO due date <b className="mono">{formatIsoDate(workOrder.due)}</b> ·{' '}
+        {workOrder.lines.length} demand line
+        {workOrder.lines.length === 1 ? '' : 's'} ·{' '}
+        <span className={`wostat ${workOrder.status.toLowerCase()}`}>
+          {workOrder.status}
+        </span>
+        {workOrder.done ? (
+          // Done date (`completed_at`, GUI_DESIGN §11.5) — present
+          // exactly on completed Work Orders.
+          <>
+            {' '}
+            · Done <b className="mono">{formatIsoDate(workOrder.done)}</b>
+          </>
+        ) : null}
+        {workOrder.internal
+          ? ' · internal Work Order — no external number yet (displays —)'
+          : ''}
+      </p>
+      <div className="wo-lines">
+        <table className="wo-table">
+          <thead>
+            <tr>
+              <th>PN</th>
+              <th>Request Type</th>
+              <th>Qty</th>
+              <th>Due date</th>
+              <th>Job Numbers</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {workOrder.lines.map((line) => (
+              <tr key={line.pn}>
+                <td data-label="PN">
+                  <div className="pn" title={line.pn}>
+                    {line.pn}
+                  </div>
+                  <div className="bc">{line.barcode}</div>
+                </td>
+                <td data-label="Request Type">
+                  <TypeChip type={line.type} />
+                </td>
+                <td data-label="Qty">
+                  <span className="mono">{line.qty}</span>
+                </td>
+                <td data-label="Due date">
+                  <span className="mono">{formatIsoDate(line.due)}</span>
+                </td>
+                <td data-label="Job Numbers">
+                  <span className="mono">{line.job || '—'}</span>
+                </td>
+                <td data-label="Status">
+                  <span className={`linestat ${line.statusClass}`}>
+                    {line.status}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="wo-actions nwo-actions">
+        <button className="btn ghost" onClick={onClose}>
+          Cancel (Esc)
+        </button>
+        <span className="hint">
+          This Work Order is <b>{workOrder.status}</b> — demand lines are
+          read-only. Editing is available only while a Work Order is Open.
+        </span>
+      </div>
+    </ModalDialog>
+  );
+}

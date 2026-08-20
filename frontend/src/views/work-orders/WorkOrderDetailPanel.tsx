@@ -1,25 +1,37 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
+import { errorMessage } from '../../api/client';
+import { resolvePartNumber } from '../../api/part-numbers';
+import {
+  deleteWorkOrderDemand,
+  getWorkOrder,
+  updateWorkOrder,
+} from '../../api/work-orders';
+import type { WorkOrderDetail } from '../../api/work-orders';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
-import { EmptyState } from '../../components/view-states';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+} from '../../components/view-states';
 import { formatIsoDate } from '../dates';
 import { normalizePartNumber } from '../scan-station/barcode';
-import type { MockWorkOrder, RequestType } from '../view-models';
+import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
 import type { AddPartResult } from './AddPartDialog';
 import {
   RELEASED_REMOVE_EXPLANATION,
   applyWorkOrderDueDateChange,
+  buildLineEdits,
   collectMissingDemandInfo,
   createDraftLine,
-  draftFromSavedLine,
-  draftsToSavedLines,
+  draftFromDemand,
+  draftToNewLine,
   isPositiveInteger,
   lineRemoveRule,
-  linesPreview,
   processScan,
   validateDemandLines,
 } from './demand-lines';
@@ -30,47 +42,71 @@ import type {
   MissingDemandInfo,
 } from './demand-lines';
 
+/** One saved demand row offered for release (GUI_DESIGN §11.4). */
+export interface ReleaseRequestContext {
+  demandId: number;
+  partNumber: string;
+  requestedQuantity: number;
+}
+
+/** Human status of the stored server value (`OPEN` → `Open`). */
+export function workOrderStatusLabel(status: string): string {
+  return status.charAt(0) + status.slice(1).toLowerCase();
+}
+
 /**
  * Work Order Details as a modal dialog over the Work Order list
  * (GUI_DESIGN §11.2): the list stays mounted and visible behind it and
- * the URL never changes. An OPEN Work Order is editable: demand lines
- * can be added (manual-first ＋ Add Part, scanning secondary), edited,
- * and — while no production quantity has been released for them —
- * removed. Released lines are read-only and can never be removed here
- * (PROJECT_PROFILE §13). All editing is a local draft applied by
- * `Save demand`; every close request (Cancel, Escape, backdrop) on a
- * dirty draft asks for explicit discard confirmation first. The Add
- * Part and confirmation dialogs render as siblings of this dialog so
- * only the topmost dialog handles Escape, backdrop, and focus.
+ * the URL never changes. The dialog loads the real Work Order (header
+ * + demand lines) from the API. An OPEN Work Order is editable: demand
+ * lines can be added (manual-first ＋ Add Part, scanning secondary)
+ * and edited as a local draft applied by `Save demand` — ONE PATCH,
+ * one all-or-nothing backend transaction; a failed save keeps the
+ * whole draft. Removing a saved line is its own explicit, confirmed
+ * server action; the backend enforces the canonical rules
+ * (PROJECT_PROFILE §13, §8.2 — released demand and the last line
+ * answer 409 removing nothing). Every close request (Cancel, Escape,
+ * backdrop) on a dirty draft asks for explicit discard confirmation
+ * first. The Add Part and confirmation dialogs render as siblings of
+ * this dialog so only the topmost dialog handles Escape, backdrop,
+ * and focus.
  */
 export function WorkOrderDetailPanel({
-  workOrder,
-  releasedLines,
+  workOrderId,
+  sessionReleased,
   writeBlocked,
   onClose,
   onRelease,
-  onSaveDetail,
+  onChanged,
   onDirtyChange,
   showNotice,
 }: {
-  workOrder: MockWorkOrder | undefined;
-  releasedLines: Set<string>;
+  workOrderId: number;
+  /** Demand ids released in this session — their lines render
+   * read-only with the release evidence (GUI_DESIGN §11.2). */
+  sessionReleased: ReadonlySet<number>;
   writeBlocked: boolean;
   onClose: () => void;
-  onRelease: (pn: string) => void;
-  onSaveDetail: (workOrder: MockWorkOrder) => void;
+  onRelease: (context: ReleaseRequestContext) => void;
+  /** Server state changed (save/removal committed) — reload the list. */
+  onChanged: () => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
 }) {
-  // All hooks run unconditionally; the missing-WO branch renders below.
   const headingId = useId();
-  const editable = workOrder ? workOrder.status === 'Open' : false;
-  const [lines, setLines] = useState<DemandLineDraft[]>(() =>
-    workOrder
-      ? workOrder.lines.map((line) => draftFromSavedLine(line, workOrder.due))
-      : [],
-  );
-  const [due, setDue] = useState(workOrder?.due ?? '');
+  // The dialog owns its detail load so a committed save can adopt the
+  // PATCH response as the fresh server state (never a simulated local
+  // success).
+  const [detail, setDetail] = useState<WorkOrderDetail | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadGeneration, setLoadGeneration] = useState(0);
+  const retryLoad = useCallback(() => {
+    setLoadError(null);
+    setLoadGeneration((value) => value + 1);
+  }, []);
+
+  const [due, setDue] = useState('');
+  const [lines, setLines] = useState<DemandLineDraft[]>([]);
   const [dirty, setDirty] = useState(false);
   const [addPartOpen, setAddPartOpen] = useState(false);
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
@@ -80,6 +116,8 @@ export function WorkOrderDetailPanel({
   const [confirmMissing, setConfirmMissing] =
     useState<MissingDemandInfo | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
 
   const scanRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -87,6 +125,45 @@ export function WorkOrderDetailPanel({
     id: number;
     field: LineField;
   } | null>(null);
+
+  /** Adopt fresh server state and rebuild the editable draft. */
+  const adoptDetail = useCallback(
+    (fresh: WorkOrderDetail) => {
+      setDetail(fresh);
+      setDue(fresh.dueDate ?? '');
+      setLines(
+        fresh.demands.map((demand) =>
+          draftFromDemand(
+            demand,
+            fresh.dueDate,
+            sessionReleased.has(demand.id),
+          ),
+        ),
+      );
+      setLineErrors([]);
+      setDirty(false);
+    },
+    [sessionReleased],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getWorkOrder(workOrderId).then(
+      (fresh) => {
+        if (!cancelled) adoptDetail(fresh);
+      },
+      (error: unknown) => {
+        if (!cancelled) setLoadError(errorMessage(error));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // adoptDetail changes only with sessionReleased — re-adopting the
+    // load result then would discard the draft, so the load reruns
+    // only per Work Order / explicit retry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workOrderId, loadGeneration]);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -101,13 +178,32 @@ export function WorkOrderDetailPanel({
     }
   }, [focusField, lines]);
 
-  if (!workOrder) {
+  if (loadError !== null) {
     return (
       <ModalDialog labelledBy={headingId} onClose={onClose}>
         <h2 id={headingId} className="nwo-title">
           Work Order Details
         </h2>
-        <EmptyState message="This Work Order could not be found." />
+        <ErrorState
+          message="The Work Order could not be loaded."
+          detail={loadError}
+          onRetry={retryLoad}
+        />
+        <div className="row">
+          <button className="bigbtn ghost" onClick={onClose}>
+            Cancel (Esc)
+          </button>
+        </div>
+      </ModalDialog>
+    );
+  }
+  if (detail === null) {
+    return (
+      <ModalDialog labelledBy={headingId} onClose={onClose}>
+        <h2 id={headingId} className="nwo-title">
+          Work Order Details
+        </h2>
+        <LoadingState label="Loading Work Order" />
         <div className="row">
           <button className="bigbtn ghost" onClick={onClose}>
             Cancel (Esc)
@@ -117,11 +213,15 @@ export function WorkOrderDetailPanel({
     );
   }
 
-  const woDisplay = workOrder.workOrderNumber ?? '—';
+  const editable = detail.status === 'OPEN';
+  const woDisplay = detail.workOrderNumber ?? '—';
+  const internal = detail.workOrderNumber === null;
 
-  // A release performed in this session also freezes its line.
+  // A release performed in this session freezes its line.
   const display = lines.map((line) =>
-    !line.released && line.pn && releasedLines.has(`${workOrder.id}:${line.pn}`)
+    !line.released &&
+    line.demandId !== null &&
+    sessionReleased.has(line.demandId)
       ? { ...line, released: true, statusLabel: 'Released' }
       : line,
   );
@@ -148,6 +248,23 @@ export function WorkOrderDetailPanel({
     setDirty(true);
   }
 
+  function addScannedLine(pn: string, barcode: string, isNewPn: boolean) {
+    const line = createDraftLine({
+      pn,
+      isNewPn,
+      barcodeNote: isNewPn
+        ? `new PN — barcode ${barcode}`
+        : `existing PN · barcode ${barcode}`,
+      due,
+    });
+    setLines((current) => [...current, line]);
+    setDirty(true);
+    showNotice(
+      `✓ ${pn} added as an unsaved draft line — Request Type NEW · due date from the WO due date.`,
+    );
+    setFocusField({ id: line.id, field: 'qty' });
+  }
+
   function handleScan(value: string) {
     const result = processScan(value, display);
     if (!result) return;
@@ -172,20 +289,10 @@ export function WorkOrderDetailPanel({
       setFocusField({ id: result.lineId, field: 'qty' });
       return;
     }
-    const line = createDraftLine({
-      pn: result.pn,
-      isNewPn: result.isNewPn,
-      barcodeNote: result.isNewPn
-        ? `new PN — barcode ${result.barcode}`
-        : `existing PN · barcode ${result.barcode}`,
-      due,
-    });
-    setLines((current) => [...current, line]);
-    setDirty(true);
-    showNotice(
-      `✓ ${result.pn} added as an unsaved draft line — Request Type NEW · due date from the WO due date.`,
+    void resolvePartNumber(result.pn).then(
+      (master) => addScannedLine(result.pn, result.barcode, master === null),
+      (error: unknown) => showNotice(`✕ ${errorMessage(error)}`),
     );
-    setFocusField({ id: line.id, field: 'qty' });
   }
 
   function handleAddPartComplete(result: AddPartResult) {
@@ -222,21 +329,59 @@ export function WorkOrderDetailPanel({
     setConfirmRemove(line);
   }
 
-  function saveDetail() {
-    if (!workOrder) return; // unreachable: save renders only with a WO present
-    const savedLines = draftsToSavedLines(display);
-    onSaveDetail({
-      ...workOrder,
-      due: due || null,
-      preview: linesPreview(savedLines),
-      lines: savedLines,
-    });
-    setLines(savedLines.map((line) => draftFromSavedLine(line, due || null)));
-    setDirty(false);
+  async function removeSavedLine(line: DemandLineDraft) {
+    if (line.demandId === null) return;
+    setConfirmRemove(null);
+    setBusy(true);
+    setServerError(null);
+    try {
+      await deleteWorkOrderDemand(workOrderId, line.demandId);
+      const fresh = await getWorkOrder(workOrderId);
+      // Re-apply the still-unsaved draft edits of the OTHER lines on
+      // top of the fresh state? No — removal commits alone; the other
+      // lines keep their local draft values below.
+      setDetail(fresh);
+      setLines((current) => current.filter((l) => l.id !== line.id));
+      setLineErrors((current) => current.filter((e) => e.lineId !== line.id));
+      setBusy(false);
+      onChanged();
+      showNotice(`✕ ${line.pn} removed from ${woDisplay}.`);
+    } catch (error) {
+      setBusy(false);
+      setServerError(errorMessage(error));
+      showNotice(`✕ ${errorMessage(error)}`);
+    }
+  }
+
+  async function saveDetail() {
+    if (!detail) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      const fresh = await updateWorkOrder(workOrderId, {
+        ...((due || null) !== detail.dueDate ? { dueDate: due || null } : {}),
+        lineEdits: buildLineEdits(display, detail.demands),
+        newLines: display
+          .filter((line) => line.demandId === null)
+          .map(draftToNewLine),
+      });
+      // Refresh from the committed server state — never a simulated
+      // local success.
+      adoptDetail(fresh);
+      setBusy(false);
+      onChanged();
+      showNotice(
+        `💾 WO ${fresh.workOrderNumber ?? '—'} demand updated — business demand only.`,
+      );
+    } catch (error) {
+      setBusy(false);
+      setServerError(errorMessage(error));
+      showNotice(`✕ ${errorMessage(error)} The entered draft was kept.`);
+    }
   }
 
   function handleSave() {
-    if (!workOrder) return; // unreachable: save renders only with a WO present
+    if (!detail || busy) return;
     const errors = validateDemandLines(display);
     setLineErrors(errors);
     if (errors.length) {
@@ -254,7 +399,7 @@ export function WorkOrderDetailPanel({
     // explicitly confirmed, never silently saved. Released lines are
     // read-only history and are not re-confirmed.
     const missing = collectMissingDemandInfo(
-      workOrder.workOrderNumber ?? '',
+      detail.workOrderNumber ?? '',
       due,
       display.filter((line) => !line.released),
     );
@@ -262,7 +407,7 @@ export function WorkOrderDetailPanel({
       setConfirmMissing(missing);
       return;
     }
-    saveDetail();
+    void saveDetail();
   }
 
   // Every close request (Cancel, Escape, backdrop) funnels through
@@ -286,7 +431,8 @@ export function WorkOrderDetailPanel({
         </div>
         <div className="big mono">{woDisplay}</div>
         <p className="wo-sub">
-          received <b className="mono">{formatIsoDate(workOrder.received)}</b> ·{' '}
+          received <b className="mono">{formatIsoDate(detail.receivedDate)}</b>{' '}
+          ·{' '}
           {editable ? (
             <>
               WO due date{' '}
@@ -303,25 +449,23 @@ export function WorkOrderDetailPanel({
             </>
           ) : (
             <>
-              WO due date <b className="mono">{formatIsoDate(workOrder.due)}</b>
+              WO due date{' '}
+              <b className="mono">{formatIsoDate(detail.dueDate)}</b>
             </>
           )}{' '}
           · {display.length} demand line{display.length === 1 ? '' : 's'} ·{' '}
-          <span className={`wostat ${workOrder.status.toLowerCase()}`}>
-            {workOrder.status}
+          <span
+            className={`wostat ${workOrderStatusLabel(detail.status).toLowerCase()}`}
+          >
+            {workOrderStatusLabel(detail.status)}
           </span>
-          {workOrder.done ? (
-            // Done date (`completed_at`, GUI_DESIGN §11.5) — present
-            // exactly on completed Work Orders.
-            <>
-              {' '}
-              · Done <b className="mono">{formatIsoDate(workOrder.done)}</b>
-            </>
-          ) : null}
-          {workOrder.internal
+          {internal
             ? ' · internal Work Order — no external number yet (displays —)'
             : ''}
         </p>
+        {display.length === 0 && !editable ? (
+          <EmptyState message="This Work Order has no demand lines." />
+        ) : null}
         <div className="wo-card">
           {editable && (
             <div className="woc-head">
@@ -443,7 +587,7 @@ export function WorkOrderDetailPanel({
                         ) : null}
                       </td>
                       <td data-label="Request Type">
-                        {rowEditable && !line.saved ? (
+                        {rowEditable ? (
                           <select
                             value={line.type}
                             aria-label={`Request Type for ${line.pn ?? 'new line'}`}
@@ -573,22 +717,31 @@ export function WorkOrderDetailPanel({
                       {editable ? (
                         <td data-label="" className="wo-cell-actions">
                           <div className="wo-rowactions">
-                            {line.saved || line.released ? (
+                            {line.demandId !== null ? (
                               <button
                                 className="rel-btn"
-                                disabled={
-                                  writeBlocked ||
-                                  !line.releasable ||
-                                  line.released
+                                disabled={writeBlocked || busy || line.released}
+                                onClick={() =>
+                                  line.pn &&
+                                  line.demandId !== null &&
+                                  onRelease({
+                                    demandId: line.demandId,
+                                    partNumber: line.pn,
+                                    requestedQuantity:
+                                      Number.parseInt(line.qty, 10) || 0,
+                                  })
                                 }
-                                onClick={() => line.pn && onRelease(line.pn)}
                               >
                                 Release to production…
                               </button>
                             ) : null}
                             <button
                               className="pr-x"
-                              disabled={removeRule === 'blocked'}
+                              disabled={
+                                removeRule === 'blocked' ||
+                                busy ||
+                                (removeRule === 'confirm' && writeBlocked)
+                              }
                               title={
                                 removeRule === 'blocked'
                                   ? RELEASED_REMOVE_EXPLANATION
@@ -658,6 +811,11 @@ export function WorkOrderDetailPanel({
           through the correction workflows. Removal never deletes the Part, its
           production quantity, or its history.
         </PageNote>
+        {serverError ? (
+          <div className="rowerr" role="alert">
+            {serverError}
+          </div>
+        ) : null}
         <div className="wo-actions nwo-actions">
           <button className="btn ghost" onClick={requestClose}>
             Cancel (Esc)
@@ -665,10 +823,10 @@ export function WorkOrderDetailPanel({
           {editable ? (
             <button
               className="btn primary"
-              disabled={writeBlocked}
+              disabled={writeBlocked || busy}
               onClick={handleSave}
             >
-              Save demand
+              {busy ? 'Saving…' : 'Save demand'}
             </button>
           ) : null}
           <span className="hint">
@@ -680,8 +838,9 @@ export function WorkOrderDetailPanel({
               </>
             ) : (
               <>
-                This Work Order is <b>{workOrder.status}</b> — demand lines are
-                read-only. Editing is available only while a Work Order is Open.
+                This Work Order is <b>{workOrderStatusLabel(detail.status)}</b>{' '}
+                — demand lines are read-only. Editing is available only while a
+                Work Order is Open.
               </>
             )}
           </span>
@@ -708,7 +867,7 @@ export function WorkOrderDetailPanel({
           cancelLabel="Cancel — keep editing"
           onConfirm={() => {
             setConfirmMissing(null);
-            saveDetail();
+            void saveDetail();
           }}
           onCancel={() => setConfirmMissing(null)}
         >
@@ -739,27 +898,16 @@ export function WorkOrderDetailPanel({
           confirmLabel="Remove line"
           cancelLabel="Cancel — keep the line"
           danger
-          onConfirm={() => {
-            setLines((current) =>
-              current.filter((l) => l.id !== confirmRemove.id),
-            );
-            setLineErrors((current) =>
-              current.filter((e) => e.lineId !== confirmRemove.id),
-            );
-            setDirty(true);
-            setConfirmRemove(null);
-            showNotice(
-              `✕ ${confirmRemove.pn} removed from the draft — apply the removal with Save demand.`,
-            );
-          }}
+          onConfirm={() => void removeSavedLine(confirmRemove)}
           onCancel={() => setConfirmRemove(null)}
         >
-          No production quantity has been released for this Work Order Demand
-          line (<span className="mono">{confirmRemove.pn}</span> · qty{' '}
-          {confirmRemove.qty || '—'}). Removing it never deletes the PartNumber
-          master, production quantity, movement history, release history, or
-          other Work Order Demand for the same PN. The removal is applied by
-          Save demand.
+          Removing this saved Work Order Demand line (
+          <span className="mono">{confirmRemove.pn}</span> · qty{' '}
+          {confirmRemove.qty || '—'}) is applied immediately. It is blocked once
+          any production quantity has been released for the line, and the last
+          demand line of a Work Order cannot be removed. Removal never deletes
+          the PartNumber master, production quantity, movement history, release
+          history, or other Work Order Demand for the same PN.
         </ConfirmDialog>
       ) : null}
 

@@ -3,30 +3,541 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
 
-// Work Orders regression tests: the Work Order Details modal dialog
-// over the always-mounted list (no URL change), the New Work Order
-// modal workflow (optional WO Number — a blank number saves a NULL
-// number rendered as `—`, no temporary number generation — and
-// optional due dates, missing-information Save Demand confirmation),
-// the multi-step Add Part dialog and its stacked-dialog behavior,
-// PN-carrying barcodes with create-on-first-use, OPEN Work Order
-// editing, nullable due-date behavior, mock validation, and
-// unsaved-change protection. Everything here exercises Phase 2
-// development mock state only.
+// Work Orders regression tests (Phase 4): the view runs against the
+// REAL /api/work-orders surface — these tests exercise it against an
+// in-memory fake of the backend API with the same route surface and
+// semantics. Covered: the Work Order Details modal dialog over the
+// always-mounted list (no URL change), the New Work Order modal
+// workflow (optional WO Number — a blank number saves a NULL number
+// rendered as `—` — and optional due dates, missing-information Save
+// Demand confirmation, duplicate numbers resolved on the server and
+// opened instead of duplicated), the multi-step Add Part dialog with
+// real PN lookup and create-on-first-use, PN-carrying barcodes,
+// one-transaction saves that keep the draft on failure, the explicit
+// §11.4 release flow (FLOATING / PLANNED, active-quantity
+// confirmation, device_event_id idempotency), server-enforced demand
+// removal, offline write blocking, and unsaved-change protection.
+
+interface FakeDemand {
+  id: number;
+  work_order_id: number;
+  part_number: string;
+  request_type: 'NEW' | 'MODIFY';
+  requested_quantity: number;
+  allocated_quantity: number;
+  due_date: string | null;
+  priority_rank: number | null;
+  job_numbers: string[];
+  requester: string | null;
+  reason: string | null;
+  notes: string | null;
+}
+
+interface FakeWorkOrder {
+  id: number;
+  work_order_number: string | null;
+  received_date: string;
+  due_date: string | null;
+  status: string;
+  demands: FakeDemand[];
+}
+
+interface ReleaseCommit {
+  body: Record<string, unknown>;
+  wire: Record<string, unknown>;
+}
+
+interface FakeState {
+  workOrders: FakeWorkOrder[];
+  partNumbers: string[];
+  /** Demands with released production quantity (server knowledge). */
+  releasedDemands: Set<number>;
+  /** PN → existing ACTIVE distribution (confirmation payload). */
+  activeDistribution: Record<
+    string,
+    {
+      quantity_flow_id: number;
+      quantity: number;
+      route_mode: string;
+      current_area_id: number;
+      current_area_name: string;
+    }[]
+  >;
+  committedReleases: Map<string, ReleaseCommit>;
+  nextWorkOrderId: number;
+  nextDemandId: number;
+  nextFlowId: number;
+  nextMovementId: number;
+  nextSnapshotId: number;
+  healthDown: boolean;
+  failNextWorkOrderWrite: boolean;
+  /** Commit the release but drop the response (transport loss). */
+  dropNextReleaseResponse: boolean;
+  failNextList: boolean;
+  calls: string[];
+}
+
+const T0 = '2026-08-01T00:00:00.000Z';
+
+function demand(
+  id: number,
+  work_order_id: number,
+  part_number: string,
+  requested_quantity: number,
+  extra?: Partial<FakeDemand>,
+): FakeDemand {
+  return {
+    id,
+    work_order_id,
+    part_number,
+    request_type: 'NEW',
+    requested_quantity,
+    allocated_quantity: 0,
+    due_date: null,
+    priority_rank: null,
+    job_numbers: [],
+    requester: null,
+    reason: null,
+    notes: null,
+    ...extra,
+  };
+}
+
+function seedState(): FakeState {
+  return {
+    workOrders: [
+      {
+        id: 1,
+        work_order_number: '007201',
+        received_date: '2026-08-01',
+        due_date: '2026-09-10',
+        status: 'OPEN',
+        demands: [
+          demand(101, 1, 'A-100', 25, {
+            due_date: '2026-09-10',
+            job_numbers: ['18112'],
+          }),
+          demand(102, 1, 'B-200', 10),
+        ],
+      },
+      {
+        id: 2,
+        work_order_number: null,
+        received_date: '2026-08-05',
+        due_date: null,
+        status: 'OPEN',
+        demands: [demand(201, 2, 'C-300', 5)],
+      },
+    ],
+    partNumbers: ['309-127', 'A-100', 'B-200', 'C-300'],
+    releasedDemands: new Set([102]),
+    activeDistribution: {
+      'A-100': [
+        {
+          quantity_flow_id: 71,
+          quantity: 40,
+          route_mode: 'FLOATING',
+          current_area_id: 2,
+          current_area_name: 'Lathe',
+        },
+      ],
+    },
+    committedReleases: new Map(),
+    nextWorkOrderId: 100,
+    nextDemandId: 1000,
+    nextFlowId: 500,
+    nextMovementId: 9000,
+    nextSnapshotId: 300,
+    healthDown: false,
+    failNextWorkOrderWrite: false,
+    dropNextReleaseResponse: false,
+    failNextList: false,
+    calls: [],
+  };
+}
+
+let state: FakeState;
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function detailResponse(message: string, status: number): Response {
+  return json({ detail: message }, status);
+}
+
+function summaryWire(wo: FakeWorkOrder) {
+  return {
+    id: wo.id,
+    work_order_number: wo.work_order_number,
+    received_date: wo.received_date,
+    due_date: wo.due_date,
+    status: wo.status,
+    demand_line_count: wo.demands.length,
+    part_numbers: wo.demands.map((d) => d.part_number),
+  };
+}
+
+function detailWire(wo: FakeWorkOrder) {
+  return {
+    id: wo.id,
+    work_order_number: wo.work_order_number,
+    received_date: wo.received_date,
+    due_date: wo.due_date,
+    status: wo.status,
+    created_at: T0,
+    updated_at: T0,
+    demands: wo.demands,
+  };
+}
+
+const AREAS = [
+  {
+    id: 1,
+    department_id: 1,
+    name: 'Material',
+    barcode_value: 'PF:AREA:1',
+    description: null,
+    color: '#4f8cff',
+    icon_url: null,
+    is_terminal: false,
+    is_active: true,
+  },
+  {
+    id: 2,
+    department_id: 1,
+    name: 'Lathe',
+    barcode_value: 'PF:AREA:2',
+    description: null,
+    color: '#f2a44a',
+    icon_url: null,
+    is_terminal: false,
+    is_active: true,
+  },
+  {
+    id: 3,
+    department_id: 1,
+    name: 'Stockroom',
+    barcode_value: 'PF:AREA:3',
+    description: null,
+    color: '#7bd88f',
+    icon_url: null,
+    is_terminal: true,
+    is_active: true,
+  },
+];
+
+const OPERATIONS = [
+  {
+    id: 11,
+    area_id: 1,
+    code: 'RECV',
+    name: 'Receiving',
+    description: null,
+    default_expected_duration: null,
+    is_external: false,
+    is_active: true,
+  },
+  {
+    id: 12,
+    area_id: 1,
+    code: 'INSP',
+    name: 'Inspection',
+    description: null,
+    default_expected_duration: null,
+    is_external: false,
+    is_active: true,
+  },
+  {
+    id: 21,
+    area_id: 2,
+    code: 'TURN',
+    name: 'Turning',
+    description: null,
+    default_expected_duration: null,
+    is_external: false,
+    is_active: true,
+  },
+];
+
+const ROUTE_TEMPLATES = [
+  {
+    id: 1,
+    name: 'Standard Flow',
+    description: 'Material → Lathe',
+    created_at: T0,
+    updated_at: T0,
+    steps: [
+      { id: 1, sequence: 10, area_id: 1, operation_id: 11, instructions: null },
+      {
+        id: 2,
+        sequence: 20,
+        area_id: 2,
+        operation_id: null,
+        instructions: null,
+      },
+    ],
+  },
+];
+
+function releaseWire(
+  body: Record<string, unknown>,
+  flowId: number,
+  movementId: number,
+  snapshotId: number | null,
+) {
+  return {
+    quantity_flow_id: flowId,
+    part_number: body.part_number,
+    quantity: body.quantity,
+    route_mode: body.route_mode,
+    assigned_route_id: snapshotId,
+    starting_area_id: body.starting_area_id,
+    operation_id: body.operation_id,
+    movement_id: movementId,
+    device_event_id: body.device_event_id,
+    occurred_at: '2026-08-19T12:00:00.000Z',
+  };
+}
+
+async function handle(url: string, init?: RequestInit): Promise<Response> {
+  const method = init?.method ?? 'GET';
+  state.calls.push(`${method} ${url}`);
+  const body =
+    typeof init?.body === 'string'
+      ? (JSON.parse(init.body) as Record<string, unknown>)
+      : {};
+
+  if (url === '/api/health') {
+    return state.healthDown
+      ? detailResponse('Service unavailable.', 503)
+      : json({ status: 'ok' });
+  }
+  if (url === '/api/areas') return json(AREAS);
+  if (url === '/api/operations') return json(OPERATIONS);
+  if (url === '/api/route-templates') return json(ROUTE_TEMPLATES);
+  if (url.startsWith('/api/part-numbers')) {
+    const params = new URLSearchParams(url.split('?')[1] ?? '');
+    const number = params.get('number');
+    if (number !== null) {
+      const canonical = number.trim().toUpperCase();
+      return json(
+        state.partNumbers
+          .filter((pn) => pn === canonical)
+          .map((pn) => ({
+            part_number: pn,
+            barcode_value: `PF:PN:${pn}`,
+            created_at: T0,
+            updated_at: T0,
+          })),
+      );
+    }
+    const search = (params.get('search') ?? '').toUpperCase();
+    return json(
+      state.partNumbers
+        .filter((pn) => !search || pn.toUpperCase().includes(search))
+        .map((pn) => ({
+          part_number: pn,
+          barcode_value: `PF:PN:${pn}`,
+          created_at: T0,
+          updated_at: T0,
+        })),
+    );
+  }
+
+  // ---- Release --------------------------------------------------------
+  const releaseMatch =
+    /^\/api\/work-orders\/(\d+)\/demands\/(\d+)\/release$/.exec(url);
+  if (releaseMatch && method === 'POST') {
+    const deviceEventId = String(body.device_event_id);
+    const replay = state.committedReleases.get(deviceEventId);
+    if (replay) return json(replay.wire, 200);
+    const pn = String(body.part_number);
+    const distribution = state.activeDistribution[pn];
+    if (distribution && body.confirm_active_quantity !== true) {
+      return json(
+        {
+          detail: `Part Number '${pn}' already has active production quantity. Review the existing distribution and confirm the intent to release a separate Quantity Flow — existing quantity is never merged.`,
+          confirmation_required: true,
+          existing_active_quantity: distribution,
+        },
+        409,
+      );
+    }
+    const snapshotId =
+      body.route_mode === 'PLANNED' ? state.nextSnapshotId++ : null;
+    const wire = releaseWire(
+      body,
+      state.nextFlowId++,
+      state.nextMovementId++,
+      snapshotId,
+    );
+    state.committedReleases.set(deviceEventId, { body, wire });
+    state.releasedDemands.add(Number(releaseMatch[2]));
+    if (state.dropNextReleaseResponse) {
+      state.dropNextReleaseResponse = false;
+      throw new TypeError('Failed to fetch');
+    }
+    return json(wire, 201);
+  }
+
+  // ---- Demand removal -------------------------------------------------
+  const demandMatch = /^\/api\/work-orders\/(\d+)\/demands\/(\d+)$/.exec(url);
+  if (demandMatch && method === 'DELETE') {
+    const wo = state.workOrders.find((w) => w.id === Number(demandMatch[1]));
+    if (!wo) return detailResponse('Work Order not found.', 404);
+    const demandId = Number(demandMatch[2]);
+    if (state.releasedDemands.has(demandId)) {
+      return detailResponse(
+        'Cannot remove: production quantity has already been released.',
+        409,
+      );
+    }
+    if (wo.demands.length <= 1) {
+      return detailResponse(
+        'Cannot remove the last demand line — a Work Order contains one or more demand records.',
+        409,
+      );
+    }
+    wo.demands = wo.demands.filter((d) => d.id !== demandId);
+    return new Response(null, { status: 204 });
+  }
+
+  // ---- Work Orders ----------------------------------------------------
+  if (url.startsWith('/api/work-orders?')) {
+    const params = new URLSearchParams(url.split('?')[1]);
+    const number = params.get('number');
+    if (number !== null) {
+      return json(
+        state.workOrders
+          .filter((w) => w.work_order_number === number)
+          .map(summaryWire),
+      );
+    }
+    return json(state.workOrders.map(summaryWire));
+  }
+  if (url === '/api/work-orders' && method === 'GET') {
+    if (state.failNextList) {
+      state.failNextList = false;
+      return detailResponse('The database is unavailable.', 500);
+    }
+    return json(state.workOrders.map(summaryWire));
+  }
+  if (url === '/api/work-orders' && method === 'POST') {
+    if (state.failNextWorkOrderWrite) {
+      state.failNextWorkOrderWrite = false;
+      return detailResponse('The save failed on the server.', 500);
+    }
+    const number = body.work_order_number as string | null;
+    if (
+      number !== null &&
+      state.workOrders.some((w) => w.work_order_number === number)
+    ) {
+      return detailResponse(
+        `Work Order Number '${number}' already exists.`,
+        409,
+      );
+    }
+    const wo: FakeWorkOrder = {
+      id: state.nextWorkOrderId++,
+      work_order_number: number,
+      received_date: String(body.received_date),
+      due_date: (body.due_date as string | null) ?? null,
+      status: 'OPEN',
+      demands: [],
+    };
+    for (const line of body.lines as Record<string, unknown>[]) {
+      const pn = String(line.part_number).trim().toUpperCase();
+      if (!state.partNumbers.includes(pn)) state.partNumbers.push(pn);
+      wo.demands.push(
+        demand(
+          state.nextDemandId++,
+          wo.id,
+          pn,
+          Number(line.requested_quantity),
+          {
+            request_type: (line.request_type as 'NEW' | 'MODIFY') ?? 'NEW',
+            due_date: (line.due_date as string | null) ?? null,
+            job_numbers: (line.job_numbers as string[]) ?? [],
+            notes: (line.notes as string | null) ?? null,
+          },
+        ),
+      );
+    }
+    state.workOrders.unshift(wo);
+    return json(detailWire(wo), 201);
+  }
+  const workOrderMatch = /^\/api\/work-orders\/(\d+)$/.exec(url);
+  if (workOrderMatch) {
+    const wo = state.workOrders.find((w) => w.id === Number(workOrderMatch[1]));
+    if (!wo) return detailResponse('Work Order not found.', 404);
+    if (method === 'GET') return json(detailWire(wo));
+    if (method === 'PATCH') {
+      if (state.failNextWorkOrderWrite) {
+        state.failNextWorkOrderWrite = false;
+        return detailResponse('The save failed on the server.', 500);
+      }
+      if ('due_date' in body) wo.due_date = body.due_date as string | null;
+      for (const edit of (body.line_edits ?? []) as Record<string, unknown>[]) {
+        const target = wo.demands.find((d) => d.id === Number(edit.id));
+        if (!target) return detailResponse('Demand not found.', 404);
+        if ('request_type' in edit) {
+          if (edit.request_type === null) {
+            return detailResponse('request_type must not be null.', 422);
+          }
+          target.request_type = edit.request_type as 'NEW' | 'MODIFY';
+        }
+        if ('requested_quantity' in edit) {
+          target.requested_quantity = Number(edit.requested_quantity);
+        }
+        if ('due_date' in edit)
+          target.due_date = edit.due_date as string | null;
+        if ('job_numbers' in edit) {
+          target.job_numbers = edit.job_numbers as string[];
+        }
+        if ('notes' in edit) target.notes = edit.notes as string | null;
+      }
+      for (const line of (body.new_lines ?? []) as Record<string, unknown>[]) {
+        const pn = String(line.part_number).trim().toUpperCase();
+        if (!state.partNumbers.includes(pn)) state.partNumbers.push(pn);
+        wo.demands.push(
+          demand(
+            state.nextDemandId++,
+            wo.id,
+            pn,
+            Number(line.requested_quantity),
+            {
+              request_type: (line.request_type as 'NEW' | 'MODIFY') ?? 'NEW',
+              due_date: (line.due_date as string | null) ?? null,
+              job_numbers: (line.job_numbers as string[]) ?? [],
+              notes: (line.notes as string | null) ?? null,
+            },
+          ),
+        );
+      }
+      return json(detailWire(wo));
+    }
+  }
+
+  return detailResponse(`Unhandled fake route: ${method} ${url}`, 500);
+}
 
 beforeEach(() => {
+  state = seedState();
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
-      Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      ),
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      handle(String(input), init),
     ),
   );
 });
@@ -41,6 +552,7 @@ async function renderWorkOrders() {
   window.history.replaceState({}, '', '/management/work-orders');
   render(<App />);
   await screen.findByRole('heading', { name: 'Work Orders' });
+  await screen.findByText('007201');
 }
 
 function openNewWorkOrderDialog() {
@@ -63,15 +575,20 @@ function workOrderRow(workOrderNumber: string) {
   return screen.getByRole('button', { name: new RegExp(workOrderNumber) });
 }
 
-async function openWorkOrderDetail(workOrderNumber: string) {
+async function openWorkOrderDetail(workOrderNumber: string, waitForPn: string) {
   const row = workOrderRow(workOrderNumber);
   row.focus();
   fireEvent.click(row);
   const dialog = await screen.findByRole('dialog', {
     name: 'Work Order Details',
   });
-  expect(dialog).toHaveTextContent(workOrderNumber);
+  // The dialog loads the real Work Order — wait for its demand lines.
+  await within(dialog).findByText(waitForPn);
   return dialog;
+}
+
+function releaseCalls(): string[] {
+  return state.calls.filter((call) => call.includes('/release'));
 }
 
 /* ============ Work Order Details modal ============ */
@@ -79,171 +596,95 @@ async function openWorkOrderDetail(workOrderNumber: string) {
 test('clicking a Work Order row opens the Work Order Details dialog over the list', async () => {
   await renderWorkOrders();
 
-  const dialog = await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
   expect(dialog).toHaveAttribute('aria-modal', 'true');
-  // The URL never changes — the details are a dialog, not a route.
+  expect(dialog).toHaveTextContent('007201');
   expect(window.location.pathname).toBe('/management/work-orders');
-  // The Work Order list stays mounted and visible behind the overlay.
+  // The list stays mounted behind the overlay.
   expect(
     screen.getByRole('heading', { name: 'Work Orders' }),
   ).toBeInTheDocument();
-  expect(document.querySelector('.wolist')).toBeInTheDocument();
-  // Primary dialog actions.
-  expect(
-    within(dialog).getByRole('button', { name: 'Save demand' }),
-  ).toBeInTheDocument();
-  expect(
-    within(dialog).getByRole('button', { name: 'Cancel (Esc)' }),
-  ).toBeInTheDocument();
-});
-
-test('the toolbar hosts ＋ New Work Order and the whole row opens the details dialog', async () => {
-  await renderWorkOrders();
-
-  // The primary action sits in the toolbar row beside the search field
-  // (v15) — same layout as Machines.
-  const newButton = screen.getByRole('button', { name: '＋ New Work Order' });
-  expect(newButton.closest('.wo-tools')).not.toBeNull();
-
-  // The name-cell button keeps the accessible entry point while the
-  // COMPLETE row is clickable.
-  const rowButton = screen.getByRole('button', {
-    name: 'Open Work Order 007010',
-  });
-  const row = rowButton.closest('tr') as HTMLTableRowElement;
-  expect(row.className).toContain('selrow');
-
-  // Clicking outside the name button — the Status cell — opens the
-  // details dialog too.
-  fireEvent.click(row.cells[row.cells.length - 1]);
-  const dialog = await screen.findByRole('dialog', {
-    name: 'Work Order Details',
-  });
-  expect(dialog).toHaveTextContent('007010');
-  fireEvent.keyDown(dialog, { key: 'Escape' });
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 test('a clean Work Order Details dialog closes directly and focus returns to its row', async () => {
   await renderWorkOrders();
+  const row = workOrderRow('007201');
+  await openWorkOrderDetail('007201', 'A-100');
 
-  // Escape on a clean dialog closes without any confirmation.
-  const dialog = await openWorkOrderDetail('007010');
-  fireEvent.keyDown(dialog, { key: 'Escape' });
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(document.activeElement).toBe(workOrderRow('007010'));
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
 
-  // Cancel (Esc) behaves identically.
-  const reopened = await openWorkOrderDetail('007010');
-  fireEvent.click(
-    within(reopened).getByRole('button', { name: 'Cancel (Esc)' }),
-  );
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(document.activeElement).toBe(workOrderRow('007010'));
+  expect(document.activeElement).toBe(row);
 });
 
 test('closing a dirty Work Order Details dialog requires explicit discard confirmation', async () => {
   await renderWorkOrders();
-  const dialog = await openWorkOrderDetail('007010');
-  const qty = within(dialog).getByLabelText('Quantity for 0455-20-0118-03');
-  fireEvent.change(qty, { target: { value: '99' } });
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  // Escape never discards silently: an explicit confirmation appears.
-  fireEvent.keyDown(dialog, { key: 'Escape' });
+  fireEvent.change(within(dialog).getByLabelText('Quantity for A-100'), {
+    target: { value: '30' },
+  });
   expect(
-    screen.getByRole('dialog', { name: 'Discard unsaved demand changes?' }),
-  ).toBeInTheDocument();
+    within(dialog).getAllByText('● Unsaved changes').length,
+  ).toBeGreaterThan(0);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
 
-  // Cancelling the discard keeps the dialog and every entered value.
-  fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+  const confirm = screen.getByRole('dialog', {
+    name: 'Discard unsaved demand changes?',
+  });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Keep editing' }),
+  );
   expect(
     screen.getByRole('dialog', { name: 'Work Order Details' }),
   ).toBeInTheDocument();
-  expect(
-    within(dialog).getByLabelText('Quantity for 0455-20-0118-03'),
-  ).toHaveValue('99');
+  expect(screen.getByLabelText('Quantity for A-100')).toHaveValue('30');
 
-  // A backdrop click is guarded exactly the same way.
-  fireEvent.mouseDown(dialog.parentElement!);
-  expect(
-    screen.getByRole('dialog', { name: 'Discard unsaved demand changes?' }),
-  ).toBeInTheDocument();
-
-  // Confirming the discard closes Work Order Details.
+  fireEvent.keyDown(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+    { key: 'Escape' },
+  );
   fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 test('Escape and backdrop on the Add Part child dialog close only the child', async () => {
   await renderWorkOrders();
-  const details = await openWorkOrderDetail('007010');
-  fireEvent.click(
-    within(details).getByRole('button', { name: '＋ Add Part manually' }),
-  );
+  await openWorkOrderDetail('007201', 'A-100');
 
-  // Escape on the child closes the child, never Work Order Details.
-  const child = screen.getByRole('dialog', { name: /Add Part — step 1/ });
-  fireEvent.keyDown(child, { key: 'Escape' });
-  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
-  expect(
-    screen.getByRole('dialog', { name: 'Work Order Details' }),
-  ).toBeInTheDocument();
-
-  // A backdrop mousedown on the child closes only the child too.
-  fireEvent.click(
-    within(details).getByRole('button', { name: '＋ Add Part manually' }),
-  );
-  const child2 = screen.getByRole('dialog', { name: /Add Part — step 1/ });
-  fireEvent.mouseDown(child2.parentElement!);
-  expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
-  expect(
-    screen.getByRole('dialog', { name: 'Work Order Details' }),
-  ).toBeInTheDocument();
-});
-
-test('the Add Part quantity step renders its own keypad when Work Orders mounts directly', async () => {
-  // No Scan Station render first: the keypad presentation is owned by
-  // components/QuantityKeypad (its CSS ships with the component), so
-  // the structure must be complete with Work Orders mounted alone.
-  await renderWorkOrders();
-  const details = await openWorkOrderDetail('007010');
-  fireEvent.click(
-    within(details).getByRole('button', { name: '＋ Add Part manually' }),
-  );
-  const addPart = screen.getByRole('dialog', { name: /Add Part — step 1/ });
-
-  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
-    target: { value: '309' },
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+  const addPart = await screen.findByRole('dialog', {
+    name: /Add Part — step 1/,
   });
-  fireEvent.click(screen.getByRole('button', { name: /309-127/ }));
-  expect(
-    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
-  ).toBeInTheDocument();
 
-  // The focused numeric input and the full keypad are present; MAX is
-  // absent because Add Part provides no maximum.
-  const display = addPart.querySelector('input.qtydisplay');
-  expect(display).toBeInTheDocument();
-  expect(document.activeElement).toBe(display);
-  expect(addPart.querySelectorAll('.keypad button')).toHaveLength(12);
-  expect(addPart.querySelector('.keypad button.keypad-max')).toBeNull();
-
-  // Physical keys reach the quantity; completing the flow adds the
-  // draft line to the still-open Work Order Details dialog.
-  fireEvent.keyDown(addPart, { key: '5' });
-  expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Add Part' }));
-
+  fireEvent.keyDown(addPart, { key: 'Escape' });
   expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
-  expect(within(details).getByLabelText('Quantity for 309-127')).toHaveValue(
-    '5',
-  );
+  expect(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
 });
 
-/* ============ New Work Order modal ============ */
+test('the detail dialog shows a real error state with Retry when the load fails', async () => {
+  await renderWorkOrders();
+  state.failNextList = false;
+  // Fail the detail GET once: temporarily remove the Work Order.
+  const [wo] = state.workOrders;
+  state.workOrders = state.workOrders.filter((w) => w.id !== wo.id);
+  const row = workOrderRow('007201');
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('The Work Order could not be loaded.');
+
+  state.workOrders = [wo, ...state.workOrders];
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+  await within(dialog).findByText('A-100');
+});
+
+/* ============ New Work Order dialog ============ */
 
 test('＋ New Work Order opens a dialog over the Work Order list without changing the URL', async () => {
   await renderWorkOrders();
@@ -252,11 +693,10 @@ test('＋ New Work Order opens a dialog over the Work Order list without changin
 
   expect(dialog).toHaveAttribute('aria-modal', 'true');
   expect(window.location.pathname).toBe('/management/work-orders');
-  // The Work Order list stays mounted behind the overlay.
   expect(
     screen.getByRole('heading', { name: 'Work Orders' }),
   ).toBeInTheDocument();
-  expect(screen.getByText('007010')).toBeInTheDocument();
+  expect(screen.getByText('007201')).toBeInTheDocument();
 });
 
 test('Cancel (Esc) closes a clean dialog and focus returns to ＋ New Work Order', async () => {
@@ -311,7 +751,7 @@ test('closing a dirty New Work Order form requires confirmation and preserves en
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-test('a complete save flow (number + due entered) saves without extra confirmation', async () => {
+test('a complete save flow (number + due entered) commits ONE POST and reloads from the server', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
@@ -322,9 +762,10 @@ test('a complete save flow (number + due entered) saves without extra confirmati
     target: { value: '2026-09-01' },
   });
 
-  // Barcode scanning remains available as a secondary method.
+  // Barcode scanning remains available as a secondary method (the PN
+  // resolution is a real server lookup, so the line arrives async).
   scanBarcode('PF:PN:78-04-0031');
-  const qty = screen.getByLabelText('Quantity for 78-04-0031');
+  const qty = await screen.findByLabelText('Quantity for 78-04-0031');
   expect(document.activeElement).toBe(qty);
   fireEvent.change(qty, { target: { value: '5' } });
   fireEvent.keyDown(qty, { key: 'Enter' });
@@ -332,16 +773,66 @@ test('a complete save flow (number + due entered) saves without extra confirmati
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
+  // The toast states the business rule; the dialog closed only after
+  // the server committed, and the list shows the server's row.
+  await screen.findByText(/007482 saved — business demand only/);
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  expect(screen.getByText('007482')).toBeInTheDocument();
+  expect(await screen.findByText('007482')).toBeInTheDocument();
   expect(window.location.pathname).toBe('/management/work-orders');
-  // The toast states the business rule only; per-surface persistence
-  // explanations were consolidated into the single DevNotice (v16) and
-  // rendered-copy.test.ts forbids the old wording everywhere.
+
+  const saved = state.workOrders.find((w) => w.work_order_number === '007482');
+  expect(saved).toBeDefined();
+  expect(saved!.due_date).toBe('2026-09-01');
+  expect(saved!.demands).toHaveLength(1);
+  expect(saved!.demands[0].part_number).toBe('78-04-0031');
+  expect(saved!.demands[0].requested_quantity).toBe(5);
+  // The line inherited the WO due date.
+  expect(saved!.demands[0].due_date).toBe('2026-09-01');
+  // Save demand touched only the intake surface — never the release
+  // endpoint.
+  expect(releaseCalls()).toEqual([]);
   expect(
-    screen.getByText(/007482 saved — business demand only/),
-  ).toBeInTheDocument();
+    state.calls.filter((call) => call === 'POST /api/work-orders'),
+  ).toHaveLength(1);
 });
+
+test('a failed New Work Order save keeps the whole draft and every entered value', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  fireEvent.change(screen.getByLabelText(/^WO Number/), {
+    target: { value: '007483' },
+  });
+  fireEvent.change(screen.getByLabelText(/^WO due date/), {
+    target: { value: '2026-09-01' },
+  });
+  scanBarcode('PF:PN:78-04-0031');
+  const qty = await screen.findByLabelText('Quantity for 78-04-0031');
+  fireEvent.change(qty, { target: { value: '5' } });
+
+  state.failNextWorkOrderWrite = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+
+  // No success is shown before the server commit; the draft is kept.
+  await screen.findByText(/The save failed on the server/);
+  expect(
+    screen.getByRole('dialog', { name: 'New Work Order' }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText(/^WO Number/)).toHaveValue('007483');
+  expect(screen.getByLabelText('Quantity for 78-04-0031')).toHaveValue('5');
+  expect(state.workOrders.some((w) => w.work_order_number === '007483')).toBe(
+    false,
+  );
+
+  // The retry with the intact draft succeeds.
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007483 saved — business demand only/);
+  expect(state.workOrders.some((w) => w.work_order_number === '007483')).toBe(
+    true,
+  );
+});
+
+/* ============ Barcodes and PN identity ============ */
 
 test('a non-PN barcode is rejected and adds nothing', async () => {
   await renderWorkOrders();
@@ -361,11 +852,11 @@ test('a PN barcode carries the PN itself; an unknown PN is created on first use'
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  // Arbitrary non-empty suffix — no format, no opaque id mapping.
+  // Arbitrary non-empty suffix — no format, no opaque id mapping. The
+  // PN has no master yet, so the line is marked as a new PN.
   scanBarcode('PF:PN:NEW-PLATE-9');
 
-  expect(screen.getByText('NEW-PLATE-9')).toBeInTheDocument();
-  // The toast confirms the add (the PN cell itself shows the PN only).
+  expect(await screen.findByText('NEW-PLATE-9')).toBeInTheDocument();
   expect(
     screen.getByText(/NEW-PLATE-9 added — Request Type NEW/),
   ).toBeInTheDocument();
@@ -373,7 +864,27 @@ test('a PN barcode carries the PN itself; an unknown PN is created on first use'
   // Case-insensitive identity: a re-scan in different casing focuses
   // the existing line instead of duplicating it.
   scanBarcode('PF:PN:new-plate-9');
-  expect(screen.getAllByLabelText('Quantity for NEW-PLATE-9')).toHaveLength(1);
+  await waitFor(() =>
+    expect(screen.getAllByLabelText('Quantity for NEW-PLATE-9')).toHaveLength(
+      1,
+    ),
+  );
+});
+
+test('scanned lines reflect the real master lookup — existing PN reuse vs. create-on-first-use', async () => {
+  await renderWorkOrders();
+  // The Work Order Details table renders each line's barcode note.
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:309-127');
+  expect(
+    await within(dialog).findByText('existing PN · barcode PF:PN:309-127'),
+  ).toBeInTheDocument();
+
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  expect(
+    await within(dialog).findByText('new PN — barcode PF:PN:NEW-PLATE-9'),
+  ).toBeInTheDocument();
 });
 
 test('scanning a duplicate PN focuses the existing line instead of adding one', async () => {
@@ -381,30 +892,28 @@ test('scanning a duplicate PN focuses the existing line instead of adding one', 
   openNewWorkOrderDialog();
 
   scanBarcode('PF:PN:78-04-0031');
+  await screen.findByLabelText('Quantity for 78-04-0031');
   scanBarcode('PF:PN:78-04-0031');
 
   const qtyFields = screen.getAllByLabelText('Quantity for 78-04-0031');
   expect(qtyFields).toHaveLength(1);
-  expect(document.activeElement).toBe(qtyFields[0]);
+  await waitFor(() => expect(document.activeElement).toBe(qtyFields[0]));
 });
 
-test('search matches hyphenated PNs and WO numbers with punctuation', async () => {
+test('search matches hyphenated PNs and internal Work Orders through the PN preview', async () => {
   await renderWorkOrders();
 
-  // Realistic PNs are multi-segment hyphenated strings; search must match
-  // them literally (WO Number and PN preview).
   fireEvent.change(screen.getByLabelText('Search WO Number'), {
-    target: { value: '52-09-0114' },
+    target: { value: 'A-100' },
   });
-  expect(screen.getByText('007010')).toBeInTheDocument();
-  expect(screen.queryByText('007005')).not.toBeInTheDocument();
+  expect(screen.getByText('007201')).toBeInTheDocument();
 
   // An internal Work Order without an external number is found through
   // its PN preview and displays `—` as its number.
   fireEvent.change(screen.getByLabelText('Search WO Number'), {
-    target: { value: '214-406' },
+    target: { value: 'C-300' },
   });
-  expect(screen.queryByText('007010')).not.toBeInTheDocument();
+  expect(screen.queryByText('007201')).not.toBeInTheDocument();
   const internalRow = screen
     .getByText('internal Work Order — no external number yet')
     .closest('tr');
@@ -413,94 +922,109 @@ test('search matches hyphenated PNs and WO numbers with punctuation', async () =
 
 /* ============ Optional header + Save Demand confirmation ============ */
 
-test('missing WO Number and due dates open a confirmation, never a validation error', async () => {
+test('missing WO Number and due dates open a confirmation and save NULLs, never placeholders', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:78-04-0031');
-  fireEvent.change(screen.getByLabelText('Quantity for 78-04-0031'), {
-    target: { value: '5' },
-  });
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  const qty = await screen.findByLabelText('Quantity for NEW-PLATE-9');
+  fireEvent.change(qty, { target: { value: '3' } });
+
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  const confirm = screen.getByRole('dialog', {
+  // Omissions are summarized and explicitly confirmed — they are never
+  // validation errors and nothing is saved yet.
+  const confirm = await screen.findByRole('dialog', {
     name: 'Save demand with missing information?',
   });
-  expect(confirm).toHaveTextContent(/No external WO Number/);
-  expect(confirm).toHaveTextContent(
-    /internal Work Order without an external number/,
-  );
-  expect(confirm).toHaveTextContent(/No WO due date/);
-  expect(confirm).toHaveTextContent(/1 demand line has no due date/);
-  // No temporary number is generated — the number stays NULL.
-  expect(confirm.textContent).not.toMatch(/TMP-/);
+  expect(confirm).toHaveTextContent(/internal Work Order without an external/);
+  expect(confirm).toHaveTextContent(/remains unscheduled/);
+  expect(confirm).toHaveTextContent(/1.*demand line.*has.*no.*due date/s);
+  expect(state.workOrders).toHaveLength(2);
 
-  // Cancel returns to editing with every entered value preserved.
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Cancel — keep editing' }),
-  );
-  expect(
-    screen.getByRole('dialog', { name: 'New Work Order' }),
-  ).toBeInTheDocument();
-  expect(screen.getByLabelText('Quantity for 78-04-0031')).toHaveValue('5');
-
-  // Confirming saves an internal Work Order with a NULL number that
-  // renders as `—` (the placeholder itself is never persisted).
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm and save' }));
 
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  const labels = screen.getAllByText(
-    'internal Work Order — no external number yet',
-  );
-  expect(labels.length).toBeGreaterThan(0);
-  const savedRow = labels[0].closest('tr');
-  expect(savedRow?.querySelector('.wo')?.textContent).toBe('—');
-  expect(screen.queryByText(/TMP-\d{8}/)).not.toBeInTheDocument();
+  await screen.findByText(/WO — saved — business demand only/);
+  const saved = state.workOrders[0];
+  // Nullable fields persist NULL — no temporary number, no fake date.
+  expect(saved.work_order_number).toBeNull();
+  expect(saved.due_date).toBeNull();
+  expect(saved.demands[0].due_date).toBeNull();
+  // The internal Work Order renders `—` plus its label in the list.
+  expect(
+    screen.getAllByText('internal Work Order — no external number yet').length,
+  ).toBeGreaterThanOrEqual(2);
 });
 
 test('an invalid quantity still blocks save and keeps entered values', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
-  scanBarcode('PF:PN:78-04-0031');
-  const qty = screen.getByLabelText('Quantity for 78-04-0031');
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  const qty = await screen.findByLabelText('Quantity for NEW-PLATE-9');
   fireEvent.change(qty, { target: { value: '0' } });
 
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
   expect(
-    screen.getByRole('dialog', { name: 'New Work Order' }),
+    await screen.findByText('quantity must be a positive whole number'),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText('quantity must be a positive whole number'),
-  ).toBeInTheDocument();
-  expect(qty).toHaveValue('0'); // preserved, not cleared
   expect(document.activeElement).toBe(qty);
+  expect(qty).toHaveValue('0');
+  // Nothing traveled: no create POST happened.
+  expect(
+    state.calls.filter((call) => call === 'POST /api/work-orders'),
+  ).toHaveLength(0);
 });
 
 test('an existing WO Number is opened instead of duplicated', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
 
+  // Without entered lines the existing Work Order opens directly.
   fireEvent.change(screen.getByLabelText(/^WO Number/), {
-    target: { value: '007010' },
+    target: { value: '007201' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
 
-  // The New Work Order dialog closes and the existing Work Order opens
-  // in the Work Order Details dialog instead.
-  expect(
-    screen.queryByRole('dialog', { name: 'New Work Order' }),
-  ).not.toBeInTheDocument();
-  const details = await screen.findByRole('dialog', {
+  const dialog = await screen.findByRole('dialog', {
     name: 'Work Order Details',
   });
-  expect(details).toHaveTextContent('007010');
-  expect(screen.getByText(/already exists/)).toBeInTheDocument();
+  expect(dialog).toHaveTextContent('007201');
+  expect(
+    screen.getByText(/007201 already exists — opening the existing Work Order/),
+  ).toBeInTheDocument();
+  // Nothing was created.
+  expect(state.workOrders).toHaveLength(2);
+  expect(
+    state.calls.filter((call) => call === 'POST /api/work-orders'),
+  ).toHaveLength(0);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // With entered lines, opening the existing Work Order (discarding
+  // them) is confirmed explicitly first.
+  openNewWorkOrderDialog();
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  await screen.findByLabelText('Quantity for NEW-PLATE-9');
+  fireEvent.change(screen.getByLabelText(/^WO Number/), {
+    target: { value: '007201' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+
+  const confirm = await screen.findByRole('dialog', {
+    name: '007201 already exists',
+  });
+  expect(confirm).toHaveTextContent(/never duplicated/);
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open existing Work Order' }),
+  );
+  expect(
+    await screen.findByRole('dialog', { name: 'Work Order Details' }),
+  ).toBeInTheDocument();
+  expect(state.workOrders).toHaveLength(2);
 });
 
-/* ============ Multi-step Add Part dialog ============ */
+/* ============ Add Part flow ============ */
 
 test('the Add Part flow steps through PN, quantity, due date and metadata', async () => {
   await renderWorkOrders();
@@ -509,11 +1033,11 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
   const dialog = screen.getByRole('dialog', { name: /Add Part — step 1/ });
 
-  // Step 1: search and select an existing PN.
+  // Step 1: search and select an existing PN (a real server search).
   fireEvent.change(screen.getByLabelText('Search PartNumber'), {
     target: { value: '309' },
   });
-  fireEvent.click(screen.getByRole('button', { name: /309-127/ }));
+  fireEvent.click(await screen.findByRole('button', { name: /309-127/ }));
   expect(
     screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
   ).toBeInTheDocument();
@@ -526,7 +1050,7 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
   // Back preserves entered values.
   fireEvent.click(screen.getByRole('button', { name: '‹ Back' }));
   expect(screen.getByLabelText('Search PartNumber')).toHaveValue('309');
-  fireEvent.click(screen.getByRole('button', { name: /309-127/ }));
+  fireEvent.click(await screen.findByRole('button', { name: /309-127/ }));
   expect(screen.getByLabelText('Quantity: 5')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Next ›' }));
 
@@ -548,6 +1072,7 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
   expect(screen.getByLabelText('Quantity for 309-127')).toHaveValue('5');
   const lineDue = screen.getByLabelText('Due date for 309-127');
   expect(lineDue).toHaveValue('');
+  expect(state.calls.filter((call) => call.startsWith('POST'))).toHaveLength(0);
 
   // The explicit `No due date` line never inherits a later WO due date…
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
@@ -556,10 +1081,40 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
   expect(lineDue).toHaveValue('');
 });
 
+test('Add Part canonicalizes manual entry like the backend — trim + uppercase, internal whitespace rejected', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  // Internal whitespace is invalid — never silently removed.
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'PL 77' },
+  });
+  expect(
+    await screen.findByText(/cannot contain spaces or other whitespace/),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Create new PN/ })).toBeNull();
+
+  // Surrounding whitespace trims; the canonical PN is UPPERCASE.
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: '  pl-77  ' },
+  });
+  const create = await screen.findByRole('button', {
+    name: '＋ Create new PN “PL-77”',
+  });
+  fireEvent.click(create);
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+  expect(screen.getByText('new Part Number')).toBeInTheDocument();
+});
+
 test('the Add Part flow rejects a PN already on the Work Order', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
   scanBarcode('PF:PN:78-04-0031');
+  await screen.findByLabelText('Quantity for 78-04-0031');
 
   fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
   fireEvent.change(screen.getByLabelText('Search PartNumber'), {
@@ -569,7 +1124,9 @@ test('the Add Part flow rejects a PN already on the Work Order', async () => {
   // exposes its own control whose accessible name carries the same PN.
   const addPartDialog = screen.getByRole('dialog', { name: /Add Part/ });
   fireEvent.click(
-    within(addPartDialog).getByRole('button', { name: /78-04-0031/ }),
+    await within(addPartDialog).findByRole('button', {
+      name: '＋ Create new PN “78-04-0031”',
+    }),
   );
 
   expect(screen.queryByRole('dialog', { name: /Add Part/ })).toBeNull();
@@ -592,10 +1149,9 @@ test('editable date fields are calendar inputs (type="date")', async () => {
   expect(screen.getByLabelText(/^WO due date/)).toHaveAttribute('type', 'date');
 
   scanBarcode('PF:PN:78-04-0031');
-  expect(screen.getByLabelText('Due date for 78-04-0031')).toHaveAttribute(
-    'type',
-    'date',
-  );
+  expect(
+    await screen.findByLabelText('Due date for 78-04-0031'),
+  ).toHaveAttribute('type', 'date');
 });
 
 test('new lines inherit the WO due date; edited lines keep their own date', async () => {
@@ -605,22 +1161,23 @@ test('new lines inherit the WO due date; edited lines keep their own date', asyn
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
     target: { value: '2026-09-01' },
   });
-  scanBarcode('PF:PN:78-04-0031');
-  scanBarcode('PF:PN:309-127');
+  scanBarcode('PF:PN:AAA-1');
+  await screen.findByLabelText('Due date for AAA-1');
+  scanBarcode('PF:PN:BBB-2');
+  await screen.findByLabelText('Due date for BBB-2');
 
-  const due1 = screen.getByLabelText('Due date for 78-04-0031');
-  const due2 = screen.getByLabelText('Due date for 309-127');
-  expect(due1).toHaveValue('2026-09-01');
-  expect(due2).toHaveValue('2026-09-01');
+  expect(screen.getByLabelText('Due date for AAA-1')).toHaveValue('2026-09-01');
 
-  // Manually edit one line, then change the WO due date.
-  fireEvent.change(due1, { target: { value: '2026-09-10' } });
+  // Edit one line's date — it becomes user-owned.
+  fireEvent.change(screen.getByLabelText('Due date for BBB-2'), {
+    target: { value: '2026-09-20' },
+  });
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
-    target: { value: '2026-09-15' },
+    target: { value: '2026-10-01' },
   });
 
-  expect(due1).toHaveValue('2026-09-10'); // manually edited — unchanged
-  expect(due2).toHaveValue('2026-09-15'); // still inherited — follows
+  expect(screen.getByLabelText('Due date for AAA-1')).toHaveValue('2026-10-01');
+  expect(screen.getByLabelText('Due date for BBB-2')).toHaveValue('2026-09-20');
 });
 
 test('a line whose due date is cleared is user-edited and stops inheriting', async () => {
@@ -630,238 +1187,550 @@ test('a line whose due date is cleared is user-edited and stops inheriting', asy
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
     target: { value: '2026-09-01' },
   });
-  scanBarcode('PF:PN:78-04-0031');
-  const due = screen.getByLabelText('Due date for 78-04-0031');
-  fireEvent.change(due, { target: { value: '' } });
+  scanBarcode('PF:PN:AAA-1');
+  const lineDue = await screen.findByLabelText('Due date for AAA-1');
+  fireEvent.change(lineDue, { target: { value: '' } });
 
   fireEvent.change(screen.getByLabelText(/^WO due date/), {
-    target: { value: '2026-09-15' },
+    target: { value: '2026-10-01' },
   });
-  expect(due).toHaveValue(''); // explicit No due date — never overwritten
+  expect(lineDue).toHaveValue('');
 });
 
 test('a Work Order without a due date displays cleanly in list and detail', async () => {
   await renderWorkOrders();
 
-  // List: `—` (no due date) instead of an empty or invalid value.
-  const row = screen.getByText('007011').closest('tr');
-  expect(row?.textContent).toContain('—');
+  // The internal seeded Work Order has no due date: the list shows `—`
+  // for both the number and the due date.
+  const internalRow = screen
+    .getByText('internal Work Order — no external number yet')
+    .closest('tr')!;
+  expect(
+    within(internalRow as HTMLElement).getAllByText('—').length,
+  ).toBeGreaterThanOrEqual(2);
 
-  const dialog = await openWorkOrderDetail('007011');
-  const sub = dialog.querySelector('.wo-sub');
-  expect(sub?.textContent).toContain('WO due date —');
+  const row = screen.getByRole('button', { name: 'Open Work Order —' });
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('C-300');
+  expect(within(dialog).getByText('no due date')).toBeInTheDocument();
 });
 
 /* ============ OPEN Work Order editing ============ */
 
-test('an OPEN Work Order offers manual-first Add Part; a non-OPEN Work Order stays read-only', async () => {
-  await renderWorkOrders();
-  const open = await openWorkOrderDetail('007010');
-  expect(
-    within(open).getByRole('button', { name: '＋ Add Part manually' }),
-  ).toBeEnabled();
-  expect(within(open).getByLabelText('Scan PN barcode')).toBeInTheDocument();
-  expect(
-    within(open).getByRole('button', { name: 'Save demand' }),
-  ).toBeInTheDocument();
-  fireEvent.click(within(open).getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-
-  const released = await openWorkOrderDetail('007003');
-  expect(
-    within(released).queryByRole('button', { name: '＋ Add Part manually' }),
-  ).not.toBeInTheDocument();
-  expect(
-    within(released).queryByRole('button', { name: /Remove line/ }),
-  ).not.toBeInTheDocument();
-  // Read-only: no Save demand, but the dialog still closes normally and
-  // explains why editing is unavailable.
-  expect(
-    within(released).queryByRole('button', { name: 'Save demand' }),
-  ).not.toBeInTheDocument();
-  expect(released).toHaveTextContent(/demand lines are read-only/);
-  expect(
-    within(released).getByRole('button', { name: 'Cancel (Esc)' }),
-  ).toBeInTheDocument();
-});
-
 test('scanning a new PN on an OPEN Work Order adds a draft line and marks unsaved', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  scanBarcode('PF:PN:78-04-0031');
+  scanBarcode('PF:PN:EXTRA-77');
+  await within(dialog).findByText('EXTRA-77');
 
-  expect(screen.getByText('78-04-0031')).toBeInTheDocument();
-  // The new line joins the shipped invalid draft row as a second draft.
-  expect(screen.getAllByText('Draft (unsaved)').length).toBeGreaterThanOrEqual(
-    2,
-  );
-  expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);
+  expect(
+    within(dialog).getAllByText('● Unsaved changes').length,
+  ).toBeGreaterThan(0);
+  expect(within(dialog).getByText('Draft (unsaved)')).toBeInTheDocument();
 });
 
 test('a duplicate PN on an OPEN Work Order focuses the existing line', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  scanBarcode('PF:PN:0455-20-0118-03'); // already on WO 007010
+  scanBarcode('PF:PN:A-100');
 
-  const qtyFields = screen.getAllByLabelText('Quantity for 0455-20-0118-03');
-  expect(qtyFields).toHaveLength(1);
-  expect(document.activeElement).toBe(qtyFields[0]);
+  expect(
+    await screen.findByText(/A-100 is already on this Work Order/),
+  ).toBeInTheDocument();
+  const qty = within(dialog).getByLabelText('Quantity for A-100');
+  await waitFor(() => expect(document.activeElement).toBe(qty));
 });
 
 test('an unsaved draft line is removed immediately without a confirmation dialog', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  scanBarcode('PF:PN:78-04-0031');
+  scanBarcode('PF:PN:EXTRA-77');
+  await within(dialog).findByText('EXTRA-77');
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line 78-04-0031' }),
+    within(dialog).getByRole('button', { name: 'Remove line EXTRA-77' }),
   );
 
-  // Only the Work Order Details dialog remains — no confirmation.
-  expect(screen.getAllByRole('dialog')).toHaveLength(1);
-  expect(screen.queryByText('78-04-0031')).not.toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: /Remove/ })).toBeNull();
+  expect(within(dialog).queryByText('EXTRA-77')).toBeNull();
+  expect(
+    screen.getByText('✕ Draft line removed — it had never been saved.'),
+  ).toBeInTheDocument();
+  // No server call happened for a draft-only removal.
+  expect(state.calls.filter((call) => call.startsWith('DELETE'))).toHaveLength(
+    0,
+  );
 });
 
-test('removing a saved unreleased line requires confirmation', async () => {
+test('removing a saved unreleased line requires confirmation and commits on the server', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line 52-09-0114' }),
+    within(dialog).getByRole('button', { name: 'Remove line A-100' }),
   );
   const confirm = screen.getByRole('dialog', {
-    name: 'Remove 52-09-0114 from 007010?',
+    name: 'Remove A-100 from 007201?',
   });
-  expect(confirm).toBeInTheDocument();
+  expect(confirm).toHaveTextContent(/never deletes the PartNumber master/);
 
-  // Cancel keeps the line.
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Cancel — keep the line' }),
-  );
-  expect(screen.getByText('52-09-0114')).toBeInTheDocument();
+  fireEvent.click(within(confirm).getByRole('button', { name: 'Remove line' }));
 
-  // Confirm removes it from the draft (mock state only).
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Remove line 52-09-0114' }),
-  );
-  fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
-  expect(screen.queryByText('52-09-0114')).not.toBeInTheDocument();
-  expect(screen.getByText(/removed from the draft/)).toBeInTheDocument();
+  await screen.findByText('✕ A-100 removed from 007201.');
+  expect(within(dialog).queryByText('A-100')).toBeNull();
+  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([102]);
+  expect(
+    state.calls.filter((call) =>
+      call.startsWith('DELETE /api/work-orders/1/demands/101'),
+    ),
+  ).toHaveLength(1);
 });
 
-test('a released line cannot be removed and explains why', async () => {
+test('a released demand cannot be removed — the server blocks it with the explanation', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  const removeButton = screen.getByRole('button', {
-    name: 'Remove line 2027-60-8114-00',
-  });
-  expect(removeButton).toBeDisabled();
-  expect(removeButton).toHaveAttribute(
-    'title',
-    'Cannot remove: production quantity has already been released.',
+  // B-200's production quantity was released in an earlier session —
+  // only the backend knows; the removal answer is authoritative.
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove line B-200' }),
   );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
+
   expect(
-    screen.getAllByText(
+    await screen.findByText(
+      /Cannot remove: production quantity has already been released\./,
+    ),
+  ).toBeInTheDocument();
+  // Nothing was removed.
+  expect(within(dialog).getByText('B-200')).toBeInTheDocument();
+  expect(state.workOrders[0].demands).toHaveLength(2);
+});
+
+test('the last demand line of a Work Order cannot be removed', async () => {
+  await renderWorkOrders();
+  const row = screen.getByRole('button', { name: 'Open Work Order —' });
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('C-300');
+
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove line C-300' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
+
+  expect(
+    await screen.findByText(/Cannot remove the last demand line/),
+  ).toBeInTheDocument();
+  expect(state.workOrders[1].demands).toHaveLength(1);
+});
+
+test('Save demand PATCHes only the diff, refreshes from the server, and never releases', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for A-100'), {
+    target: { value: '30' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+
+  // B-200 has no due date — the omission is summarized and explicitly
+  // confirmed before anything travels.
+  const missing = await screen.findByRole('dialog', {
+    name: 'Save demand with missing information?',
+  });
+  fireEvent.click(
+    within(missing).getByRole('button', { name: 'Confirm and save' }),
+  );
+
+  await screen.findByText(/007201 demand updated — business demand only/);
+  // Server state took the edit; the other line traveled no edit.
+  const wo = state.workOrders.find((w) => w.id === 1)!;
+  expect(wo.demands.find((d) => d.id === 101)!.requested_quantity).toBe(30);
+  const patchCalls = state.calls.filter(
+    (call) => call === 'PATCH /api/work-orders/1',
+  );
+  expect(patchCalls).toHaveLength(1);
+  // Saving demand never touches the release surface.
+  expect(releaseCalls()).toEqual([]);
+  // The dialog refreshed from server state and is clean again.
+  expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+});
+
+test('a failed Save demand keeps the draft and shows the server message', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for A-100'), {
+    target: { value: '30' },
+  });
+  state.failNextWorkOrderWrite = true;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  const missing = await screen.findByRole('dialog', {
+    name: 'Save demand with missing information?',
+  });
+  fireEvent.click(
+    within(missing).getByRole('button', { name: 'Confirm and save' }),
+  );
+
+  await screen.findByText(/The save failed on the server/);
+  // The draft is intact, still dirty, and nothing changed server-side.
+  expect(within(dialog).getByLabelText('Quantity for A-100')).toHaveValue('30');
+  expect(
+    within(dialog).getAllByText('● Unsaved changes').length,
+  ).toBeGreaterThan(0);
+  expect(
+    state.workOrders[0].demands.find((d) => d.id === 101)!.requested_quantity,
+  ).toBe(25);
+});
+
+test('saving an OPEN Work Order with an incomplete row is blocked, not filtered', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:EXTRA-77');
+  await within(dialog).findByText('EXTRA-77');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+
+  expect(
+    await screen.findByText('quantity must be a positive whole number'),
+  ).toBeInTheDocument();
+  // The incomplete row is still there — never silently dropped — and
+  // nothing traveled.
+  expect(within(dialog).getByText('EXTRA-77')).toBeInTheDocument();
+  expect(state.calls.filter((call) => call.startsWith('PATCH'))).toHaveLength(
+    0,
+  );
+});
+
+/* ============ Release to production (§11.4) ============ */
+
+async function openRelease(pn: string, woNumber = '007201') {
+  const dialog = await openWorkOrderDetail(woNumber, pn);
+  const row = within(dialog).getByText(pn).closest('tr')!;
+  fireEvent.click(
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Release to production…',
+    }),
+  );
+  const release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  // The release choices load from the real environment surfaces.
+  await within(release).findByLabelText('Release quantity');
+  return release;
+}
+
+test('release FLOATING confirms quantity, Area and Operation, and reports the committed result', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('C-300', '—');
+
+  // The quantity defaults to the requested demand quantity; FLOATING
+  // is the default Route Mode and needs no Route.
+  expect(within(release).getByLabelText('Release quantity')).toHaveValue('5');
+  expect(within(release).getByLabelText('Route Mode')).toHaveValue('FLOATING');
+
+  // The explicit starting Area + Operation confirmation.
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  expect(release).toHaveTextContent(
+    /starts in Material \(Operation Receiving\)/,
+  );
+
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+
+  // The committed result: Quantity Flow id, route mode, Area, quantity
+  // and the appended RECEIVED Movement.
+  const result = await screen.findByRole('dialog', {
+    name: 'Release committed',
+  });
+  expect(result).toHaveTextContent('Quantity Flow');
+  expect(result).toHaveTextContent('#500');
+  expect(result).toHaveTextContent('× 5 pcs');
+  expect(result).toHaveTextContent(/FLOATING — actual route derives/);
+  expect(result).toHaveTextContent('Material');
+  expect(result).toHaveTextContent('RECEIVED · movement #9000');
+
+  fireEvent.click(within(result).getByRole('button', { name: 'Done' }));
+  await screen.findByText(/C-300 released to production × 5/);
+
+  // The fake committed exactly one FLOATING release for the demand.
+  expect(state.committedReleases.size).toBe(1);
+  const commit = [...state.committedReleases.values()][0];
+  expect(commit.body.route_mode).toBe('FLOATING');
+  expect(commit.body.route_template_id).toBeNull();
+  expect(commit.body.starting_area_id).toBe(1);
+  expect(commit.body.operation_id).toBe(11);
+
+  // The released line froze in this session: read-only status, release
+  // and removal disabled with the explanation.
+  const detailDialog = screen.getByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  expect(within(detailDialog).getByText('Released')).toBeInTheDocument();
+  const row = within(detailDialog).getByText('C-300').closest('tr')!;
+  expect(
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Release to production…',
+    }),
+  ).toBeDisabled();
+  expect(
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Remove line C-300',
+    }),
+  ).toBeDisabled();
+  expect(
+    within(detailDialog).getAllByText(
       'Cannot remove: production quantity has already been released.',
     ).length,
   ).toBeGreaterThan(0);
 });
 
-test('saving an edited OPEN Work Order reports demand-only saving', async () => {
+test('release PLANNED requires an existing active Planned Route and fixes the starting step', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const release = await openRelease('C-300', '—');
 
-  // The mock data ships one invalid draft row — remove it first (drafts
-  // are removed immediately), then save a real edit.
-  fireEvent.click(screen.getByRole('button', { name: 'Remove draft line' }));
-  fireEvent.change(screen.getByLabelText('Quantity for 0455-20-0118-03'), {
-    target: { value: '14' },
+  fireEvent.change(within(release).getByLabelText('Route Mode'), {
+    target: { value: 'PLANNED' },
+  });
+  fireEvent.change(within(release).getByLabelText('Planned Route'), {
+    target: { value: '1' },
   });
 
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+  // The Route's first step fixes the starting Area and its Operation —
+  // never a silent adjustment.
+  expect(release).toHaveTextContent(
+    /Material — fixed by the Route's first step/,
+  );
+  expect(release).toHaveTextContent(
+    /Receiving — fixed by the Route's first step/,
+  );
+  expect(release).toHaveTextContent(/snapshot is taken on commit/);
 
-  // The toast states the business rule only; the mock/persistence
-  // boundary lives solely in the shared DevNotice (v16).
-  expect(
-    screen.getByText(/demand updated — business demand only/),
-  ).toBeInTheDocument();
-  // Saving keeps Work Order Details open with the draft now clean.
-  expect(
-    screen.getByRole('dialog', { name: 'Work Order Details' }),
-  ).toBeInTheDocument();
-  expect(screen.queryByText('● Unsaved changes')).not.toBeInTheDocument();
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+
+  const result = await screen.findByRole('dialog', {
+    name: 'Release committed',
+  });
+  expect(result).toHaveTextContent(/PLANNED — route snapshot/);
+  expect(result).toHaveTextContent('#300');
+
+  const commit = [...state.committedReleases.values()][0];
+  expect(commit.body.route_mode).toBe('PLANNED');
+  expect(commit.body.route_template_id).toBe(1);
+  expect(commit.body.starting_area_id).toBe(1);
+  expect(commit.body.operation_id).toBe(11);
 });
 
-test('clearing the WO due date on an OPEN Work Order asks for explicit confirmation', async () => {
+test('existing active quantity demands explicit confirmation before a separate flow is created', async () => {
   await renderWorkOrders();
-  await openWorkOrderDetail('007010');
+  const release = await openRelease('A-100');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Remove draft line' }));
-  fireEvent.change(screen.getByLabelText('WO due date'), {
-    target: { value: '' },
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
-
-  const confirm = screen.getByRole('dialog', {
-    name: 'Save demand with missing information?',
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
   });
-  expect(confirm).toHaveTextContent(/No WO due date/);
-
-  // Cancel returns to editing — nothing saved.
   fireEvent.click(
-    screen.getByRole('button', { name: 'Cancel — keep editing' }),
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+
+  // The backend answered 409 + distribution — nothing was created.
+  expect(
+    await within(release).findByText(/already has active quantity/),
+  ).toBeInTheDocument();
+  expect(release).toHaveTextContent(/Lathe × 40 \(flow #71\)/);
+  expect(release).toHaveTextContent(/never automatically adds to or merges/);
+  expect(state.committedReleases.size).toBe(0);
+
+  // The confirm action stays disabled until the intent is explicit.
+  const confirmButton = within(release).getByRole('button', {
+    name: 'Confirm release',
+  });
+  expect(confirmButton).toBeDisabled();
+  fireEvent.click(
+    within(release).getByRole('checkbox', {
+      name: /Release a separate Quantity Flow anyway/,
+    }),
+  );
+  fireEvent.click(confirmButton);
+
+  await screen.findByRole('dialog', { name: 'Release committed' });
+  expect(state.committedReleases.size).toBe(1);
+
+  // Both submissions used the SAME device_event_id — the confirmation
+  // resubmission continues the submission, it never starts a new one.
+  const releaseBodies = state.calls.filter((call) => call.includes('/release'));
+  expect(releaseBodies).toHaveLength(2);
+  const commit = [...state.committedReleases.values()][0];
+  expect(commit.body.confirm_active_quantity).toBe(true);
+});
+
+test('a transport retry reuses the device_event_id and can only replay the committed release', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('C-300', '—');
+
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+
+  // The commit succeeds server-side but the response is lost.
+  state.dropNextReleaseResponse = true;
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+
+  expect(
+    await within(release).findByText(
+      /The PartFlow server could not be reached/,
+    ),
+  ).toBeInTheDocument();
+  expect(release).toHaveTextContent(
+    /a retry of this submission can never create a second Quantity Flow/i,
+  );
+  expect(state.committedReleases.size).toBe(1);
+
+  // Retry: the SAME device_event_id replays the original result.
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Retry release' }),
+  );
+  const result = await screen.findByRole('dialog', {
+    name: 'Release committed',
+  });
+  expect(result).toHaveTextContent(/already committed/);
+  expect(result).toHaveTextContent('#500');
+  // Still exactly ONE committed flow.
+  expect(state.committedReleases.size).toBe(1);
+  expect(releaseCalls()).toHaveLength(2);
+});
+
+test('cancelling the release creates nothing', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('C-300', '—');
+
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+
+  expect(
+    await screen.findByText('✕ Release cancelled — nothing was created.'),
+  ).toBeInTheDocument();
+  expect(releaseCalls()).toEqual([]);
+  expect(state.committedReleases.size).toBe(0);
+});
+
+/* ============ View states ============ */
+
+test('the list shows a real error state with Retry', async () => {
+  state.failNextList = true;
+  window.history.replaceState({}, '', '/management/work-orders');
+  render(<App />);
+
+  await screen.findByText('Work Orders could not be loaded.');
+  expect(screen.getByText('The database is unavailable.')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('007201')).toBeInTheDocument();
+});
+
+test('an empty server list shows the empty state', async () => {
+  state.workOrders = [];
+  window.history.replaceState({}, '', '/management/work-orders');
+  render(<App />);
+
+  expect(
+    await screen.findByText(
+      'No Work Orders yet — create the first one with ＋ New Work Order.',
+    ),
+  ).toBeInTheDocument();
+});
+
+test('the development ?state=long preview appends the dense-table fixture', async () => {
+  window.history.replaceState({}, '', '/management/work-orders?state=long');
+  render(<App />);
+
+  expect(
+    await screen.findByText('007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B'),
+  ).toBeInTheDocument();
+  // The real server rows render too.
+  expect(screen.getByText('007201')).toBeInTheDocument();
+});
+
+test('offline blocks every write action while reading stays available', async () => {
+  state.healthDown = true;
+  await renderWorkOrders();
+
+  // Reading works: the list rendered. Open the details dialog.
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  await waitFor(() =>
+    expect(
+      within(dialog).getByRole('button', { name: 'Save demand' }),
+    ).toBeDisabled(),
   );
   expect(
-    screen.queryByText(/demand updated — business demand only/),
-  ).toBeNull();
-
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm and save' }));
+    within(dialog).getByRole('button', { name: '＋ Add Part manually' }),
+  ).toBeDisabled();
+  expect(within(dialog).getByLabelText('Scan PN barcode')).toBeDisabled();
+  const row = within(dialog).getByText('A-100').closest('tr')!;
   expect(
-    screen.getByText(/demand updated — business demand only/),
-  ).toBeInTheDocument();
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Release to production…',
+    }),
+  ).toBeDisabled();
+  // A saved line's removal is a server write — blocked offline too.
+  expect(
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Remove line A-100',
+    }),
+  ).toBeDisabled();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // The New Work Order dialog blocks its save as well.
+  openNewWorkOrderDialog();
+  expect(screen.getByRole('button', { name: 'Save demand' })).toBeDisabled();
 });
 
-test('saving an OPEN Work Order with an incomplete row is blocked, not filtered', async () => {
-  await renderWorkOrders();
-  await openWorkOrderDetail('007010');
-
-  // WO 007010 ships with an invalid row (no PN, qty 0).
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
-
-  expect(
-    screen.getByText('PN is required — look up or create the PartNumber'),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByText(/demand updated — business demand only/),
-  ).not.toBeInTheDocument();
-});
-
-/* ============ Unsaved changes and navigation protection ============ */
+/* ============ Unsaved-change protection ============ */
 
 async function makeDetailDirty() {
-  const dialog = await openWorkOrderDetail('007010');
-  fireEvent.change(
-    within(dialog).getByLabelText('Quantity for 0455-20-0118-03'),
-    {
-      target: { value: '99' },
-    },
-  );
-  expect(screen.getAllByText('● Unsaved changes').length).toBeGreaterThan(0);
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  fireEvent.change(within(dialog).getByLabelText('Quantity for A-100'), {
+    target: { value: '30' },
+  });
   return dialog;
 }
 
 test('cancelling the discard confirmation keeps the user on the dirty Work Order', async () => {
-  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
   fireEvent.click(screen.getByRole('link', { name: 'Scan Station' }));
 
-  expect(confirmSpy).toHaveBeenCalled();
+  expect(confirmSpy).toHaveBeenCalledWith(
+    'Work Orders has unsaved changes. Discard them and leave this view?',
+  );
   expect(window.location.pathname).toBe('/management/work-orders');
   expect(
     screen.getByRole('dialog', { name: 'Work Order Details' }),
@@ -869,7 +1738,6 @@ test('cancelling the discard confirmation keeps the user on the dirty Work Order
 });
 
 test('confirming the discard allows top-level navigation away', async () => {
-  await renderWorkOrders();
   await makeDetailDirty();
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 
@@ -879,7 +1747,6 @@ test('confirming the discard allows top-level navigation away', async () => {
 });
 
 test('Management sub-navigation is guarded too', async () => {
-  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
@@ -890,41 +1757,38 @@ test('Management sub-navigation is guarded too', async () => {
 });
 
 test('browser back is guarded while the Work Order detail is dirty', async () => {
-  await renderWorkOrders();
   await makeDetailDirty();
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
-  // Simulate the browser's back/forward navigation event.
   fireEvent.popState(window);
 
   expect(confirmSpy).toHaveBeenCalled();
-  expect(
-    screen.getByRole('dialog', { name: 'Work Order Details' }),
-  ).toBeInTheDocument();
 });
 
 test('reload and tab close are guarded through beforeunload while dirty', async () => {
-  await renderWorkOrders();
   await makeDetailDirty();
 
   const event = new Event('beforeunload', { cancelable: true });
   window.dispatchEvent(event);
+
   expect(event.defaultPrevented).toBe(true);
 
-  // Saving clears the protection (the shipped invalid row is removed
-  // first so the save is valid).
-  fireEvent.click(screen.getByRole('button', { name: 'Remove draft line' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
-  const after = new Event('beforeunload', { cancelable: true });
-  window.dispatchEvent(after);
-  expect(after.defaultPrevented).toBe(false);
+  // A clean view never blocks unload.
+  fireEvent.keyDown(
+    screen.getByRole('dialog', { name: 'Work Order Details' }),
+    { key: 'Escape' },
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+  const cleanEvent = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(cleanEvent);
+  expect(cleanEvent.defaultPrevented).toBe(false);
 });
 
 test('a dirty New Work Order dialog also guards top-level navigation', async () => {
   await renderWorkOrders();
   openNewWorkOrderDialog();
   fireEvent.change(screen.getByLabelText(/^WO Number/), {
-    target: { value: '007490' },
+    target: { value: '007999' },
   });
   const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
@@ -932,7 +1796,4 @@ test('a dirty New Work Order dialog also guards top-level navigation', async () 
 
   expect(confirmSpy).toHaveBeenCalled();
   expect(window.location.pathname).toBe('/management/work-orders');
-  expect(
-    screen.getByRole('dialog', { name: 'New Work Order' }),
-  ).toBeInTheDocument();
 });

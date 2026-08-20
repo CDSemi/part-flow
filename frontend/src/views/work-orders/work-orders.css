@@ -846,6 +846,67 @@
   font-family: var(--mono), monospace;
 }
 
+/* Explicit active-quantity confirmation inside the warning panel. */
+.relconfirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-weight: 650;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.relconfirm input {
+  accent-color: var(--info);
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+/* A value fixed by the Planned Route's first step — read-only row in
+   the release grid, aligned with the editable controls. */
+.relfixed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1.5px dashed var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.relfixed .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* Committed-release result: quiet two-column definition list. */
+.relresult {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 13.5px;
+}
+
+.relresult dt {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.relresult dd {
+  margin: 0;
+}
+
 /* ============ Add Part multi-step dialog ============ */
 /* Selected-PN header block: the strong PN plus one quiet context line
    (catalog description or `new Part Number`; the final step appends

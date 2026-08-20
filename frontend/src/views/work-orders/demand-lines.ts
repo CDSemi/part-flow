@@ -2,19 +2,27 @@
 // Work Order dialog and the OPEN Work Order detail edit the same kind
 // of line drafts.
 //
-// Phase 2 scope: this is PRESENTATION-side mock validation and draft
-// bookkeeping against local mock state only. The canonical business
-// rules (Work Order Intake workflow, Work Order Demand removal) are
-// owned by
-// PROJECT_PROFILE §13 and are enforced transactionally in the
-// Application/Domain layer when the Phase 4 backend slice exists.
+// Phase 4 scope: presentation-side draft bookkeeping and pre-flight
+// validation over REAL server state. The canonical business rules
+// (Work Order Intake workflow, Work Order Demand removal) are owned by
+// PROJECT_PROFILE §13 and enforced transactionally in the backend
+// Application layer — this module only prepares one Save's request
+// (`line_edits` diff + `new_lines`) and mirrors the entry rules so
+// obviously invalid rows never travel.
 
-import { catalogPartNumber } from '../../mocks/work-orders';
+import type {
+  DemandLineEdit,
+  NewDemandLine,
+  WorkOrderDemand,
+} from '../../api/work-orders';
 import { parseScan } from '../scan-station/barcode';
-import type { MockWorkOrderLine, RequestType } from '../view-models';
+import type { RequestType } from '../view-models';
 
 export interface DemandLineDraft {
+  /** Local draft key — stable for React keys and field focus. */
   id: number;
+  /** The saved WorkOrderDemand id, or null for an unsaved draft line. */
+  demandId: number | null;
   /** null while a manual row still needs its PN lookup / inline create. */
   pn: string | null;
   barcodeNote: string;
@@ -32,13 +40,14 @@ export interface DemandLineDraft {
    * follow later WO due-date changes.
    */
   dueTouched: boolean;
+  /** Job Numbers as entered — comma-separated display text. */
   job: string;
   notes: string;
-  /** True when the line exists in saved mock state (not an unsaved draft). */
+  /** True when the line exists in saved server state. */
   saved: boolean;
-  /** True when production quantity was released for this WorkOrderDemand. */
+  /** True when production quantity was released for this demand in
+   * this session — the line renders read-only (GUI_DESIGN §11.2). */
   released: boolean;
-  releasable: boolean;
   statusLabel: string;
 }
 
@@ -60,6 +69,7 @@ export function createDraftLine(
 ): DemandLineDraft {
   return {
     id: nextDraftId++,
+    demandId: null,
     pn: null,
     barcodeNote: 'PN lookup — an unknown PN is created inline with its barcode',
     isNewPn: false,
@@ -70,48 +80,60 @@ export function createDraftLine(
     notes: '',
     saved: false,
     released: false,
-    releasable: false,
     statusLabel: 'Draft (unsaved)',
     ...init,
   };
 }
 
-/** Load a saved mock line into an editable draft. */
-export function draftFromSavedLine(
-  line: MockWorkOrderLine,
+/** Job Numbers list ↔ the comma-separated entry text. */
+export function jobNumbersToText(jobNumbers: readonly string[]): string {
+  return jobNumbers.join(', ');
+}
+
+export function textToJobNumbers(text: string): string[] {
+  return text
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '');
+}
+
+/** Load one saved server demand line into an editable draft. */
+export function draftFromDemand(
+  demand: WorkOrderDemand,
   workOrderDue: string | null,
+  released: boolean,
 ): DemandLineDraft {
-  const saved = line.statusClass !== 'invalid';
   return createDraftLine({
-    pn: line.pn || null,
-    barcodeNote: line.barcode,
-    isNewPn: line.barcode.startsWith('new PN'),
-    type: line.type,
-    qty: line.qty > 0 ? String(line.qty) : '',
-    due: line.due ?? '',
+    demandId: demand.id,
+    pn: demand.partNumber,
+    barcodeNote: `barcode PF:PN:${demand.partNumber}`,
+    isNewPn: false,
+    type: demand.requestType,
+    qty: String(demand.requestedQuantity),
+    due: demand.dueDate ?? '',
     // A line still holding the WO due date follows later WO-due edits;
     // a line with its own date (or explicit No due date) keeps it.
-    dueTouched: (line.due ?? '') !== (workOrderDue ?? ''),
-    job: line.job === '—' ? '' : line.job,
-    notes: line.notes ?? '',
-    saved,
-    released: line.statusClass === 'released',
-    releasable: line.releasable ?? false,
-    statusLabel: saved ? line.status : 'Draft (unsaved)',
+    dueTouched: (demand.dueDate ?? '') !== (workOrderDue ?? ''),
+    job: jobNumbersToText(demand.jobNumbers),
+    notes: demand.notes ?? '',
+    saved: true,
+    released,
+    statusLabel: released ? 'Released' : 'Saved',
   });
 }
 
 export type ScanResult =
   | { kind: 'invalid'; barcode: string }
   | { kind: 'duplicate'; lineId: number; pn: string; released: boolean }
-  | { kind: 'new'; pn: string; barcode: string; isNewPn: boolean };
+  | { kind: 'pn'; pn: string; barcode: string };
 
 /**
  * Resolve a scanned PN barcode. `PF:PN:<part-number>` carries the PN
  * itself: the whitespace-free suffix, canonicalized to uppercase, is
- * the canonical PN (no format validation, no opaque id mapping). A PN
- * outside the catalog is create-on-first-use. Non-PN barcodes never
- * add demand lines.
+ * the canonical PN (no format validation, no opaque id mapping).
+ * Whether the PN already has a master record is an async server
+ * lookup the caller performs — a PN outside the masters is
+ * create-on-first-use. Non-PN barcodes never add demand lines.
  */
 export function processScan(
   value: string,
@@ -123,23 +145,18 @@ export function processScan(
     return { kind: 'invalid', barcode: value.trim() };
   }
   // parsed.pn is the canonical PN — the PN string itself is identity.
-  const known = catalogPartNumber(parsed.pn);
-  const pn = known?.pn ?? parsed.pn;
-  const duplicate = lines.find((line) => line.pn !== null && line.pn === pn);
+  const duplicate = lines.find(
+    (line) => line.pn !== null && line.pn === parsed.pn,
+  );
   if (duplicate) {
     return {
       kind: 'duplicate',
       lineId: duplicate.id,
-      pn: duplicate.pn ?? pn,
+      pn: duplicate.pn ?? parsed.pn,
       released: duplicate.released,
     };
   }
-  return {
-    kind: 'new',
-    pn,
-    barcode: `PF:PN:${pn}`,
-    isNewPn: known === undefined,
-  };
+  return { kind: 'pn', pn: parsed.pn, barcode: `PF:PN:${parsed.pn}` };
 }
 
 /**
@@ -161,11 +178,11 @@ export function isPositiveInteger(raw: string): boolean {
 }
 
 /**
- * Mock validation for saving demand: every line needs a PN and a
- * positive whole quantity; duplicate PNs are rejected. A missing due
- * date is NOT a validation error — it is summarized by the Save Demand
- * confirmation instead. Incomplete rows are never silently filtered
- * out.
+ * Pre-flight validation before Save demand travels: every line needs a
+ * PN and a positive whole quantity; duplicate PNs are rejected. A
+ * missing due date is NOT a validation error — it is summarized by the
+ * Save Demand confirmation instead. Incomplete rows are never silently
+ * filtered out. The backend re-validates everything transactionally.
  */
 export function validateDemandLines(
   lines: readonly DemandLineDraft[],
@@ -173,7 +190,7 @@ export function validateDemandLines(
   const errors: LineError[] = [];
   const seen = new Map<string, number>();
   for (const line of lines) {
-    if (line.released) continue; // read-only; already valid in mock state
+    if (line.released) continue; // read-only — unchanged saved state
     if (!line.pn) {
       errors.push({
         lineId: line.id,
@@ -235,38 +252,81 @@ export function collectMissingDemandInfo(
 export type RemoveRule = 'draft' | 'confirm' | 'blocked';
 
 /**
- * Phase 2 mirror of the canonical WorkOrderDemand removal rule
+ * Presentation mirror of the canonical WorkOrderDemand removal rule
  * (PROJECT_PROFILE §13): an unsaved draft is removed immediately, a
- * saved line with no released production quantity needs explicit
- * confirmation, and a line with released quantity can never be removed
- * from Work Orders.
+ * saved line needs explicit confirmation (the backend enforces the
+ * released-quantity and last-line rules transactionally and answers
+ * 409 removing nothing), and a line whose released quantity is known
+ * to this session never offers removal at all.
  */
 export function lineRemoveRule(line: DemandLineDraft): RemoveRule {
   if (line.released) return 'blocked';
   return line.saved ? 'confirm' : 'draft';
 }
 
-/** Convert validated drafts back into saved mock lines. */
-export function draftsToSavedLines(
-  lines: readonly DemandLineDraft[],
-): MockWorkOrderLine[] {
-  return lines.map((line) => ({
-    pn: line.pn ?? '—',
-    barcode: line.barcodeNote,
-    type: line.type,
-    qty: Number.parseInt(line.qty, 10),
-    due: line.due || null,
-    job: line.job || '—',
-    notes: line.notes || undefined,
-    status: line.released ? line.statusLabel : 'Saved',
-    statusClass: line.released ? ('released' as const) : ('saved' as const),
-    releasable: line.released ? undefined : true,
-  }));
+/** One unsaved draft line as its `new_lines` request entry. */
+export function draftToNewLine(line: DemandLineDraft): NewDemandLine {
+  return {
+    partNumber: line.pn ?? '',
+    requestedQuantity: Number.parseInt(line.qty, 10),
+    requestType: line.type,
+    dueDate: line.due || null,
+    jobNumbers: textToJobNumbers(line.job),
+    notes: line.notes.trim() ? line.notes : null,
+  };
 }
 
-/** PN preview text for the Work Order list row. */
-export function linesPreview(lines: readonly MockWorkOrderLine[]): string {
-  const pns = lines.map((line) => line.pn).filter(Boolean);
-  const head = pns.slice(0, 2).join(' · ');
-  return pns.length > 2 ? `${head} · ${pns.length - 2} more` : head;
+/**
+ * The `line_edits` diff of one Save demand: for every saved line, only
+ * fields that differ from the loaded server demand travel — an
+ * unchanged line produces no edit at all, and `request_type` never
+ * travels as null (the backend rejects that instead of reinterpreting
+ * it).
+ */
+export function buildLineEdits(
+  lines: readonly DemandLineDraft[],
+  demands: readonly WorkOrderDemand[],
+): DemandLineEdit[] {
+  const demandById = new Map(demands.map((demand) => [demand.id, demand]));
+  const edits: DemandLineEdit[] = [];
+  for (const line of lines) {
+    if (line.demandId === null || line.released) continue;
+    const demand = demandById.get(line.demandId);
+    if (!demand) continue;
+    const edit: DemandLineEdit = { id: line.demandId };
+    let changed = false;
+    if (line.type !== demand.requestType) {
+      edit.requestType = line.type;
+      changed = true;
+    }
+    const quantity = Number.parseInt(line.qty, 10);
+    if (quantity !== demand.requestedQuantity) {
+      edit.requestedQuantity = quantity;
+      changed = true;
+    }
+    if ((line.due || null) !== demand.dueDate) {
+      edit.dueDate = line.due || null;
+      changed = true;
+    }
+    const jobNumbers = textToJobNumbers(line.job);
+    if (jobNumbersToText(demand.jobNumbers) !== jobNumbersToText(jobNumbers)) {
+      edit.jobNumbers = jobNumbers;
+      changed = true;
+    }
+    const notes = line.notes.trim() ? line.notes : null;
+    if (notes !== demand.notes) {
+      edit.notes = notes;
+      changed = true;
+    }
+    if (changed) edits.push(edit);
+  }
+  return edits;
+}
+
+/** PN preview text for a Work Order list row. */
+export function partNumbersPreview(partNumbers: readonly string[]): string {
+  const head = partNumbers.slice(0, 2).join(' · ');
+  return partNumbers.length > 2
+    ? `${head} · ${partNumbers.length - 2} more`
+    : head;
 }

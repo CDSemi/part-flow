@@ -1,67 +1,87 @@
 import './work-orders.css';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import type { ComponentType, LazyExoticComponent } from 'react';
 
+import { listWorkOrders } from '../../api/work-orders';
+import type { WorkOrderSummary } from '../../api/work-orders';
+import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
+import { Link } from '../../app/link';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { DevNotice } from '../../components/DevNotice';
 import { useMockNotice } from '../../components/mock-notice';
-import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
+import { useUiClock } from '../../components/ui-clock';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import {
-  MOCK_COMPLETED_WORK_ORDERS,
-  MOCK_RELEASE_DATA,
-  MOCK_WORK_ORDER_LIST,
-} from '../../mocks/work-orders';
-import { Link } from '../../app/link';
-import { useUiClock } from '../../components/ui-clock';
 import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
-import type { MockWorkOrder } from '../view-models';
-import { CompletedWorkOrdersView } from './CompletedWorkOrdersView';
+import { partNumbersPreview } from './demand-lines';
+import { CompletedWorkOrdersUnavailable } from './CompletedWorkOrdersUnavailable';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
-import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
+import { ReleaseDialog } from './ReleaseDialog';
+import {
+  WorkOrderDetailPanel,
+  workOrderStatusLabel,
+} from './WorkOrderDetailPanel';
+import type { ReleaseRequestContext } from './WorkOrderDetailPanel';
 
 /** Display form of a Work Order Number — `—` when no external number
  * is known (display-only placeholder, never persisted). */
 const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
 
-// Long-data preview rows (?state=long): many Work Orders plus over-long
-// WO and PN identifiers to exercise dense-table and truncation behavior.
-const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
-  ...Array.from({ length: 20 }, (_, i): MockWorkOrder => {
-    const n = i + 1;
-    return {
-      id: `wo-long-${n}`,
-      workOrderNumber: String(7300 + n).padStart(6, '0'),
-      received: '2026-07-01',
-      // Every fifth long-preview Work Order has no due date (valid).
-      due: n % 5 === 0 ? null : '2026-09-30',
-      status: 'Open',
-      preview: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
-      lines: [],
-    };
-  }),
-  {
-    id: 'wo-long-supplemental',
-    workOrderNumber: '007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
-    received: '2026-07-20',
-    due: '2026-10-15',
-    status: 'Open',
-    preview: '0118-40-0022-07-0455-88-REV-C',
-    lines: [],
-  },
-];
+// Long-data preview rows (?state=long, development only): many Work
+// Orders plus over-long WO and PN identifiers to exercise dense-table
+// and truncation behavior. Compiled out of production builds.
+const LONG_PREVIEW_WORK_ORDERS: WorkOrderSummary[] = import.meta.env.DEV
+  ? [
+      ...Array.from({ length: 20 }, (_, i): WorkOrderSummary => {
+        const n = i + 1;
+        return {
+          id: -1000 - n,
+          workOrderNumber: String(7300 + n).padStart(6, '0'),
+          receivedDate: '2026-07-01',
+          // Every fifth long-preview Work Order has no due date (valid).
+          dueDate: n % 5 === 0 ? null : '2026-09-30',
+          status: 'OPEN',
+          demandLineCount: 0,
+          partNumbers: [`0114-60-${String(100 + n).padStart(4, '0')}-00`],
+        };
+      }),
+      {
+        id: -1099,
+        workOrderNumber: '007099-SUPPLEMENTAL-AMENDMENT-2026-REV-B',
+        receivedDate: '2026-07-20',
+        dueDate: '2026-10-15',
+        status: 'OPEN',
+        demandLineCount: 0,
+        partNumbers: ['0118-40-0022-07-0455-88-REV-C'],
+      },
+    ]
+  : [];
 
-// Management sub view for manual Work Order entry and explicit production
-// release. Phase 2: layout and local interactions only — saving and
-// releasing are development mocks that change presentation state and
-// never persist.
+// The §11.5 Completed Work Orders page has no backend yet (completion
+// = full allocation, Phase 10): the real route states that honestly.
+// The development-only visual preview of the approved page design is
+// reachable ONLY through this `import.meta.env.DEV`-guarded lazy
+// import, so production builds drop it — and its mock history — from
+// the module graph entirely.
+const CompletedWorkOrdersPreview: LazyExoticComponent<ComponentType> | null =
+  import.meta.env.DEV
+    ? lazy(() =>
+        import('./CompletedWorkOrdersView').then((m) => ({
+          default: m.CompletedWorkOrdersView,
+        })),
+      )
+    : null;
+
+// Management sub view for manual Work Order entry and explicit
+// production release, wired to the real /api/work-orders surface
+// (Phase 4): saving persists business demand transactionally, and
+// Release to production is the separate explicit action of §11.4.
 //
 // Two routes belong to this sub view (GUI_DESIGN §11): the active WO
 // list on `/management/work-orders` and the read-only Completed Work
@@ -70,7 +90,20 @@ const LONG_PREVIEW_WORK_ORDERS: MockWorkOrder[] = [
 export function WorkOrdersView() {
   const { route } = useRouter();
   if (route.view === 'management' && route.page === 'completed') {
-    return <CompletedWorkOrdersView />;
+    if (CompletedWorkOrdersPreview) {
+      return (
+        <Suspense
+          fallback={
+            <section className="wo-view" aria-label="Completed Work Orders">
+              <LoadingState label="Loading Completed Work Orders" />
+            </section>
+          }
+        >
+          <CompletedWorkOrdersPreview />
+        </Suspense>
+      );
+    }
+    return <CompletedWorkOrdersUnavailable />;
   }
   return <ActiveWorkOrdersView />;
 }
@@ -82,20 +115,26 @@ function ActiveWorkOrdersView() {
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useMockNotice();
 
+  const workOrdersData = useApiData(listWorkOrders);
+
   // Selected Work Order — its details open as a modal dialog over the
   // list (GUI_DESIGN §11.2); the list stays mounted and the URL never
   // changes.
-  const [detailId, setDetailId] = useState<string | null>(null);
-  const [workOrderList, setWorkOrderList] =
-    useState<MockWorkOrder[]>(MOCK_WORK_ORDER_LIST);
+  const [detailId, setDetailId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
   const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
   const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
-  const [releasedLines, setReleasedLines] = useState<Set<string>>(new Set());
+  // Demand ids released in THIS session: their lines render read-only
+  // with the release evidence. (Earlier sessions' releases are
+  // enforced by the backend — a removal attempt answers 409.)
+  const [sessionReleased, setSessionReleased] = useState<Set<number>>(
+    new Set(),
+  );
   const [releaseDialog, setReleaseDialog] = useState<{
-    workOrderId: string;
-    pn: string;
+    workOrderId: number;
+    workOrderNumber: string | null;
+    demand: ReleaseRequestContext;
   } | null>(null);
 
   const dirty =
@@ -133,7 +172,7 @@ function ActiveWorkOrdersView() {
     [],
   );
 
-  if (preview === 'loading') {
+  if (preview === 'loading' || workOrdersData.state.status === 'loading') {
     return (
       <section className="wo-view" aria-label="Work Orders">
         <LoadingState label="Loading Work Orders" />
@@ -150,15 +189,26 @@ function ActiveWorkOrdersView() {
       </section>
     );
   }
+  if (workOrdersData.state.status === 'error') {
+    return (
+      <section className="wo-view" aria-label="Work Orders">
+        <ErrorState
+          message="Work Orders could not be loaded."
+          detail={workOrdersData.state.message}
+          onRetry={workOrdersData.reload}
+        />
+      </section>
+    );
+  }
 
-  const listData: MockWorkOrder[] =
+  const listData: WorkOrderSummary[] =
     preview === 'empty'
       ? []
       : preview === 'long'
-        ? [...workOrderList, ...LONG_PREVIEW_WORK_ORDERS]
-        : workOrderList;
+        ? [...workOrdersData.state.data, ...LONG_PREVIEW_WORK_ORDERS]
+        : workOrdersData.state.data;
 
-  const openWorkOrder = (id: string) => {
+  const openWorkOrder = (id: number) => {
     setDetailDirty(false);
     setDetailId(id);
   };
@@ -185,25 +235,19 @@ function ActiveWorkOrdersView() {
       {detailId !== null && (
         <WorkOrderDetailPanel
           key={detailId}
-          workOrder={
-            // A completed Work Order is only reached here through the
-            // New Work Order duplicate check (its number already
-            // exists in history) — the dialog is read-only for it.
-            listData.find((w) => w.id === detailId) ??
-            MOCK_COMPLETED_WORK_ORDERS.find((w) => w.id === detailId)
-          }
-          releasedLines={releasedLines}
+          workOrderId={detailId}
+          sessionReleased={sessionReleased}
           writeBlocked={writeBlocked}
           onClose={closeDetail}
-          onRelease={(pn) => setReleaseDialog({ workOrderId: detailId, pn })}
-          onSaveDetail={(updated) => {
-            setWorkOrderList((current) =>
-              current.map((w) => (w.id === updated.id ? updated : w)),
-            );
-            showNotice(
-              `💾 WO ${woDisplay(updated.workOrderNumber)} demand updated — business demand only.`,
-            );
+          onRelease={(demand) => {
+            const summary = listData.find((w) => w.id === detailId);
+            setReleaseDialog({
+              workOrderId: detailId,
+              workOrderNumber: summary?.workOrderNumber ?? null,
+              demand,
+            });
           }}
+          onChanged={workOrdersData.reload}
           onDirtyChange={handleDetailDirtyChange}
           showNotice={showNotice}
         />
@@ -211,41 +255,23 @@ function ActiveWorkOrdersView() {
 
       {newWorkOrderOpen && (
         <NewWorkOrderDialog
-          // WO-Number uniqueness spans the whole history including
-          // completed Work Orders (PROJECT_PROFILE §8.2) — a completed
-          // number is never silently reusable.
-          existing={[...workOrderList, ...MOCK_COMPLETED_WORK_ORDERS].flatMap(
-            (w) => (w.workOrderNumber === null ? [] : [w.workOrderNumber]),
-          )}
           writeBlocked={writeBlocked}
           onClose={closeNewWorkOrder}
-          onOpenExisting={(workOrderNumber) => {
-            closeNewWorkOrder();
-            const existing = workOrderList.find(
-              (w) => w.workOrderNumber === workOrderNumber,
-            );
-            if (existing) {
-              showNotice(
-                `⚠ WO Number ${workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
-              );
-              openWorkOrder(existing.id);
-              return;
-            }
-            const completed = MOCK_COMPLETED_WORK_ORDERS.find(
-              (w) => w.workOrderNumber === workOrderNumber,
-            );
-            if (completed) {
-              showNotice(
-                `⚠ WO Number ${workOrderNumber} already exists and is Complete — opening its read-only details.`,
-              );
-              openWorkOrder(completed.id);
-            }
-          }}
-          onSave={(workOrder) => {
-            setWorkOrderList((current) => [workOrder, ...current]);
+          onOpenExisting={(existing) => {
+            // A WO Number is never duplicated (uniqueness spans the
+            // whole history, PROJECT_PROFILE §8.2) — the existing Work
+            // Order opens instead.
             closeNewWorkOrder();
             showNotice(
-              `💾 WO ${woDisplay(workOrder.workOrderNumber)} saved — business demand only (${workOrder.lines.length} line${workOrder.lines.length > 1 ? 's' : ''}).`,
+              `⚠ WO Number ${existing.workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
+            );
+            openWorkOrder(existing.id);
+          }}
+          onSaved={(saved) => {
+            closeNewWorkOrder();
+            workOrdersData.reload();
+            showNotice(
+              `💾 WO ${woDisplay(saved.workOrderNumber)} saved — business demand only (${saved.demands.length} line${saved.demands.length > 1 ? 's' : ''}).`,
             );
           }}
           onDirtyChange={setNewWorkOrderDirty}
@@ -255,20 +281,22 @@ function ActiveWorkOrdersView() {
 
       {releaseDialog && (
         <ReleaseDialog
-          pn={releaseDialog.pn}
+          workOrderId={releaseDialog.workOrderId}
+          workOrderNumber={releaseDialog.workOrderNumber}
+          demand={releaseDialog.demand}
+          writeBlocked={writeBlocked}
           onCancel={() => {
             setReleaseDialog(null);
             showNotice('✕ Release cancelled — nothing was created.');
           }}
-          onConfirm={(qty, route) => {
-            setReleasedLines((current) =>
-              new Set(current).add(
-                `${releaseDialog.workOrderId}:${releaseDialog.pn}`,
-              ),
+          onReleased={(result) => {
+            setSessionReleased((current) =>
+              new Set(current).add(releaseDialog.demand.demandId),
             );
             setReleaseDialog(null);
+            workOrdersData.reload();
             showNotice(
-              `✓ ${releaseDialog.pn} released to production × ${qty} · Route “${route}”.`,
+              `✓ ${result.partNumber} released to production × ${result.quantity} · Quantity Flow #${result.quantityFlowId}.`,
             );
           }}
         />
@@ -285,23 +313,22 @@ function WorkOrderListPanel({
   onOpen,
   onNew,
 }: {
-  list: MockWorkOrder[];
+  list: WorkOrderSummary[];
   search: string;
   onSearch: (v: string) => void;
-  onOpen: (id: string) => void;
+  onOpen: (id: number) => void;
   onNew: () => void;
 }) {
   // Due-date lateness is DERIVED from the fixed due date and the
-  // shared UI clock (a completed Work Order is never flagged late) —
-  // the urgency keeps updating while the view stays open.
+  // shared UI clock — the urgency keeps updating while the view stays
+  // open.
   const now = useUiClock('minute');
-  const dueTone = (w: MockWorkOrder): string => {
-    if (!w.due) return 'none';
-    if (w.status === 'Complete') return '';
+  const dueTone = (w: WorkOrderSummary): string => {
+    if (!w.dueDate) return 'none';
     // The policy is the shared Due Soon configuration stand-in — only
     // the `late` class is used here, but the call stays uniform.
-    return dueCountdown(w.due, now, {
-      received: w.received,
+    return dueCountdown(w.dueDate, now, {
+      received: w.receivedDate,
       policy: DEFAULT_DUE_SOON_POLICY,
     }).dueClass === 'late'
       ? 'late'
@@ -311,7 +338,7 @@ function WorkOrderListPanel({
   const rows = list.filter(
     (w) =>
       !query ||
-      ((w.workOrderNumber ?? '') + ' ' + w.preview)
+      ((w.workOrderNumber ?? '') + ' ' + partNumbersPreview(w.partNumbers))
         .toLowerCase()
         .includes(query),
   );
@@ -327,10 +354,6 @@ function WorkOrderListPanel({
         <b>Release to production</b> action on a demand line. Select a Work
         Order to open its details.
       </p>
-      <DevNotice>
-        Development preview — saves and releases update sample data in this
-        browser session only.
-      </DevNotice>
       {/* Toolbar (v15): search + primary action on one row, the action
           right-aligned with the full-width list — the same layout as
           the Machines page. */}
@@ -394,7 +417,7 @@ function WorkOrderListPanel({
                       <span className="wo" title={woDisplay(w.workOrderNumber)}>
                         {woDisplay(w.workOrderNumber)}
                       </span>
-                      {w.internal ? (
+                      {w.workOrderNumber === null ? (
                         <span className="sub" style={{ display: 'block' }}>
                           internal Work Order — no external number yet
                         </span>
@@ -406,20 +429,24 @@ function WorkOrderListPanel({
                       bare dates and a line count are not self-evident
                       without the header row. */}
                   <td className="mono-sm" data-label="Received">
-                    {formatIsoDate(w.received)}
+                    {formatIsoDate(w.receivedDate)}
                   </td>
                   <td className="mono-sm" data-label="Due date">
                     <span className={`duetxt ${dueTone(w)}`}>
-                      {formatIsoDate(w.due)}
+                      {formatIsoDate(w.dueDate)}
                     </span>
                   </td>
                   <td data-label="Demand lines">
-                    {w.lines.length}
-                    <div className="sub mono-sm">{w.preview}</div>
+                    {w.demandLineCount}
+                    <div className="sub mono-sm">
+                      {partNumbersPreview(w.partNumbers)}
+                    </div>
                   </td>
                   <td>
-                    <span className={`wostat ${w.status.toLowerCase()}`}>
-                      {w.status}
+                    <span
+                      className={`wostat ${workOrderStatusLabel(w.status).toLowerCase()}`}
+                    >
+                      {workOrderStatusLabel(w.status)}
                     </span>
                   </td>
                 </tr>
@@ -439,87 +466,5 @@ function WorkOrderListPanel({
         through an audited edit.
       </PageNote>
     </div>
-  );
-}
-
-function ReleaseDialog({
-  pn,
-  onCancel,
-  onConfirm,
-}: {
-  pn: string;
-  onCancel: () => void;
-  onConfirm: (qty: number, route: string) => void;
-}) {
-  const data = MOCK_RELEASE_DATA[pn];
-  const [qty, setQty] = useState(String(data?.requested ?? ''));
-  const [route, setRoute] = useState(data?.routes[0] ?? '—');
-  const parsedQty = parseInt(qty || '0', 10);
-  return (
-    <ModalDialog
-      label="Release to production — explicit action"
-      onClose={onCancel}
-      size="wide"
-    >
-      <h3>Release to production — explicit action</h3>
-      <div className="big mono">{pn}</div>
-      <div className="sub">
-        WO 007010 demand · requested <b>{data?.requested ?? '—'}</b> — nothing
-        is created until you confirm.
-      </div>
-      {data?.activeDistribution ? (
-        <div className="relwarn">
-          ⚠ <b>This PN already has active quantity:</b>{' '}
-          <span className="mono">{data.activeDistribution}</span>. Confirm
-          intent explicitly — release always creates a <b>separate</b> Quantity
-          Flow; it never automatically adds to or merges existing flows.
-        </div>
-      ) : null}
-      <div className="relgrid">
-        <label htmlFor="rel-qty">Release quantity</label>
-        <input
-          id="rel-qty"
-          className="mono"
-          inputMode="numeric"
-          value={qty}
-          onChange={(e) => setQty(e.target.value)}
-        />
-        <label htmlFor="rel-route">Route</label>
-        <select
-          id="rel-route"
-          value={route}
-          onChange={(e) => setRoute(e.target.value)}
-        >
-          {(data?.routes ?? ['—']).map((r) => (
-            <option key={r}>{r}</option>
-          ))}
-        </select>
-        <label htmlFor="rel-area">Starting Area · Operation</label>
-        <select
-          id="rel-area"
-          defaultValue="Material — Receiving (configured start)"
-        >
-          <option>Material — Receiving (configured start)</option>
-        </select>
-      </div>
-      <div className="relsum">
-        Release summary: <b>× {qty || '0'}</b> pcs as a new, separate Quantity
-        Flow · Route <b>“{route}”</b> · starts in <b>Material</b> (Operation{' '}
-        <b>Receiving</b>) with a recorded <b>RECEIVED</b> event. Existing
-        quantity of this PN is never merged.
-      </div>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc)
-        </button>
-        <button
-          className="bigbtn primary"
-          disabled={!parsedQty || parsedQty < 1}
-          onClick={() => onConfirm(parsedQty, route)}
-        >
-          Confirm release
-        </button>
-      </div>
-    </ModalDialog>
   );
 }
