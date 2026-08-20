@@ -12,7 +12,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
-import { PnBarcodeChip } from '../../components/PnBarcodeChip';
+import { PnLabelButton } from '../../components/PnLabelButton';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import {
   EmptyState,
@@ -545,8 +545,16 @@ export function WorkOrderDetailPanel({
                         className={errorFor(line.id, 'pn') ? 'err-cell' : ''}
                       >
                         {line.pn ? (
-                          <div className="pn" title={line.pn}>
-                            {line.pn}
+                          // The PN itself opens its printable label; a
+                          // PN with no master yet is marked beside it.
+                          <div className="pncell">
+                            <PnLabelButton
+                              pn={line.pn}
+                              onOpen={() => setLabelPn(line.pn)}
+                            />
+                            {line.isNewPn ? (
+                              <span className="bc newpn">new PN</span>
+                            ) : null}
                           </div>
                         ) : rowEditable ? (
                           <input
@@ -614,17 +622,7 @@ export function WorkOrderDetailPanel({
                             —
                           </div>
                         )}
-                        {line.pn ? (
-                          <div className="pnbc">
-                            <PnBarcodeChip
-                              pn={line.pn}
-                              onOpen={() => setLabelPn(line.pn)}
-                            />
-                            {line.isNewPn ? (
-                              <span className="bc newpn">new PN</span>
-                            ) : null}
-                          </div>
-                        ) : (
+                        {line.pn ? null : (
                           <div className="bc">
                             PN lookup — an unknown PN is created inline with its
                             barcode

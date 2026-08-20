@@ -7,7 +7,7 @@ import { resolvePartNumber } from '../../api/part-numbers';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
-import { PnBarcodeChip } from '../../components/PnBarcodeChip';
+import { PnLabelButton } from '../../components/PnLabelButton';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { todayIso } from '../dates';
 import type { RequestType } from '../view-models';
@@ -419,16 +419,16 @@ export function NewWorkOrderDialog({
                         className={errorFor(line.id, 'pn') ? 'err-cell' : ''}
                       >
                         {/* Lines always carry a PN here: they come from
-                            the Add Part flow or a valid PN barcode. */}
-                        <div className="pn" title={line.pn ?? ''}>
-                          {line.pn}
-                        </div>
+                            the Add Part flow or a valid PN barcode. The PN
+                            itself opens its printable label. */}
                         {line.pn ? (
-                          <PnBarcodeChip
+                          <PnLabelButton
                             pn={line.pn}
                             onOpen={() => setLabelPn(line.pn)}
                           />
-                        ) : null}
+                        ) : (
+                          <div className="pn">{line.pn}</div>
+                        )}
                         {errorFor(line.id, 'pn') ? (
                           <div className="rowerr">
                             {errorFor(line.id, 'pn')}

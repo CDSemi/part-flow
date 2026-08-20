@@ -66,33 +66,45 @@
   }
 }
 
-/* The label entry: a quiet secondary chip. It reads as a small
-   supporting affordance under the PN, never as a primary action. */
-.pnb-chip {
+/* The label entry: the PN itself is the control, with a small label
+   glyph after it. It carries the demand-line PN typography and adds no
+   row height — the button sits exactly where the PN text sat. */
+.pnb-pnbtn {
   display: inline-flex;
-  align-items: center;
-  flex: none;
-  margin-top: 3px;
-  padding: 2px 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: var(--chip);
-  color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 650;
-  line-height: 1.5;
-  /* One line, always — the chip is a fixed short affordance. */
+  align-items: baseline;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--mono), monospace;
+  font-size: inherit;
+  font-weight: 750;
+  line-height: inherit;
+  color: inherit;
   white-space: nowrap;
   cursor: pointer;
   text-align: left;
 }
 
-.pnb-chip:hover {
-  border-color: var(--border);
+.pnb-pnbtn:hover {
   color: var(--info-t);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
-.pnb-chip:focus-visible {
+.pnb-pnbtn:focus-visible {
   outline: 2px solid var(--info-t);
   outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.pnb-pnicon {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--faint);
+}
+
+.pnb-pnbtn:hover .pnb-pnicon {
+  color: var(--info-t);
 }

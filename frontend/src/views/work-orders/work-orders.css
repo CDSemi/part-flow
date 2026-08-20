@@ -267,16 +267,17 @@
   color: var(--info-t);
 }
 
-/* Demand-line PN cell: the shared barcode chip and, for a PN with no
-   master record yet, the quiet `new PN` marker beside it. */
-.wo-table .pnbc {
+/* Demand-line PN cell: the PN label control and, for a PN with no
+   master record yet, the quiet `new PN` marker beside it on the same
+   line — the marker never adds a row. */
+.wo-table .pncell {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
 }
 
-.wo-table .pnbc .bc {
+.wo-table .pncell .bc {
   margin-top: 0;
 }
 

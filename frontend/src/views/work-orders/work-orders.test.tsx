@@ -959,7 +959,7 @@ test('scanned lines reflect the real master lookup — existing PN reuse vs. cre
     await within(dialog).findByRole('button', {
       name: 'Open barcode label for 309-127',
     }),
-  ).toHaveTextContent('Barcode label');
+  ).toHaveTextContent('309-127');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
   const newLine = (
@@ -967,6 +967,8 @@ test('scanned lines reflect the real master lookup — existing PN reuse vs. cre
       name: 'Open barcode label for NEW-PLATE-9',
     })
   ).closest('td') as HTMLElement;
+  // The `new PN` marker sits on the PN's own line — no extra row.
+  expect(newLine.querySelector('.pncell')).not.toBeNull();
   expect(within(newLine).getByText('new PN')).toBeInTheDocument();
 
   // The barcode is never a sentence in the row any more.
@@ -2350,16 +2352,16 @@ test('a New Work Order demand line opens the shared label through the barcode ch
   scanBarcode('PF:PN:309-127');
   await screen.findByLabelText('Quantity for 309-127');
 
-  // The per-line text link is gone — the shared chip is the ONE entry,
+  // The per-line text link is gone — the PN itself is the ONE entry,
   // rendered identically to Work Order Details.
   expect(dialog.querySelector('.pn-labellink')).toBeNull();
-  const chip = within(dialog).getByRole('button', {
+  const pnControl = within(dialog).getByRole('button', {
     name: 'Open barcode label for 309-127',
   });
-  expect(chip).toHaveClass('pnb-chip');
-  expect(chip).toHaveTextContent('Barcode label…');
+  expect(pnControl).toHaveClass('pnb-pnbtn');
+  expect(pnControl).toHaveTextContent('309-127');
 
-  fireEvent.click(chip);
+  fireEvent.click(pnControl);
   const label = await screen.findByRole('dialog', {
     name: 'Part Number barcode label',
   });
@@ -2374,20 +2376,21 @@ test('a saved Work Order Details line carries the barcode chip and opens the sha
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  // No barcode sentence in the PN column any more.
+  // No barcode sentence and no extra entry row in the PN column any
+  // more — the PN itself carries the affordance.
   expect(within(dialog).queryByText(/existing PN · barcode/)).toBeNull();
   expect(dialog.querySelector('.pn-labellink')).toBeNull();
 
-  const chip = within(dialog).getByRole('button', {
+  const pnControl = within(dialog).getByRole('button', {
     name: 'Open barcode label for A-100',
   });
-  expect(chip).toHaveAttribute('type', 'button');
-  expect(chip).toHaveClass('pnb-chip');
-  expect(chip).toHaveTextContent('Barcode label…');
+  expect(pnControl).toHaveAttribute('type', 'button');
+  expect(pnControl).toHaveClass('pnb-pnbtn');
+  expect(pnControl).toHaveTextContent('A-100');
   // Opening the label is presentation only — the draft stays clean.
   expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
 
-  fireEvent.click(chip);
+  fireEvent.click(pnControl);
   const label = await screen.findByRole('dialog', {
     name: 'Part Number barcode label',
   });
@@ -2413,12 +2416,12 @@ test('a draft line for a new PN carries the same chip — the label derives from
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
-  const chip = await within(dialog).findByRole('button', {
+  const pnControl = await within(dialog).findByRole('button', {
     name: 'Open barcode label for NEW-PLATE-9',
   });
-  expect(chip).toHaveClass('pnb-chip');
+  expect(pnControl).toHaveClass('pnb-pnbtn');
 
-  fireEvent.click(chip);
+  fireEvent.click(pnControl);
   const label = await screen.findByRole('dialog', {
     name: 'Part Number barcode label',
   });
