@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
-import { searchPartNumbers } from '../../api/part-numbers';
+import { resolvePartNumber, searchPartNumbers } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
 import { ModalDialog } from '../../components/ModalDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
@@ -34,12 +34,14 @@ const STEP_TITLES = [
 ];
 
 /** The PN master is an unbounded catalog, so step ① is a real search:
- * it starts only once the entry is specific enough, waits out the
- * typing burst instead of querying per keystroke, and renders a
- * bounded list. */
+ * it waits out the typing burst instead of querying per keystroke, and
+ * broadens from an exact canonical lookup to a contains-search once
+ * the entry is specific enough. The result bound itself is the
+ * SERVER's (`part_numbers.SEARCH_RESULT_LIMIT`) — mirrored here only
+ * to word the "refine your search" hint. */
 const MIN_SEARCH_LENGTH = 2;
 const SEARCH_DEBOUNCE_MS = 250;
-const RENDERED_MATCH_LIMIT = 50;
+const SERVER_SEARCH_LIMIT = 50;
 
 /**
  * One accessible multi-step Add Part dialog (no stacked nested modals):
@@ -94,18 +96,34 @@ export function AddPartDialog({
   const trimmed = query.trim();
   const [settledQuery, setSettledQuery] = useState(query);
   useEffect(() => {
-    const timer = setTimeout(() => setSettledQuery(query), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    const timer = setTimeout(() => {
+      setSettledQuery(query);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
   }, [query]);
   const searchable = settledQuery.trim().length >= MIN_SEARCH_LENGTH;
-  const searchLoader = useCallback(
-    () => (searchable ? searchPartNumbers(settledQuery) : Promise.resolve([])),
-    [searchable, settledQuery],
-  );
+  // A short entry is still a valid PN — the minimum length bounds the
+  // contains-SEARCH, it is not a rule about what a PN may be. So a
+  // too-short entry that canonicalizes falls back to the exact
+  // canonical lookup: a one-character PN that already exists is found
+  // and offered, and is never mistaken for a new PN.
+  const settledCanonical = normalizePartNumber(settledQuery);
+  const exactOnly = !searchable && settledCanonical !== null;
+  const searchLoader = useCallback(() => {
+    if (searchable) return searchPartNumbers(settledQuery);
+    if (settledCanonical === null) return Promise.resolve([]);
+    return resolvePartNumber(settledCanonical).then((master) =>
+      master ? [master] : [],
+    );
+  }, [searchable, settledCanonical, settledQuery]);
   const searchData = useApiData(searchLoader);
-  const allMatches =
+  const matches =
     searchData.state.status === 'ready' ? searchData.state.data : [];
-  const matches = allMatches.slice(0, RENDERED_MATCH_LIMIT);
+  // The server bounds the listing; a full page means "refine", not
+  // "these are all of them".
+  const bounded = matches.length >= SERVER_SEARCH_LIMIT;
   const canonical = normalizePartNumber(query);
   const exactMatch =
     canonical !== null &&
@@ -267,21 +285,21 @@ export function AddPartDialog({
                 <div className="ap-empty" role="alert">
                   {searchData.state.message}
                 </div>
-              ) : !searchable ? (
+              ) : searchData.state.status === 'loading' ? (
+                <div className="ap-empty">Searching Part Numbers…</div>
+              ) : !searchable && !exactOnly ? (
                 <div className="ap-empty">
                   Type at least {MIN_SEARCH_LENGTH} characters to search Part
                   Numbers.
                 </div>
-              ) : searchData.state.status === 'loading' ? (
-                <div className="ap-empty">Searching Part Numbers…</div>
               ) : matches.length === 0 ? (
                 <div className="ap-empty">
                   No existing PN matches “{settledQuery.trim()}”.
                 </div>
-              ) : allMatches.length > matches.length ? (
+              ) : bounded ? (
                 <div className="ap-empty">
-                  Showing the first {RENDERED_MATCH_LIMIT} of{' '}
-                  {allMatches.length} matches — refine the search.
+                  Showing the first {SERVER_SEARCH_LIMIT} matches — refine the
+                  search.
                 </div>
               ) : null}
             </div>

@@ -123,14 +123,28 @@ def resolve_part_number(session: Session, value: object) -> PartNumber | None:
     return session.get(PartNumber, canonical_part_number(value))
 
 
+#: Most masters one Add Part lookup returns. The PN master is an
+#: unbounded catalog, so the lookup is bounded HERE — not by slicing an
+#: already-transferred list in the browser. This is a result bound, not
+#: a pagination contract: Phase 4 needs no more than a screenful, and
+#: full Part Numbers management (with whatever paging it needs) stays
+#: Phase 13. ``resolve_part_number`` is unaffected — it resolves one
+#: canonical PN by equality, so a valid one-character PN still
+#: resolves exactly.
+SEARCH_RESULT_LIMIT: Final = 50
+
+
 def list_part_numbers(session: Session, *, search: str | None = None) -> list[PartNumber]:
     """List masters for the Add Part lookup, optionally filtered.
 
     ``search`` is a case-insensitive contains-match over the canonical
     PN with LIKE wildcards escaped — a lookup convenience only, never a
-    normalization of the stored value.
+    normalization of the stored value. At most
+    :data:`SEARCH_RESULT_LIMIT` masters come back, in the unchanged
+    canonical-PN order, so neither a broad search term nor an absent
+    one can stream the whole catalog to a client.
     """
-    query = select(PartNumber).order_by(PartNumber.part_number)
+    query = select(PartNumber).order_by(PartNumber.part_number).limit(SEARCH_RESULT_LIMIT)
     if search is not None and search.strip():
         query = query.where(PartNumber.part_number.ilike(_contains_pattern(search), escape="\\"))
     return list(session.scalars(query))

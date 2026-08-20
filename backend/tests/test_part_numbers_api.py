@@ -37,6 +37,7 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
 
 from alembic import command
+from app.application import part_numbers
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -190,6 +191,54 @@ def test_lookup_by_number_and_search(client: TestClient) -> None:
     found = client.get("/api/part-numbers", params={"search": fragment})
     assert found.status_code == 200
     assert canonical in [master["part_number"] for master in found.json()]
+
+
+def test_search_results_are_bounded_by_the_server(client: TestClient) -> None:
+    """The lookup is bounded in the QUERY, not by slicing in the browser.
+
+    The PN master is an unbounded catalog: a broad search term (and the
+    unfiltered listing) must never stream all of it to a client. The
+    bound is the server's, so a client that ignores it still cannot
+    download more than one screenful.
+    """
+    prefix = f"BOUND{uuid.uuid4().hex[:6].upper()}"
+    seeded = [f"{prefix}-{index:03d}" for index in range(part_numbers.SEARCH_RESULT_LIMIT + 10)]
+    for canonical in seeded:
+        assert client.post("/api/part-numbers", json={"part_number": canonical}).status_code == 201
+
+    bounded = client.get("/api/part-numbers", params={"search": prefix})
+    assert bounded.status_code == 200
+    returned = [master["part_number"] for master in bounded.json()]
+    assert len(returned) == part_numbers.SEARCH_RESULT_LIMIT
+    # The bound keeps the canonical-PN ordering — it truncates the tail,
+    # it does not sample.
+    assert returned == sorted(seeded)[: part_numbers.SEARCH_RESULT_LIMIT]
+
+    # The unfiltered listing is bounded by the same query.
+    everything = client.get("/api/part-numbers")
+    assert everything.status_code == 200
+    assert len(everything.json()) <= part_numbers.SEARCH_RESULT_LIMIT
+
+    # ...and the exact resolution reaches a master the bound cut off.
+    beyond = sorted(seeded)[-1]
+    exact = client.get("/api/part-numbers", params={"number": beyond})
+    assert exact.status_code == 200
+    assert [master["part_number"] for master in exact.json()] == [beyond]
+
+
+def test_one_character_part_number_is_valid_and_exactly_resolvable(
+    client: TestClient,
+) -> None:
+    """A short PN is a PN: the search bound is an optimization, never a
+    domain rule about what a Part Number may be."""
+    created = client.post("/api/part-numbers", json={"part_number": "x"})
+    assert created.status_code in {200, 201}, created.text
+    assert created.json()["part_number"] == "X"
+    assert created.json()["barcode_value"] == "PF:PN:X"
+
+    exact = client.get("/api/part-numbers", params={"number": "x"})
+    assert exact.status_code == 200
+    assert [master["part_number"] for master in exact.json()] == ["X"]
 
 
 def test_server_owned_fields_are_rejected(client: TestClient) -> None:

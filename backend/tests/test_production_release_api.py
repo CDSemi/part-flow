@@ -50,7 +50,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import environment, production_release, projections
+from app.application import environment, production_release, projections, work_orders
 from app.application.common import flush as translated_flush
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -1820,3 +1820,343 @@ def test_external_number_edit_stays_available_after_full_release(
             )
         ).scalar_one()
     assert stored == number
+
+
+# ---------------------------------------------------------------------------
+# Demand edit vs. production release — the same row lock, either order
+# ---------------------------------------------------------------------------
+
+
+def _over_released_demands(engine: Engine) -> list[tuple[int, int, int]]:
+    """Every demand whose released quantity exceeds what was requested.
+
+    The list must always be empty: releasing more than the business
+    demand asked for is a quantity state the domain has no meaning for,
+    and no interleaving of a demand edit and a release may produce it.
+    """
+    demand_id = models.PartMovement.metadata_["context"]["work_order_demand_id"].as_integer()
+    released = (
+        sa.select(
+            demand_id.label("demand_id"),
+            sa.func.sum(models.PartMovement.quantity).label("released"),
+        )
+        .where(models.PartMovement.movement_type == "RECEIVED")
+        .group_by(demand_id)
+        .subquery()
+    )
+    with engine.connect() as connection:
+        return [
+            (int(row.id), int(row.requested_quantity), int(row.released))
+            for row in connection.execute(
+                sa.select(
+                    models.WorkOrderDemand.id,
+                    models.WorkOrderDemand.requested_quantity,
+                    released.c.released,
+                )
+                .join(released, released.c.demand_id == models.WorkOrderDemand.id)
+                .where(released.c.released > models.WorkOrderDemand.requested_quantity)
+            )
+        ]
+
+
+class _PauseFirstReleaseAfterDemandLock:
+    """Test seam: pause a release AFTER it holds the WorkOrderDemand row
+    lock (the active-quantity check runs later in the command) so a
+    competing demand edit can be started and observed blocking."""
+
+    def __init__(self) -> None:
+        self.real = production_release._existing_active_distribution
+        self.inside = threading.Event()
+        self.let_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, part_number: str) -> list[dict[str, Any]]:
+        result = self.real(session, part_number)
+        with self._guard:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.inside.set()
+            assert self.let_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+class _PauseEditAfterDemandLock:
+    """Test seam: pause a demand save immediately after it has locked the
+    edited line and is recomputing that line's released quantity.
+
+    The paused call is identified by its argument — the save recomputes
+    for the EDITED ids only, while the surrounding read models ask for
+    every demand of the Work Order — so the seam cannot drift onto the
+    unlocked read before it.
+    """
+
+    def __init__(self, edited_id: int) -> None:
+        self.real = production_release.released_quantities
+        self.edited_id = edited_id
+        self.inside = threading.Event()
+        self.let_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, ids: Any) -> dict[int, int]:
+        result = self.real(session, ids)
+        with self._guard:
+            should_pause = not self._paused_once and list(ids) == [self.edited_id]
+            if should_pause:
+                self._paused_once = True
+        if should_pause:
+            self.inside.set()
+            assert self.let_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release first → the edit blocks on the lock, then sees the release.
+
+    The edit cannot read "nothing released", wait out the release and
+    still lower `requested_quantity` underneath it: it blocks on the
+    same row lock and, once the release commits, recomputes the
+    released quantity and refuses the whole line edit.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+
+    pause = _PauseFirstReleaseAfterDemandLock()
+    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+    results: dict[str, Any] = {}
+
+    def run_release() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["release"] = production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    quantity=40,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["release"] = exc
+
+    def run_edit() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["edit"] = work_orders.update_work_order(
+                    session,
+                    work_order_id,
+                    line_edits=[{"id": demand_id, "requested_quantity": 5}],
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["edit"] = exc
+
+    release_thread = threading.Thread(target=run_release, daemon=True)
+    edit_thread = threading.Thread(target=run_edit, daemon=True)
+    try:
+        release_thread.start()
+        assert pause.inside.wait(timeout=20)  # holds the demand row lock
+        edit_thread.start()
+        time.sleep(1.0)
+        assert "edit" not in results  # really blocked on the lock, not failed
+    finally:
+        pause.let_finish.set()
+    release_thread.join(timeout=20)
+    edit_thread.join(timeout=20)
+    assert not release_thread.is_alive() and not edit_thread.is_alive()
+
+    assert isinstance(results["release"], production_release.ProductionRelease)
+    assert results["release"].created
+    assert isinstance(results["edit"], ConflictError)
+    assert "already been released" in str(results["edit"])
+
+    # The demand kept its requested quantity, and the release stands.
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["requested_quantity"], state["released_quantity"]) == (50, 40)
+    assert state["remaining_quantity"] == 10
+    assert _over_released_demands(db_engine) == []
+
+
+def test_edit_winning_the_demand_lock_makes_the_release_use_the_new_quantity(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Edit first → the release blocks, then caps on the NEW quantity.
+
+    The release must not validate against the `requested_quantity` it
+    read before the edit committed: it waits on the same row lock, its
+    own `FOR UPDATE` read refreshes the row, and the remaining cap is
+    recomputed from the edited value.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    pn = _unique("PN")
+    created = client.post(
+        "/api/work-orders",
+        json={
+            "lines": [
+                {"part_number": pn, "requested_quantity": 50},
+                # A second line so the save's post-lock recompute is
+                # distinguishable from the read models around it.
+                {"part_number": _unique("PN"), "requested_quantity": 50},
+            ]
+        },
+    )
+    assert created.status_code == 201, created.text
+    work_order_id = int(created.json()["id"])
+    demand_id = int(created.json()["demands"][0]["id"])
+
+    pause = _PauseEditAfterDemandLock(demand_id)
+    monkeypatch.setattr(production_release, "released_quantities", pause)
+    results: dict[str, Any] = {}
+
+    def run_edit() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["edit"] = work_orders.update_work_order(
+                    session,
+                    work_order_id,
+                    line_edits=[{"id": demand_id, "requested_quantity": 30}],
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["edit"] = exc
+
+    def run_release() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["release"] = production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    # Valid against the original 50, too much for the
+                    # edited 30.
+                    quantity=40,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results["release"] = exc
+
+    edit_thread = threading.Thread(target=run_edit, daemon=True)
+    release_thread = threading.Thread(target=run_release, daemon=True)
+    try:
+        edit_thread.start()
+        assert pause.inside.wait(timeout=20)  # holds the demand row lock
+        release_thread.start()
+        time.sleep(1.0)
+        assert "release" not in results  # really blocked on the lock
+    finally:
+        pause.let_finish.set()
+    edit_thread.join(timeout=20)
+    release_thread.join(timeout=20)
+    assert not edit_thread.is_alive() and not release_thread.is_alive()
+
+    assert isinstance(results["edit"], work_orders.WorkOrderDetail)
+    assert isinstance(results["release"], ConflictError)
+    assert "Only 30 pcs remain" in str(results["release"])
+
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["requested_quantity"], state["released_quantity"]) == (30, 0)
+    assert _over_released_demands(db_engine) == []
+
+    # The edited quantity is fully releasable — the cap moved, nothing broke.
+    accepted = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        quantity=30,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+    )
+    assert accepted.status_code == 201, accepted.text
+    assert _over_released_demands(db_engine) == []
+
+
+def test_unpaused_edit_release_races_never_over_release(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Six unsynchronized races, no seams: either order is acceptable,
+    `released_quantity > requested_quantity` never is."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    cases = [_create_demand(client) for _ in range(6)]  # requested 50 each
+    start = threading.Barrier(len(cases) * 2)
+    outcomes: list[tuple[str, Any]] = []
+    guard = threading.Lock()
+
+    def record(kind: str, value: Any) -> None:
+        with guard:
+            outcomes.append((kind, value))
+
+    def run_edit(work_order_id: int, demand_id: int) -> None:
+        start.wait(timeout=30)
+        with Session(db_engine) as session:
+            try:
+                work_orders.update_work_order(
+                    session, work_order_id, line_edits=[{"id": demand_id, "requested_quantity": 10}]
+                )
+                record("edit", True)
+            except ConflictError as exc:
+                record("edit", exc)
+
+    def run_release(work_order_id: int, demand_id: int, pn: str) -> None:
+        start.wait(timeout=30)
+        with Session(db_engine) as session:
+            try:
+                production_release.release_to_production(
+                    session,
+                    work_order_id=work_order_id,
+                    work_order_demand_id=demand_id,
+                    part_number=pn,
+                    quantity=40,
+                    route_mode="FLOATING",
+                    route_template_id=None,
+                    starting_area_id=int(area["id"]),
+                    operation_id=int(operation["id"]),
+                    confirm_active_quantity=False,
+                    device_event_id=str(uuid.uuid4()),
+                )
+                record("release", True)
+            except ConflictError as exc:
+                record("release", exc)
+
+    threads = [
+        thread
+        for work_order_id, demand_id, pn in cases
+        for thread in (
+            threading.Thread(target=run_edit, args=(work_order_id, demand_id), daemon=True),
+            threading.Thread(target=run_release, args=(work_order_id, demand_id, pn), daemon=True),
+        )
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=40)
+    assert all(not thread.is_alive() for thread in threads)
+
+    assert len(outcomes) == len(cases) * 2  # every thread reached an outcome
+    assert _over_released_demands(db_engine) == []
+    # Per demand the two operations really did serialize: an edit that
+    # committed forces the 40-piece release to fail the new cap of 10,
+    # and a release that committed forces the edit to conflict.
+    for work_order_id, demand_id, _ in cases:
+        state = _demand_state(client, work_order_id, demand_id)
+        assert state["released_quantity"] <= state["requested_quantity"]
+        assert (state["requested_quantity"], state["released_quantity"]) in {
+            (50, 40),  # release won
+            (10, 0),  # edit won
+        }

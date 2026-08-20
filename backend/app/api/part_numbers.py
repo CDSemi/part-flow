@@ -61,7 +61,13 @@ def list_part_numbers(
 ) -> list[PartNumberResponse]:
     """PN lookup: ``number`` resolves one exact canonical PN (empty list
     on a miss — the Add Part flow then offers creation), ``search``
-    filters by contains-match."""
+    filters by contains-match.
+
+    A ``search`` (or unfiltered) listing is bounded server-side at
+    ``part_numbers.SEARCH_RESULT_LIMIT`` masters; an exact ``number``
+    resolution is never bounded away, so a short but valid canonical PN
+    still resolves.
+    """
     matches: list[PartNumber]
     if number is not None:
         master = part_numbers.resolve_part_number(session, number)

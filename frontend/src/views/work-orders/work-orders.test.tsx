@@ -393,6 +393,11 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     return json(
       state.partNumbers
         .filter((pn) => !search || pn.toUpperCase().includes(search))
+        .sort()
+        // The real backend bounds the listing in the query
+        // (part_numbers.SEARCH_RESULT_LIMIT) — mirrored so the fake
+        // cannot promise the client an unbounded catalog.
+        .slice(0, 50)
         .map((pn) => ({
           part_number: pn,
           barcode_value: `PF:PN:${pn}`,
@@ -1151,6 +1156,52 @@ test('the Add Part flow steps through PN, quantity, due date and metadata', asyn
     target: { value: '2026-09-15' },
   });
   expect(lineDue).toHaveValue('');
+});
+
+test('a one-character PN that already exists is found, not offered as new', async () => {
+  // The Add Part minimum search length bounds the contains-SEARCH; it
+  // is not a rule about what a Part Number may be. A short existing PN
+  // must resolve exactly, or the operator would be told to create a PN
+  // that is already in the master.
+  state.partNumbers.push('X');
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'x' },
+  });
+
+  // Offered as the existing master, with its derived barcode...
+  const match = await screen.findByRole('button', { name: /PF:PN:X/ });
+  expect(match).toBeInTheDocument();
+  // ...and never as a new PN.
+  expect(
+    screen.queryByRole('button', { name: /Create new PN/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Type at least 2 characters/),
+  ).not.toBeInTheDocument();
+
+  fireEvent.click(match);
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+});
+
+test('a one-character PN that does not exist is still creatable', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'q' },
+  });
+
+  const create = await screen.findByRole('button', {
+    name: /Create new PN “Q”/,
+  });
+  expect(create).toBeInTheDocument();
 });
 
 test('Add Part canonicalizes manual entry like the backend — trim + uppercase, internal whitespace rejected', async () => {

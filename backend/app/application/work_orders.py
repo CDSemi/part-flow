@@ -41,7 +41,11 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   a line instead of leaving the rule to the UI. Its released and
   remaining quantities are DERIVED from the immutable ``RECEIVED``
   history (``production_release.released_quantities``) — never stored,
-  so they survive any reload and need no migration.
+  so they survive any reload and need no migration. The check runs
+  under a ``FOR UPDATE`` lock on each edited line, which is what makes
+  it a rule rather than a hope: a release and an edit of the same
+  demand serialize in either arrival order, and no interleaving can
+  leave ``released_quantity > requested_quantity``.
 - Demand-line removal follows the canonical rule (PROJECT_PROFILE §13):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
@@ -486,6 +490,12 @@ def update_work_order(
     An unchanged field appends no audit row. Saving edits never touches
     production data. Demand-line removal is deferred with the release
     workflow (its released-quantity rule needs release to exist).
+
+    Every edited saved demand line is locked ``FOR UPDATE`` before this
+    save decides whether it may be edited at all, so the read-only rule
+    of a released line cannot be raced by a release in flight and
+    ``released_quantity > requested_quantity`` is unreachable. A
+    header-only save takes no demand lock.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -493,17 +503,6 @@ def update_work_order(
 
     header_before = _work_order_snapshot(work_order)
     header_changed = False
-
-    if not isinstance(work_order_number, UnsetType):
-        number = _normalized_work_order_number(work_order_number)
-        if number != work_order.work_order_number:
-            if number is not None:
-                _reject_duplicate_work_order_number(session, number, exclude_id=work_order.id)
-            work_order.work_order_number = number
-            header_changed = True
-    if not isinstance(due_date, UnsetType) and due_date != work_order.due_date:
-        work_order.due_date = due_date
-        header_changed = True
 
     # One demand line may appear at most once per save: intermediate
     # states inside one Save would produce misleading multiple UPDATED
@@ -518,6 +517,52 @@ def update_work_order(
             )
         seen_edit_ids.add(edit_id)
 
+    # Lock every edited saved demand line BEFORE deciding whether it may
+    # be edited, then recompute its released quantity under that lock.
+    #
+    # The decision races a release otherwise: this save could read
+    # "nothing released", a concurrent release could lock the same
+    # demand, create quantity and commit, and this save could then still
+    # lower `requested_quantity` — leaving released > requested, a
+    # quantity state the domain has no meaning for. With the lock the
+    # two orders are both safe and neither can interleave:
+    #
+    # - release commits first → the recomputed released quantity is
+    #   visible here and the whole edit of that line is refused (409);
+    # - this save commits first → the release waits on this lock, then
+    #   re-reads the demand row (its own ``FOR UPDATE`` get refreshes
+    #   it) and applies the remaining cap to the NEW requested quantity.
+    #
+    # Locking in ascending id order makes two concurrent saves queue
+    # instead of deadlocking, and matches the demand→Work Order order
+    # `delete_work_order_demand` already takes. A header-only save locks
+    # nothing: the audited Work Order Number edit stays available after
+    # a release (PROJECT_PROFILE §7).
+    edited_ids = sorted(edit_id for edit_id in seen_edit_ids if isinstance(edit_id, int))
+    for edited_id in edited_ids:
+        locked = session.get(WorkOrderDemand, edited_id, with_for_update=True)
+        if locked is None or locked.work_order_id != work_order.id:
+            raise NotFoundError(
+                f"Demand line {edited_id} does not exist on Work Order {work_order.id}."
+            )
+        demands_by_id[edited_id] = locked
+    released = production_release.released_quantities(session, edited_ids)
+
+    # Header edits are applied AFTER the demand locks: their UPDATE is
+    # emitted at flush, so touching them first would let an autoflush
+    # take the Work Order row lock before the demand locks and invert
+    # the order `delete_work_order_demand` uses.
+    if not isinstance(work_order_number, UnsetType):
+        number = _normalized_work_order_number(work_order_number)
+        if number != work_order.work_order_number:
+            if number is not None:
+                _reject_duplicate_work_order_number(session, number, exclude_id=work_order.id)
+            work_order.work_order_number = number
+            header_changed = True
+    if not isinstance(due_date, UnsetType) and due_date != work_order.due_date:
+        work_order.due_date = due_date
+        header_changed = True
+
     audited: list[tuple[WorkOrderDemand, dict[str, Any]]] = []
     for edit in line_edits:
         demand_id = edit.get("id")
@@ -526,7 +571,7 @@ def update_work_order(
             raise NotFoundError(
                 f"Demand line {demand_id} does not exist on Work Order {work_order.id}."
             )
-        if detail.released_quantities.get(demand.id, 0) > 0:
+        if released.get(demand.id, 0) > 0:
             # GUI_DESIGN §11 wording — the UI renders the line read-only,
             # the backend still refuses. Later adjustments go through
             # the correction and production workflows

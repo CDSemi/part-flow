@@ -1,4 +1,14 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -130,21 +140,63 @@ function stripComments(source: string): string {
 }
 
 /**
- * Every module a production build actually reaches, walked transitively
- * from the real entry point.
+ * The character ranges of a module that a production build compiles
+ * away, as `[start, end)` pairs.
  *
- * Static imports are always followed. A DYNAMIC import inside a module
- * that tests `import.meta.env.DEV` is a cut edge: Vite replaces that
- * constant statically, so in a production build the branch is dead
- * code and its lazy chunk is never emitted — this is exactly how the
- * mock views, the Worker sessions preview and the Completed Work
- * Orders preview leave the graph. Walking instead of listing folders
- * is the point: shared helpers that started life in the mock views
- * (dates, barcode parsing, the toast hook) are production modules
- * today, and a fixed directory list silently stopped covering them.
+ * The codebase expresses its DEV boundary one way — a conditional whose
+ * test is `import.meta.env.DEV`, whose consequent holds the lazy
+ * import:
+ *
+ *     export const X = import.meta.env.DEV ? lazy(() => import('…')) : null;
+ *
+ * Vite substitutes the constant, so that consequent is dead code and
+ * its chunk is never emitted. This finds exactly those consequents by
+ * matching the `?` that follows the guard to its `:` at the same
+ * bracket depth — enough to model the one construct in use, and no
+ * parser or new dependency. Anything else (a guard written some other
+ * way, a dynamic import outside a guard) is deliberately NOT treated as
+ * cut: the walk then follows the import, and a mock reached that way
+ * fails the suite instead of passing quietly.
  */
-function productionModuleGraph(): string[] {
-  const entry = join(srcDir, 'main.tsx');
+function devOnlyRanges(source: string): [number, number][] {
+  const ranges: [number, number][] = [];
+  const guard = /import\.meta\.env\.DEV\s*\?/g;
+  for (const match of source.matchAll(guard)) {
+    let depth = 0;
+    const start = match.index + match[0].length;
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index];
+      if ('([{'.includes(char)) depth += 1;
+      else if (')]}'.includes(char)) {
+        // The conditional ended without its own `:` — stop rather than
+        // swallow the rest of the file.
+        if (depth === 0) break;
+        depth -= 1;
+      } else if (char === ':' && depth === 0) {
+        ranges.push([start, index]);
+        break;
+      }
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Every module a production build actually reaches, walked transitively
+ * from an entry point.
+ *
+ * Static imports are always followed. A dynamic import is followed too
+ * — unless it sits inside a DEV-only range, which is how the mock
+ * views, the Worker sessions preview and the Completed Work Orders
+ * preview leave the graph. Walking instead of listing folders is the
+ * point: shared helpers that started life in the mock views (dates,
+ * barcode parsing, the toast hook) are production modules today, and a
+ * fixed directory list silently stopped covering them.
+ *
+ * Parameterized on the root so the rules themselves can be tested
+ * against fixtures rather than only against the live tree.
+ */
+function moduleGraph(entry: string, rootDir: string): string[] {
   const seen = new Set<string>();
   const queue = [entry];
   while (queue.length > 0) {
@@ -154,35 +206,166 @@ function productionModuleGraph(): string[] {
     // Comments are stripped first: a module that only MENTIONS the DEV
     // boundary in prose still ships its dynamic imports.
     const source = stripComments(readFileSync(file, 'utf8'));
-    const devGuarded = source.includes('import.meta.env.DEV');
-    const specifiers = [
+    const devOnly = devOnlyRanges(source);
+    const specifiers: string[] = [
       // Static: `import x from '…'`, `export … from '…'`, `import '…'`.
       ...Array.from(source.matchAll(/\bfrom\s+'([^']+)'/g), (m) => m[1]),
       ...Array.from(source.matchAll(/^\s*import\s+'([^']+)'/gm), (m) => m[1]),
-      // Dynamic, and only from modules with no DEV guard.
-      ...(devGuarded
-        ? []
-        : Array.from(source.matchAll(/\bimport\(\s*'([^']+)'/g), (m) => m[1])),
     ];
+    for (const match of source.matchAll(/\bimport\(\s*'([^']+)'/g)) {
+      const cut = devOnly.some(
+        ([start, end]) => match.index >= start && match.index < end,
+      );
+      if (!cut) specifiers.push(match[1]);
+    }
     for (const specifier of specifiers) {
       const resolved = resolveModule(file, specifier);
       if (resolved) queue.push(resolved);
     }
   }
-  return [...seen].map((file) => relative(srcDir, file)).sort();
+  return [...seen].map((file) => relative(rootDir, file)).sort();
+}
+
+function mockOffenders(graph: readonly string[]): string[] {
+  return graph.filter(
+    (module) => module === 'mocks' || module.startsWith(`mocks${sep}`),
+  );
 }
 
 test('no production module reaches src/mocks/', () => {
-  const graph = productionModuleGraph();
+  const graph = moduleGraph(join(srcDir, 'main.tsx'), srcDir);
   // The walk is meaningful only if it actually reached the real views.
   expect(graph).toContain(join('app', 'real-views.ts'));
   expect(graph).toContain(join('views', 'work-orders', 'WorkOrdersView.tsx'));
   expect(graph.length).toBeGreaterThan(30);
-
-  const offenders = graph.filter(
-    (module) => module === 'mocks' || module.startsWith(`mocks${sep}`),
+  // ...and only if the DEV boundary really cut the mock views away.
+  expect(graph).toContain(join('app', 'dev-views.ts')); // statically imported
+  expect(graph).not.toContain(
+    join('views', 'scan-station', 'ScanStationView.tsx'),
   );
-  expect(offenders).toEqual([]);
+  expect(graph).not.toContain(
+    join('views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
+  );
+
+  expect(mockOffenders(graph)).toEqual([]);
+});
+
+/** Write one fixture module, creating parent folders as needed. */
+function writeFixture(root: string, relativePath: string, source: string) {
+  const path = join(root, relativePath);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, source, 'utf8');
+}
+
+function withFixtureTree(
+  build: (root: string) => void,
+  assert: (root: string) => void,
+) {
+  const root = mkdtempSync(join(tmpdir(), 'partflow-boundary-'));
+  try {
+    build(root);
+    assert(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('an ordinary production dynamic import is still walked', () => {
+  // The DEV cut must be narrow: a module may hold a DEV-guarded lazy
+  // import AND an ordinary code-split import, and only the guarded one
+  // leaves the production graph.
+  withFixtureTree(
+    (root) => {
+      writeFixture(root, 'mocks/data.ts', 'export const MOCK = 1;\n');
+      writeFixture(root, 'shared.ts', 'export const shared = 2;\n');
+      writeFixture(
+        root,
+        'preview.ts',
+        "import { MOCK } from './mocks/data';\nexport const preview = MOCK;\n",
+      );
+      writeFixture(
+        root,
+        'feature.ts',
+        [
+          'export const lazyPreview = import.meta.env.DEV',
+          "  ? () => import('./preview')",
+          '  : null;',
+          "export const split = () => import('./shared');",
+          '',
+        ].join('\n'),
+      );
+      writeFixture(root, 'main.tsx', "import './feature';\n");
+    },
+    (root) => {
+      const graph = moduleGraph(join(root, 'main.tsx'), root);
+      expect(graph).toContain('feature.ts');
+      // Followed: a plain production dynamic import.
+      expect(graph).toContain('shared.ts');
+      // Not followed: the DEV-guarded lazy import, and what it pulls.
+      expect(graph).not.toContain('preview.ts');
+      expect(mockOffenders(graph)).toEqual([]);
+    },
+  );
+});
+
+test('a DEV-only lazy import does not drag its mocks into the graph', () => {
+  withFixtureTree(
+    (root) => {
+      writeFixture(root, 'mocks/data.ts', 'export const MOCK = 1;\n');
+      writeFixture(
+        root,
+        'dev-view.ts',
+        "import { MOCK } from './mocks/data';\nexport const view = MOCK;\n",
+      );
+      writeFixture(
+        root,
+        'registry.ts',
+        [
+          'export const REGISTRY = import.meta.env.DEV',
+          "  ? { view: () => import('./dev-view') }",
+          '  : null;',
+          '',
+        ].join('\n'),
+      );
+      writeFixture(
+        root,
+        'main.tsx',
+        "import { REGISTRY } from './registry';\n",
+      );
+    },
+    (root) => {
+      const graph = moduleGraph(join(root, 'main.tsx'), root);
+      expect(graph).toContain('registry.ts');
+      expect(graph).not.toContain('dev-view.ts');
+      expect(mockOffenders(graph)).toEqual([]);
+    },
+  );
+});
+
+test('a mock reached through a shared transitive module is caught', () => {
+  // The failure the folder-list scan used to miss: no production VIEW
+  // imports src/mocks/ directly — a shared helper two hops away does.
+  withFixtureTree(
+    (root) => {
+      writeFixture(root, 'mocks/data.ts', 'export const MOCK = 1;\n');
+      writeFixture(
+        root,
+        'helper.ts',
+        "import { MOCK } from './mocks/data';\nexport const helper = MOCK;\n",
+      );
+      writeFixture(
+        root,
+        'view.ts',
+        "import { helper } from './helper';\nexport const view = helper;\n",
+      );
+      writeFixture(root, 'main.tsx', "import './view';\n");
+    },
+    (root) => {
+      const graph = moduleGraph(join(root, 'main.tsx'), root);
+      expect(graph).toContain('helper.ts');
+      expect(mockOffenders(graph)).toEqual([join('mocks', 'data.ts')]);
+    },
+  );
 });
 
 test('the dev-only Worker sessions preview stays behind the DEV boundary', () => {
