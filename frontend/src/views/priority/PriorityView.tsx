@@ -7,7 +7,7 @@ import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import { DevNotice } from '../../components/DevNotice';
 import { TypeChip } from '../../components/indicators';
-import { useMockNotice } from '../../components/mock-notice';
+import { useToastNotice } from '../../components/toast-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -139,7 +139,7 @@ export function PriorityView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
-  const { showNotice, noticeElement } = useMockNotice();
+  const { showNotice, noticeElement } = useToastNotice();
 
   const [hotList, setHotList] = useState<MockHotEntry[]>(MOCK_HOT_LIST);
   // Undo/Redo depth is unlimited within the current application

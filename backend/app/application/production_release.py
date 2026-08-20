@@ -44,6 +44,16 @@ Rules owned here:
 - Releasing a PN with ACTIVE flows requires the explicit confirmation
   flag set by the UI after showing the existing distribution; a
   confirmed release creates a separate flow and NEVER merges.
+- A demand may be released in SEVERAL parts (20 of 50, then 12, then
+  18). The released quantity of a demand is DERIVED from the immutable
+  ``RECEIVED`` metadata context — no stored counter, no migration, no
+  second source of truth — and the remaining quantity
+  (``requested_quantity`` − released) is the hard server-side cap: a
+  release beyond it is refused and creates nothing, so quantity can
+  never be over-released against business demand.
+- A release enters production at a STARTING Area: an inactive Area and
+  a terminal Area (the Stockroom end of the flow, PROJECT_PROFILE §18)
+  are both refused here, never only in the UI.
 - The release transaction appends **no** generic `audit_events` row:
   the `RECEIVED` PartMovement is itself the immutable production audit
   record (SLICE1 §16).
@@ -388,6 +398,26 @@ def release_to_production(
             " demand's own PN."
         )
 
+    # -- Remaining demand quantity (partial/multiple release) -----------
+    # Derived from the immutable RECEIVED history, under the demand row
+    # lock taken above: a concurrent release of the same demand is
+    # serialized, so two partial releases can never jointly exceed the
+    # requested quantity.
+    already_released = demand_released_quantity(session, demand.id)
+    remaining = demand.requested_quantity - already_released
+    if remaining <= 0:
+        raise ConflictError(
+            f"Demand line {demand.id} is fully released"
+            f" ({already_released} of {demand.requested_quantity} pcs)."
+            " There is no remaining quantity to release."
+        )
+    if release_quantity > remaining:
+        raise ConflictError(
+            f"Only {remaining} pcs remain to release on demand line {demand.id}"
+            f" ({already_released} of {demand.requested_quantity} pcs already"
+            f" released). Release {remaining} pcs or less."
+        )
+
     # The starting Area row is locked until COMMIT: Area deactivation
     # takes the same row lock before its active-quantity check, so a
     # concurrent release-vs-deactivation always has exactly one serial
@@ -399,6 +429,14 @@ def release_to_production(
     if not area.is_active:
         raise ConflictError(
             f"Area '{area.name}' is inactive and cannot accept a production release."
+        )
+    if area.is_terminal:
+        # A terminal Area is where finished quantity ENDS (Stockroom,
+        # PROJECT_PROFILE §18) — it is never a configured starting Area
+        # (SLICE1_DATA_MODEL §8.1), so production never enters there.
+        raise ConflictError(
+            f"Area '{area.name}' is a terminal Area and never starts production."
+            " Release into the configured starting Area instead."
         )
     operation = session.get(Operation, operation_id)
     if operation is None:
@@ -546,55 +584,48 @@ def release_to_production(
 # ---------------------------------------------------------------------------
 
 
-def demand_has_released_quantity(session: Session, work_order_demand_id: int) -> bool:
-    """True when any committed release recorded this demand as its context.
+def released_quantities(session: Session, work_order_demand_ids: Collection[int]) -> dict[int, int]:
+    """Released quantity per demand, derived from Movement history.
 
-    The removal rule of PROJECT_PROFILE §13 needs "has this demand ever
-    released" without a Movement→Demand foreign key (which is
-    deliberately forbidden — WorkOrderDemand never owns Movement). The
-    canonical evidence is the immutable `RECEIVED` metadata context
-    (SLICE1 §3/§11/§14): the release command always records the
-    initiating demand id there, and `part_movements` rows can never be
-    updated or deleted, so the answer never regresses.
-    """
-    return (
-        session.scalar(
-            select(PartMovement.id)
-            .where(
-                # Only a RECEIVED Movement is release evidence: later
-                # movement types may carry demand context for other
-                # reasons without meaning "this demand released".
-                PartMovement.movement_type == MovementType.RECEIVED,
-                PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
-                == work_order_demand_id,
-            )
-            .limit(1)
-        )
-        is not None
-    )
+    ONE set-based aggregate over the immutable ``RECEIVED`` metadata
+    context (SLICE1 §3/§11/§14), so a Work Order read — or the whole WO
+    list — never issues a per-demand lookup. There is no
+    Movement→Demand foreign key (deliberately forbidden: WorkOrderDemand
+    never owns Movement) and no stored counter: the release command
+    always records the initiating demand id in the ``RECEIVED``
+    metadata, and `part_movements` rows can never be updated or
+    deleted, so the answer never regresses and needs no reconciliation.
 
-
-def released_demand_ids(session: Session, work_order_demand_ids: Collection[int]) -> set[int]:
-    """The subset of the given demand ids with committed release evidence.
-
-    ONE set-based query over the same immutable ``RECEIVED`` metadata
-    context as :func:`demand_has_released_quantity`, so a Work Order
-    read (or the whole WO list) never issues a per-demand lookup. The
-    result feeds the read models: a demand with evidence renders
-    Released/read-only, and a Work Order whose every current demand has
-    evidence reads as RELEASED (GUI_DESIGN §11.1) — both derived, never
-    stored, so the answer survives any reload and never regresses.
+    Demands without release evidence are simply absent from the result
+    (callers read them as 0). The values feed both the removal rule of
+    PROJECT_PROFILE §13 and the read models: a demand's remaining
+    quantity is ``requested_quantity`` minus this value, and a Work
+    Order whose every current demand has no remaining quantity reads as
+    RELEASED (GUI_DESIGN §11.1).
     """
     ids = [int(demand_id) for demand_id in work_order_demand_ids]
     if not ids:
-        return set()
+        return {}
     demand_id_value = PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
-    rows = session.scalars(
-        select(demand_id_value)
+    rows = session.execute(
+        select(demand_id_value, func.sum(PartMovement.quantity))
         .where(
+            # Only a RECEIVED Movement is release evidence: later
+            # movement types may carry demand context for other
+            # reasons without meaning "this demand released".
             PartMovement.movement_type == MovementType.RECEIVED,
             demand_id_value.in_(ids),
         )
-        .distinct()
+        .group_by(demand_id_value)
     )
-    return {int(value) for value in rows if value is not None}
+    return {int(demand_id): int(total) for demand_id, total in rows if demand_id is not None}
+
+
+def demand_released_quantity(session: Session, work_order_demand_id: int) -> int:
+    """Total quantity ever released for one demand (0 when never released)."""
+    return released_quantities(session, [work_order_demand_id]).get(work_order_demand_id, 0)
+
+
+def demand_has_released_quantity(session: Session, work_order_demand_id: int) -> bool:
+    """True when any committed release recorded this demand as its context."""
+    return demand_released_quantity(session, work_order_demand_id) > 0

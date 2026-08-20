@@ -10,7 +10,7 @@ import { useConnectivity } from '../../app/connectivity-context';
 import { Link } from '../../app/link';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { useMockNotice } from '../../components/mock-notice';
+import { useToastNotice } from '../../components/toast-notice';
 import { PageNote } from '../../components/PageNote';
 import { useUiClock } from '../../components/ui-clock';
 import {
@@ -108,7 +108,7 @@ function ActiveWorkOrdersView() {
   const { status } = useConnectivity();
   const { setNavigationGuard } = useRouter();
   const writeBlocked = status !== 'connected';
-  const { showNotice, noticeElement } = useMockNotice();
+  const { showNotice, noticeElement } = useToastNotice();
 
   const workOrdersData = useApiData(listWorkOrders);
 
@@ -278,14 +278,13 @@ function WorkOrderListPanel({
   const now = useUiClock('minute');
   const dueTone = (w: WorkOrderSummary): string => {
     if (!w.dueDate) return 'none';
-    // The policy is the shared Due Soon configuration stand-in — only
-    // the `late` class is used here, but the call stays uniform.
+    // Colour-ramped like every other due date (GUI_DESIGN §11.1/§3.9):
+    // late → soon → ok, from the shared Due Soon configuration
+    // stand-in.
     return dueCountdown(w.dueDate, now, {
       received: w.receivedDate,
       policy: DEFAULT_DUE_SOON_POLICY,
-    }).dueClass === 'late'
-      ? 'late'
-      : '';
+    }).dueClass;
   };
   const query = search.trim().toLowerCase();
   const rows = list.filter(

@@ -26,6 +26,10 @@ class RouteStepResponse(BaseModel):
     sequence: int
     area_id: int
     operation_id: int | None
+    # Advisory only, and copied verbatim into the AssignedRoute
+    # snapshot at release (SLICE1_DATA_MODEL §10) — part of the step
+    # shape, so the read model exposes it instead of dropping it.
+    expected_duration: datetime.timedelta | None
     instructions: str | None
 
 
@@ -51,6 +55,7 @@ def _response(detail: RouteTemplateDetail) -> RouteTemplateResponse:
                 sequence=step.sequence,
                 area_id=step.area_id,
                 operation_id=step.operation_id,
+                expected_duration=step.expected_duration,
                 instructions=step.instructions,
             )
             for step in detail.steps

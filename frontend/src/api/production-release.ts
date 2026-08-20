@@ -73,9 +73,30 @@ interface ProductionReleaseWire {
   occurred_at: string;
 }
 
-/** A fresh UUID idempotency key for one release submission. */
+/**
+ * A fresh UUID idempotency key for one release submission.
+ *
+ * `crypto.randomUUID` is secure-context only, so it is absent when the
+ * stack is served over plain HTTP from anything but `localhost` — a
+ * realistic shop-floor setup. The RFC 4122 v4 fallback keeps the
+ * release flow working there instead of throwing while the dialog
+ * renders; `crypto.getRandomValues` needs no secure context.
+ */
 export function newDeviceEventId(): string {
-  return crypto.randomUUID();
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('');
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-');
 }
 
 export async function releaseToProduction(

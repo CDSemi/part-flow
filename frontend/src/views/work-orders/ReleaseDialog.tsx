@@ -33,7 +33,15 @@ import type { ReleaseRequestContext } from './WorkOrderDetailPanel';
  * ONE submission keeps ONE `device_event_id` through every retry —
  * including the resubmission after the active-quantity confirmation —
  * so a transport retry can only replay the original committed result,
- * never create a second flow. A fresh dialog is a fresh submission.
+ * never create a second flow. A fresh dialog is a fresh submission,
+ * and so is a CHANGED intent: editing a field that the server's
+ * request fingerprint covers after an attempt starts a new key
+ * (SLICE1 §14 — "a new release intent gets a new `device_event_id`"),
+ * so a corrected retry is never rejected as an idempotency conflict.
+ *
+ * A demand may be released in several parts, so the dialog offers the
+ * REMAINING quantity by default and never lets more than that travel;
+ * the backend enforces the same cap.
  */
 export function ReleaseDialog({
   workOrderId,
@@ -55,7 +63,7 @@ export function ReleaseDialog({
   const operationsData = useApiData(listOperations);
   const templatesData = useApiData(listRouteTemplates);
 
-  const [qty, setQty] = useState(String(demand.requestedQuantity || ''));
+  const [qty, setQty] = useState(String(demand.remainingQuantity || ''));
   const [routeMode, setRouteMode] = useState<'FLOATING' | 'PLANNED'>(
     'FLOATING',
   );
@@ -71,8 +79,30 @@ export function ReleaseDialog({
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [result, setResult] = useState<ProductionReleaseResult | null>(null);
-  // The submission's idempotency key — created once per dialog.
-  const deviceEventId = useRef(newDeviceEventId());
+  // The submission's idempotency key, created lazily on first submit
+  // and reused on every transport retry of the SAME intent.
+  const deviceEventId = useRef<string | null>(null);
+  const submitted = useRef(false);
+
+  function releaseKey(): string {
+    deviceEventId.current ??= newDeviceEventId();
+    return deviceEventId.current;
+  }
+
+  /**
+   * A changed release intent is a NEW submission (SLICE1 §14): drop
+   * the key so the next submit gets a fresh one. Without this, a
+   * corrected retry after a failed attempt would travel under the old
+   * key and be refused as an idempotency conflict. The
+   * active-quantity confirmation is deliberately NOT an intent change
+   * — it is the same submission, continued.
+   */
+  function intentChanged() {
+    if (!submitted.current) return;
+    submitted.current = false;
+    deviceEventId.current = null;
+    setServerError(null);
+  }
 
   const loading =
     areasData.state.status === 'loading' ||
@@ -136,6 +166,10 @@ export function ReleaseDialog({
   );
 
   const parsedQty = isPositiveInteger(qty) ? Number.parseInt(qty, 10) : null;
+  // The demand's remaining quantity is the cap — the server refuses
+  // anything beyond it, so the dialog never submits it either.
+  const overRemaining =
+    parsedQty !== null && parsedQty > demand.remainingQuantity;
   const areaName = effectiveArea?.name ?? '—';
   const operationLabel = effectiveOperation
     ? (effectiveOperation.name ?? effectiveOperation.code)
@@ -145,6 +179,7 @@ export function ReleaseDialog({
     !writeBlocked &&
     !busy &&
     parsedQty !== null &&
+    !overRemaining &&
     effectiveAreaId !== null &&
     effectiveOperationId !== null &&
     areaOperations.some((op) => op.id === effectiveOperationId) &&
@@ -162,6 +197,7 @@ export function ReleaseDialog({
     }
     setBusy(true);
     setServerError(null);
+    submitted.current = true;
     try {
       const committed = await releaseToProduction(
         workOrderId,
@@ -174,7 +210,7 @@ export function ReleaseDialog({
           startingAreaId: effectiveAreaId,
           operationId: effectiveOperationId,
           confirmActiveQuantity: distribution !== null && confirmActive,
-          deviceEventId: deviceEventId.current,
+          deviceEventId: releaseKey(),
         },
       );
       setBusy(false);
@@ -261,7 +297,9 @@ export function ReleaseDialog({
       <div className="big mono">{demand.partNumber}</div>
       <div className="sub">
         WO {workOrderNumber ?? '—'} demand · requested{' '}
-        <b>{demand.requestedQuantity || '—'}</b> — nothing is created until you
+        <b>{demand.requestedQuantity || '—'}</b> · already released{' '}
+        <b>{demand.releasedQuantity}</b> · remaining{' '}
+        <b>{demand.remainingQuantity}</b> — nothing is created until you
         confirm.
       </div>
       {loading ? (
@@ -310,7 +348,10 @@ export function ReleaseDialog({
               className="mono"
               inputMode="numeric"
               value={qty}
-              onChange={(e) => setQty(e.target.value)}
+              onChange={(e) => {
+                setQty(e.target.value);
+                intentChanged();
+              }}
             />
             <label htmlFor="rel-mode">Route Mode</label>
             <select
@@ -320,6 +361,7 @@ export function ReleaseDialog({
                 const mode = e.target.value as 'FLOATING' | 'PLANNED';
                 setRouteMode(mode);
                 if (mode === 'FLOATING') setTemplateId(null);
+                intentChanged();
               }}
             >
               <option value="FLOATING">FLOATING — no Route (default)</option>
@@ -331,11 +373,12 @@ export function ReleaseDialog({
                 <select
                   id="rel-route"
                   value={templateId ?? ''}
-                  onChange={(e) =>
+                  onChange={(e) => {
                     setTemplateId(
                       e.target.value === '' ? null : Number(e.target.value),
-                    )
-                  }
+                    );
+                    intentChanged();
+                  }}
                 >
                   <option value="">Select a Planned Route…</option>
                   {templates.map((entry) => (
@@ -364,6 +407,7 @@ export function ReleaseDialog({
                     e.target.value === '' ? null : Number(e.target.value);
                   setAreaId(next);
                   setOperationId(null);
+                  intentChanged();
                 }}
               >
                 <option value="">Select the starting Area…</option>
@@ -383,11 +427,12 @@ export function ReleaseDialog({
               <select
                 id="rel-op"
                 value={effectiveOperationId ?? ''}
-                onChange={(e) =>
+                onChange={(e) => {
                   setOperationId(
                     e.target.value === '' ? null : Number(e.target.value),
-                  )
-                }
+                  );
+                  intentChanged();
+                }}
                 disabled={effectiveAreaId === null}
               >
                 <option value="">Select the Operation…</option>
@@ -399,6 +444,13 @@ export function ReleaseDialog({
               </select>
             )}
           </div>
+          {overRemaining ? (
+            <div className="rowerr">
+              Only {demand.remainingQuantity} pcs remain to release on this
+              demand line ({demand.releasedQuantity} of{' '}
+              {demand.requestedQuantity} already released).
+            </div>
+          ) : null}
           {routeMode === 'PLANNED' && templates.length === 0 ? (
             <div className="rowerr">
               No active Planned Route exists yet — release FLOATING, or define a

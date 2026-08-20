@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test } from 'vitest';
@@ -13,14 +13,16 @@ import { REAL_VIEWS } from './app/real-views';
 //  2. this suite keeps that sentinel list honest — every sentinel must
 //     exist in the development mock sources, so the build check can
 //     never silently rot into scanning for values that no longer exist;
-//  3. the real modules (the API layer, Management → Machines,
-//     Administration since Phase 3.5, Management → Work Orders since
-//     Phase 4) ship in production builds, so this suite verifies at
-//     the source level that none of them imports from src/mocks/ —
-//     the deliberate exceptions are the development-only previews
-//     (the Worker sessions policy preview and the Completed Work
-//     Orders visual preview), each reachable only through an
-//     `import.meta.env.DEV`-guarded lazy import.
+//  3. this suite walks the production module graph transitively from
+//     the real entry point and verifies at the source level that
+//     nothing it reaches imports from src/mocks/ — the deliberate
+//     exceptions are the development-only previews (the Worker
+//     sessions policy preview and the Completed Work Orders visual
+//     preview), each reachable only through an
+//     `import.meta.env.DEV`-guarded lazy import that a production
+//     build compiles away. The walk replaces an earlier fixed list of
+//     view folders, which stopped covering the shared helper modules
+//     the real views started importing.
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
 const scriptPath = join(
@@ -98,37 +100,88 @@ test('the real views ship in every build', () => {
   );
 });
 
-/** Production modules (shipped in every build) that must never import
- * from src/mocks/. */
-const PRODUCTION_MODULE_DIRS = [
-  'api',
-  join('views', 'machines'),
-  join('views', 'administration'),
-  join('views', 'work-orders'),
-];
-
-/** The development-only modules inside production view folders —
- * each reachable only through an `import.meta.env.DEV`-guarded lazy
- * import, so production builds drop them from the module graph. */
-const DEV_ONLY_MODULES = new Set([
-  join('views', 'administration', 'WorkerSessionsPreview.tsx'),
-  join('views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
-]);
-
-test('production modules do not import from src/mocks/', () => {
-  const offenders: string[] = [];
-  for (const dir of PRODUCTION_MODULE_DIRS) {
-    for (const file of readdirSync(join(srcDir, dir))) {
-      if (!/\.(ts|tsx)$/.test(file) || /\.test\.tsx?$/.test(file)) continue;
-      const path = join(srcDir, dir, file);
-      const relativePath = relative(srcDir, path);
-      if (DEV_ONLY_MODULES.has(relativePath)) continue;
-      const source = readFileSync(path, 'utf8');
-      if (/from '(\.\.\/)+mocks\//.test(source)) {
-        offenders.push(relativePath);
-      }
+/** Resolve one relative import specifier to a file under src/, or null
+ * when it is a bare package / asset import. */
+function resolveModule(fromFile: string, specifier: string): string | null {
+  if (!specifier.startsWith('.')) return null;
+  const base = join(dirname(fromFile), specifier);
+  for (const candidate of [
+    `${base}.ts`,
+    `${base}.tsx`,
+    join(base, 'index.ts'),
+    join(base, 'index.tsx'),
+    base,
+  ]) {
+    if (
+      /\.tsx?$/.test(candidate) &&
+      existsSync(candidate) &&
+      statSync(candidate).isFile()
+    ) {
+      return candidate;
     }
   }
+  return null;
+}
+
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+}
+
+/**
+ * Every module a production build actually reaches, walked transitively
+ * from the real entry point.
+ *
+ * Static imports are always followed. A DYNAMIC import inside a module
+ * that tests `import.meta.env.DEV` is a cut edge: Vite replaces that
+ * constant statically, so in a production build the branch is dead
+ * code and its lazy chunk is never emitted — this is exactly how the
+ * mock views, the Worker sessions preview and the Completed Work
+ * Orders preview leave the graph. Walking instead of listing folders
+ * is the point: shared helpers that started life in the mock views
+ * (dates, barcode parsing, the toast hook) are production modules
+ * today, and a fixed directory list silently stopped covering them.
+ */
+function productionModuleGraph(): string[] {
+  const entry = join(srcDir, 'main.tsx');
+  const seen = new Set<string>();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    // Comments are stripped first: a module that only MENTIONS the DEV
+    // boundary in prose still ships its dynamic imports.
+    const source = stripComments(readFileSync(file, 'utf8'));
+    const devGuarded = source.includes('import.meta.env.DEV');
+    const specifiers = [
+      // Static: `import x from '…'`, `export … from '…'`, `import '…'`.
+      ...Array.from(source.matchAll(/\bfrom\s+'([^']+)'/g), (m) => m[1]),
+      ...Array.from(source.matchAll(/^\s*import\s+'([^']+)'/gm), (m) => m[1]),
+      // Dynamic, and only from modules with no DEV guard.
+      ...(devGuarded
+        ? []
+        : Array.from(source.matchAll(/\bimport\(\s*'([^']+)'/g), (m) => m[1])),
+    ];
+    for (const specifier of specifiers) {
+      const resolved = resolveModule(file, specifier);
+      if (resolved) queue.push(resolved);
+    }
+  }
+  return [...seen].map((file) => relative(srcDir, file)).sort();
+}
+
+test('no production module reaches src/mocks/', () => {
+  const graph = productionModuleGraph();
+  // The walk is meaningful only if it actually reached the real views.
+  expect(graph).toContain(join('app', 'real-views.ts'));
+  expect(graph).toContain(join('views', 'work-orders', 'WorkOrdersView.tsx'));
+  expect(graph.length).toBeGreaterThan(30);
+
+  const offenders = graph.filter(
+    (module) => module === 'mocks' || module.startsWith(`mocks${sep}`),
+  );
   expect(offenders).toEqual([]);
 });
 

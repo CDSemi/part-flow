@@ -33,6 +33,14 @@ const STEP_TITLES = [
   'Optional metadata',
 ];
 
+/** The PN master is an unbounded catalog, so step ① is a real search:
+ * it starts only once the entry is specific enough, waits out the
+ * typing burst instead of querying per keystroke, and renders a
+ * bounded list. */
+const MIN_SEARCH_LENGTH = 2;
+const SEARCH_DEBOUNCE_MS = 250;
+const RENDERED_MATCH_LIMIT = 50;
+
 /**
  * One accessible multi-step Add Part dialog (no stacked nested modals):
  * ① search/select an existing PN or explicitly create a new one,
@@ -84,10 +92,20 @@ export function AddPartDialog({
   // never silently removed. The master record itself is created by the
   // Save demand transaction (create-on-first-valid-use).
   const trimmed = query.trim();
-  const searchLoader = useCallback(() => searchPartNumbers(query), [query]);
+  const [settledQuery, setSettledQuery] = useState(query);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledQuery(query), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const searchable = settledQuery.trim().length >= MIN_SEARCH_LENGTH;
+  const searchLoader = useCallback(
+    () => (searchable ? searchPartNumbers(settledQuery) : Promise.resolve([])),
+    [searchable, settledQuery],
+  );
   const searchData = useApiData(searchLoader);
-  const matches =
+  const allMatches =
     searchData.state.status === 'ready' ? searchData.state.data : [];
+  const matches = allMatches.slice(0, RENDERED_MATCH_LIMIT);
   const canonical = normalizePartNumber(query);
   const exactMatch =
     canonical !== null &&
@@ -249,11 +267,21 @@ export function AddPartDialog({
                 <div className="ap-empty" role="alert">
                   {searchData.state.message}
                 </div>
+              ) : !searchable ? (
+                <div className="ap-empty">
+                  Type at least {MIN_SEARCH_LENGTH} characters to search Part
+                  Numbers.
+                </div>
               ) : searchData.state.status === 'loading' ? (
                 <div className="ap-empty">Searching Part Numbers…</div>
               ) : matches.length === 0 ? (
                 <div className="ap-empty">
-                  No existing PN matches “{query.trim()}”.
+                  No existing PN matches “{settledQuery.trim()}”.
+                </div>
+              ) : allMatches.length > matches.length ? (
+                <div className="ap-empty">
+                  Showing the first {RENDERED_MATCH_LIMIT} of{' '}
+                  {allMatches.length} matches — refine the search.
                 </div>
               ) : null}
             </div>

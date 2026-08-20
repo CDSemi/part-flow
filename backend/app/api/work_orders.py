@@ -28,6 +28,12 @@ Deliberate surface decisions:
   /work-orders/{id}`` saves the Work Order Details draft (header
   edits + ``line_edits`` + ``new_lines``) — each all-or-nothing with
   its audit rows.
+- ``released_quantity`` / ``remaining_quantity`` are derived per demand
+  from the immutable ``RECEIVED`` Movement context: a demand may be
+  released in several parts, so the release action stays available
+  while ``remaining_quantity > 0`` and the server refuses anything
+  beyond it. A line with any released quantity is read-only — a
+  ``line_edits`` entry addressing it is a 409 that changes nothing.
 - ``DELETE /work-orders/{id}/demands/{id}`` enforces the canonical
   removal rules (PROJECT_PROFILE §13, §8.2) in the backend, never
   only in the UI: a saved demand deletes only while no production
@@ -79,6 +85,12 @@ class WorkOrderDemandResponse(BaseModel):
     # demand. The UI renders such a line Released/read-only — the flag
     # survives any reload and is never a client-session guess.
     has_released_quantity: bool
+    # Quantity already released for this demand, and what is left of
+    # the requested quantity. A demand may be released in several
+    # parts, so the UI keeps offering the release action while
+    # remaining_quantity > 0; the server enforces the same cap.
+    released_quantity: int
+    remaining_quantity: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -187,7 +199,7 @@ def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
     )
 
 
-def _demand_response(demand: WorkOrderDemand, released: bool) -> WorkOrderDemandResponse:
+def _demand_response(demand: WorkOrderDemand, released: int) -> WorkOrderDemandResponse:
     return WorkOrderDemandResponse(
         id=demand.id,
         work_order_id=demand.work_order_id,
@@ -201,7 +213,9 @@ def _demand_response(demand: WorkOrderDemand, released: bool) -> WorkOrderDemand
         requester=demand.requester,
         reason=demand.reason,
         notes=demand.notes,
-        has_released_quantity=released,
+        has_released_quantity=released > 0,
+        released_quantity=released,
+        remaining_quantity=max(demand.requested_quantity - released, 0),
         created_at=demand.created_at,
         updated_at=demand.updated_at,
     )
@@ -218,7 +232,7 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
         demands=[
-            _demand_response(demand, demand.id in detail.released_demand_ids)
+            _demand_response(demand, detail.released_quantities.get(demand.id, 0))
             for demand in detail.demands
         ],
     )

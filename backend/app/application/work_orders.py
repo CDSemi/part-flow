@@ -35,6 +35,13 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   new and edited demand lines, any first-use PN masters, and every
   ``audit_events`` row commit together or roll back together — no
   partial business draft can persist (SLICE1_DATA_MODEL §16).
+- A demand line that has released production quantity is read-only
+  (GUI_DESIGN §11 — "a line whose quantity has been released arrives
+  read-only from the first load"): the server refuses an edit of such
+  a line instead of leaving the rule to the UI. Its released and
+  remaining quantities are DERIVED from the immutable ``RECEIVED``
+  history (``production_release.released_quantities``) — never stored,
+  so they survive any reload and need no migration.
 - Demand-line removal follows the canonical rule (PROJECT_PROFILE §13):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
@@ -176,21 +183,27 @@ class WorkOrderDetail(NamedTuple):
 
     work_order: WorkOrder
     demands: list[WorkOrderDemand]
-    # Demand ids with committed release evidence (immutable RECEIVED
-    # Movement context) — the server-authoritative Released flag.
-    released_demand_ids: frozenset[int]
+    # Released quantity per demand id, derived from the immutable
+    # RECEIVED Movement context — the server-authoritative Released
+    # evidence and the basis of each line's remaining quantity. A
+    # demand never released is absent (read as 0).
+    released_quantities: Mapping[int, int]
     # The server-derived read status (see WorkOrderSummary.status).
     status: str
 
 
 def _derived_status(
-    work_order: WorkOrder, demand_ids: Collection[int], released: Collection[int]
+    work_order: WorkOrder,
+    demands: Collection[tuple[int, int]],
+    released: Mapping[int, int],
 ) -> str:
-    """OPEN while any current demand has never released; RELEASED once
-    every current demand line carries release evidence (GUI_DESIGN
-    §11.1). Derived at read time from immutable history — the stored
-    column stays OPEN, so no migration and no drift are possible."""
-    if demand_ids and all(demand_id in released for demand_id in demand_ids):
+    """OPEN while any current demand still has quantity left to release;
+    RELEASED once every current demand line is fully released
+    (GUI_DESIGN §11.1). Derived at read time from immutable history —
+    the stored column stays OPEN, so no migration and no drift are
+    possible. A partially released line keeps the Work Order OPEN: its
+    remaining quantity is still releasable."""
+    if demands and all(released.get(demand_id, 0) >= requested for demand_id, requested in demands):
         return WorkOrderStatus.RELEASED
     return work_order.status
 
@@ -199,12 +212,16 @@ def _build_detail(
     session: Session, work_order: WorkOrder, demands: list[WorkOrderDemand]
 ) -> WorkOrderDetail:
     """Assemble the detail read model with ONE released-evidence query."""
-    released = production_release.released_demand_ids(session, [demand.id for demand in demands])
+    released = production_release.released_quantities(session, [demand.id for demand in demands])
     return WorkOrderDetail(
         work_order=work_order,
         demands=demands,
-        released_demand_ids=frozenset(released),
-        status=_derived_status(work_order, [demand.id for demand in demands], released),
+        released_quantities=released,
+        status=_derived_status(
+            work_order,
+            [(demand.id, demand.requested_quantity) for demand in demands],
+            released,
+        ),
     )
 
 
@@ -223,8 +240,11 @@ def list_work_orders(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
     )
     demand_ids = func.array_agg(aggregate_order_by(WorkOrderDemand.id, WorkOrderDemand.id))
+    requested = func.array_agg(
+        aggregate_order_by(WorkOrderDemand.requested_quantity, WorkOrderDemand.id)
+    )
     query = (
-        select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers, demand_ids)
+        select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers, demand_ids, requested)
         .outerjoin(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
         .group_by(WorkOrder.id)
         .order_by(WorkOrder.received_date.desc(), WorkOrder.id.desc())
@@ -240,22 +260,26 @@ def list_work_orders(
             count,
             # array_agg over an empty outer join yields [None].
             [value for value in (values or []) if value is not None],
-            [demand_id for demand_id in (ids or []) if demand_id is not None],
+            [
+                (demand_id, quantity)
+                for demand_id, quantity in zip(ids or [], quantities or [], strict=True)
+                if demand_id is not None
+            ],
         )
-        for work_order, count, values, ids in session.execute(query)
+        for work_order, count, values, ids, quantities in session.execute(query)
     ]
     # ONE released-evidence query for the whole page — never per row.
-    released = production_release.released_demand_ids(
-        session, [demand_id for _, _, _, ids in rows for demand_id in ids]
+    released = production_release.released_quantities(
+        session, [demand_id for _, _, _, lines in rows for demand_id, _ in lines]
     )
     return [
         WorkOrderSummary(
             work_order=work_order,
             demand_line_count=count,
             part_numbers=values,
-            status=_derived_status(work_order, ids, released),
+            status=_derived_status(work_order, lines, released),
         )
-        for work_order, count, values, ids in rows
+        for work_order, count, values, lines in rows
     ]
 
 
@@ -501,6 +525,15 @@ def update_work_order(
         if demand is None:
             raise NotFoundError(
                 f"Demand line {demand_id} does not exist on Work Order {work_order.id}."
+            )
+        if detail.released_quantities.get(demand.id, 0) > 0:
+            # GUI_DESIGN §11 wording — the UI renders the line read-only,
+            # the backend still refuses. Later adjustments go through
+            # the correction and production workflows
+            # (PROJECT_PROFILE §16), never through a demand edit.
+            raise ConflictError(
+                "Cannot edit: production quantity has already been released"
+                f" for Part Number '{demand.part_number}'."
             )
         before = _demand_snapshot(demand)
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):

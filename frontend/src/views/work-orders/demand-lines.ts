@@ -49,6 +49,12 @@ export interface DemandLineDraft {
    * line renders Released and read-only (GUI_DESIGN §11.2). Never a
    * client-session guess — it survives any reload. */
   released: boolean;
+  /** Server-derived released and remaining quantity of the demand. A
+   * demand may be released in several parts, so the release action
+   * stays offered while `remainingQuantity > 0` — the backend enforces
+   * the same cap. */
+  releasedQuantity: number;
+  remainingQuantity: number;
   statusLabel: string;
 }
 
@@ -87,6 +93,8 @@ export function createDraftLine(
     notes: '',
     saved: false,
     released: false,
+    releasedQuantity: 0,
+    remainingQuantity: 0,
     statusLabel: 'Draft (unsaved)',
     ...init,
   };
@@ -113,6 +121,8 @@ export function draftFromDemand(
 ): DemandLineDraft {
   const released = demand.hasReleasedQuantity;
   return createDraftLine({
+    releasedQuantity: demand.releasedQuantity,
+    remainingQuantity: demand.remainingQuantity,
     demandId: demand.id,
     pn: demand.partNumber,
     barcodeNote: `barcode PF:PN:${demand.partNumber}`,
@@ -127,7 +137,14 @@ export function draftFromDemand(
     notes: demand.notes ?? '',
     saved: true,
     released,
-    statusLabel: released ? 'Released' : 'Saved',
+    // A partly released line states what is actually released, so the
+    // remaining quantity is never mistaken for "nothing released" or
+    // for "fully released".
+    statusLabel: !released
+      ? 'Saved'
+      : demand.remainingQuantity > 0
+        ? `Released ${demand.releasedQuantity}/${demand.requestedQuantity}`
+        : 'Released',
   });
 }
 

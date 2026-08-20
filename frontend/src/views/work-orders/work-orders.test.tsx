@@ -57,8 +57,10 @@ interface ReleaseCommit {
 interface FakeState {
   workOrders: FakeWorkOrder[];
   partNumbers: string[];
-  /** Demands with released production quantity (server knowledge). */
-  releasedDemands: Set<number>;
+  /** Released quantity per demand id (server knowledge — derived from
+   * Movement history on the real backend). A demand may be released in
+   * several parts, so this is a running total, never a flag. */
+  releasedQuantities: Map<number, number>;
   /** PN → existing ACTIVE distribution (confirmation payload). */
   activeDistribution: Record<
     string,
@@ -71,6 +73,11 @@ interface FakeState {
     }[]
   >;
   committedReleases: Map<string, ReleaseCommit>;
+  /** Every release body the client sent, in order — the idempotency
+   * key of each attempt is observable from here. */
+  releaseAttempts: Record<string, unknown>[];
+  /** Reject the next release with a server error, committing nothing. */
+  failNextRelease: boolean;
   nextWorkOrderId: number;
   nextDemandId: number;
   nextFlowId: number;
@@ -148,7 +155,11 @@ function seedState(): FakeState {
       },
     ],
     partNumbers: ['309-127', 'A-100', 'B-200', 'C-300', 'D-400', 'E-500'],
-    releasedDemands: new Set([102, 301]),
+    // Demands 102 (10 pcs) and 301 (8 pcs) are fully released.
+    releasedQuantities: new Map([
+      [102, 10],
+      [301, 8],
+    ]),
     activeDistribution: {
       'A-100': [
         {
@@ -161,6 +172,8 @@ function seedState(): FakeState {
       ],
     },
     committedReleases: new Map(),
+    releaseAttempts: [],
+    failNextRelease: false,
     nextWorkOrderId: 100,
     nextDemandId: 1000,
     nextFlowId: 500,
@@ -187,11 +200,19 @@ function detailResponse(message: string, status: number): Response {
   return json({ detail: message }, status);
 }
 
-/** Server-derived read status: RELEASED once EVERY current demand has
- * release evidence; the stored column stays OPEN. */
+function releasedOf(demandId: number): number {
+  return state.releasedQuantities.get(demandId) ?? 0;
+}
+
+function remainingOf(demand: FakeDemand): number {
+  return Math.max(demand.requested_quantity - releasedOf(demand.id), 0);
+}
+
+/** Server-derived read status: RELEASED once EVERY current demand is
+ * fully released; the stored column stays OPEN. A partly released
+ * line keeps the Work Order Open — its remainder is still releasable. */
 function derivedStatus(wo: FakeWorkOrder): string {
-  return wo.demands.length > 0 &&
-    wo.demands.every((d) => state.releasedDemands.has(d.id))
+  return wo.demands.length > 0 && wo.demands.every((d) => remainingOf(d) === 0)
     ? 'RELEASED'
     : wo.status;
 }
@@ -220,7 +241,9 @@ function detailWire(wo: FakeWorkOrder) {
     demands: wo.demands.map((d) => ({
       ...d,
       // Server-derived release evidence — never a client-session flag.
-      has_released_quantity: state.releasedDemands.has(d.id),
+      has_released_quantity: releasedOf(d.id) > 0,
+      released_quantity: releasedOf(d.id),
+      remaining_quantity: remainingOf(d),
     })),
   };
 }
@@ -384,8 +407,13 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     /^\/api\/work-orders\/(\d+)\/demands\/(\d+)\/release$/.exec(url);
   if (releaseMatch && method === 'POST') {
     const deviceEventId = String(body.device_event_id);
+    state.releaseAttempts.push(body);
     const replay = state.committedReleases.get(deviceEventId);
     if (replay) return json(replay.wire, 200);
+    if (state.failNextRelease) {
+      state.failNextRelease = false;
+      return detailResponse('Release rejected by the server.', 409);
+    }
     const pn = String(body.part_number);
     const distribution = state.activeDistribution[pn];
     if (distribution && body.confirm_active_quantity !== true) {
@@ -406,8 +434,12 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       state.nextMovementId++,
       snapshotId,
     );
+    const releasedDemandId = Number(releaseMatch[2]);
     state.committedReleases.set(deviceEventId, { body, wire });
-    state.releasedDemands.add(Number(releaseMatch[2]));
+    state.releasedQuantities.set(
+      releasedDemandId,
+      releasedOf(releasedDemandId) + Number(body.quantity),
+    );
     if (state.dropNextReleaseResponse) {
       state.dropNextReleaseResponse = false;
       throw new TypeError('Failed to fetch');
@@ -421,7 +453,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     const wo = state.workOrders.find((w) => w.id === Number(demandMatch[1]));
     if (!wo) return detailResponse('Work Order not found.', 404);
     const demandId = Number(demandMatch[2]);
-    if (state.releasedDemands.has(demandId)) {
+    if (releasedOf(demandId) > 0) {
       return detailResponse(
         'Cannot remove: production quantity has already been released.',
         409,
@@ -1339,7 +1371,7 @@ test('a release committed after the view loaded still blocks removal — server 
   // The stale-view race: A-100 released elsewhere AFTER this dialog
   // loaded. The UI still offers removal, but the backend rule is the
   // authority — the 409 removes nothing and explains why.
-  state.releasedDemands.add(101);
+  state.releasedQuantities.set(101, 25);
   fireEvent.click(
     within(dialog).getByRole('button', { name: 'Remove line A-100' }),
   );
@@ -1653,6 +1685,132 @@ test('a transport retry reuses the device_event_id and can only replay the commi
   // Still exactly ONE committed flow.
   expect(state.committedReleases.size).toBe(1);
   expect(releaseCalls()).toHaveLength(2);
+});
+
+test('a demand released in parts keeps offering the remaining quantity', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500'); // demand 103, requested 7
+
+  // The quantity defaults to what is LEFT to release (all of it here).
+  expect(within(release).getByLabelText('Release quantity')).toHaveValue('7');
+  fireEvent.change(within(release).getByLabelText('Release quantity'), {
+    target: { value: '3' },
+  });
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  const result = await screen.findByRole('dialog', {
+    name: 'Release committed',
+  });
+  expect(result).toHaveTextContent('× 3 pcs');
+  fireEvent.click(within(result).getByRole('button', { name: 'Done' }));
+
+  // The line states what is actually released, the Work Order stays
+  // Open, and the release action is still available for the remainder.
+  const detailDialog = screen.getByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  const row = await waitFor(() => {
+    const partial = within(detailDialog)
+      .getByText('E-500')
+      .closest('tr') as HTMLElement;
+    expect(within(partial).getByText('Released 3/7')).toBeInTheDocument();
+    return partial;
+  });
+  expect(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  ).toBeEnabled();
+  expect(within(detailDialog).getByText('Open')).toBeInTheDocument();
+  // Removal stays blocked — quantity has been released (§13).
+  expect(
+    within(row).getByRole('button', { name: 'Remove line E-500' }),
+  ).toBeDisabled();
+
+  // Reopening offers exactly the remainder and refuses more than that.
+  fireEvent.click(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  );
+  const second = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  await within(second).findByLabelText('Release quantity');
+  expect(within(second).getByLabelText('Release quantity')).toHaveValue('4');
+  expect(second).toHaveTextContent(/already released 3/);
+  expect(second).toHaveTextContent(/remaining 4/);
+
+  fireEvent.change(within(second).getByLabelText('Release quantity'), {
+    target: { value: '5' },
+  });
+  expect(second).toHaveTextContent(/Only 4 pcs remain to release/);
+  expect(
+    within(second).getByRole('button', { name: 'Confirm release' }),
+  ).toBeDisabled();
+});
+
+test('a fully released demand line closes its release action', async () => {
+  await renderWorkOrders();
+  // Demand 102 (B-200) is fully released in the seeded server state.
+  const detailDialog = await openWorkOrderDetail('007201', 'B-200');
+  const row = within(detailDialog).getByText('B-200').closest('tr')!;
+
+  expect(within(row as HTMLElement).getByText('Released')).toBeInTheDocument();
+  expect(
+    within(row as HTMLElement).getByRole('button', {
+      name: 'Release to production…',
+    }),
+  ).toBeDisabled();
+});
+
+test('a changed release intent gets a new device_event_id; a plain retry keeps it', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  fireEvent.change(within(release).getByLabelText('Operation'), {
+    target: { value: '11' },
+  });
+
+  state.failNextRelease = true;
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  await within(release).findByText(/Release rejected by the server\./);
+
+  // An unchanged retry is the SAME submission — same key.
+  state.failNextRelease = true;
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Retry release' }),
+  );
+  await waitFor(() => expect(state.releaseAttempts).toHaveLength(2));
+  expect(state.releaseAttempts[1].device_event_id).toBe(
+    state.releaseAttempts[0].device_event_id,
+  );
+
+  // Editing a field the server fingerprint covers is a NEW intent: it
+  // gets a fresh key, so the corrected release is never rejected as an
+  // idempotency conflict (SLICE1 §14).
+  fireEvent.change(within(release).getByLabelText('Release quantity'), {
+    target: { value: '4' },
+  });
+  expect(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  ).toBeEnabled();
+  fireEvent.click(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  );
+  await screen.findByRole('dialog', { name: 'Release committed' });
+  expect(state.releaseAttempts).toHaveLength(3);
+  expect(state.releaseAttempts[2].quantity).toBe(4);
+  expect(state.releaseAttempts[2].device_event_id).not.toBe(
+    state.releaseAttempts[0].device_event_id,
+  );
 });
 
 test('cancelling the release creates nothing', async () => {

@@ -1,4 +1,4 @@
-# PartFlow Project Profile v19
+# PartFlow Project Profile v20
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -1282,7 +1282,9 @@ Production release is a separate, explicit action. On production release:
 
 New ERP production normally uses Request Type `NEW`.
 
-The starting Area may be Material or another configured starting Area.
+The starting Area may be Material or another configured starting Area. A **terminal** Area is never a starting Area (v20): it is where finished quantity ends (§18), so production release into it is refused.
+
+**Partial and repeated release (v20 — decided):** a Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal, and each part is its own explicit release creating its own Quantity Flow — parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated next. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing. A Work Order Demand line that has released quantity is read-only — it can no longer be edited or removed (§13 *Work Order Demand Removal*); later adjustments go through the correction and production workflows (§16).
 
 If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new Work Order requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
 

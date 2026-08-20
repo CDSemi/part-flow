@@ -1,4 +1,5 @@
-// Shared date/duration helpers for the mock views.
+// Shared date/duration helpers for the Work Orders, Machines and
+// monitoring views.
 //
 // Editable date fields hold ISO `YYYY-MM-DD` values (native
 // <input type="date">); read-only presentation formats them as

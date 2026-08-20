@@ -2,7 +2,7 @@
 
 > **Status:** Analysis and design only. No migrations or application code.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.
-> **Basis:** `docs/PROJECT_PROFILE.md` (v19, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3, 3.5, 4), `docs/GUI_DESIGN.md` §11 Work Orders, `CLAUDE.md`.
+> **Basis:** `docs/PROJECT_PROFILE.md` (v20, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3, 3.5, 4), `docs/GUI_DESIGN.md` §11 Work Orders, `CLAUDE.md`.
 
 ---
 
@@ -95,7 +95,7 @@ PartMovement carries **no** `work_order_demand_id`. A release may be initiated f
 - **Canonical demand ordering key** (PROJECT_PROFILE §18), for every consumer that orders demand: `priority_rank` (Hot rank first), then `due_date` ascending with **NULLS LAST**, then the parent WorkOrder's `received_date` ascending for undated demand, then a stable deterministic tie-breaker (creation order / internal `id`). Slice 1 performs no such ordering itself; supporting indexes arrive with the phases that consume the ordering (allocation, boards, priority — Phases 10–12).
 - `job_numbers` stores external Job Numbers as data (list of arbitrary strings) — searchable, displayable, sortable; never a domain aggregate.
 - `priority_rank` is nullable; Hot ranking management is a later phase but the column belongs to WorkOrderDemand from the start.
-- Editing WorkOrderDemand is permitted (Admin/Manager per PROJECT_PROFILE §8.3); edits are audited (§16) and never touch QuantityFlow or Movement.
+- Editing WorkOrderDemand is permitted (Admin/Manager per PROJECT_PROFILE §8.3); edits are audited (§16) and never touch QuantityFlow or Movement. The one exception is a line that has released production quantity: it is read-only (§8a; GUI_DESIGN §11), enforced by the Application layer and not only by the UI, so `requested_quantity` can never fall below what is already released. Removal of such a line stays refused by PROJECT_PROFILE §13.
 
 ---
 
@@ -124,7 +124,7 @@ Input: PN, release quantity, Route Mode (`FLOATING` default; `PLANNED` with a te
 
 Steps (one transaction, §13):
 
-1. Validate the canonical PN (normalized: trimmed, uppercase, no internal whitespace), Area active and configured as a starting Area, Operation valid for that Area, RouteTemplate active **when `PLANNED`**, quantity > 0. The PartNumber master has no active/inactive state and its existence is never a release precondition.
+1. Validate the canonical PN (normalized: trimmed, uppercase, no internal whitespace), Area active and configured as a starting Area — a **terminal** Area (`areas.is_terminal`, the Stockroom end of the flow, PROJECT_PROFILE §18) is never one and is refused in the Application layer, not only in the release UI — Operation valid for that Area, RouteTemplate active **when `PLANNED`**, quantity > 0 and within the initiating demand's remaining quantity (§8a). The PartNumber master has no active/inactive state and its existence is never a release precondition.
 2. If the PN has active flows, require the request to carry the explicit confirmation flag set by the UI after showing the existing distribution; otherwise reject. Never auto-create or auto-merge.
 3. Snapshot the AssignedRoute **only for a `PLANNED` release** (§10); a `FLOATING` release creates none.
 4. Create the QuantityFlow with its `route_mode`, its `assigned_route_id` (the snapshot's id for `PLANNED`, NULL for `FLOATING` — PROJECT_PROFILE §8.7) and its initial projection: `current_area_id` = the confirmed starting Area (§9, §15).
@@ -132,6 +132,15 @@ Steps (one transaction, §13):
 6. Commit and return: flow id, route mode, route snapshot id when planned, starting Area, Operation, quantity, Movement id.
 
 The release transaction appends **no** generic `audit_events` row: the `RECEIVED` Movement is itself the immutable production audit record (§16).
+
+### 8a. Partial and repeated release of one demand
+
+A WorkOrderDemand may be released in **several parts** — 20 of 50, then 12, then 18. Each part is an independent release: its own `device_event_id`, its own QuantityFlow, its own `RECEIVED` Movement, and (from the second part onward, because the PN then has active quantity) its own explicit confirmation under §8.2. Nothing is ever merged.
+
+- `released_quantity(demand)` is **derived**: the sum of `RECEIVED.quantity` over the Movements whose `metadata.context.work_order_demand_id` is that demand (§11/§14). There is no stored counter, no column, and no migration — `part_movements` is append-only, so the value can never regress or drift, and it needs no reconciliation.
+- `remaining_quantity = requested_quantity − released_quantity` is the **hard server-side cap**: a release beyond it, or any release once it reaches 0, is refused and creates nothing. The demand row is locked for the release transaction, so two concurrent partial releases of the same demand serialize and can never jointly over-release.
+- A demand with any released quantity is **read-only** (GUI_DESIGN §11): the demand-edit command (§7) refuses a `line_edits` entry addressing it, so lowering `requested_quantity` below what is already released is impossible. Removal stays refused by PROJECT_PROFILE §13. The Work Order header/number edit is unaffected.
+- Read models expose `released_quantity` and `remaining_quantity` per demand; a Work Order reads `RELEASED` only when **every** current demand line has `remaining_quantity = 0` — a partly released line keeps it `OPEN`, because its remainder is still releasable.
 
 ---
 
@@ -250,7 +259,7 @@ Event mapping in this slice: Work Order create/edit → `CREATED`/`UPDATED` on `
 Rules:
 
 - Every audit row commits in the **same transaction** as the change it records; an audited write without its audit row (or vice versa) must be impossible.
-- Audit rows are append-only: UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, exactly like `part_movements`.
+- Audit rows are append-only: UPDATE/DELETE revoked from the application role plus a raise-on-write trigger, exactly like `part_movements`. The trigger ships with the Slice 1 migration; the application-role revocation arrives with deployment hardening once a distinct application database role exists (IMPLEMENTATION_ROADMAP Phases 3 and 16) — the same deferral as `part_movements`, and the trigger already binds every non-superuser path.
 - Edits append a new `UPDATED` row; prior rows are never rewritten.
 
 ---
@@ -328,7 +337,10 @@ Cross-row invariants PostgreSQL cannot express declaratively (projection agrees 
 13. Every WorkOrder and WorkOrderDemand creation or edit appends an `audit_events` row (`CREATED`/`UPDATED` with `before_data`/`after_data`) in the same transaction as the change; edits preserve all prior audit rows unchanged (append-only history, verified by test).
 14. `audit_events` contains rows only for `WorkOrder`, `WorkOrderDemand`, and `PartNumber` — never for production release or any other production activity (constraint- and test-verified).
 15. Conservation holds: Σ(active flow quantities per PN) = Σ(`RECEIVED` quantities per PN).
-16. No Slice 1 migration contains a foreign key to any table it does not create, nor any unused deferred column: no `machines`, `workers`, `scan_sessions`, `scan_stations`, or user-table references, and no `current_machine_id`, `parent_flow_id`, `station_id`, `worker_id`, `scan_session_id`, `reverses_movement_id`, `movement_reason`, `is_terminal`, `worker_identification_mode`, `preferred_machine_id`, or `completed_at`. (There is no `machine_assignment_mode` at all anymore — Area behavior follows from its Machines, PROJECT_PROFILE §12.)
+16. Releasing into a **terminal** Area is rejected with no write, whatever the UI offered.
+17. A demand releases in parts until its remaining quantity is exhausted: each part creates its own QuantityFlow and `RECEIVED` (never a merge), the released and remaining quantities derive from Movement history alone, a release beyond the remainder — and any release once it is 0 — is rejected with no write, and the Work Order reads `RELEASED` only once every line's remainder is 0.
+18. Editing a demand line that has released quantity is rejected with no write; its prior audit history and the Work Order header edit are unaffected.
+19. No Slice 1 migration contains a foreign key to any table it does not create, nor any unused deferred column: no `machines`, `workers`, `scan_sessions`, `scan_stations`, or user-table references, and no `current_machine_id`, `parent_flow_id`, `station_id`, `worker_id`, `scan_session_id`, `reverses_movement_id`, `movement_reason`, `is_terminal`, `worker_identification_mode`, `preferred_machine_id`, or `completed_at`. (There is no `machine_assignment_mode` at all anymore — Area behavior follows from its Machines, PROJECT_PROFILE §12.)
 
 ---
 

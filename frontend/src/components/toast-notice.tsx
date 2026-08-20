@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
  * Transient toast for confirmed view interactions. Messages use normal
- * operator wording; the development-only data boundary is stated once
- * per view by DevNotice, never repeated in every toast.
+ * operator wording — one explanation lives in one place, so a toast
+ * never restates a rule the view already states.
  */
-export function useMockNotice(): {
+export function useToastNotice(): {
   notice: string | null;
   showNotice: (message: string) => void;
   noticeElement: React.ReactNode;

@@ -60,6 +60,16 @@ export interface WorkOrderDemand {
    * read-only; this is never a client-session guess.
    */
   hasReleasedQuantity: boolean;
+  /**
+   * Quantity already released for this demand, and what is left of the
+   * requested quantity. A demand may be released in several parts (20
+   * of 50, then 12, then 18), so the release action stays offered
+   * while `remainingQuantity > 0` — the server enforces the same cap.
+   * Both are derived from Movement history: never stored, never a
+   * session guess.
+   */
+  releasedQuantity: number;
+  remainingQuantity: number;
 }
 
 export interface WorkOrderDetail {
@@ -124,6 +134,8 @@ interface WorkOrderDemandWire {
   reason: string | null;
   notes: string | null;
   has_released_quantity: boolean;
+  released_quantity: number;
+  remaining_quantity: number;
 }
 
 interface WorkOrderDetailWire {
@@ -162,6 +174,8 @@ function toDemand(wire: WorkOrderDemandWire): WorkOrderDemand {
     reason: wire.reason,
     notes: wire.notes,
     hasReleasedQuantity: wire.has_released_quantity,
+    releasedQuantity: wire.released_quantity,
+    remainingQuantity: wire.remaining_quantity,
   };
 }
 

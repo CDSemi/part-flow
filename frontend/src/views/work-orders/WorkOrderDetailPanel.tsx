@@ -50,10 +50,17 @@ export interface ReleaseRequestContext {
   demandId: number;
   partNumber: string;
   requestedQuantity: number;
+  /** Already released, and what is left to release — both
+   * server-derived, and the same cap the backend enforces. */
+  releasedQuantity: number;
+  remainingQuantity: number;
 }
 
 const RELEASE_WHILE_DIRTY_EXPLANATION =
   'Save or discard demand changes before releasing.';
+
+const FULLY_RELEASED_EXPLANATION =
+  'Fully released — no remaining quantity on this demand line.';
 
 const REMOVE_WHILE_DIRTY_EXPLANATION =
   'Save or discard demand changes before removing a saved line.';
@@ -413,7 +420,12 @@ export function WorkOrderDetailPanel({
       due,
       display.filter((line) => !line.released),
     );
-    if (missing) {
+    // Only real, summarizable omissions open the confirmation. The
+    // missing external Work Order Number is NOT one here: in Details
+    // it is the always-visible optional audited edit (§11.2), so
+    // confirming it on every save of an internal Work Order would show
+    // an empty omission list.
+    if (missing && (missing.noWorkOrderDue || missing.undatedLineCount > 0)) {
       setConfirmMissing(missing);
       return;
     }
@@ -751,16 +763,21 @@ export function WorkOrderDetailPanel({
                                 disabled={
                                   writeBlocked ||
                                   busy ||
-                                  line.released ||
+                                  // Only an exhausted demand closes the
+                                  // action: a partly released line
+                                  // keeps releasing its remainder.
+                                  line.remainingQuantity === 0 ||
                                   // A release must run against the
                                   // COMMITTED demand — never with
                                   // unsaved edits in flight.
                                   dirty
                                 }
                                 title={
-                                  dirty && !line.released
-                                    ? RELEASE_WHILE_DIRTY_EXPLANATION
-                                    : undefined
+                                  line.remainingQuantity === 0
+                                    ? FULLY_RELEASED_EXPLANATION
+                                    : dirty
+                                      ? RELEASE_WHILE_DIRTY_EXPLANATION
+                                      : undefined
                                 }
                                 onClick={() => {
                                   // The committed server values — the
@@ -775,6 +792,10 @@ export function WorkOrderDetailPanel({
                                       partNumber: committed.partNumber,
                                       requestedQuantity:
                                         committed.requestedQuantity,
+                                      releasedQuantity:
+                                        committed.releasedQuantity,
+                                      remainingQuantity:
+                                        committed.remainingQuantity,
                                     });
                                   }
                                 }}

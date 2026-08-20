@@ -24,8 +24,9 @@ This module is the Phase 3 boundary: it migrates to the Phase 3
 revision `0002_phase3_domain` — never to `head` — so its exact-table-set
 and absent-deferred-column assertions keep guarding what Phase 3 itself
 created even as later migrations (Phase 3.5+) extend the schema.
-Head-level coverage (models↔migration parity, Phase 3.5 invariants)
-lives in test_phase35_schema.py.
+Head-level coverage (models↔migration parity, the current boundary)
+lives in test_phase4_schema.py; test_phase35_schema.py is pinned to
+`0003_phase35_environment` for the same reason as this module.
 """
 
 import datetime
@@ -261,6 +262,7 @@ class TestMigrationSchema:
                 "station_id",
                 "worker_id",
                 "scan_session_id",
+                "machine_id",
                 "movement_reason",
                 "reverses_movement_id",
             }
@@ -325,7 +327,7 @@ class TestMigrationSchema:
         assert doubled == set()
 
     # NOTE: models↔migration metadata parity is asserted at head in
-    # test_phase35_schema.py — the model metadata describes the full
+    # test_phase4_schema.py — the model metadata describes the full
     # current schema, which this Phase-3-boundary database predates.
 
     def test_downgrade_removes_every_created_object(self, admin_engine: Engine) -> None:

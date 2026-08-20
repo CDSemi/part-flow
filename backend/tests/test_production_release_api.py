@@ -203,7 +203,11 @@ _PRODUCTION_MODELS = (
     models.AssignedRouteStep,
     models.AuditEvent,
     models.PartNumber,
+    # The business tables belong in the zero-write assertion too: a
+    # release must never touch demand or its Work Order (the RELEASED
+    # read status is derived at read time, never stored).
     models.WorkOrderDemand,
+    models.WorkOrder,
 )
 
 
@@ -625,36 +629,84 @@ def test_same_device_event_id_replays_original_result(
     assert _counts(db_engine) == before
 
 
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        "quantity",
+        "starting_area_id",
+        "operation_id",
+        "route_mode",
+        "route_template_id",
+        "work_order_demand_id",
+    ],
+)
 def test_device_event_id_reuse_with_different_request_conflicts(
-    client: TestClient, db_engine: Engine
+    client: TestClient, db_engine: Engine, changed_field: str
 ) -> None:
+    """Every fingerprint field must make a reused id an explicit conflict.
+
+    SLICE1_DATA_MODEL §14 lists what the deterministic fingerprint
+    covers. Testing only one field would let a refactor silently drop
+    another: a retry that names a different starting Area would then
+    replay the original result with HTTP 200, and the operator would
+    believe quantity entered Area B while it sits in Area A. Each
+    variant asserts the 409 AND that nothing was created.
+    """
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
-    work_order_id, demand_id, pn = _create_demand(client)
+    other_area = _create_area(client)
+    other_operation = _create_operation(client, int(other_area["id"]))
+    second_operation = _create_operation(client, int(area["id"]))
+    template_id = _create_route_template(db_engine, [{"area_id": area["id"]}])
+    other_template_id = _create_route_template(db_engine, [{"area_id": area["id"]}])
+    pn = _unique("PN")
+    work_order_id, demand_id, pn = _create_demand(client, pn)
+    # A second Work Order for the SAME PN, so the demand-context
+    # variant differs in the demand id ALONE.
+    other_work_order_id, other_demand_id, _ = _create_demand(client, pn)
+
     event_id = str(uuid.uuid4())
-    first = _release(
-        client,
-        work_order_id,
-        demand_id,
-        part_number=pn,
-        starting_area_id=area["id"],
-        operation_id=operation["id"],
-        device_event_id=event_id,
-    )
+    base: dict[str, Any] = {
+        "part_number": pn,
+        "quantity": 25,
+        "route_mode": "PLANNED",
+        "route_template_id": template_id,
+        "starting_area_id": area["id"],
+        "operation_id": operation["id"],
+        "device_event_id": event_id,
+    }
+    first = _release(client, work_order_id, demand_id, **base)
     assert first.status_code == 201, first.text
     before = _counts(db_engine)
 
-    mismatch = _release(
-        client,
-        work_order_id,
-        demand_id,
-        part_number=pn,
-        starting_area_id=area["id"],
-        operation_id=operation["id"],
-        device_event_id=event_id,
-        quantity=26,  # different normalized request
-        confirm_active_quantity=True,
-    )
+    # One field of the normalized request differs — the id is the same.
+    variant = dict(base)
+    target_work_order_id = work_order_id
+    target_demand_id = demand_id
+    if changed_field == "quantity":
+        variant["quantity"] = 10
+    elif changed_field == "starting_area_id":
+        variant["route_mode"] = "FLOATING"
+        variant["route_template_id"] = None
+        variant["starting_area_id"] = other_area["id"]
+        variant["operation_id"] = other_operation["id"]
+    elif changed_field == "operation_id":
+        variant["route_mode"] = "FLOATING"
+        variant["route_template_id"] = None
+        variant["operation_id"] = second_operation["id"]
+    elif changed_field == "route_mode":
+        variant["route_mode"] = "FLOATING"
+        variant["route_template_id"] = None
+    elif changed_field == "route_template_id":
+        variant["route_template_id"] = other_template_id
+    else:
+        # Same PN, same Area/Operation/Route/quantity — ONLY the
+        # initiating demand context differs.
+        target_work_order_id = other_work_order_id
+        target_demand_id = other_demand_id
+
+    variant["confirm_active_quantity"] = True
+    mismatch = _release(client, target_work_order_id, target_demand_id, **variant)
     assert mismatch.status_code == 409, mismatch.text
     assert "device_event_id" in mismatch.json()["detail"]
     assert _counts(db_engine) == before  # nothing created
@@ -802,6 +854,7 @@ def test_projection_rebuilds_from_movement_history_alone(
     template_id = _create_route_template(
         db_engine, [{"area_id": area_b["id"]}, {"area_id": area_a["id"]}]
     )
+    own_flow_ids: set[int] = set()
     for starting, operation, mode, template in (
         (area_a, operation_a, "FLOATING", None),
         (area_b, operation_b, "PLANNED", template_id),
@@ -818,48 +871,344 @@ def test_projection_rebuilds_from_movement_history_alone(
             operation_id=operation["id"],
         )
         assert response.status_code == 201, response.text
+        own_flow_ids.add(int(response.json()["quantity_flow_id"]))
 
     with Session(db_engine) as session:
         rebuilt = projections.rebuild_current_area_ids(session)
         stored = {
             flow_id: current_area_id
             for flow_id, current_area_id in session.execute(
-                sa.select(models.QuantityFlow.id, models.QuantityFlow.current_area_id)
+                sa.select(models.QuantityFlow.id, models.QuantityFlow.current_area_id).where(
+                    models.QuantityFlow.id.in_(own_flow_ids)
+                )
             )
         }
+    # Scoped to the flows THIS test created: another test in the module
+    # deliberately corrupts a projection to prove replay independence,
+    # so a module-wide comparison would depend on declaration order.
     # Every flow appears (its first Movement is its RECEIVED) and the
     # stored projection matches the history-derived value exactly.
-    assert rebuilt == stored
-    assert stored  # the check is not vacuous
+    assert stored.keys() == own_flow_ids  # the check is not vacuous
+    assert {flow_id: rebuilt[flow_id] for flow_id in own_flow_ids} == stored
 
 
 def test_conservation_of_released_quantities(client: TestClient, db_engine: Engine) -> None:
-    with db_engine.connect() as connection:
-        flows: dict[str, int] = {
-            part_number: int(total)
-            for part_number, total in connection.execute(
-                sa.select(
-                    models.QuantityFlow.part_number,
-                    sa.func.sum(models.QuantityFlow.quantity),
-                )
-                .where(models.QuantityFlow.status == "ACTIVE")
-                .group_by(models.QuantityFlow.part_number)
+    """Σ(active flow quantities per PN) = Σ(RECEIVED quantities per PN).
+
+    Self-contained: the test seeds its own PNs (a FLOATING release, a
+    PLANNED release, and a PN released in two parts) so it holds when
+    run alone, in any order, and independently of what other tests in
+    the module left behind. The module-wide equality is asserted as
+    well, because the invariant is global.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    template_id = _create_route_template(db_engine, [{"area_id": area["id"]}])
+    expected: dict[str, int] = {}
+
+    for mode, template, parts in (
+        ("FLOATING", None, [25]),
+        ("PLANNED", template_id, [25]),
+        ("FLOATING", None, [20, 12]),
+    ):
+        work_order_id, demand_id, pn = _create_demand(client)
+        for index, quantity in enumerate(parts):
+            response = _release(
+                client,
+                work_order_id,
+                demand_id,
+                part_number=pn,
+                quantity=quantity,
+                route_mode=mode,
+                route_template_id=template,
+                starting_area_id=area["id"],
+                operation_id=operation["id"],
+                confirm_active_quantity=index > 0,
             )
-        }
-        received: dict[str, int] = {
-            part_number: int(total)
-            for part_number, total in connection.execute(
-                sa.select(
-                    models.PartMovement.part_number,
-                    sa.func.sum(models.PartMovement.quantity),
+            assert response.status_code == 201, response.text
+        expected[pn] = sum(parts)
+
+    def _totals(table: Any, condition: Any) -> dict[str, int]:
+        with db_engine.connect() as connection:
+            return {
+                part_number: int(total)
+                for part_number, total in connection.execute(
+                    sa.select(table.part_number, sa.func.sum(table.quantity))
+                    .where(condition)
+                    .group_by(table.part_number)
                 )
-                .where(models.PartMovement.movement_type == "RECEIVED")
-                .group_by(models.PartMovement.part_number)
-            )
-        }
-    # Σ(active flow quantities per PN) = Σ(RECEIVED quantities per PN).
+            }
+
+    flows = _totals(models.QuantityFlow, models.QuantityFlow.status == "ACTIVE")
+    received = _totals(models.PartMovement, models.PartMovement.movement_type == "RECEIVED")
+    # The PNs this test seeded, then the module-wide invariant.
+    assert {pn: flows.get(pn, 0) for pn in expected} == expected
+    assert {pn: received.get(pn, 0) for pn in expected} == expected
     assert flows == received
-    assert flows  # earlier tests released quantity, so never vacuous
+
+
+def test_every_movement_agrees_with_its_own_flow_route_mode(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Reconciliation for the cross-table invariant of SLICE1 §11.
+
+    No PostgreSQL CHECK can express it: a ``PLANNED`` flow's Movement
+    must reference a step of THAT flow's own AssignedRoute, and a
+    ``FLOATING`` flow's must stay NULL. Asserted over every Movement in
+    the database, so a release that ever wired a foreign snapshot step
+    is caught wherever it came from.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    template_id = _create_route_template(db_engine, [{"area_id": area["id"]}])
+    for mode, template in (("FLOATING", None), ("PLANNED", template_id)):
+        work_order_id, demand_id, pn = _create_demand(client)
+        response = _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            route_mode=mode,
+            route_template_id=template,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        )
+        assert response.status_code == 201, response.text
+
+    flow = models.QuantityFlow.__table__
+    movement = models.PartMovement.__table__
+    step = models.AssignedRouteStep.__table__
+    with db_engine.connect() as connection:
+        rows = connection.execute(
+            sa.select(
+                movement.c.id,
+                flow.c.route_mode,
+                flow.c.assigned_route_id,
+                movement.c.assigned_route_step_id,
+                step.c.assigned_route_id.label("step_route_id"),
+            )
+            .select_from(
+                movement.join(flow, flow.c.id == movement.c.quantity_flow_id).outerjoin(
+                    step, step.c.id == movement.c.assigned_route_step_id
+                )
+            )
+            .order_by(movement.c.id)
+        ).all()
+
+    assert rows  # the reconciliation is not vacuous
+    for row in rows:
+        if row.route_mode == "PLANNED":
+            assert row.assigned_route_step_id is not None
+            assert row.step_route_id == row.assigned_route_id
+        else:
+            assert row.assigned_route_step_id is None
+            assert row.assigned_route_id is None
+
+
+# ---------------------------------------------------------------------------
+# Starting Area (SLICE1_DATA_MODEL §8.1) — a terminal Area never starts
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_area_never_accepts_a_release(client: TestClient, db_engine: Engine) -> None:
+    """A terminal Area is where finished quantity ENDS, never where it enters.
+
+    The rule lives in the backend, not only in the release dialog's
+    Area list: an API client that names the Stockroom is refused and
+    nothing is created.
+    """
+    terminal = _create_area(client, is_terminal=True)
+    operation = _create_operation(client, int(terminal["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)
+    before = _counts(db_engine)
+
+    response = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        starting_area_id=terminal["id"],
+        operation_id=operation["id"],
+    )
+    assert response.status_code == 409, response.text
+    assert "terminal Area" in response.json()["detail"]
+    assert _counts(db_engine) == before
+
+
+# ---------------------------------------------------------------------------
+# Partial and repeated release of one demand
+# ---------------------------------------------------------------------------
+
+
+def _demand_state(client: TestClient, work_order_id: int, demand_id: int) -> dict[str, Any]:
+    response = client.get(f"/api/work-orders/{work_order_id}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    line = next(demand for demand in body["demands"] if demand["id"] == demand_id)
+    return {**line, "work_order_status": body["status"]}
+
+
+def test_demand_releases_in_parts_until_the_remaining_quantity_is_gone(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """20 of 50, then 12, then 18 — each part a separate Quantity Flow.
+
+    Released and remaining quantities are derived from the immutable
+    RECEIVED history, so they survive every reload; the Work Order
+    stays OPEN while any line still has remaining quantity and reads
+    RELEASED only once nothing is left to release.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["released_quantity"], state["remaining_quantity"]) == (0, 50)
+    assert state["has_released_quantity"] is False
+    assert state["work_order_status"] == "OPEN"
+
+    flow_ids: list[int] = []
+    for index, (quantity, released, remaining) in enumerate(
+        [(20, 20, 30), (12, 32, 18), (18, 50, 0)]
+    ):
+        response = _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=quantity,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+            # Every part after the first meets existing active quantity
+            # and needs the explicit confirmation of SLICE1 §8.2.
+            confirm_active_quantity=index > 0,
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["quantity"] == quantity
+        flow_ids.append(int(response.json()["quantity_flow_id"]))
+
+        state = _demand_state(client, work_order_id, demand_id)
+        assert (state["released_quantity"], state["remaining_quantity"]) == (released, remaining)
+        assert state["has_released_quantity"] is True
+        # A partially released Work Order stays OPEN.
+        assert state["work_order_status"] == ("RELEASED" if remaining == 0 else "OPEN")
+
+    # Three separate flows — nothing was ever merged into an existing one.
+    assert len(set(flow_ids)) == 3
+    with db_engine.connect() as connection:
+        quantities = connection.execute(
+            sa.select(models.QuantityFlow.quantity)
+            .where(models.QuantityFlow.part_number == pn)
+            .order_by(models.QuantityFlow.id)
+        ).scalars()
+        assert list(quantities) == [20, 12, 18]
+
+    # Fully released: there is nothing left, and the refusal writes nothing.
+    before = _counts(db_engine)
+    exhausted = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        quantity=1,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+        confirm_active_quantity=True,
+    )
+    assert exhausted.status_code == 409, exhausted.text
+    assert "fully released" in exhausted.json()["detail"]
+    assert _counts(db_engine) == before
+
+
+def test_release_beyond_the_remaining_quantity_is_refused(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Quantity is never over-released against business demand."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+
+    first = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        quantity=30,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+    )
+    assert first.status_code == 201, first.text
+    before = _counts(db_engine)
+
+    too_much = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        quantity=21,  # only 20 remain
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+        confirm_active_quantity=True,
+    )
+    assert too_much.status_code == 409, too_much.text
+    assert "Only 20 pcs remain" in too_much.json()["detail"]
+    assert _counts(db_engine) == before
+
+    # The whole remaining quantity is still releasable.
+    exact = _release(
+        client,
+        work_order_id,
+        demand_id,
+        part_number=pn,
+        quantity=20,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+        confirm_active_quantity=True,
+    )
+    assert exact.status_code == 201, exact.text
+
+
+def test_released_demand_line_cannot_be_edited(client: TestClient, db_engine: Engine) -> None:
+    """A released line is read-only in the backend, not only in the UI.
+
+    GUI_DESIGN §11: "a line whose quantity has been released arrives
+    read-only from the first load". Lowering the requested quantity
+    below what is already released would break demand integrity, so the
+    server refuses every edit of such a line — the Work Order header
+    edit (PROJECT_PROFILE §7) stays available.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=20,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        ).status_code
+        == 201
+    )
+    before = _counts(db_engine)
+
+    refused = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"line_edits": [{"id": demand_id, "requested_quantity": 5}]},
+    )
+    assert refused.status_code == 409, refused.text
+    assert "already been released" in refused.json()["detail"]
+    state = _demand_state(client, work_order_id, demand_id)
+    assert state["requested_quantity"] == 50  # unchanged
+    assert _counts(db_engine) == before
+
+    # The audited header edit is unaffected by the released line.
+    number = _unique("WO")
+    header = client.patch(f"/api/work-orders/{work_order_id}", json={"work_order_number": number})
+    assert header.status_code == 200, header.text
+    assert header.json()["work_order_number"] == number
 
 
 # ---------------------------------------------------------------------------
