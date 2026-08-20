@@ -2135,3 +2135,78 @@ test('an entered demand line offers the label for an existing PN master too', as
   ).toBeInTheDocument();
   expect(label).toHaveTextContent('309-127 · PF:PN:309-127');
 });
+
+/* ============ Saved-line removal vs. unsaved demand edits ============ */
+
+test('unsaved demand changes disable saved-line removal; after Save the removals commit and the WO derives RELEASED', async () => {
+  await renderWorkOrders();
+  // 007201: B-200 released (server evidence), A-100 and E-500 saved
+  // and unreleased.
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const removeButtonOf = (pn: string) =>
+    within(dialog).getByRole('button', { name: `Remove line ${pn}` });
+
+  // Make the draft dirty with a header edit (the WO due date).
+  fireEvent.change(within(dialog).getByLabelText('WO due date'), {
+    target: { value: '2026-09-20' },
+  });
+
+  // Saved-line removal is a committed server action — blocked while
+  // unsaved edits are in flight, with the stated explanation.
+  expect(removeButtonOf('A-100')).toBeDisabled();
+  expect(removeButtonOf('A-100')).toHaveAttribute(
+    'title',
+    'Save or discard demand changes before removing a saved line.',
+  );
+  expect(dialog).toHaveTextContent(
+    'Save or discard demand changes before removing a saved line.',
+  );
+  // An unsaved draft line stays removable locally — it IS the draft.
+  scanBarcode('PF:PN:TEMP-1');
+  await within(dialog).findByText('TEMP-1');
+  fireEvent.click(removeButtonOf('TEMP-1'));
+  expect(
+    await screen.findByText('✕ Draft line removed — it had never been saved.'),
+  ).toBeInTheDocument();
+  expect(within(dialog).queryByText('TEMP-1')).toBeNull();
+  expect(removeButtonOf('A-100')).toBeDisabled();
+
+  // Save the draft — nothing was auto-saved or auto-discarded; the
+  // saved-line removal re-enables.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+  expect(state.workOrders[0].due_date).toBe('2026-09-20');
+  const enabledRemove = await waitFor(() => {
+    const button = removeButtonOf('A-100');
+    expect(button).not.toBeDisabled();
+    return button;
+  });
+
+  // Confirmed removal of both unreleased lines: afterwards every
+  // remaining persisted demand carries release evidence, so the Work
+  // Order derives RELEASED — with no unsaved draft stranded or lost.
+  fireEvent.click(enabledRemove);
+  fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
+  await screen.findByText('✕ A-100 removed from 007201.');
+  fireEvent.click(removeButtonOf('E-500'));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
+  await screen.findByText('✕ E-500 removed from 007201.');
+
+  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([102]);
+  // The reloaded server detail derives RELEASED: the dialog is
+  // read-only and shows no unsaved marker.
+  await waitFor(() =>
+    expect(dialog).toHaveTextContent('demand lines are read-only'),
+  );
+  expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Save demand' }),
+  ).toBeNull();
+
+  // The list derives RELEASED for the Work Order too.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  const listRow = workOrderRow('007201').closest('tr') as HTMLElement;
+  await waitFor(() =>
+    expect(within(listRow).getByText('Released')).toBeInTheDocument(),
+  );
+});

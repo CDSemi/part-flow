@@ -55,6 +55,9 @@ export interface ReleaseRequestContext {
 const RELEASE_WHILE_DIRTY_EXPLANATION =
   'Save or discard demand changes before releasing.';
 
+const REMOVE_WHILE_DIRTY_EXPLANATION =
+  'Save or discard demand changes before removing a saved line.';
+
 /**
  * Work Order Details as a modal dialog over the Work Order list
  * (GUI_DESIGN §11.2): the list stays mounted and visible behind it and
@@ -317,12 +320,18 @@ export function WorkOrderDetailPanel({
     const rule = lineRemoveRule(line);
     if (rule === 'blocked') return;
     if (rule === 'draft') {
+      // An unsaved draft line is local state only — removing it stays
+      // available while the draft is dirty (it IS the draft).
       setLines((current) => current.filter((l) => l.id !== line.id));
       setLineErrors((current) => current.filter((e) => e.lineId !== line.id));
       setDirty(true);
       showNotice('✕ Draft line removed — it had never been saved.');
       return;
     }
+    // Removing a SAVED line is a committed server action — like
+    // Release, it never runs with unsaved edits in flight (the button
+    // is disabled; this guard covers any other path).
+    if (dirty) return;
     setConfirmRemove(line);
   }
 
@@ -778,13 +787,19 @@ export function WorkOrderDetailPanel({
                               disabled={
                                 removeRule === 'blocked' ||
                                 busy ||
-                                (removeRule === 'confirm' && writeBlocked)
+                                (removeRule === 'confirm' &&
+                                  // A saved-line removal commits on the
+                                  // server — never with unsaved edits
+                                  // in flight (same rule as Release).
+                                  (writeBlocked || dirty))
                               }
                               title={
                                 removeRule === 'blocked'
                                   ? RELEASED_REMOVE_EXPLANATION
                                   : removeRule === 'confirm'
-                                    ? 'Remove line (asks for confirmation)'
+                                    ? dirty
+                                      ? REMOVE_WHILE_DIRTY_EXPLANATION
+                                      : 'Remove line (asks for confirmation)'
                                     : 'Remove draft line'
                               }
                               aria-label={
@@ -872,7 +887,8 @@ export function WorkOrderDetailPanel({
               dirty ? (
                 <>
                   Saving stores <b>business demand only</b>.{' '}
-                  <b>{RELEASE_WHILE_DIRTY_EXPLANATION}</b>
+                  <b>{RELEASE_WHILE_DIRTY_EXPLANATION}</b>{' '}
+                  <b>{REMOVE_WHILE_DIRTY_EXPLANATION}</b>
                 </>
               ) : (
                 <>
