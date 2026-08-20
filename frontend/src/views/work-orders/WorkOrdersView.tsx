@@ -19,15 +19,10 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
-import { partNumbersPreview } from './demand-lines';
+import { partNumbersPreview, workOrderStatusLabel } from './demand-lines';
 import { CompletedWorkOrdersUnavailable } from './CompletedWorkOrdersUnavailable';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
-import { ReleaseDialog } from './ReleaseDialog';
-import {
-  WorkOrderDetailPanel,
-  workOrderStatusLabel,
-} from './WorkOrderDetailPanel';
-import type { ReleaseRequestContext } from './WorkOrderDetailPanel';
+import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
 /** Display form of a Work Order Number — `—` when no external number
  * is known (display-only placeholder, never persisted). */
@@ -125,17 +120,6 @@ function ActiveWorkOrdersView() {
   const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
   const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
-  // Demand ids released in THIS session: their lines render read-only
-  // with the release evidence. (Earlier sessions' releases are
-  // enforced by the backend — a removal attempt answers 409.)
-  const [sessionReleased, setSessionReleased] = useState<Set<number>>(
-    new Set(),
-  );
-  const [releaseDialog, setReleaseDialog] = useState<{
-    workOrderId: number;
-    workOrderNumber: string | null;
-    demand: ReleaseRequestContext;
-  } | null>(null);
 
   const dirty =
     (newWorkOrderOpen && newWorkOrderDirty) ||
@@ -236,17 +220,8 @@ function ActiveWorkOrdersView() {
         <WorkOrderDetailPanel
           key={detailId}
           workOrderId={detailId}
-          sessionReleased={sessionReleased}
           writeBlocked={writeBlocked}
           onClose={closeDetail}
-          onRelease={(demand) => {
-            const summary = listData.find((w) => w.id === detailId);
-            setReleaseDialog({
-              workOrderId: detailId,
-              workOrderNumber: summary?.workOrderNumber ?? null,
-              demand,
-            });
-          }}
           onChanged={workOrdersData.reload}
           onDirtyChange={handleDetailDirtyChange}
           showNotice={showNotice}
@@ -279,28 +254,6 @@ function ActiveWorkOrdersView() {
         />
       )}
 
-      {releaseDialog && (
-        <ReleaseDialog
-          workOrderId={releaseDialog.workOrderId}
-          workOrderNumber={releaseDialog.workOrderNumber}
-          demand={releaseDialog.demand}
-          writeBlocked={writeBlocked}
-          onCancel={() => {
-            setReleaseDialog(null);
-            showNotice('✕ Release cancelled — nothing was created.');
-          }}
-          onReleased={(result) => {
-            setSessionReleased((current) =>
-              new Set(current).add(releaseDialog.demand.demandId),
-            );
-            setReleaseDialog(null);
-            workOrdersData.reload();
-            showNotice(
-              `✓ ${result.partNumber} released to production × ${result.quantity} · Quantity Flow #${result.quantityFlowId}.`,
-            );
-          }}
-        />
-      )}
       {noticeElement}
     </section>
   );

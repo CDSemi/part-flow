@@ -26,6 +26,7 @@ import type {
   LineField,
   MissingDemandInfo,
 } from './demand-lines';
+import { PnBarcodeLabelDialog } from './PnBarcodeLabelDialog';
 
 interface HeaderErrors {
   received?: string;
@@ -75,6 +76,9 @@ export function NewWorkOrderDialog({
   const [confirmMissing, setConfirmMissing] =
     useState<MissingDemandInfo | null>(null);
   const [addPartOpen, setAddPartOpen] = useState(false);
+  // The printable PN barcode label of one entered line (§10 — the
+  // barcode derives from the PN identity itself).
+  const [labelPn, setLabelPn] = useState<string | null>(null);
   // One in-flight server interaction at a time (duplicate resolution
   // or the save itself); a failed write keeps the draft and shows the
   // server's message here.
@@ -204,29 +208,35 @@ export function NewWorkOrderDialog({
     el?.focus();
   }
 
+  // The entered Work Order Number is an opaque string that is NEVER
+  // reformatted (PROJECT_PROFILE §7): trimming exists only to DETECT a
+  // blank entry — a blank saves NULL, a non-blank value travels (and
+  // resolves duplicates) exactly as entered, surrounding whitespace
+  // included.
+  const numberIsBlank = workOrderNumber.trim() === '';
+
   async function saveWorkOrder() {
-    // Entered Work Order Numbers stay opaque strings (never
-    // reformatted). A blank number is saved as NULL — displayed as `—`
-    // (the placeholder itself is never persisted); multiple Work
-    // Orders may have a null number while non-null numbers stay
-    // unique. The POST is one all-or-nothing transaction.
-    const entered = workOrderNumber.trim();
+    // A blank number is saved as NULL — displayed as `—` (the
+    // placeholder itself is never persisted); multiple Work Orders may
+    // have a null number while non-null numbers stay unique. The POST
+    // is one all-or-nothing transaction.
     setBusy(true);
     setServerError(null);
     try {
       const detail = await createWorkOrder({
-        workOrderNumber: entered || null,
+        workOrderNumber: numberIsBlank ? null : workOrderNumber,
         receivedDate: received,
         dueDate: due || null,
         lines: lines.map(draftToNewLine),
       });
       onSaved(detail);
     } catch (error) {
-      // A lost duplicate race commits nothing — resolve and open the
-      // existing Work Order exactly like the pre-check would have.
-      if (entered) {
+      // A lost duplicate race commits nothing — resolve the ORIGINAL
+      // entered value and open the existing Work Order exactly like
+      // the pre-check would have.
+      if (!numberIsBlank) {
         try {
-          const existing = await resolveWorkOrderNumber(entered);
+          const existing = await resolveWorkOrderNumber(workOrderNumber);
           if (existing) {
             setBusy(false);
             setConfirmExisting(existing);
@@ -244,8 +254,7 @@ export function NewWorkOrderDialog({
 
   async function handleSave() {
     if (busy) return;
-    const number = workOrderNumber.trim();
-    if (number) {
+    if (!numberIsBlank) {
       // An entered WO Number that already exists is opened, never
       // duplicated (exact verbatim resolution on the server). With
       // entered lines, opening discards them — confirm explicitly.
@@ -254,7 +263,8 @@ export function NewWorkOrderDialog({
       setServerError(null);
       let existing: WorkOrderSummary | null;
       try {
-        existing = await resolveWorkOrderNumber(number);
+        // Verbatim equality — the ORIGINAL entered string, untrimmed.
+        existing = await resolveWorkOrderNumber(workOrderNumber);
       } catch (error) {
         setBusy(false);
         setServerError(errorMessage(error));
@@ -286,7 +296,7 @@ export function NewWorkOrderDialog({
     }
     // Absent WO Number / due dates are NOT validation errors — they are
     // summarized and explicitly confirmed before saving.
-    const missing = collectMissingDemandInfo(number, due, lines);
+    const missing = collectMissingDemandInfo(workOrderNumber, due, lines);
     if (missing) {
       setConfirmMissing(missing);
       return;
@@ -415,6 +425,14 @@ export function NewWorkOrderDialog({
                         <div className="pn" title={line.pn ?? ''}>
                           {line.pn}
                         </div>
+                        {line.pn ? (
+                          <button
+                            className="pn-labellink"
+                            onClick={() => setLabelPn(line.pn)}
+                          >
+                            Barcode label…
+                          </button>
+                        ) : null}
                         {errorFor(line.id, 'pn') ? (
                           <div className="rowerr">
                             {errorFor(line.id, 'pn')}
@@ -569,6 +587,10 @@ export function NewWorkOrderDialog({
           onDuplicate={handleAddPartDuplicate}
           onComplete={handleAddPartComplete}
         />
+      ) : null}
+
+      {labelPn !== null ? (
+        <PnBarcodeLabelDialog pn={labelPn} onClose={() => setLabelPn(null)} />
       ) : null}
 
       {confirmMissing ? (

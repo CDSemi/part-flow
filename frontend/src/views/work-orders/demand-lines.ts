@@ -45,8 +45,9 @@ export interface DemandLineDraft {
   notes: string;
   /** True when the line exists in saved server state. */
   saved: boolean;
-  /** True when production quantity was released for this demand in
-   * this session — the line renders read-only (GUI_DESIGN §11.2). */
+  /** Server-derived release evidence (`has_released_quantity`): the
+   * line renders Released and read-only (GUI_DESIGN §11.2). Never a
+   * client-session guess — it survives any reload. */
   released: boolean;
   statusLabel: string;
 }
@@ -57,6 +58,12 @@ export interface LineError {
   lineId: number;
   field: LineField;
   message: string;
+}
+
+/** Human status of the server-derived read value (`OPEN` → `Open`,
+ * `RELEASED` → `Released`). */
+export function workOrderStatusLabel(status: string): string {
+  return status.charAt(0) + status.slice(1).toLowerCase();
 }
 
 export const RELEASED_REMOVE_EXPLANATION =
@@ -97,12 +104,14 @@ export function textToJobNumbers(text: string): string[] {
     .filter((value) => value !== '');
 }
 
-/** Load one saved server demand line into an editable draft. */
+/** Load one saved server demand line into an editable draft. The
+ * Released/read-only state comes from the server's release evidence,
+ * never from local session state. */
 export function draftFromDemand(
   demand: WorkOrderDemand,
   workOrderDue: string | null,
-  released: boolean,
 ): DemandLineDraft {
+  const released = demand.hasReleasedQuantity;
   return createDraftLine({
     demandId: demand.id,
     pn: demand.partNumber,

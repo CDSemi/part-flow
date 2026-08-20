@@ -1345,3 +1345,129 @@ def test_area_deactivation_patch_applies_metadata_edits_atomically(
     assert row.color == "#123456"
     assert row.is_terminal is True
     assert row.is_active is False
+
+
+# ---------------------------------------------------------------------------
+# Server-derived release evidence in the Work Order read models
+# ---------------------------------------------------------------------------
+
+
+def test_release_evidence_and_derived_status_in_work_order_reads(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """`has_released_quantity` and the derived OPEN/RELEASED status come
+    from the immutable RECEIVED Movement context — server state that
+    survives any reload, never a client-session flag. A mixed Work
+    Order (released and unreleased demand) stays OPEN; only a Work
+    Order whose EVERY current demand has release evidence reads
+    RELEASED. The stored status column keeps OPEN (derived read model,
+    no migration)."""
+    area = _create_area(client)
+    operation = _create_operation(client, area["id"])
+    pn_a, pn_b = _unique("PN"), _unique("PN")
+    response = client.post(
+        "/api/work-orders",
+        json={
+            "lines": [
+                {"part_number": pn_a, "requested_quantity": 10},
+                {"part_number": pn_b, "requested_quantity": 5},
+            ]
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    wo_id = int(body["id"])
+    demand_a, demand_b = (int(line["id"]) for line in body["demands"])
+
+    # Before any release: no evidence, status OPEN everywhere.
+    assert all(line["has_released_quantity"] is False for line in body["demands"])
+    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    assert detail["status"] == "OPEN"
+    assert all(line["has_released_quantity"] is False for line in detail["demands"])
+
+    # Release ONE of two demands: evidence on that demand only, and the
+    # mixed Work Order stays OPEN (never "any released => RELEASED").
+    released = _release(
+        client,
+        wo_id,
+        demand_a,
+        part_number=pn_a,
+        quantity=10,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+    )
+    assert released.status_code == 201, released.text
+    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    flags = {int(line["id"]): line["has_released_quantity"] for line in detail["demands"]}
+    assert flags == {demand_a: True, demand_b: False}
+    assert detail["status"] == "OPEN"
+    listed = client.get("/api/work-orders").json()
+    assert {entry["id"]: entry["status"] for entry in listed}[wo_id] == "OPEN"
+
+    # Release the second demand: every current demand carries evidence
+    # — the read status derives RELEASED while the stored column keeps
+    # OPEN.
+    released = _release(
+        client,
+        wo_id,
+        demand_b,
+        part_number=pn_b,
+        quantity=5,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+    )
+    assert released.status_code == 201, released.text
+    detail = client.get(f"/api/work-orders/{wo_id}").json()
+    assert detail["status"] == "RELEASED"
+    assert all(line["has_released_quantity"] is True for line in detail["demands"])
+    listed = client.get("/api/work-orders").json()
+    assert {entry["id"]: entry["status"] for entry in listed}[wo_id] == "RELEASED"
+    with db_engine.connect() as connection:
+        stored = connection.execute(
+            sa.select(models.WorkOrder.__table__.c.status).where(
+                models.WorkOrder.__table__.c.id == wo_id
+            )
+        ).scalar_one()
+    assert stored == "OPEN"
+
+
+def test_external_number_edit_stays_available_after_full_release(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Release evidence never blocks the audited Work Order Number edit
+    (PROJECT_PROFILE §7): an internal Work Order that fully released
+    still receives its real external number later — stored VERBATIM,
+    surrounding whitespace included."""
+    area = _create_area(client)
+    operation = _create_operation(client, area["id"])
+    pn = _unique("PN")
+    body = client.post(
+        "/api/work-orders",
+        json={"lines": [{"part_number": pn, "requested_quantity": 4}]},
+    ).json()
+    wo_id, demand_id = int(body["id"]), int(body["demands"][0]["id"])
+    assert body["work_order_number"] is None
+
+    released = _release(
+        client,
+        wo_id,
+        demand_id,
+        part_number=pn,
+        quantity=4,
+        starting_area_id=area["id"],
+        operation_id=operation["id"],
+    )
+    assert released.status_code == 201, released.text
+    assert client.get(f"/api/work-orders/{wo_id}").json()["status"] == "RELEASED"
+
+    number = f"  {_unique('WO')}  "
+    edited = client.patch(f"/api/work-orders/{wo_id}", json={"work_order_number": number})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["work_order_number"] == number
+    with db_engine.connect() as connection:
+        stored = connection.execute(
+            sa.select(models.WorkOrder.__table__.c.work_order_number).where(
+                models.WorkOrder.__table__.c.id == wo_id
+            )
+        ).scalar_one()
+    assert stored == number

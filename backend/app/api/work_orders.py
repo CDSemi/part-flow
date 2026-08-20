@@ -54,13 +54,12 @@ from app.application import work_orders
 from app.application.common import UNSET
 from app.application.work_orders import WorkOrderDetail, WorkOrderSummary
 from app.domain.enums import RequestType
+from app.infrastructure.models import WorkOrderDemand
 
 router = APIRouter(prefix="/api")
 
 
 class WorkOrderDemandResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     work_order_id: int
     # Canonical uppercase PN, kept by the demand itself (no FK to the
@@ -75,6 +74,11 @@ class WorkOrderDemandResponse(BaseModel):
     requester: str | None
     reason: str | None
     notes: str | None
+    # Server-derived release evidence (immutable RECEIVED Movement
+    # context): true once any production quantity was released for this
+    # demand. The UI renders such a line Released/read-only — the flag
+    # survives any reload and is never a client-session guess.
+    has_released_quantity: bool
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -86,6 +90,9 @@ class WorkOrderSummaryResponse(BaseModel):
     work_order_number: str | None
     received_date: datetime.date
     due_date: datetime.date | None
+    # Server-derived read status: OPEN while at least one current
+    # demand has never released; RELEASED once every current demand
+    # line carries release evidence (GUI_DESIGN §11.1).
     status: str
     demand_line_count: int
     part_numbers: list[str]
@@ -174,9 +181,29 @@ def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
         work_order_number=work_order.work_order_number,
         received_date=work_order.received_date,
         due_date=work_order.due_date,
-        status=work_order.status,
+        status=summary.status,
         demand_line_count=summary.demand_line_count,
         part_numbers=summary.part_numbers,
+    )
+
+
+def _demand_response(demand: WorkOrderDemand, released: bool) -> WorkOrderDemandResponse:
+    return WorkOrderDemandResponse(
+        id=demand.id,
+        work_order_id=demand.work_order_id,
+        part_number=demand.part_number,
+        request_type=RequestType(demand.request_type),
+        requested_quantity=demand.requested_quantity,
+        allocated_quantity=demand.allocated_quantity,
+        due_date=demand.due_date,
+        priority_rank=demand.priority_rank,
+        job_numbers=demand.job_numbers,
+        requester=demand.requester,
+        reason=demand.reason,
+        notes=demand.notes,
+        has_released_quantity=released,
+        created_at=demand.created_at,
+        updated_at=demand.updated_at,
     )
 
 
@@ -187,10 +214,13 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
         work_order_number=work_order.work_order_number,
         received_date=work_order.received_date,
         due_date=work_order.due_date,
-        status=work_order.status,
+        status=detail.status,
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
-        demands=[WorkOrderDemandResponse.model_validate(demand) for demand in detail.demands],
+        demands=[
+            _demand_response(demand, demand.id in detail.released_demand_ids)
+            for demand in detail.demands
+        ],
     )
 
 

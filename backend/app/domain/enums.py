@@ -56,15 +56,22 @@ class QuantityFlowStatus(StrEnum):
 
 
 class WorkOrderStatus(StrEnum):
-    """Stored status of a WorkOrder (PROJECT_PROFILE §8.2).
+    """Status vocabulary of a WorkOrder (PROJECT_PROFILE §8.2).
 
     OPEN is the manual-intake initial state and matches the database
-    creation default. The vocabulary widens additively with production
-    release; completion stays derived from allocation records
-    (`completed_at`, Phase 10) and is never a stored status value.
+    creation default — it is the only STORED value in Phase 4.
+    RELEASED is a DERIVED read-model value (GUI_DESIGN §11.1): a Work
+    Order whose every current demand line has committed release
+    evidence reads as RELEASED; the stored column stays OPEN, because
+    the derivation from immutable ``RECEIVED`` Movement context can
+    never drift while a stored copy could. Completion stays derived
+    from allocation records (`completed_at`, Phase 10) and is never a
+    stored status value either.
     """
 
     OPEN = "OPEN"
+    # Derived read status only — never written to work_orders.status.
+    RELEASED = "RELEASED"
 
 
 class AuditEventType(StrEnum):

@@ -34,6 +34,7 @@ import {
   lineRemoveRule,
   processScan,
   validateDemandLines,
+  workOrderStatusLabel,
 } from './demand-lines';
 import type {
   DemandLineDraft,
@@ -41,18 +42,18 @@ import type {
   LineField,
   MissingDemandInfo,
 } from './demand-lines';
+import { ReleaseDialog } from './ReleaseDialog';
 
-/** One saved demand row offered for release (GUI_DESIGN §11.4). */
+/** One saved demand row offered for release (GUI_DESIGN §11.4) — the
+ * COMMITTED server values, never the local draft. */
 export interface ReleaseRequestContext {
   demandId: number;
   partNumber: string;
   requestedQuantity: number;
 }
 
-/** Human status of the stored server value (`OPEN` → `Open`). */
-export function workOrderStatusLabel(status: string): string {
-  return status.charAt(0) + status.slice(1).toLowerCase();
-}
+const RELEASE_WHILE_DIRTY_EXPLANATION =
+  'Save or discard demand changes before releasing.';
 
 /**
  * Work Order Details as a modal dialog over the Work Order list
@@ -73,22 +74,17 @@ export function workOrderStatusLabel(status: string): string {
  */
 export function WorkOrderDetailPanel({
   workOrderId,
-  sessionReleased,
   writeBlocked,
   onClose,
-  onRelease,
   onChanged,
   onDirtyChange,
   showNotice,
 }: {
   workOrderId: number;
-  /** Demand ids released in this session — their lines render
-   * read-only with the release evidence (GUI_DESIGN §11.2). */
-  sessionReleased: ReadonlySet<number>;
   writeBlocked: boolean;
   onClose: () => void;
-  onRelease: (context: ReleaseRequestContext) => void;
-  /** Server state changed (save/removal committed) — reload the list. */
+  /** Server state changed (save/removal/release committed) — reload
+   * the list. */
   onChanged: () => void;
   onDirtyChange: (dirty: boolean) => void;
   showNotice: (message: string) => void;
@@ -118,6 +114,15 @@ export function WorkOrderDetailPanel({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  // The §11.4 release flow of one saved demand row — carried by this
+  // dialog so a committed release refreshes the SERVER-derived
+  // released state (never a session-local flag).
+  const [releaseDialog, setReleaseDialog] =
+    useState<ReleaseRequestContext | null>(null);
+  // The audited external-number entry of an internal Work Order
+  // (PROJECT_PROFILE §7): blank = no change; a non-blank entry travels
+  // VERBATIM with Save demand.
+  const [numberDraft, setNumberDraft] = useState('');
 
   const scanRef = useRef<HTMLInputElement>(null);
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -126,25 +131,19 @@ export function WorkOrderDetailPanel({
     field: LineField;
   } | null>(null);
 
-  /** Adopt fresh server state and rebuild the editable draft. */
-  const adoptDetail = useCallback(
-    (fresh: WorkOrderDetail) => {
-      setDetail(fresh);
-      setDue(fresh.dueDate ?? '');
-      setLines(
-        fresh.demands.map((demand) =>
-          draftFromDemand(
-            demand,
-            fresh.dueDate,
-            sessionReleased.has(demand.id),
-          ),
-        ),
-      );
-      setLineErrors([]);
-      setDirty(false);
-    },
-    [sessionReleased],
-  );
+  /** Adopt fresh server state and rebuild the editable draft. The
+   * Released/read-only state of every line comes from the server's
+   * release evidence inside the response. */
+  const adoptDetail = useCallback((fresh: WorkOrderDetail) => {
+    setDetail(fresh);
+    setDue(fresh.dueDate ?? '');
+    setLines(
+      fresh.demands.map((demand) => draftFromDemand(demand, fresh.dueDate)),
+    );
+    setNumberDraft('');
+    setLineErrors([]);
+    setDirty(false);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -159,11 +158,7 @@ export function WorkOrderDetailPanel({
     return () => {
       cancelled = true;
     };
-    // adoptDetail changes only with sessionReleased — re-adopting the
-    // load result then would discard the draft, so the load reruns
-    // only per Work Order / explicit retry.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workOrderId, loadGeneration]);
+  }, [workOrderId, loadGeneration, adoptDetail]);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -216,15 +211,17 @@ export function WorkOrderDetailPanel({
   const editable = detail.status === 'OPEN';
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
+  // An internal Work Order may receive its real external number later
+  // through the audited edit (PROJECT_PROFILE §7) — release evidence
+  // never blocks that, so the entry stays available on a RELEASED
+  // Work Order too (only demand-line editing is OPEN-only).
+  const numberEditVisible =
+    internal && (detail.status === 'OPEN' || detail.status === 'RELEASED');
+  const numberEntered = numberEditVisible && numberDraft.trim() !== '';
 
-  // A release performed in this session freezes its line.
-  const display = lines.map((line) =>
-    !line.released &&
-    line.demandId !== null &&
-    sessionReleased.has(line.demandId)
-      ? { ...line, released: true, statusLabel: 'Released' }
-      : line,
-  );
+  // Released/read-only comes from the server release evidence loaded
+  // with each line (`draftFromDemand`) — no session-local remapping.
+  const display = lines;
 
   const errorFor = (id: number, field: LineField) =>
     lineErrors.find((e) => e.lineId === id && e.field === field)?.message;
@@ -359,6 +356,10 @@ export function WorkOrderDetailPanel({
     setServerError(null);
     try {
       const fresh = await updateWorkOrder(workOrderId, {
+        // The audited external-number edit: only an entered value
+        // travels, and it travels VERBATIM (never trimmed/reformatted
+        // — trimming only detected that something was entered).
+        ...(numberEntered ? { workOrderNumber: numberDraft } : {}),
         ...((due || null) !== detail.dueDate ? { dueDate: due || null } : {}),
         lineEdits: buildLineEdits(display, detail.demands),
         newLines: display
@@ -399,7 +400,7 @@ export function WorkOrderDetailPanel({
     // explicitly confirmed, never silently saved. Released lines are
     // read-only history and are not re-confirmed.
     const missing = collectMissingDemandInfo(
-      detail.workOrderNumber ?? '',
+      numberEntered ? numberDraft : (detail.workOrderNumber ?? ''),
       due,
       display.filter((line) => !line.released),
     );
@@ -425,11 +426,29 @@ export function WorkOrderDetailPanel({
             Work Order Details
           </h2>
           <span className="spacer" />
-          {editable && dirty ? (
+          {(editable || numberEditVisible) && dirty ? (
             <span className="unsaved">● Unsaved changes</span>
           ) : null}
         </div>
         <div className="big mono">{woDisplay}</div>
+        {numberEditVisible ? (
+          <div className="wo-numedit">
+            <label htmlFor="wo-extnum">
+              External WO Number{' '}
+              <span className="field-optional">(optional — audited edit)</span>
+            </label>
+            <input
+              id="wo-extnum"
+              className="mono"
+              placeholder="e.g. 007482"
+              value={numberDraft}
+              onChange={(e) => {
+                setNumberDraft(e.target.value);
+                setDirty(true);
+              }}
+            />
+          </div>
+        ) : null}
         <p className="wo-sub">
           received <b className="mono">{formatIsoDate(detail.receivedDate)}</b>{' '}
           ·{' '}
@@ -720,17 +739,36 @@ export function WorkOrderDetailPanel({
                             {line.demandId !== null ? (
                               <button
                                 className="rel-btn"
-                                disabled={writeBlocked || busy || line.released}
-                                onClick={() =>
-                                  line.pn &&
-                                  line.demandId !== null &&
-                                  onRelease({
-                                    demandId: line.demandId,
-                                    partNumber: line.pn,
-                                    requestedQuantity:
-                                      Number.parseInt(line.qty, 10) || 0,
-                                  })
+                                disabled={
+                                  writeBlocked ||
+                                  busy ||
+                                  line.released ||
+                                  // A release must run against the
+                                  // COMMITTED demand — never with
+                                  // unsaved edits in flight.
+                                  dirty
                                 }
+                                title={
+                                  dirty && !line.released
+                                    ? RELEASE_WHILE_DIRTY_EXPLANATION
+                                    : undefined
+                                }
+                                onClick={() => {
+                                  // The committed server values — the
+                                  // local draft equals them here (a
+                                  // dirty draft disables this button).
+                                  const committed = detail.demands.find(
+                                    (demand) => demand.id === line.demandId,
+                                  );
+                                  if (committed) {
+                                    setReleaseDialog({
+                                      demandId: committed.id,
+                                      partNumber: committed.partNumber,
+                                      requestedQuantity:
+                                        committed.requestedQuantity,
+                                    });
+                                  }
+                                }}
                               >
                                 Release to production…
                               </button>
@@ -820,7 +858,7 @@ export function WorkOrderDetailPanel({
           <button className="btn ghost" onClick={requestClose}>
             Cancel (Esc)
           </button>
-          {editable ? (
+          {editable || numberEditVisible ? (
             <button
               className="btn primary"
               disabled={writeBlocked || busy}
@@ -831,11 +869,18 @@ export function WorkOrderDetailPanel({
           ) : null}
           <span className="hint">
             {editable ? (
-              <>
-                Saving stores <b>business demand only</b> — release to
-                production stays a separate explicit step. Invalid rows cannot
-                be saved and are never dropped silently.
-              </>
+              dirty ? (
+                <>
+                  Saving stores <b>business demand only</b>.{' '}
+                  <b>{RELEASE_WHILE_DIRTY_EXPLANATION}</b>
+                </>
+              ) : (
+                <>
+                  Saving stores <b>business demand only</b> — release to
+                  production stays a separate explicit step. Invalid rows cannot
+                  be saved and are never dropped silently.
+                </>
+              )
             ) : (
               <>
                 This Work Order is <b>{workOrderStatusLabel(detail.status)}</b>{' '}
@@ -850,6 +895,30 @@ export function WorkOrderDetailPanel({
       {/* Stacked dialogs render as siblings of the details dialog, so
           each one's Escape / backdrop / focus trap stays its own and a
           child close never closes Work Order Details. */}
+      {releaseDialog ? (
+        <ReleaseDialog
+          workOrderId={workOrderId}
+          workOrderNumber={detail.workOrderNumber}
+          demand={releaseDialog}
+          writeBlocked={writeBlocked}
+          onCancel={() => {
+            setReleaseDialog(null);
+            showNotice('✕ Release cancelled — nothing was created.');
+          }}
+          onReleased={(result) => {
+            setReleaseDialog(null);
+            // The Released/read-only state comes back from the server
+            // (release evidence in the reloaded demand lines) — never
+            // from a session-local flag.
+            retryLoad();
+            onChanged();
+            showNotice(
+              `✓ ${result.partNumber} released to production × ${result.quantity} · Quantity Flow #${result.quantityFlowId}.`,
+            );
+          }}
+        />
+      ) : null}
+
       {addPartOpen ? (
         <AddPartDialog
           workOrderDue={due}

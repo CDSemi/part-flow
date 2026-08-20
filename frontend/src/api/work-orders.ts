@@ -53,6 +53,13 @@ export interface WorkOrderDemand {
   requester: string | null;
   reason: string | null;
   notes: string | null;
+  /**
+   * Server-derived release evidence (immutable RECEIVED Movement
+   * context): true once any production quantity was released for this
+   * demand — in any session, ever. The line renders Released and
+   * read-only; this is never a client-session guess.
+   */
+  hasReleasedQuantity: boolean;
 }
 
 export interface WorkOrderDetail {
@@ -116,6 +123,7 @@ interface WorkOrderDemandWire {
   requester: string | null;
   reason: string | null;
   notes: string | null;
+  has_released_quantity: boolean;
 }
 
 interface WorkOrderDetailWire {
@@ -153,6 +161,7 @@ function toDemand(wire: WorkOrderDemandWire): WorkOrderDemand {
     requester: wire.requester,
     reason: wire.reason,
     notes: wire.notes,
+    hasReleasedQuantity: wire.has_released_quantity,
   };
 }
 
@@ -247,6 +256,13 @@ export async function createWorkOrder(input: {
 export async function updateWorkOrder(
   id: number,
   input: {
+    /**
+     * Omit to keep the current number. A string travels VERBATIM (the
+     * audited Work Order Number edit, PROJECT_PROFILE §7 — e.g. adding
+     * the real external number to an internal Work Order); an explicit
+     * null persists NULL. Never trimmed, reformatted, or padded here.
+     */
+    workOrderNumber?: string | null;
     /** Omit to keep; explicit null persists NULL (audited edit). */
     dueDate?: string | null;
     lineEdits: DemandLineEdit[];
@@ -256,6 +272,9 @@ export async function updateWorkOrder(
   const wire = await apiRequest<WorkOrderDetailWire>(`/api/work-orders/${id}`, {
     method: 'PATCH',
     body: {
+      ...('workOrderNumber' in input
+        ? { work_order_number: input.workOrderNumber }
+        : {}),
       ...('dueDate' in input ? { due_date: input.dueDate } : {}),
       line_edits: input.lineEdits.map(lineEditBody),
       new_lines: input.newLines.map(newLineBody),

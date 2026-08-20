@@ -125,6 +125,7 @@ function seedState(): FakeState {
             job_numbers: ['18112'],
           }),
           demand(102, 1, 'B-200', 10),
+          demand(103, 1, 'E-500', 7, { due_date: '2026-09-10' }),
         ],
       },
       {
@@ -135,9 +136,19 @@ function seedState(): FakeState {
         status: 'OPEN',
         demands: [demand(201, 2, 'C-300', 5)],
       },
+      // Every demand of this Work Order has release evidence — the
+      // derived read status is RELEASED.
+      {
+        id: 3,
+        work_order_number: '007300',
+        received_date: '2026-07-25',
+        due_date: '2026-08-30',
+        status: 'OPEN',
+        demands: [demand(301, 3, 'D-400', 8, { due_date: '2026-08-30' })],
+      },
     ],
-    partNumbers: ['309-127', 'A-100', 'B-200', 'C-300'],
-    releasedDemands: new Set([102]),
+    partNumbers: ['309-127', 'A-100', 'B-200', 'C-300', 'D-400', 'E-500'],
+    releasedDemands: new Set([102, 301]),
     activeDistribution: {
       'A-100': [
         {
@@ -176,13 +187,22 @@ function detailResponse(message: string, status: number): Response {
   return json({ detail: message }, status);
 }
 
+/** Server-derived read status: RELEASED once EVERY current demand has
+ * release evidence; the stored column stays OPEN. */
+function derivedStatus(wo: FakeWorkOrder): string {
+  return wo.demands.length > 0 &&
+    wo.demands.every((d) => state.releasedDemands.has(d.id))
+    ? 'RELEASED'
+    : wo.status;
+}
+
 function summaryWire(wo: FakeWorkOrder) {
   return {
     id: wo.id,
     work_order_number: wo.work_order_number,
     received_date: wo.received_date,
     due_date: wo.due_date,
-    status: wo.status,
+    status: derivedStatus(wo),
     demand_line_count: wo.demands.length,
     part_numbers: wo.demands.map((d) => d.part_number),
   };
@@ -194,10 +214,14 @@ function detailWire(wo: FakeWorkOrder) {
     work_order_number: wo.work_order_number,
     received_date: wo.received_date,
     due_date: wo.due_date,
-    status: wo.status,
+    status: derivedStatus(wo),
     created_at: T0,
     updated_at: T0,
-    demands: wo.demands,
+    demands: wo.demands.map((d) => ({
+      ...d,
+      // Server-derived release evidence — never a client-session flag.
+      has_released_quantity: state.releasedDemands.has(d.id),
+    })),
   };
 }
 
@@ -486,6 +510,22 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       if (state.failNextWorkOrderWrite) {
         state.failNextWorkOrderWrite = false;
         return detailResponse('The save failed on the server.', 500);
+      }
+      if ('work_order_number' in body) {
+        // Verbatim semantics: the entered string is stored exactly;
+        // uniqueness spans non-null numbers.
+        const nextNumber = body.work_order_number as string | null;
+        if (
+          nextNumber !== null &&
+          nextNumber !== wo.work_order_number &&
+          state.workOrders.some((w) => w.work_order_number === nextNumber)
+        ) {
+          return detailResponse(
+            `Work Order '${nextNumber}' already exists. Open the existing Work Order instead of creating a duplicate.`,
+            409,
+          );
+        }
+        wo.work_order_number = nextNumber;
       }
       if ('due_date' in body) wo.due_date = body.due_date as string | null;
       for (const edit of (body.line_edits ?? []) as Record<string, unknown>[]) {
@@ -940,7 +980,7 @@ test('missing WO Number and due dates open a confirmation and save NULLs, never 
   expect(confirm).toHaveTextContent(/internal Work Order without an external/);
   expect(confirm).toHaveTextContent(/remains unscheduled/);
   expect(confirm).toHaveTextContent(/1.*demand line.*has.*no.*due date/s);
-  expect(state.workOrders).toHaveLength(2);
+  expect(state.workOrders).toHaveLength(3);
 
   fireEvent.click(screen.getByRole('button', { name: 'Confirm and save' }));
 
@@ -995,7 +1035,7 @@ test('an existing WO Number is opened instead of duplicated', async () => {
     screen.getByText(/007201 already exists — opening the existing Work Order/),
   ).toBeInTheDocument();
   // Nothing was created.
-  expect(state.workOrders).toHaveLength(2);
+  expect(state.workOrders).toHaveLength(3);
   expect(
     state.calls.filter((call) => call === 'POST /api/work-orders'),
   ).toHaveLength(0);
@@ -1021,7 +1061,7 @@ test('an existing WO Number is opened instead of duplicated', async () => {
   expect(
     await screen.findByRole('dialog', { name: 'Work Order Details' }),
   ).toBeInTheDocument();
-  expect(state.workOrders).toHaveLength(2);
+  expect(state.workOrders).toHaveLength(3);
 });
 
 /* ============ Add Part flow ============ */
@@ -1284,7 +1324,7 @@ test('removing a saved unreleased line requires confirmation and commits on the 
 
   await screen.findByText('✕ A-100 removed from 007201.');
   expect(within(dialog).queryByText('A-100')).toBeNull();
-  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([102]);
+  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([102, 103]);
   expect(
     state.calls.filter((call) =>
       call.startsWith('DELETE /api/work-orders/1/demands/101'),
@@ -1292,14 +1332,16 @@ test('removing a saved unreleased line requires confirmation and commits on the 
   ).toHaveLength(1);
 });
 
-test('a released demand cannot be removed — the server blocks it with the explanation', async () => {
+test('a release committed after the view loaded still blocks removal — server 409 with the explanation', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  // B-200's production quantity was released in an earlier session —
-  // only the backend knows; the removal answer is authoritative.
+  // The stale-view race: A-100 released elsewhere AFTER this dialog
+  // loaded. The UI still offers removal, but the backend rule is the
+  // authority — the 409 removes nothing and explains why.
+  state.releasedDemands.add(101);
   fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Remove line B-200' }),
+    within(dialog).getByRole('button', { name: 'Remove line A-100' }),
   );
   fireEvent.click(screen.getByRole('button', { name: 'Remove line' }));
 
@@ -1309,8 +1351,8 @@ test('a released demand cannot be removed — the server blocks it with the expl
     ),
   ).toBeInTheDocument();
   // Nothing was removed.
-  expect(within(dialog).getByText('B-200')).toBeInTheDocument();
-  expect(state.workOrders[0].demands).toHaveLength(2);
+  expect(within(dialog).getByText('A-100')).toBeInTheDocument();
+  expect(state.workOrders[0].demands).toHaveLength(3);
 });
 
 test('the last demand line of a Work Order cannot be removed', async () => {
@@ -1343,15 +1385,6 @@ test('Save demand PATCHes only the diff, refreshes from the server, and never re
   });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
 
-  // B-200 has no due date — the omission is summarized and explicitly
-  // confirmed before anything travels.
-  const missing = await screen.findByRole('dialog', {
-    name: 'Save demand with missing information?',
-  });
-  fireEvent.click(
-    within(missing).getByRole('button', { name: 'Confirm and save' }),
-  );
-
   await screen.findByText(/007201 demand updated — business demand only/);
   // Server state took the edit; the other line traveled no edit.
   const wo = state.workOrders.find((w) => w.id === 1)!;
@@ -1375,12 +1408,6 @@ test('a failed Save demand keeps the draft and shows the server message', async 
   });
   state.failNextWorkOrderWrite = true;
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
-  const missing = await screen.findByRole('dialog', {
-    name: 'Save demand with missing information?',
-  });
-  fireEvent.click(
-    within(missing).getByRole('button', { name: 'Confirm and save' }),
-  );
 
   await screen.findByText(/The save failed on the server/);
   // The draft is intact, still dirty, and nothing changed server-side.
@@ -1432,11 +1459,11 @@ async function openRelease(pn: string, woNumber = '007201') {
 
 test('release FLOATING confirms quantity, Area and Operation, and reports the committed result', async () => {
   await renderWorkOrders();
-  const release = await openRelease('C-300', '—');
+  const release = await openRelease('E-500');
 
-  // The quantity defaults to the requested demand quantity; FLOATING
-  // is the default Route Mode and needs no Route.
-  expect(within(release).getByLabelText('Release quantity')).toHaveValue('5');
+  // The quantity defaults to the COMMITTED requested demand quantity;
+  // FLOATING is the default Route Mode and needs no Route.
+  expect(within(release).getByLabelText('Release quantity')).toHaveValue('7');
   expect(within(release).getByLabelText('Route Mode')).toHaveValue('FLOATING');
 
   // The explicit starting Area + Operation confirmation.
@@ -1461,13 +1488,13 @@ test('release FLOATING confirms quantity, Area and Operation, and reports the co
   });
   expect(result).toHaveTextContent('Quantity Flow');
   expect(result).toHaveTextContent('#500');
-  expect(result).toHaveTextContent('× 5 pcs');
+  expect(result).toHaveTextContent('× 7 pcs');
   expect(result).toHaveTextContent(/FLOATING — actual route derives/);
   expect(result).toHaveTextContent('Material');
   expect(result).toHaveTextContent('RECEIVED · movement #9000');
 
   fireEvent.click(within(result).getByRole('button', { name: 'Done' }));
-  await screen.findByText(/C-300 released to production × 5/);
+  await screen.findByText(/E-500 released to production × 7/);
 
   // The fake committed exactly one FLOATING release for the demand.
   expect(state.committedReleases.size).toBe(1);
@@ -1477,33 +1504,36 @@ test('release FLOATING confirms quantity, Area and Operation, and reports the co
   expect(commit.body.starting_area_id).toBe(1);
   expect(commit.body.operation_id).toBe(11);
 
-  // The released line froze in this session: read-only status, release
-  // and removal disabled with the explanation.
+  // The released state comes back from the SERVER (the dialog
+  // reloaded the demand lines): read-only status, release and removal
+  // disabled with the explanation. The mixed Work Order stays OPEN.
   const detailDialog = screen.getByRole('dialog', {
     name: 'Work Order Details',
   });
-  expect(within(detailDialog).getByText('Released')).toBeInTheDocument();
-  const row = within(detailDialog).getByText('C-300').closest('tr')!;
+  const row = await waitFor(() => {
+    const releasedRow = within(detailDialog)
+      .getByText('E-500')
+      .closest('tr') as HTMLElement;
+    expect(within(releasedRow).getByText('Released')).toBeInTheDocument();
+    return releasedRow;
+  });
   expect(
-    within(row as HTMLElement).getByRole('button', {
-      name: 'Release to production…',
-    }),
+    within(row).getByRole('button', { name: 'Release to production…' }),
   ).toBeDisabled();
   expect(
-    within(row as HTMLElement).getByRole('button', {
-      name: 'Remove line C-300',
-    }),
+    within(row).getByRole('button', { name: 'Remove line E-500' }),
   ).toBeDisabled();
   expect(
     within(detailDialog).getAllByText(
       'Cannot remove: production quantity has already been released.',
     ).length,
   ).toBeGreaterThan(0);
+  expect(within(detailDialog).getByText('Open')).toBeInTheDocument();
 });
 
 test('release PLANNED requires an existing active Planned Route and fixes the starting step', async () => {
   await renderWorkOrders();
-  const release = await openRelease('C-300', '—');
+  const release = await openRelease('E-500');
 
   fireEvent.change(within(release).getByLabelText('Route Mode'), {
     target: { value: 'PLANNED' },
@@ -1586,7 +1616,7 @@ test('existing active quantity demands explicit confirmation before a separate f
 
 test('a transport retry reuses the device_event_id and can only replay the committed release', async () => {
   await renderWorkOrders();
-  const release = await openRelease('C-300', '—');
+  const release = await openRelease('E-500');
 
   fireEvent.change(within(release).getByLabelText('Starting Area'), {
     target: { value: '1' },
@@ -1796,4 +1826,312 @@ test('a dirty New Work Order dialog also guards top-level navigation', async () 
 
   expect(confirmSpy).toHaveBeenCalled();
   expect(window.location.pathname).toBe('/management/work-orders');
+});
+
+/* ============ Server-derived released state ============ */
+
+test('a demand released in an earlier session loads Released and read-only before any local action', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  // B-200's release evidence comes from the SERVER response — no
+  // release ever happened in this browser session.
+  const row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+  expect(within(row).getByText('Released')).toBeInTheDocument();
+  expect(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  ).toBeDisabled();
+  expect(
+    within(row).getByRole('button', { name: 'Remove line B-200' }),
+  ).toBeDisabled();
+  expect(
+    within(row).getByText(
+      'Cannot remove: production quantity has already been released.',
+    ),
+  ).toBeInTheDocument();
+
+  // A duplicate scan of the released PN announces the read-only line.
+  scanBarcode('PF:PN:B-200');
+  expect(
+    await screen.findByText(
+      /B-200 is already on this Work Order and its production quantity is released — the line is read-only here\./,
+    ),
+  ).toBeInTheDocument();
+  // Still exactly one B-200 line — nothing was added.
+  expect(within(dialog).getAllByText('B-200')).toHaveLength(1);
+});
+
+test('the released state survives a full page reload', async () => {
+  await renderWorkOrders();
+  let dialog = await openWorkOrderDetail('007201', 'A-100');
+  let row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+  expect(within(row).getByText('Released')).toBeInTheDocument();
+
+  // Full reload: a brand-new application instance, same server state.
+  cleanup();
+  await renderWorkOrders();
+  dialog = await openWorkOrderDetail('007201', 'A-100');
+  row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+  expect(within(row).getByText('Released')).toBeInTheDocument();
+  expect(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  ).toBeDisabled();
+});
+
+test('the WO list derives Open for a mixed Work Order and Released for a fully released one', async () => {
+  await renderWorkOrders();
+
+  // 007201 holds released AND unreleased demand — canonical OPEN.
+  const mixedRow = workOrderRow('007201').closest('tr') as HTMLElement;
+  expect(within(mixedRow).getByText('Open')).toBeInTheDocument();
+  // 007300's every demand carries release evidence — RELEASED.
+  const releasedRow = workOrderRow('007300').closest('tr') as HTMLElement;
+  expect(within(releasedRow).getByText('Released')).toBeInTheDocument();
+});
+
+test('a fully released Work Order opens read-only', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007300', 'D-400');
+
+  expect(dialog).toHaveTextContent('demand lines are read-only');
+  expect(within(dialog).getAllByText('Released').length).toBeGreaterThan(0);
+  expect(
+    within(dialog).queryByRole('button', { name: 'Save demand' }),
+  ).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Release to production…' }),
+  ).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: '＋ Add Part manually' }),
+  ).toBeNull();
+});
+
+/* ============ Release vs. unsaved demand edits ============ */
+
+test('unsaved demand changes disable Release until saved; release then uses the committed quantity', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  // Edit E-500's requested quantity — the draft is now dirty.
+  fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
+    target: { value: '9' },
+  });
+  const releasedButtonOf = (pn: string) =>
+    within(within(dialog).getByText(pn).closest('tr') as HTMLElement).getByRole(
+      'button',
+      { name: 'Release to production…' },
+    );
+  expect(releasedButtonOf('E-500')).toBeDisabled();
+  expect(releasedButtonOf('A-100')).toBeDisabled();
+  expect(releasedButtonOf('E-500')).toHaveAttribute(
+    'title',
+    'Save or discard demand changes before releasing.',
+  );
+  expect(dialog).toHaveTextContent(
+    'Save or discard demand changes before releasing.',
+  );
+
+  // Save demand commits the edit; Release re-enables.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+  const enabledButton = await waitFor(() => {
+    const button = releasedButtonOf('E-500');
+    expect(button).not.toBeDisabled();
+    return button;
+  });
+
+  // The release flow opens with the COMMITTED requested quantity.
+  fireEvent.click(enabledButton);
+  const release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  await within(release).findByLabelText('Release quantity');
+  expect(within(release).getByLabelText('Release quantity')).toHaveValue('9');
+  expect(release).toHaveTextContent(/requested 9/);
+});
+
+/* ============ Work Order Number verbatim ============ */
+
+test('an entered WO Number travels and resolves verbatim — surrounding whitespace included', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  fireEvent.change(screen.getByLabelText(/^WO Number/), {
+    target: { value: '  WO-77  ' },
+  });
+  fireEvent.change(screen.getByLabelText(/^WO due date/), {
+    target: { value: '2026-09-01' },
+  });
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  const qty = await screen.findByLabelText('Quantity for NEW-PLATE-9');
+  fireEvent.change(qty, { target: { value: '3' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/saved — business demand only/);
+
+  // The duplicate lookup used the ORIGINAL string, never a trimmed one.
+  expect(
+    state.calls.filter(
+      (call) =>
+        call ===
+        `GET /api/work-orders?number=${encodeURIComponent('  WO-77  ')}`,
+    ),
+  ).toHaveLength(1);
+  // The stored number is byte-for-byte the entered value.
+  expect(
+    state.workOrders.some((w) => w.work_order_number === '  WO-77  '),
+  ).toBe(true);
+  expect(state.workOrders.some((w) => w.work_order_number === 'WO-77')).toBe(
+    false,
+  );
+});
+
+test('a whitespace-only WO Number saves NULL — trimming only DETECTS blank', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  fireEvent.change(screen.getByLabelText(/^WO Number/), {
+    target: { value: '   ' },
+  });
+  scanBarcode('PF:PN:NEW-PLATE-9');
+  const qty = await screen.findByLabelText('Quantity for NEW-PLATE-9');
+  fireEvent.change(qty, { target: { value: '3' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save demand' }));
+  // Blank counts as "no number entered": no duplicate lookup runs and
+  // the omission confirmation appears.
+  const confirm = await screen.findByRole('dialog', {
+    name: 'Save demand with missing information?',
+  });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Confirm and save' }),
+  );
+  await screen.findByText(/WO — saved — business demand only/);
+
+  expect(state.workOrders[0].work_order_number).toBeNull();
+  expect(
+    state.calls.some((call) => call.includes('/api/work-orders?number=')),
+  ).toBe(false);
+});
+
+/* ============ Audited external-number edit (internal WO) ============ */
+
+test('an internal Work Order receives its external number through the audited edit and it persists', async () => {
+  await renderWorkOrders();
+  const row = screen.getByRole('button', { name: 'Open Work Order —' });
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('C-300');
+
+  // Verbatim: the entered value keeps its surrounding whitespace.
+  fireEvent.change(within(dialog).getByLabelText(/External WO Number/), {
+    target: { value: ' WO-500 ' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  // The Work Order has no due date — the omission confirmation stays.
+  const confirm = await screen.findByRole('dialog', {
+    name: 'Save demand with missing information?',
+  });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Confirm and save' }),
+  );
+  await screen.findByText(/demand updated — business demand only/);
+
+  expect(state.workOrders[1].work_order_number).toBe(' WO-500 ');
+  expect(dialog).toHaveTextContent('WO-500');
+  // The entry disappeared — the Work Order is no longer internal.
+  expect(within(dialog).queryByLabelText(/External WO Number/)).toBeNull();
+
+  // Full reload: the exact entered number persists on the server.
+  cleanup();
+  await renderWorkOrders();
+  expect(screen.getByText('WO-500')).toBeInTheDocument();
+  expect(
+    screen.queryByText('internal Work Order — no external number yet'),
+  ).toBeNull();
+});
+
+test('an external-number conflict keeps the draft and shows the server message', async () => {
+  await renderWorkOrders();
+  const row = screen.getByRole('button', { name: 'Open Work Order —' });
+  row.focus();
+  fireEvent.click(row);
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(dialog).findByText('C-300');
+
+  fireEvent.change(within(dialog).getByLabelText(/External WO Number/), {
+    target: { value: '007201' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  const confirm = await screen.findByRole('dialog', {
+    name: 'Save demand with missing information?',
+  });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Confirm and save' }),
+  );
+
+  // 409: nothing overwritten, the draft and the message stay.
+  expect(
+    await screen.findByText(/Work Order '007201' already exists/),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByLabelText(/External WO Number/)).toHaveValue(
+    '007201',
+  );
+  expect(state.workOrders[1].work_order_number).toBeNull();
+});
+
+/* ============ Printable PN barcode label ============ */
+
+test('the Add Part intake offers a printable Code 128 label for a new canonical PN', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: '  pl-88  ' },
+  });
+  fireEvent.click(
+    await screen.findByRole('button', { name: '＋ Create new PN “PL-88”' }),
+  );
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+
+  // The label derives from the canonical PN identity — no master
+  // record exists for PL-88 and none is needed.
+  fireEvent.click(screen.getByRole('button', { name: 'Barcode label…' }));
+  const label = await screen.findByRole('dialog', { name: 'PN barcode label' });
+  expect(
+    within(label).getByRole('img', { name: 'Barcode PF:PN:PL-88' }),
+  ).toBeInTheDocument();
+  expect(label).toHaveTextContent('PL-88 · PF:PN:PL-88');
+  expect(
+    within(label).getByRole('button', { name: 'Print Label' }),
+  ).toBeInTheDocument();
+
+  // Closing the label returns to the Add Part flow, values intact.
+  fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+});
+
+test('an entered demand line offers the label for an existing PN master too', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+
+  scanBarcode('PF:PN:309-127');
+  await screen.findByLabelText('Quantity for 309-127');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Barcode label…' }));
+  const label = await screen.findByRole('dialog', { name: 'PN barcode label' });
+  expect(
+    within(label).getByRole('img', { name: 'Barcode PF:PN:309-127' }),
+  ).toBeInTheDocument();
+  expect(label).toHaveTextContent('309-127 · PF:PN:309-127');
 });

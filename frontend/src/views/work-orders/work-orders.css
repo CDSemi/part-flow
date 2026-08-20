@@ -907,6 +907,106 @@
   margin: 0;
 }
 
+/* External WO Number entry of an internal Work Order (audited edit —
+   PROJECT_PROFILE §7): a compact labeled field under the `—` header. */
+.wo-numedit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+  font-size: 12.5px;
+}
+
+.wo-numedit label {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.wo-numedit input {
+  background-color: var(--panel);
+  border: 1.5px solid var(--border);
+  border-radius: 9px;
+  font-size: 13.5px;
+  padding: 6px 10px;
+  color: var(--text);
+  outline: none;
+  width: 180px;
+}
+
+.wo-numedit input:focus {
+  border-color: var(--info-t);
+}
+
+/* PN barcode label: a light, printable label card — always a white
+   surface with black ink so the printed label scans in both UI
+   themes (the shared label idiom of the Machine asset label). */
+.pn-label {
+  background: #fff;
+  color: #111;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px 12px;
+  margin: 6px 0 2px;
+  text-align: center;
+}
+
+.pn-label .lname {
+  font-size: 22px;
+  font-weight: 850;
+  line-height: 1.2;
+  margin-bottom: 6px;
+}
+
+.pn-label .lbarcode {
+  display: block;
+  width: 100%;
+  max-width: 340px;
+  height: 64px;
+  margin: 0 auto;
+  fill: #111;
+}
+
+.pn-label .lvalue {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+/* Quiet per-line / in-dialog entry to the printable PN label. */
+.pn-labellink {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--info-t);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Print Label: print exactly the label — everything else on the page
+   is hidden while the label fills the sheet's top-left corner. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .pn-labelprint,
+  .pn-labelprint * {
+    visibility: visible;
+  }
+
+  .pn-labelprint {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 90mm;
+    border: none;
+    margin: 0;
+  }
+}
+
 /* ============ Add Part multi-step dialog ============ */
 /* Selected-PN header block: the strong PN plus one quiet context line
    (catalog description or `new Part Number`; the final step appends

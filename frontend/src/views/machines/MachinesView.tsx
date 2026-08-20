@@ -39,6 +39,7 @@ import { getViewStatePreview } from '../../app/view-state';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
+import { Code128Svg } from '../../components/Code128Svg';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
@@ -49,7 +50,6 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { formatAssetTag, machineBarcode } from '../asset-tags';
-import { code128ModuleCount, encodeCode128B } from '../code128';
 import {
   LIFECYCLE_EVENT_LABEL,
   MACHINE_STATE_LABEL,
@@ -1169,12 +1169,6 @@ function BarcodeLabelDialog({
   onClose: () => void;
 }) {
   const value = machineBarcode(machine.assetTag);
-  const runs = encodeCode128B(value);
-  const quiet = 10;
-  const moduleWidth = 2;
-  const barHeight = 64;
-  const totalModules = runs ? code128ModuleCount(runs) + quiet * 2 : 0;
-  let x = quiet;
   return (
     <ModalDialog label="Machine barcode label" onClose={onClose}>
       <h3>Machine barcode label</h3>
@@ -1184,29 +1178,7 @@ function BarcodeLabelDialog({
       <div className="mg-label mg-labelprint">
         <div className="lname">{machine.name}</div>
         <div className="ltag">{machine.assetTag}</div>
-        {runs ? (
-          <svg
-            className="lbarcode"
-            viewBox={`0 0 ${totalModules * moduleWidth} ${barHeight}`}
-            preserveAspectRatio="xMidYMid meet"
-            role="img"
-            aria-label={`Barcode ${value}`}
-          >
-            {runs.map((run, index) => {
-              const rect = run.bar ? (
-                <rect
-                  key={index}
-                  x={x * moduleWidth}
-                  y={0}
-                  width={run.width * moduleWidth}
-                  height={barHeight}
-                />
-              ) : null;
-              x += run.width;
-              return rect;
-            })}
-          </svg>
-        ) : null}
+        <Code128Svg className="lbarcode" value={value} />
         <div className="lvalue">{value}</div>
       </div>
       <div className="row">

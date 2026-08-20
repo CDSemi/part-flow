@@ -9,6 +9,7 @@ import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
 import { isPositiveInteger } from './demand-lines';
+import { PnBarcodeLabelDialog } from './PnBarcodeLabelDialog';
 
 export interface AddPartResult {
   pn: string;
@@ -68,6 +69,7 @@ export function AddPartDialog({
   const [type, setType] = useState<RequestType>('NEW');
   const [job, setJob] = useState('');
   const [notes, setNotes] = useState('');
+  const [labelOpen, setLabelOpen] = useState(false);
 
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -171,7 +173,7 @@ export function AddPartDialog({
     }
   }
 
-  return (
+  const dialog = (
     <ModalDialog
       labelledBy={headingId}
       onClose={onCancel}
@@ -196,7 +198,16 @@ export function AddPartDialog({
                   {' '}
                   · Qty <b className="mono">{qty}</b> · {dueSummary()}
                 </span>
-              ) : null}
+              ) : null}{' '}
+              {/* The barcode derives from the PN identity itself, so
+                  the printable label exists for an existing master and
+                  a new canonical PN alike (Phase 4 §10 capability). */}
+              <button
+                className="pn-labellink"
+                onClick={() => setLabelOpen(true)}
+              >
+                Barcode label…
+              </button>
             </div>
           </div>
         ) : null}
@@ -400,5 +411,16 @@ export function AddPartDialog({
         </div>
       </div>
     </ModalDialog>
+  );
+
+  return (
+    <>
+      {dialog}
+      {/* Stacked sibling: only the topmost dialog handles Escape,
+          backdrop, and focus — closing the label returns here. */}
+      {labelOpen && pn ? (
+        <PnBarcodeLabelDialog pn={pn} onClose={() => setLabelOpen(false)} />
+      ) : null}
+    </>
   );
 }

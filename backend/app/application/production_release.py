@@ -53,6 +53,7 @@ import datetime
 import hashlib
 import json
 import uuid
+from collections.abc import Collection
 from typing import Any, Final, NamedTuple
 
 from sqlalchemy import func, select
@@ -571,3 +572,29 @@ def demand_has_released_quantity(session: Session, work_order_demand_id: int) ->
         )
         is not None
     )
+
+
+def released_demand_ids(session: Session, work_order_demand_ids: Collection[int]) -> set[int]:
+    """The subset of the given demand ids with committed release evidence.
+
+    ONE set-based query over the same immutable ``RECEIVED`` metadata
+    context as :func:`demand_has_released_quantity`, so a Work Order
+    read (or the whole WO list) never issues a per-demand lookup. The
+    result feeds the read models: a demand with evidence renders
+    Released/read-only, and a Work Order whose every current demand has
+    evidence reads as RELEASED (GUI_DESIGN §11.1) — both derived, never
+    stored, so the answer survives any reload and never regresses.
+    """
+    ids = [int(demand_id) for demand_id in work_order_demand_ids]
+    if not ids:
+        return set()
+    demand_id_value = PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
+    rows = session.scalars(
+        select(demand_id_value)
+        .where(
+            PartMovement.movement_type == MovementType.RECEIVED,
+            demand_id_value.in_(ids),
+        )
+        .distinct()
+    )
+    return {int(value) for value in rows if value is not None}

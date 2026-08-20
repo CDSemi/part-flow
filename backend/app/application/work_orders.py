@@ -47,7 +47,7 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
 """
 
 import datetime
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final, NamedTuple
 
 from sqlalchemy import func, select
@@ -166,6 +166,9 @@ class WorkOrderSummary(NamedTuple):
     work_order: WorkOrder
     demand_line_count: int
     part_numbers: list[str]
+    # The server-derived read status (OPEN, or RELEASED when every
+    # current demand line has committed release evidence).
+    status: str
 
 
 class WorkOrderDetail(NamedTuple):
@@ -173,6 +176,36 @@ class WorkOrderDetail(NamedTuple):
 
     work_order: WorkOrder
     demands: list[WorkOrderDemand]
+    # Demand ids with committed release evidence (immutable RECEIVED
+    # Movement context) — the server-authoritative Released flag.
+    released_demand_ids: frozenset[int]
+    # The server-derived read status (see WorkOrderSummary.status).
+    status: str
+
+
+def _derived_status(
+    work_order: WorkOrder, demand_ids: Collection[int], released: Collection[int]
+) -> str:
+    """OPEN while any current demand has never released; RELEASED once
+    every current demand line carries release evidence (GUI_DESIGN
+    §11.1). Derived at read time from immutable history — the stored
+    column stays OPEN, so no migration and no drift are possible."""
+    if demand_ids and all(demand_id in released for demand_id in demand_ids):
+        return WorkOrderStatus.RELEASED
+    return work_order.status
+
+
+def _build_detail(
+    session: Session, work_order: WorkOrder, demands: list[WorkOrderDemand]
+) -> WorkOrderDetail:
+    """Assemble the detail read model with ONE released-evidence query."""
+    released = production_release.released_demand_ids(session, [demand.id for demand in demands])
+    return WorkOrderDetail(
+        work_order=work_order,
+        demands=demands,
+        released_demand_ids=frozenset(released),
+        status=_derived_status(work_order, [demand.id for demand in demands], released),
+    )
 
 
 def list_work_orders(
@@ -189,8 +222,9 @@ def list_work_orders(
     part_numbers = func.array_agg(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
     )
+    demand_ids = func.array_agg(aggregate_order_by(WorkOrderDemand.id, WorkOrderDemand.id))
     query = (
-        select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers)
+        select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers, demand_ids)
         .outerjoin(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
         .group_by(WorkOrder.id)
         .order_by(WorkOrder.received_date.desc(), WorkOrder.id.desc())
@@ -200,14 +234,28 @@ def list_work_orders(
     elif search is not None and search.strip():
         escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.where(WorkOrder.work_order_number.ilike(f"%{escaped}%", escape="\\"))
+    rows = [
+        (
+            work_order,
+            count,
+            # array_agg over an empty outer join yields [None].
+            [value for value in (values or []) if value is not None],
+            [demand_id for demand_id in (ids or []) if demand_id is not None],
+        )
+        for work_order, count, values, ids in session.execute(query)
+    ]
+    # ONE released-evidence query for the whole page — never per row.
+    released = production_release.released_demand_ids(
+        session, [demand_id for _, _, _, ids in rows for demand_id in ids]
+    )
     return [
         WorkOrderSummary(
             work_order=work_order,
             demand_line_count=count,
-            # array_agg over an empty outer join yields [None].
-            part_numbers=[value for value in (values or []) if value is not None],
+            part_numbers=values,
+            status=_derived_status(work_order, ids, released),
         )
-        for work_order, count, values in session.execute(query)
+        for work_order, count, values, ids in rows
     ]
 
 
@@ -222,7 +270,7 @@ def get_work_order(session: Session, work_order_id: int) -> WorkOrderDetail:
             .order_by(WorkOrderDemand.id)
         )
     )
-    return WorkOrderDetail(work_order, demands)
+    return _build_detail(session, work_order, demands)
 
 
 def _reject_duplicate_work_order_number(
@@ -387,7 +435,7 @@ def create_work_order(
             actor_reference=actor,
         )
     commit(session, _WORK_ORDER_CONFLICTS)
-    return WorkOrderDetail(work_order, demands)
+    return _build_detail(session, work_order, demands)
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +547,7 @@ def update_work_order(
 
     if header_changed or audited or created:
         commit(session, _WORK_ORDER_CONFLICTS)
-    return WorkOrderDetail(work_order, [*detail.demands, *created])
+    return _build_detail(session, work_order, [*detail.demands, *created])
 
 
 # ---------------------------------------------------------------------------
