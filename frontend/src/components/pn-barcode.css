@@ -66,32 +66,25 @@
   }
 }
 
-/* The label entry: a quiet secondary chip carrying the scanned value
-   itself. It reads as identification data (the shared barcode reading
-   tone), never as a primary action. */
+/* The label entry: a quiet secondary chip. It reads as a small
+   supporting affordance under the PN, never as a primary action. */
 .pnb-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  max-width: 100%;
+  flex: none;
   margin-top: 3px;
   padding: 2px 8px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: var(--chip);
   color: var(--muted);
-  font-family: var(--mono), monospace;
   font-size: 11.5px;
   font-weight: 650;
   line-height: 1.5;
+  /* One line, always — the chip is a fixed short affordance. */
+  white-space: nowrap;
   cursor: pointer;
-  overflow-wrap: anywhere;
   text-align: left;
-}
-
-.pnb-chip .pnb-chipicon {
-  font-size: 12px;
-  line-height: 1;
 }
 
 .pnb-chip:hover {

@@ -959,7 +959,7 @@ test('scanned lines reflect the real master lookup — existing PN reuse vs. cre
     await within(dialog).findByRole('button', {
       name: 'Open barcode label for 309-127',
     }),
-  ).toHaveTextContent('PF:PN:309-127');
+  ).toHaveTextContent('Barcode label');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
   const newLine = (
@@ -2350,16 +2350,14 @@ test('a New Work Order demand line opens the shared label through the barcode ch
   scanBarcode('PF:PN:309-127');
   await screen.findByLabelText('Quantity for 309-127');
 
-  // The per-line text link is gone — the chip carrying the scanned
-  // value is the ONE entry, identical to Work Order Details.
-  expect(
-    within(dialog).queryByRole('button', { name: 'Barcode label…' }),
-  ).toBeNull();
+  // The per-line text link is gone — the shared chip is the ONE entry,
+  // rendered identically to Work Order Details.
+  expect(dialog.querySelector('.pn-labellink')).toBeNull();
   const chip = within(dialog).getByRole('button', {
     name: 'Open barcode label for 309-127',
   });
   expect(chip).toHaveClass('pnb-chip');
-  expect(chip).toHaveTextContent('PF:PN:309-127');
+  expect(chip).toHaveTextContent('Barcode label…');
 
   fireEvent.click(chip);
   const label = await screen.findByRole('dialog', {
@@ -2378,16 +2376,14 @@ test('a saved Work Order Details line carries the barcode chip and opens the sha
 
   // No barcode sentence in the PN column any more.
   expect(within(dialog).queryByText(/existing PN · barcode/)).toBeNull();
-  expect(
-    within(dialog).queryByRole('button', { name: 'Barcode label…' }),
-  ).toBeNull();
+  expect(dialog.querySelector('.pn-labellink')).toBeNull();
 
   const chip = within(dialog).getByRole('button', {
     name: 'Open barcode label for A-100',
   });
   expect(chip).toHaveAttribute('type', 'button');
   expect(chip).toHaveClass('pnb-chip');
-  expect(chip).toHaveTextContent('PF:PN:A-100');
+  expect(chip).toHaveTextContent('Barcode label…');
   // Opening the label is presentation only — the draft stays clean.
   expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
 
