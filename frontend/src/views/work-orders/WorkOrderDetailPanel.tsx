@@ -14,6 +14,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { PnLabelButton } from '../../components/PnLabelButton';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
+import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
   EmptyState,
   ErrorState,
@@ -59,8 +60,8 @@ export interface ReleaseRequestContext {
   remainingQuantity: number;
 }
 
-const RELEASE_WHILE_DIRTY_EXPLANATION =
-  'Save or discard demand changes before releasing.';
+const RELEASE_WITH_UNSAVED_EXPLANATION =
+  'Releasing asks to save or discard demand changes first.';
 
 const FULLY_RELEASED_EXPLANATION =
   'Fully released — no remaining quantity on this demand line.';
@@ -121,7 +122,6 @@ export function WorkOrderDetailPanel({
 
   const [due, setDue] = useState('');
   const [lines, setLines] = useState<DemandLineDraft[]>([]);
-  const [dirty, setDirty] = useState(false);
   const [addPartOpen, setAddPartOpen] = useState(false);
   // Presentation-only: the PN whose printable label is open.
   const [labelPn, setLabelPn] = useState<string | null>(null);
@@ -129,8 +129,16 @@ export function WorkOrderDetailPanel({
   const [confirmRemove, setConfirmRemove] = useState<DemandLineDraft | null>(
     null,
   );
-  const [confirmMissing, setConfirmMissing] =
-    useState<MissingDemandInfo | null>(null);
+  // The Save demand omission confirmation, carrying the release that
+  // may be waiting on this save (§11.4 requested while dirty).
+  const [confirmMissing, setConfirmMissing] = useState<{
+    info: MissingDemandInfo;
+    releaseDemandId: number | null;
+  } | null>(null);
+  // A release requested while the draft still had unsaved edits: the
+  // explicit Save / Discard / Cancel decision runs first — the release
+  // itself always uses COMMITTED values, never the draft.
+  const [releaseUnsaved, setReleaseUnsaved] = useState<number | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -151,6 +159,31 @@ export function WorkOrderDetailPanel({
     field: LineField;
   } | null>(null);
 
+  // An internal Work Order may receive its real external number later
+  // through the audited edit (PROJECT_PROFILE §7) — release evidence
+  // never blocks that, so the entry stays available on a RELEASED Work
+  // Order too (only demand-line editing is OPEN-only).
+  const numberEditVisible =
+    detail !== null &&
+    detail.workOrderNumber === null &&
+    (detail.status === 'OPEN' || detail.status === 'RELEASED');
+  const numberEntered = numberEditVisible && numberDraft.trim() !== '';
+
+  // "Unsaved changes" is DERIVED from the draft against the loaded
+  // server state — never a sticky flag set by the first keystroke.
+  // Undoing an edit (retyping the original quantity, removing a draft
+  // line again, clearing the number entry) therefore really does
+  // return the dialog to "nothing to save", so saved-line removal
+  // becomes available again and `Release to production…` stops asking
+  // to settle the draft first — without a save or a reload. The diff
+  // is exactly the one `Save demand` would send.
+  const dirty =
+    detail !== null &&
+    (numberEntered ||
+      (due || null) !== detail.dueDate ||
+      lines.some((line) => line.demandId === null) ||
+      buildLineEdits(lines, detail.demands).length > 0);
+
   /** Adopt fresh server state and rebuild the editable draft. The
    * Released state of every line — and with it the restricted edit —
    * comes from the server's release evidence inside the response. */
@@ -162,7 +195,6 @@ export function WorkOrderDetailPanel({
     );
     setNumberDraft('');
     setLineErrors([]);
-    setDirty(false);
   }, []);
 
   useEffect(() => {
@@ -237,13 +269,6 @@ export function WorkOrderDetailPanel({
   const linesRestricted = lines.some((line) => line.released);
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
-  // An internal Work Order may receive its real external number later
-  // through the audited edit (PROJECT_PROFILE §7) — release evidence
-  // never blocks that, so the entry stays available on a RELEASED
-  // Work Order too (only demand-line editing is OPEN-only).
-  const numberEditVisible =
-    internal && (detail.status === 'OPEN' || detail.status === 'RELEASED');
-  const numberEntered = numberEditVisible && numberDraft.trim() !== '';
 
   // The Released state (and with it the restricted edit) comes from
   // the server release evidence loaded with each line
@@ -274,13 +299,11 @@ export function WorkOrderDetailPanel({
     setLines((current) =>
       current.map((l) => (l.id === id ? { ...l, ...patch } : l)),
     );
-    setDirty(true);
   }
 
   function handleDueChange(value: string) {
     setDue(value);
     setLines((current) => applyWorkOrderDueDateChange(current, value));
-    setDirty(true);
   }
 
   function addScannedLine(pn: string, isNewPn: boolean) {
@@ -290,7 +313,6 @@ export function WorkOrderDetailPanel({
       due,
     });
     setLines((current) => [...current, line]);
-    setDirty(true);
     showNotice(
       `✓ ${pn} added as an unsaved draft line — Request Type NEW · due date from the WO due date.`,
     );
@@ -326,7 +348,6 @@ export function WorkOrderDetailPanel({
     setAddPartOpen(false);
     const line = createDraftLine(result);
     setLines((current) => [...current, line]);
-    setDirty(true);
     showNotice(
       `✓ ${result.pn} added as an unsaved draft line — apply it with Save demand.`,
     );
@@ -349,7 +370,6 @@ export function WorkOrderDetailPanel({
       // available while the draft is dirty (it IS the draft).
       setLines((current) => current.filter((l) => l.id !== line.id));
       setLineErrors((current) => current.filter((e) => e.lineId !== line.id));
-      setDirty(true);
       showNotice('✕ Draft line removed — it had never been saved.');
       return;
     }
@@ -384,7 +404,27 @@ export function WorkOrderDetailPanel({
     }
   }
 
-  async function saveDetail() {
+  /** Open the §11.4 release flow of one saved demand row from the
+   * COMMITTED server values of `source` — never from the draft. */
+  function openReleaseFor(demandId: number, source: WorkOrderDetail) {
+    const committed = source.demands.find((demand) => demand.id === demandId);
+    if (!committed) return;
+    if (committed.remainingQuantity === 0) {
+      // Reachable when the settled draft itself exhausted the demand
+      // (its Qty was lowered to exactly the released quantity).
+      showNotice(`⚠ ${committed.partNumber}: ${FULLY_RELEASED_EXPLANATION}`);
+      return;
+    }
+    setReleaseDialog({
+      demandId: committed.id,
+      partNumber: committed.partNumber,
+      requestedQuantity: committed.requestedQuantity,
+      releasedQuantity: committed.releasedQuantity,
+      remainingQuantity: committed.remainingQuantity,
+    });
+  }
+
+  async function saveDetail(releaseDemandId: number | null) {
     if (!detail) return;
     setBusy(true);
     setServerError(null);
@@ -408,6 +448,9 @@ export function WorkOrderDetailPanel({
       showNotice(
         `💾 WO ${fresh.workOrderNumber ?? '—'} demand updated — business demand only.`,
       );
+      // A release that waited for this save now runs against exactly
+      // what was just committed. A FAILED save opens nothing.
+      if (releaseDemandId !== null) openReleaseFor(releaseDemandId, fresh);
     } catch (error) {
       setBusy(false);
       setServerError(errorMessage(error));
@@ -415,7 +458,7 @@ export function WorkOrderDetailPanel({
     }
   }
 
-  function handleSave() {
+  function handleSave(releaseDemandId: number | null = null) {
     if (!detail || busy) return;
     const errors = validateDemandLines(display);
     setLineErrors(errors);
@@ -444,10 +487,10 @@ export function WorkOrderDetailPanel({
     // confirming it on every save of an internal Work Order would show
     // an empty omission list.
     if (missing && (missing.noWorkOrderDue || missing.undatedLineCount > 0)) {
-      setConfirmMissing(missing);
+      setConfirmMissing({ info: missing, releaseDemandId });
       return;
     }
-    void saveDetail();
+    void saveDetail(releaseDemandId);
   }
 
   // Every close request (Cancel, Escape, backdrop) funnels through
@@ -481,10 +524,7 @@ export function WorkOrderDetailPanel({
               className="mono"
               placeholder="e.g. 007482"
               value={numberDraft}
-              onChange={(e) => {
-                setNumberDraft(e.target.value);
-                setDirty(true);
-              }}
+              onChange={(e) => setNumberDraft(e.target.value)}
             />
           </div>
         ) : null}
@@ -815,38 +855,27 @@ export function WorkOrderDetailPanel({
                                   // Only an exhausted demand closes the
                                   // action: a partly released line
                                   // keeps releasing its remainder.
-                                  line.remainingQuantity === 0 ||
-                                  // A release must run against the
-                                  // COMMITTED demand — never with
-                                  // unsaved edits in flight.
-                                  dirty
+                                  line.remainingQuantity === 0
                                 }
                                 title={
                                   line.remainingQuantity === 0
                                     ? FULLY_RELEASED_EXPLANATION
                                     : dirty
-                                      ? RELEASE_WHILE_DIRTY_EXPLANATION
+                                      ? RELEASE_WITH_UNSAVED_EXPLANATION
                                       : undefined
                                 }
                                 onClick={() => {
-                                  // The committed server values — the
-                                  // local draft equals them here (a
-                                  // dirty draft disables this button).
-                                  const committed = detail.demands.find(
-                                    (demand) => demand.id === line.demandId,
-                                  );
-                                  if (committed) {
-                                    setReleaseDialog({
-                                      demandId: committed.id,
-                                      partNumber: committed.partNumber,
-                                      requestedQuantity:
-                                        committed.requestedQuantity,
-                                      releasedQuantity:
-                                        committed.releasedQuantity,
-                                      remainingQuantity:
-                                        committed.remainingQuantity,
-                                    });
+                                  const demandId = line.demandId;
+                                  if (demandId === null) return;
+                                  // A release always runs against the
+                                  // COMMITTED demand. With unsaved
+                                  // edits in flight the draft is
+                                  // settled first, explicitly.
+                                  if (dirty) {
+                                    setReleaseUnsaved(demandId);
+                                    return;
                                   }
+                                  openReleaseFor(demandId, detail);
                                 }}
                               >
                                 Release to production…
@@ -947,7 +976,7 @@ export function WorkOrderDetailPanel({
             <button
               className="btn primary"
               disabled={writeBlocked || busy}
-              onClick={handleSave}
+              onClick={() => handleSave()}
             >
               {busy ? 'Saving…' : 'Save demand'}
             </button>
@@ -957,7 +986,7 @@ export function WorkOrderDetailPanel({
               dirty ? (
                 <>
                   Saving stores <b>business demand only</b>.{' '}
-                  <b>{RELEASE_WHILE_DIRTY_EXPLANATION}</b>{' '}
+                  <b>{RELEASE_WITH_UNSAVED_EXPLANATION}</b>{' '}
                   <b>{REMOVE_WHILE_DIRTY_EXPLANATION}</b>
                 </>
               ) : (
@@ -983,6 +1012,48 @@ export function WorkOrderDetailPanel({
       {/* Stacked dialogs render as siblings of the details dialog, so
           each one's Escape / backdrop / focus trap stays its own and a
           child close never closes Work Order Details. */}
+      {releaseUnsaved !== null
+        ? (() => {
+            // A release never saves the draft silently and never runs
+            // on it either — the same three-way decision Machines and
+            // Planned Routes use before their own server actions.
+            const problem = validateDemandLines(display).length
+              ? 'the Work Order has invalid demand lines'
+              : undefined;
+            return (
+              <UnsavedChoiceDialog
+                title="Unsaved changes"
+                saveLabel="Save demand, then release…"
+                discardLabel="Discard changes, then release…"
+                saveDisabledReason={
+                  problem
+                    ? `The demand cannot be saved yet: ${problem}.`
+                    : undefined
+                }
+                saveDisabled={writeBlocked || busy}
+                onCancel={() => setReleaseUnsaved(null)}
+                onSave={() => {
+                  const demandId = releaseUnsaved;
+                  setReleaseUnsaved(null);
+                  handleSave(demandId);
+                }}
+                onDiscard={() => {
+                  const demandId = releaseUnsaved;
+                  setReleaseUnsaved(null);
+                  // Rebuild the draft from the loaded server state —
+                  // exactly what the release will run against.
+                  adoptDetail(detail);
+                  openReleaseFor(demandId, detail);
+                }}
+              >
+                This Work Order still has unsaved demand changes. Releasing
+                always uses the <b>saved</b> demand, so choose what happens to
+                the changes before the release opens.
+              </UnsavedChoiceDialog>
+            );
+          })()
+        : null}
+
       {releaseDialog ? (
         <ReleaseDialog
           workOrderId={workOrderId}
@@ -1027,24 +1098,27 @@ export function WorkOrderDetailPanel({
           confirmLabel="Confirm and save"
           cancelLabel="Cancel — keep editing"
           onConfirm={() => {
+            const releaseDemandId = confirmMissing.releaseDemandId;
             setConfirmMissing(null);
-            void saveDetail();
+            void saveDetail(releaseDemandId);
           }}
           onCancel={() => setConfirmMissing(null)}
         >
           These omissions are valid — confirm them explicitly:
           <ul className="missinglist">
-            {confirmMissing.noWorkOrderDue ? (
+            {confirmMissing.info.noWorkOrderDue ? (
               <li>
                 No WO due date — the Work Order remains <b>unscheduled</b> until
                 a due date is added.
               </li>
             ) : null}
-            {confirmMissing.undatedLineCount ? (
+            {confirmMissing.info.undatedLineCount ? (
               <li>
-                <b>{confirmMissing.undatedLineCount}</b> demand line
-                {confirmMissing.undatedLineCount === 1 ? ' has' : 's have'} no
-                due date — they receive the lowest date priority and order by
+                <b>{confirmMissing.info.undatedLineCount}</b> demand line
+                {confirmMissing.info.undatedLineCount === 1
+                  ? ' has'
+                  : 's have'}{' '}
+                no due date — they receive the lowest date priority and order by
                 the Work Order received date.
               </li>
             ) : null}

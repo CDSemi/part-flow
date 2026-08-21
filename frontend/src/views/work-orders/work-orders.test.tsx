@@ -2296,7 +2296,13 @@ test('raising the Qty of a fully released Work Order makes it Open with quantity
 
 /* ============ Release vs. unsaved demand edits ============ */
 
-test('unsaved demand changes disable Release until saved; release then uses the committed quantity', async () => {
+const releaseButtonIn = (dialog: HTMLElement, pn: string) =>
+  within(within(dialog).getByText(pn).closest('tr') as HTMLElement).getByRole(
+    'button',
+    { name: 'Release to production…' },
+  );
+
+test('releasing with unsaved changes asks to save first, then uses the committed quantity', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
@@ -2304,38 +2310,176 @@ test('unsaved demand changes disable Release until saved; release then uses the 
   fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
     target: { value: '9' },
   });
-  const releasedButtonOf = (pn: string) =>
-    within(within(dialog).getByText(pn).closest('tr') as HTMLElement).getByRole(
-      'button',
-      { name: 'Release to production…' },
-    );
-  expect(releasedButtonOf('E-500')).toBeDisabled();
-  expect(releasedButtonOf('A-100')).toBeDisabled();
-  expect(releasedButtonOf('E-500')).toHaveAttribute(
+  // The action stays available; it announces that it settles the draft.
+  expect(releaseButtonIn(dialog, 'E-500')).toBeEnabled();
+  expect(releaseButtonIn(dialog, 'E-500')).toHaveAttribute(
     'title',
-    'Save or discard demand changes before releasing.',
+    'Releasing asks to save or discard demand changes first.',
   );
   expect(dialog).toHaveTextContent(
-    'Save or discard demand changes before releasing.',
+    'Releasing asks to save or discard demand changes first.',
   );
 
-  // Save demand commits the edit; Release re-enables.
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
-  await screen.findByText(/007201 demand updated — business demand only/);
-  const enabledButton = await waitFor(() => {
-    const button = releasedButtonOf('E-500');
-    expect(button).not.toBeDisabled();
-    return button;
-  });
+  fireEvent.click(releaseButtonIn(dialog, 'E-500'));
+  const choice = await screen.findByRole('dialog', { name: 'Unsaved changes' });
+  expect(choice).toHaveTextContent('Releasing always uses the saved demand');
+  // Nothing is saved or released by opening the decision.
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
 
-  // The release flow opens with the COMMITTED requested quantity.
-  fireEvent.click(enabledButton);
+  fireEvent.click(
+    within(choice).getByRole('button', { name: 'Save demand, then release…' }),
+  );
+  await screen.findByText(/007201 demand updated — business demand only/);
+
+  // The release flow opens on exactly what was just committed.
   const release = await screen.findByRole('dialog', {
     name: 'Release to production — explicit action',
   });
   await within(release).findByLabelText('Release quantity');
   expect(within(release).getByLabelText('Release quantity')).toHaveValue('9');
   expect(release).toHaveTextContent(/requested 9/);
+  expect(
+    state.workOrders.find((w) => w.id === 1)!.demands[2].requested_quantity,
+  ).toBe(9);
+});
+
+test('discarding unsaved changes releases the saved demand and restores the draft', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
+    target: { value: '9' },
+  });
+  fireEvent.click(releaseButtonIn(dialog, 'E-500'));
+  const choice = await screen.findByRole('dialog', { name: 'Unsaved changes' });
+  fireEvent.click(
+    within(choice).getByRole('button', {
+      name: 'Discard changes, then release…',
+    }),
+  );
+
+  // The edit is gone (never saved) and the release uses the saved 7.
+  const release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  expect(await within(release).findByLabelText('Release quantity')).toHaveValue(
+    '7',
+  );
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
+  expect(within(dialog).getByLabelText('Quantity for E-500')).toHaveValue('7');
+  expect(within(dialog).queryAllByText('● Unsaved changes')).toHaveLength(0);
+});
+
+test('cancelling the unsaved decision keeps the draft and releases nothing', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
+    target: { value: '9' },
+  });
+  fireEvent.click(releaseButtonIn(dialog, 'E-500'));
+  const choice = await screen.findByRole('dialog', { name: 'Unsaved changes' });
+  fireEvent.click(within(choice).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Unsaved changes' }),
+    ).toBeNull(),
+  );
+  expect(
+    screen.queryByRole('dialog', {
+      name: 'Release to production — explicit action',
+    }),
+  ).toBeNull();
+  expect(within(dialog).getByLabelText('Quantity for E-500')).toHaveValue('9');
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
+});
+
+test('an invalid draft cannot be saved from the release decision', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+
+  // A quantity below what B-200 already released is invalid.
+  fireEvent.change(within(dialog).getByLabelText('Quantity for B-200'), {
+    target: { value: '9' },
+  });
+  fireEvent.click(releaseButtonIn(dialog, 'E-500'));
+  const choice = await screen.findByRole('dialog', { name: 'Unsaved changes' });
+  expect(
+    within(choice).getByRole('button', { name: 'Save demand, then release…' }),
+  ).toBeDisabled();
+  expect(choice).toHaveTextContent(
+    'The demand cannot be saved yet: the Work Order has invalid demand lines.',
+  );
+  // Discarding the invalid draft is still a way forward.
+  fireEvent.click(
+    within(choice).getByRole('button', {
+      name: 'Discard changes, then release…',
+    }),
+  );
+  const release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  expect(await within(release).findByLabelText('Release quantity')).toHaveValue(
+    '7',
+  );
+});
+
+test('undoing an edit clears the unsaved state — it is derived, not sticky', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const releasedRow = within(dialog)
+    .getByText('B-200')
+    .closest('tr') as HTMLElement;
+  const qty = within(releasedRow).getByLabelText('Quantity for B-200');
+  const removeButton = () =>
+    within(dialog).getByRole('button', { name: 'Remove line A-100' });
+
+  expect(removeButton()).toBeEnabled();
+  expect(releaseButtonIn(dialog, 'E-500')).not.toHaveAttribute('title');
+
+  // A rejected entry makes the draft dirty: saved-line removal is
+  // blocked and Release announces that it settles the draft first.
+  fireEvent.change(qty, { target: { value: '9' } });
+  expect(
+    within(releasedRow).getByText('≥ 10 pcs released'),
+  ).toBeInTheDocument();
+  expect(removeButton()).toBeDisabled();
+  expect(releaseButtonIn(dialog, 'E-500')).toHaveAttribute(
+    'title',
+    'Releasing asks to save or discard demand changes first.',
+  );
+  expect(
+    within(dialog).getAllByText('● Unsaved changes').length,
+  ).toBeGreaterThan(0);
+
+  // Typing the committed value back leaves nothing to save, so the
+  // error and every dirty gate go — without a save or a reload.
+  fireEvent.change(qty, { target: { value: '10' } });
+  expect(within(releasedRow).queryByText('≥ 10 pcs released')).toBeNull();
+  expect(removeButton()).toBeEnabled();
+  expect(releaseButtonIn(dialog, 'E-500')).not.toHaveAttribute('title');
+  expect(within(dialog).queryAllByText('● Unsaved changes')).toHaveLength(0);
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
+
+  // The same holds for a draft line added and removed again.
+  scanBarcode('PF:PN:TEMP-9');
+  await within(dialog).findByText('TEMP-9');
+  expect(removeButton()).toBeDisabled();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove line TEMP-9' }),
+  );
+  await screen.findByText('✕ Draft line removed — it had never been saved.');
+  expect(removeButton()).toBeEnabled();
+  expect(within(dialog).queryAllByText('● Unsaved changes')).toHaveLength(0);
 });
 
 /* ============ Work Order Number verbatim ============ */
