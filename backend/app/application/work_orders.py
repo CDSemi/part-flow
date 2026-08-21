@@ -35,17 +35,26 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   new and edited demand lines, any first-use PN masters, and every
   ``audit_events`` row commit together or roll back together — no
   partial business draft can persist (SLICE1_DATA_MODEL §16).
-- A demand line that has released production quantity is read-only
-  (GUI_DESIGN §11 — "a line whose quantity has been released arrives
-  read-only from the first load"): the server refuses an edit of such
-  a line instead of leaving the rule to the UI. Its released and
-  remaining quantities are DERIVED from the immutable ``RECEIVED``
-  history (``production_release.released_quantities``) — never stored,
-  so they survive any reload and need no migration. The check runs
-  under a ``FOR UPDATE`` lock on each edited line, which is what makes
-  it a rule rather than a hope: a release and an edit of the same
-  demand serialize in either arrival order, and no interleaving can
-  leave ``released_quantity > requested_quantity``.
+- A demand line that has released production quantity accepts a
+  RESTRICTED edit, not none at all (PROJECT_PROFILE §13; GUI_DESIGN
+  §11): business demand keeps changing after production started —
+  quantities grow, due dates move, Job Numbers arrive — while what
+  production already committed can never be contradicted. ``Qty``,
+  ``due_date`` and ``job_numbers`` stay editable; the Part Number
+  (never in the edit schema at all) and ``request_type`` are locked
+  once quantity has been released, and ``requester``/``reason``/
+  ``notes`` stay locked with them. ``requested_quantity`` may not fall
+  below ``max(released_quantity, allocated_quantity)`` — it may be
+  raised freely (the demand then has releasable remainder again and
+  the Work Order derives back to ``OPEN``) and lowered down to exactly
+  what is committed. Its released and remaining quantities are DERIVED
+  from the immutable ``RECEIVED`` history
+  (``production_release.released_quantities``) — never stored, so they
+  survive any reload and need no migration. The check runs under a
+  ``FOR UPDATE`` lock on each edited line, which is what makes it a
+  rule rather than a hope: a release and an edit of the same demand
+  serialize in either arrival order, and no interleaving can leave
+  ``released_quantity > requested_quantity``.
 - Demand-line removal follows the canonical rule (PROJECT_PROFILE §13):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
@@ -363,7 +372,10 @@ def _apply_line_edit(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> bool:
     The PN of a saved line is deliberately not editable — a different
     PN is a new demand line (the Add Part flow), never a rewrite of an
     existing one. ``allocated_quantity`` and ``priority_rank`` stay
-    server-owned (allocation and Hot ranking are later phases).
+    server-owned (allocation and Hot ranking are later phases). The
+    extra restrictions of a line with released quantity are applied by
+    the caller (``_guard_released_line_edit``) before this runs, so no
+    locked field is ever written and then rolled back.
     """
     changed = False
     if "request_type" in edit:
@@ -399,6 +411,87 @@ def _apply_line_edit(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> bool:
                 setattr(demand, field, text_value)
                 changed = True
     return changed
+
+
+# ---------------------------------------------------------------------------
+# The restricted edit of a demand line with released quantity (§13)
+# ---------------------------------------------------------------------------
+
+# Locked once production quantity has been released: the demand's own
+# identity of the work (Request Type — like the PN, which the edit
+# schema never carries) and the intake metadata recorded with it.
+# Opening any of these is a separate decision, not a side effect of
+# making Qty/Due date/Job Numbers editable.
+_RELEASED_LINE_LOCKED_TEXT_FIELDS: Final = (
+    ("requester", "Requester"),
+    ("reason", "Reason"),
+    ("notes", "Notes"),
+)
+
+
+def _locked_field_of_released_line(demand: WorkOrderDemand, edit: Mapping[str, Any]) -> str | None:
+    """The locked field this edit would really change, if any.
+
+    A field submitted with its current value changes nothing and is not
+    an edit — the same no-op semantics every other field has here — so
+    only a real change is reported.
+    """
+    if (
+        "request_type" in edit
+        # An explicit null is invalid on any line, released or not, and
+        # stays the InvalidInputError of `_apply_line_edit`.
+        and edit["request_type"] is not None
+        and _validated_request_type(edit["request_type"]) != demand.request_type
+    ):
+        return "Request Type"
+    for field, label in _RELEASED_LINE_LOCKED_TEXT_FIELDS:
+        if field in edit and optional_text(edit[field]) != getattr(demand, field):
+            return label
+    return None
+
+
+def _guard_released_line_edit(
+    demand: WorkOrderDemand, edit: Mapping[str, Any], released_quantity: int
+) -> None:
+    """Enforce the restricted edit of a released line; write nothing.
+
+    Runs under the caller's ``FOR UPDATE`` lock on the demand with the
+    released quantity recomputed under it (PROJECT_PROFILE §13):
+
+    - a locked field (Request Type, Requester, Reason, Notes) refuses
+      the whole save — the PN is not editable on any saved line and
+      never reaches here;
+    - ``requested_quantity`` may not fall below what is already
+      committed: ``max(released_quantity, allocated_quantity)``.
+      Raising it is always allowed — the demand simply has releasable
+      remainder again — and lowering it to exactly the committed
+      quantity is valid, leaving nothing left to release.
+
+    Qty, due date and Job Numbers are otherwise the normal audited
+    edit; nothing here touches QuantityFlows, PartMovements, or release
+    history.
+    """
+    locked = _locked_field_of_released_line(demand, edit)
+    if locked is not None:
+        raise ConflictError(
+            f"Cannot change {locked} for Part Number '{demand.part_number}':"
+            " production quantity has already been released for this demand"
+            " line. Qty, Due date and Job Numbers stay editable."
+        )
+    if "requested_quantity" not in edit:
+        return
+    quantity = _validated_quantity(edit["requested_quantity"])
+    committed = max(released_quantity, demand.allocated_quantity)
+    if quantity < committed:
+        reason = (
+            f"{released_quantity} pcs are already released"
+            if released_quantity >= demand.allocated_quantity
+            else f"{demand.allocated_quantity} pcs are already allocated"
+        )
+        raise ConflictError(
+            f"Cannot lower Qty to {quantity} pcs for Part Number"
+            f" '{demand.part_number}': {reason}. Enter {committed} pcs or more."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +585,9 @@ def update_work_order(
     workflow (its released-quantity rule needs release to exist).
 
     Every edited saved demand line is locked ``FOR UPDATE`` before this
-    save decides whether it may be edited at all, so the read-only rule
-    of a released line cannot be raced by a release in flight and
+    save decides which of its fields may be edited and how low its
+    quantity may go, so the restricted-edit rule of a released line
+    cannot be raced by a release in flight and
     ``released_quantity > requested_quantity`` is unreachable. A
     header-only save takes no demand lock.
     """
@@ -517,8 +611,8 @@ def update_work_order(
             )
         seen_edit_ids.add(edit_id)
 
-    # Lock every edited saved demand line BEFORE deciding whether it may
-    # be edited, then recompute its released quantity under that lock.
+    # Lock every edited saved demand line BEFORE deciding what may be
+    # edited on it, then recompute its released quantity under that lock.
     #
     # The decision races a release otherwise: this save could read
     # "nothing released", a concurrent release could lock the same
@@ -528,7 +622,8 @@ def update_work_order(
     # two orders are both safe and neither can interleave:
     #
     # - release commits first → the recomputed released quantity is
-    #   visible here and the whole edit of that line is refused (409);
+    #   visible here and the restricted-edit rule applies to that line
+    #   against the real released quantity (a lower Qty is refused);
     # - this save commits first → the release waits on this lock, then
     #   re-reads the demand row (its own ``FOR UPDATE`` get refreshes
     #   it) and applies the remaining cap to the NEW requested quantity.
@@ -571,15 +666,14 @@ def update_work_order(
             raise NotFoundError(
                 f"Demand line {demand_id} does not exist on Work Order {work_order.id}."
             )
-        if released.get(demand.id, 0) > 0:
-            # GUI_DESIGN §11 wording — the UI renders the line read-only,
-            # the backend still refuses. Later adjustments go through
-            # the correction and production workflows
-            # (PROJECT_PROFILE §16), never through a demand edit.
-            raise ConflictError(
-                "Cannot edit: production quantity has already been released"
-                f" for Part Number '{demand.part_number}'."
-            )
+        released_quantity = released.get(demand.id, 0)
+        if released_quantity > 0:
+            # Restricted, not frozen (PROJECT_PROFILE §13): the UI
+            # renders the locked fields read-only, the backend refuses
+            # them anyway. Released quantity itself is never rewritten
+            # from here — production corrections stay in the correction
+            # and production workflows (PROJECT_PROFILE §16).
+            _guard_released_line_edit(demand, edit, released_quantity)
         before = _demand_snapshot(demand)
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):
             demand.updated_at = func.now()

@@ -131,7 +131,7 @@ function seedState(): FakeState {
             due_date: '2026-09-10',
             job_numbers: ['18112'],
           }),
-          demand(102, 1, 'B-200', 10),
+          demand(102, 1, 'B-200', 10, { due_date: '2026-09-10' }),
           demand(103, 1, 'E-500', 7, { due_date: '2026-09-10' }),
         ],
       },
@@ -568,6 +568,40 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       for (const edit of (body.line_edits ?? []) as Record<string, unknown>[]) {
         const target = wo.demands.find((d) => d.id === Number(edit.id));
         if (!target) return detailResponse('Demand not found.', 404);
+        // Mirror of the backend restricted-edit rule for a released
+        // line (PROJECT_PROFILE §13): the identity of the work and the
+        // intake metadata are locked, and the quantity may not fall
+        // below what production has already committed.
+        const releasedQuantity = releasedOf(target.id);
+        if (releasedQuantity > 0) {
+          const locked = (
+            [
+              ['request_type', 'Request Type'],
+              ['requester', 'Requester'],
+              ['reason', 'Reason'],
+              ['notes', 'Notes'],
+            ] as const
+          ).find(([field]) => field in edit && edit[field] !== target[field]);
+          if (locked) {
+            return detailResponse(
+              `Cannot change ${locked[1]} for Part Number '${target.part_number}': production quantity has already been released for this demand line. Qty, Due date and Job Numbers stay editable.`,
+              409,
+            );
+          }
+          const committed = Math.max(
+            releasedQuantity,
+            target.allocated_quantity,
+          );
+          if (
+            'requested_quantity' in edit &&
+            Number(edit.requested_quantity) < committed
+          ) {
+            return detailResponse(
+              `Cannot lower Qty to ${Number(edit.requested_quantity)} pcs for Part Number '${target.part_number}': ${releasedQuantity} pcs are already released. Enter ${committed} pcs or more.`,
+              409,
+            );
+          }
+        }
         if ('request_type' in edit) {
           if (edit.request_type === null) {
             return detailResponse('request_type must not be null.', 422);
@@ -1600,7 +1634,7 @@ test('release FLOATING confirms quantity, Area and Operation, and reports the co
   expect(commit.body.operation_id).toBe(11);
 
   // The released state comes back from the SERVER (the dialog
-  // reloaded the demand lines): read-only status, release and removal
+  // reloaded the demand lines): Released status, release and removal
   // disabled with the explanation. The mixed Work Order stays OPEN.
   const detailDialog = screen.getByRole('dialog', {
     name: 'Work Order Details',
@@ -2051,7 +2085,7 @@ test('a dirty New Work Order dialog also guards top-level navigation', async () 
 
 /* ============ Server-derived released state ============ */
 
-test('a demand released in an earlier session loads Released and read-only before any local action', async () => {
+test('a demand released in an earlier session loads Released and restricted before any local action', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
@@ -2071,15 +2105,98 @@ test('a demand released in an earlier session loads Released and read-only befor
     ),
   ).toBeInTheDocument();
 
-  // A duplicate scan of the released PN announces the read-only line.
+  // Restricted, not frozen: Qty, due date and Job Numbers stay
+  // editable with the committed quantity stated as the floor…
+  expect(within(row).getByLabelText('Quantity for B-200')).toHaveValue('10');
+  expect(within(row).getByLabelText('Due date for B-200')).toBeInTheDocument();
+  expect(
+    within(row).getByLabelText('Job Numbers for B-200'),
+  ).toBeInTheDocument();
+  expect(
+    within(row).getByText('min 10 — already released'),
+  ).toBeInTheDocument();
+  // …while the PN and the Request Type are fixed.
+  expect(within(row).queryByLabelText('Request Type for B-200')).toBeNull();
+  expect(within(row).getByText('NEW')).toBeInTheDocument();
+
+  // A duplicate scan of the released PN points at the existing line.
   scanBarcode('PF:PN:B-200');
   expect(
     await screen.findByText(
-      /B-200 is already on this Work Order and its production quantity is released — the line is read-only here\./,
+      /B-200 is already on this Work Order and its production quantity is released — edit its quantity, due date or Job Numbers instead of adding a duplicate line\./,
     ),
   ).toBeInTheDocument();
   // Still exactly one B-200 line — nothing was added.
   expect(within(dialog).getAllByText('B-200')).toHaveLength(1);
+});
+
+test('a released line saves its Qty, due date and Job Numbers as a normal audited edit', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+
+  fireEvent.change(within(row).getByLabelText('Quantity for B-200'), {
+    target: { value: '18' },
+  });
+  fireEvent.change(within(row).getByLabelText('Due date for B-200'), {
+    target: { value: '2026-10-02' },
+  });
+  fireEvent.change(within(row).getByLabelText('Job Numbers for B-200'), {
+    target: { value: '18112, 18113' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+
+  // Exactly the restricted fields travelled for the released line.
+  const patch = state.calls.filter((call) =>
+    call.startsWith('PATCH /api/work-orders/1'),
+  );
+  expect(patch).toHaveLength(1);
+  const saved = state.workOrders.find((w) => w.id === 1)!.demands[1];
+  expect(saved.requested_quantity).toBe(18);
+  expect(saved.due_date).toBe('2026-10-02');
+  expect(saved.job_numbers).toEqual(['18112', '18113']);
+  expect(saved.request_type).toBe('NEW');
+  // The release evidence is untouched — the remainder simply grew.
+  expect(state.releasedQuantities.get(102)).toBe(10);
+  await waitFor(() =>
+    expect(within(dialog).getByText('Released 10/18')).toBeInTheDocument(),
+  );
+});
+
+test('a released line refuses a Qty below the released quantity before anything travels', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  const row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+
+  fireEvent.change(within(row).getByLabelText('Quantity for B-200'), {
+    target: { value: '9' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  expect(
+    await within(row).findByText(
+      'quantity cannot go below 10 — that much is already released',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
+  expect(
+    state.workOrders.find((w) => w.id === 1)!.demands[1].requested_quantity,
+  ).toBe(10);
+
+  // Down to exactly the released quantity is valid.
+  fireEvent.change(within(row).getByLabelText('Quantity for B-200'), {
+    target: { value: '10' },
+  });
+  fireEvent.change(within(row).getByLabelText('Due date for B-200'), {
+    target: { value: '2026-10-03' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007201 demand updated — business demand only/);
+  expect(state.workOrders.find((w) => w.id === 1)!.demands[1].due_date).toBe(
+    '2026-10-03',
+  );
 });
 
 test('the released state survives a full page reload', async () => {
@@ -2110,21 +2227,66 @@ test('the WO list derives Open for a mixed Work Order and Released for a fully r
   expect(within(releasedRow).getByText('Released')).toBeInTheDocument();
 });
 
-test('a fully released Work Order opens read-only', async () => {
+test('a fully released Work Order keeps the restricted line edit', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007300', 'D-400');
 
-  expect(dialog).toHaveTextContent('demand lines are read-only');
+  expect(dialog).toHaveTextContent('every demand line is fully released');
   expect(within(dialog).getAllByText('Released').length).toBeGreaterThan(0);
+  // Qty, due date and Job Numbers stay editable even here…
+  expect(within(dialog).getByLabelText('Quantity for D-400')).toHaveValue('8');
   expect(
-    within(dialog).queryByRole('button', { name: 'Save demand' }),
-  ).toBeNull();
+    within(dialog).getByLabelText('Due date for D-400'),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByLabelText('Job Numbers for D-400'),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole('button', { name: 'Save demand' }),
+  ).toBeEnabled();
+  // …while the OPEN-only scope stays closed: no new lines, no release
+  // action and no removal while nothing remains to release.
+  expect(within(dialog).queryByLabelText('Request Type for D-400')).toBeNull();
   expect(
     within(dialog).queryByRole('button', { name: 'Release to production…' }),
   ).toBeNull();
   expect(
     within(dialog).queryByRole('button', { name: '＋ Add Part manually' }),
   ).toBeNull();
+  expect(within(dialog).queryByLabelText('WO due date')).toBeNull();
+});
+
+test('raising the Qty of a fully released Work Order makes it Open with quantity to release again', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007300', 'D-400');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for D-400'), {
+    target: { value: '12' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+  await screen.findByText(/007300 demand updated — business demand only/);
+
+  // The Work Order derives back to Open, the line states what is
+  // actually released, and the release action returns for the rest.
+  await waitFor(() =>
+    expect(within(dialog).getByText('Released 8/12')).toBeInTheDocument(),
+  );
+  expect(within(dialog).getByText('Open')).toBeInTheDocument();
+  const row = within(dialog).getByText('D-400').closest('tr') as HTMLElement;
+  expect(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  ).toBeEnabled();
+
+  // The remainder is what the release dialog offers.
+  fireEvent.click(
+    within(row).getByRole('button', { name: 'Release to production…' }),
+  );
+  const release = await screen.findByRole('dialog', {
+    name: 'Release to production — explicit action',
+  });
+  expect(await within(release).findByLabelText('Release quantity')).toHaveValue(
+    '4',
+  );
 });
 
 /* ============ Release vs. unsaved demand edits ============ */
@@ -2488,15 +2650,18 @@ test('unsaved demand changes disable saved-line removal; after Save the removals
   await screen.findByText('✕ E-500 removed from 007201.');
 
   expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([102]);
-  // The reloaded server detail derives RELEASED: the dialog is
-  // read-only and shows no unsaved marker.
+  // The reloaded server detail derives RELEASED: the OPEN-only scope
+  // closes (no Add Part, no release, no removal) while the remaining
+  // released line keeps its restricted edit — and no unsaved marker is
+  // stranded.
   await waitFor(() =>
-    expect(dialog).toHaveTextContent('demand lines are read-only'),
+    expect(dialog).toHaveTextContent('every demand line is fully released'),
   );
   expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
   expect(
-    within(dialog).queryByRole('button', { name: 'Save demand' }),
+    within(dialog).queryByRole('button', { name: '＋ Add Part manually' }),
   ).toBeNull();
+  expect(within(dialog).getByLabelText('Quantity for B-200')).toHaveValue('10');
 
   // The list derives RELEASED for the Work Order too.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));

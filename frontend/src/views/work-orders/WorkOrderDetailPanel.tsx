@@ -29,6 +29,8 @@ import {
   applyWorkOrderDueDateChange,
   buildLineEdits,
   collectMissingDemandInfo,
+  committedQuantity,
+  committedQuantityReason,
   createDraftLine,
   draftFromDemand,
   draftToNewLine,
@@ -75,8 +77,13 @@ const REMOVE_WHILE_DIRTY_EXPLANATION =
  * lines can be added (manual-first ＋ Add Part, scanning secondary)
  * and edited as a local draft applied by `Save demand` — ONE PATCH,
  * one all-or-nothing backend transaction; a failed save keeps the
- * whole draft. Removing a saved line is its own explicit, confirmed
- * server action; the backend enforces the canonical rules
+ * whole draft. A line with released production quantity keeps the
+ * RESTRICTED edit (Qty — never below what is already released or
+ * allocated — due date and Job Numbers) on an Open and on a Released
+ * Work Order alike; its PN and Request Type render read-only and it
+ * can never be removed (PROJECT_PROFILE §13). Removing a saved line is
+ * its own explicit, confirmed server action; the backend enforces the
+ * canonical rules
  * (PROJECT_PROFILE §13, §8.2 — released demand and the last line
  * answer 409 removing nothing). Every close request (Cancel, Escape,
  * backdrop) on a dirty draft asks for explicit discard confirmation
@@ -146,8 +153,8 @@ export function WorkOrderDetailPanel({
   } | null>(null);
 
   /** Adopt fresh server state and rebuild the editable draft. The
-   * Released/read-only state of every line comes from the server's
-   * release evidence inside the response. */
+   * Released state of every line — and with it the restricted edit —
+   * comes from the server's release evidence inside the response. */
   const adoptDetail = useCallback((fresh: WorkOrderDetail) => {
     setDetail(fresh);
     setDue(fresh.dueDate ?? '');
@@ -222,7 +229,13 @@ export function WorkOrderDetailPanel({
     );
   }
 
+  // OPEN scope: adding lines, the WO due date, removal and release.
   const editable = detail.status === 'OPEN';
+  // A released line keeps its RESTRICTED edit (Qty, due date, Job
+  // Numbers) whatever the Work Order's derived status — a Released
+  // Work Order is exactly the case where every line is released, so
+  // its lines stay editable that far and `Save demand` stays offered.
+  const linesRestricted = lines.some((line) => line.released);
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
   // An internal Work Order may receive its real external number later
@@ -233,9 +246,11 @@ export function WorkOrderDetailPanel({
     internal && (detail.status === 'OPEN' || detail.status === 'RELEASED');
   const numberEntered = numberEditVisible && numberDraft.trim() !== '';
 
-  // Released/read-only comes from the server release evidence loaded
-  // with each line (`draftFromDemand`) — no session-local remapping.
+  // The Released state (and with it the restricted edit) comes from
+  // the server release evidence loaded with each line
+  // (`draftFromDemand`) — no session-local remapping.
   const display = lines;
+  const saveVisible = editable || numberEditVisible || linesRestricted;
 
   const errorFor = (id: number, field: LineField) =>
     lineErrors.find((e) => e.lineId === id && e.field === field)?.message;
@@ -284,15 +299,10 @@ export function WorkOrderDetailPanel({
       return;
     }
     if (result.kind === 'duplicate') {
-      if (result.released) {
-        showNotice(
-          `⚠ ${result.pn} is already on this Work Order and its production quantity is released — the line is read-only here.`,
-        );
-        scanRef.current?.focus();
-        return;
-      }
       showNotice(
-        `⚠ ${result.pn} is already on this Work Order — edit its quantity instead of adding a duplicate line.`,
+        result.released
+          ? `⚠ ${result.pn} is already on this Work Order and its production quantity is released — edit its quantity, due date or Job Numbers instead of adding a duplicate line.`
+          : `⚠ ${result.pn} is already on this Work Order — edit its quantity instead of adding a duplicate line.`,
       );
       setFocusField({ id: result.lineId, field: 'qty' });
       return;
@@ -319,9 +329,7 @@ export function WorkOrderDetailPanel({
     showNotice(
       `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
     );
-    if (duplicate && !duplicate.released) {
-      setFocusField({ id: duplicate.id, field: 'qty' });
-    }
+    if (duplicate) setFocusField({ id: duplicate.id, field: 'qty' });
   }
 
   function requestRemove(line: DemandLineDraft) {
@@ -414,12 +422,12 @@ export function WorkOrderDetailPanel({
       return;
     }
     // Missing due dates are valid — but they are summarized and
-    // explicitly confirmed, never silently saved. Released lines are
-    // read-only history and are not re-confirmed.
+    // explicitly confirmed, never silently saved. A released line's due
+    // date is editable too, so it is summarized like any other.
     const missing = collectMissingDemandInfo(
       numberEntered ? numberDraft : (detail.workOrderNumber ?? ''),
       due,
-      display.filter((line) => !line.released),
+      display,
     );
     // Only real, summarizable omissions open the confirmation. The
     // missing external Work Order Number is NOT one here: in Details
@@ -448,7 +456,7 @@ export function WorkOrderDetailPanel({
             Work Order Details
           </h2>
           <span className="spacer" />
-          {(editable || numberEditVisible) && dirty ? (
+          {saveVisible && dirty ? (
             <span className="unsaved">● Unsaved changes</span>
           ) : null}
         </div>
@@ -508,12 +516,22 @@ export function WorkOrderDetailPanel({
           <EmptyState message="This Work Order has no demand lines." />
         ) : null}
         <div className="wo-card">
-          {editable && (
+          {(editable || linesRestricted) && (
             <div className="woc-head">
               <span className="meta">
-                Demand lines — each line's due date defaults to the{' '}
-                <b>WO due date</b> and may be edited per line. Edits stay an
-                unsaved draft until <b>Save demand</b>.
+                {editable ? (
+                  <>
+                    Demand lines — each line's due date defaults to the{' '}
+                    <b>WO due date</b> and may be edited per line. Edits stay an
+                    unsaved draft until <b>Save demand</b>.
+                  </>
+                ) : (
+                  <>
+                    Released demand lines — <b>Qty</b>, <b>due date</b> and{' '}
+                    <b>Job Numbers</b> stay editable. Edits stay an unsaved
+                    draft until <b>Save demand</b>.
+                  </>
+                )}
               </span>
               <span className="spacer" />
               {dirty ? (
@@ -536,7 +554,14 @@ export function WorkOrderDetailPanel({
               </thead>
               <tbody>
                 {display.map((line) => {
+                  // The full edit — PN and Request Type included —
+                  // exists only while nothing is released for the line.
                   const rowEditable = editable && !line.released;
+                  // The restricted edit of a released line: Qty, due
+                  // date and Job Numbers stay editable (§11.2), on an
+                  // Open and on a Released Work Order alike.
+                  const valueEditable = rowEditable || line.released;
+                  const floor = committedQuantity(line);
                   const removeRule = lineRemoveRule(line);
                   return (
                     <tr key={line.id}>
@@ -593,12 +618,10 @@ export function WorkOrderDetailPanel({
                                   `⚠ ${pn} is already on this Work Order — edit the existing line instead of adding a duplicate.`,
                                 );
                                 e.target.value = '';
-                                if (!duplicate.released) {
-                                  setFocusField({
-                                    id: duplicate.id,
-                                    field: 'qty',
-                                  });
-                                }
+                                setFocusField({
+                                  id: duplicate.id,
+                                  field: 'qty',
+                                });
                                 return;
                               }
                               clearLineError(line.id, 'pn');
@@ -659,7 +682,7 @@ export function WorkOrderDetailPanel({
                         data-label="Qty"
                         className={errorFor(line.id, 'qty') ? 'err-cell' : ''}
                       >
-                        {rowEditable ? (
+                        {valueEditable ? (
                           <>
                             <input
                               ref={(el) => {
@@ -694,6 +717,11 @@ export function WorkOrderDetailPanel({
                                 scanRef.current?.focus();
                               }}
                             />
+                            {floor > 0 ? (
+                              <div className="bc">
+                                min {floor} — {committedQuantityReason(line)}
+                              </div>
+                            ) : null}
                             {errorFor(line.id, 'qty') ? (
                               <div className="rowerr">
                                 {errorFor(line.id, 'qty')}
@@ -705,7 +733,7 @@ export function WorkOrderDetailPanel({
                         )}
                       </td>
                       <td data-label="Due date">
-                        {rowEditable ? (
+                        {valueEditable ? (
                           <>
                             <input
                               ref={(el) => {
@@ -735,7 +763,7 @@ export function WorkOrderDetailPanel({
                         )}
                       </td>
                       <td data-label="Job Numbers">
-                        {rowEditable ? (
+                        {valueEditable ? (
                           <input
                             className="mono"
                             size={10}
@@ -905,7 +933,7 @@ export function WorkOrderDetailPanel({
           <button className="btn ghost" onClick={requestClose}>
             Cancel (Esc)
           </button>
-          {editable || numberEditVisible ? (
+          {saveVisible ? (
             <button
               className="btn primary"
               disabled={writeBlocked || busy}
@@ -932,8 +960,10 @@ export function WorkOrderDetailPanel({
             ) : (
               <>
                 This Work Order is <b>{workOrderStatusLabel(detail.status)}</b>{' '}
-                — demand lines are read-only. Editing is available only while a
-                Work Order is Open.
+                — every demand line is fully released. Qty, due date and Job
+                Numbers stay editable; the PN and Request Type are fixed and
+                released lines cannot be removed. Raising a Qty leaves quantity
+                to release again.
               </>
             )}
           </span>

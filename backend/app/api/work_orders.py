@@ -32,8 +32,13 @@ Deliberate surface decisions:
   from the immutable ``RECEIVED`` Movement context: a demand may be
   released in several parts, so the release action stays available
   while ``remaining_quantity > 0`` and the server refuses anything
-  beyond it. A line with any released quantity is read-only — a
-  ``line_edits`` entry addressing it is a 409 that changes nothing.
+  beyond it. A line with any released quantity accepts a RESTRICTED
+  edit: ``requested_quantity`` (never below the released or allocated
+  quantity), ``due_date`` and ``job_numbers`` stay editable, while
+  ``request_type`` — like the PN, which no edit carries — plus
+  ``requester``, ``reason`` and ``notes`` are locked and removal stays
+  refused. A ``line_edits`` entry that breaks the restriction is a 409
+  that changes nothing.
 - ``DELETE /work-orders/{id}/demands/{id}`` enforces the canonical
   removal rules (PROJECT_PROFILE §13, §8.2) in the backend, never
   only in the UI: a saved demand deletes only while no production
@@ -82,8 +87,9 @@ class WorkOrderDemandResponse(BaseModel):
     notes: str | None
     # Server-derived release evidence (immutable RECEIVED Movement
     # context): true once any production quantity was released for this
-    # demand. The UI renders such a line Released/read-only — the flag
-    # survives any reload and is never a client-session guess.
+    # demand. The UI renders such a line Released and restricts it to
+    # the Qty/Due date/Job Numbers edit — the flag survives any reload
+    # and is never a client-session guess.
     has_released_quantity: bool
     # Quantity already released for this demand, and what is left of
     # the requested quantity. A demand may be released in several
@@ -144,7 +150,11 @@ class WorkOrderDemandEditRequest(BaseModel):
 
     The PN is deliberately absent: a different PN is a new line, never
     a rewrite of a saved one. Omitted fields keep their values; an
-    explicit ``null`` due date is the valid "No due date" choice.
+    explicit ``null`` due date is the valid "No due date" choice. Once
+    the line has released quantity only ``requested_quantity``,
+    ``due_date`` and ``job_numbers`` are still accepted, and the
+    quantity may not fall below what is already released or allocated
+    (409, nothing written).
     """
 
     model_config = ConfigDict(extra="forbid")

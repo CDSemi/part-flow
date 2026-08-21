@@ -1,4 +1,4 @@
-# PartFlow Project Profile v20
+# PartFlow Project Profile v21
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction
@@ -640,6 +640,7 @@ Rules:
 - `due_date` may be null. A missing due date is valid data, not a validation error, and never blocks saving. Undated demand is ordered after all dated demand (§18 Allocation Order).
 - The PN itself owns no due date. A PN presented without a due date means the relevant Work Order Demand has no due date.
 - Work Order Demand may be edited by Admin or Manager.
+- Once production quantity has been released for a Work Order Demand, only the restricted edit of §13 *Restricted edit after release* remains: requested quantity (never below the released or allocated quantity), due date, and Job Numbers. The line can no longer be removed (§13 *Work Order Demand Removal*).
 - Priority belongs to Work Order Demand.
 - Work Order Demand does not own shop-floor Movement.
 - Work Order Demand does not determine current PN location.
@@ -1284,7 +1285,17 @@ New ERP production normally uses Request Type `NEW`.
 
 The starting Area may be Material or another configured starting Area. A **terminal** Area is never a starting Area (v20): it is where finished quantity ends (§18), so production release into it is refused.
 
-**Partial and repeated release (v20 — decided):** a Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal, and each part is its own explicit release creating its own Quantity Flow — parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated next. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing. A Work Order Demand line that has released quantity is read-only — it can no longer be edited or removed (§13 *Work Order Demand Removal*); later adjustments go through the correction and production workflows (§16).
+**Partial and repeated release (v20 — decided):** a Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal, and each part is its own explicit release creating its own Quantity Flow — parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated next. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing.
+
+**Restricted edit after release (v21 — decided; supersedes the v20 "a released demand line is read-only" rule):** business demand keeps changing after production has started — quantities grow, due dates move, Job Numbers arrive — so a Work Order Demand line that has released quantity stays **editable within limits** instead of freezing:
+
+- **Requested quantity** may be edited, but never below what is already committed to the line: `max(released quantity, allocated quantity)`. Raising it is always valid — the line then has remaining quantity to release again, and its Work Order returns to `Open` accordingly (§8.2 status is derived from the demand lines). Lowering it to exactly the committed quantity is valid and simply leaves nothing to release.
+- **Due date** and external **Job Numbers** may be edited like on any other demand line.
+- **Part Number** stays uneditable — as on every saved demand line, a different PN is a new line, never a rewrite.
+- **Request Type** is fixed once quantity has been released: what was released was released as `NEW` or `MODIFY` work, and that is history. **Requester**, **reason** and **notes** stay fixed with it; opening them is a separate decision, not a side effect of this rule.
+- **Removal stays refused** (§13 *Work Order Demand Removal*), and no demand edit ever rewrites released quantity, Quantity Flows, Movement history, or release history — later production adjustments go through the correction and production workflows (§16).
+
+The rule is enforced where the data is written, never only in the UI, and an edit of a released line serializes against a release of the same line so the released quantity can never exceed the requested quantity.
 
 If the PN already has active quantity, the system must show the existing distribution and require explicit confirmation of intent. A new Work Order requesting an already active PN never automatically creates additional physical quantity and never automatically merges Quantity Flows.
 

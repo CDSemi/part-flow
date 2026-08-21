@@ -47,7 +47,8 @@ export interface DemandLineDraft {
   /** True when the line exists in saved server state. */
   saved: boolean;
   /** Server-derived release evidence (`has_released_quantity`): the
-   * line renders Released and read-only (GUI_DESIGN §11.2). Never a
+   * line renders Released and accepts the restricted edit only — Qty,
+   * due date and Job Numbers (GUI_DESIGN §11.2). Never a
    * client-session guess — it survives any reload. */
   released: boolean;
   /** Server-derived released and remaining quantity of the demand. A
@@ -56,6 +57,10 @@ export interface DemandLineDraft {
    * the same cap. */
   releasedQuantity: number;
   remainingQuantity: number;
+  /** Server-owned allocated quantity (Phase 10). Together with the
+   * released quantity it is what production has already committed —
+   * the floor a saved Qty can never fall below. */
+  allocatedQuantity: number;
   statusLabel: string;
 }
 
@@ -76,6 +81,23 @@ export function workOrderStatusLabel(status: string): string {
 export const RELEASED_REMOVE_EXPLANATION =
   'Cannot remove: production quantity has already been released.';
 
+/**
+ * The quantity a saved demand line can never fall below: what
+ * production has already committed to it (PROJECT_PROFILE §13). A
+ * released line may be raised freely and lowered down to exactly this
+ * value — never under it. The backend enforces the same floor.
+ */
+export function committedQuantity(line: DemandLineDraft): number {
+  return Math.max(line.releasedQuantity, line.allocatedQuantity);
+}
+
+/** Which commitment sets the floor — the larger one names itself. */
+export function committedQuantityReason(line: DemandLineDraft): string {
+  return line.allocatedQuantity > line.releasedQuantity
+    ? 'already allocated'
+    : 'already released';
+}
+
 let nextDraftId = 1;
 
 export function createDraftLine(
@@ -95,6 +117,7 @@ export function createDraftLine(
     released: false,
     releasedQuantity: 0,
     remainingQuantity: 0,
+    allocatedQuantity: 0,
     statusLabel: 'Draft (unsaved)',
     ...init,
   };
@@ -113,8 +136,8 @@ export function textToJobNumbers(text: string): string[] {
 }
 
 /** Load one saved server demand line into an editable draft. The
- * Released/read-only state comes from the server's release evidence,
- * never from local session state. */
+ * Released state — and with it the restricted edit — comes from the
+ * server's release evidence, never from local session state. */
 export function draftFromDemand(
   demand: WorkOrderDemand,
   workOrderDue: string | null,
@@ -123,6 +146,7 @@ export function draftFromDemand(
   return createDraftLine({
     releasedQuantity: demand.releasedQuantity,
     remainingQuantity: demand.remainingQuantity,
+    allocatedQuantity: demand.allocatedQuantity,
     demandId: demand.id,
     pn: demand.partNumber,
     isNewPn: false,
@@ -187,14 +211,16 @@ export function processScan(
 /**
  * The WO due date is the entry default: update lines still inheriting
  * it. A line whose due date was edited — including an explicit
- * `No due date` — is user-owned and never overwritten.
+ * `No due date` — is user-owned and never overwritten. A released line
+ * follows the same rule: its due date stays editable after release, so
+ * an inherited one still inherits.
  */
 export function applyWorkOrderDueDateChange(
   lines: readonly DemandLineDraft[],
   newDue: string,
 ): DemandLineDraft[] {
   return lines.map((line) =>
-    line.dueTouched || line.released ? line : { ...line, due: newDue },
+    line.dueTouched ? line : { ...line, due: newDue },
   );
 }
 
@@ -205,9 +231,12 @@ export function isPositiveInteger(raw: string): boolean {
 /**
  * Pre-flight validation before Save demand travels: every line needs a
  * PN and a positive whole quantity; duplicate PNs are rejected. A
- * missing due date is NOT a validation error — it is summarized by the
- * Save Demand confirmation instead. Incomplete rows are never silently
- * filtered out. The backend re-validates everything transactionally.
+ * released line keeps its (unchangeable) PN and is validated too — its
+ * quantity may not drop below what production already committed
+ * (PROJECT_PROFILE §13). A missing due date is NOT a validation error
+ * — it is summarized by the Save Demand confirmation instead.
+ * Incomplete rows are never silently filtered out. The backend
+ * re-validates everything transactionally.
  */
 export function validateDemandLines(
   lines: readonly DemandLineDraft[],
@@ -215,7 +244,6 @@ export function validateDemandLines(
   const errors: LineError[] = [];
   const seen = new Map<string, number>();
   for (const line of lines) {
-    if (line.released) continue; // read-only — unchanged saved state
     if (!line.pn) {
       errors.push({
         lineId: line.id,
@@ -236,6 +264,12 @@ export function validateDemandLines(
         lineId: line.id,
         field: 'qty',
         message: 'quantity must be a positive whole number',
+      });
+    } else if (Number.parseInt(line.qty, 10) < committedQuantity(line)) {
+      errors.push({
+        lineId: line.id,
+        field: 'qty',
+        message: `quantity cannot go below ${committedQuantity(line)} — that much is ${committedQuantityReason(line)}`,
       });
     }
   }
@@ -307,6 +341,11 @@ export function draftToNewLine(line: DemandLineDraft): NewDemandLine {
  * unchanged line produces no edit at all, and `request_type` never
  * travels as null (the backend rejects that instead of reinterpreting
  * it).
+ *
+ * A released line is NOT skipped: it still contributes its Qty, due
+ * date and Job Numbers (PROJECT_PROFILE §13). Only its locked fields
+ * stay out of the request — the UI renders them read-only, so they
+ * cannot differ, and sending them would be a 409 either way.
  */
 export function buildLineEdits(
   lines: readonly DemandLineDraft[],
@@ -315,12 +354,12 @@ export function buildLineEdits(
   const demandById = new Map(demands.map((demand) => [demand.id, demand]));
   const edits: DemandLineEdit[] = [];
   for (const line of lines) {
-    if (line.demandId === null || line.released) continue;
+    if (line.demandId === null) continue;
     const demand = demandById.get(line.demandId);
     if (!demand) continue;
     const edit: DemandLineEdit = { id: line.demandId };
     let changed = false;
-    if (line.type !== demand.requestType) {
+    if (!line.released && line.type !== demand.requestType) {
       edit.requestType = line.type;
       changed = true;
     }
@@ -339,7 +378,7 @@ export function buildLineEdits(
       changed = true;
     }
     const notes = line.notes.trim() ? line.notes : null;
-    if (notes !== demand.notes) {
+    if (!line.released && notes !== demand.notes) {
       edit.notes = notes;
       changed = true;
     }

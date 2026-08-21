@@ -57,7 +57,9 @@ export interface WorkOrderDemand {
    * Server-derived release evidence (immutable RECEIVED Movement
    * context): true once any production quantity was released for this
    * demand — in any session, ever. The line renders Released and
-   * read-only; this is never a client-session guess.
+   * accepts the restricted edit only (Qty never below the released or
+   * allocated quantity, due date, Job Numbers — PROJECT_PROFILE §13);
+   * this is never a client-session guess.
    */
   hasReleasedQuantity: boolean;
   /**

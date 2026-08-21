@@ -1168,14 +1168,218 @@ def test_release_beyond_the_remaining_quantity_is_refused(
     assert exact.status_code == 201, exact.text
 
 
-def test_released_demand_line_cannot_be_edited(client: TestClient, db_engine: Engine) -> None:
-    """A released line is read-only in the backend, not only in the UI.
+def _demand_audit_rows(engine: Engine, demand_id: int) -> list[str]:
+    """The demand's audit event types, oldest first (append-only)."""
+    with engine.connect() as connection:
+        return [
+            str(row[0])
+            for row in connection.execute(
+                sa.select(models.AuditEvent.__table__.c.event_type)
+                .where(
+                    models.AuditEvent.__table__.c.entity_type == "WorkOrderDemand",
+                    models.AuditEvent.__table__.c.entity_id == str(demand_id),
+                )
+                .order_by(models.AuditEvent.__table__.c.id)
+            )
+        ]
 
-    GUI_DESIGN §11: "a line whose quantity has been released arrives
-    read-only from the first load". Lowering the requested quantity
-    below what is already released would break demand integrity, so the
-    server refuses every edit of such a line — the Work Order header
-    edit (PROJECT_PROFILE §7) stays available.
+
+def test_released_demand_line_takes_the_restricted_edit(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Released ≠ frozen (PROJECT_PROFILE §13).
+
+    Business demand keeps moving after production started: Qty, due
+    date and Job Numbers stay editable on a released line and are
+    audited like any demand edit. Nothing about the release itself —
+    QuantityFlow, Movement, released quantity — is rewritten.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=20,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        ).status_code
+        == 201
+    )
+    before = _counts(db_engine)
+
+    edited = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={
+            "line_edits": [
+                {
+                    "id": demand_id,
+                    "requested_quantity": 80,
+                    "due_date": "2026-10-01",
+                    "job_numbers": ["18112", "18113"],
+                }
+            ]
+        },
+    )
+    assert edited.status_code == 200, edited.text
+
+    state = _demand_state(client, work_order_id, demand_id)
+    assert state["requested_quantity"] == 80
+    assert state["due_date"] == "2026-10-01"
+    assert state["job_numbers"] == ["18112", "18113"]
+    # The release evidence is untouched; only the remainder moved.
+    assert (state["released_quantity"], state["remaining_quantity"]) == (20, 60)
+    assert state["has_released_quantity"] is True
+    assert state["request_type"] == "NEW"
+
+    after = _counts(db_engine)
+    assert after["quantity_flows"] == before["quantity_flows"]
+    assert after["part_movements"] == before["part_movements"]
+    # One UPDATED row for the one edit (the CREATED row precedes it).
+    assert after["audit_events"] == before["audit_events"] + 1
+    assert _demand_audit_rows(db_engine, demand_id) == ["CREATED", "UPDATED"]
+    assert _over_released_demands(db_engine) == []
+
+
+def test_raising_qty_of_a_fully_released_demand_reopens_the_work_order(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A fully released demand can grow, and the remainder is releasable.
+
+    The Work Order status is derived, so raising the requested quantity
+    of an exhausted line brings the Work Order back to OPEN with real
+    remaining quantity — no stored status to repair, no migration.
+    """
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=50,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        ).status_code
+        == 201
+    )
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["remaining_quantity"], state["work_order_status"]) == (0, "RELEASED")
+
+    raised = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"line_edits": [{"id": demand_id, "requested_quantity": 65}]},
+    )
+    assert raised.status_code == 200, raised.text
+    assert raised.json()["status"] == "OPEN"
+
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["released_quantity"], state["remaining_quantity"]) == (50, 15)
+    assert state["work_order_status"] == "OPEN"
+
+    # The reopened remainder really releases — and only up to it.
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=16,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+            confirm_active_quantity=True,
+        ).status_code
+        == 409
+    )
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=15,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+            confirm_active_quantity=True,
+        ).status_code
+        == 201
+    )
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["released_quantity"], state["remaining_quantity"]) == (65, 0)
+    assert state["work_order_status"] == "RELEASED"
+    assert _over_released_demands(db_engine) == []
+
+
+def test_released_demand_line_qty_never_falls_below_what_is_committed(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The floor is `max(released, allocated)` — exactly it is valid."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)  # requested 50
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=20,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        ).status_code
+        == 201
+    )
+    before = _counts(db_engine)
+
+    refused = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"line_edits": [{"id": demand_id, "requested_quantity": 19}]},
+    )
+    assert refused.status_code == 409, refused.text
+    assert "20 pcs are already released" in refused.json()["detail"]
+    assert _demand_state(client, work_order_id, demand_id)["requested_quantity"] == 50
+    assert _counts(db_engine) == before  # nothing written, not even audit
+
+    # Down to exactly the released quantity is valid: the demand simply
+    # has nothing left to release.
+    exact = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"line_edits": [{"id": demand_id, "requested_quantity": 20}]},
+    )
+    assert exact.status_code == 200, exact.text
+    state = _demand_state(client, work_order_id, demand_id)
+    assert (state["requested_quantity"], state["remaining_quantity"]) == (20, 0)
+    assert state["work_order_status"] == "RELEASED"
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=1,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+            confirm_active_quantity=True,
+        ).status_code
+        == 409
+    )
+    assert _over_released_demands(db_engine) == []
+
+
+def test_released_demand_line_locked_fields_refuse_the_whole_save(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Request Type and the intake metadata stay locked after release.
+
+    The PN is not editable on any saved line (no edit schema carries
+    it); Request Type, Requester, Reason and Notes are locked once
+    quantity has been released, and one locked field refuses the whole
+    save — including the valid fields travelling with it.
     """
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
@@ -1194,14 +1398,65 @@ def test_released_demand_line_cannot_be_edited(client: TestClient, db_engine: En
     )
     before = _counts(db_engine)
 
-    refused = client.patch(
+    for field, value, label in (
+        ("request_type", "MODIFY", "Request Type"),
+        ("requester", "J. Smith", "Requester"),
+        ("reason", "rework", "Reason"),
+        ("notes", "handle with care", "Notes"),
+    ):
+        refused = client.patch(
+            f"/api/work-orders/{work_order_id}",
+            json={
+                "line_edits": [
+                    # A valid Qty edit rides along and is refused with it:
+                    # one save is one transaction.
+                    {"id": demand_id, "requested_quantity": 60, field: value}
+                ]
+            },
+        )
+        assert refused.status_code == 409, refused.text
+        assert f"Cannot change {label}" in refused.json()["detail"]
+        state = _demand_state(client, work_order_id, demand_id)
+        assert (state["requested_quantity"], state["request_type"]) == (50, "NEW")
+        assert state[field] == (None if field != "request_type" else "NEW")
+
+    # An unchanged locked field is not an edit and never conflicts.
+    unchanged = client.patch(
         f"/api/work-orders/{work_order_id}",
-        json={"line_edits": [{"id": demand_id, "requested_quantity": 5}]},
+        json={"line_edits": [{"id": demand_id, "request_type": "NEW", "due_date": "2026-11-02"}]},
     )
-    assert refused.status_code == 409, refused.text
-    assert "already been released" in refused.json()["detail"]
-    state = _demand_state(client, work_order_id, demand_id)
-    assert state["requested_quantity"] == 50  # unchanged
+    assert unchanged.status_code == 200, unchanged.text
+    assert _demand_state(client, work_order_id, demand_id)["due_date"] == "2026-11-02"
+
+    after = _counts(db_engine)
+    assert after["audit_events"] == before["audit_events"] + 1  # only the due-date edit
+    assert after["part_movements"] == before["part_movements"]
+
+
+def test_released_demand_line_stays_unremovable_and_the_header_edit_stays_free(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The restricted edit opens no removal and blocks no header edit."""
+    area = _create_area(client)
+    operation = _create_operation(client, int(area["id"]))
+    work_order_id, demand_id, pn = _create_demand(client)
+    assert (
+        _release(
+            client,
+            work_order_id,
+            demand_id,
+            part_number=pn,
+            quantity=20,
+            starting_area_id=area["id"],
+            operation_id=operation["id"],
+        ).status_code
+        == 201
+    )
+    before = _counts(db_engine)
+
+    removed = client.delete(f"/api/work-orders/{work_order_id}/demands/{demand_id}")
+    assert removed.status_code == 409, removed.text
+    assert "already been released" in removed.json()["detail"]
     assert _counts(db_engine) == before
 
     # The audited header edit is unaffected by the released line.
@@ -1920,7 +2175,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
     The edit cannot read "nothing released", wait out the release and
     still lower `requested_quantity` underneath it: it blocks on the
     same row lock and, once the release commits, recomputes the
-    released quantity and refuses the whole line edit.
+    released quantity and refuses the quantity it was about to write.
     """
     area = _create_area(client)
     operation = _create_operation(client, int(area["id"]))
@@ -1977,7 +2232,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
     assert isinstance(results["release"], production_release.ProductionRelease)
     assert results["release"].created
     assert isinstance(results["edit"], ConflictError)
-    assert "already been released" in str(results["edit"])
+    assert "40 pcs are already released" in str(results["edit"])
 
     # The demand kept its requested quantity, and the release stands.
     state = _demand_state(client, work_order_id, demand_id)
