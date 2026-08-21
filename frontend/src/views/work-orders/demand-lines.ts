@@ -91,13 +91,12 @@ function committedQuantity(line: DemandLineDraft): number {
   return Math.max(line.releasedQuantity, line.allocatedQuantity);
 }
 
-/** The one wording of the floor — the larger commitment names itself. */
+/** The one wording of the floor — terse, and the larger commitment
+ * names itself (`≥ 20 pcs released`). */
 function belowCommittedMessage(line: DemandLineDraft): string {
   const reason =
-    line.allocatedQuantity > line.releasedQuantity
-      ? 'already allocated'
-      : 'already released';
-  return `quantity cannot go below ${committedQuantity(line)} — that much is ${reason}`;
+    line.allocatedQuantity > line.releasedQuantity ? 'allocated' : 'released';
+  return `≥ ${committedQuantity(line)} pcs ${reason}`;
 }
 
 /**

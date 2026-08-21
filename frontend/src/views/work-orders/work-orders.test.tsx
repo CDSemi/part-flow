@@ -2173,11 +2173,7 @@ test('a released line marks a Qty below the released quantity while it is typed'
 
   // The error appears on entry — no Save needed, and nothing travels.
   fireEvent.change(qty, { target: { value: '9' } });
-  expect(
-    within(row).getByText(
-      'quantity cannot go below 10 — that much is already released',
-    ),
-  ).toBeInTheDocument();
+  expect(within(row).getByText('≥ 10 pcs released')).toBeInTheDocument();
   expect(qty).toHaveAttribute('aria-invalid', 'true');
   expect(
     state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
@@ -2185,11 +2181,7 @@ test('a released line marks a Qty below the released quantity while it is typed'
 
   // Saving with it stays blocked, and the value is preserved.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
-  expect(
-    await within(row).findByText(
-      'quantity cannot go below 10 — that much is already released',
-    ),
-  ).toBeInTheDocument();
+  expect(await within(row).findByText('≥ 10 pcs released')).toBeInTheDocument();
   expect(
     state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
   ).toHaveLength(0);
@@ -2200,11 +2192,7 @@ test('a released line marks a Qty below the released quantity while it is typed'
   // Down to exactly the released quantity is valid — and correcting the
   // entry clears the error immediately.
   fireEvent.change(qty, { target: { value: '10' } });
-  expect(
-    within(row).queryByText(
-      'quantity cannot go below 10 — that much is already released',
-    ),
-  ).toBeNull();
+  expect(within(row).queryByText('≥ 10 pcs released')).toBeNull();
   expect(qty).not.toHaveAttribute('aria-invalid');
   fireEvent.change(within(row).getByLabelText('Due date for B-200'), {
     target: { value: '2026-10-03' },
