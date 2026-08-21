@@ -87,15 +87,36 @@ export const RELEASED_REMOVE_EXPLANATION =
  * released line may be raised freely and lowered down to exactly this
  * value — never under it. The backend enforces the same floor.
  */
-export function committedQuantity(line: DemandLineDraft): number {
+function committedQuantity(line: DemandLineDraft): number {
   return Math.max(line.releasedQuantity, line.allocatedQuantity);
 }
 
-/** Which commitment sets the floor — the larger one names itself. */
-export function committedQuantityReason(line: DemandLineDraft): string {
-  return line.allocatedQuantity > line.releasedQuantity
-    ? 'already allocated'
-    : 'already released';
+/** The one wording of the floor — the larger commitment names itself. */
+function belowCommittedMessage(line: DemandLineDraft): string {
+  const reason =
+    line.allocatedQuantity > line.releasedQuantity
+      ? 'already allocated'
+      : 'already released';
+  return `quantity cannot go below ${committedQuantity(line)} — that much is ${reason}`;
+}
+
+/**
+ * The Qty error of one line as it is being typed: a line may never be
+ * taken below what production has already committed to it
+ * (PROJECT_PROFILE §13), and the field says so at entry time instead
+ * of waiting for Save. Returns null while the entry is acceptable — a
+ * blank or not-yet-numeric entry is not an entry-time error, so a
+ * half-typed value never shouts; `validateDemandLines` still catches
+ * it when Save runs.
+ */
+export function qtyEntryError(
+  line: DemandLineDraft,
+  raw: string,
+): string | null {
+  if (!isPositiveInteger(raw)) return null;
+  return Number.parseInt(raw, 10) < committedQuantity(line)
+    ? belowCommittedMessage(line)
+    : null;
 }
 
 let nextDraftId = 1;
@@ -269,7 +290,7 @@ export function validateDemandLines(
       errors.push({
         lineId: line.id,
         field: 'qty',
-        message: `quantity cannot go below ${committedQuantity(line)} — that much is ${committedQuantityReason(line)}`,
+        message: belowCommittedMessage(line),
       });
     }
   }

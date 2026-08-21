@@ -2106,14 +2106,15 @@ test('a demand released in an earlier session loads Released and restricted befo
   ).toBeInTheDocument();
 
   // Restricted, not frozen: Qty, due date and Job Numbers stay
-  // editable with the committed quantity stated as the floor…
+  // editable — with no standing note, the field speaks only when the
+  // entry is actually wrong…
   expect(within(row).getByLabelText('Quantity for B-200')).toHaveValue('10');
+  expect(within(row).getByLabelText('Quantity for B-200')).not.toHaveAttribute(
+    'aria-invalid',
+  );
   expect(within(row).getByLabelText('Due date for B-200')).toBeInTheDocument();
   expect(
     within(row).getByLabelText('Job Numbers for B-200'),
-  ).toBeInTheDocument();
-  expect(
-    within(row).getByText('min 10 — already released'),
   ).toBeInTheDocument();
   // …while the PN and the Request Type are fixed.
   expect(within(row).queryByLabelText('Request Type for B-200')).toBeNull();
@@ -2164,14 +2165,25 @@ test('a released line saves its Qty, due date and Job Numbers as a normal audite
   );
 });
 
-test('a released line refuses a Qty below the released quantity before anything travels', async () => {
+test('a released line marks a Qty below the released quantity while it is typed', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
   const row = within(dialog).getByText('B-200').closest('tr') as HTMLElement;
+  const qty = within(row).getByLabelText('Quantity for B-200');
 
-  fireEvent.change(within(row).getByLabelText('Quantity for B-200'), {
-    target: { value: '9' },
-  });
+  // The error appears on entry — no Save needed, and nothing travels.
+  fireEvent.change(qty, { target: { value: '9' } });
+  expect(
+    within(row).getByText(
+      'quantity cannot go below 10 — that much is already released',
+    ),
+  ).toBeInTheDocument();
+  expect(qty).toHaveAttribute('aria-invalid', 'true');
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders/1')),
+  ).toHaveLength(0);
+
+  // Saving with it stays blocked, and the value is preserved.
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
   expect(
     await within(row).findByText(
@@ -2185,10 +2197,15 @@ test('a released line refuses a Qty below the released quantity before anything 
     state.workOrders.find((w) => w.id === 1)!.demands[1].requested_quantity,
   ).toBe(10);
 
-  // Down to exactly the released quantity is valid.
-  fireEvent.change(within(row).getByLabelText('Quantity for B-200'), {
-    target: { value: '10' },
-  });
+  // Down to exactly the released quantity is valid — and correcting the
+  // entry clears the error immediately.
+  fireEvent.change(qty, { target: { value: '10' } });
+  expect(
+    within(row).queryByText(
+      'quantity cannot go below 10 — that much is already released',
+    ),
+  ).toBeNull();
+  expect(qty).not.toHaveAttribute('aria-invalid');
   fireEvent.change(within(row).getByLabelText('Due date for B-200'), {
     target: { value: '2026-10-03' },
   });

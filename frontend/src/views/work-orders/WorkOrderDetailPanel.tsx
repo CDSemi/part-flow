@@ -29,14 +29,13 @@ import {
   applyWorkOrderDueDateChange,
   buildLineEdits,
   collectMissingDemandInfo,
-  committedQuantity,
-  committedQuantityReason,
   createDraftLine,
   draftFromDemand,
   draftToNewLine,
   isPositiveInteger,
   lineRemoveRule,
   processScan,
+  qtyEntryError,
   validateDemandLines,
   workOrderStatusLabel,
 } from './demand-lines';
@@ -255,10 +254,20 @@ export function WorkOrderDetailPanel({
   const errorFor = (id: number, field: LineField) =>
     lineErrors.find((e) => e.lineId === id && e.field === field)?.message;
 
+  /** Replace (or clear, with null) the per-field error of one line. */
+  function setLineError(id: number, field: LineField, message: string | null) {
+    setLineErrors((current) => {
+      const rest = current.filter(
+        (e) => !(e.lineId === id && e.field === field),
+      );
+      return message === null
+        ? rest
+        : [...rest, { lineId: id, field, message }];
+    });
+  }
+
   function clearLineError(id: number, field: LineField) {
-    setLineErrors((current) =>
-      current.filter((e) => !(e.lineId === id && e.field === field)),
-    );
+    setLineError(id, field, null);
   }
 
   function updateLine(id: number, patch: Partial<DemandLineDraft>) {
@@ -561,7 +570,6 @@ export function WorkOrderDetailPanel({
                   // date and Job Numbers stay editable (§11.2), on an
                   // Open and on a Released Work Order alike.
                   const valueEditable = rowEditable || line.released;
-                  const floor = committedQuantity(line);
                   const removeRule = lineRemoveRule(line);
                   return (
                     <tr key={line.id}>
@@ -700,7 +708,14 @@ export function WorkOrderDetailPanel({
                                 errorFor(line.id, 'qty') ? true : undefined
                               }
                               onChange={(e) => {
-                                clearLineError(line.id, 'qty');
+                                // A quantity below what production has
+                                // already committed turns the field red
+                                // as it is typed — never only at Save.
+                                setLineError(
+                                  line.id,
+                                  'qty',
+                                  qtyEntryError(line, e.target.value),
+                                );
                                 updateLine(line.id, {
                                   qty: e.target.value,
                                 });
@@ -717,11 +732,6 @@ export function WorkOrderDetailPanel({
                                 scanRef.current?.focus();
                               }}
                             />
-                            {floor > 0 ? (
-                              <div className="bc">
-                                min {floor} — {committedQuantityReason(line)}
-                              </div>
-                            ) : null}
                             {errorFor(line.id, 'qty') ? (
                               <div className="rowerr">
                                 {errorFor(line.id, 'qty')}
