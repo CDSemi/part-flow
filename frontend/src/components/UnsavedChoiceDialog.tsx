@@ -10,6 +10,8 @@ import { ModalDialog } from './ModalDialog';
  * explicitly chooses Save or Discard first, or cancels and stays in
  * the form. Save is unavailable while the form fails validation —
  * silently saving an invalid form would be worse than blocking.
+ * Discard carries the danger tone: it always throws the entered edits
+ * away, whatever the workflow behind it.
  */
 export function UnsavedChoiceDialog({
   title,
@@ -55,8 +57,10 @@ export function UnsavedChoiceDialog({
         <button className="bigbtn ghost" onClick={onCancel}>
           Cancel (Esc)
         </button>
+        {/* Discarding always throws the entered edits away — it carries
+            the destructive tone in every caller of this dialog. */}
         <button
-          className="bigbtn ghost"
+          className="bigbtn danger"
           disabled={discardDisabled}
           onClick={onDiscard}
         >

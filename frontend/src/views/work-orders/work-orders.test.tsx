@@ -1660,6 +1660,50 @@ test('release FLOATING confirms quantity, Area and Operation, and reports the co
   expect(within(detailDialog).getByText('Open')).toBeInTheDocument();
 });
 
+test('the release quantity field states what is available and MAX fills it', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500'); // demand 103 — remaining 7
+  const qty = within(release).getByLabelText('Release quantity');
+
+  expect(within(release).getByText('available 7 pcs')).toBeInTheDocument();
+
+  fireEvent.change(qty, { target: { value: '3' } });
+  expect(qty).toHaveValue('3');
+  fireEvent.click(within(release).getByRole('button', { name: 'MAX' }));
+  expect(qty).toHaveValue('7');
+  expect(release).toHaveTextContent(/× 7 pcs as a new, separate Quantity Flow/);
+});
+
+test('an Area with a single active Operation preselects it', async () => {
+  await renderWorkOrders();
+  const release = await openRelease('E-500');
+
+  // Material has two active Operations — the choice stays open.
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  expect(within(release).getByLabelText('Operation')).toHaveValue('');
+  expect(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  ).toBeDisabled();
+
+  // Lathe has exactly one — nothing left to choose, so it is selected.
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '2' },
+  });
+  expect(within(release).getByLabelText('Operation')).toHaveValue('21');
+  expect(release).toHaveTextContent(/starts in Lathe \(Operation Turning\)/);
+  expect(
+    within(release).getByRole('button', { name: 'Confirm release' }),
+  ).toBeEnabled();
+
+  // Switching back re-opens the choice — the preselection is derived.
+  fireEvent.change(within(release).getByLabelText('Starting Area'), {
+    target: { value: '1' },
+  });
+  expect(within(release).getByLabelText('Operation')).toHaveValue('');
+});
+
 test('release PLANNED requires an existing active Planned Route and fixes the starting step', async () => {
   await renderWorkOrders();
   const release = await openRelease('E-500');
@@ -2343,6 +2387,25 @@ test('releasing with unsaved changes asks to save first, then uses the committed
   expect(
     state.workOrders.find((w) => w.id === 1)!.demands[2].requested_quantity,
   ).toBe(9);
+});
+
+test('the unsaved decision marks Discard as the destructive choice', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
+    target: { value: '9' },
+  });
+  fireEvent.click(releaseButtonIn(dialog, 'E-500'));
+  const choice = await screen.findByRole('dialog', { name: 'Unsaved changes' });
+
+  expect(
+    within(choice).getByRole('button', {
+      name: 'Discard changes, then release…',
+    }),
+  ).toHaveClass('danger');
+  expect(
+    within(choice).getByRole('button', { name: 'Save demand, then release…' }),
+  ).toHaveClass('primary');
 });
 
 test('discarding unsaved changes releases the saved demand and restores the draft', async () => {

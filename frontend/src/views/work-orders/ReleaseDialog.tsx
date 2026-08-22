@@ -160,7 +160,13 @@ export function ReleaseDialog({
       ),
     [operations, effectiveAreaId],
   );
-  const effectiveOperationId = firstStep?.operationId ?? operationId;
+  // An Area with exactly ONE active Operation leaves nothing to
+  // choose: it is preselected instead of asking for a pick that has a
+  // single possible answer. Derived, not stored — switching Area (or
+  // Planned Route) re-derives it, and an explicit pick always wins.
+  const onlyOperation = areaOperations.length === 1 ? areaOperations[0] : null;
+  const effectiveOperationId =
+    firstStep?.operationId ?? operationId ?? onlyOperation?.id ?? null;
   const effectiveOperation = operations.find(
     (operation) => operation.id === effectiveOperationId,
   );
@@ -343,16 +349,35 @@ export function ReleaseDialog({
           ) : null}
           <div className="relgrid">
             <label htmlFor="rel-qty">Release quantity</label>
-            <input
-              id="rel-qty"
-              className="mono"
-              inputMode="numeric"
-              value={qty}
-              onChange={(e) => {
-                setQty(e.target.value);
-                intentChanged();
-              }}
-            />
+            {/* The entry, what is still available on the demand, and
+                the MAX shortcut share one field: the cap is read where
+                the number is typed, never only in the text above. */}
+            <div className="relqty">
+              <input
+                id="rel-qty"
+                className="mono"
+                inputMode="numeric"
+                value={qty}
+                onChange={(e) => {
+                  setQty(e.target.value);
+                  intentChanged();
+                }}
+              />
+              <span className="relqty-note">
+                available {demand.remainingQuantity} pcs
+              </span>
+              <button
+                type="button"
+                className="relqty-max"
+                disabled={demand.remainingQuantity === 0}
+                onClick={() => {
+                  setQty(String(demand.remainingQuantity));
+                  intentChanged();
+                }}
+              >
+                MAX
+              </button>
+            </div>
             <label htmlFor="rel-mode">Route Mode</label>
             <select
               id="rel-mode"
