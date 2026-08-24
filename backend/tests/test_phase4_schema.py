@@ -15,6 +15,9 @@ verifies the Phase 4 invariants PostgreSQL must enforce:
 - trigger-enforced append-only immutability (UPDATE, DELETE, and
   TRUNCATE all raise), same pattern as `part_movements` and
   `machine_lifecycle_events`;
+- the `0005_phase4_release_index` partial expression index that
+  serves the released-quantity derivation, stored with the exact
+  JSONB subscript expression the application emits;
 - models↔migration metadata parity at head;
 - clean downgrade back to the Phase 3.5 boundary
   (`0003_phase35_environment`) with a successful re-upgrade.
@@ -52,6 +55,7 @@ from app.infrastructure import models
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 _PHASE35_REVISION = "0003_phase35_environment"
+_PHASE4_AUDIT_REVISION = "0004_phase4_audit"
 
 _PHASE3_TABLES = {
     "departments",
@@ -247,6 +251,68 @@ class TestMigrationSchema:
         }
         history = indexes["ix_audit_events_entity_type_entity_id_id"]
         assert history["column_names"] == ["entity_type", "entity_id", "id"]
+
+    def test_release_context_index_matches_the_query_it_serves(
+        self, migrated_engine: Engine
+    ) -> None:
+        """`0005_phase4_release_index` must index the expression the
+        application actually emits, restricted to RECEIVED.
+
+        `released_quantities` derives a demand's released quantity from
+        the immutable RECEIVED metadata context (no counter, no FK, no
+        column). PostgreSQL only uses an expression index when the
+        stored expression matches the query's expression tree, so the
+        index carries the JSONB SUBSCRIPT form SQLAlchemy renders —
+        `metadata['context'] ->> '...'` — and NOT the `->` operator
+        form. This asserts the stored definition rather than a query
+        plan: plans are planner- and statistics-dependent, the index
+        definition is not.
+        """
+        with migrated_engine.connect() as conn:
+            definition = conn.execute(
+                sa.text(
+                    "SELECT indexdef FROM pg_indexes"
+                    " WHERE tablename = 'part_movements' AND indexname = :name"
+                ),
+                {"name": "ix_part_movements_received_demand_context"},
+            ).scalar_one()
+        normalized = " ".join(definition.split())
+        assert "metadata['context'::text] ->> 'work_order_demand_id'::text" in normalized
+        assert "::integer" in normalized
+        assert "WHERE (movement_type = 'RECEIVED'::text)" in normalized
+
+    def test_downgrading_only_the_index_revision_keeps_the_audit_schema(
+        self, admin_engine: Engine
+    ) -> None:
+        # 0005 adds one index and nothing else: downgrading it must
+        # remove exactly that index and leave the Phase 4 audit schema
+        # (0004) completely intact.
+        name = "partflow_test_phase4_index_downgrade"
+        _create_temp_database(admin_engine, name)
+        url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+        config = _alembic_config(url)
+        try:
+            command.upgrade(config, "head")
+            command.downgrade(config, _PHASE4_AUDIT_REVISION)
+            engine = create_engine(url)
+            try:
+                tables = set(inspect(engine).get_table_names())
+                assert tables == (
+                    _PHASE3_TABLES | _PHASE35_TABLES | _PHASE4_TABLES | {"alembic_version"}
+                )
+                with engine.connect() as connection:
+                    remaining = connection.execute(
+                        sa.text(
+                            "SELECT count(*) FROM pg_indexes"
+                            " WHERE indexname = 'ix_part_movements_received_demand_context'"
+                        )
+                    ).scalar_one()
+                assert remaining == 0
+            finally:
+                engine.dispose()
+            command.upgrade(config, "head")
+        finally:
+            _drop_temp_database(admin_engine, name)
 
     def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
         # The SQLAlchemy mappings and the hand-written migrations must

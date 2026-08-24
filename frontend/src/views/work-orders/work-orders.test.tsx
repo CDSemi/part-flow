@@ -88,6 +88,9 @@ interface FakeState {
   /** Commit the release but drop the response (transport loss). */
   dropNextReleaseResponse: boolean;
   failNextList: boolean;
+  /** Hold every PN lookup until the test releases it — lets a test
+   * observe the UI while a lookup is genuinely in flight. */
+  holdPartNumbers: Promise<void> | null;
   calls: string[];
 }
 
@@ -183,6 +186,7 @@ function seedState(): FakeState {
     failNextWorkOrderWrite: false,
     dropNextReleaseResponse: false,
     failNextList: false,
+    holdPartNumbers: null,
     calls: [],
   };
 }
@@ -227,6 +231,22 @@ function summaryWire(wo: FakeWorkOrder) {
     demand_line_count: wo.demands.length,
     part_numbers: wo.demands.map((d) => d.part_number),
   };
+}
+
+/** The server's active-list page: the contains-match over the Work
+ * Order Number runs HERE (GUI_DESIGN §11.1 — never over PNs, and never
+ * in the browser), and the result is bounded exactly as the real
+ * backend bounds it (`work_orders.LIST_RESULT_LIMIT`). */
+const FAKE_LIST_LIMIT = 100;
+
+function listPage(search: string | null) {
+  const term = (search ?? '').trim().toLowerCase();
+  return state.workOrders
+    .filter(
+      (w) => !term || (w.work_order_number ?? '').toLowerCase().includes(term),
+    )
+    .slice(0, FAKE_LIST_LIMIT)
+    .map(summaryWire);
 }
 
 function detailWire(wo: FakeWorkOrder) {
@@ -374,6 +394,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (url === '/api/operations') return json(OPERATIONS);
   if (url === '/api/route-templates') return json(ROUTE_TEMPLATES);
   if (url.startsWith('/api/part-numbers')) {
+    if (state.holdPartNumbers) await state.holdPartNumbers;
     const params = new URLSearchParams(url.split('?')[1] ?? '');
     const number = params.get('number');
     if (number !== null) {
@@ -479,20 +500,22 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     const params = new URLSearchParams(url.split('?')[1]);
     const number = params.get('number');
     if (number !== null) {
+      // Exact resolution answers "does this number already exist?", so
+      // it is never bounded away (mirrors the real backend).
       return json(
         state.workOrders
           .filter((w) => w.work_order_number === number)
           .map(summaryWire),
       );
     }
-    return json(state.workOrders.map(summaryWire));
+    return json(listPage(params.get('search')));
   }
   if (url === '/api/work-orders' && method === 'GET') {
     if (state.failNextList) {
       state.failNextList = false;
       return detailResponse('The database is unavailable.', 500);
     }
-    return json(state.workOrders.map(summaryWire));
+    return json(listPage(null));
   }
   if (url === '/api/work-orders' && method === 'POST') {
     if (state.failNextWorkOrderWrite) {
@@ -1023,20 +1046,76 @@ test('scanning a duplicate PN focuses the existing line instead of adding one', 
   await waitFor(() => expect(document.activeElement).toBe(qtyFields[0]));
 });
 
-test('search matches hyphenated PNs and internal Work Orders through the PN preview', async () => {
+test('search is a server request over the Work Order Number, not a local filter', async () => {
   await renderWorkOrders();
 
   fireEvent.change(screen.getByLabelText('Search WO Number'), {
-    target: { value: 'A-100' },
+    target: { value: '007201' },
   });
+  // The entry travels to the server (after the debounce) — the client
+  // never downloads the whole active list to filter it itself.
+  await waitFor(() =>
+    expect(state.calls).toContain('GET /api/work-orders?search=007201'),
+  );
+  await waitFor(() =>
+    expect(screen.queryByText('007300')).not.toBeInTheDocument(),
+  );
   expect(screen.getByText('007201')).toBeInTheDocument();
 
-  // An internal Work Order without an external number is found through
-  // its PN preview and displays `—` as its number.
+  // §11.1 scopes the search to the WO Number. A PN is not a WO Number,
+  // so the server answers with nothing and the view shows that answer —
+  // it does not fall back to matching the row's PN preview text, which
+  // could only ever have matched the first two PNs of a Work Order.
   fireEvent.change(screen.getByLabelText('Search WO Number'), {
-    target: { value: 'C-300' },
+    target: { value: 'A-100' },
   });
-  expect(screen.queryByText('007201')).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(state.calls).toContain('GET /api/work-orders?search=A-100'),
+  );
+  await waitFor(() =>
+    expect(screen.queryByText('007201')).not.toBeInTheDocument(),
+  );
+  expect(screen.getByText(/No active Work Order matches/)).toBeInTheDocument();
+});
+
+test('the active list is bounded by the server and says so', async () => {
+  // More Work Orders than one page: nothing leaves the active list
+  // before allocation-derived completion (Phase 10), so the read must
+  // be bounded and the view must say what it is showing.
+  for (let index = 0; index < 120; index += 1) {
+    state.workOrders.push({
+      id: 5000 + index,
+      work_order_number: `BULK-${String(index).padStart(4, '0')}`,
+      received_date: '2026-08-02',
+      due_date: null,
+      status: 'OPEN',
+      demands: [demand(9000 + index, 5000 + index, 'Z-900', 1)],
+    });
+  }
+  await renderWorkOrders();
+
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Showing the first 100 Work Orders/),
+    ).toBeInTheDocument(),
+  );
+  expect(document.querySelectorAll('.wolist tbody tr')).toHaveLength(100);
+
+  // A Work Order beyond the bound is still reachable by searching for
+  // it — the WHERE runs before the LIMIT on the server.
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
+    target: { value: 'BULK-0119' },
+  });
+  await waitFor(() =>
+    expect(screen.getByText('BULK-0119')).toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByText(/Showing the first 100 Work Orders/),
+  ).not.toBeInTheDocument();
+});
+
+test('an internal Work Order without an external number renders as —', async () => {
+  await renderWorkOrders();
   const internalRow = screen
     .getByText('internal Work Order — no external number yet')
     .closest('tr');
@@ -1148,6 +1227,77 @@ test('an existing WO Number is opened instead of duplicated', async () => {
 });
 
 /* ============ Add Part flow ============ */
+
+test('a one-character PN is never called new while its lookup is unresolved', async () => {
+  // `X` is a valid canonical PN and its master EXISTS. The contains
+  // search needs 2 characters, so a single character resolves through
+  // the exact lookup — and until that lookup has answered for exactly
+  // what is in the field, the dialog may not claim the PN is new.
+  state.partNumbers.push('X');
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  let release = () => {};
+  state.holdPartNumbers = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'X' },
+  });
+  // Immediately: still inside the debounce, nothing was even asked.
+  expect(
+    screen.queryByRole('button', { name: /Create new PN/ }),
+  ).not.toBeInTheDocument();
+
+  // The debounce elapses and the exact lookup is genuinely in flight —
+  // the answer is unknown, so the create offer stays absent.
+  await waitFor(() =>
+    expect(
+      state.calls.some((call) => call.includes('/api/part-numbers?number=X')),
+    ).toBe(true),
+  );
+  expect(
+    screen.queryByRole('button', { name: /Create new PN/ }),
+  ).not.toBeInTheDocument();
+
+  // Resolved: the existing PN is offered for selection, and it is
+  // still never offered as new.
+  release();
+  const dialog = screen.getByRole('dialog', { name: /Add Part/ });
+  await within(dialog).findByRole('button', { name: /PF:PN:X/ });
+  expect(
+    screen.queryByRole('button', { name: /Create new PN/ }),
+  ).not.toBeInTheDocument();
+  // The short entry is not treated as "too short to be a PN" either.
+  expect(
+    within(dialog).queryByText(/Type at least 2 characters/),
+  ).not.toBeInTheDocument();
+});
+
+test('an unknown one-character PN is offered for creation once the lookup confirms the miss', async () => {
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'q' },
+  });
+  // Not before the answer.
+  expect(
+    screen.queryByRole('button', { name: /Create new PN/ }),
+  ).not.toBeInTheDocument();
+
+  // After it: the canonical form is offered for creation.
+  const create = await screen.findByRole('button', {
+    name: '＋ Create new PN “Q”',
+  });
+  fireEvent.click(create);
+  expect(
+    screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
+  ).toBeInTheDocument();
+});
 
 test('the Add Part flow steps through PN, quantity, due date and metadata', async () => {
   await renderWorkOrders();

@@ -5,18 +5,21 @@ production quantities through the factory.
 
 This repository currently contains the **Phase 1 Repository Foundation**,
 the **Phase 2 Frontend Design System and Application Shell**, the
-**Phase 3 Minimum Canonical Domain and Data Foundation**, and the
-completed **Phase 3.5 Minimum Environment Setup** (persistence, the
-configuration APIs, and the real Administration/Machines frontend):
+**Phase 3 Minimum Canonical Domain and Data Foundation**, the completed
+**Phase 3.5 Minimum Environment Setup** (persistence, the configuration
+APIs, and the real Administration/Machines frontend), and the completed
+**Phase 4 Manual Work Order Intake and Production Release** — the first
+business vertical slice, end to end:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
   real `/api/health` connectivity integration, and the ten approved GUI
-  views — the Phase 3.5 views (Administration's minimum-environment
-  sections and Management → Machines) read and write the real `/api`
+  views — the real views (Administration's minimum-environment
+  sections and Management → Machines from Phase 3.5, and
+  Management → Work Orders from Phase 4) read and write the real `/api`
   surface through the shared client layer in `src/api/` and ship in
-  every build, while the remaining views stay development-only mock
-  views until their backend slices exist
+  every build from `src/app/real-views.ts`, while the remaining views
+  stay development-only mock views until their backend slices exist
 - `backend/` — FastAPI with the operational health endpoint
   (`GET /api/health`), the Phase 3.5 environment configuration API
   (Departments, Areas with derived `PF:AREA` barcodes, Operations,
@@ -25,10 +28,19 @@ configuration APIs, and the real Administration/Machines frontend):
   (`/api/machines` — automatic Asset Tag assignment with derived
   `PF:MACHINE` barcodes, metadata editing, the maintenance override,
   and retirement/reactivation committing atomically with their
-  append-only lifecycle events; Application-layer services in
-  `app/application/`), the framework-independent domain vocabulary
-  (`app/domain/`), and the SQLAlchemy mappings of the canonical Phase 3
-  and Phase 3.5 schema (`app/infrastructure/models.py`)
+  append-only lifecycle events), the Phase 4 Work Order intake and
+  production-release APIs (`/api/work-orders` — create/find, list and
+  server-side bounded search, the one-transaction demand save and the
+  demand-line removal rule; `/api/part-numbers` — canonical lookup and
+  create-or-reuse with the derived `PF:PN:` barcode; the read-only
+  `GET /api/route-templates` a `PLANNED` release selects from; and
+  `POST /api/work-orders/{id}/demands/{id}/release`, the one command
+  that introduces production quantity — transactional and idempotent
+  per `device_event_id`), all with Application-layer services in
+  `app/application/` owning every rule and transaction, the
+  framework-independent domain vocabulary (`app/domain/`), and the
+  SQLAlchemy mappings of the canonical Phase 3, Phase 3.5 and Phase 4
+  schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
@@ -37,17 +49,27 @@ configuration APIs, and the real Administration/Machines frontend):
   configuration (completed Area/Operation configuration fields,
   `scan_stations`, `machines` with immutable auto-assigned Asset Tags,
   the append-only `machine_lifecycle_events` history, and the singleton
-  Machine Asset Tag format configuration)
+  Machine Asset Tag format configuration) and the Phase 4 additions
+  (the append-only generic `audit_events` table with its own
+  raise-on-write trigger, and the partial expression index that serves
+  the released-quantity derivation over `part_movements`)
 - Docker Compose development stack with health checks
 
-**No production workflows exist yet**: the Phase 3 and Phase 3.5
-schema is migrated and the Phase 3.5 configuration surfaces
-(Administration → Departments/Areas/Operations/Scan Stations/Barcode
-configuration and Management → Machines) read and write real
-configuration and Machine master data end to end, but nothing writes
-production data. Every other view renders development-only mock data;
-barcode resolution, Work Order intake, Machine assignments, and all
-tracking behavior arrive in later phases.
+**One production workflow exists**: Management → Work Orders (Phase 4)
+saves business demand and, as a separate explicit action, releases
+production quantity — creating a Quantity Flow and appending an
+immutable `RECEIVED` Part Movement in one transaction. Saving demand
+never creates production quantity, and a demand may be released in
+parts until its remaining quantity is exhausted. The Phase 3.5
+configuration surfaces (Administration →
+Departments/Areas/Operations/Scan Stations/Barcode configuration and
+Management → Machines) read and write real configuration and Machine
+master data end to end. Every other view renders development-only mock
+data; Scan Station transfer and barcode-driven movement, Machine
+assignments, SPLIT/MERGED, Undo/corrections, the Stockroom and
+allocation-derived completion, and all remaining tracking behavior
+arrive in later phases — the movement-type check still admits
+`RECEIVED` only.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
@@ -93,29 +115,33 @@ Frontend structure:
   request timeout below the probe interval, recheck on tab
   focus/visibility, explicit Retry; no optimistic writes — a write is
   recorded only after the server confirms it), dev state preview.
-- `src/api/` — the shared API client layer of the real Phase 3.5
-  views: a thin typed fetch core translating the backend's
-  `{"detail": …}` errors into user-facing messages, the environment
-  configuration and Machines endpoints with snake_case ↔ camelCase
-  mapping, the ISO 8601 duration helpers, and the `useApiData`
-  loading/error/reload hook. Production-safe — never imports from
-  `src/mocks/`.
+- `src/api/` — the shared API client layer of the real views: a thin
+  typed fetch core translating the backend's `{"detail": …}` errors
+  into user-facing messages, the environment configuration and
+  Machines endpoints (Phase 3.5) and the Work Orders, Part Numbers,
+  route-template and production-release endpoints (Phase 4) with
+  snake_case ↔ camelCase mapping, the ISO 8601 duration helpers, and
+  the `useApiData` loading/error/reload hook. Production-safe — never
+  imports from `src/mocks/`.
 - `src/mocks/` — the development-only mock datasets. The remaining
   mock views read from here and pass data to components via props;
   nothing in `src/mocks` encodes production business rules or is
   written to the backend. Mock views and datasets are reachable only
   through the dev-only registry `src/app/dev-views.ts`
   (`import.meta.env.DEV`), so a production build excludes them
-  entirely: the real Phase 3.5 views (`src/app/real-views.ts` —
-  Machines and Administration) ship in every build against the live
-  `/api` surface, and every other route renders an explicit "not
-  connected to a production data source yet" state. `npm run build`
+  entirely: the real views (`src/app/real-views.ts` — Administration
+  and Machines from Phase 3.5, Work Orders from Phase 4) ship in every
+  build against the live `/api` surface, and every other route renders
+  an explicit "not connected to a production data source yet" state. `npm run build`
   verifies the boundary by scanning the generated assets for known
   mock sentinel values (`scripts/check-production-boundary.mjs`), and
   `src/production-boundary.test.ts` additionally verifies at the
   source level that no production module imports from `src/mocks/`
-  (the development-only Worker sessions preview stays behind an
-  `import.meta.env.DEV`-guarded lazy import). Shared view-model types
+  by walking the production module graph transitively from
+  `src/main.tsx` (the development-only Worker sessions preview and the
+  Completed Work Orders visual preview stay behind
+  `import.meta.env.DEV`-guarded lazy imports, which the walk cuts —
+  an ordinary production dynamic import is still followed). Shared view-model types
   live in `src/views/view-models.ts` (types only — production-safe).
 - `src/views/<view>/` — one folder per GUI view. `src/views/scan-station/barcode.ts`
   holds the deterministic `PF:` barcode parsing and PN normalization (PN
@@ -176,8 +202,9 @@ docker compose up --build
 - Backend API: <http://localhost:8000>
 - Health endpoint: <http://localhost:8000/api/health> (also proxied at <http://localhost:5173/api/health>)
 
-The frontend serves the Phase 2 application shell (see “Phase 2
-frontend” above). The top-navigation chip shows the real backend
+The frontend serves the application shell with the real Phase 3.5 and
+Phase 4 views (Administration, Management → Machines, Management →
+Work Orders) plus the remaining development-only mock views. The top-navigation chip shows the real backend
 connectivity state: CONNECTING…, ONLINE, or OFFLINE with a persistent
 banner and Retry action.
 
@@ -200,9 +227,12 @@ docker compose up --build -V
 
 ## Database migrations (Alembic)
 
-Apply migrations (the Phase 3 canonical domain schema and the
-Phase 3.5 environment setup on top of the no-op repository-foundation
-baseline):
+Apply migrations (the Phase 3 canonical domain schema, the Phase 3.5
+environment setup, and the Phase 4 slice — `0004_phase4_audit` adding
+the append-only `audit_events` table and `0005_phase4_release_index`
+adding the partial expression index that serves the released-quantity
+derivation — on top of the no-op repository-foundation baseline; the
+current head is `0005_phase4_release_index`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -311,19 +341,31 @@ integration):
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
 - `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
-  `tests/test_phase35_schema.py`, `tests/test_environment_api.py`, and
-  `tests/test_machines_api.py` — **integration** tests that require the
-  PostgreSQL service to be
+  `tests/test_phase35_schema.py`, `tests/test_phase4_schema.py`,
+  `tests/test_environment_api.py`, `tests/test_machines_api.py`,
+  `tests/test_work_orders_api.py`, `tests/test_part_numbers_api.py`,
+  `tests/test_route_templates_api.py`, and
+  `tests/test_production_release_api.py` — **integration** tests that
+  require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
-  mocking, the schema tests run the real Alembic migrations
-  (upgrade → downgrade → upgrade; the Phase 3 module stops at its own
-  boundary revision `0002_phase3_domain`, the Phase 3.5 module migrates
-  to head), and the environment-API and Machines-API tests exercise
-  the Phase 3.5 configuration and Machine management endpoints
-  end-to-end (Asset Tag allocation, maintenance, retirement and
-  reactivation with their atomic lifecycle events) — all against
-  dedicated temporary
+  mocking; the schema tests run the real Alembic migrations
+  (upgrade → downgrade → upgrade; each phase module stops at its own
+  boundary revision — `0002_phase3_domain` for Phase 3,
+  `0003_phase35_environment` for Phase 3.5 — while the Phase 4 module
+  carries the head-level coverage: `audit_events` shape and
+  append-only trigger, the release-context expression index, and
+  models↔migration parity); and the API tests exercise the endpoints
+  end-to-end — Phase 3.5 configuration and Machine management (Asset
+  Tag allocation, maintenance, retirement and reactivation with their
+  atomic lifecycle events) and Phase 4 intake and release (one-save
+  one-transaction demand saves with their audit rows, the
+  server-bounded active list and unbounded exact number resolution,
+  concurrent same-PN adds to one Work Order, the atomic and idempotent
+  release command, partial and repeated release with its hard
+  remaining cap, terminal-Area rejection, the restricted edit of a
+  released line, demand removal, Movement immutability, projection
+  replay and conservation) — all against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`
   is).
@@ -410,7 +452,7 @@ format check, lint, typecheck, tests, and production build. A separate
 ## Repository layout
 
 ```text
-frontend/          Vite + React + TypeScript app (shell + real Phase 3.5 views + mock views)
+frontend/          Vite + React + TypeScript app (shell + real Phase 3.5/Phase 4 views + mock views)
   src/styles/      semantic design tokens and shared primitives
   src/app/         router, theme, connectivity, real/dev view registries, dev state preview
   src/api/         typed API client layer of the real views (production-safe)
@@ -418,13 +460,13 @@ frontend/          Vite + React + TypeScript app (shell + real Phase 3.5 views +
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components
 backend/
-  app/api/         HTTP routes (health, environment configuration, and Machines management endpoints)
-  app/application/ application services (environment configuration and Machine management rules and transactions)
+  app/api/         HTTP routes (health, environment configuration, Machines management, Work Order intake, Part Numbers, route templates, and production release)
+  app/application/ application services (environment, Machines, Work Order intake, Part Numbers, and the production release command — every rule and transaction)
   app/core/        configuration (pydantic-settings)
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

@@ -222,9 +222,30 @@ function lineEditBody(edit: DemandLineEdit): Record<string, unknown> {
 // Calls
 // ---------------------------------------------------------------------------
 
-/** The active WO list, newest first. */
-export async function listWorkOrders(): Promise<WorkOrderSummary[]> {
-  const wires = await apiRequest<WorkOrderSummaryWire[]>('/api/work-orders');
+/**
+ * Most Work Orders one active-list read returns — the SERVER's bound
+ * (`work_orders.LIST_RESULT_LIMIT`), mirrored here only to word the
+ * "refine your search" hint. Never a client-side slice.
+ */
+export const WORK_ORDER_LIST_LIMIT = 100;
+
+/**
+ * The active WO list, newest first — filtered AND bounded by the server.
+ *
+ * `search` travels as `?search=`, so the contains-match over the Work
+ * Order Number (GUI_DESIGN §11.1) runs in the database and a match
+ * outside the first page is still found. Nothing leaves the active
+ * list before allocation-derived completion (Phase 10), so the client
+ * never downloads the whole list in order to filter it locally.
+ */
+export async function listWorkOrders(
+  search?: string,
+): Promise<WorkOrderSummary[]> {
+  const term = search?.trim() ?? '';
+  const query = term ? `?search=${encodeURIComponent(term)}` : '';
+  const wires = await apiRequest<WorkOrderSummaryWire[]>(
+    `/api/work-orders${query}`,
+  );
   return wires.map(toSummary);
 }
 

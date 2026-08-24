@@ -207,12 +207,20 @@ function moduleGraph(entry: string, rootDir: string): string[] {
     // boundary in prose still ships its dynamic imports.
     const source = stripComments(readFileSync(file, 'utf8'));
     const devOnly = devOnlyRanges(source);
+    // BOTH quote styles. Prettier normalizes this tree to single
+    // quotes, but a walk that silently skipped `import("…")` would let
+    // a mock import leave the graph unnoticed — exactly the failure
+    // this suite exists to prevent, and it must not depend on a
+    // formatting convention holding.
     const specifiers: string[] = [
       // Static: `import x from '…'`, `export … from '…'`, `import '…'`.
-      ...Array.from(source.matchAll(/\bfrom\s+'([^']+)'/g), (m) => m[1]),
-      ...Array.from(source.matchAll(/^\s*import\s+'([^']+)'/gm), (m) => m[1]),
+      ...Array.from(source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g), (m) => m[1]),
+      ...Array.from(
+        source.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm),
+        (m) => m[1],
+      ),
     ];
-    for (const match of source.matchAll(/\bimport\(\s*'([^']+)'/g)) {
+    for (const match of source.matchAll(/\bimport\(\s*['"]([^'"]+)['"]/g)) {
       const cut = devOnly.some(
         ([start, end]) => match.index >= start && match.index < end,
       );
@@ -338,6 +346,41 @@ test('a DEV-only lazy import does not drag its mocks into the graph', () => {
       expect(graph).toContain('registry.ts');
       expect(graph).not.toContain('dev-view.ts');
       expect(mockOffenders(graph)).toEqual([]);
+    },
+  );
+});
+
+test('double-quoted specifiers are walked like single-quoted ones', () => {
+  // Prettier keeps this tree on single quotes, so the walk must not
+  // quietly depend on that: a double-quoted static or dynamic import
+  // reaching src/mocks/ has to fail exactly the same way.
+  withFixtureTree(
+    (root) => {
+      writeFixture(root, 'mocks/data.ts', 'export const MOCK = 1;\n');
+      writeFixture(
+        root,
+        'helper.ts',
+        'import { MOCK } from "./mocks/data";\nexport const helper = MOCK;\n',
+      );
+      writeFixture(root, 'split.ts', 'export const split = 3;\n');
+      writeFixture(
+        root,
+        'view.ts',
+        [
+          'import { helper } from "./helper";',
+          'export const lazy = () => import("./split");',
+          'export const view = helper;',
+          '',
+        ].join('\n'),
+      );
+      writeFixture(root, 'main.tsx', 'import "./view";\n');
+    },
+    (root) => {
+      const graph = moduleGraph(join(root, 'main.tsx'), root);
+      expect(graph).toContain('view.ts');
+      expect(graph).toContain('helper.ts');
+      expect(graph).toContain('split.ts');
+      expect(mockOffenders(graph)).toEqual([join('mocks', 'data.ts')]);
     },
   );
 });

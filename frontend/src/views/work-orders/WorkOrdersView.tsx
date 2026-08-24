@@ -3,7 +3,7 @@ import './work-orders.css';
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import type { ComponentType, LazyExoticComponent } from 'react';
 
-import { listWorkOrders } from '../../api/work-orders';
+import { WORK_ORDER_LIST_LIMIT, listWorkOrders } from '../../api/work-orders';
 import type { WorkOrderSummary } from '../../api/work-orders';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
@@ -27,6 +27,9 @@ import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 /** Display form of a Work Order Number — `—` when no external number
  * is known (display-only placeholder, never persisted). */
 const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
+
+/** Wait out the typing burst before asking the server (§11.1 search). */
+const SEARCH_DEBOUNCE_MS = 250;
 
 // Long-data preview rows (?state=long, development only): many Work
 // Orders plus over-long WO and PN identifiers to exercise dense-table
@@ -110,13 +113,42 @@ function ActiveWorkOrdersView() {
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useToastNotice();
 
-  const workOrdersData = useApiData(listWorkOrders);
-
   // Selected Work Order — its details open as a modal dialog over the
   // list (GUI_DESIGN §11.2); the list stays mounted and the URL never
   // changes.
   const [detailId, setDetailId] = useState<number | null>(null);
   const [search, setSearch] = useState('');
+
+  // Search runs on the SERVER (GUI_DESIGN §11.1 — a contains-match over
+  // the Work Order Number), so the typing burst is waited out instead
+  // of one request per keystroke. Nothing leaves the active list before
+  // allocation-derived completion (Phase 10), so the list only grows:
+  // it is never downloaded whole to be filtered in the browser.
+  const [settledSearch, setSettledSearch] = useState(search);
+  useEffect(() => {
+    const timer = setTimeout(
+      () => setSettledSearch(search),
+      SEARCH_DEBOUNCE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [search]);
+  const loadWorkOrders = useCallback(
+    () => listWorkOrders(settledSearch),
+    [settledSearch],
+  );
+  const workOrdersData = useApiData(loadWorkOrders);
+
+  // A search reload keeps the current page on screen (and the search
+  // field focused) instead of replacing the whole view with the
+  // loading state.
+  const readyRows =
+    workOrdersData.state.status === 'ready' ? workOrdersData.state.data : null;
+  const [retainedRows, setRetainedRows] = useState<WorkOrderSummary[] | null>(
+    null,
+  );
+  useEffect(() => {
+    if (readyRows) setRetainedRows(readyRows);
+  }, [readyRows]);
   const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
   const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
@@ -156,13 +188,6 @@ function ActiveWorkOrdersView() {
     [],
   );
 
-  if (preview === 'loading' || workOrdersData.state.status === 'loading') {
-    return (
-      <section className="wo-view" aria-label="Work Orders">
-        <LoadingState label="Loading Work Orders" />
-      </section>
-    );
-  }
   if (preview === 'error') {
     return (
       <section className="wo-view" aria-label="Work Orders">
@@ -184,13 +209,25 @@ function ActiveWorkOrdersView() {
       </section>
     );
   }
+  const loadedRows = readyRows ?? retainedRows;
+  if (preview === 'loading' || loadedRows === null) {
+    return (
+      <section className="wo-view" aria-label="Work Orders">
+        <LoadingState label="Loading Work Orders" />
+      </section>
+    );
+  }
 
   const listData: WorkOrderSummary[] =
     preview === 'empty'
       ? []
       : preview === 'long'
-        ? [...workOrdersData.state.data, ...LONG_PREVIEW_WORK_ORDERS]
-        : workOrdersData.state.data;
+        ? [...loadedRows, ...LONG_PREVIEW_WORK_ORDERS]
+        : loadedRows;
+  // The server bounds the page; a full page means "refine", not "these
+  // are all of them".
+  const bounded = listData.length >= WORK_ORDER_LIST_LIMIT;
+  const searching = readyRows === null || settledSearch !== search;
 
   const openWorkOrder = (id: number) => {
     setDetailDirty(false);
@@ -212,6 +249,8 @@ function ActiveWorkOrdersView() {
       <WorkOrderListPanel
         list={listData}
         search={search}
+        searching={searching}
+        bounded={bounded}
         onSearch={setSearch}
         onOpen={openWorkOrder}
         onNew={() => setNewWorkOrderOpen(true)}
@@ -262,12 +301,19 @@ function ActiveWorkOrdersView() {
 function WorkOrderListPanel({
   list,
   search,
+  searching,
+  bounded,
   onSearch,
   onOpen,
   onNew,
 }: {
+  /** The server's page — already filtered and already bounded. */
   list: WorkOrderSummary[];
   search: string;
+  /** A server read for the current entry is still in flight. */
+  searching: boolean;
+  /** The page came back full: there may be more behind the bound. */
+  bounded: boolean;
   onSearch: (v: string) => void;
   onOpen: (id: number) => void;
   onNew: () => void;
@@ -286,14 +332,10 @@ function WorkOrderListPanel({
       policy: DEFAULT_DUE_SOON_POLICY,
     }).dueClass;
   };
-  const query = search.trim().toLowerCase();
-  const rows = list.filter(
-    (w) =>
-      !query ||
-      ((w.workOrderNumber ?? '') + ' ' + partNumbersPreview(w.partNumbers))
-        .toLowerCase()
-        .includes(query),
-  );
+  // The rows ARE the server's answer for the current search — no
+  // second, local filter with its own accidental semantics.
+  const rows = list;
+  const hasSearch = search.trim() !== '';
   return (
     <div>
       <div className="wo-head">
@@ -329,7 +371,17 @@ function WorkOrderListPanel({
           ＋ New Work Order
         </button>
       </div>
-      {list.length === 0 ? (
+      {searching && hasSearch ? (
+        <div className="wo-bound" role="status">
+          Searching Work Orders…
+        </div>
+      ) : bounded ? (
+        <div className="wo-bound">
+          Showing the first {WORK_ORDER_LIST_LIMIT} Work Orders — refine the
+          search to narrow it.
+        </div>
+      ) : null}
+      {rows.length === 0 && !hasSearch ? (
         <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
       ) : (
         <table className="wolist">

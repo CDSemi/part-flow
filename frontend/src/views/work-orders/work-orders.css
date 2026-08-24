@@ -69,6 +69,15 @@
   flex: 1;
 }
 
+/* Quiet line between the toolbar and the list: the server bound of the
+   active list, or a search still in flight. It states what is on
+   screen — never an alarm. */
+.wo-bound {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* Full-width list (v15) — the toolbar's right-aligned primary action
    lines up with the list edge, like the Machines page. */
 .wolist {

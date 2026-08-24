@@ -838,6 +838,19 @@ class PartMovement(Base):
     )
 
 
+# Declared after the class so the index expression is literally the one
+# `production_release.released_quantities` emits — the JSONB SUBSCRIPT
+# form, which is what PostgreSQL must match to use the index (the `->`
+# operator form is a different expression node to the planner). Partial
+# on RECEIVED, because only a RECEIVED Movement is release evidence.
+# Created by migration `0005_phase4_release_index`.
+Index(
+    "ix_part_movements_received_demand_context",
+    PartMovement.metadata_["context"]["work_order_demand_id"].as_integer(),
+    postgresql_where=PartMovement.movement_type == MovementType.RECEIVED,
+)
+
+
 class AuditEvent(Base):
     """Generic append-only audit row (SLICE1_DATA_MODEL §16).
 

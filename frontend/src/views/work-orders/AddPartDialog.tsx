@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
 import { resolvePartNumber, searchPartNumbers } from '../../api/part-numbers';
+import type { PartNumberMaster } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
@@ -109,23 +110,49 @@ export function AddPartDialog({
   // and offered, and is never mistaken for a new PN.
   const settledCanonical = normalizePartNumber(settledQuery);
   const exactOnly = !searchable && settledCanonical !== null;
-  const searchLoader = useCallback(() => {
-    if (searchable) return searchPartNumbers(settledQuery);
-    if (settledCanonical === null) return Promise.resolve([]);
-    return resolvePartNumber(settledCanonical).then((master) =>
-      master ? [master] : [],
-    );
+  // The lookup result carries the entry it answers for. `useApiData`
+  // keeps the PREVIOUS ready value while the next request is in
+  // flight, so "there is a ready result" alone says nothing about the
+  // entry on screen — the answered query has to be compared to it.
+  const searchLoader = useCallback(async (): Promise<{
+    query: string;
+    matches: PartNumberMaster[];
+  }> => {
+    if (searchable) {
+      return {
+        query: settledQuery,
+        matches: await searchPartNumbers(settledQuery),
+      };
+    }
+    if (settledCanonical === null) return { query: settledQuery, matches: [] };
+    const master = await resolvePartNumber(settledCanonical);
+    return { query: settledQuery, matches: master ? [master] : [] };
   }, [searchable, settledCanonical, settledQuery]);
   const searchData = useApiData(searchLoader);
-  const matches =
-    searchData.state.status === 'ready' ? searchData.state.data : [];
+  const answered =
+    searchData.state.status === 'ready' ? searchData.state.data : null;
+  // "This PN does not exist yet" is a claim about the SERVER, so it may
+  // only be made from a COMPLETED lookup of exactly what is in the
+  // field. Two windows must not conclude anything: the debounce (the
+  // entry has not been asked about yet) and the request in flight (it
+  // has been asked, but the previous answer is still what is held). A
+  // one-character PN like `X` spends the whole debounce in the first
+  // one, which is exactly where an existing PN used to be offered as
+  // new. One comparison covers both windows.
+  const lookupAnswered = answered !== null && answered.query === query;
+  const matches = lookupAnswered ? answered.matches : [];
   // The server bounds the listing; a full page means "refine", not
   // "these are all of them".
   const bounded = matches.length >= SERVER_SEARCH_LIMIT;
-  const canonical = normalizePartNumber(query);
+  // The whitespace rejection is a pure client-side judgement about the
+  // entry itself — no server answer is involved, so it stays immediate
+  // and reads the live entry.
+  const liveCanonical = normalizePartNumber(query);
+  const canonical = settledCanonical;
   const exactMatch =
     canonical !== null &&
     matches.some((entry) => entry.partNumber === canonical);
+  const offerCreate = lookupAnswered && canonical !== null && !exactMatch;
 
   function choosePn(value: string, asNewPn: boolean) {
     // `value` is a canonical PN; existing line PNs are canonical too.
@@ -275,7 +302,10 @@ export function AddPartDialog({
                 <div className="ap-empty" role="alert">
                   {searchData.state.message}
                 </div>
-              ) : searchData.state.status === 'loading' ? (
+              ) : !lookupAnswered ? (
+                // Covers the first load, the debounce and a lookup in
+                // flight alike: what is on screen is not an answer for
+                // what is in the field yet, and it says so.
                 <div className="ap-empty">Searching Part Numbers…</div>
               ) : !searchable && !exactOnly ? (
                 <div className="ap-empty">
@@ -293,7 +323,7 @@ export function AddPartDialog({
                 </div>
               ) : null}
             </div>
-            {canonical && !exactMatch ? (
+            {offerCreate && canonical ? (
               <button
                 className="btn ghost ap-create"
                 onClick={() => choosePn(canonical, true)}
@@ -301,7 +331,7 @@ export function AddPartDialog({
                 ＋ Create new PN “{canonical}”
               </button>
             ) : null}
-            {trimmed && !canonical ? (
+            {trimmed && !liveCanonical ? (
               <div className="ap-empty">
                 A Part Number cannot contain spaces or other whitespace inside
                 the value, so “{query.trim()}” cannot be created as a new PN.

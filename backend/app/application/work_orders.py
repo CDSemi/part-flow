@@ -55,6 +55,14 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   rule rather than a hope: a release and an edit of the same demand
   serialize in either arrival order, and no interleaving can leave
   ``released_quantity > requested_quantity``.
+- A canonical PN appears **at most once** among the current demand
+  lines of one Work Order. The rule is enforced where the rows are
+  written and it is serialized against itself: staging new demand
+  lines first takes the parent Work Order's row lock and re-reads that
+  Work Order's canonical PN set from the database **after** the lock is
+  granted, so two concurrent saves adding the same PN can never both
+  pass a pre-lock snapshot. The loser is refused with the ordinary
+  duplicate-demand error and writes nothing.
 - Demand-line removal follows the canonical rule (PROJECT_PROFILE §13):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
@@ -238,6 +246,17 @@ def _build_detail(
     )
 
 
+#: Most Work Orders one active-list read returns. Nothing leaves the
+#: active list before allocation-derived completion (Phase 10), so the
+#: list only grows: it is bounded HERE, in the query, never by slicing
+#: an already-transferred list in the browser. This is a result bound,
+#: not a pagination contract — the client narrows with ``search``, and
+#: the Completed Work Orders history (GUI_DESIGN §11.5) brings its own
+#: server-side paging when it becomes real. ``number`` is unaffected:
+#: an exact resolution must reach every Work Order, bound or not.
+LIST_RESULT_LIMIT: Final = 100
+
+
 def list_work_orders(
     session: Session, *, search: str | None = None, number: str | None = None
 ) -> list[WorkOrderSummary]:
@@ -245,9 +264,11 @@ def list_work_orders(
 
     ``number`` is the exact-resolution lookup the New Work Order dialog
     uses to open an existing entered number instead of duplicating it —
-    verbatim equality, because stored numbers are verbatim. ``search``
-    is a case-insensitive contains-match over the Work Order Number
-    with LIKE wildcards escaped (a lookup convenience only).
+    verbatim equality, because stored numbers are verbatim, and never
+    bounded away. ``search`` is a case-insensitive contains-match over
+    the Work Order Number with LIKE wildcards escaped (a lookup
+    convenience only), evaluated in the database and bounded there at
+    :data:`LIST_RESULT_LIMIT` in the unchanged canonical order.
     """
     part_numbers = func.array_agg(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
@@ -263,10 +284,14 @@ def list_work_orders(
         .order_by(WorkOrder.received_date.desc(), WorkOrder.id.desc())
     )
     if number is not None:
+        # Exact resolution answers "does this number already exist?" —
+        # it must see every Work Order, so it is never bounded.
         query = query.where(WorkOrder.work_order_number == number)
-    elif search is not None and search.strip():
-        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        query = query.where(WorkOrder.work_order_number.ilike(f"%{escaped}%", escape="\\"))
+    else:
+        if search is not None and search.strip():
+            escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(WorkOrder.work_order_number.ilike(f"%{escaped}%", escape="\\"))
+        query = query.limit(LIST_RESULT_LIMIT)
     rows = [
         (
             work_order,
@@ -327,6 +352,37 @@ def _reject_duplicate_work_order_number(
 # ---------------------------------------------------------------------------
 # Demand-line drafts
 # ---------------------------------------------------------------------------
+
+
+def _lock_work_order_and_read_part_numbers(session: Session, work_order_id: int) -> set[str]:
+    """Serialize adding demand lines to one Work Order, then re-read its PNs.
+
+    Adding a demand line is the one write whose rule — a canonical PN
+    appears at most once among a Work Order's current demand lines —
+    spans rows this transaction has not touched yet, so a snapshot taken
+    before the lock is not authority. The parent Work Order row lock
+    makes concurrent adds to the SAME Work Order queue instead of
+    interleaving, and the PN set is read from the database only after
+    the lock is granted: a competing save that added the same PN while
+    this one waited is visible here and its duplicate is refused with
+    the ordinary duplicate-demand error, writing nothing.
+
+    Placement matters twice over. It is taken AFTER the edited-line
+    ``FOR UPDATE`` locks, keeping the system-wide demand → Work Order
+    order that `delete_work_order_demand` also uses (and that
+    `release_to_production` never contradicts). And it is taken BEFORE
+    any mutation of this transaction, so no autoflush can emit the
+    header UPDATE and take the same row lock earlier, inverting that
+    order.
+    """
+    session.get(WorkOrder, work_order_id, with_for_update=True)
+    return set(
+        session.scalars(
+            select(WorkOrderDemand.part_number).where(
+                WorkOrderDemand.work_order_id == work_order_id
+            )
+        )
+    )
 
 
 def _stage_new_line(
@@ -453,25 +509,33 @@ def _locked_field_of_released_line(demand: WorkOrderDemand, edit: Mapping[str, A
 def _guard_released_line_edit(
     demand: WorkOrderDemand, edit: Mapping[str, Any], released_quantity: int
 ) -> None:
-    """Enforce the restricted edit of a released line; write nothing.
+    """Enforce the committed-quantity rules of one demand line; write nothing.
 
     Runs under the caller's ``FOR UPDATE`` lock on the demand with the
     released quantity recomputed under it (PROJECT_PROFILE §13):
 
     - a locked field (Request Type, Requester, Reason, Notes) refuses
       the whole save — the PN is not editable on any saved line and
-      never reaches here;
+      never reaches here. This part is tied to RELEASE: it is what
+      "Request Type is fixed once quantity has been released" means, so
+      it applies only when ``released_quantity > 0``;
     - ``requested_quantity`` may not fall below what is already
       committed: ``max(released_quantity, allocated_quantity)``.
       Raising it is always allowed — the demand simply has releasable
       remainder again — and lowering it to exactly the committed
-      quantity is valid, leaving nothing left to release.
+      quantity is valid, leaving nothing left to release. This part is
+      tied to COMMITTED QUANTITY, not to release alone, so it also
+      binds a line that only carries allocated quantity. Allocation
+      arrives with Phase 10 and nothing in Phase 4 writes
+      ``allocated_quantity``, so today the branch is provably inert —
+      it is written this way so the canonical floor cannot silently
+      lose half its meaning when allocation starts writing.
 
     Qty, due date and Job Numbers are otherwise the normal audited
     edit; nothing here touches QuantityFlows, PartMovements, or release
     history.
     """
-    locked = _locked_field_of_released_line(demand, edit)
+    locked = _locked_field_of_released_line(demand, edit) if released_quantity > 0 else None
     if locked is not None:
         raise ConflictError(
             f"Cannot change {locked} for Part Number '{demand.part_number}':"
@@ -590,6 +654,13 @@ def update_work_order(
     cannot be raced by a release in flight and
     ``released_quantity > requested_quantity`` is unreachable. A
     header-only save takes no demand lock.
+
+    A save that adds demand lines additionally locks the parent Work
+    Order row and re-reads that Work Order's canonical PN set under the
+    lock, so two concurrent saves adding the same PN serialize and only
+    one of them can create the line
+    (``_lock_work_order_and_read_part_numbers``). Lock order stays
+    demand (ascending id) → Work Order.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -643,6 +714,14 @@ def update_work_order(
         demands_by_id[edited_id] = locked
     released = production_release.released_quantities(session, edited_ids)
 
+    # Adding demand lines serializes on the parent Work Order row, and
+    # the authoritative PN set is re-read under that lock — never the
+    # `detail.demands` snapshot taken before any waiting. Nothing has
+    # been mutated yet, so this cannot autoflush an earlier lock.
+    taken: set[str] = (
+        _lock_work_order_and_read_part_numbers(session, work_order.id) if new_lines else set()
+    )
+
     # Header edits are applied AFTER the demand locks: their UPDATE is
     # emitted at flush, so touching them first would let an autoflush
     # take the Work Order row lock before the demand locks and invert
@@ -667,19 +746,20 @@ def update_work_order(
                 f"Demand line {demand_id} does not exist on Work Order {work_order.id}."
             )
         released_quantity = released.get(demand.id, 0)
-        if released_quantity > 0:
+        if released_quantity > 0 or demand.allocated_quantity > 0:
             # Restricted, not frozen (PROJECT_PROFILE §13): the UI
             # renders the locked fields read-only, the backend refuses
             # them anyway. Released quantity itself is never rewritten
             # from here — production corrections stay in the correction
-            # and production workflows (PROJECT_PROFILE §16).
+            # and production workflows (PROJECT_PROFILE §16). A line
+            # carrying only allocated quantity reaches the same guard
+            # for its quantity floor alone (Phase 10; inert today).
             _guard_released_line_edit(demand, edit, released_quantity)
         before = _demand_snapshot(demand)
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):
             demand.updated_at = func.now()
             audited.append((demand, before))
 
-    taken = {demand.part_number for demand in detail.demands}
     created = [
         _stage_new_line(session, work_order, draft, taken, actor=actor) for draft in new_lines
     ]
@@ -719,6 +799,13 @@ def update_work_order(
 
     if header_changed or audited or created:
         commit(session, _WORK_ORDER_CONFLICTS)
+    else:
+        # A save that turns out to change nothing still took row locks
+        # above. Ending the transaction here releases them immediately
+        # instead of holding them until the request-scoped session
+        # closes, where they would needlessly block a concurrent
+        # release or save of the same line.
+        session.rollback()
     return _build_detail(session, work_order, [*detail.demands, *created])
 
 

@@ -31,7 +31,11 @@ function toMaster(wire: PartNumberWire): PartNumberMaster {
   return { partNumber: wire.part_number, barcodeValue: wire.barcode_value };
 }
 
-/** Contains-search over the PN masters (all of them for a blank query). */
+/**
+ * Contains-search over the PN masters. The result is bounded by the
+ * SERVER (`part_numbers.SEARCH_RESULT_LIMIT`) — for a blank query too,
+ * so an unfiltered lookup never streams the whole catalog.
+ */
 export async function searchPartNumbers(
   search: string,
 ): Promise<PartNumberMaster[]> {

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../../App';
@@ -262,7 +268,13 @@ test('an active-list search miss points at the completed history', async () => {
     target: { value: '006996' },
   });
 
-  expect(screen.getByText(/No active Work Order matches/)).toBeInTheDocument();
+  // The search runs on the server (GUI_DESIGN §11.1), so the miss
+  // arrives with the server's answer rather than from a local filter.
+  await waitFor(() =>
+    expect(
+      screen.getByText(/No active Work Order matches/),
+    ).toBeInTheDocument(),
+  );
   const cell = screen
     .getByText(/No active Work Order matches/)
     .closest('td') as HTMLTableCellElement;

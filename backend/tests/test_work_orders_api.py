@@ -23,12 +23,21 @@ SLICE1_DATA_MODEL §5, §7, §16; GUI_DESIGN §11.1–§11.3):
   write that fails at COMMIT takes its audit rows down with it;
 - server-owned fields (status, allocated_quantity, priority_rank)
   are rejected by ``extra="forbid"`` schemas.
+- one canonical PN appears at most once among a Work Order's
+  current demand lines, and the rule is serialized against itself:
+  two concurrent saves adding the same PN cannot both create a
+  line (the loser waits on the parent Work Order row lock,
+  re-reads the PN set under it, and is refused writing nothing);
+- the active list is bounded server-side while the exact
+  ``number=`` resolution reaches every Work Order.
 
 The API commits real transactions, so tests isolate through unique
 numbers/PNs; the module database is dropped afterwards.
 """
 
 import os
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -40,8 +49,11 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.orm import Session
 
 from alembic import command
+from app.application import work_orders
+from app.application.errors import InvalidInputError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -653,3 +665,306 @@ def test_list_and_search_over_work_order_numbers(client: TestClient) -> None:
     assert rows[0]["demand_line_count"] == 2
     assert rows[0]["part_numbers"] == [pn_one, pn_two]
     assert rows[0]["status"] == "OPEN"
+
+
+# ---------------------------------------------------------------------------
+# One canonical PN at most once per Work Order — serialized, not hoped for
+# ---------------------------------------------------------------------------
+
+
+class _PauseFirstWorkOrderLock:
+    """Test seam: pause a save AFTER it holds the parent Work Order row
+    lock and has re-read that Work Order's PN set, so a competing save
+    adding the same PN can be started and observed blocking on the same
+    lock rather than racing past it."""
+
+    def __init__(self) -> None:
+        self.real = work_orders._lock_work_order_and_read_part_numbers
+        self.inside = threading.Event()
+        self.let_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, work_order_id: int) -> set[str]:
+        result = self.real(session, work_order_id)
+        with self._guard:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.inside.set()
+            assert self.let_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+def _demand_count_for(engine: Engine, work_order_id: int, part_number: str) -> int:
+    with engine.connect() as connection:
+        return connection.execute(
+            sa.select(sa.func.count())
+            .select_from(models.WorkOrderDemand.__table__)
+            .where(
+                models.WorkOrderDemand.work_order_id == work_order_id,
+                models.WorkOrderDemand.part_number == part_number,
+            )
+        ).scalar_one()
+
+
+def test_concurrent_adds_of_the_same_part_number_cannot_both_create_a_line(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent saves adding the SAME PN to the SAME Work Order.
+
+    The rule "one canonical PN appears at most once among a Work
+    Order's current demand lines" is decided from a set read before any
+    waiting, so it is only a rule if the read happens under the Work
+    Order's row lock. The loser here waits on that lock, re-reads the
+    PN set once the winner committed, and refuses its duplicate —
+    writing nothing at all, not even the PN master or an audit row.
+
+    The PN master EXISTS before the race on purpose: with a brand-new
+    PN the loser would be stopped incidentally by the `part_numbers`
+    primary-key race inside `ensure_part_number`, which would prove
+    nothing about this rule.
+    """
+    duplicate_pn = _unique("RACE")
+    master = client.post("/api/part-numbers", json={"part_number": duplicate_pn})
+    assert master.status_code == 201, master.text
+
+    body = _create_work_order(client, lines=[_line()])
+    work_order_id = int(body["id"])
+    before = _write_counts(db_engine)
+
+    pause = _PauseFirstWorkOrderLock()
+    monkeypatch.setattr(work_orders, "_lock_work_order_and_read_part_numbers", pause)
+    results: dict[str, Any] = {}
+
+    def add(key: str) -> None:
+        with Session(db_engine) as session:
+            try:
+                work_orders.update_work_order(
+                    session,
+                    work_order_id,
+                    new_lines=[{"part_number": duplicate_pn, "requested_quantity": 4}],
+                )
+                results[key] = "ok"
+            except Exception as exc:  # noqa: BLE001 — collected for assertions
+                results[key] = exc
+
+    winner = threading.Thread(target=add, args=("winner",), daemon=True)
+    loser = threading.Thread(target=add, args=("loser",), daemon=True)
+    try:
+        winner.start()
+        assert pause.inside.wait(timeout=20)  # holds the Work Order row lock
+        loser.start()
+        # The overlap is real: the second save is blocked on the lock,
+        # not finished and not failed.
+        time.sleep(1.0)
+        assert "loser" not in results
+    finally:
+        pause.let_finish.set()
+    winner.join(timeout=20)
+    loser.join(timeout=20)
+    assert not winner.is_alive() and not loser.is_alive()
+
+    assert results["winner"] == "ok"
+    assert isinstance(results["loser"], InvalidInputError)
+    assert "already on this Work Order" in str(results["loser"])
+
+    # Exactly one demand line carries the PN, and the loser wrote nothing.
+    assert _demand_count_for(db_engine, work_order_id, duplicate_pn) == 1
+    after = _write_counts(db_engine)
+    assert after["work_order_demands"] == before["work_order_demands"] + 1
+    assert after["part_numbers"] == before["part_numbers"]
+    assert after["audit_events"] == before["audit_events"] + 1  # the one created line
+    assert after["quantity_flows"] == before["quantity_flows"]
+    assert after["part_movements"] == before["part_movements"]
+
+    # The Work Order is not left in a state the UI cannot save again.
+    detail = client.get(f"/api/work-orders/{work_order_id}").json()
+    assert [d["part_number"] for d in detail["demands"]].count(duplicate_pn) == 1
+    line_id = next(d["id"] for d in detail["demands"] if d["part_number"] == duplicate_pn)
+    edited = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"line_edits": [{"id": line_id, "requested_quantity": 9}]},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["demands"][-1]["requested_quantity"] == 9
+    added = client.patch(
+        f"/api/work-orders/{work_order_id}",
+        json={"new_lines": [_line()]},
+    )
+    assert added.status_code == 200, added.text
+
+
+def _race_one_add(client: TestClient, work_order_id: int, part_number: str) -> list[int]:
+    """Two threads PATCH the same Work Order with the same new PN at the
+    same instant; returns both HTTP status codes."""
+    barrier = threading.Barrier(2)
+    statuses: list[int] = []
+    guard = threading.Lock()
+
+    def patch_add() -> None:
+        barrier.wait(timeout=20)
+        response = client.patch(
+            f"/api/work-orders/{work_order_id}",
+            json={"new_lines": [{"part_number": part_number, "requested_quantity": 3}]},
+        )
+        with guard:
+            statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=patch_add, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+    return statuses
+
+
+def test_unsynchronized_concurrent_adds_never_duplicate_a_part_number(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The same race with no seam, over the real HTTP surface.
+
+    No pause, no monkeypatch: two threads PATCH the same Work Order at
+    the same instant, several rounds. Whatever the interleaving, the
+    Work Order may never end up with two lines for one canonical PN,
+    and the losing request must fail cleanly (422) rather than
+    half-write.
+    """
+    duplicate_pn = _unique("STRESS")
+    assert client.post("/api/part-numbers", json={"part_number": duplicate_pn}).status_code == 201
+
+    for _ in range(8):
+        body = _create_work_order(client, lines=[_line()])
+        work_order_id = int(body["id"])
+        statuses = _race_one_add(client, work_order_id, duplicate_pn)
+        assert _demand_count_for(db_engine, work_order_id, duplicate_pn) == 1
+        assert sorted(statuses) == [200, 422], statuses
+
+
+# ---------------------------------------------------------------------------
+# The active list is bounded in the query; exact resolution is not
+# ---------------------------------------------------------------------------
+
+
+def test_active_list_and_search_are_bounded_by_the_server(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """More Work Orders than the bound come back bounded, in order.
+
+    Nothing leaves the active list before allocation-derived completion
+    (Phase 10), so an unbounded read would only ever grow. The bound is
+    applied in the query — the tail is truncated in canonical order,
+    never sampled — and `search` narrows it server-side.
+    """
+    limit = work_orders.LIST_RESULT_LIMIT
+    marker = uuid.uuid4().hex[:8].upper()
+    # Seeded directly: this is about the read path, and creating
+    # limit + 20 Work Orders through the API would only be slower.
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "INSERT INTO work_orders (work_order_number, received_date, status)"
+                " SELECT :marker || '-' || lpad(g::text, 4, '0'), DATE '2030-01-01' + g,"
+                " 'OPEN' FROM generate_series(1, :count) g"
+            ),
+            {"marker": marker, "count": limit + 20},
+        )
+
+    rows = client.get("/api/work-orders", params={"search": marker})
+    assert rows.status_code == 200
+    numbers = [row["work_order_number"] for row in rows.json()]
+    assert len(numbers) == limit
+    # Canonical order preserved: newest received_date first, so the
+    # highest generated suffixes survive and the OLDEST are cut.
+    expected = [f"{marker}-{index:04d}" for index in range(limit + 20, 20, -1)]
+    assert numbers == expected
+
+    # The unfiltered listing is bounded too.
+    assert len(client.get("/api/work-orders").json()) == limit
+
+    # A Work Order outside the default page is still reachable: by a
+    # narrower search...
+    narrow = client.get("/api/work-orders", params={"search": f"{marker}-0001"})
+    assert [row["work_order_number"] for row in narrow.json()] == [f"{marker}-0001"]
+    # ...and by the exact resolution, which is never bounded away.
+    exact = client.get("/api/work-orders", params={"number": f"{marker}-0007"})
+    assert exact.status_code == 200
+    assert [row["work_order_number"] for row in exact.json()] == [f"{marker}-0007"]
+
+
+def test_search_is_evaluated_in_the_database_not_after_the_bound(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A match beyond the first page is found because the WHERE runs
+    before the LIMIT — the bound never hides a real match."""
+    limit = work_orders.LIST_RESULT_LIMIT
+    marker = uuid.uuid4().hex[:8].upper()
+    needle = f"{marker}-NEEDLE"
+    with db_engine.begin() as connection:
+        # The needle is the OLDEST, so an unbounded-then-filter client
+        # would never see it inside a bounded page.
+        connection.execute(
+            sa.text(
+                "INSERT INTO work_orders (work_order_number, received_date, status)"
+                " VALUES (:needle, DATE '2029-01-01', 'OPEN')"
+            ),
+            {"needle": needle},
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO work_orders (work_order_number, received_date, status)"
+                " SELECT :marker || '-NOISE-' || g, DATE '2031-01-01' + g, 'OPEN'"
+                " FROM generate_series(1, :count) g"
+            ),
+            {"marker": marker, "count": limit + 20},
+        )
+
+    everything = client.get("/api/work-orders", params={"search": marker})
+    assert needle not in [row["work_order_number"] for row in everything.json()]
+    found = client.get("/api/work-orders", params={"search": "NEEDLE"})
+    assert [row["work_order_number"] for row in found.json()] == [needle]
+
+
+def test_quantity_floor_also_binds_a_line_that_only_carries_allocation(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """`requested_quantity` may never fall below `max(released, allocated)`.
+
+    Allocation arrives with Phase 10 and no Phase 4 endpoint writes
+    `allocated_quantity` (`extra="forbid"` rejects it), so the value is
+    seeded directly here. The point of the test is that the canonical
+    floor of PROJECT_PROFILE §13 is written as `max(released,
+    allocated)` and not silently reduced to "released only" — the
+    locked FIELDS stay tied to release, the quantity FLOOR does not.
+    """
+    body = _create_work_order(client, lines=[_line(requested_quantity=30)])
+    line_id = int(body["demands"][0]["id"])
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.text("UPDATE work_order_demands SET allocated_quantity = 12 WHERE id = :id"),
+            {"id": line_id},
+        )
+
+    too_low = client.patch(
+        f"/api/work-orders/{body['id']}",
+        json={"line_edits": [{"id": line_id, "requested_quantity": 11}]},
+    )
+    assert too_low.status_code == 409
+    assert "12 pcs are already allocated" in too_low.json()["detail"]
+
+    # Nothing about the line changed.
+    assert (
+        client.get(f"/api/work-orders/{body['id']}").json()["demands"][0]["requested_quantity"]
+        == 30
+    )
+
+    # Down to exactly the committed quantity is valid, and Request Type
+    # stays editable — nothing has been RELEASED for this line.
+    exact = client.patch(
+        f"/api/work-orders/{body['id']}",
+        json={"line_edits": [{"id": line_id, "requested_quantity": 12, "request_type": "MODIFY"}]},
+    )
+    assert exact.status_code == 200, exact.text
+    saved = exact.json()["demands"][0]
+    assert (saved["requested_quantity"], saved["request_type"]) == (12, "MODIFY")
