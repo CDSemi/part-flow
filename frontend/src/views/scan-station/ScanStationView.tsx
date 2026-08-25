@@ -15,7 +15,7 @@ import type { ReactNode } from 'react';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { isMockPreviewRequested } from '../../app/view-state';
-import { errorMessage } from '../../api/client';
+import { ApiError, errorMessage } from '../../api/client';
 import {
   listAreas,
   listDepartments,
@@ -251,8 +251,8 @@ function StationList({ data }: { data: SelectorData }) {
               </span>
               <span className="stype">
                 {machineCount > 0
-                  ? `${machineCount} Machine${machineCount === 1 ? '' : 's'} · Queue and assignment enabled`
-                  : 'Direct Area processing · No Machine assignment'}
+                  ? `${machineCount} Machine${machineCount === 1 ? '' : 's'} · Quantity waits in the Area queue`
+                  : 'No Machines · Direct Area processing'}
               </span>
             </button>
             <div className="ss-stationacts">
@@ -464,8 +464,18 @@ function StationView({
     head.classList.remove('measuring');
     setHeadWrapped(required > available + 0.5);
   }, []);
+  // The inventory counts as loaded only once the FIRST response for
+  // the rendered Area arrived: the placeholder before the station
+  // context resolved, and data of a previously bound Area during a
+  // rebind reload, never render as a (false) empty Area.
   const inventoryReady =
-    inventory.state.status === 'ready' ? inventory.state.data : null;
+    inventory.state.status === 'ready' &&
+    inventory.state.data !== null &&
+    inventory.state.data.area.id === areaId
+      ? inventory.state.data
+      : null;
+  const inventoryLoading =
+    inventory.state.status !== 'error' && inventoryReady === null;
   useLayoutEffect(() => {
     measureHead();
   }, [measureHead, ready, inventoryReady, productionMode, status]);
@@ -543,15 +553,16 @@ function StationView({
    */
   const openResolution = useCallback(
     (resolution: ScanResolution, parent?: Flow) => {
-      if (resolution.resolution === 'ALREADY_IN_AREA') {
-        setFlow({ kind: 'in-area', resolution, parent });
+      if (resolution.transferBlockedReason !== null) {
+        // The station's Area never receives a transfer (a terminal
+        // Area — the Stockroom workflow, a later release): no Receive
+        // action at all, whatever quantity sits here or elsewhere; the
+        // candidates are information only.
+        setFlow({ kind: 'no-quantity', resolution, parent });
         return;
       }
-      if (resolution.transferBlockedReason !== null) {
-        // A terminal Area never receives a transfer (the Stockroom
-        // workflow, a later release): the candidates are information
-        // only, never a transfer offer.
-        setFlow({ kind: 'no-quantity', resolution, parent });
+      if (resolution.resolution === 'ALREADY_IN_AREA') {
+        setFlow({ kind: 'in-area', resolution, parent });
         return;
       }
       if (resolution.candidates.length === 1) {
@@ -580,6 +591,23 @@ function StationView({
       setResolving(true);
       try {
         const resolution = await resolveScan(stationId, input);
+        if (ready && resolution.area.id !== ready.area.id) {
+          // The station was rebound since this page loaded: the
+          // rendered context is stale. Never continue against it —
+          // drop the pending workflow, reload the station and its
+          // inventory, and ask for the scan again.
+          setFlow(null);
+          context.reload();
+          inventory.reload();
+          setNotice({
+            kind: 'warn',
+            icon: '⚠',
+            title: 'Scan Station configuration changed',
+            detail: `${stationId} is now bound to ${resolution.area.name}. The station was reloaded — scan the Part Number again. No changes were recorded.`,
+          });
+          focusScan();
+          return;
+        }
         openResolution(resolution, parent);
       } catch (error) {
         focusScan();
@@ -593,7 +621,7 @@ function StationView({
         setResolving(false);
       }
     },
-    [stationId, openResolution, focusScan],
+    [stationId, ready, context, inventory, openResolution, focusScan],
   );
 
   const blockedNotice = useCallback(() => {
@@ -683,7 +711,18 @@ function StationView({
         if (target.isContentEditable) return;
         const tag = target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        if (tag === 'BUTTON') return;
+        // A focused non-dialog button keeps its native keyboard
+        // activation (Enter/Space) while NO scan is buffered; scanner
+        // characters are captured into the main input regardless — a
+        // barcode is never lost because a button held focus — and the
+        // terminating Enter of a buffered scan submits it.
+        if (tag === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) {
+          if (event.key === 'Enter' && input.value) {
+            event.preventDefault();
+            handleScan();
+          }
+          return;
+        }
       }
       if (event.key === 'Enter') {
         if (input.value) {
@@ -788,8 +827,13 @@ function StationView({
             operations={station.operations.map(operationLabel)}
           />
         </div>
+        {/* The Area totals render only from a server inventory —
+            never a zero row before the first response. */}
         <div className="ss-stats" aria-label="Area statistics">
-          {(area ? areaStats(area, cards, hasMachines) : []).map((s) => (
+          {(area && inventoryReady
+            ? areaStats(area, cards, hasMachines)
+            : []
+          ).map((s) => (
             <div className="stat" key={s.label}>
               <div className={`n ${s.tone ?? ''}`}>{s.value}</div>
               <div className="l">{s.label}</div>
@@ -888,6 +932,14 @@ function StationView({
             detail={inventory.state.message}
             onRetry={inventory.reload}
           />
+        ) : machinesData.state.status === 'error' ? (
+          <ErrorState
+            message="The Area's Machines could not be loaded."
+            detail={machinesData.state.message}
+            onRetry={machinesData.reload}
+          />
+        ) : inventoryLoading || machinesData.state.status === 'loading' ? (
+          <LoadingState label="Loading Area inventory" />
         ) : (
           <AreaMachineLayout
             summary={
@@ -943,6 +995,21 @@ function StationView({
             completeTransfer(result, flow.candidate, destinationNote)
           }
           onCancel={cancelFlow}
+          onAbandonUnknown={() => {
+            // The operator leaves a transfer whose outcome the server
+            // never answered: the Area is re-read from the server and
+            // the next scan shows where the quantity actually is.
+            setFlow(null);
+            inventory.reload();
+            setNotice({
+              kind: 'warn',
+              icon: '⚠',
+              title: 'Transfer outcome unknown',
+              detail:
+                'The server did not answer, so the transfer may or may not have been recorded. The Area was reloaded — scan the Part Number again to see where the quantity is.',
+            });
+            focusScan();
+          }}
         />
       )}
       {flow?.kind === 'in-area' && (
@@ -1124,6 +1191,7 @@ function TransferDialog({
   onBack,
   onDone,
   onCancel,
+  onAbandonUnknown,
 }: {
   station: StationContext;
   resolution: ScanResolution;
@@ -1134,9 +1202,16 @@ function TransferDialog({
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: TransferResult) => void;
   onCancel: () => void;
+  /** The operator abandons a transfer whose outcome is UNKNOWN (the
+   * server never answered): the owner re-reads the Area. */
+  onAbandonUnknown: () => void;
 }) {
   const pn = resolution.partNumber;
   const operations = resolution.operations;
+  // The destination is the Area the scan just resolved against — the
+  // one the operator confirms — never a stale station context (the
+  // owner already verified both agree before opening this dialog).
+  const destination = resolution.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   // MAX = the whole Quantity Flow, and in this release the ONLY valid
   // quantity: partial movement needs SPLIT (a later release) and is
@@ -1144,16 +1219,25 @@ function TransferDialog({
   const [qty, setQty] = useState(String(candidate.quantity));
   const parsedQty = parseInt(qty || '0', 10);
   const fullQuantity = parsedQty === candidate.quantity;
+  // Several active Operations at the destination ALWAYS take an
+  // explicit choice — the Planned Route's expected Operation is
+  // guidance shown beside the choice, never a pre-selection that hides
+  // it. A single Operation resolves itself.
+  const operationRequired = operations.length > 1;
   const [operationId, setOperationId] = useState<number | null>(
-    candidate.suggestedOperationId,
+    operationRequired ? null : (candidate.suggestedOperationId ?? null),
   );
   const operation = operations.find((item) => item.id === operationId) ?? null;
-  const operationRequired =
-    operations.length > 1 && candidate.suggestedOperationId === null;
   const valid = fullQuantity && operation !== null;
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  // The server never answered a submission: it may have committed the
+  // transfer and lost the response. From here on the intent is FROZEN
+  // (no Operation/reason/Back changes) and the only way forward is the
+  // exact same request with the same device_event_id — which replays
+  // the committed transfer or records it once.
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false);
   // One idempotency key per transfer intent, reused verbatim on every
   // retry — a retry after an unknown outcome replays the committed
   // transfer instead of recording it twice.
@@ -1180,7 +1264,7 @@ function TransferDialog({
               code: '?',
               name: null,
             },
-          )} here, not ${operationLabel(operation)}.`
+          )} at ${destination.name}, not ${operationLabel(operation)}.`
         : null;
   const deviation = serverDeviation ?? localDeviation;
   const reasonMissing = deviation !== null && reason.trim() === '';
@@ -1205,7 +1289,7 @@ function TransferDialog({
         partNumber: pn,
         quantityFlowId: candidate.quantityFlowId,
         sourceAreaId: candidate.currentArea.id,
-        targetAreaId: station.area.id,
+        targetAreaId: destination.id,
         quantity: candidate.quantity,
         operationId: operation!.id,
         confirmRouteDeviation: deviation !== null,
@@ -1214,19 +1298,28 @@ function TransferDialog({
       });
       onDone(result);
     } catch (error) {
-      const asked = routeDeviationConfirmation(error);
-      if (asked) {
+      if (!(error instanceof ApiError)) {
+        // Transport failure: the request may or may not have reached
+        // and been committed by the server. NEVER "nothing changed" —
+        // the outcome is unknown until the same request is answered.
+        setOutcomeUnknown(true);
+        setServerError(null);
+      } else if (routeDeviationConfirmation(error)) {
         // The server sees a deviation the candidate did not show (the
         // route position changed meanwhile): present it and require the
-        // reason before the SAME intent is resubmitted.
-        setServerDeviation(errorMessage(error));
+        // reason before the SAME intent is resubmitted. Nothing was
+        // recorded.
+        setServerDeviation(error.message);
       } else {
-        setServerError(errorMessage(error));
+        // An explicit server rejection: nothing was recorded.
+        setServerError(error.message);
       }
     } finally {
       setBusy(false);
     }
   }
+
+  const cancel = outcomeUnknown ? onAbandonUnknown : onCancel;
 
   const quantityGuidance =
     parsedQty > candidate.quantity ? (
@@ -1245,7 +1338,7 @@ function TransferDialog({
   return (
     <ModalDialog
       label="Receive from another Area"
-      onClose={busy ? () => undefined : onCancel}
+      onClose={busy ? () => undefined : cancel}
       onKeyDown={
         step === 'qty'
           ? quantityKeyHandler(qty, setQty, goConfirm)
@@ -1265,7 +1358,7 @@ function TransferDialog({
                 <AreaChip area={candidate.currentArea}>
                   {candidate.currentArea.name}
                 </AreaChip>{' '}
-                → <AreaChip area={station.area}>{destinationNote}</AreaChip>
+                → <AreaChip area={destination}>{destinationNote}</AreaChip>
               </>,
               <WorkOrderContextLine workOrder={candidate.workOrder} />,
             ]}
@@ -1273,8 +1366,11 @@ function TransferDialog({
           {operationRequired ? (
             <>
               <Guidance tone="action">
-                {station.area.name} supports several Operations. Select the
+                {destination.name} supports several Operations. Select the
                 Operation this quantity is transferred for.
+                {candidate.expectedOperationId !== null
+                  ? ' The Planned Route expects the one marked planned; another choice is a route deviation.'
+                  : ''}
               </Guidance>
               <div className="ss-choices" role="group" aria-label="Operation">
                 {operations.map((item) => (
@@ -1288,7 +1384,15 @@ function TransferDialog({
                     <span className="cic" aria-hidden="true">
                       OP
                     </span>
-                    <span className="ct1">{operationLabel(item)}</span>
+                    <span>
+                      <span className="ct1">{operationLabel(item)}</span>
+                      {item.id === candidate.expectedOperationId ? (
+                        <>
+                          <br />
+                          <span className="ct2">planned for this step</span>
+                        </>
+                      ) : null}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -1303,7 +1407,7 @@ function TransferDialog({
             />
           ) : (
             <Guidance tone="error">
-              {station.area.name} has no active Operation configured. Configure
+              {destination.name} has no active Operation configured. Configure
               one in Administration → Operations before receiving quantity.
             </Guidance>
           )}
@@ -1347,7 +1451,7 @@ function TransferDialog({
               ],
               [
                 'Destination',
-                <AreaChip area={station.area}>{destinationNote}</AreaChip>,
+                <AreaChip area={destination}>{destinationNote}</AreaChip>,
                 'primary',
               ],
               [
@@ -1386,31 +1490,51 @@ function TransferDialog({
                 className="field"
                 autoComplete="off"
                 value={reason}
-                disabled={busy}
+                disabled={busy || outcomeUnknown}
                 placeholder="Reason for leaving the Planned Route"
                 onChange={(event) => setReason(event.target.value)}
               />
             </>
           ) : null}
+          {outcomeUnknown ? (
+            <Guidance tone="warn">
+              The server did not answer — this transfer may or may not have been
+              recorded. Retry the exact same transfer to find out: the server
+              answers with the recorded result, or records it once. Nothing can
+              be changed until then.
+            </Guidance>
+          ) : null}
           {serverError ? <Guidance tone="error">{serverError}</Guidance> : null}
-          {writeBlocked && !serverError ? (
+          {writeBlocked && !serverError && !outcomeUnknown ? (
             <Guidance tone="error">
               Disconnected — the transfer cannot be recorded until the
               connection returns.
             </Guidance>
           ) : null}
+          {/* With the outcome unknown the intent is frozen: no Back to
+              the choices (a different Operation or reason under the
+              same device_event_id would be a different request). */}
           <StepButtons
-            onBack={() => {
-              setServerError(null);
-              setStep('qty');
-            }}
-            onCancel={onCancel}
+            onBack={
+              outcomeUnknown
+                ? undefined
+                : () => {
+                    setServerError(null);
+                    setStep('qty');
+                  }
+            }
+            onCancel={cancel}
+            cancelLabel={
+              outcomeUnknown ? 'Leave — check the Area' : 'Cancel (Esc)'
+            }
             primary={{
-              label: serverError
-                ? 'Retry transfer'
-                : busy
-                  ? 'Recording…'
-                  : 'Confirm transfer',
+              label: outcomeUnknown
+                ? 'Retry the same transfer'
+                : serverError
+                  ? 'Retry transfer'
+                  : busy
+                    ? 'Recording…'
+                    : 'Confirm transfer',
               onClick: () => void confirm(),
               disabled: !valid || busy || reasonMissing || writeBlocked,
               autoFocus: true,

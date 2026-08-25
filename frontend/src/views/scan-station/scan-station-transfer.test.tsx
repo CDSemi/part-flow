@@ -70,10 +70,19 @@ let committed: Map<string, { status: number; body: unknown }>;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let requests: { url: string; method: string; body: any }[];
 let nextMovementId: number;
-let transferFailure: null | 'network' | { status: number; body: unknown };
+// 'network': the request never reaches the server. 'lost-response': the
+// server COMMITS the transfer and the response is lost on the way back
+// — the client can only learn the outcome by retrying the same
+// device_event_id.
+let transferFailure:
+  null | 'network' | 'lost-response' | { status: number; body: unknown };
+let machinesFailure: boolean;
+/** While set, inventory reads stay pending until it resolves. */
+let inventoryHold: Promise<void> | null;
 let healthDown: boolean;
 let inventoryReads: number;
 let resolveFailure: boolean;
+let stationAreaId: number;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -132,6 +141,11 @@ function canonicalPn(raw: string): string | { detail: string } {
   return trimmed.toUpperCase();
 }
 
+function boundAreaId(stationId: string): number {
+  if (stationId === 'LATHE-ST-01') return stationAreaId;
+  return STATIONS.find((s) => s.station_id === stationId)!.area_id;
+}
+
 function handle(url: string, method: string, body: unknown): Response {
   if (url === '/api/health') {
     return healthDown
@@ -169,6 +183,7 @@ function handle(url: string, method: string, body: unknown): Response {
     );
   }
   if (url === '/api/machines') {
+    if (machinesFailure) throw new TypeError('Failed to fetch');
     return json([
       {
         id: 1,
@@ -203,12 +218,13 @@ function handle(url: string, method: string, body: unknown): Response {
         404,
       );
     }
+    const areaId = boundAreaId(station.station_id);
     return json({
       station_id: station.station_id,
       department: { id: 1, name: 'Machining' },
-      area: areaRef(station.area_id),
-      operations: activeOperations(station.area_id).map(operationRef),
-      has_machines: station.area_id === 2,
+      area: areaRef(areaId),
+      operations: activeOperations(areaId).map(operationRef),
+      has_machines: areaId === 2,
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -234,9 +250,10 @@ function handle(url: string, method: string, body: unknown): Response {
   const resolve = /^\/api\/scan-stations\/([^/]+)\/scans\/resolve$/.exec(url);
   if (resolve && method === 'POST') {
     if (resolveFailure) throw new TypeError('Failed to fetch');
-    const station = STATIONS.find(
+    const found = STATIONS.find(
       (s) => s.station_id === decodeURIComponent(resolve[1]),
     )!;
+    const station = { ...found, area_id: boundAreaId(found.station_id) };
     const input = body as { barcode?: string; part_number?: string };
     let pn: string | { detail: string };
     if (input.barcode !== undefined) {
@@ -309,13 +326,17 @@ function handle(url: string, method: string, body: unknown): Response {
     if (transferFailure === 'network') {
       throw new TypeError('Failed to fetch');
     }
-    if (transferFailure) {
+    if (transferFailure && transferFailure !== 'lost-response') {
       const failure = transferFailure;
       return json(failure.body, failure.status);
     }
-    const station = STATIONS.find(
+    const foundStation = STATIONS.find(
       (s) => s.station_id === decodeURIComponent(transfer[1]),
     )!;
+    const station = {
+      ...foundStation,
+      area_id: boundAreaId(foundStation.station_id),
+    };
     const flow = flows.find((f) => f.id === request.quantity_flow_id);
     if (!flow) return json({ detail: 'Quantity Flow does not exist.' }, 422);
     if (request.target_area_id !== station.area_id) {
@@ -345,18 +366,21 @@ function handle(url: string, method: string, body: unknown): Response {
         422,
       );
     }
-    const deviation =
+    const areaDeviation =
+      flow.routeMode === 'PLANNED' && flow.routeStatus === 'DEVIATION';
+    const operationDeviation =
       flow.routeMode === 'PLANNED' &&
-      (flow.routeStatus === 'DEVIATION' ||
-        (flow.expectedOperationId != null &&
-          flow.expectedOperationId !== operationId));
+      !areaDeviation &&
+      flow.expectedOperationId != null &&
+      flow.expectedOperationId !== operationId;
+    const deviation = areaDeviation || operationDeviation;
     if (deviation && !request.confirm_route_deviation) {
       return json(
         {
           detail: 'Confirm the route deviation with a reason.',
           confirmation_required: true,
           route_deviation: {
-            kind: 'AREA',
+            kind: areaDeviation ? 'AREA' : 'OPERATION',
             expected_next_area_id: flow.expectedNextAreaId ?? null,
             expected_operation_id: null,
             actual_area_id: station.area_id,
@@ -382,7 +406,7 @@ function handle(url: string, method: string, body: unknown): Response {
       assigned_route_step_id: null,
       route_deviation: deviation
         ? {
-            kind: 'AREA',
+            kind: areaDeviation ? 'AREA' : 'OPERATION',
             reason: request.route_deviation_reason,
             confirmed: true,
           }
@@ -391,6 +415,11 @@ function handle(url: string, method: string, body: unknown): Response {
       occurred_at: '2026-08-25T12:00:00Z',
     };
     committed.set(request.device_event_id, { status: 201, body: result });
+    if (transferFailure === 'lost-response') {
+      // Committed on the server; the client never sees this answer.
+      transferFailure = null;
+      throw new TypeError('Failed to fetch');
+    }
     return json(result, 201);
   }
   return json({ detail: `Unhandled ${method} ${url}` }, 500);
@@ -449,6 +478,9 @@ beforeEach(() => {
   healthDown = false;
   inventoryReads = 0;
   resolveFailure = false;
+  machinesFailure = false;
+  inventoryHold = null;
+  stationAreaId = 2;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -456,11 +488,11 @@ beforeEach(() => {
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       if (!url.endsWith('/api/health')) requests.push({ url, method, body });
-      try {
-        return Promise.resolve(handle(url, method, body));
-      } catch (error) {
-        return Promise.reject(error);
-      }
+      const hold =
+        inventoryHold && /\/inventory$/.test(url)
+          ? inventoryHold
+          : Promise.resolve();
+      return hold.then(() => handle(url, method, body));
     }),
   );
 });
@@ -520,10 +552,13 @@ test('the Station Selector lists the active Scan Stations from the server', asyn
   expect(lathe).toHaveTextContent('Lathe');
   expect(lathe).toHaveTextContent('Turning');
   expect(lathe).not.toHaveTextContent('Threading'); // inactive Operation
-  expect(lathe).toHaveTextContent('1 Machine · Queue and assignment enabled');
+  expect(lathe).toHaveTextContent(
+    '1 Machine · Quantity waits in the Area queue',
+  );
+  expect(lathe).not.toHaveTextContent('assignment');
   expect(
     screen.getByRole('button', { name: 'Open CUT-ST-01' }),
-  ).toHaveTextContent('Direct Area processing');
+  ).toHaveTextContent('No Machines · Direct Area processing');
   expect(window.location.pathname).toBe('/scan-station');
 
   fireEvent.click(
@@ -543,7 +578,7 @@ test('a station renders its server context and the Area inventory', async () => 
   expect(header).toHaveTextContent('Turning');
   const stats = screen.getByLabelText('Area statistics');
   expect(
-    within(stats).getByText('Total PNs').previousSibling,
+    (await within(stats).findByText('Total PNs')).previousSibling,
   ).toHaveTextContent('1');
   expect(
     within(stats).getByText('Total pcs').previousSibling,
@@ -789,8 +824,56 @@ test('partial quantity is refused clearly and never submitted', async () => {
 
 /* ============ Write failures, retries, idempotency ============ */
 
-test('a failed write reports no success and Retry reuses the same device_event_id', async () => {
+test('a lost response is an UNKNOWN outcome: frozen intent, exact retry with the same device_event_id', async () => {
   const input = await renderStation();
+  // The server commits the transfer; the response never arrives.
+  transferFailure = 'lost-response';
+
+  scan('PF:PN:PLN-1'); // a Planned Route deviation — the reason is part of the intent
+  await screen.findByRole('dialog', { name: 'Receive from another Area' });
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  fireEvent.change(within(dialog()).getByLabelText('Route deviation reason'), {
+    target: { value: 'Cut backlog' },
+  });
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+
+  await waitFor(() =>
+    expect(dialog()).toHaveTextContent('may or may not have been recorded'),
+  );
+  // Never "nothing changed": the outcome is unknown.
+  expect(dialog()).not.toHaveTextContent('Nothing was changed');
+  expect(dialog()).not.toHaveTextContent('nothing was recorded');
+  noNotice();
+  expect(document.querySelector('.ss-lastpn .p')).toHaveTextContent('—');
+  // The intent is frozen: no Back, the reason cannot change, and the
+  // only primary action is the exact same transfer.
+  expect(within(dialog()).queryByRole('button', { name: '‹ Back' })).toBeNull();
+  expect(
+    within(dialog()).getByLabelText('Route deviation reason'),
+  ).toBeDisabled();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Leave — check the Area' }),
+  ).toBeInTheDocument();
+  const first = transferRequests()[0].body;
+
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Retry the same transfer' }),
+  );
+  expect(await notice()).toHaveTextContent(
+    'already recorded by the server (TRANSFERRED #500)',
+  );
+  expect(transferRequests()).toHaveLength(2);
+  // Byte-for-byte the same request — same key, same reason, same intent.
+  expect(transferRequests()[1].body).toEqual(first);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(flows.find((f) => f.id === 104)?.areaId).toBe(2);
+  await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test('leaving an unknown-outcome transfer re-reads the Area instead of claiming a result', async () => {
+  await renderStation();
   transferFailure = 'network';
 
   scan('PF:PN:2027-60-8114-00');
@@ -799,46 +882,19 @@ test('a failed write reports no success and Retry reuses the same device_event_i
   fireEvent.click(
     within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
   );
-
   await waitFor(() =>
-    expect(dialog()).toHaveTextContent(
-      'The PartFlow server could not be reached. Nothing was changed.',
-    ),
+    expect(dialog()).toHaveTextContent('may or may not have been recorded'),
   );
-  noNotice();
-  expect(document.querySelector('.ss-lastpn .p')).toHaveTextContent('—');
-  const first = transferRequests()[0].body.device_event_id;
-
-  // The server had in fact committed the first attempt (the response
-  // was lost): the retry carries the SAME key and gets the replay.
-  transferFailure = null;
-  committed.set(first, {
-    status: 200,
-    body: {
-      movement_id: 777,
-      quantity_flow_id: 100,
-      part_number: '2027-60-8114-00',
-      quantity: 12,
-      from_area_id: 1,
-      to_area_id: 2,
-      operation_id: 20,
-      station_id: 'LATHE-ST-01',
-      assigned_route_step_id: null,
-      route_deviation: null,
-      device_event_id: first,
-      occurred_at: '2026-08-25T12:00:00Z',
-    },
-  });
+  const readsBefore = inventoryReads;
   fireEvent.click(
-    within(dialog()).getByRole('button', { name: 'Retry transfer' }),
+    within(dialog()).getByRole('button', { name: 'Leave — check the Area' }),
   );
-  expect(await notice()).toHaveTextContent(
-    'already recorded by the server (TRANSFERRED #777)',
-  );
-  expect(transferRequests()).toHaveLength(2);
-  expect(transferRequests()[1].body.device_event_id).toBe(first);
   expect(screen.queryByRole('dialog')).toBeNull();
-  await waitFor(() => expect(document.activeElement).toBe(input));
+  const toast = await notice();
+  expect(toast).toHaveTextContent('Transfer outcome unknown');
+  expect(toast).not.toHaveTextContent('No changes were recorded');
+  await waitFor(() => expect(inventoryReads).toBeGreaterThan(readsBefore));
+  expect(document.querySelector('.ss-lastpn .p')).toHaveTextContent('—');
 });
 
 test('a server rejection keeps the dialog open with the reason and records nothing', async () => {
@@ -1034,4 +1090,189 @@ test('the keyboard wedge reaches the input while nothing is focused, and Escape 
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(transferRequests()).toHaveLength(0);
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test('several Operations always take an explicit choice — the planned one is guidance, another is an OPERATION deviation', async () => {
+  flows.push({
+    id: 106,
+    pn: 'PLN-CUT',
+    qty: 6,
+    areaId: 1,
+    routeMode: 'PLANNED',
+    routeStatus: 'ON_ROUTE',
+    expectedNextAreaId: 3,
+    expectedOperationId: 30, // Cutting is planned at Cut
+    wo: { id: 5, number: '007030', demandId: 15, type: 'NEW' },
+  });
+  await renderStation('CUT-ST-01');
+
+  scan('PF:PN:PLN-CUT');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  // Nothing is pre-selected, even though the route plans Cutting.
+  expect(within(box).getByRole('button', { name: 'Next' })).toBeDisabled();
+  const cutting = within(box).getByRole('button', { name: /Cutting/ });
+  const sawing = within(box).getByRole('button', { name: /Sawing/ });
+  expect(cutting).toHaveAttribute('aria-pressed', 'false');
+  expect(cutting).toHaveTextContent('planned for this step');
+  expect(sawing).not.toHaveTextContent('planned for this step');
+  expect(box).toHaveTextContent('another choice is a route deviation');
+
+  fireEvent.click(sawing);
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  const summary = dialog();
+  expect(summary).toHaveTextContent('Route deviation');
+  expect(summary).toHaveTextContent(
+    'expects Operation Cutting at Cut, not Sawing',
+  );
+  expect(
+    within(summary).getByRole('button', { name: 'Confirm transfer' }),
+  ).toBeDisabled();
+  fireEvent.change(within(summary).getByLabelText('Route deviation reason'), {
+    target: { value: 'Saw is free' },
+  });
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await notice();
+  expect(transferRequests()[0].body).toMatchObject({
+    quantity_flow_id: 106,
+    target_area_id: 3,
+    operation_id: 31,
+    confirm_route_deviation: true,
+    route_deviation_reason: 'Saw is free',
+  });
+});
+
+test('a station rebound after page load is never used stale — the station reloads and asks for the scan again', async () => {
+  await renderStation();
+  expect(screen.getByRole('banner')).toHaveTextContent('Lathe');
+  // Administration rebinds the station to Cut after this page loaded.
+  stationAreaId = 3;
+
+  scan('PF:PN:2027-60-8114-00');
+  const toast = await notice();
+  expect(toast).toHaveTextContent('Scan Station configuration changed');
+  expect(toast).toHaveTextContent('now bound to Cut');
+  expect(toast).toHaveTextContent('scan the Part Number again');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(transferRequests()).toHaveLength(0);
+  // The station context and inventory reloaded from the server.
+  await waitFor(() =>
+    expect(screen.getByRole('banner')).toHaveTextContent('Cut'),
+  );
+  expect(screen.getByRole('banner')).toHaveTextContent('Cutting');
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByLabelText('Scan barcode')),
+  );
+
+  // The next scan confirms against the CURRENT destination.
+  scan('PF:PN:2027-60-8114-00');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  expect(box).toHaveTextContent('Cut — direct processing');
+  fireEvent.click(within(box).getByRole('button', { name: /Cutting/ }));
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await notice();
+  expect(transferRequests()[0].body.target_area_id).toBe(3);
+});
+
+test('a scan is captured even while a non-dialog button holds focus, and resolves exactly once', async () => {
+  const input = await renderStation();
+  const theme = screen.getByRole('button', { name: /Dark|Light/ });
+  theme.focus();
+  expect(document.activeElement).toBe(theme);
+
+  // Enter on the focused button with NO scan buffered stays native
+  // button activation (the event is not consumed).
+  expect(fireEvent.keyDown(theme, { key: 'Enter' })).toBe(true);
+  expect(input).toHaveValue('');
+
+  // The first scanner character arrives while the button holds focus:
+  // it is captured into the main input, which takes focus so the rest
+  // of the barcode types natively.
+  fireEvent.keyDown(theme, { key: 'P' });
+  expect(input).toHaveValue('P');
+  expect(document.activeElement).toBe(input);
+  fireEvent.change(input, { target: { value: 'PF:PN:2027-60-8114-00' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await screen.findByRole('dialog', { name: 'Receive from another Area' });
+  expect(requests.filter((r) => r.url.endsWith('/scans/resolve'))).toHaveLength(
+    1,
+  );
+});
+
+test('a whole scan delivered to a focused button — terminating Enter included — submits once', async () => {
+  const input = await renderStation();
+  const theme = screen.getByRole('button', { name: /Dark|Light/ });
+  theme.focus();
+  for (const key of 'PF:PN:2027-60-8114-00') {
+    fireEvent.keyDown(theme, { key });
+  }
+  expect(input).toHaveValue('PF:PN:2027-60-8114-00');
+  // The terminating Enter of a buffered scan is consumed as the
+  // submission, not as button activation.
+  expect(fireEvent.keyDown(theme, { key: 'Enter' })).toBe(false);
+  await screen.findByRole('dialog', { name: 'Receive from another Area' });
+  expect(requests.filter((r) => r.url.endsWith('/scans/resolve'))).toHaveLength(
+    1,
+  );
+});
+
+test('a terminal-Area station refuses every Receive action even with quantity here and elsewhere', async () => {
+  flows.push({
+    id: 107,
+    pn: '2027-60-8114-00',
+    qty: 20,
+    areaId: 4, // already in the Stockroom
+    routeMode: 'FLOATING',
+    wo: { id: 1, number: '007003', demandId: 11, type: 'NEW' },
+  });
+  await renderStation('STOCK-ST-01');
+
+  scan('PF:PN:2027-60-8114-00'); // also 12 pcs in Material
+  const box = await screen.findByRole('dialog', {
+    name: 'No quantity to receive',
+  });
+  expect(box).toHaveTextContent('terminal Area');
+  expect(screen.queryByRole('dialog', { name: 'Select an action' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /Receive more/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Next' })).toBeNull();
+  expect(transferRequests()).toHaveLength(0);
+});
+
+test('no false empty Area renders before the first inventory response, and a Machines failure shows an error with Retry', async () => {
+  let releaseInventory!: () => void;
+  inventoryHold = new Promise<void>((resolve) => {
+    releaseInventory = resolve;
+  });
+  await renderStation();
+
+  // Context is up, inventory still pending: loading — no zero totals,
+  // no empty "No production" row.
+  expect(screen.getByLabelText('Loading Area inventory')).toBeInTheDocument();
+  expect(screen.queryByText('Total PNs')).toBeNull();
+  expect(screen.queryByText(/No production in/)).toBeNull();
+
+  releaseInventory();
+  inventoryHold = null;
+  expect(await screen.findByText('Total PNs')).toBeInTheDocument();
+  expect(screen.getByText('0455-20-0118-03')).toBeInTheDocument();
+});
+
+test('a Machines load failure is an error with Retry — never an empty Area', async () => {
+  machinesFailure = true;
+  await renderStation();
+
+  const error = await screen.findByRole('alert');
+  expect(error).toHaveTextContent("The Area's Machines could not be loaded.");
+  expect(screen.queryByText(/No production in/)).toBeNull();
+  machinesFailure = false;
+  fireEvent.click(within(error).getByRole('button', { name: /Retry/ }));
+  expect(await screen.findByText('Lathe 1')).toBeInTheDocument();
 });
