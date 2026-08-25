@@ -91,6 +91,8 @@ interface FakeState {
   /** Hold every PN lookup until the test releases it — lets a test
    * observe the UI while a lookup is genuinely in flight. */
   holdPartNumbers: Promise<void> | null;
+  /** Same seam for the active Work Order list read. */
+  holdWorkOrderList: Promise<void> | null;
   calls: string[];
 }
 
@@ -187,6 +189,7 @@ function seedState(): FakeState {
     dropNextReleaseResponse: false,
     failNextList: false,
     holdPartNumbers: null,
+    holdWorkOrderList: null,
     calls: [],
   };
 }
@@ -508,6 +511,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
           .map(summaryWire),
       );
     }
+    if (state.holdWorkOrderList) await state.holdWorkOrderList;
     return json(listPage(params.get('search')));
   }
   if (url === '/api/work-orders' && method === 'GET') {
@@ -515,6 +519,7 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       state.failNextList = false;
       return detailResponse('The database is unavailable.', 500);
     }
+    if (state.holdWorkOrderList) await state.holdWorkOrderList;
     return json(listPage(null));
   }
   if (url === '/api/work-orders' && method === 'POST') {
@@ -1112,6 +1117,98 @@ test('the active list is bounded by the server and says so', async () => {
   expect(
     screen.queryByText(/Showing the first 100 Work Orders/),
   ).not.toBeInTheDocument();
+});
+
+test('a search in flight never presents the previous page as its answer', async () => {
+  // A full previous page and a search still on the wire: the bound
+  // belongs to the OLD query, so it must not be shown as this search's
+  // state, and the rows on screen must not be read as its answer.
+  for (let index = 0; index < 120; index += 1) {
+    state.workOrders.push({
+      id: 6000 + index,
+      work_order_number: `PEND-${String(index).padStart(4, '0')}`,
+      received_date: '2026-08-03',
+      due_date: null,
+      status: 'OPEN',
+      demands: [demand(9500 + index, 6000 + index, 'Z-900', 1)],
+    });
+  }
+  await renderWorkOrders();
+  await waitFor(() =>
+    expect(
+      screen.getByText(/Showing the first 100 Work Orders/),
+    ).toBeInTheDocument(),
+  );
+
+  let release = () => {};
+  state.holdWorkOrderList = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
+    target: { value: 'PEND-0119' },
+  });
+  // The debounce fires and the request is genuinely in flight.
+  await waitFor(() =>
+    expect(state.calls).toContain('GET /api/work-orders?search=PEND-0119'),
+  );
+
+  // Unanswered: the view says so, keeps the previous rows visible so the
+  // list does not flicker, and concludes NOTHING about the new search.
+  expect(screen.getByText('Searching Work Orders…')).toBeInTheDocument();
+  expect(screen.getByText('007201')).toBeInTheDocument();
+  expect(
+    screen.queryByText(/Showing the first 100 Work Orders/),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/No active Work Order matches/),
+  ).not.toBeInTheDocument();
+
+  release();
+  await waitFor(() =>
+    expect(screen.getByText('PEND-0119')).toBeInTheDocument(),
+  );
+  expect(screen.queryByText('Searching Work Orders…')).not.toBeInTheDocument();
+  expect(screen.queryByText('007201')).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Showing the first 100 Work Orders/),
+  ).not.toBeInTheDocument();
+});
+
+test("a stale empty page is never presented as the next search's answer", async () => {
+  await renderWorkOrders();
+
+  // First search: a real miss, answered.
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
+    target: { value: 'ZZZZ' },
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByText(/No active Work Order matches/),
+    ).toBeInTheDocument(),
+  );
+
+  let release = () => {};
+  state.holdWorkOrderList = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  // Second search, still in flight: the previous page was empty, but
+  // "nothing matches" is a claim about THIS entry and has no answer yet.
+  fireEvent.change(screen.getByLabelText('Search WO Number'), {
+    target: { value: '007201' },
+  });
+  await waitFor(() =>
+    expect(state.calls).toContain('GET /api/work-orders?search=007201'),
+  );
+  expect(screen.getByText('Searching Work Orders…')).toBeInTheDocument();
+  expect(
+    screen.queryByText(/No active Work Order matches/),
+  ).not.toBeInTheDocument();
+
+  release();
+  await waitFor(() => expect(screen.getByText('007201')).toBeInTheDocument());
+  expect(screen.queryByText('Searching Work Orders…')).not.toBeInTheDocument();
 });
 
 test('an internal Work Order without an external number renders as —', async () => {

@@ -29,9 +29,12 @@ development database configured in DATABASE_URL is never touched beyond
 CREATE/DROP of the dedicated test databases.
 
 Phase 4 is the current head, so this module carries the head-level
-coverage (models↔migration parity, exact table set). When a later phase
-adds its migration, pin this module to `0004_phase4_audit` and move the
-head-level coverage into that phase's schema test — the same handoff
+coverage (models↔migration parity, exact table set). Phase 4 owns TWO
+revisions — `0004_phase4_audit` (the `audit_events` table) and
+`0005_phase4_release_index` (the release-context index) — so the phase
+boundary is the later one. When a later phase adds its migration, pin
+this module to `0005_phase4_release_index` and move the head-level
+coverage into that phase's schema test — the same handoff
 test_phase3_schema.py and test_phase35_schema.py already made.
 """
 
@@ -55,6 +58,9 @@ from app.infrastructure import models
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 _PHASE35_REVISION = "0003_phase35_environment"
+# The FIRST of Phase 4's two revisions — the target of the "0005 removes
+# only its index" downgrade test, deliberately not the phase boundary
+# (that is `0005_phase4_release_index`, the current head).
 _PHASE4_AUDIT_REVISION = "0004_phase4_audit"
 
 _PHASE3_TABLES = {
@@ -344,10 +350,11 @@ class TestMigrationSchema:
         assert doubled == set()
 
     def test_downgrade_restores_the_phase35_boundary(self, admin_engine: Engine) -> None:
-        # Downgrading only the Phase 4 revision must leave exactly the
-        # Phase 3.5 schema behind — audit_events, its trigger, and its
-        # function removed, nothing of Phase 3/3.5 touched — and a
-        # re-upgrade must succeed from there.
+        # Downgrading BOTH Phase 4 revisions (0005 then 0004) must leave
+        # exactly the Phase 3.5 schema behind — the release-context
+        # index, audit_events, its trigger and its function removed,
+        # nothing of Phase 3/3.5 touched — and a re-upgrade must succeed
+        # from there.
         name = "partflow_test_phase4_downgrade"
         _create_temp_database(admin_engine, name)
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)

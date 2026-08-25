@@ -132,23 +132,39 @@ function ActiveWorkOrdersView() {
     );
     return () => clearTimeout(timer);
   }, [search]);
+  // The page carries the entry it answers for. `useApiData` keeps the
+  // PREVIOUS ready value while the next request is in flight, so "there
+  // is a ready result" alone says nothing about the entry on screen —
+  // the answered query has to be compared to it (the same rule the Add
+  // Part lookup follows).
   const loadWorkOrders = useCallback(
-    () => listWorkOrders(settledSearch),
+    async (): Promise<{ query: string; rows: WorkOrderSummary[] }> => ({
+      query: settledSearch,
+      rows: await listWorkOrders(settledSearch),
+    }),
     [settledSearch],
   );
   const workOrdersData = useApiData(loadWorkOrders);
 
-  // A search reload keeps the current page on screen (and the search
-  // field focused) instead of replacing the whole view with the
-  // loading state.
-  const readyRows =
+  const answered =
     workOrdersData.state.status === 'ready' ? workOrdersData.state.data : null;
+  // The page for exactly what is in the field, or null across BOTH
+  // unanswered windows: the debounce has not asked yet (`search` has
+  // moved past `settledSearch`), or the request for it has not come
+  // back. Nothing derived from the current search — "no match", the
+  // bound — may be concluded from anything but this.
+  const currentRows =
+    answered !== null && answered.query === search ? answered.rows : null;
+  // The last page that did answer stays on screen while the next one
+  // loads, so the list does not flicker and the search field keeps
+  // focus. It is presentation only — never treated as this search's
+  // answer.
   const [retainedRows, setRetainedRows] = useState<WorkOrderSummary[] | null>(
     null,
   );
   useEffect(() => {
-    if (readyRows) setRetainedRows(readyRows);
-  }, [readyRows]);
+    if (answered) setRetainedRows(answered.rows);
+  }, [answered]);
   const [newWorkOrderOpen, setNewWorkOrderOpen] = useState(false);
   const [newWorkOrderDirty, setNewWorkOrderDirty] = useState(false);
   const [detailDirty, setDetailDirty] = useState(false);
@@ -209,7 +225,7 @@ function ActiveWorkOrdersView() {
       </section>
     );
   }
-  const loadedRows = readyRows ?? retainedRows;
+  const loadedRows = currentRows ?? retainedRows;
   if (preview === 'loading' || loadedRows === null) {
     return (
       <section className="wo-view" aria-label="Work Orders">
@@ -224,10 +240,17 @@ function ActiveWorkOrdersView() {
       : preview === 'long'
         ? [...loadedRows, ...LONG_PREVIEW_WORK_ORDERS]
         : loadedRows;
+  // A search is unanswered until its OWN page comes back; the rows on
+  // screen may still be the previous one.
+  const searching = currentRows === null;
   // The server bounds the page; a full page means "refine", not "these
-  // are all of them".
-  const bounded = listData.length >= WORK_ORDER_LIST_LIMIT;
-  const searching = readyRows === null || settledSearch !== search;
+  // are all of them". Measured on the answer for the CURRENT search
+  // only — a previous full page says nothing about this one, and the
+  // development-only `?state=` fixtures are not a server answer at all.
+  const bounded =
+    preview === null &&
+    currentRows !== null &&
+    currentRows.length >= WORK_ORDER_LIST_LIMIT;
 
   const openWorkOrder = (id: number) => {
     setDetailDirty(false);
@@ -310,7 +333,9 @@ function WorkOrderListPanel({
   /** The server's page — already filtered and already bounded. */
   list: WorkOrderSummary[];
   search: string;
-  /** A server read for the current entry is still in flight. */
+  /** No page for the current entry has come back yet — the rows below
+   * may still be the previous search's. Nothing about the current
+   * search may be concluded from them. */
   searching: boolean;
   /** The page came back full: there may be more behind the bound. */
   bounded: boolean;
@@ -332,10 +357,13 @@ function WorkOrderListPanel({
       policy: DEFAULT_DUE_SOON_POLICY,
     }).dueClass;
   };
-  // The rows ARE the server's answer for the current search — no
-  // second, local filter with its own accidental semantics.
+  // The rows come from the server — no second, local filter with its
+  // own accidental semantics. While `searching`, they are the PREVIOUS
+  // page kept on screen to avoid a flicker, so "there is nothing here"
+  // is only ever said once the current search has answered.
   const rows = list;
   const hasSearch = search.trim() !== '';
+  const noRows = !searching && rows.length === 0;
   return (
     <div>
       <div className="wo-head">
@@ -371,7 +399,7 @@ function WorkOrderListPanel({
           ＋ New Work Order
         </button>
       </div>
-      {searching && hasSearch ? (
+      {searching ? (
         <div className="wo-bound" role="status">
           Searching Work Orders…
         </div>
@@ -381,7 +409,7 @@ function WorkOrderListPanel({
           search to narrow it.
         </div>
       ) : null}
-      {rows.length === 0 && !hasSearch ? (
+      {noRows && !hasSearch ? (
         <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
       ) : (
         <table className="wolist">
@@ -395,7 +423,13 @@ function WorkOrderListPanel({
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {/* The "nothing matches" row is a claim about the CURRENT
+                search, so it waits for that search's own page: while
+                one is in flight the previous rows stay on screen and
+                this stays out. (Reaching it implies a search — an
+                answered empty page with no search renders the empty
+                state instead of the table.) */}
+            {noRows ? (
               <tr>
                 <td colSpan={5} className="empty">
                   No active Work Order matches “{search.trim()}” — search{' '}
@@ -405,57 +439,56 @@ function WorkOrderListPanel({
                   , check the number, or create it with ＋ New Work Order
                 </td>
               </tr>
-            ) : (
-              rows.map((w) => (
-                // The COMPLETE row opens the Work Order Details dialog
-                // (v15): the WO-cell button stays the keyboard
-                // (Enter/Space) and screen-reader entry point — its
-                // activation bubbles to this row handler; no other
-                // interactive control lives inside the row.
-                <tr key={w.id} className="selrow" onClick={() => onOpen(w.id)}>
-                  <td>
-                    <button
-                      className="rowbtn"
-                      aria-label={`Open Work Order ${woDisplay(w.workOrderNumber)}`}
-                    >
-                      <span className="wo" title={woDisplay(w.workOrderNumber)}>
-                        {woDisplay(w.workOrderNumber)}
+            ) : null}
+            {rows.map((w) => (
+              // The COMPLETE row opens the Work Order Details dialog
+              // (v15): the WO-cell button stays the keyboard
+              // (Enter/Space) and screen-reader entry point — its
+              // activation bubbles to this row handler; no other
+              // interactive control lives inside the row.
+              <tr key={w.id} className="selrow" onClick={() => onOpen(w.id)}>
+                <td>
+                  <button
+                    className="rowbtn"
+                    aria-label={`Open Work Order ${woDisplay(w.workOrderNumber)}`}
+                  >
+                    <span className="wo" title={woDisplay(w.workOrderNumber)}>
+                      {woDisplay(w.workOrderNumber)}
+                    </span>
+                    {w.workOrderNumber === null ? (
+                      <span className="sub" style={{ display: 'block' }}>
+                        internal Work Order — no external number yet
                       </span>
-                      {w.workOrderNumber === null ? (
-                        <span className="sub" style={{ display: 'block' }}>
-                          internal Work Order — no external number yet
-                        </span>
-                      ) : null}
-                    </button>
-                  </td>
-                  {/* data-label: inline column captions in the
+                    ) : null}
+                  </button>
+                </td>
+                {/* data-label: inline column captions in the
                       collapsed stacked layout (GUI_DESIGN §2.5) —
                       bare dates and a line count are not self-evident
                       without the header row. */}
-                  <td className="mono-sm" data-label="Received">
-                    {formatIsoDate(w.receivedDate)}
-                  </td>
-                  <td className="mono-sm" data-label="Due date">
-                    <span className={`duetxt ${dueTone(w)}`}>
-                      {formatIsoDate(w.dueDate)}
-                    </span>
-                  </td>
-                  <td data-label="Demand lines">
-                    {w.demandLineCount}
-                    <div className="sub mono-sm">
-                      {partNumbersPreview(w.partNumbers)}
-                    </div>
-                  </td>
-                  <td>
-                    <span
-                      className={`wostat ${workOrderStatusLabel(w.status).toLowerCase()}`}
-                    >
-                      {workOrderStatusLabel(w.status)}
-                    </span>
-                  </td>
-                </tr>
-              ))
-            )}
+                <td className="mono-sm" data-label="Received">
+                  {formatIsoDate(w.receivedDate)}
+                </td>
+                <td className="mono-sm" data-label="Due date">
+                  <span className={`duetxt ${dueTone(w)}`}>
+                    {formatIsoDate(w.dueDate)}
+                  </span>
+                </td>
+                <td data-label="Demand lines">
+                  {w.demandLineCount}
+                  <div className="sub mono-sm">
+                    {partNumbersPreview(w.partNumbers)}
+                  </div>
+                </td>
+                <td>
+                  <span
+                    className={`wostat ${workOrderStatusLabel(w.status).toLowerCase()}`}
+                  >
+                    {workOrderStatusLabel(w.status)}
+                  </span>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
