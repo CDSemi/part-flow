@@ -9,7 +9,10 @@ the **Phase 2 Frontend Design System and Application Shell**, the
 **Phase 3.5 Minimum Environment Setup** (persistence, the configuration
 APIs, and the real Administration/Machines frontend), and the completed
 **Phase 4 Manual Work Order Intake and Production Release** — the first
-business vertical slice, end to end:
+business vertical slice, end to end — and the **Phase 5 Scan Station
+Transfer to an Area Queue backend** (persistence, the transfer command
+and the Scan Station read models; the real Scan Station frontend wiring
+is still to come):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -36,11 +39,19 @@ business vertical slice, end to end:
   `GET /api/route-templates` a `PLANNED` release selects from; and
   `POST /api/work-orders/{id}/demands/{id}/release`, the one command
   that introduces production quantity — transactional and idempotent
-  per `device_event_id`), all with Application-layer services in
+  per `device_event_id`), and the Phase 5 Scan Station transfer API
+  (`GET /api/scan-stations/{id}/context`,
+  `POST /api/scan-stations/{id}/scans/resolve` — PN barcode/manual
+  entry resolved into in-Area quantity and explicit transfer
+  candidates, `POST /api/scan-stations/{id}/transfers` — the one
+  command that moves a whole Quantity Flow, appending the immutable
+  `TRANSFERRED` Movement and updating the current-position projection
+  in one idempotent transaction, and `GET /api/areas/{id}/inventory`),
+  all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
-  SQLAlchemy mappings of the canonical Phase 3, Phase 3.5 and Phase 4
-  schema (`app/infrastructure/models.py`)
+  SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4 and
+  Phase 5 schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
@@ -52,15 +63,25 @@ business vertical slice, end to end:
   Machine Asset Tag format configuration) and the Phase 4 additions
   (the append-only generic `audit_events` table with its own
   raise-on-write trigger, and the partial expression index that serves
-  the released-quantity derivation over `part_movements`)
+  the released-quantity derivation over `part_movements`) and the
+  Phase 5 Movement widening (`TRANSFERRED` admitted by the movement-type
+  check, `part_movements.station_id` recording the Scan Station of a
+  scan-driven Movement, and the per-type Movement shape check)
 - Docker Compose development stack with health checks
 
-**One production workflow exists**: Management → Work Orders (Phase 4)
+**Two production commands exist**: Management → Work Orders (Phase 4)
 saves business demand and, as a separate explicit action, releases
 production quantity — creating a Quantity Flow and appending an
 immutable `RECEIVED` Part Movement in one transaction. Saving demand
 never creates production quantity, and a demand may be released in
-parts until its remaining quantity is exhausted. The Phase 3.5
+parts until its remaining quantity is exhausted. The Phase 5 backend
+transfer moves one whole Quantity Flow into the Area an active Scan
+Station is bound to — appending the immutable `TRANSFERRED` Movement
+and updating the current position in one idempotent transaction, with
+explicit source selection, destination Operation resolution and
+Planned-Route deviation confirmation (partial quantity is refused
+until SPLIT, Phase 8); it is reachable through the API only until the
+Scan Station view is wired to it. The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
@@ -231,8 +252,10 @@ Apply migrations (the Phase 3 canonical domain schema, the Phase 3.5
 environment setup, and the Phase 4 slice — `0004_phase4_audit` adding
 the append-only `audit_events` table and `0005_phase4_release_index`
 adding the partial expression index that serves the released-quantity
-derivation — on top of the no-op repository-foundation baseline; the
-current head is `0005_phase4_release_index`):
+derivation — and the Phase 5 revision `0006_phase5_transfer` widening
+`part_movements` (`TRANSFERRED`, `station_id`, per-type shape check) on
+top of the no-op repository-foundation baseline; the current head is
+`0006_phase5_transfer`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -342,20 +365,22 @@ integration):
   canonical Part Number normalization rules (no database needed).
 - `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
   `tests/test_phase35_schema.py`, `tests/test_phase4_schema.py`,
-  `tests/test_environment_api.py`, `tests/test_machines_api.py`,
-  `tests/test_work_orders_api.py`, `tests/test_part_numbers_api.py`,
-  `tests/test_route_templates_api.py`, and
-  `tests/test_production_release_api.py` — **integration** tests that
+  `tests/test_phase5_schema.py`, `tests/test_environment_api.py`,
+  `tests/test_machines_api.py`, `tests/test_work_orders_api.py`,
+  `tests/test_part_numbers_api.py`, `tests/test_route_templates_api.py`,
+  `tests/test_production_release_api.py`, and
+  `tests/test_scan_station_transfer_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
   mocking; the schema tests run the real Alembic migrations
   (upgrade → downgrade → upgrade; each phase module stops at its own
   boundary revision — `0002_phase3_domain` for Phase 3,
-  `0003_phase35_environment` for Phase 3.5 — while the Phase 4 module
-  carries the head-level coverage: `audit_events` shape and
-  append-only trigger, the release-context expression index, and
-  models↔migration parity); and the API tests exercise the endpoints
+  `0003_phase35_environment` for Phase 3.5, `0005_phase4_release_index`
+  for Phase 4 — while the Phase 5 module carries the head-level
+  coverage: the widened movement-type and per-type shape checks,
+  `station_id`, the downgrade that refuses to drop `TRANSFERRED`
+  history, and models↔migration parity); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save
@@ -365,7 +390,15 @@ integration):
   release command, partial and repeated release with its hard
   remaining cap, terminal-Area rejection, the restricted edit of a
   released line, demand removal, Movement immutability, projection
-  replay and conservation) — all against dedicated temporary
+  replay and conservation) and the Phase 5 transfer (station context
+  and Area inventory, PN barcode/manual resolution, source candidates
+  by position and route with several sources returned unpicked and
+  uncombined, the exact `TRANSFERRED` shape with the matched snapshot
+  step, route-deviation refusal until confirmed, destination
+  Operation resolution, partial-quantity and invalid-input rejection
+  with zero writes, idempotent replay and conflict, concurrent
+  transfers of one flow and transfer versus Area deactivation) — all
+  against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`
   is).
@@ -460,13 +493,13 @@ frontend/          Vite + React + TypeScript app (shell + real Phase 3.5/Phase 4
   src/views/       one folder per approved GUI view
   src/components/  shared presentation components
 backend/
-  app/api/         HTTP routes (health, environment configuration, Machines management, Work Order intake, Part Numbers, route templates, and production release)
-  app/application/ application services (environment, Machines, Work Order intake, Part Numbers, and the production release command — every rule and transaction)
+  app/api/         HTTP routes (health, environment configuration, Machines management, Work Order intake, Part Numbers, route templates, production release, and the Scan Station transfer surface)
+  app/application/ application services (environment, Machines, Work Order intake, Part Numbers, the production release command, the Scan Station read models and the transfer command — every rule and transaction)
   app/core/        configuration (pydantic-settings)
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

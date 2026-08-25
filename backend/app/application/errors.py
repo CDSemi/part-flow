@@ -58,3 +58,18 @@ class ActiveQuantityConfirmationRequiredError(ConflictError):
     def __init__(self, message: str, existing_active_quantity: list[dict[str, Any]]) -> None:
         super().__init__(message)
         self.existing_active_quantity = existing_active_quantity
+
+
+class RouteDeviationConfirmationRequiredError(ConflictError):
+    """A PLANNED transfer leaves its route and needs explicit confirmation.
+
+    PROJECT_PROFILE §17 Route Deviation: the operator is warned and must
+    confirm before the actual Movement is recorded. The response carries
+    the deviation the confirmation dialog presents (the expected next
+    step versus the station's Area); nothing is written until the
+    request is resubmitted with the explicit confirmation flag.
+    """
+
+    def __init__(self, message: str, route_deviation: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.route_deviation = route_deviation

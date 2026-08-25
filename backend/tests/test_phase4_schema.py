@@ -18,23 +18,21 @@ verifies the Phase 4 invariants PostgreSQL must enforce:
 - the `0005_phase4_release_index` partial expression index that
   serves the released-quantity derivation, stored with the exact
   JSONB subscript expression the application emits;
-- models↔migration metadata parity at head;
 - clean downgrade back to the Phase 3.5 boundary
   (`0003_phase35_environment`) with a successful re-upgrade.
 
-The module fixture migrates head → base → head, so a downgrade that
-leaves any object behind fails the module before any test runs. Every
-test runs in its own rolled-back transaction against isolated data; the
-development database configured in DATABASE_URL is never touched beyond
-CREATE/DROP of the dedicated test databases.
+The module fixture migrates to the Phase 4 boundary → base → boundary,
+so a downgrade that leaves any object behind fails the module before
+any test runs. Every test runs in its own rolled-back transaction
+against isolated data; the development database configured in
+DATABASE_URL is never touched beyond CREATE/DROP of the dedicated test
+databases.
 
-Phase 4 is the current head, so this module carries the head-level
-coverage (models↔migration parity, exact table set). Phase 4 owns TWO
-revisions — `0004_phase4_audit` (the `audit_events` table) and
-`0005_phase4_release_index` (the release-context index) — so the phase
-boundary is the later one. When a later phase adds its migration, pin
-this module to `0005_phase4_release_index` and move the head-level
-coverage into that phase's schema test — the same handoff
+Phase 4 owns TWO revisions — `0004_phase4_audit` (the `audit_events`
+table) and `0005_phase4_release_index` (the release-context index) — so
+the phase boundary is the later one. This module is pinned to that
+boundary; the head-level coverage (models↔migration parity, exact table
+set at head) lives in test_phase5_schema.py — the same handoff
 test_phase3_schema.py and test_phase35_schema.py already made.
 """
 
@@ -59,9 +57,11 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 _PHASE35_REVISION = "0003_phase35_environment"
 # The FIRST of Phase 4's two revisions — the target of the "0005 removes
-# only its index" downgrade test, deliberately not the phase boundary
-# (that is `0005_phase4_release_index`, the current head).
+# only its index" downgrade test, deliberately not the phase boundary.
 _PHASE4_AUDIT_REVISION = "0004_phase4_audit"
+# The Phase 4 boundary this module is pinned to (Phase 5 widened the
+# schema afterwards in `0006_phase5_transfer`).
+_PHASE4_REVISION = "0005_phase4_release_index"
 
 _PHASE3_TABLES = {
     "departments",
@@ -117,17 +117,17 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated to the Phase 4 boundary → base → boundary."""
     name = "partflow_test_phase4_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE4_REVISION)
     # Reversibility gate: the full downgrade must remove everything the
     # chain created (tables, triggers, functions, columns) or the
     # second upgrade fails.
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE4_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -172,7 +172,7 @@ def _rejected(connection: Connection, statement: sa.Insert | sa.Update | sa.Dele
 
 
 class TestMigrationSchema:
-    def test_head_creates_exactly_the_phase4_boundary(self, migrated_engine: Engine) -> None:
+    def test_boundary_creates_exactly_the_phase4_tables(self, migrated_engine: Engine) -> None:
         tables = set(inspect(migrated_engine).get_table_names())
         expected = _PHASE3_TABLES | _PHASE35_TABLES | _PHASE4_TABLES
         assert tables >= expected
@@ -212,7 +212,8 @@ class TestMigrationSchema:
 
     def test_movement_type_check_is_not_pre_widened(self, connection: Connection) -> None:
         # Phase 4 adds audit persistence only: the movement-type
-        # vocabulary stays exactly RECEIVED until Phase 5 widens it.
+        # vocabulary stays exactly RECEIVED at the Phase 4 boundary
+        # (Phase 5 widens it in 0006).
         check_clause = connection.execute(
             sa.text(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
@@ -298,7 +299,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE4_REVISION)
             command.downgrade(config, _PHASE4_AUDIT_REVISION)
             engine = create_engine(url)
             try:
@@ -316,21 +317,9 @@ class TestMigrationSchema:
                 assert remaining == 0
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE4_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
-
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        # The SQLAlchemy mappings and the hand-written migrations must
-        # describe the same schema at head, or later autogenerate runs
-        # and ORM usage would silently disagree with the database.
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
 
     def test_check_constraint_names_are_deterministic_and_not_doubled(
         self, migrated_engine: Engine
@@ -360,7 +349,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE4_REVISION)
             command.downgrade(config, _PHASE35_REVISION)
             engine = create_engine(url)
             try:
@@ -376,7 +365,7 @@ class TestMigrationSchema:
                 assert leftover_functions == []
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE4_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 

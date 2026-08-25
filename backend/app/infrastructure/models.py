@@ -8,7 +8,8 @@ completed Area/Operation configuration fields, `scan_stations`,
 `machines`, the append-only `machine_lifecycle_events` history, and the
 Machine Asset Tag format configuration; plus the Phase 4 generic
 append-only `audit_events` table for master-data and business-demand
-changes (SLICE1_DATA_MODEL §16). Business rules stay in the
+changes (SLICE1_DATA_MODEL §16); plus the Phase 5 Movement widening
+(`TRANSFERRED`, `part_movements.station_id`). Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -112,6 +113,15 @@ MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
 # barcode carries the canonical uppercase PN itself — fully derived,
 # never stored and never separately unique.
 PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
+
+# Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
+# transfer). Reused verbatim by the Phase 5 migration so the stored
+# CHECK and the mapping never drift.
+MOVEMENT_SHAPE_SQL = (
+    "(movement_type = 'RECEIVED' AND from_area_id IS NULL)"
+    " OR (movement_type = 'TRANSFERRED' AND from_area_id IS NOT NULL"
+    " AND from_area_id <> to_area_id AND station_id IS NOT NULL)"
+)
 
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
@@ -766,10 +776,11 @@ class PartMovement(Base):
 
     Append-only enforcement lives in PostgreSQL (raise-on-write trigger
     created by the Phase 3 migration), never only in application
-    convention. Canonical later-phase columns (`station_id`,
-    `worker_id`, `scan_session_id`, `movement_reason`,
-    `reverses_movement_id`, Machine columns) deliberately do not exist
-    yet.
+    convention. `station_id` (Phase 5) records the stable Scan Station
+    identity of a scan-driven Movement for audit (PROJECT_PROFILE §15);
+    the remaining canonical later-phase columns (`worker_id`,
+    `scan_session_id`, `movement_reason`, `reverses_movement_id`,
+    Machine columns) deliberately do not exist yet.
     """
 
     __tablename__ = "part_movements"
@@ -805,6 +816,14 @@ class PartMovement(Base):
             name="fk_part_movements_assigned_route_step_id_assigned_route_steps",
         ),
     )
+    # Stable Scan Station identity of a scan-driven Movement (Phase 5,
+    # PROJECT_PROFILE §15 Scan Station Persistence): audit context
+    # only — never production state. NULL for Management-initiated
+    # Movements such as the Phase 4 RECEIVED release.
+    station_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey("scan_stations.station_id", name="fk_part_movements_station_id_scan_stations"),
+    )
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     server_received_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -823,16 +842,16 @@ class PartMovement(Base):
             name="fk_part_movements_quantity_flow_id_part_number_quantity_flows",
         ),
         CheckConstraint(
-            f"movement_type IN ('{MovementType.RECEIVED}')",
+            f"movement_type IN ('{MovementType.RECEIVED}', '{MovementType.TRANSFERRED}')",
             name=conv("ck_part_movements_movement_type"),
         ),
         CheckConstraint("quantity > 0", name=conv("ck_part_movements_quantity_positive")),
-        # Movement-shape rule: RECEIVED introduces quantity, so it has
-        # no source Area. Widens per movement type in later phases.
-        CheckConstraint(
-            f"movement_type = '{MovementType.RECEIVED}' AND from_area_id IS NULL",
-            name=conv("ck_part_movements_received_shape"),
-        ),
+        # Movement-shape rule per type (widens per movement type in the
+        # phase that adds it): RECEIVED introduces quantity, so it has
+        # no source Area; TRANSFERRED moves quantity between two
+        # DIFFERENT Areas and is always scan-driven, so it records the
+        # Scan Station it was recorded at.
+        CheckConstraint(MOVEMENT_SHAPE_SQL, name=conv("ck_part_movements_movement_shape")),
         UniqueConstraint("device_event_id", name="uq_part_movements_device_event_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
     )

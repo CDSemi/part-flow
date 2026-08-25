@@ -38,11 +38,14 @@ class MovementType(StrEnum):
     """Immutable PartMovement event types (PROJECT_PROFILE §8.11).
 
     Phase 3 needs only RECEIVED — the first Movement of every
-    QuantityFlow. Later phases widen this additively (TRANSFERRED,
-    ASSIGNED_TO_MACHINE, ...); none of those values exist yet.
+    QuantityFlow. Phase 5 adds TRANSFERRED — the Scan Station move of a
+    whole QuantityFlow from its current Area into the station's Area.
+    Later phases widen this additively (ASSIGNED_TO_MACHINE,
+    AREA_COMPLETED, ...); none of those values exist yet.
     """
 
     RECEIVED = "RECEIVED"
+    TRANSFERRED = "TRANSFERRED"
 
 
 class QuantityFlowStatus(StrEnum):

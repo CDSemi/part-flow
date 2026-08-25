@@ -5,11 +5,13 @@ errors from ``app.application.errors`` and never think in HTTP terms,
 while every response body stays in the standard FastAPI
 ``{"detail": ...}`` shape with the safe, user-facing message only.
 
-The one deliberate exception is the release confirmation-required
-outcome (SLICE1_DATA_MODEL §8.2): its 409 body additionally carries
-the existing active distribution, because the UI must show it before
-the user can confirm the intent — still no internal detail, only the
-data the confirmation dialog presents.
+The deliberate exceptions are the confirmation-required outcomes: the
+release active-quantity confirmation (SLICE1_DATA_MODEL §8.2) carries
+the existing active distribution, and the Phase 5 route-deviation
+confirmation (PROJECT_PROFILE §17) carries the deviation itself,
+because the UI must show them before the user can confirm the intent —
+still no internal detail, only the data the confirmation dialog
+presents.
 """
 
 from typing import cast
@@ -23,6 +25,7 @@ from app.application.errors import (
     ConflictError,
     InvalidInputError,
     NotFoundError,
+    RouteDeviationConfirmationRequiredError,
 )
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
@@ -63,3 +66,18 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         ActiveQuantityConfirmationRequiredError, confirmation_required_handler
     )
+
+    async def route_deviation_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Same shape family as the release confirmation: the body carries
+        # only what the deviation confirmation dialog presents.
+        error = cast(RouteDeviationConfirmationRequiredError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": error.message,
+                "confirmation_required": True,
+                "route_deviation": error.route_deviation,
+            },
+        )
+
+    app.add_exception_handler(RouteDeviationConfirmationRequiredError, route_deviation_handler)
