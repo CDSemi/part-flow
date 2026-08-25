@@ -320,7 +320,7 @@ def suggested_operation_id(operations: list[Operation], assessment: RouteAssessm
 
 
 def _lock_operation(session: Session, operation_id: int) -> Operation | None:
-    """The Operation row locked until COMMIT.
+    """The Operation row locked until COMMIT and RE-READ under that lock.
 
     Operation deactivation is a plain UPDATE of this row, so it blocks
     behind a transfer that already holds the lock (and commits with the
@@ -328,8 +328,16 @@ def _lock_operation(session: Session, operation_id: int) -> Operation | None:
     the inactive row below and refuses — one serial outcome, never a
     Movement recorded against an Operation deactivated "at the same
     time".
+
+    ``populate_existing`` is essential: the unlocked
+    ``active_area_operations`` listing that precedes this call has
+    already put the Operation into the Session identity map, and a bare
+    ``session.get(..., with_for_update=True)`` would take the lock but
+    hand back that stale object — a deactivation committed between the
+    listing and the lock would go unseen. Forcing the row state to be
+    reloaded from the locked SELECT closes that window.
     """
-    return session.get(Operation, operation_id, with_for_update=True)
+    return session.get(Operation, operation_id, with_for_update=True, populate_existing=True)
 
 
 def _resolve_operation(

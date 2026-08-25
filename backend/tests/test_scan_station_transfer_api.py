@@ -1874,3 +1874,87 @@ def test_confirmed_deviation_requires_and_records_a_reason(
         route_deviation_reason="unused",
     )
     assert ok.status_code == 201 and ok.json()["route_deviation"] is None
+
+
+class _PauseBeforeOperationLock:
+    """Test seam: pause the FIRST transfer AFTER its unlocked Operation
+    listing saw the Operation active and BEFORE the Operation row is
+    locked — the window a concurrent deactivation can commit into."""
+
+    def __init__(self) -> None:
+        self.real = transfers._lock_operation
+        self.first_inside = threading.Event()
+        self.let_first_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, operation_id: int) -> models.Operation | None:
+        with self._guard:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.first_inside.set()
+            assert self.let_first_finish.wait(timeout=20), "test deadlock: never released"
+        return self.real(session, operation_id)
+
+
+def test_operation_deactivated_between_listing_and_lock_is_seen_under_the_lock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(4b) The unlocked listing already placed the Operation in the
+    Session identity map as ACTIVE. A deactivation committed before the
+    row lock must still be seen: the lock re-reads the row
+    (`populate_existing`), the transfer refuses, zero writes."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    _create_operation(client, lathe.area_id)  # keeps the Area configured afterwards
+    flow_id, pn = _release(client, material, quantity=3)
+    before = _counts(db_engine)
+    pause = _PauseBeforeOperationLock()
+    monkeypatch.setattr(transfers, "_lock_operation", pause)
+    results: dict[str, Any] = {}
+
+    def run_transfer() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["transfer"] = transfers.transfer_to_station_area(
+                    session,
+                    station_id=lathe.station_id,
+                    part_number=pn,
+                    quantity_flow_id=flow_id,
+                    source_area_id=material.area_id,
+                    target_area_id=lathe.area_id,
+                    quantity=3,
+                    operation_id=lathe.operation_id,
+                    confirm_route_deviation=False,
+                    route_deviation_reason=None,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["transfer"] = exc
+
+    transfer_thread = threading.Thread(target=run_transfer, daemon=True)
+    transfer_thread.start()
+    assert pause.first_inside.wait(timeout=20)  # listing done, lock not yet taken
+    # The deactivation commits in the window — no lock is held yet, so it
+    # must NOT block.
+    with Session(db_engine) as session:
+        environment.update_operation(session, lathe.operation_id, is_active=False)
+    with db_engine.connect() as connection:
+        assert (
+            connection.execute(
+                sa.select(models.Operation.is_active).where(
+                    models.Operation.id == lathe.operation_id
+                )
+            ).scalar_one()
+            is False
+        )
+    pause.let_first_finish.set()
+    transfer_thread.join(timeout=20)
+    assert not transfer_thread.is_alive()
+
+    outcome = results["transfer"]
+    assert isinstance(outcome, ConflictError), outcome
+    assert "inactive" in outcome.message
+    assert _counts(db_engine) == before
+    assert _flow_row(db_engine, flow_id).current_area_id == material.area_id
