@@ -218,6 +218,13 @@ def _transfer(
     quantity: Any,
     **overrides: Any,
 ) -> Any:
+    """POST a transfer; the confirmed destination defaults to the
+    station's CURRENT bound Area (what a freshly loaded station shows)."""
+    if "target_area_id" not in overrides:
+        station = client.get(f"/api/scan-stations/{station_id}")
+        overrides["target_area_id"] = (
+            station.json()["area_id"] if station.status_code == 200 else -1
+        )
     payload: dict[str, Any] = {
         "part_number": part_number,
         "quantity_flow_id": quantity_flow_id,
@@ -636,8 +643,11 @@ def test_planned_transfer_on_route_records_the_snapshot_step_and_its_operation(
         quantity=3,
         operation_id=int(other_lathe_operation["id"]),
     )
-    assert mismatch.status_code == 422, mismatch.text
-    assert "route step" in mismatch.json()["detail"]
+    # Not a hard rejection: it is an OPERATION route deviation that needs
+    # explicit confirmation (covered in depth below). Nothing written.
+    assert mismatch.status_code == 409, mismatch.text
+    assert mismatch.json()["confirmation_required"] is True
+    assert mismatch.json()["route_deviation"]["kind"] == "OPERATION"
     assert _flow_row(db_engine, other_flow).current_area_id == material.area_id
 
 
@@ -726,11 +736,14 @@ def test_route_deviation_is_refused_until_confirmed_then_recorded(
     body = refused.json()
     assert body["confirmation_required"] is True
     assert body["route_deviation"] == {
+        "kind": "AREA",
         "expected_next_area_id": cut.area_id,
         "expected_next_step_id": steps[1],
         "expected_next_sequence": 20,
+        "expected_operation_id": None,
         "last_known_step_id": steps[0],
         "actual_area_id": lathe.area_id,
+        "actual_operation_id": lathe.operation_id,
     }
     assert cut.area["name"] in body["detail"]
     assert _counts(db_engine) == before
@@ -747,11 +760,14 @@ def test_route_deviation_is_refused_until_confirmed_then_recorded(
         quantity=6,
         device_event_id=event_id,  # same intent, same id — still fresh
         confirm_route_deviation=True,
+        route_deviation_reason="Cut backlog — turning first per supervisor",
     )
     assert confirmed.status_code == 201, confirmed.text
     result = confirmed.json()
     assert result["assigned_route_step_id"] is None
     assert result["route_deviation"]["confirmed"] is True
+    assert result["route_deviation"]["reason"] == "Cut backlog — turning first per supervisor"
+    assert result["route_deviation"]["kind"] == "AREA"
     assert result["route_deviation"]["expected_next_area_id"] == cut.area_id
     movement = _movement_row(db_engine, result["movement_id"])
     assert movement.movement_type == "TRANSFERRED"
@@ -1160,7 +1176,7 @@ def test_concurrent_transfers_of_one_flow_serialize_with_one_winner(
     monkeypatch.setattr(transfers, "assess_route", pause)
     results: dict[str, Any] = {}
 
-    def run(name: str, station_id: str) -> None:
+    def run(name: str, station_id: str, target_area_id: int) -> None:
         with Session(db_engine) as session:
             try:
                 results[name] = transfers.transfer_to_station_area(
@@ -1169,16 +1185,22 @@ def test_concurrent_transfers_of_one_flow_serialize_with_one_winner(
                     part_number=pn,
                     quantity_flow_id=flow_id,
                     source_area_id=material.area_id,
+                    target_area_id=target_area_id,
                     quantity=11,
                     operation_id=None,
                     confirm_route_deviation=False,
+                    route_deviation_reason=None,
                     device_event_id=str(uuid.uuid4()),
                 )
             except Exception as exc:  # noqa: BLE001 — collected for assertions
                 results[name] = exc
 
-    first = threading.Thread(target=run, args=("first", lathe.station_id), daemon=True)
-    second = threading.Thread(target=run, args=("second", deburr.station_id), daemon=True)
+    first = threading.Thread(
+        target=run, args=("first", lathe.station_id, lathe.area_id), daemon=True
+    )
+    second = threading.Thread(
+        target=run, args=("second", deburr.station_id, deburr.area_id), daemon=True
+    )
     try:
         first.start()
         assert pause.first_inside.wait(timeout=20)  # holds the flow lock, paused
@@ -1229,9 +1251,11 @@ def test_concurrent_identical_retries_one_creates_one_replays(
                     part_number=pn,
                     quantity_flow_id=flow_id,
                     source_area_id=material.area_id,
+                    target_area_id=lathe.area_id,
                     quantity=7,
                     operation_id=None,
                     confirm_route_deviation=False,
+                    route_deviation_reason=None,
                     device_event_id=event_id,
                 )
             except Exception as exc:  # noqa: BLE001 — collected for assertions
@@ -1290,9 +1314,11 @@ def test_transfer_versus_area_deactivation_has_one_serial_outcome(
                     part_number=pn,
                     quantity_flow_id=flow_id,
                     source_area_id=material.area_id,
+                    target_area_id=lathe.area_id,
                     quantity=2,
                     operation_id=None,
                     confirm_route_deviation=False,
+                    route_deviation_reason=None,
                     device_event_id=str(uuid.uuid4()),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1363,3 +1389,488 @@ def test_no_phase6_plus_behavior_leaks_in(client: TestClient, db_engine: Engine)
     columns = {column.name for column in models.PartMovement.__table__.columns}
     assert columns.isdisjoint({"worker_id", "scan_session_id", "movement_reason", "machine_id"})
     assert "current_machine_id" not in {c.name for c in models.QuantityFlow.__table__.columns}
+
+
+# ---------------------------------------------------------------------------
+# Audit regressions (post-implementation review)
+# ---------------------------------------------------------------------------
+
+
+def test_confirmed_destination_is_a_precondition_on_the_station_binding(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """(1) The transfer carries the Area the operator confirmed; a
+    station deactivated or rebound since is refused with zero writes —
+    the backend never records Area B under a confirmation of Area A."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    deburr = _Cell(client)
+    flow_id, pn = _release(client, material, quantity=5)
+    before = _counts(db_engine)
+
+    def attempt(**overrides: Any) -> Any:
+        return _transfer(
+            client,
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            source_area_id=material.area_id,
+            quantity=5,
+            **overrides,
+        )
+
+    # Missing / stale destination: the request shape requires it, and a
+    # confirmed Area that is not the station's Area is refused.
+    missing = client.post(
+        f"/api/scan-stations/{lathe.station_id}/transfers",
+        json={
+            "part_number": pn,
+            "quantity_flow_id": flow_id,
+            "source_area_id": material.area_id,
+            "quantity": 5,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert missing.status_code == 422
+    stale = attempt(target_area_id=deburr.area_id)
+    assert stale.status_code == 409, stale.text
+    assert "no longer bound to the confirmed destination" in stale.json()["detail"]
+
+    # Rebound AFTER the operator confirmed Lathe: refused, nothing moves
+    # to Deburr behind the operator's back.
+    assert (
+        client.patch(
+            f"/api/scan-stations/{lathe.station_id}", json={"area_id": deburr.area_id}
+        ).status_code
+        == 200
+    )
+    rebound = attempt(target_area_id=lathe.area_id)
+    assert rebound.status_code == 409, rebound.text
+    assert "no longer bound" in rebound.json()["detail"]
+    # Deactivated after confirmation: refused as well.
+    assert (
+        client.patch(
+            f"/api/scan-stations/{lathe.station_id}",
+            json={"area_id": lathe.area_id, "is_active": False},
+        ).status_code
+        == 200
+    )
+    inactive = attempt(target_area_id=lathe.area_id)
+    assert inactive.status_code == 409 and "inactive" in inactive.json()["detail"]
+
+    assert _counts(db_engine) == before
+    assert _flow_row(db_engine, flow_id).current_area_id == material.area_id
+
+    # Re-activated and confirmed against the CURRENT binding: recorded
+    # into exactly the confirmed Area.
+    assert (
+        client.patch(f"/api/scan-stations/{lathe.station_id}", json={"is_active": True}).status_code
+        == 200
+    )
+    ok = attempt(target_area_id=lathe.area_id)
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["to_area_id"] == lathe.area_id
+
+
+def test_transfer_versus_station_rebind_has_one_serial_outcome(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(1) The station row is locked from the precondition check to
+    COMMIT: a concurrent rebind blocks behind it and the transfer lands
+    in the Area the operator confirmed."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    deburr = _Cell(client)
+    flow_id, pn = _release(client, material, quantity=4)
+    pause = _PauseFirstAssessment()  # runs after the station lock is held
+    monkeypatch.setattr(transfers, "assess_route", pause)
+    results: dict[str, Any] = {}
+
+    def run_transfer() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["transfer"] = transfers.transfer_to_station_area(
+                    session,
+                    station_id=lathe.station_id,
+                    part_number=pn,
+                    quantity_flow_id=flow_id,
+                    source_area_id=material.area_id,
+                    target_area_id=lathe.area_id,
+                    quantity=4,
+                    operation_id=None,
+                    confirm_route_deviation=False,
+                    route_deviation_reason=None,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["transfer"] = exc
+
+    def run_rebind() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["rebind"] = environment.update_scan_station(
+                    session, lathe.station_id, area_id=deburr.area_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["rebind"] = exc
+
+    transfer_thread = threading.Thread(target=run_transfer, daemon=True)
+    rebind_thread = threading.Thread(target=run_rebind, daemon=True)
+    try:
+        transfer_thread.start()
+        assert pause.first_inside.wait(timeout=20)
+        rebind_thread.start()
+        time.sleep(1.0)
+        assert "rebind" not in results  # blocked on the station row lock
+    finally:
+        pause.let_first_finish.set()
+    transfer_thread.join(timeout=20)
+    rebind_thread.join(timeout=20)
+
+    transfer = results["transfer"]
+    assert isinstance(transfer, transfers.AreaTransfer), transfer
+    assert transfer.to_area_id == lathe.area_id  # the confirmed Area, not Deburr
+    assert not isinstance(results["rebind"], Exception)  # applied afterwards
+    assert _flow_row(db_engine, flow_id).current_area_id == lathe.area_id
+    with db_engine.connect() as connection:
+        bound = connection.execute(
+            sa.select(models.ScanStation.area_id).where(
+                models.ScanStation.station_id == lathe.station_id
+            )
+        ).scalar_one()
+    assert bound == deburr.area_id
+
+
+def test_operation_is_part_of_the_route_expectation(client: TestClient, db_engine: Engine) -> None:
+    """(2) An ON_ROUTE Area with a DIFFERENT active Operation than the
+    planned step is an OPERATION deviation: explicit confirmation with a
+    reason, recorded WITHOUT a matched snapshot step — never a hard 422
+    and never a matched step under another Operation."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    other_operation = _create_operation(client, lathe.area_id)
+    template_id = _create_route_template(
+        db_engine,
+        [
+            {"area_id": material.area_id},
+            {"area_id": lathe.area_id, "operation_id": lathe.operation_id},
+        ],
+    )
+    flow_id, pn = _release(
+        client, material, route_mode="PLANNED", route_template_id=template_id, quantity=8
+    )
+    steps = _snapshot_step_ids(db_engine, flow_id)
+    candidate = _resolve(client, lathe.station_id, part_number=pn).json()["candidates"][0]
+    assert candidate["route_status"] == "ON_ROUTE"
+    assert candidate["expected_operation_id"] == lathe.operation_id
+    assert candidate["suggested_operation_id"] == lathe.operation_id
+    before = _counts(db_engine)
+    event_id = str(uuid.uuid4())
+
+    def attempt(**overrides: Any) -> Any:
+        return _transfer(
+            client,
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            source_area_id=material.area_id,
+            quantity=8,
+            operation_id=int(other_operation["id"]),
+            device_event_id=event_id,
+            **overrides,
+        )
+
+    refused = attempt()
+    assert refused.status_code == 409, refused.text
+    body = refused.json()
+    assert body["confirmation_required"] is True
+    assert body["route_deviation"] == {
+        "kind": "OPERATION",
+        "expected_next_area_id": lathe.area_id,
+        "expected_next_step_id": steps[1],
+        "expected_next_sequence": 20,
+        "expected_operation_id": lathe.operation_id,
+        "last_known_step_id": steps[0],
+        "actual_area_id": lathe.area_id,
+        "actual_operation_id": int(other_operation["id"]),
+    }
+    assert lathe.operation["code"] in body["detail"]
+    assert _counts(db_engine) == before
+
+    confirmed = attempt(
+        confirm_route_deviation=True, route_deviation_reason="Tool for planned op down"
+    )
+    assert confirmed.status_code == 201, confirmed.text
+    result = confirmed.json()
+    assert result["operation_id"] == int(other_operation["id"])
+    assert result["assigned_route_step_id"] is None  # never matched under another Operation
+    assert result["route_deviation"]["kind"] == "OPERATION"
+    assert result["route_deviation"]["reason"] == "Tool for planned op down"
+    movement = _movement_row(db_engine, result["movement_id"])
+    assert movement.assigned_route_step_id is None
+    assert movement.metadata["route_deviation"]["expected_operation_id"] == lathe.operation_id
+
+    # The planned Operation itself fulfils the step with no confirmation.
+    planned_flow, planned_pn = _release(
+        client, material, route_mode="PLANNED", route_template_id=template_id, quantity=2
+    )
+    on_route = _transfer(
+        client,
+        lathe.station_id,
+        part_number=planned_pn,
+        quantity_flow_id=planned_flow,
+        source_area_id=material.area_id,
+        quantity=2,
+        operation_id=lathe.operation_id,
+    )
+    assert on_route.status_code == 201, on_route.text
+    assert (
+        on_route.json()["assigned_route_step_id"] == _snapshot_step_ids(db_engine, planned_flow)[1]
+    )
+    assert on_route.json()["route_deviation"] is None
+
+    # A step WITHOUT an Operation accepts any active Operation of its Area.
+    open_template = _create_route_template(
+        db_engine, [{"area_id": material.area_id}, {"area_id": lathe.area_id}]
+    )
+    open_flow, open_pn = _release(
+        client, material, route_mode="PLANNED", route_template_id=open_template, quantity=1
+    )
+    any_operation = _transfer(
+        client,
+        lathe.station_id,
+        part_number=open_pn,
+        quantity_flow_id=open_flow,
+        source_area_id=material.area_id,
+        quantity=1,
+        operation_id=int(other_operation["id"]),
+    )
+    assert any_operation.status_code == 201, any_operation.text
+    assert (
+        any_operation.json()["assigned_route_step_id"]
+        == _snapshot_step_ids(db_engine, open_flow)[1]
+    )
+    assert any_operation.json()["route_deviation"] is None
+
+
+def test_replay_is_independent_of_the_current_station_state(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """(3) A retry of a committed transfer — same device_event_id, same
+    confirmed intent — replays the original result even after the
+    station was deactivated and rebound; nothing is written."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    deburr = _Cell(client)
+    flow_id, pn = _release(client, material, quantity=6)
+    event_id = str(uuid.uuid4())
+    request: dict[str, Any] = {
+        "part_number": pn,
+        "quantity_flow_id": flow_id,
+        "source_area_id": material.area_id,
+        "target_area_id": lathe.area_id,
+        "quantity": 6,
+        "device_event_id": event_id,
+    }
+    original = _transfer(client, lathe.station_id, **request)
+    assert original.status_code == 201, original.text
+    before = _counts(db_engine)
+
+    # Station rebound to another Area AND deactivated; its Operation
+    # deactivated too. The retry must still replay.
+    assert (
+        client.patch(
+            f"/api/scan-stations/{lathe.station_id}",
+            json={"area_id": deburr.area_id, "is_active": False},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(f"/api/operations/{lathe.operation_id}", json={"is_active": False}).status_code
+        == 200
+    )
+    replay = _transfer(client, lathe.station_id, **request)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == original.json()
+    assert _counts(db_engine) == before
+    # A fresh intent at the same station is refused (inactive).
+    fresh = _transfer(client, lathe.station_id, **{**request, "device_event_id": str(uuid.uuid4())})
+    assert fresh.status_code == 409
+    # A different confirmed destination under the same id is a conflict.
+    conflict = _transfer(client, lathe.station_id, **{**request, "target_area_id": deburr.area_id})
+    assert conflict.status_code == 409
+    assert "different production request" in conflict.json()["detail"]
+    assert _counts(db_engine) == before
+
+
+class _PauseAfterOperationLock:
+    """Test seam: pause the FIRST transfer right after it locked its
+    Operation row, so a concurrent deactivation can be observed
+    blocking, then released deterministically."""
+
+    def __init__(self) -> None:
+        self.real = transfers._lock_operation
+        self.first_inside = threading.Event()
+        self.let_first_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, session: Session, operation_id: int) -> models.Operation | None:
+        result = self.real(session, operation_id)
+        with self._guard:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.first_inside.set()
+            assert self.let_first_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+def test_transfer_versus_operation_deactivation_has_one_serial_outcome(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(4) The selected Operation row is locked and re-validated before
+    the write: a concurrent deactivation blocks behind the transfer
+    (which commits with the Operation still active), and a deactivation
+    that commits first makes the transfer refuse with zero writes."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    _create_operation(client, lathe.area_id)  # a second one stays active throughout
+    flow_id, pn = _release(client, material, quantity=3)
+    pause = _PauseAfterOperationLock()
+    monkeypatch.setattr(transfers, "_lock_operation", pause)
+    results: dict[str, Any] = {}
+
+    def run_transfer() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["transfer"] = transfers.transfer_to_station_area(
+                    session,
+                    station_id=lathe.station_id,
+                    part_number=pn,
+                    quantity_flow_id=flow_id,
+                    source_area_id=material.area_id,
+                    target_area_id=lathe.area_id,
+                    quantity=3,
+                    operation_id=lathe.operation_id,
+                    confirm_route_deviation=False,
+                    route_deviation_reason=None,
+                    device_event_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["transfer"] = exc
+
+    def run_deactivation() -> None:
+        with Session(db_engine) as session:
+            try:
+                results["deactivation"] = environment.update_operation(
+                    session, lathe.operation_id, is_active=False
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["deactivation"] = exc
+
+    transfer_thread = threading.Thread(target=run_transfer, daemon=True)
+    deactivation_thread = threading.Thread(target=run_deactivation, daemon=True)
+    try:
+        transfer_thread.start()
+        assert pause.first_inside.wait(timeout=20)  # holds the Operation row lock
+        deactivation_thread.start()
+        time.sleep(1.0)
+        assert "deactivation" not in results  # blocked on the Operation lock
+    finally:
+        pause.let_first_finish.set()
+    transfer_thread.join(timeout=20)
+    deactivation_thread.join(timeout=20)
+
+    transfer = results["transfer"]
+    assert isinstance(transfer, transfers.AreaTransfer), transfer
+    assert transfer.operation_id == lathe.operation_id
+    assert not isinstance(results["deactivation"], Exception)
+    monkeypatch.undo()
+
+    # Reverse order: the Operation is now inactive — a fresh transfer
+    # selecting it is refused with nothing written.
+    other_flow, other_pn = _release(client, material, quantity=1)
+    before = _counts(db_engine)
+    refused = _transfer(
+        client,
+        lathe.station_id,
+        part_number=other_pn,
+        quantity_flow_id=other_flow,
+        source_area_id=material.area_id,
+        quantity=1,
+        operation_id=lathe.operation_id,
+    )
+    assert refused.status_code == 409 and "inactive" in refused.json()["detail"]
+    assert _counts(db_engine) == before
+
+
+def test_confirmed_deviation_requires_and_records_a_reason(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """(5) PROJECT_PROFILE §17 step 7: a confirmed deviation records its
+    reason on the immutable TRANSFERRED metadata; confirming without one
+    (or with whitespace) is refused with zero writes; the reason is part
+    of the confirmed intent for idempotency."""
+    material = _Cell(client)
+    cut = _Cell(client)
+    lathe = _Cell(client)
+    template_id = _create_route_template(
+        db_engine,
+        [{"area_id": material.area_id}, {"area_id": cut.area_id}, {"area_id": lathe.area_id}],
+    )
+    flow_id, pn = _release(
+        client, material, route_mode="PLANNED", route_template_id=template_id, quantity=7
+    )
+    before = _counts(db_engine)
+    event_id = str(uuid.uuid4())
+
+    def attempt(**overrides: Any) -> Any:
+        return _transfer(
+            client,
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            source_area_id=material.area_id,
+            quantity=7,
+            device_event_id=event_id,
+            confirm_route_deviation=True,
+            **overrides,
+        )
+
+    for reason in (None, "", "   "):
+        response = attempt(route_deviation_reason=reason)
+        assert response.status_code == 422, (reason, response.text)
+        assert "needs a reason" in response.json()["detail"]
+    assert _counts(db_engine) == before
+
+    recorded = attempt(route_deviation_reason="  Skip Cut: blank already cut  ")
+    assert recorded.status_code == 201, recorded.text
+    movement = _movement_row(db_engine, recorded.json()["movement_id"])
+    assert movement.metadata["route_deviation"]["reason"] == "Skip Cut: blank already cut"
+    assert movement.metadata["route_deviation"]["confirmed"] is True
+    assert recorded.json()["route_deviation"]["reason"] == "Skip Cut: blank already cut"
+
+    # Same id + same reason replays; a different reason is a different
+    # confirmed intent and conflicts. Neither writes.
+    after = _counts(db_engine)
+    replay = attempt(route_deviation_reason="Skip Cut: blank already cut")
+    assert replay.status_code == 200 and replay.json() == recorded.json()
+    conflict = attempt(route_deviation_reason="Another reason")
+    assert conflict.status_code == 409
+    assert _counts(db_engine) == after
+
+    # A FLOATING flow never needs a reason: an unused reason is ignored,
+    # nothing about deviation is recorded.
+    floating, floating_pn = _release(client, material, quantity=1)
+    ok = _transfer(
+        client,
+        lathe.station_id,
+        part_number=floating_pn,
+        quantity_flow_id=floating,
+        source_area_id=material.area_id,
+        quantity=1,
+        confirm_route_deviation=True,
+        route_deviation_reason="unused",
+    )
+    assert ok.status_code == 201 and ok.json()["route_deviation"] is None

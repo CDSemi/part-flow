@@ -22,9 +22,13 @@ Surface:
 - ``POST /scan-stations/{station_id}/transfers`` — the confirmed
   transfer of ONE whole QuantityFlow into the station's Area. 201 on a
   fresh transfer, 200 on an idempotent replay (same ``device_event_id``
-  + same request), 409 on a mismatched reuse, 409 with
-  ``confirmation_required`` when a PLANNED flow leaves its route and
-  the deviation is not yet confirmed, 422 for partial quantity.
+  + same confirmed intent — whatever happened to the station, Area
+  or Operation since), 409 on a mismatched reuse, 409 on a station
+  deactivated or rebound away from the confirmed destination Area,
+  409 with ``confirmation_required`` when a PLANNED flow leaves its
+  route (a different Area OR a different Operation than the planned
+  step) and the deviation is not yet confirmed, 422 for a confirmed
+  deviation without a reason and for partial quantity.
 - ``GET  /areas/{area_id}/inventory`` — the ACTIVE quantity currently
   in an Area grouped per PN, the refresh source after a transfer.
 """
@@ -173,6 +177,11 @@ class TransferCandidateResponse(BaseModel):
     # explicit route-deviation confirmation.
     route_status: Literal["FLOATING", "ON_ROUTE", "DEVIATION"]
     expected_next_area: AreaRef | None
+    # The Operation the Planned Route expects at its next step (null:
+    # FLOATING, route end, or a step without an Operation). Choosing a
+    # different Operation at an ON_ROUTE destination is a route
+    # deviation the transfer confirms explicitly with a reason.
+    expected_operation_id: int | None
     # The Operation the transfer resolves to without a choice; null
     # means the operator must choose one of ``operations``.
     suggested_operation_id: int | None
@@ -218,6 +227,7 @@ def resolve_scan(
                     if candidate.expected_next_area is not None
                     else None
                 ),
+                expected_operation_id=candidate.expected_operation_id,
                 suggested_operation_id=candidate.suggested_operation_id,
                 work_order=_work_order(candidate.work_order),
             )
@@ -244,6 +254,10 @@ class AreaTransferRequest(BaseModel):
     # in — a precondition, so quantity that moved meanwhile is refused.
     quantity_flow_id: int
     source_area_id: int
+    # The destination Area the operator resolved and confirmed at the
+    # station — an optimistic precondition: the station must still be
+    # bound to exactly this Area when the transfer is recorded.
+    target_area_id: int
     # Strict: a quantity is an integer, never a coerced bool/float/text.
     # Phase 5 accepts only the flow's whole quantity.
     quantity: StrictInt
@@ -251,8 +265,10 @@ class AreaTransferRequest(BaseModel):
     # route-step Operation); required when several are configured.
     operation_id: int | None = None
     # Explicit route-deviation confirmation (PROJECT_PROFILE §17): set
-    # by the UI only after showing the deviation.
+    # by the UI only after showing the deviation, together with the
+    # mandatory reason (§17 step 7) recorded on the Movement.
     confirm_route_deviation: StrictBool = False
+    route_deviation_reason: str | None = None
     device_event_id: str
 
 
@@ -287,9 +303,11 @@ def transfer_to_station_area(
         part_number=body.part_number,
         quantity_flow_id=body.quantity_flow_id,
         source_area_id=body.source_area_id,
+        target_area_id=body.target_area_id,
         quantity=body.quantity,
         operation_id=body.operation_id,
         confirm_route_deviation=body.confirm_route_deviation,
+        route_deviation_reason=body.route_deviation_reason,
         device_event_id=body.device_event_id,
     )
     response.status_code = 201 if result.created else 200

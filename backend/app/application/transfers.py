@@ -13,9 +13,15 @@ same rules.
 
 Rules owned here:
 
-- The source is always EXPLICIT: the command takes exactly one
-  QuantityFlow chosen by the operator (with the Area the operator saw
-  it in as a precondition) and never picks, ranks, or combines flows.
+- The source AND the destination are always EXPLICIT: the command
+  takes exactly one QuantityFlow chosen by the operator (with the Area
+  the operator saw it in as a precondition) and the destination Area
+  the operator resolved and confirmed at the station (an optimistic
+  precondition checked under the Scan Station row lock — a station
+  deactivated or rebound to another Area since the confirmation is
+  refused with nothing written, so the UI can never confirm Area A
+  while the backend records Area B). It never picks, ranks, or
+  combines flows.
   With several valid sources the read model returns them all and the
   UI requires a selection before any write (PROJECT_PROFILE §10
   Barcode Resolution, §15).
@@ -25,15 +31,20 @@ Rules owned here:
   its whole quantity in an Area other than the station's, and the
   station's Area accepts production (active, non-terminal). A
   FLOATING flow has no route expectation; a PLANNED flow's next
-  expected snapshot step is compared against the station's Area — a
-  match records the step on the Movement, anything else is a ROUTE
-  DEVIATION that is refused until the operator explicitly confirms it,
-  and a confirmed deviation is recorded in the Movement metadata
-  (PROJECT_PROFILE §17 steps 1–5). No Movement type beyond
-  `TRANSFERRED` exists in this phase, so the deviation is recorded ON
-  the transfer, and the previous route stays untouched: route
-  adjustment and the separate `ROUTE_DEVIATION_CONFIRMED`/
-  `ROUTE_ADJUSTED` events arrive with route editing (Phase 9+).
+  expected snapshot step — its Area AND, when the step defines one,
+  its Operation — is compared against the station's Area and the
+  resolved Operation. Only a full match records the step on the
+  Movement (`assigned_route_step_id`); a different Area OR a different
+  active Operation is a ROUTE DEVIATION that is refused until the
+  operator explicitly confirms it with a reason, and a confirmed
+  deviation is recorded in the Movement metadata — kind, expected step
+  /Area/Operation, actual Area/Operation, reason, and the step is
+  never recorded as matched (PROJECT_PROFILE §17 steps 1–5, 7). No
+  Movement type beyond `TRANSFERRED` exists in this phase, so the
+  deviation is recorded ON the transfer, and the previous route stays
+  untouched: route adjustment and the separate
+  `ROUTE_DEVIATION_CONFIRMED`/`ROUTE_ADJUSTED` events arrive with route
+  editing (Phase 9+).
 - The Operation is resolved from the station Area's configuration
   (SLICE1_DATA_MODEL §12 applied to the destination): a step-defined
   Operation of the matched route step, else the single active
@@ -45,14 +56,20 @@ Rules owned here:
   partial movement is SPLIT (Phase 8) and is never claimed; a larger
   quantity exceeds the source (PROJECT_PROFILE §6 rule 7).
 - Order of operations mirrors the release command: idempotency check
-  first (a transport retry of a committed transfer replays the original
-  result even after the flow moved again), then the source flow row
-  lock (`FOR UPDATE`) that serializes concurrent transfers of one flow
-  and a second idempotency check under it, then validation, then the
-  writes. Any failure before COMMIT leaves zero writes.
-- The target Area row is locked until COMMIT exactly like the release
-  starting Area, so Area deactivation (which checks for active
-  quantity under the same lock) and a transfer into that Area have one
+  first — before ANY station/Area/Operation state is consulted, so a
+  transport retry of a committed transfer replays the original result
+  even after the flow moved again or the station was deactivated or
+  rebound — then the source flow row lock (`FOR UPDATE`) that
+  serializes concurrent transfers of one flow and a second idempotency
+  check under it, then the Scan Station row lock and its
+  precondition, then validation, then the writes. Any failure before
+  COMMIT leaves zero writes.
+- Row locks held until COMMIT (lock order: flow → station → target
+  Area → Operation): the target Area exactly like the release starting
+  Area, so Area deactivation (which checks for active quantity under
+  the same lock) and a transfer into that Area have one serial
+  outcome; the selected Operation, re-validated under its lock, so
+  Operation deactivation and a transfer recording it also have one
   serial outcome.
 - The projection update (`quantity_flows.current_area_id`) is written
   in the same transaction as the Movement and stays rebuildable from
@@ -75,7 +92,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application.common import required_flag
+from app.application.common import optional_text, required_flag
 from app.application.errors import (
     ConflictError,
     IdempotencyConflictError,
@@ -104,6 +121,7 @@ _ROUTE_DEVIATION_KEY: Final = "route_deviation"
 _DEVICE_EVENT_ID_CONSTRAINT: Final = "uq_part_movements_device_event_id"
 
 RouteStatus = Literal["FLOATING", "ON_ROUTE", "DEVIATION"]
+DeviationKind = Literal["AREA", "OPERATION"]
 
 
 class RouteAssessment(NamedTuple):
@@ -111,7 +129,8 @@ class RouteAssessment(NamedTuple):
 
     status: RouteStatus
     # The snapshot step the transfer fulfils (ON_ROUTE only) — recorded
-    # as the Movement's `assigned_route_step_id`.
+    # as the Movement's `assigned_route_step_id` ONLY when the resolved
+    # Operation also matches the step (see `operation_deviates`).
     matched_step: AssignedRouteStep | None
     # The step the route expected next (PLANNED only; None when the
     # flow's last known step is the final one).
@@ -245,16 +264,37 @@ def assess_route(session: Session, flow: QuantityFlow, target_area_id: int) -> R
     return RouteAssessment("DEVIATION", None, expected_next, last_known)
 
 
-def route_deviation_context(assessment: RouteAssessment, target_area_id: int) -> dict[str, Any]:
+def operation_deviates(assessment: RouteAssessment, operation_id: int) -> bool:
+    """True when the step the Area matched defines a DIFFERENT Operation.
+
+    The Operation is part of the route expectation (PROJECT_PROFILE
+    §8.9/§17): a step without an Operation accepts any Operation of its
+    Area; a step with one is fulfilled only by that Operation. Anything
+    else is a deviation — never a silently recorded matched step.
+    """
+    step = assessment.matched_step
+    return step is not None and step.operation_id is not None and step.operation_id != operation_id
+
+
+def route_deviation_context(
+    assessment: RouteAssessment,
+    *,
+    kind: DeviationKind,
+    target_area_id: int,
+    operation_id: int | None,
+) -> dict[str, Any]:
     """The deviation as the confirmation dialog presents and the Movement records it."""
     expected = assessment.expected_next_step
     last_known = assessment.last_known_step
     return {
+        "kind": kind,
         "expected_next_area_id": expected.area_id if expected is not None else None,
         "expected_next_step_id": expected.id if expected is not None else None,
         "expected_next_sequence": expected.sequence if expected is not None else None,
+        "expected_operation_id": expected.operation_id if expected is not None else None,
         "last_known_step_id": last_known.id if last_known is not None else None,
         "actual_area_id": target_area_id,
+        "actual_operation_id": operation_id,
     }
 
 
@@ -279,19 +319,37 @@ def suggested_operation_id(operations: list[Operation], assessment: RouteAssessm
     return None
 
 
+def _lock_operation(session: Session, operation_id: int) -> Operation | None:
+    """The Operation row locked until COMMIT.
+
+    Operation deactivation is a plain UPDATE of this row, so it blocks
+    behind a transfer that already holds the lock (and commits with the
+    Operation still active), or commits first and the transfer re-reads
+    the inactive row below and refuses — one serial outcome, never a
+    Movement recorded against an Operation deactivated "at the same
+    time".
+    """
+    return session.get(Operation, operation_id, with_for_update=True)
+
+
 def _resolve_operation(
     session: Session,
     area: Area,
     assessment: RouteAssessment,
     requested_operation_id: int | None,
 ) -> Operation:
+    """Resolve, lock and re-validate the destination Operation.
+
+    A resolved Operation different from the matched step's Operation is
+    NOT rejected here: it is a route deviation the caller confirms
+    explicitly (`operation_deviates`).
+    """
     operations = active_area_operations(session, area.id)
     if not operations:
         raise ConflictError(
             f"Area '{area.name}' has no active Operation configured."
             " Configure an Operation for the Area before transferring quantity into it."
         )
-    by_id = {operation.id: operation for operation in operations}
     suggested = suggested_operation_id(operations, assessment)
     if requested_operation_id is None:
         if suggested is None:
@@ -299,28 +357,19 @@ def _resolve_operation(
                 f"Area '{area.name}' supports several Operations. Choose the"
                 " Operation this quantity is transferred for."
             )
-        return by_id[suggested]
-    operation = session.get(Operation, requested_operation_id)
+        requested_operation_id = suggested
+    operation = _lock_operation(session, requested_operation_id)
     if operation is None:
         raise InvalidInputError(f"Operation {requested_operation_id} does not exist.")
     if operation.area_id != area.id:
         raise InvalidInputError(
             f"Operation '{operation.code}' does not belong to Area '{area.name}'."
         )
-    if operation.id not in by_id:
+    # Re-validated under the row lock: the unlocked listing above may
+    # predate a concurrent deactivation.
+    if not operation.is_active:
         raise ConflictError(
             f"Operation '{operation.code}' is inactive and cannot accept transferred quantity."
-        )
-    step = assessment.matched_step
-    step_operation = (
-        by_id.get(step.operation_id) if step is not None and step.operation_id is not None else None
-    )
-    if step_operation is not None and step_operation.id != operation.id:
-        # Mismatch is a validation failure, never a silent adjustment —
-        # the same rule the PLANNED release applies to its first step.
-        raise InvalidInputError(
-            f"The route step this transfer fulfils defines Operation"
-            f" '{step_operation.code}', not '{operation.code}'."
         )
     return operation
 
@@ -354,11 +403,15 @@ def _request_fingerprint(
     target_area_id: int,
     quantity: int,
     operation_id: int | None,
+    route_deviation_reason: str | None,
 ) -> str:
     """Deterministic canonical hash of the normalized request (SLICE1 §14).
 
-    The explicit deviation confirmation is intent, not request content
-    (like the release's active-quantity confirmation) and is excluded.
+    Covers the whole CONFIRMED intent — station, flow, PN, source and
+    destination Area, quantity, Operation choice, and the deviation
+    reason when one was given. The explicit confirmation flag itself is
+    intent-to-proceed, not request content (like the release's
+    active-quantity confirmation), and is excluded.
     """
     normalized = {
         "station_id": station_id,
@@ -368,6 +421,7 @@ def _request_fingerprint(
         "target_area_id": target_area_id,
         "quantity": quantity,
         "operation_id": operation_id,
+        "route_deviation_reason": route_deviation_reason,
     }
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -423,6 +477,80 @@ def _replay_or_conflict(movement: PartMovement, fingerprint: str) -> AreaTransfe
 
 
 # ---------------------------------------------------------------------------
+# Confirmed destination precondition (station row lock)
+# ---------------------------------------------------------------------------
+
+
+def _require_confirmed_station(
+    session: Session, station_id: str, target_area_id: int
+) -> tuple[ScanStation, Area]:
+    """The station locked until COMMIT, still bound to the confirmed Area.
+
+    Same refusals as `require_production_station`, plus the optimistic
+    precondition: the Area the operator confirmed must be the Area the
+    station is bound to NOW. A rebound station is refused with nothing
+    written — the operator re-loads the station and confirms again.
+    """
+    station = session.get(ScanStation, station_id, with_for_update=True)
+    if station is None:
+        raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
+    if not station.is_active:
+        raise ConflictError(
+            f"Scan Station '{station_id}' is inactive and accepts no production use."
+            " Nothing was transferred."
+        )
+    if station.area_id != target_area_id:
+        raise ConflictError(
+            f"Scan Station '{station_id}' is no longer bound to the confirmed destination"
+            " Area — its configuration changed since the transfer was prepared. Reload"
+            " the station and confirm the transfer again. Nothing was transferred."
+        )
+    area = session.get(Area, station.area_id)
+    if area is None:  # pragma: no cover - FK guarantees the row
+        raise NotFoundError(f"Area {station.area_id} does not exist.")
+    if not area.is_active:
+        raise ConflictError(
+            f"Area '{area.name}' bound to Scan Station '{station_id}' is inactive"
+            " and accepts no production use."
+        )
+    return station, area
+
+
+def _deviation_message(
+    session: Session,
+    assessment: RouteAssessment,
+    deviation: dict[str, Any],
+    target: Area,
+    operation: Operation,
+) -> str:
+    expected = assessment.expected_next_step
+    if deviation["kind"] == "OPERATION":
+        expected_operation = (
+            session.get(Operation, expected.operation_id)
+            if expected is not None and expected.operation_id is not None
+            else None
+        )
+        expected_code = expected_operation.code if expected_operation is not None else "?"
+        lead = (
+            f"Operation '{operation.code}' is not the Operation this Quantity Flow's Planned"
+            f" Route expects at Area '{target.name}' (planned: '{expected_code}')."
+        )
+    else:
+        expected_area = session.get(Area, expected.area_id) if expected is not None else None
+        lead = (
+            f"Area '{target.name}' is not the next step of this Quantity Flow's Planned"
+            f" Route (next expected: '{expected_area.name}')."
+            if expected_area is not None
+            else f"Area '{target.name}' is not on this Quantity Flow's Planned Route"
+            " — the route has no further step."
+        )
+    return (
+        lead + " Confirm the route deviation with a reason to record the actual transfer;"
+        " nothing is recorded until confirmed."
+    )
+
+
+# ---------------------------------------------------------------------------
 # The transfer command
 # ---------------------------------------------------------------------------
 
@@ -434,37 +562,41 @@ def transfer_to_station_area(
     part_number: object,
     quantity_flow_id: int,
     source_area_id: int,
+    target_area_id: int,
     quantity: object,
     operation_id: int | None,
     confirm_route_deviation: object,
+    route_deviation_reason: str | None,
     device_event_id: object,
 ) -> AreaTransfer:
     """Move one whole QuantityFlow into the station's Area, ONE transaction.
 
     Validates everything before any write; a replayed submission (same
-    ``device_event_id`` + same normalized request) returns the original
-    committed result and creates nothing; a mismatched reuse is an
-    explicit idempotency conflict that creates nothing.
+    ``device_event_id`` + same confirmed intent) returns the original
+    committed result and creates nothing — whatever happened to the
+    station, Area or Operation since; a mismatched reuse is an explicit
+    idempotency conflict that creates nothing.
     """
     # -- Pure input shape (no database) -------------------------------
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity)
     deviation_confirmed = required_flag(confirm_route_deviation, "confirm_route_deviation")
+    reason = optional_text(route_deviation_reason)
     event_id = _normalized_device_event_id(device_event_id)
-
-    # -- Station context ------------------------------------------------
-    station, target = require_production_station(session, station_id)
     fingerprint = _request_fingerprint(
-        station_id=station.station_id,
+        station_id=station_id,
         quantity_flow_id=quantity_flow_id,
         part_number=pn,
         source_area_id=source_area_id,
-        target_area_id=target.id,
+        target_area_id=target_area_id,
         quantity=confirmed_quantity,
         operation_id=operation_id,
+        route_deviation_reason=reason,
     )
 
     # -- Idempotency fast path (SLICE1 §14) ------------------------------
+    # Before any station/Area/Operation state is read: a committed
+    # transfer replays whatever the configuration looks like now.
     committed = _committed_transfer(session, event_id)
     if committed is not None:
         return _replay_or_conflict(committed, fingerprint)
@@ -481,6 +613,13 @@ def transfer_to_station_area(
     committed = _committed_transfer(session, event_id)
     if committed is not None:
         return _replay_or_conflict(committed, fingerprint)
+
+    # -- Station context under the station row lock ---------------------
+    # The confirmed destination is an optimistic precondition: the
+    # station must still be active and still bound to exactly the Area
+    # the operator confirmed, checked on the locked row so a concurrent
+    # deactivation or rebind and this transfer have one serial outcome.
+    station, target = _require_confirmed_station(session, station_id, target_area_id)
 
     # -- Validation before write ---------------------------------------
     if flow.part_number != pn:
@@ -526,31 +665,39 @@ def transfer_to_station_area(
         )
 
     assessment = assess_route(session, flow, target.id)
+    operation = _resolve_operation(session, target, assessment, operation_id)
+
+    # -- Route expectation: Area AND Operation (PROJECT_PROFILE §17) ------
     deviation: dict[str, Any] | None = None
+    matched_step: AssignedRouteStep | None = assessment.matched_step
     if assessment.status == "DEVIATION":
-        deviation = route_deviation_context(assessment, target.id)
+        deviation = route_deviation_context(
+            assessment, kind="AREA", target_area_id=target.id, operation_id=operation.id
+        )
+    elif operation_deviates(assessment, operation.id):
+        deviation = route_deviation_context(
+            assessment, kind="OPERATION", target_area_id=target.id, operation_id=operation.id
+        )
+        # The step is NOT fulfilled: never record it as matched.
+        matched_step = None
+    if deviation is not None:
         if not deviation_confirmed:
-            expected = assessment.expected_next_step
-            expected_area = session.get(Area, expected.area_id) if expected is not None else None
-            expected_name = expected_area.name if expected_area is not None else None
             raise RouteDeviationConfirmationRequiredError(
-                (
-                    f"Area '{target.name}' is not the next step of this Quantity Flow's"
-                    f" Planned Route (next expected: '{expected_name}')."
-                    if expected_name is not None
-                    else f"Area '{target.name}' is not on this Quantity Flow's Planned Route"
-                    " — the route has no further step."
-                )
-                + " Confirm the route deviation to record the actual transfer;"
-                " nothing is recorded until confirmed.",
+                _deviation_message(session, assessment, deviation, target, operation),
                 route_deviation=deviation,
             )
-    operation = _resolve_operation(session, target, assessment, operation_id)
+        if reason is None:
+            # §17 step 7: a confirmed deviation records who, when and
+            # WHY — the reason is mandatory, never defaulted.
+            raise InvalidInputError(
+                "A route deviation needs a reason. Enter why the quantity leaves its"
+                " Planned Route — nothing is recorded until then."
+            )
 
     # -- Writes — all inside the one open transaction ------------------
     metadata: dict[str, Any] = {_FINGERPRINT_KEY: fingerprint}
     if deviation is not None:
-        metadata[_ROUTE_DEVIATION_KEY] = {**deviation, "confirmed": True}
+        metadata[_ROUTE_DEVIATION_KEY] = {**deviation, "confirmed": True, "reason": reason}
     movement = PartMovement(
         quantity_flow_id=flow.id,
         part_number=pn,
@@ -559,9 +706,7 @@ def transfer_to_station_area(
         from_area_id=source.id,
         to_area_id=target.id,
         operation_id=operation.id,
-        assigned_route_step_id=(
-            assessment.matched_step.id if assessment.matched_step is not None else None
-        ),
+        assigned_route_step_id=matched_step.id if matched_step is not None else None,
         station_id=station.station_id,
         occurred_at=func.now(),
         server_received_at=func.now(),

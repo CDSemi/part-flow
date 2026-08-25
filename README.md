@@ -78,9 +78,10 @@ parts until its remaining quantity is exhausted. The Phase 5 backend
 transfer moves one whole Quantity Flow into the Area an active Scan
 Station is bound to — appending the immutable `TRANSFERRED` Movement
 and updating the current position in one idempotent transaction, with
-explicit source selection, destination Operation resolution and
-Planned-Route deviation confirmation (partial quantity is refused
-until SPLIT, Phase 8); it is reachable through the API only until the
+explicit source selection, the confirmed destination Area as a
+precondition on the station binding, destination Operation resolution
+and Planned-Route deviation confirmation with a reason — Area or
+Operation (partial quantity is refused until SPLIT, Phase 8); it is reachable through the API only until the
 Scan Station view is wired to it. The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
@@ -394,10 +395,13 @@ integration):
   and Area inventory, PN barcode/manual resolution, source candidates
   by position and route with several sources returned unpicked and
   uncombined, the exact `TRANSFERRED` shape with the matched snapshot
-  step, route-deviation refusal until confirmed, destination
-  Operation resolution, partial-quantity and invalid-input rejection
-  with zero writes, idempotent replay and conflict, concurrent
-  transfers of one flow and transfer versus Area deactivation) — all
+  step, Area and Operation route-deviation refusal until confirmed
+  with a reason, the confirmed destination as a station-binding
+  precondition, destination Operation resolution, partial-quantity
+  and invalid-input rejection with zero writes, idempotent replay —
+  independent of later station changes — and conflict, concurrent
+  transfers of one flow, and transfer versus Area deactivation,
+  station rebind and Operation deactivation) — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`

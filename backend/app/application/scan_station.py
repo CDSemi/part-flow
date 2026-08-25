@@ -141,6 +141,11 @@ class TransferCandidate(NamedTuple):
     current_area: Area
     route_status: RouteStatus
     expected_next_area: Area | None
+    # The Operation the Planned Route expects at the next step (None:
+    # FLOATING, no next step, or a step without an Operation). An
+    # ON_ROUTE transfer for a DIFFERENT active Operation is an
+    # Operation deviation the transfer command confirms explicitly.
+    expected_operation_id: int | None
     # The Operation the destination resolves to without a choice, if
     # any; None means the operator must choose among ``operations``.
     suggested_operation_id: int | None
@@ -236,6 +241,7 @@ def resolve_part_number_scan(
                 current_area=_area(flow.current_area_id),
                 route_status=assessment.status,
                 expected_next_area=_area(expected.area_id) if expected is not None else None,
+                expected_operation_id=expected.operation_id if expected is not None else None,
                 suggested_operation_id=suggested_operation_id(operations, assessment),
                 work_order=contexts.get(flow.id),
             )
