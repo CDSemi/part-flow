@@ -8,9 +8,10 @@ import { App } from './App';
 
 beforeEach(() => {
   // A concrete station URL: /scan-station itself is the Station
-  // Selector and has no scan input. DEBURR-ST-01 is a Fixed-Worker
-  // Area, so no Worker sign-in modal gates the main input — these
-  // tests assert pure connectivity enable/disable behavior.
+  // Selector and has no scan input. The Scan Station is the real
+  // Phase 5 view: its station context and Area inventory come from the
+  // stubbed `/api` below, so these tests assert pure connectivity
+  // enable/disable behavior of the shell on real controls.
   window.history.replaceState({}, '', '/scan-station/DEBURR-ST-01');
 });
 
@@ -20,8 +21,44 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/**
+ * The station environment every test shares: one active station bound
+ * to the Deburr Area with one Operation and no production quantity.
+ * Only the health endpoint follows the per-test implementation —
+ * connectivity is what these tests are about.
+ */
+function stationFixture(url: string): Promise<Response> {
+  const area = {
+    id: 5,
+    name: 'Deburr',
+    color: '#33aa66',
+    description: null,
+    is_terminal: false,
+  };
+  const json = (body: unknown) =>
+    Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+  if (/\/context$/.test(url)) {
+    return json({
+      station_id: 'DEBURR-ST-01',
+      department: { id: 1, name: 'Machining' },
+      area,
+      operations: [
+        { id: 50, code: 'DEBURR', name: 'Deburring', is_external: false },
+      ],
+      has_machines: false,
+    });
+  }
+  if (/\/inventory$/.test(url)) {
+    return json({ area, lines: [], total_part_numbers: 0, total_quantity: 0 });
+  }
+  return json([]);
+}
+
 function stubFetch(implementation: () => Promise<Response>) {
-  const fetchMock = vi.fn(implementation);
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    return url.endsWith('/api/health') ? implementation() : stationFixture(url);
+  });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
@@ -47,7 +84,6 @@ test('shows the connecting state while the health request is pending', async () 
 
   expect(screen.getByText('CONNECTING…')).toBeInTheDocument();
   // Production-write controls are not enabled before the backend confirms.
-  // (Views load lazily through the development-only mock boundary.)
   expect(await screen.findByLabelText('Scan barcode')).toBeDisabled();
 });
 
@@ -199,7 +235,7 @@ test('shows OFFLINE when the backend returns a non-success response', async () =
   expect(await screen.findByText('OFFLINE')).toBeInTheDocument();
 });
 
-test('disables production-write controls while disconnected but keeps read-only mock data visible', async () => {
+test('disables production-write controls while disconnected but keeps read-only data visible', async () => {
   stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
 
   render(<App />);
@@ -212,8 +248,8 @@ test('disables production-write controls while disconnected but keeps read-only 
   ).toBeDisabled();
   expect(screen.getByRole('button', { name: '⟲ UNDO' })).toBeDisabled();
 
-  // Already displayed read-only mock information stays visible.
-  expect(screen.getByText('In this Area now')).toBeInTheDocument();
+  // Already displayed read-only information stays visible.
+  expect(await screen.findByText('In this Area now')).toBeInTheDocument();
 });
 
 test('retry re-runs the health check and recovers to ONLINE', async () => {

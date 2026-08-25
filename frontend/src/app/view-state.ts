@@ -23,3 +23,35 @@ export function getViewStatePreview(): ViewStatePreview {
     ? (value as ViewStatePreview)
     : null;
 }
+
+/**
+ * Development-only mock preview of a real view's LATER-phase workflows.
+ *
+ * The Scan Station is a real view since Phase 5 (transfer to an Area
+ * queue), while its approved Phase 6+ one-shot workflows (Machine
+ * assignment, DONE / QUEUE, Repair, Scrap, Undo, Worker sessions) still
+ * exist only as the mock preview. `?preview=mock` on a Scan Station
+ * route opts a development build into that preview; the choice is
+ * remembered for the browser session so the preview's own navigation
+ * (station selection, the Ctrl+Shift+K mode switch) stays inside it.
+ * Production builds compile the check away and never expose it.
+ */
+const MOCK_PREVIEW_KEY = 'partflow.dev.mock-preview';
+
+export function isMockPreviewRequested(): boolean {
+  if (!import.meta.env.DEV) return false;
+  const param = new URLSearchParams(window.location.search).get('preview');
+  try {
+    if (param === 'mock') {
+      window.sessionStorage.setItem(MOCK_PREVIEW_KEY, 'mock');
+      return true;
+    }
+    if (param === 'real') {
+      window.sessionStorage.removeItem(MOCK_PREVIEW_KEY);
+      return false;
+    }
+    return window.sessionStorage.getItem(MOCK_PREVIEW_KEY) === 'mock';
+  } catch {
+    return param === 'mock';
+  }
+}

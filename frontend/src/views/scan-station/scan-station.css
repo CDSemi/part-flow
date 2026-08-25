@@ -1468,3 +1468,16 @@
 .ss-headactions .themetoggle.compact:hover {
   background: var(--row-hover);
 }
+
+/* Operation choice inside the transfer quantity step (Phase 5): the
+   shared `.choice` button, with the selected Operation marked by the
+   action color edge — never color alone (aria-pressed carries it). */
+.ss-choices {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.ss-choices .choice.selected {
+  border-color: var(--info);
+  box-shadow: inset 3px 0 0 var(--info);
+}

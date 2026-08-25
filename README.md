@@ -9,20 +9,20 @@ the **Phase 2 Frontend Design System and Application Shell**, the
 **Phase 3.5 Minimum Environment Setup** (persistence, the configuration
 APIs, and the real Administration/Machines frontend), and the completed
 **Phase 4 Manual Work Order Intake and Production Release** — the first
-business vertical slice, end to end — and the **Phase 5 Scan Station
-Transfer to an Area Queue backend** (persistence, the transfer command
-and the Scan Station read models; the real Scan Station frontend wiring
-is still to come):
+business vertical slice, end to end — and the completed **Phase 5 Scan
+Station Transfer to an Area Queue** (persistence, the transfer command,
+the Scan Station read models, and the real Scan Station frontend):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
   real `/api/health` connectivity integration, and the ten approved GUI
   views — the real views (Administration's minimum-environment
-  sections and Management → Machines from Phase 3.5, and
-  Management → Work Orders from Phase 4) read and write the real `/api`
-  surface through the shared client layer in `src/api/` and ship in
-  every build from `src/app/real-views.ts`, while the remaining views
-  stay development-only mock views until their backend slices exist
+  sections and Management → Machines from Phase 3.5, Management →
+  Work Orders from Phase 4, and the Scan Station from Phase 5) read and
+  write the real `/api` surface through the shared client layer in
+  `src/api/` and ship in every build from `src/app/real-views.ts`,
+  while the remaining views stay development-only mock views until
+  their backend slices exist
 - `backend/` — FastAPI with the operational health endpoint
   (`GET /api/health`), the Phase 3.5 environment configuration API
   (Departments, Areas with derived `PF:AREA` barcodes, Operations,
@@ -81,8 +81,14 @@ and updating the current position in one idempotent transaction, with
 explicit source selection, the confirmed destination Area as a
 precondition on the station binding, destination Operation resolution
 and Planned-Route deviation confirmation with a reason — Area or
-Operation (partial quantity is refused until SPLIT, Phase 8); it is reachable through the API only until the
-Scan Station view is wired to it. The Phase 3.5
+Operation (partial quantity is refused until SPLIT, Phase 8); the
+Scan Station view records it — scans resolve on the server, success is
+reported only after the server confirmed the write, and the Area
+inventory refreshes from the server. Machine, Area and scrap barcodes,
+Worker identity and every Phase 6+ station action stay honest
+placeholders; the approved presentation of those workflows survives as
+a development-only mock preview (`?preview=mock` on a Scan Station
+route) that never enters a production build. The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
@@ -140,9 +146,11 @@ Frontend structure:
 - `src/api/` — the shared API client layer of the real views: a thin
   typed fetch core translating the backend's `{"detail": …}` errors
   into user-facing messages, the environment configuration and
-  Machines endpoints (Phase 3.5) and the Work Orders, Part Numbers,
-  route-template and production-release endpoints (Phase 4) with
-  snake_case ↔ camelCase mapping, the ISO 8601 duration helpers, and
+  Machines endpoints (Phase 3.5), the Work Orders, Part Numbers,
+  route-template and production-release endpoints (Phase 4) and the
+  Scan Station context / scan resolution / transfer / Area inventory
+  endpoints (Phase 5, `scan-station.ts`) with snake_case ↔ camelCase
+  mapping, the ISO 8601 duration helpers, and
   the `useApiData` loading/error/reload hook. Production-safe — never
   imports from `src/mocks/`.
 - `src/mocks/` — the development-only mock datasets. The remaining
@@ -152,7 +160,8 @@ Frontend structure:
   through the dev-only registry `src/app/dev-views.ts`
   (`import.meta.env.DEV`), so a production build excludes them
   entirely: the real views (`src/app/real-views.ts` — Administration
-  and Machines from Phase 3.5, Work Orders from Phase 4) ship in every
+  and Machines from Phase 3.5, Work Orders from Phase 4, the Scan
+  Station from Phase 5) ship in every
   build against the live `/api` surface, and every other route renders
   an explicit "not connected to a production data source yet" state. `npm run build`
   verifies the boundary by scanning the generated assets for known
@@ -160,10 +169,12 @@ Frontend structure:
   `src/production-boundary.test.ts` additionally verifies at the
   source level that no production module imports from `src/mocks/`
   by walking the production module graph transitively from
-  `src/main.tsx` (the development-only Worker sessions preview and the
-  Completed Work Orders visual preview stay behind
-  `import.meta.env.DEV`-guarded lazy imports, which the walk cuts —
-  an ordinary production dynamic import is still followed). Shared view-model types
+  `src/main.tsx` (the development-only Worker sessions preview, the
+  Completed Work Orders visual preview and the mock Scan Station
+  preview of the Phase 6+ workflows — `ScanStationMockView.tsx`,
+  `?preview=mock` — stay behind `import.meta.env.DEV`-guarded lazy
+  imports, which the walk cuts — an ordinary production dynamic import
+  is still followed). Shared view-model types
   live in `src/views/view-models.ts` (types only — production-safe).
 - `src/views/<view>/` — one folder per GUI view. `src/views/scan-station/barcode.ts`
   holds the deterministic `PF:` barcode parsing and PN normalization (PN
@@ -224,9 +235,10 @@ docker compose up --build
 - Backend API: <http://localhost:8000>
 - Health endpoint: <http://localhost:8000/api/health> (also proxied at <http://localhost:5173/api/health>)
 
-The frontend serves the application shell with the real Phase 3.5 and
-Phase 4 views (Administration, Management → Machines, Management →
-Work Orders) plus the remaining development-only mock views. The top-navigation chip shows the real backend
+The frontend serves the application shell with the real Phase 3.5,
+Phase 4 and Phase 5 views (Administration, Management → Machines,
+Management → Work Orders, Scan Station) plus the remaining
+development-only mock views. The top-navigation chip shows the real backend
 connectivity state: CONNECTING…, ONLINE, or OFFLINE with a persistent
 banner and Retry action.
 
@@ -489,7 +501,7 @@ format check, lint, typecheck, tests, and production build. A separate
 ## Repository layout
 
 ```text
-frontend/          Vite + React + TypeScript app (shell + real Phase 3.5/Phase 4 views + mock views)
+frontend/          Vite + React + TypeScript app (shell + real Phase 3.5/Phase 4/Phase 5 views + mock views)
   src/styles/      semantic design tokens and shared primitives
   src/app/         router, theme, connectivity, real/dev view registries, dev state preview
   src/api/         typed API client layer of the real views (production-safe)

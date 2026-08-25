@@ -1,7 +1,8 @@
 import './scan-station.css';
 
 import {
-  Fragment,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,215 +14,177 @@ import type { ReactNode } from 'react';
 
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
-import { getViewStatePreview } from '../../app/view-state';
+import { isMockPreviewRequested } from '../../app/view-state';
+import { errorMessage } from '../../api/client';
+import {
+  listAreas,
+  listDepartments,
+  listOperations,
+  listScanStations,
+} from '../../api/environment';
+import type { Area, Department, Operation } from '../../api/environment';
+import { listMachines } from '../../api/machines';
+import type { Machine } from '../../api/machines';
+import { newDeviceEventId } from '../../api/production-release';
+import {
+  areaRefColor,
+  getAreaInventory,
+  getStationContext,
+  resolveScan,
+  routeDeviationConfirmation,
+  transferToStationArea,
+} from '../../api/scan-station';
+import type {
+  AreaInventory,
+  AreaRef,
+  OperationRef,
+  ScanResolution,
+  StationContext,
+  TransferCandidate,
+  TransferResult,
+  WorkOrderContext,
+} from '../../api/scan-station';
+import { useApiData } from '../../api/use-api-data';
 import {
   AreaMachineLayout,
   AreaSummaryCard,
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
-import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ConnectivityChip } from '../../components/ConnectivityChip';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot, RouteModeChip, TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
-import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { isTouchPrimaryDevice } from '../../components/touch-device';
-import { LoadingState } from '../../components/view-states';
+import { ErrorState, LoadingState } from '../../components/view-states';
+import { areaStats } from '../area-monitoring';
+import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
+import { normalizeScanInput, parseScan } from './barcode';
 import {
-  MOCK_AREA_CARDS,
-  MOCK_AREA_CARDS_LONG,
-  MOCK_AREA_MACHINES,
-} from '../../mocks/area-board';
-import { areaByKey } from '../../mocks/areas';
-import { activeMachines } from '../../mocks/machines';
-import { workerIdModeFor } from '../../mocks/administration';
-import type { WorkerIdMode } from '../../mocks/administration';
+  ConfirmationSummary,
+  EntityChip,
+  FloatingNotice,
+  Guidance,
+  HeaderOperations,
+  ManualEntryDialog,
+  OperationChips,
+  StepButtons,
+  StepRecap,
+  UnknownStation,
+} from './scan-station-presentation';
 import {
-  fixedWorkerFor,
-  MOCK_MACHINE_BARCODES,
-  MOCK_REPAIR_SOURCES,
-  MOCK_SCAN_STATIONS,
-  requireBadgeConfirm,
-  stationById,
-  workerByBadge,
-  workerSessionTimeoutMinutes,
-} from '../../mocks/scan-station';
-import type { BadgeConfirmAction, MockWorker } from '../../mocks/scan-station';
-import { catalogPartNumber } from '../../mocks/work-orders';
-import { areaStats, splitAssignments } from '../area-monitoring';
-import type { AreaAssignment } from '../area-monitoring';
-import { useUiClock } from '../../components/ui-clock';
-import { formatIsoDate, todayIso } from '../dates';
-import type {
-  MockAreaCard,
-  MockAreaMachine,
-  MockCompletedAction,
-  MockScanStation,
-  MovementType,
-  RequestType,
-  RouteMode,
-} from '../view-models';
-import {
-  normalizePartNumber,
-  normalizeScanInput,
-  parseScan,
-  SCRAP_BARCODE,
-} from './barcode';
-import {
-  applyAssign,
-  applyDone,
-  applyIntroduce,
-  applyQueueReturn,
-  applyScrap,
-  applyTransferIn,
-  cardBreakdown,
-  completionRequired,
-  deriveSessionMachines,
-} from './mock-area-state';
+  enterKeyHandler,
+  NOTICE_OK_MS,
+  NOTICE_WARN_MS,
+  quantityKeyHandler,
+} from './scan-station-wizard';
+import type { Notice } from './scan-station-presentation';
 
 /**
- * One floating scan notification. Success/info notices auto-dismiss
- * after ~4 s, warnings and errors after ~8 s; a new notice replaces
- * the previous one and restarts the timer. The persistent OFFLINE
- * application banner is NOT a notice — it stays until reconnection.
+ * Scan Station — the REAL Phase 5 view (GUI_DESIGN §4; IMPLEMENTATION_
+ * ROADMAP Phase 5). The Station Selector and the station itself read
+ * real server state through `/api`, PN barcodes and manual entries
+ * resolve on the server, and the ONE production command this phase
+ * records is the source-explicit transfer of a whole Quantity Flow
+ * into the station's Area — recorded by the server before anything
+ * reads as success. The approved Phase 6+ workflows (Machine
+ * assignment, DONE / QUEUE, Repair, Scrap, Undo, Worker sessions,
+ * Receive Quantity from the station) are NOT implemented here: they
+ * stay honest placeholders, and the mock preview of them survives only
+ * behind the development-only boundary below (`?preview=mock`).
  */
-type Notice = {
-  kind: 'ok' | 'warn' | 'err' | 'info';
-  icon?: string;
-  title: string;
-  detail?: string;
-};
 
-const NOTICE_OK_MS = 4000;
-const NOTICE_WARN_MS = 8000;
+// Development-only preview of the mock Scan Station (Phase 6+
+// workflows). The conditional is compiled away in production builds,
+// so the mock view and its datasets never enter the module graph.
+const MockPreview = import.meta.env.DEV
+  ? lazy(() =>
+      import('./ScanStationMockView').then((m) => ({
+        default: m.ScanStationMockView,
+      })),
+    )
+  : null;
 
-// Mock-only "clock" for newly recorded actions — deterministic on purpose.
-const MOCK_SCAN_TIME = '14:32';
-
-/** A transferable source position of a PN outside the station's Area. */
-interface SourceOption {
-  areaLabel: string;
-  qty: number;
-  card: MockAreaCard;
-}
-
-/**
- * One confirmed application command: the immutable Movement events it
- * appends (in order) plus the mock state transition. Undo reverses the
- * complete command — never one arbitrary event of it.
- */
-interface Command {
-  action: MockCompletedAction;
-  update: (cards: MockAreaCard[]) => MockAreaCard[];
-}
-
-/**
- * One-shot dialog flows — no persistent context survives a dialog.
- *
- * `parent` is the dialog/step the flow was opened FROM within the same
- * one-shot workflow (the PN action dialog, the source selection, or
- * manual PN entry) — the complete previous flow value, so Back re-opens
- * exactly that step with its context (PN, source, selections) intact.
- * Back is pure dialog navigation and never records or changes tracking
- * data. Flows opened directly from the Scan Station surface (scan, row
- * action, Undo) carry no parent: they show no Back, and Cancel stays
- * the only exit. Variants that can never be opened from another dialog
- * (queue-return, undo, manual-pn) deliberately have no `parent`.
- */
-type Flow =
-  | {
-      kind: 'machine-assign';
-      machine: string | null;
-      pn: string | null;
-      parent?: Flow;
-    }
-  | { kind: 'pn-actions'; pn: string; parent?: Flow }
-  | {
-      kind: 'transfer';
-      pn: string;
-      source: SourceOption;
-      parent?: Flow;
-    }
-  | {
-      kind: 'source-select';
-      pn: string;
-      sources: SourceOption[];
-      parent?: Flow;
-    }
-  | { kind: 'intake'; pn: string; parent?: Flow }
-  | { kind: 'add-qty'; pn: string; parent?: Flow }
-  | { kind: 'repair'; pn: string; parent?: Flow }
-  | { kind: 'scrap'; pn: string; parent?: Flow }
-  | { kind: 'queue-return'; pn: string; machine: string; max: number }
-  | {
-      kind: 'done';
-      pn: string;
-      machine: string | null;
-      max: number;
-      parent?: Flow;
-    }
-  | { kind: 'undo' }
-  | { kind: 'manual-pn'; initialPn?: string };
-
-/**
- * Flow variants the PN action dialog can open as its next step — every
- * one carries the optional `parent` back-reference, so the caller can
- * attach the action dialog as the step Back returns to.
- */
-type PnActionChildFlow = Exclude<
-  Flow,
-  { kind: 'queue-return' } | { kind: 'undo' } | { kind: 'manual-pn' }
->;
-
-/**
- * Scan Station routing: `/scan-station` shows the Station Selector
- * (never auto-redirecting to a station); `/scan-station/:stationId`
- * loads the station; an unknown or inactive Station ID shows an
- * explicit error and never silently falls back to another station.
- * `/scan-station/:stationId/production` loads the same station in
- * production mode: the top application navigation is hidden (App
- * shell). The footer is identical in both modes — a non-interactive
- * Station ID, mode label, and shortcut hint.
- */
 export function ScanStationView() {
   const { route } = useRouter();
+  if (MockPreview && isMockPreviewRequested()) {
+    return (
+      <Suspense fallback={<LoadingState label="Loading Scan Station" />}>
+        <MockPreview />
+      </Suspense>
+    );
+  }
   if (route.view !== 'scan-station' || route.stationId === null) {
     return <StationSelector />;
   }
-  const station = stationById(route.stationId);
-  if (!station) return <UnknownStation stationId={route.stationId} />;
   return (
     <StationView
-      key={station.stationId}
-      station={station}
+      key={route.stationId}
+      stationId={route.stationId}
       productionMode={route.mode === 'production'}
     />
   );
 }
 
-/**
- * Supported Operations as individual light informational chips — the
- * same presentation the Scan Station header uses (shared `.opchips` /
- * `.opchip` styling). Labels, not controls: no action color, no
- * button-like hover, wrapping cleanly for multi-Operation Areas.
- */
-function OperationChips({ operations }: { operations: readonly string[] }) {
-  if (operations.length === 0) return <>—</>;
-  return (
-    <span className="opchips">
-      {operations.map((op) => (
-        <span className="opchip" key={op}>
-          {op}
-        </span>
-      ))}
-    </span>
-  );
+/* ------------------------------------------------------------------ */
+/* Station Selector                                                    */
+/* ------------------------------------------------------------------ */
+
+interface SelectorData {
+  stations: { stationId: string; areaId: number }[];
+  areas: Map<number, Area>;
+  departments: Map<number, Department>;
+  operationsByArea: Map<number, Operation[]>;
+  machineCountByArea: Map<number, number>;
+}
+
+async function loadSelectorData(): Promise<SelectorData> {
+  const [stations, areas, departments, operations, machines] =
+    await Promise.all([
+      listScanStations(),
+      listAreas(),
+      listDepartments(),
+      listOperations(),
+      listMachines(),
+    ]);
+  const operationsByArea = new Map<number, Operation[]>();
+  for (const operation of operations) {
+    if (!operation.isActive) continue;
+    const list = operationsByArea.get(operation.areaId) ?? [];
+    list.push(operation);
+    operationsByArea.set(operation.areaId, list);
+  }
+  const machineCountByArea = new Map<number, number>();
+  for (const machine of machines) {
+    if (machine.retiredOn !== undefined) continue;
+    machineCountByArea.set(
+      machine.areaId,
+      (machineCountByArea.get(machine.areaId) ?? 0) + 1,
+    );
+  }
+  return {
+    stations: stations
+      .filter((station) => station.isActive)
+      .map((station) => ({
+        stationId: station.stationId,
+        areaId: station.areaId,
+      })),
+    areas: new Map(areas.map((area) => [area.id, area])),
+    departments: new Map(
+      departments.map((department) => [department.id, department]),
+    ),
+    operationsByArea,
+    machineCountByArea,
+  };
+}
+
+function operationLabel(operation: Pick<Operation, 'code' | 'name'>): string {
+  return operation.name ?? operation.code;
 }
 
 function StationSelector() {
-  const { navigate } = useRouter();
+  const data = useApiData(loadSelectorData);
   return (
     <section className="ss" aria-label="Scan Station">
       <div className="ss-select">
@@ -230,222 +193,230 @@ function StationSelector() {
           Select the Scan Station for your work area. <b>Production mode</b>{' '}
           hides the main navigation to keep the station focused on scanning.
         </p>
-        <ul className="ss-stationlist">
-          {MOCK_SCAN_STATIONS.filter((s) => s.active).map((s) => {
-            const area = areaByKey(s.area);
-            const machines = MOCK_AREA_MACHINES[s.area] ?? [];
-            return (
-              // No nested interactive controls: the card's main surface
-              // is ONE button (standard mode) with the Production mode
-              // action as its sibling in a separate cell.
-              <li key={s.stationId} className="ss-stationcard">
-                <button
-                  className="ss-stationmain"
-                  aria-label={`Open ${s.stationId}`}
-                  onClick={() => navigate(`/scan-station/${s.stationId}`)}
-                >
-                  <span className="sid mono">{s.stationId}</span>
-                  <span className="smeta">
-                    {s.department} ·{' '}
-                    <AreaDot
-                      colorVar={area?.colorVar ?? 'var(--faint)'}
-                      size={10}
-                    />{' '}
-                    {area?.name} · Operations:{' '}
-                    <OperationChips operations={area?.operations ?? []} />
-                  </span>
-                  <span className="stype">
-                    {machines.length > 0
-                      ? `${machines.length} Machines · Queue and assignment enabled`
-                      : 'Direct Area processing · No Machine assignment'}
-                  </span>
-                </button>
-                <div className="ss-stationacts">
-                  <button
-                    className="ss-openbtn"
-                    aria-label={`Open ${s.stationId} in production mode`}
-                    title="Opens this station with the application navigation hidden"
-                    onClick={() =>
-                      navigate(`/scan-station/${s.stationId}/production`)
-                    }
-                  >
-                    Production mode
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+        {data.state.status === 'loading' ? (
+          <LoadingState label="Loading Scan Stations" />
+        ) : data.state.status === 'error' ? (
+          <ErrorState
+            message="Scan Stations could not be loaded."
+            detail={data.state.message}
+            onRetry={data.reload}
+          />
+        ) : data.state.data.stations.length === 0 ? (
+          <div className="ss-feedback idle">
+            <div>
+              <div className="t1">No active Scan Station is configured</div>
+              <div className="t2">
+                Configure Scan Stations in Administration → Scan Stations, bound
+                to an active Area.
+              </div>
+            </div>
+          </div>
+        ) : (
+          <StationList data={data.state.data} />
+        )}
       </div>
     </section>
   );
 }
 
-function UnknownStation({ stationId }: { stationId: string }) {
+function StationList({ data }: { data: SelectorData }) {
   const { navigate } = useRouter();
+  const { areas, departments, operationsByArea, machineCountByArea } = data;
   return (
-    <section className="ss" aria-label="Scan Station">
-      <div className="ss-select">
-        <div className="ss-feedback err" role="alert">
-          <div className="fic" aria-hidden="true">
-            ✕
-          </div>
-          <div>
-            <div className="t1">Scan Station “{stationId}” is unavailable</div>
-            <div className="t2">
-              The Station ID is invalid or inactive. Select an available Scan
-              Station to continue.
+    <ul className="ss-stationlist">
+      {data.stations.map((station) => {
+        const area = areas.get(station.areaId);
+        const department = area
+          ? departments.get(area.departmentId)
+          : undefined;
+        const operations = operationsByArea.get(station.areaId) ?? [];
+        const machineCount = machineCountByArea.get(station.areaId) ?? 0;
+        return (
+          // No nested interactive controls: the card's main
+          // surface is ONE button (standard mode) with the
+          // Production mode action as its sibling in a separate
+          // cell.
+          <li key={station.stationId} className="ss-stationcard">
+            <button
+              className="ss-stationmain"
+              aria-label={`Open ${station.stationId}`}
+              onClick={() => navigate(`/scan-station/${station.stationId}`)}
+            >
+              <span className="sid mono">{station.stationId}</span>
+              <span className="smeta">
+                {department?.name ?? '—'} ·{' '}
+                <AreaDot colorVar={area?.color ?? 'var(--faint)'} size={10} />{' '}
+                {area?.name ?? '—'} · Operations:{' '}
+                <OperationChips operations={operations.map(operationLabel)} />
+              </span>
+              <span className="stype">
+                {machineCount > 0
+                  ? `${machineCount} Machine${machineCount === 1 ? '' : 's'} · Queue and assignment enabled`
+                  : 'Direct Area processing · No Machine assignment'}
+              </span>
+            </button>
+            <div className="ss-stationacts">
+              <button
+                className="ss-openbtn"
+                aria-label={`Open ${station.stationId} in production mode`}
+                title="Opens this station with the application navigation hidden"
+                onClick={() =>
+                  navigate(`/scan-station/${station.stationId}/production`)
+                }
+              >
+                Production mode
+              </button>
             </div>
-          </div>
-        </div>
-        <button
-          className="bigbtn primary"
-          onClick={() => navigate('/scan-station')}
-        >
-          Select another Scan Station
-        </button>
-      </div>
-    </section>
+          </li>
+        );
+      })}
+    </ul>
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Presentation adapters                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The shared Area/Machine monitoring components take the presentation
+ * shapes of `views/view-models` (their `key`/`area` fields carry the
+ * development registry's Area keys, which the components never read
+ * — they only use name, color, description, Operations and terminal
+ * flag). A real Area is identified by its server id; the key below is
+ * a stable render identity only.
+ */
+function presentationArea(area: AreaRef, operations: OperationRef[]): MockArea {
+  return {
+    key: `area-${area.id}` as MockArea['key'],
+    name: area.name,
+    colorVar: areaRefColor(area),
+    description: area.description ?? '',
+    operations: operations.map(operationLabel),
+    terminal: area.isTerminal,
+  };
+}
+
+/** Work Order context line of a flow, in the shared card label form. */
+function workOrderLabel(workOrder: WorkOrderContext | null): string {
+  if (!workOrder) return 'WO —';
+  return `WO ${workOrder.workOrderNumber ?? '—'} · ${workOrder.requestType}`;
 }
 
 /**
- * Development-only clickable demo barcode inside the DevNotice. The
- * button is an invisible wrapper around the shared code chip — the
- * value keeps its `<code>` presentation, hover/focus reveal the
- * affordance (scan-station.css). A click feeds the value through the
- * EXACT scanner path (`onScan` → main input + `handleScan()`); there
- * is no parallel demo scan flow.
+ * One presence card per Quantity Flow currently in the Area. Phase 5
+ * knows no processing states: every flow simply is "in this Area"
+ * (queue in an Area with Machines, direct processing otherwise —
+ * exactly what the shared card derives from an entry without Machine
+ * portions). Due dates, Job Numbers and time in Area arrive with the
+ * later monitoring read models.
  */
-function DemoBarcode({
-  value,
-  onScan,
-}: {
-  value: string;
-  onScan: (value: string) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="ss-demobarcode"
-      title="Click to simulate scan"
-      onClick={() => onScan(value)}
-    >
-      <code>{value}</code>
-    </button>
+function inventoryCards(
+  inventory: AreaInventory,
+  areaKey: MockArea['key'],
+): MockAreaCard[] {
+  return inventory.lines.flatMap((line) =>
+    line.flows.map((flow) => ({
+      area: areaKey,
+      pn: line.partNumber,
+      workOrder: workOrderLabel(flow.workOrder),
+      job: '—',
+      qty: flow.quantity,
+      machines: [],
+      due: null,
+      enteredAreaAt: null,
+      received: '',
+    })),
   );
 }
 
+/** Active Machines of the Area as monitoring cards: Idle unless the
+ * maintenance override applies (assignment arrives with Phase 6). */
+function areaMachineCards(
+  machines: Machine[],
+  areaId: number,
+): MockAreaMachine[] {
+  return machines
+    .filter(
+      (machine) => machine.areaId === areaId && machine.retiredOn === undefined,
+    )
+    .map((machine) => ({
+      name: machine.name,
+      status: machine.maintenance ? 'maintenance' : 'idle',
+      stateChangedAt: machine.stateChangedAt,
+      maintenanceNote: machine.maintenance?.note,
+      expectedReturn: machine.maintenance?.expectedReturn,
+    }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Station                                                             */
+/* ------------------------------------------------------------------ */
+
+/** The last confirmed action of this station session (Last Action block). */
+interface LastAction {
+  pn: string;
+  summary: string;
+}
+
+/**
+ * One-shot dialog flows — no persistent context survives a dialog.
+ * `parent` is the step Back returns to within the same workflow
+ * (source selection, the in-Area dialog, manual PN entry); flows
+ * opened directly from a scan carry none and show no Back.
+ */
+type Flow =
+  | { kind: 'manual-pn'; initialPn?: string }
+  | {
+      kind: 'source-select';
+      resolution: ScanResolution;
+      parent?: Flow;
+    }
+  | {
+      kind: 'transfer';
+      resolution: ScanResolution;
+      candidate: TransferCandidate;
+      parent?: Flow;
+    }
+  | { kind: 'in-area'; resolution: ScanResolution; parent?: Flow }
+  | { kind: 'no-quantity'; resolution: ScanResolution; parent?: Flow };
+
 function StationView({
-  station,
+  stationId,
   productionMode,
 }: {
-  station: MockScanStation;
+  stationId: string;
   productionMode: boolean;
 }) {
-  const preview = getViewStatePreview();
   const { navigate } = useRouter();
   const { status } = useConnectivity();
   const disconnected = status === 'unavailable';
   const writeBlocked = status !== 'connected';
 
-  const area = areaByKey(station.area);
-  // This Area's Machines from the registry (retired Machines never
-  // appear). Their monitoring state (running/idle + state age) is NOT
-  // taken from the load-time mock projection — it is derived below from
-  // the session-local cards, so confirmed commands are reflected.
-  const stationMachines = useMemo(
-    () => activeMachines().filter((m) => m.area === station.area),
-    [station.area],
+  const loadContext = useCallback(
+    () => getStationContext(stationId),
+    [stationId],
   );
-  const hasMachines = stationMachines.length > 0;
+  const context = useApiData(loadContext);
+  const ready = context.state.status === 'ready' ? context.state.data : null;
+  const areaId = ready?.area.id ?? null;
+  const loadInventory = useCallback(
+    () =>
+      areaId === null
+        ? Promise.resolve<AreaInventory | null>(null)
+        : getAreaInventory(areaId),
+    [areaId],
+  );
+  const inventory = useApiData(loadInventory);
+  const machinesData = useApiData(listMachines);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  // Decided once per station lifecycle — pointer capabilities do not
-  // change while the station is open (same pattern as QuantityKeypad).
   const [touchPrimary] = useState(isTouchPrimaryDevice);
-  // Worker identification follows the Area's configured Worker ID mode
-  // (PROJECT_PROFILE §19): Disabled records no Worker, Fixed Worker
-  // records the Area's configured Worker, Scanned session requires an
-  // active Worker Session opened by a badge scan.
-  const workerMode = workerIdModeFor(station.area);
-  const fixedWorker =
-    workerMode === 'fixed' ? fixedWorkerFor(station.area) : null;
-  const sessionTimeoutMs = workerSessionTimeoutMinutes(station.area) * 60_000;
-  // Scanned-session state: the sliding inactivity deadline moves
-  // forward with every VALID production interaction (refreshSession);
-  // invalid or unknown scans never refresh it. No session exists until
-  // the first badge scan.
-  const [session, setSession] = useState<{
-    worker: MockWorker;
-    expiresAt: number;
-  } | null>(null);
-  // Expiration flips through a timer aimed at the sliding deadline —
-  // the displayed countdown derives from the shared UI clock inside
-  // the Worker pill (§4.3), so the big station surface never
-  // re-renders per tick.
-  const [sessionExpired, setSessionExpired] = useState(false);
-  useEffect(() => {
-    if (workerMode !== 'scanned' || !session) return;
-    setSessionExpired(false);
-    const ms = session.expiresAt - Date.now();
-    if (ms <= 0) {
-      setSessionExpired(true);
-      return;
-    }
-    const timer = window.setTimeout(() => setSessionExpired(true), ms);
-    return () => window.clearTimeout(timer);
-  }, [session, workerMode]);
-  // The station is session-blocked in Scanned-session mode until a
-  // valid badge scan: on open (no session yet) and after expiration.
-  // ONLY the Scan Station is blocked — the badge modal exists on this
-  // route alone, and an open production dialog keeps its draft
-  // underneath while confirmation stays blocked (§4.12).
-  const sessionBlocked =
-    workerMode === 'scanned' && (!session || sessionExpired);
-  const activeWorker: MockWorker | null =
-    workerMode === 'fixed'
-      ? fixedWorker
-      : workerMode === 'scanned' && session && !sessionExpired
-        ? session.worker
-        : null;
-  const workerName = activeWorker?.name ?? null;
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
-  // Session-local copy of the mock Area cards (all Areas): confirmed
-  // commands update it so the monitoring surfaces reflect the result.
-  const baseCards = preview === 'long' ? MOCK_AREA_CARDS_LONG : MOCK_AREA_CARDS;
-  const [allCards, setAllCards] = useState<MockAreaCard[]>(() =>
-    structuredClone(baseCards),
-  );
-  // Completed application commands, newest first; reversed entries stay
-  // for audit display but are no longer Undo-eligible. Each entry keeps
-  // the pre-command state so Undo restores the complete command.
-  const [history, setHistory] = useState<
-    { action: MockCompletedAction; reversed: boolean; before: MockAreaCard[] }[]
-  >([]);
-  // Per-Machine session monitoring state (keyed by stable Machine id):
-  // `running`/`idle` derive from the quantity currently assigned on
-  // each Machine in the session-local cards (queue and finished never
-  // count; maintenance stays an explicit override). The ref carries
-  // each Machine's `stateChangedAt` across commands, so the displayed
-  // state age keeps aging while the state is unchanged and restarts
-  // only when a command actually flips a Machine between Idle and
-  // Running.
-  const machineStateRef = useRef<Map<string, MockAreaMachine>>(new Map());
+  const [resolving, setResolving] = useState(false);
+  const [lastAction, setLastAction] = useState<LastAction | null>(null);
 
-  // Reset the session-local mock state when the dev preview changes —
-  // including the per-Machine session timestamps, so the next
-  // derivation starts from the registry anchors again.
-  useEffect(() => {
-    setAllCards(structuredClone(baseCards));
-    setHistory([]);
-    machineStateRef.current = new Map();
-  }, [baseCards]);
-
-  // Auto-dismiss the floating notification: ~4 s for success/info,
-  // ~8 s for warnings and errors. A replacing notice restarts the
-  // timer; the cleanup clears it on replacement and unmount.
   useEffect(() => {
     if (!notice) return;
     const timeout = window.setTimeout(
@@ -459,9 +430,8 @@ function StationView({
 
   const focusScan = useCallback(() => {
     // §3.1 focus discipline: the barcode input regains focus after every
-    // completed operation and dialog close. The delayed refocus must
-    // never pull focus out of a dialog that opened in the meantime —
-    // the dialog owns ENTER/ESC/TAB until it closes.
+    // completed operation and dialog close — never pulling focus out of
+    // a dialog that opened in the meantime.
     setTimeout(() => {
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       inputRef.current?.focus();
@@ -469,78 +439,12 @@ function StationView({
   }, []);
 
   useEffect(() => {
-    if (!writeBlocked) focusScan();
-  }, [writeBlocked, focusScan]);
+    if (!writeBlocked && ready) focusScan();
+  }, [writeBlocked, ready, focusScan]);
 
-  /**
-   * Slide the Scanned-session inactivity deadline forward — called on
-   * every VALID production interaction (a successfully resolved PN or
-   * Machine scan, a confirmed command, a valid badge scan). Invalid,
-   * unknown, or rejected scans never call this (§19).
-   */
-  const refreshSession = useCallback(() => {
-    setSession((current) =>
-      current ? { ...current, expiresAt: Date.now() + sessionTimeoutMs } : null,
-    );
-  }, [sessionTimeoutMs]);
-
-  /**
-   * Open (or switch to) a Worker Session from a valid badge scan.
-   * Scanning a different active Worker's badge switches the active
-   * Worker immediately — no sign-out step (§19).
-   */
-  const signInWorker = useCallback(
-    (worker: MockWorker) => {
-      const previous = session?.worker ?? null;
-      setSession({ worker, expiresAt: Date.now() + sessionTimeoutMs });
-      setNotice({
-        kind: 'ok',
-        icon: '✓',
-        title: `Worker signed in: ${worker.name}`,
-        detail:
-          previous && previous.id !== worker.id
-            ? `${previous.name} was signed out. New actions will be recorded under ${worker.name}.`
-            : `New actions will be recorded under ${worker.name}.`,
-      });
-    },
-    [session, sessionTimeoutMs],
-  );
-
-  const areaCards = useMemo(
-    () =>
-      preview === 'empty'
-        ? []
-        : allCards.filter((c) => c.area === station.area),
-    [allCards, preview, station.area],
-  );
-  const { assigned } = splitAssignments(areaCards);
-
-  // Session-local Machine monitoring cards, derived from the CURRENT
-  // session cards above (never the load-time mock projection): a
-  // Machine keeps its `stateChangedAt` while its derived state is
-  // unchanged and gets a fresh timestamp only when a confirmed command
-  // actually flips it between Idle and Running. Idempotent per card
-  // state — safe under re-renders.
-  const machines = useMemo(() => {
-    const derived = deriveSessionMachines(
-      stationMachines,
-      areaCards,
-      machineStateRef.current,
-      new Date().toISOString(),
-    );
-    machineStateRef.current = derived;
-    return [...derived.values()];
-  }, [stationMachines, areaCards]);
-
-  // Header fit measurement (§4.3): the Area totals drop to their
-  // full-width second row only when the single-row layout genuinely
-  // cannot hold the three header cells — never at a hard-coded
-  // breakpoint. The probe pass applies the `measuring` class (full
-  // natural single-row column widths: identity with Department, Area
-  // name AND Operations chips each on one line — chips never wrap
-  // before the totals drop — totals and Worker Session at content
-  // width), reads the widths, and reverts — all synchronously before
-  // paint, so the probe layout is never visible.
+  // Header fit measurement (§4.3) — identical to the approved
+  // presentation: the Area totals drop to their second row only when
+  // the measured single-row layout genuinely cannot fit.
   const headRef = useRef<HTMLElement>(null);
   const [headWrapped, setHeadWrapped] = useState(false);
   const measureHead = useCallback(() => {
@@ -558,30 +462,13 @@ function StationView({
       cells.reduce((sum, cell) => sum + cell.getBoundingClientRect().width, 0) +
       gap * Math.max(0, cells.length - 1);
     head.classList.remove('measuring');
-    // Half-pixel tolerance so subpixel rounding never flips the state.
     setHeadWrapped(required > available + 0.5);
   }, []);
-
-  // Re-measure after every commit that can change a header cell's
-  // natural width: Area identity, totals values, Worker session, and
-  // the production-mode actions (the connectivity chip text follows
-  // the connection status). The measurement is deterministic per
-  // container width, so repeated runs are stable.
+  const inventoryReady =
+    inventory.state.status === 'ready' ? inventory.state.data : null;
   useLayoutEffect(() => {
     measureHead();
-  }, [
-    measureHead,
-    area,
-    areaCards,
-    hasMachines,
-    workerMode,
-    activeWorker,
-    session,
-    sessionExpired,
-    productionMode,
-    status,
-  ]);
-
+  }, [measureHead, ready, inventoryReady, productionMode, status]);
   useEffect(() => {
     window.addEventListener('resize', measureHead);
     let observer: ResizeObserver | undefined;
@@ -595,88 +482,118 @@ function StationView({
     };
   }, [measureHead]);
 
-  const eligible = history.find((h) => !h.reversed);
-  const lastPn = eligible?.action ?? null;
+  // Ctrl+Shift+K — the same standard/production toggle as the approved
+  // presentation (never inside text fields, selects, or a dialog).
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+        return;
+      }
+      if (event.key !== 'K' && event.key !== 'k') return;
+      if (flow) return;
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tag = target.tagName;
+        if (
+          (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') &&
+          target !== inputRef.current
+        ) {
+          return;
+        }
+        if (target.isContentEditable || target.closest('[role="dialog"]')) {
+          return;
+        }
+      }
+      event.preventDefault();
+      navigate(
+        productionMode
+          ? `/scan-station/${stationId}`
+          : `/scan-station/${stationId}/production`,
+      );
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [flow, navigate, productionMode, stationId]);
 
-  // PNs entering this view are already canonical (uppercase,
-  // whitespace-free — parseScan / normalizePartNumber), so the PN
-  // string itself is the identity and direct equality compares it.
-  const cardsFor = useCallback(
-    (pn: string) => areaCards.filter((c) => c.pn === pn),
-    [areaCards],
-  );
-
-  const sourcesFor = useCallback(
-    (pn: string): SourceOption[] =>
-      allCards
-        .filter(
-          (c) =>
-            c.pn === pn &&
-            c.area !== station.area &&
-            c.area !== 'stockroom' &&
-            c.qty > 0,
-        )
-        .map((card) => ({
-          areaLabel: areaByKey(card.area)?.name ?? card.area,
-          qty: card.qty,
-          card,
-        })),
-    [allCards, station.area],
-  );
-
-  const queuedQtyFor = useCallback(
-    (pn: string) => {
-      const { queued } = splitAssignments(cardsFor(pn));
-      return queued
-        .filter((e) => e.state === 'queue')
-        .reduce((s, e) => s + e.qty, 0);
+  const closeFlow = useCallback(
+    (message?: string) => {
+      setFlow(null);
+      if (message) setNotice({ kind: 'info', title: message });
+      focusScan();
     },
-    [cardsFor],
+    [focusScan],
   );
 
-  /** Directly processing (not finished) quantity of a no-Machine Area. */
-  const processingQtyFor = useCallback(
-    (pn: string) =>
-      cardsFor(pn).reduce((s, c) => s + cardBreakdown(c).active, 0),
-    [cardsFor],
-  );
+  const cancelFlow = useCallback(() => {
+    // Cancel always means no write; the temporary context is cleared
+    // and never replaces the Last Action.
+    closeFlow('Cancelled. No changes were recorded.');
+  }, [closeFlow]);
+
+  const backTo = (parent?: Flow) =>
+    parent ? () => setFlow(parent) : undefined;
 
   /**
-   * Actively Machine-assigned portions of one PN, per Machine — the
-   * PN action dialog offers a DONE choice for each (post-v18),
-   * equivalent to the Machine card's DONE row action.
+   * Route a server resolution to the applicable one-shot dialog
+   * (GUI_DESIGN §4.7): quantity already in the Area → the action
+   * dialog (Phase 5: receive more from another Area only); exactly one
+   * valid source → the transfer's quantity/review flow; several → the
+   * explicit source selection — never an automatic pick; nothing
+   * transferable → the honest placeholder.
    */
-  const machineAssignmentsFor = useCallback(
-    (pn: string) =>
-      splitAssignments(cardsFor(pn))
-        .assigned.filter((entry) => entry.qty > 0)
-        .map((entry) => ({ machine: entry.context, qty: entry.qty })),
-    [cardsFor],
-  );
-
-  const repairSourcesFor = useCallback(
-    (pn: string) => MOCK_REPAIR_SOURCES[pn] ?? [],
+  const openResolution = useCallback(
+    (resolution: ScanResolution, parent?: Flow) => {
+      if (resolution.resolution === 'ALREADY_IN_AREA') {
+        setFlow({ kind: 'in-area', resolution, parent });
+        return;
+      }
+      if (resolution.transferBlockedReason !== null) {
+        // A terminal Area never receives a transfer (the Stockroom
+        // workflow, a later release): the candidates are information
+        // only, never a transfer offer.
+        setFlow({ kind: 'no-quantity', resolution, parent });
+        return;
+      }
+      if (resolution.candidates.length === 1) {
+        setFlow({
+          kind: 'transfer',
+          resolution,
+          candidate: resolution.candidates[0],
+          parent,
+        });
+        return;
+      }
+      if (resolution.candidates.length > 1) {
+        setFlow({ kind: 'source-select', resolution, parent });
+        return;
+      }
+      setFlow({ kind: 'no-quantity', resolution, parent });
+    },
     [],
   );
 
-  /**
-   * Apply one confirmed application command atomically to the mock
-   * state: all of its Movement events take effect together, and the
-   * pre-command snapshot lets Undo reverse the whole command.
-   */
-  const applyCommand = useCallback(
-    (command: Command) => {
-      const before = structuredClone(allCards);
-      setAllCards(command.update(structuredClone(allCards)));
-      setHistory((current) => [
-        { action: command.action, reversed: false, before },
-        ...current,
-      ]);
-      // A confirmed production command is a valid production
-      // interaction — it slides the Worker Session deadline (§19).
-      refreshSession();
+  const resolvePn = useCallback(
+    async (
+      input: { barcode: string } | { partNumber: string },
+      parent?: Flow,
+    ) => {
+      setResolving(true);
+      try {
+        const resolution = await resolveScan(stationId, input);
+        openResolution(resolution, parent);
+      } catch (error) {
+        focusScan();
+        setNotice({
+          kind: 'err',
+          icon: '✕',
+          title: 'Part Number could not be resolved',
+          detail: `${errorMessage(error)} No changes were recorded.`,
+        });
+      } finally {
+        setResolving(false);
+      }
     },
-    [allCards, refreshSession],
+    [stationId, openResolution, focusScan],
   );
 
   const blockedNotice = useCallback(() => {
@@ -689,65 +606,6 @@ function StationView({
     });
   }, []);
 
-  const closeFlow = useCallback(
-    (message?: string) => {
-      setFlow(null);
-      if (message) {
-        setNotice({ kind: 'info', title: message });
-      }
-      focusScan();
-    },
-    [focusScan],
-  );
-
-  const cancelFlow = useCallback(() => {
-    // Cancel always means no write; the temporary context is cleared
-    // and never replaces the Last Scanned PN.
-    closeFlow('Cancelled. No changes were recorded.');
-  }, [closeFlow]);
-
-  /**
-   * Back handler for a flow's stored parent step: re-opens exactly the
-   * previous dialog/step of the same workflow (context preserved) and
-   * writes nothing. Returns undefined when no parent exists, so
-   * StepButtons renders no Back for flows entered directly from the
-   * Scan Station surface.
-   */
-  const backTo = (parent?: Flow) =>
-    parent ? () => setFlow(parent) : undefined;
-
-  /**
-   * Route a resolved PN to the applicable one-shot dialog. `parent` is
-   * the dialog step the resolution came from (manual PN entry) so the
-   * opened dialog can offer Back to it; a plain scan passes none.
-   */
-  const openPnFlow = useCallback(
-    (pn: string, parent?: Flow) => {
-      // `pn` is already the canonical PN (parseScan / manual-entry
-      // normalization) — the PN string itself is the identity. A
-      // successfully resolved PN is a valid production interaction.
-      refreshSession();
-      if (cardsFor(pn).length > 0) {
-        setFlow({ kind: 'pn-actions', pn, parent });
-        return;
-      }
-      const sources = sourcesFor(pn);
-      if (sources.length === 1) {
-        setFlow({ kind: 'transfer', pn, source: sources[0], parent });
-        return;
-      }
-      if (sources.length > 1) {
-        setFlow({ kind: 'source-select', pn, sources, parent });
-        return;
-      }
-      // No active WO Demand and no active quantity: intake flow
-      // (equivalent to Work Orders "Add Part") — MODIFY + FLOATING
-      // defaults, both editable. The PN is created on first valid use.
-      setFlow({ kind: 'intake', pn, parent });
-    },
-    [cardsFor, sourcesFor, refreshSession],
-  );
-
   const handleScan = useCallback(() => {
     const input = inputRef.current;
     if (!input) return;
@@ -757,13 +615,16 @@ function StationView({
     }
     const raw = input.value;
     input.value = '';
-    // Refocus only in the branches that stay on the scan surface — the
-    // branches that open a dialog must leave focus to the dialog (the
-    // input regains focus through closeFlow/cancelFlow afterwards).
     const parsed = parseScan(raw);
     switch (parsed.kind) {
       case 'empty':
         focusScan();
+        return;
+      case 'pn':
+        // The verbatim scanner value goes to the server, which owns the
+        // canonical PN rules (PROJECT_PROFILE §10); a PN resolution
+        // opens a dialog — no refocus here.
+        void resolvePn({ barcode: normalizeScanInput(raw) });
         return;
       case 'scrap':
         focusScan();
@@ -772,57 +633,19 @@ function StationView({
           icon: '✕',
           title: 'Scrap barcode cannot be used here',
           detail:
-            'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.',
+            'Scrap recording is not available at this station in this release. No changes were recorded.',
         });
         return;
-      case 'machine': {
-        const machine = MOCK_MACHINE_BARCODES[parsed.id];
-        if (!machine) {
-          focusScan();
-          setNotice({
-            kind: 'err',
-            icon: '✕',
-            title: 'Machine barcode not recognized',
-            detail:
-              'Check the Machine barcode and scan again. No changes were recorded.',
-          });
-          return;
-        }
-        if (machine.area !== station.area) {
-          focusScan();
-          setNotice({
-            kind: 'err',
-            icon: '✕',
-            title: `${machine.machine} belongs to another Area`,
-            detail:
-              'This Machine is assigned to a different Area and cannot be used at this station. No changes were recorded.',
-          });
-          return;
-        }
-        const status = machines.find((m) => m.name === machine.machine)?.status;
-        if (status === 'maintenance') {
-          focusScan();
-          setNotice({
-            kind: 'err',
-            icon: '✕',
-            title: `${machine.machine} is unavailable for production`,
-            detail:
-              'This Machine is under maintenance. Select another Machine or contact a supervisor.',
-          });
-          return;
-        }
-        // One-shot shortcut only: opens the Machine assignment dialog
-        // with the Machine preselected. There is NO Machine Session.
-        // A successfully resolved Machine scan is a valid production
-        // interaction — it slides the Worker Session deadline.
-        refreshSession();
-        setFlow({
-          kind: 'machine-assign',
-          machine: machine.machine,
-          pn: null,
+      case 'machine':
+        focusScan();
+        setNotice({
+          kind: 'err',
+          icon: '✕',
+          title: 'Machine assignment is not available yet',
+          detail:
+            'This release records transfers into the Area only. Machine barcodes will open the one-time assignment in a later release. No changes were recorded.',
         });
         return;
-      }
       case 'area':
         focusScan();
         setNotice({
@@ -830,100 +653,36 @@ function StationView({
           icon: '✕',
           title: 'Area barcode is not required here',
           detail:
-            'This Scan Station is already assigned to an Area. Scan a Part Number, Worker badge, or Machine barcode. No changes were recorded.',
+            'This Scan Station is already assigned to an Area. Scan a Part Number barcode. No changes were recorded.',
         });
         return;
-      case 'pn':
-        // Every PN resolution opens a dialog — no refocus here.
-        openPnFlow(parsed.pn);
-        return;
-      case 'unknown': {
+      case 'unknown':
         focusScan();
-        // Worker badges are non-PF values (the company's existing
-        // employee badge, PROJECT_PROFILE §10): an unrecognized value
-        // is first exact-matched against ACTIVE Worker badge barcodes.
-        // Unknown or inactive badges fall through to the rejection —
-        // never guessed, and a rejected scan never refreshes the
-        // Worker Session deadline.
-        const badgeWorker = workerByBadge(parsed.raw);
-        if (badgeWorker) {
-          if (workerMode !== 'scanned') {
-            setNotice({
-              kind: 'warn',
-              icon: '⚠',
-              title: 'Worker badge scans are not used in this Area',
-              detail:
-                workerMode === 'fixed'
-                  ? 'This Area records its configured Worker automatically. No changes were recorded.'
-                  : 'This Area does not record Worker identity. No changes were recorded.',
-            });
-            return;
-          }
-          // A Worker scan never replaces the Last Scanned PN; scanning
-          // a different Worker's badge switches immediately (§19).
-          signInWorker(badgeWorker);
-          return;
-        }
         setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Barcode not recognized',
           detail:
-            'Scan a PartFlow Part Number or Machine barcode, or a registered Worker badge. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
+            'Scan a PartFlow Part Number barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
         });
         return;
-      }
     }
-  }, [
-    writeBlocked,
-    blockedNotice,
-    focusScan,
-    machines,
-    station.area,
-    openPnFlow,
-    refreshSession,
-    signInWorker,
-    workerMode,
-  ]);
+  }, [writeBlocked, blockedNotice, focusScan, resolvePn]);
 
-  // Development-only: a click on a DemoBarcode in the DevNotice is the
-  // exact equivalent of a keyboard-wedge scan ending in Enter — the
-  // value lands in the main barcode input and goes through the SAME
-  // handleScan()/parseScan() path (validation, notices, dialogs).
-  // While writes are blocked the value is NOT staged (mirroring the
-  // wedge capture, which is inert then); handleScan still runs so the
-  // click gets the same blocked notice a real scan would.
-  const simulateScan = useCallback(
-    (value: string) => {
-      const input = inputRef.current;
-      if (input && !writeBlocked) input.value = value;
-      handleScan();
-    },
-    [writeBlocked, handleScan],
-  );
-
-  // Keyboard-wedge capture at the Scan Station level: when no dialog
-  // is open, a scanned barcode reaches the main input even when the
-  // input is not focused. The first character is captured (never
-  // lost), focus then follows the scan; Enter submits exactly once.
-  // Typing inside any other input/textarea/select/contenteditable, an
-  // active dialog workflow, modifier shortcuts, and normal button
-  // activation are all left alone.
+  // Keyboard-wedge capture (§4.4): the main input never loses a scan
+  // while no dialog is open — identical to the approved presentation.
   useEffect(() => {
-    // While session-blocked the badge modal owns scanning (its own
-    // input is focused); the main-input capture stays inert.
-    if (flow || writeBlocked || sessionBlocked) return;
+    if (flow || writeBlocked || resolving) return;
     function onKeyDown(event: KeyboardEvent) {
       const input = inputRef.current;
       if (!input || event.defaultPrevented) return;
       if (event.ctrlKey || event.altKey || event.metaKey) return;
       const target = event.target;
-      if (target === input) return; // native typing already lands here
+      if (target === input) return;
       if (target instanceof HTMLElement) {
         if (target.isContentEditable) return;
         const tag = target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        // Enter/Space on a button stays button activation.
         if (tag === 'BUTTON') return;
       }
       if (event.key === 'Enter') {
@@ -941,270 +700,115 @@ function StationView({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [flow, writeBlocked, sessionBlocked, handleScan]);
+  }, [flow, writeBlocked, resolving, handleScan]);
 
-  // Ctrl+Shift+K — convenience toggle between this station's standard
-  // and production routes for authorized users. The dedicated route and
-  // the explicit Station Selector actions stay the primary entry; the
-  // shortcut never fires inside text inputs, selects, or an active
-  // dialog, never conflicts with barcode capture (which ignores
-  // modifier chords), and is never a security mechanism.
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
-        return;
-      }
-      if (event.key !== 'K' && event.key !== 'k') return;
-      if (flow) return;
-      const target = event.target;
-      if (target instanceof HTMLElement) {
-        const tag = target.tagName;
-        // The main barcode input is a scanner target, not text entry —
-        // the chord stays usable while it holds focus (which it almost
-        // always does, §3.1); every other field keeps the chord inert.
-        if (
-          (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') &&
-          target !== inputRef.current
-        ) {
-          return;
-        }
-        if (target.isContentEditable || target.closest('[role="dialog"]')) {
-          return;
-        }
-      }
-      event.preventDefault();
-      navigate(
-        productionMode
-          ? `/scan-station/${station.stationId}`
-          : `/scan-station/${station.stationId}/production`,
-      );
-    }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [flow, navigate, productionMode, station.stationId]);
+  /** A transfer the SERVER confirmed: refresh the Area, note it, refocus. */
+  const completeTransfer = useCallback(
+    (
+      result: TransferResult,
+      candidate: TransferCandidate,
+      destination: string,
+    ) => {
+      setLastAction({
+        pn: result.partNumber,
+        summary: `TRANSFERRED · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}`,
+      });
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.quantity} → ${destination}`,
+        detail: result.created
+          ? `The quantity moved here from ${candidate.currentArea.name}. Recorded by the server (TRANSFERRED #${result.movementId}).`
+          : `This transfer was already recorded by the server (TRANSFERRED #${result.movementId}) — nothing was recorded twice.`,
+      });
+      // The Area inventory and header totals refresh from the server
+      // (PROJECT_PROFILE §15 step 10) — never from an optimistic guess.
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [inventory, focusScan],
+  );
 
-  /**
-   * Final-confirmation gate of the three sensitive one-shot actions
-   * (post-v18, PROJECT_PROFILE §19): every action ends in a
-   * final toned confirmation question (the Machines last-question
-   * pattern) restating the key facts — ALWAYS, in every Area. The
-   * Administration options only decide whether a Worker badge scan is
-   * REQUIRED as that final step where badges exist: in a
-   * Scanned-session Area with the action's option ON (default) the
-   * gate is a badge scan instead of the question; with the option OFF
-   * — and in Fixed-Worker and Disabled Areas, where no badge exists —
-   * the gate is the question. The gate itself is never optional.
-   */
-  const finalGateFor = (action: BadgeConfirmAction): FinalGate =>
-    workerMode === 'scanned' && requireBadgeConfirm(action)
-      ? 'badge'
-      : 'question';
+  const area = ready ? presentationArea(ready.area, ready.operations) : null;
+  const cards = useMemo(
+    () =>
+      inventoryReady && area ? inventoryCards(inventoryReady, area.key) : [],
+    [inventoryReady, area],
+  );
+  const machines = useMemo(
+    () =>
+      ready && machinesData.state.status === 'ready'
+        ? areaMachineCards(machinesData.state.data, ready.area.id)
+        : [],
+    [ready, machinesData.state],
+  );
+  const hasMachines = ready?.hasMachines ?? machines.length > 0;
 
-  function undoTarget(): MockCompletedAction | null {
-    return eligible?.action ?? null;
-  }
-
-  function confirmUndo() {
-    const entryIndex = history.findIndex((h) => !h.reversed);
-    if (entryIndex < 0) return;
-    const entry = history[entryIndex];
-    // Whole-command reversal: the pre-command state returns, covering
-    // every Movement the command appended (e.g. AREA_COMPLETED +
-    // TRANSFERRED together).
-    setAllCards(structuredClone(entry.before));
-    setHistory((current) =>
-      current.map((h, i) => (i === entryIndex ? { ...h, reversed: true } : h)),
-    );
-    setFlow(null);
-    setNotice({
-      kind: 'warn',
-      icon: '⟲',
-      title: `Last action reversed — ${entry.action.pn}`,
-      detail: `${entry.action.reversalEffect} The original history remains available for audit.`,
-    });
-    focusScan();
-  }
-
-  if (preview === 'loading') {
+  if (context.state.status === 'loading') {
+    // No scan input yet: the station is usable only once its context
+    // (Area, Operations) is known — a scan before that has nowhere to
+    // resolve.
     return (
       <section className="ss" aria-label="Scan Station">
         <LoadingState label="Loading Scan Station" />
-        <div className="ss-scanwrap">
-          <div className="ss-scanrow">
-            <input
-              className="ss-scaninput"
-              disabled
-              placeholder="Connecting…"
-              aria-label="Scan barcode"
-            />
-          </div>
-        </div>
       </section>
     );
   }
-
-  const shownNotice: Notice | null =
-    preview === 'error'
-      ? {
-          kind: 'err',
-          icon: '✕',
-          title: 'Barcode not recognized',
-          detail:
-            'Unknown or invalid scans never update tracking data. No changes were recorded.',
-        }
-      : notice;
-
-  // Row actions. Machine-card rows carry the two distinct one-shot
-  // actions — DONE completes Area processing and moves the quantity to
-  // the finished rack; QUEUE returns unfinished or paused quantity to
-  // the Area queue. They are never merged. The shared DONE button is
-  // one presentation for both surfaces (success tone, icon above the
-  // label, accessible name `Complete Area processing`); while writes
-  // are blocked it stays disabled in place — the rail keeps its layout
-  // and no workflow that could record a false state can open.
-  const doneRowAction = (entry: AreaAssignment, machine: string | null) => (
-    <button
-      className="rowact done"
-      aria-label="Complete Area processing"
-      title="Complete processing — move this quantity to the finished rack, ready to transfer"
-      disabled={writeBlocked || sessionBlocked}
-      onClick={() =>
-        setFlow({
-          kind: 'done',
-          pn: entry.card.pn,
-          machine,
-          max: entry.qty,
-        })
-      }
-    >
-      <span className="ric" aria-hidden="true">
-        ✓
-      </span>
-      DONE
-    </button>
-  );
-
-  const machineRowAction = (entry: AreaAssignment) => (
-    <>
-      {doneRowAction(entry, entry.context)}
-      <button
-        className="rowact"
-        aria-label="Return to Area queue"
-        title="Return unfinished or paused quantity to the Area queue"
-        disabled={writeBlocked || sessionBlocked}
-        onClick={() =>
-          setFlow({
-            kind: 'queue-return',
-            pn: entry.card.pn,
-            machine: entry.context,
-            max: entry.qty,
-          })
-        }
-      >
-        <span className="ric" aria-hidden="true">
-          ⟲
-        </span>
-        QUEUE
-      </button>
-    </>
-  );
-
-  // `In this Area now` row actions. In an Area WITH Machines the card
-  // carries NO row actions (assignment stays available through PN
-  // scan, Machine scan and the action dialog; DONE / QUEUE live in the
-  // Machine cards). A direct-processing Area (no Machines) is the
-  // deliberate exception: its actively processing quantity has no
-  // Machine card to act from, so exactly those rows carry the single
-  // DONE action — the same manual DONE wizard with Machine = NULL.
-  // There is no QUEUE here: a direct-processing Area has no Machine
-  // queue to return quantity to. Visibility is decided by explicit
-  // semantic data — the Area's Machine-less non-terminal mode plus the
-  // portion's actively processing state (`direct`, or `vendor` for
-  // External processing) — never by CSS selectors or Area names;
-  // finished (`READY_TO_TRANSFER`) portions and quantity no longer in
-  // the Area never carry the action. Management → Area Board renders
-  // the same shared card without any rowAction and stays read-only.
-  const directRowAction =
-    hasMachines || area?.terminal
-      ? undefined
-      : (entry: AreaAssignment) =>
-          (entry.state === 'direct' || entry.state === 'vendor') &&
-          entry.qty > 0
-            ? doneRowAction(entry, null)
-            : null;
+  if (context.state.status === 'error') {
+    return (
+      <UnknownStation
+        stationId={stationId}
+        detail={context.state.message}
+        onRetry={context.reload}
+      />
+    );
+  }
+  const station = ready!;
+  const destinationNote = hasMachines
+    ? `${station.area.name} queue (awaiting Machine)`
+    : `${station.area.name} — direct processing`;
 
   return (
     <section
       className={`ss${productionMode ? ' production' : ''}`}
       aria-label="Scan Station"
     >
-      {/* Header grid: the left Area identity group and the Worker
-          Session always share the main row; the Area totals sit
-          between them while space allows and drop to a full-width
-          second row (equal cells) only when the measured single-row
-          layout genuinely cannot fit (`wrapped` class from the fit
-          measurement above — no hard-coded breakpoint). The header is
-          the single summary surface for the Area totals — the `In
-          this Area now` card carries no statistics block. */}
       <header
         ref={headRef}
         className={headWrapped ? 'ss-head wrapped' : 'ss-head'}
       >
         <div className="ss-id">
-          <div className="dept">{station.department}</div>
+          <div className="dept">{station.department.name}</div>
           <div className="area">
-            <AreaDot colorVar={area?.colorVar ?? 'var(--faint)'} size={16} />
-            {area?.name}
+            <AreaDot colorVar={areaRefColor(station.area)} size={16} />
+            {station.area.name}
           </div>
-          <HeaderOperations operations={area?.operations ?? []} />
+          <HeaderOperations
+            operations={station.operations.map(operationLabel)}
+          />
         </div>
         <div className="ss-stats" aria-label="Area statistics">
-          {(area ? areaStats(area, areaCards, hasMachines) : []).map((s) => (
+          {(area ? areaStats(area, cards, hasMachines) : []).map((s) => (
             <div className="stat" key={s.label}>
               <div className={`n ${s.tone ?? ''}`}>{s.value}</div>
               <div className="l">{s.label}</div>
             </div>
           ))}
         </div>
-        {/* The top application navigation is hidden in production
-            mode, so the connectivity status chip and the global
-            Dark/Light mode control move next to the Worker Session
-            pill — connectivity must stay visible and the theme must
-            stay reachable. Standard mode keeps both in the top
-            navigation. Inside the shared `.ss-headgroup` wrapper the
-            Worker Session pill keeps its NATURAL height and drives the
-            group height; the actions column stretches to that height
-            and distributes its two compact controls inside it — the
-            ONLINE chip's top aligns with the pill's top edge, the
-            theme control's bottom with the pill's bottom edge. No
-            enclosing frame and no separator around the actions. */}
+        {/* Worker identity arrives with the Worker-session workflows
+            (the Area's Worker ID mode is not configured before then):
+            no Worker pill renders, exactly like a Disabled Area. In
+            production mode the connectivity chip and the theme control
+            keep their place in the header actions column. */}
         {productionMode ? (
           <div className="ss-headgroup">
-            <WorkerPill
-              mode={workerMode}
-              worker={activeWorker}
-              expiresAt={
-                workerMode === 'scanned' && session && !sessionExpired
-                  ? session.expiresAt
-                  : null
-              }
-            />
             <div className="ss-headactions">
               <ConnectivityChip />
               <ThemeToggle compact />
             </div>
           </div>
-        ) : (
-          <WorkerPill
-            mode={workerMode}
-            worker={activeWorker}
-            expiresAt={
-              workerMode === 'scanned' && session && !sessionExpired
-                ? session.expiresAt
-                : null
-            }
-          />
-        )}
+        ) : null}
       </header>
 
       <div className="ss-body">
@@ -1213,8 +817,7 @@ function StationView({
             Scan barcode
             <span className="spacer" />
             <span className="note">
-              Scan a Part Number or Worker badge. Scanning a Machine opens a
-              one-time assignment.
+              Scan a Part Number to receive its quantity from another Area.
             </span>
           </div>
           <div className="ss-scanwrap">
@@ -1223,21 +826,16 @@ function StationView({
                 ref={inputRef}
                 className="ss-scaninput"
                 autoComplete="off"
-                // Touch-primary devices suppress the native soft
-                // keyboard for this scanner-driven input (GUI_DESIGN
-                // §4.8, shared touch-device detection): keyboard-wedge
-                // scanners and physical keyboards fire real key events
-                // regardless of inputMode. Ordinary text inputs — the
-                // manual PN entry dialog, reasons, notes — keep their
-                // normal soft keyboard.
                 inputMode={touchPrimary ? 'none' : undefined}
-                disabled={writeBlocked || sessionBlocked}
+                disabled={writeBlocked || resolving}
                 placeholder={
                   disconnected
                     ? 'Disconnected — scanning disabled'
                     : status === 'connecting'
                       ? 'Connecting…'
-                      : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
+                      : resolving
+                        ? 'Resolving Part Number…'
+                        : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
                 }
                 aria-label="Scan barcode"
                 onKeyDown={(e) => {
@@ -1247,63 +845,36 @@ function StationView({
               <button
                 className="ss-manualbtn"
                 onClick={() => setFlow({ kind: 'manual-pn' })}
-                disabled={writeBlocked || sessionBlocked}
+                disabled={writeBlocked || resolving}
               >
                 ⌨ Enter PN manually
               </button>
             </div>
-            {/* Fixed content order — DOM order = visual = keyboard =
-                screen-reader order (never reordered by CSS): scan row,
-                the manual-entry fallback explanation directly beneath
-                it, the development demo barcodes, then Last scanned
-                PN / Undo. */}
             <div className="ss-manualcap">
               Use manual entry only when the scanner is unavailable. The Part
               Number will be validated before any action is recorded.
             </div>
-            {/* Development-only demo barcodes: the shared DevNotice
-                renders only in the dev build (the whole mock view is
-                also excluded from production bundles — see
-                app/dev-views.ts and the mock-sentinel build check). */}
             <DevNotice>
-              Demo barcodes (development build only) — click one to simulate a
-              scan — <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}
-              <DemoBarcode
-                value="PF:PN:2027-60-8114-00"
-                onScan={simulateScan}
-              />{' '}
-              in this Area ·{' '}
-              <DemoBarcode value="PF:PN:118-052" onScan={simulateScan} />{' '}
-              elsewhere ·{' '}
-              <DemoBarcode value="PF:PN:NEW-PART-01" onScan={simulateScan} />{' '}
-              unknown → intake) ·{' '}
-              <DemoBarcode value="PF:MACHINE:CD-0105" onScan={simulateScan} />{' '}
-              assign to Machine ·{' '}
-              <DemoBarcode value="100517" onScan={simulateScan} /> worker badge
+              Development build — this station records real transfers on the
+              server. The mock preview of the later workflows (Machine
+              assignment, DONE, Repair, Scrap, Undo) opens with{' '}
+              <code>?preview=mock</code> on this route.
             </DevNotice>
-            {/* Compact section label OUTSIDE the block (uppercase via
-                CSS), then one quiet row: PN + movement summary, a
-                standalone separator, and the borderless Undo text
-                action. */}
-            {/* Two explicit regions — the same division as a Station
-                Selector card: the information region fills the
-                remaining space, the Undo ACTION REGION is the block's
-                complete right edge (the button itself), separated by
-                its own inset vertical rule — no separator element. */}
             <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
               <div className="ss-lastpninfo">
-                <span className="p">{lastPn?.pn ?? '—'}</span>
+                <span className="p">{lastAction?.pn ?? '—'}</span>
                 <span className="d">
-                  {lastPn
-                    ? `${lastPn.movements.join(' + ')} · ${lastPn.description}`
-                    : 'No Part Number actions yet'}
+                  {lastAction?.summary ?? 'No Part Number actions yet'}
                 </span>
               </div>
+              {/* Undo reverses a complete application command (Phase 9);
+                  until then the action region stays present and
+                  disabled — never a hidden control. */}
               <button
                 className="ss-undo zone-action"
-                disabled={writeBlocked || sessionBlocked || !eligible}
-                onClick={() => setFlow({ kind: 'undo' })}
+                disabled
+                title="Undo is not available in this release"
               >
                 ⟲ UNDO
               </button>
@@ -1311,74 +882,50 @@ function StationView({
           </div>
         </div>
 
-        <AreaMachineLayout
-          summary={
-            area ? (
-              <AreaSummaryCard
-                area={area}
-                cards={areaCards}
-                machines={machines}
-                title="In this Area now"
-                rowAction={directRowAction}
-                showStats={false}
+        {inventory.state.status === 'error' ? (
+          <ErrorState
+            message="The Area inventory could not be loaded."
+            detail={inventory.state.message}
+            onRetry={inventory.reload}
+          />
+        ) : (
+          <AreaMachineLayout
+            summary={
+              area ? (
+                <AreaSummaryCard
+                  area={area}
+                  cards={cards}
+                  machines={machines}
+                  title="In this Area now"
+                  showStats={false}
+                />
+              ) : null
+            }
+            machineCards={machines.map((machine) => (
+              <MachineMonitoringCard
+                key={machine.name}
+                machine={machine}
+                entries={[]}
               />
-            ) : null
-          }
-          machineCards={machines.map((machine) => (
-            <MachineMonitoringCard
-              key={machine.name}
-              machine={machine}
-              entries={assigned.filter((e) => e.context === machine.name)}
-              rowAction={machineRowAction}
-            />
-          ))}
-        />
+            ))}
+          />
+        )}
       </div>
 
-      {shownNotice ? (
-        <FloatingNotice notice={shownNotice} onClose={() => setNotice(null)} />
+      {notice ? (
+        <FloatingNotice notice={notice} onClose={() => setNotice(null)} />
       ) : null}
 
-      {flow?.kind === 'machine-assign' && (
-        <MachineAssignDialog
-          station={station}
-          machines={machines}
-          initialMachine={flow.machine}
-          initialPn={flow.pn}
-          queuedQtyFor={queuedQtyFor}
-          areaCards={areaCards}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'pn-actions' && (
-        <PnActionsDialog
-          pn={flow.pn}
-          station={station}
-          hasMachines={hasMachines}
-          queuedQty={queuedQtyFor(flow.pn)}
-          directQty={hasMachines ? 0 : processingQtyFor(flow.pn)}
-          machineAssignments={hasMachines ? machineAssignmentsFor(flow.pn) : []}
-          sources={sourcesFor(flow.pn)}
-          repairSources={repairSourcesFor(flow.pn)}
-          inAreaQty={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
-          // Every picked child flow records THIS dialog (with its own
-          // parent chain) as the step Back returns to.
-          onPick={(next) => setFlow({ ...next, parent: flow })}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
       {flow?.kind === 'source-select' && (
         <SourceSelectDialog
-          pn={flow.pn}
-          sources={flow.sources}
-          onPick={(source) =>
-            setFlow({ kind: 'transfer', pn: flow.pn, source, parent: flow })
+          resolution={flow.resolution}
+          onPick={(candidate) =>
+            setFlow({
+              kind: 'transfer',
+              resolution: flow.resolution,
+              candidate,
+              parent: flow,
+            })
           }
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
@@ -1387,157 +934,66 @@ function StationView({
       {flow?.kind === 'transfer' && (
         <TransferDialog
           station={station}
-          pn={flow.pn}
-          source={flow.source}
-          hasMachines={hasMachines}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'intake' && (
-        <IntakeDialog
-          station={station}
-          pn={flow.pn}
-          hasMachines={hasMachines}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'add-qty' && (
-        <AddQuantityDialog
-          station={station}
-          pn={flow.pn}
-          hasMachines={hasMachines}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'repair' && (
-        <RepairDialog
-          station={station}
-          pn={flow.pn}
-          sources={repairSourcesFor(flow.pn)}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'scrap' && (
-        <ScrapDialog
-          station={station}
-          pn={flow.pn}
-          available={cardsFor(flow.pn).reduce((s, c) => s + c.qty, 0)}
-          worker={workerName}
-          onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'queue-return' && (
-        <QueueReturnDialog
-          station={station}
-          pn={flow.pn}
-          machine={flow.machine}
-          max={flow.max}
-          worker={workerName}
-          finalGate={finalGateFor('queue')}
+          resolution={flow.resolution}
+          candidate={flow.candidate}
+          destinationNote={destinationNote}
           writeBlocked={writeBlocked}
-          onBadgeWorker={signInWorker}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'done' && (
-        <DoneDialog
-          station={station}
-          pn={flow.pn}
-          machine={flow.machine}
-          max={flow.max}
-          worker={workerName}
-          finalGate={finalGateFor('done')}
-          writeBlocked={writeBlocked}
-          onBadgeWorker={signInWorker}
           onBack={backTo(flow.parent)}
-          onApply={applyCommand}
-          onNotice={setNotice}
-          onClose={closeFlow}
+          onDone={(result) =>
+            completeTransfer(result, flow.candidate, destinationNote)
+          }
           onCancel={cancelFlow}
         />
       )}
-      {flow?.kind === 'undo' && undoTarget() && (
-        <UndoConfirmDialog
-          target={undoTarget()!}
-          reversedBy={workerName}
-          finalGate={finalGateFor('undo')}
-          writeBlocked={writeBlocked}
-          onBadgeWorker={signInWorker}
-          onConfirm={confirmUndo}
+      {flow?.kind === 'in-area' && (
+        <InAreaDialog
+          resolution={flow.resolution}
+          onReceiveMore={() =>
+            flow.resolution.candidates.length === 1
+              ? setFlow({
+                  kind: 'transfer',
+                  resolution: flow.resolution,
+                  candidate: flow.resolution.candidates[0],
+                  parent: flow,
+                })
+              : setFlow({
+                  kind: 'source-select',
+                  resolution: flow.resolution,
+                  parent: flow,
+                })
+          }
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+        />
+      )}
+      {flow?.kind === 'no-quantity' && (
+        <NoQuantityDialog
+          resolution={flow.resolution}
+          onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
         />
       )}
       {flow?.kind === 'manual-pn' && (
         <ManualEntryDialog
           initialPn={flow.initialPn}
+          examplePn="1234-56-7890-01"
           onCancel={cancelFlow}
           onConfirm={(pn) => {
-            // `pn` is already the canonical PN ('' when the entry was
-            // empty — treated like a cancelled entry, no write).
             setFlow(null);
             if (!pn) {
               focusScan();
               return;
             }
             // The resolved dialog can go Back to manual entry with the
-            // canonical PN preserved for correction.
-            openPnFlow(pn, { kind: 'manual-pn', initialPn: pn });
+            // entered PN preserved for correction.
+            void resolvePn(
+              { partNumber: pn },
+              { kind: 'manual-pn', initialPn: pn },
+            );
           }}
         />
       )}
 
-      {/* Scanned-session badge modal (§4.12): rendered LAST so it sits
-          above any open production dialog — the dialog's draft and
-          selections stay preserved underneath while confirmation is
-          blocked. It blocks only the Scan Station; it cannot be
-          dismissed without a valid badge scan. */}
-      {sessionBlocked && (
-        <WorkerSignInDialog
-          expired={session !== null}
-          writeBlocked={writeBlocked}
-          onSignIn={(badgeWorker) => {
-            signInWorker(badgeWorker);
-            // Continue where the workflow was: focus returns into the
-            // open dialog if one exists, else the main barcode input.
-            focusScan();
-          }}
-        />
-      )}
-
-      {/* One coherent non-interactive footer for both modes: the faint
-          Station ID, a subtle mode label, and the mode-switch shortcut
-          hint. Returning to the Station Selector is the top
-          navigation's Scan Station entry — the footer never duplicates
-          it, and there is no casual route away from a configured
-          station (the browser itself stays outside PartFlow's
-          control). */}
       <footer className="ss-stationfoot">
         Station <span className="mono">{station.stationId}</span>
         <span className="ss-modetag">
@@ -1550,1481 +1006,93 @@ function StationView({
 }
 
 /* ------------------------------------------------------------------ */
-/* Floating notification                                               */
+/* Dialog building blocks                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * The single floating scan notification. It never reserves layout
- * space, shows only the most recent notice, carries an explicit close
- * button, and stays clear of the barcode input (bottom edge) and of
- * dialog actions (it renders beneath the modal overlay).
- */
-function FloatingNotice({
-  notice,
-  onClose,
-}: {
-  notice: Notice;
-  onClose: () => void;
-}) {
-  const alerting = notice.kind === 'warn' || notice.kind === 'err';
-  return (
-    <div
-      className={`ss-toast ${notice.kind}`}
-      role={alerting ? 'alert' : 'status'}
-    >
-      {notice.icon ? (
-        <div className="fic" aria-hidden="true">
-          {notice.icon}
-        </div>
-      ) : null}
-      <div className="tx">
-        <div className="t1">{notice.title}</div>
-        {notice.detail ? <div className="t2">{notice.detail}</div> : null}
-      </div>
-      <button
-        type="button"
-        className="tclose"
-        aria-label="Dismiss notification"
-        onClick={onClose}
-      >
-        ×
-      </button>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Wizard building blocks                                              */
-/* ------------------------------------------------------------------ */
-
-interface ActionDialogProps {
-  station: MockScanStation;
-  /** Recorded Worker per the Area's Worker ID mode; null = Disabled. */
-  worker: string | null;
-  /** Apply one confirmed application command (atomic in mock state). */
-  onApply: (command: Command) => void;
-  onNotice: (n: Notice) => void;
-  onClose: (message?: string) => void;
-  onCancel: () => void;
-}
-
-/**
- * Final-confirmation gate of a sensitive one-shot action (post-v18) —
- * every action carries one: `badge` requires a Worker badge scan as
- * the last step (Scanned session + Administration option ON),
- * `question` asks one final toned confirmation question (every other
- * case — Fixed Worker, Disabled, or the Administration option OFF).
- */
-type FinalGate = 'badge' | 'question';
-
-/** Props the gated dialogs share on top of ActionDialogProps. */
-interface FinalGateProps {
-  finalGate: FinalGate;
-  writeBlocked: boolean;
-  /** A badge-gate scan signs that Worker in (switch + refresh) before
-   * the action records — the confirming Worker per §19. */
-  onBadgeWorker: (worker: MockWorker) => void;
-}
-
-/**
- * Badge-scan final confirmation (post-v18, §4.12/§19): the last step of
- * a sensitive action in a Scanned-session Area when the Administration
- * option requires it. The key facts of the pending action stay
- * visible; ANY active Worker badge confirms — the badge identifies the
- * confirming Worker, who is recorded on the action (and signed in,
- * exactly like a normal badge scan). Unknown or inactive badges are
- * rejected with nothing recorded. Cancel returns to the summary.
- */
-function BadgeConfirmDialog({
-  title,
-  tone,
-  writeBlocked,
-  onConfirm,
-  onCancel,
-  children,
-}: {
-  title: string;
-  /** Attention tone of the gate — the shared attention presentation
-   * (global.css tone family): `info` (blue) for DONE, `warning` for
-   * QUEUE return and UNDO. */
-  tone?: 'warning' | 'info';
-  writeBlocked: boolean;
-  onConfirm: (worker: MockWorker) => void;
-  onCancel: () => void;
-  children: ReactNode;
-}) {
-  const fieldRef = useRef<HTMLInputElement>(null);
-  const [scanError, setScanError] = useState<string | null>(null);
-  useEffect(() => {
-    fieldRef.current?.focus();
-  }, []);
-  function submit() {
-    const value = normalizeScanInput(fieldRef.current?.value ?? '');
-    if (fieldRef.current) fieldRef.current.value = '';
-    if (!value) return;
-    // Exact match against ACTIVE Worker badge barcodes only — an
-    // unknown, inactive, or non-badge value is rejected with nothing
-    // recorded.
-    const badgeWorker = workerByBadge(value);
-    if (!badgeWorker) {
-      setScanError(
-        'Badge not recognized. Check the badge and scan again — nothing was recorded.',
-      );
-      return;
-    }
-    onConfirm(badgeWorker);
-  }
-  // Development-only: a click on a demo badge is the exact equivalent
-  // of a wedge badge scan ending in Enter. Inert while writes are
-  // blocked, like the field itself.
-  function simulateBadge(value: string) {
-    if (writeBlocked || !fieldRef.current) return;
-    fieldRef.current.value = value;
-    setScanError(null);
-    submit();
-  }
-  return (
-    <ModalDialog
-      label={title}
-      onClose={onCancel}
-      className={`msgdlg${tone ? ` alertdlg tone-${tone}` : ''}`}
-    >
-      {tone ? (
-        <span className="alertbadge" aria-hidden="true">
-          {tone === 'info' ? 'i' : '!'}
-        </span>
-      ) : null}
-      <h3>{title}</h3>
-      <div className="sub">{children}</div>
-      <Guidance tone="action">
-        Scan a Worker badge to confirm — the badge identifies the confirming
-        Worker and completes the action.
-      </Guidance>
-      <input
-        aria-label="Scan Worker badge"
-        ref={fieldRef}
-        className="field mono"
-        autoComplete="off"
-        disabled={writeBlocked}
-        placeholder={
-          writeBlocked
-            ? 'Disconnected — scanning disabled'
-            : 'Scan Worker badge · Press Enter'
-        }
-        onChange={() => setScanError(null)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') submit();
-        }}
-      />
-      {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
-      <DevNotice>
-        Demo badges (development build only) — click one to simulate a badge
-        scan: <DemoBarcode value="100482" onScan={simulateBadge} /> H. Nguyen ·{' '}
-        <DemoBarcode value="100517" onScan={simulateBadge} /> V. Tran
-      </DevNotice>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc)
-        </button>
-      </div>
-    </ModalDialog>
-  );
-}
-
-/** Optional row emphasis for the shared confirmation summary. */
-type SummaryEmphasis = 'primary' | 'secondary';
-
-/**
- * Controlled semantic tone for a summary VALUE (v15). Additive only:
- * emphasis (weight/size) still carries the hierarchy, so tone is never
- * the only distinction. `ok` marks a successful/recorded result,
- * `warn` a deviation worth noticing, `err` a destructive result.
- * Audit context (Worker, Scan Station, timestamps) stays `secondary`
- * muted; Area identity is shown with an AreaDot beside plain text, not
- * by recoloring the text (area hues are not readable as body text in
- * both themes).
- */
-type SummaryTone = 'ok' | 'warn' | 'err';
-
-type SummaryRow = [
-  string,
-  ReactNode,
-  (SummaryEmphasis | undefined)?,
-  (SummaryTone | undefined)?,
-];
-
-/**
- * Structured confirmation summary — the dedicated final view of every
- * production wizard. Two columns (term / value); rows without a value
- * are omitted. Never a single interpolated sentence.
- *
- * A small optional row-emphasis mechanism keeps the primary
- * operational values (PN, Quantity, Action, Source, Destination,
- * Machine, Area, Operation, Reason) easy to scan and quiets the
- * secondary audit/context rows (Worker, Scan Station, recorded event
- * names, explanatory notes) — nothing is hidden, labels never look
- * like buttons, and the distinction never relies on color alone
- * (weight and size carry it in both themes; the optional value tone is
- * additive on top).
- */
-function ConfirmationSummary({ rows }: { rows: SummaryRow[] }) {
-  return (
-    <dl className="ss-confirm">
-      {rows
-        .filter((row) => row[1] !== null && row[1] !== undefined)
-        .map(([label, value, emphasis, tone]) => (
-          <Fragment key={label}>
-            <dt className={emphasis ?? ''}>{label}</dt>
-            <dd className={`${emphasis ?? ''}${tone ? ` tone-${tone}` : ''}`}>
-              {value}
-            </dd>
-          </Fragment>
-        ))}
-    </dl>
-  );
-}
-
-/**
- * Subtle non-interactive chip for a selected entity (Machine, Area,
- * Operation, source, Route Mode) inside recaps and confirmation
- * summaries — a label, never a control.
- */
-function EntityChip({ children }: { children: ReactNode }) {
-  return <span className="dlgchip">{children}</span>;
-}
-
-/**
- * Area entity inside recaps and confirmation summaries: the stable
- * Area identity dot beside plain text (v15). The dot carries the Area
- * color; the text keeps the normal value color so Area identity never
- * depends on recoloring body text.
- */
-function AreaChip({
-  areaKey,
-  children,
-}: {
-  areaKey: string;
-  children: ReactNode;
-}) {
+/** Area entity inside recaps and confirmation summaries: the stable
+ * Area color dot beside plain text. */
+function AreaChip({ area, children }: { area: AreaRef; children: ReactNode }) {
   return (
     <EntityChip>
-      <AreaDot colorVar={areaByKey(areaKey)?.colorVar ?? 'var(--faint)'} />
+      <AreaDot colorVar={areaRefColor(area)} />
       {children}
     </EntityChip>
   );
 }
 
 /**
- * Worker pill — shared by both header layouts, following the Area's
- * Worker ID mode (GUI_DESIGN §4.3, post-v18 — there is no shift-end
- * concept): Scanned session shows the active Worker's avatar + name
- * with the live `Session · 12m remaining` countdown; Fixed Worker
- * shows the configured Worker with a static `Fixed Worker` sub line;
- * Disabled renders NO pill at all — Worker identity does not exist in
- * such an Area. The avatar spans both text lines.
+ * Work Order context line of a transfer recap (GUI_DESIGN §4.7 item
+ * 2): `WO` stays a plain label, the WO Number value carries the shared
+ * `.rval` emphasis (`—` for an internal blank number) and the Request
+ * Type is the shared chip.
  */
-function WorkerPill({
-  mode,
-  worker,
-  expiresAt,
+function WorkOrderContextLine({
+  workOrder,
 }: {
-  mode: WorkerIdMode;
-  worker: MockWorker | null;
-  /** Sliding session deadline (scanned mode with a valid session). */
-  expiresAt: number | null;
+  workOrder: WorkOrderContext | null;
 }) {
-  // Disabled Areas render NO Worker pill at all — Worker identity does
-  // not exist there, so the header simply has nothing to show (the
-  // mode itself stays visible in Administration → Areas).
-  if (mode === 'disabled') return null;
-  return (
-    <div className="ss-pill">
-      <span className="avatar" aria-hidden="true">
-        {worker ? worker.avatar : '?'}
-      </span>
-      <span className="ss-pilltext">
-        <span className="val">{worker?.name ?? 'No Worker'}</span>
-        {mode === 'fixed' ? (
-          <span className="sub">Fixed Worker</span>
-        ) : (
-          <SessionCountdown expiresAt={expiresAt} />
-        )}
-      </span>
-    </div>
-  );
-}
-
-/**
- * Header Operations row (§4.3) — always one line, fit-measured against
- * the identity cell (never a hard-coded breakpoint), shedding
- * presentation in tiers only when the full `Operations: <chips>` line
- * genuinely cannot fit: first the `Operations:` label is dropped
- * (chips only), then trailing chips are replaced by one `…` chip, and
- * when not even the first chip fits the row hides entirely. A hidden
- * natural-width ghost copy (label + every chip) provides the
- * measurements — and stands in for the visible row during the header
- * fit probe, so the Area totals still drop to their second row before
- * the Operations row ever sheds anything.
- */
-function HeaderOperations({ operations }: { operations: readonly string[] }) {
-  const ghostRef = useRef<HTMLDivElement>(null);
-  // `label`: the `Operations:` prefix is visible; `chips`: how many
-  // chips render (operations.length = all of them, no `…` chip).
-  const [fit, setFit] = useState({ label: true, chips: operations.length });
-  const measure = useCallback(() => {
-    const ghost = ghostRef.current;
-    const cell = ghost?.parentElement; // the .ss-id identity cell
-    if (!ghost || !cell) return;
-    const available = cell.clientWidth;
-    const rowGap = Number.parseFloat(getComputedStyle(ghost).columnGap) || 0;
-    const chipsWrap = ghost.querySelector('.opchips');
-    const chipGap = chipsWrap
-      ? Number.parseFloat(getComputedStyle(chipsWrap).columnGap) || 0
-      : 0;
-    const width = (el: Element | null) =>
-      el ? el.getBoundingClientRect().width : 0;
-    const labelWidth = width(ghost.querySelector('.oplabel'));
-    const moreWidth = width(ghost.querySelector('.opchip-more'));
-    const chipWidths = Array.from(
-      ghost.querySelectorAll('.opchip:not(.opchip-more)'),
-      width,
-    );
-    const chipsWidth = (count: number) =>
-      chipWidths.slice(0, count).reduce((sum, w) => sum + w, 0) +
-      chipGap * Math.max(0, count - 1);
-    const all = chipWidths.length;
-    // Half-pixel tolerance so subpixel rounding never flips a tier.
-    const fits = (required: number) => required <= available + 0.5;
-    let next: { label: boolean; chips: number };
-    if (fits(labelWidth + rowGap + chipsWidth(all))) {
-      next = { label: true, chips: all };
-    } else if (fits(chipsWidth(all))) {
-      next = { label: false, chips: all };
-    } else {
-      let count = all - 1;
-      while (count > 0 && !fits(chipsWidth(count) + chipGap + moreWidth)) {
-        count -= 1;
-      }
-      next = { label: false, chips: count };
-    }
-    setFit((current) =>
-      current.label === next.label && current.chips === next.chips
-        ? current
-        : next,
-    );
-  }, []);
-  useLayoutEffect(() => {
-    measure();
-  }, [measure, operations]);
-  useEffect(() => {
-    window.addEventListener('resize', measure);
-    let observer: ResizeObserver | undefined;
-    if (typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(() => measure());
-      const cell = ghostRef.current?.parentElement;
-      if (cell) observer.observe(cell);
-    }
-    return () => {
-      window.removeEventListener('resize', measure);
-      observer?.disconnect();
-    };
-  }, [measure]);
-  const truncated = fit.chips < operations.length;
+  if (!workOrder) return <>WO —</>;
   return (
     <>
-      {(fit.chips > 0 || !truncated) && (
-        <div className="op">
-          {fit.label && 'Operations:'}
-          <span className="opchips">
-            {operations.slice(0, fit.chips).map((op) => (
-              <span className="opchip" key={op}>
-                {op}
-              </span>
-            ))}
-            {truncated && (
-              <span
-                className="opchip opchip-more"
-                title={operations.slice(fit.chips).join(', ')}
-              >
-                …
-              </span>
-            )}
-          </span>
-        </div>
-      )}
-      <div className="op-ghost" aria-hidden="true" ref={ghostRef}>
-        <span className="oplabel">Operations:</span>
-        <span className="opchips">
-          {operations.map((op) => (
-            <span className="opchip" key={op}>
-              {op}
-            </span>
-          ))}
-          <span className="opchip opchip-more">…</span>
-        </span>
-      </div>
+      WO <b className="rval">{workOrder.workOrderNumber ?? '—'}</b>
+      {' · '}
+      <TypeChip type={workOrder.requestType} />
     </>
   );
 }
 
-/**
- * Blocking badge-scan modal of a Scanned-session Area (GUI_DESIGN
- * §4.12): shown when the station is opened without an active Worker
- * Session and when the session expires. Only the Scan Station is
- * blocked; Escape and backdrop clicks never dismiss it — a valid badge
- * scan is the only way through. Never `unlock` wording.
- */
-function WorkerSignInDialog({
-  expired,
-  writeBlocked,
-  onSignIn,
-}: {
-  /** true after a session expired; false on first open (no session). */
-  expired: boolean;
-  writeBlocked: boolean;
-  onSignIn: (worker: MockWorker) => void;
-}) {
-  const fieldRef = useRef<HTMLInputElement>(null);
-  const [scanError, setScanError] = useState<string | null>(null);
-  useEffect(() => {
-    fieldRef.current?.focus();
-  }, []);
-  const title = expired ? 'Worker session expired' : 'Worker sign-in required';
-  function submit() {
-    const value = normalizeScanInput(fieldRef.current?.value ?? '');
-    if (fieldRef.current) fieldRef.current.value = '';
-    if (!value) return;
-    // Exact match against ACTIVE Worker badge barcodes only — an
-    // unknown, inactive, or non-badge value is rejected with nothing
-    // recorded, and never refreshes anything.
-    const worker = workerByBadge(value);
-    if (!worker) {
-      setScanError(
-        'Badge not recognized. Check the badge and scan again — nothing was recorded.',
-      );
-      return;
-    }
-    onSignIn(worker);
-  }
-  // Development-only: a click on a demo badge is the exact equivalent
-  // of a wedge badge scan ending in Enter — the value lands in the
-  // modal's own field and goes through the SAME submit()/exact-match
-  // path. Inert while writes are blocked, like the field itself.
-  function simulateBadge(value: string) {
-    if (writeBlocked || !fieldRef.current) return;
-    fieldRef.current.value = value;
-    setScanError(null);
-    submit();
-  }
-  return (
-    <ModalDialog
-      label={title}
-      // Deliberately not dismissable: the close request is ignored —
-      // the station stays blocked until a valid badge scan.
-      onClose={() => {}}
-    >
-      <h3>{title}</h3>
-      <div className="sub">Scan your badge to continue.</div>
-      <input
-        aria-label="Scan Worker badge"
-        ref={fieldRef}
-        className="field mono"
-        autoComplete="off"
-        disabled={writeBlocked}
-        placeholder={
-          writeBlocked
-            ? 'Disconnected — scanning disabled'
-            : 'Scan Worker badge · Press Enter'
-        }
-        onChange={() => setScanError(null)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') submit();
-        }}
-      />
-      {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
-      <DevNotice>
-        Demo badges (development build only) — click one to simulate a badge
-        scan: <DemoBarcode value="100482" onScan={simulateBadge} /> H. Nguyen ·{' '}
-        <DemoBarcode value="100517" onScan={simulateBadge} /> V. Tran
-      </DevNotice>
-    </ModalDialog>
-  );
+/** Route-mode chip detail: the actual trace for FLOATING, the route
+ * expectation for PLANNED (GUI_DESIGN §7.2 `RouteModeChip`). */
+function routeDetail(candidate: TransferCandidate): string {
+  if (candidate.routeMode === 'FLOATING') return 'actual trace';
+  return candidate.routeStatus === 'ON_ROUTE' ? 'next step' : 'route deviation';
 }
 
-/** Near-expiration warning threshold of the session countdown. */
-const SESSION_WARN_MS = 2 * 60_000;
-
-/**
- * Live remaining-session line of the Worker pill, derived from the
- * sliding deadline plus the ONE shared UI clock (§3.12) — never a
- * component-owned timer. Isolated in a leaf component so only the pill
- * re-renders per tick. The countdown reads `Session: 10m 23s` —
- * minutes and seconds ticking down every second, in plain (non-bold)
- * weight — with the time value in the success tone while comfortably
- * inside the timeout, stepping into the warning tone near expiration.
- */
-function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
-  // The shared tick drives the per-second re-renders; the remaining
-  // time derives from the wall clock at render so a render triggered
-  // between ticks (badge scan, confirmed command) is never one stale
-  // tick behind — the §3.12 clamping rule for values newer than the
-  // tick.
-  const tick = useUiClock('second');
-  const now = Math.max(tick, Date.now());
-  if (expiresAt === null) {
-    return <span className="sub">Session · scan badge</span>;
-  }
-  const remaining = expiresAt - now;
-  if (remaining <= 0) {
-    return <span className="sub warn">Session · expired</span>;
-  }
-  const totalSeconds = Math.max(1, Math.ceil(remaining / 1_000));
-  const value = `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
-  return (
-    <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
-      Session: <span className="num">{value}</span>
-    </span>
-  );
-}
-
-/** Markers keep the guidance kinds apart without relying on color. */
-const GUIDE_MARKERS: Record<'info' | 'warn' | 'action' | 'error', string> = {
-  info: 'ℹ',
-  warn: '⚠',
-  action: '›',
-  error: '✕',
-};
-
-/**
- * Semantic quantity/step guidance directly above the related input or
- * choice. Four kinds only (§3.10, v15 — the former marker-less
- * `neutral` kind is retired): instructions and information are `info`,
- * important constraints and deviations are `warn`, required next
- * actions are `action`, and validation errors are `error`. Every kind
- * carries a small marker plus an accent edge — color is never the
- * only distinction, and validation reads stronger than any
- * instruction. Deliberately light: never a large framed card.
- */
-function Guidance({
-  tone = 'info',
-  children,
-}: {
-  tone?: 'info' | 'warn' | 'action' | 'error';
-  children: ReactNode;
-}) {
-  return (
-    <div className={`ss-guide ${tone}`}>
-      <span className="gmark" aria-hidden="true">
-        {GUIDE_MARKERS[tone]}
-      </span>
-      <span className="gtext">{children}</span>
-    </div>
-  );
-}
-
-/**
- * Split a mock Work Order context label (`WO 007003 · Turning`,
- * `WO — · Turning · MODIFY`) into the WO Number value and its trailing
- * context segments — the ONE place this display string is taken apart,
- * so recaps can emphasize the number and chip the Operation instead of
- * echoing the raw string.
- */
-function parseWorkOrderLabel(label: string): {
-  number: string;
-  segments: string[];
-} {
-  const [head, ...segments] = label.split(' · ');
-  return { number: head.replace(/^WO\s*/, '') || '—', segments };
-}
-
-/**
- * Work Order context line for recaps: `WO` stays a plain label, the
- * WO Number value carries the shared `.rval` emphasis (`—` for an
- * internal blank number), the Operation renders as the shared entity
- * chip, and a NEW/MODIFY segment stays the shared Request Type chip.
- */
-function WorkOrderRecapLine({ workOrder }: { workOrder: string }) {
-  const { number, segments } = parseWorkOrderLabel(workOrder);
-  return (
-    <>
-      WO <b className="rval">{number}</b>
-      {segments.map((segment, index) => (
-        <Fragment key={`${segment}-${index}`}>
-          {' · '}
-          {segment === 'NEW' || segment === 'MODIFY' ? (
-            <TypeChip type={segment} />
-          ) : (
-            <EntityChip>{segment}</EntityChip>
-          )}
-        </Fragment>
-      ))}
-    </>
-  );
-}
-
-/** Concise recap of the selections carried into the current step. */
-function StepRecap({ lines }: { lines: ReactNode[] }) {
-  return (
-    <div className="ss-recap">
-      {lines.filter(Boolean).map((line, index) => (
-        <div key={index} className="ss-recapline">
-          {line}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Wizard navigation row: Back only when a meaningful previous view
- * exists, Cancel (Esc) always abandons the whole one-shot workflow
- * with no write (the standard label is exactly `Cancel (Esc)`), and
- * the primary button names the actual operation.
- */
-function StepButtons({
-  onBack,
-  onCancel,
-  cancelLabel = 'Cancel (Esc)',
-  primary,
-}: {
-  onBack?: () => void;
-  onCancel: () => void;
-  cancelLabel?: string;
-  primary: {
-    label: string;
-    onClick: () => void;
-    disabled?: boolean;
-    danger?: boolean;
-    autoFocus?: boolean;
-  };
-}) {
-  const primaryRef = useRef<HTMLButtonElement>(null);
-  const { autoFocus } = primary;
-  useEffect(() => {
-    if (autoFocus) primaryRef.current?.focus();
-  }, [autoFocus]);
-  return (
-    <div className="row">
-      {onBack ? (
-        <button className="bigbtn ghost ss-back" onClick={onBack}>
-          ‹ Back
-        </button>
-      ) : null}
-      <button className="bigbtn ghost" onClick={onCancel}>
-        {cancelLabel}
-      </button>
-      <button
-        ref={primaryRef}
-        className={`bigbtn ${primary.danger ? 'danger' : 'primary'}`}
-        disabled={primary.disabled}
-        onClick={primary.onClick}
-      >
-        {primary.label}
-      </button>
-    </div>
-  );
-}
-
-/**
- * Central physical-key handling for quantity steps: Enter advances (to
- * the next step — never directly to a write), Escape cancels
- * (ModalDialog), and while the quantity input itself is NOT focused
- * the editing keys fall back to end-of-value editing (digits append,
- * Backspace removes the last digit, Delete clears, Space is ignored).
- * While the quantity input IS focused, the shared QuantityKeypad owns
- * cursor-aware editing (selection replacement / caret insertion — the
- * same transitions, see components/quantity-input.ts) and consumes
- * those keys before they reach this handler. Keys typed into other
- * text fields (reason, notes, scan-within-dialog) are left alone.
- */
-function quantityKeyHandler(
-  value: string,
-  onChange: (next: string) => void,
-  onAdvance: () => void,
-) {
-  return (event: React.KeyboardEvent) => {
-    const target = event.target;
-    // Focusable dialog buttons (Cancel, Back, selection buttons) keep
-    // their native keyboard activation. Virtual keypad buttons are
-    // type="button", non-focusable (tabIndex -1) and never take focus
-    // on click, so a previously clicked keypad button can never
-    // reclaim Enter or Space.
-    if (target instanceof HTMLButtonElement) return;
-    if (event.key === 'Enter') {
-      // Enter always means "advance" for the quantity step.
-      event.preventDefault();
-      onAdvance();
-      return;
-    }
-    const inOtherField =
-      (target instanceof HTMLInputElement &&
-        !target.classList.contains('qtydisplay')) ||
-      target instanceof HTMLTextAreaElement ||
-      target instanceof HTMLSelectElement;
-    if (inOtherField) return;
-    if (
-      target instanceof HTMLInputElement &&
-      target.classList.contains('qtydisplay')
-    ) {
-      // The focused quantity input already handled (and consumed) its
-      // cursor-aware editing keys; anything still bubbling from it is
-      // intentionally left alone.
-      return;
-    }
-    if (event.key === ' ') {
-      event.preventDefault(); // Space is ignored
-      return;
-    }
-    const next = applyQuantityKey(value, event.key);
-    if (next !== null) {
-      event.preventDefault();
-      onChange(next);
-    }
-  };
-}
-
-/**
- * Enter handling for non-quantity steps (settings/confirmation):
- * Enter performs the given action unless focus sits on a button or in
- * a text-entry control (those keep their native behavior).
- */
-function enterKeyHandler(onEnter: () => void) {
-  return (event: React.KeyboardEvent) => {
-    const target = event.target;
-    if (
-      target instanceof HTMLButtonElement ||
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLSelectElement ||
-      target instanceof HTMLTextAreaElement
-    ) {
-      return;
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      onEnter();
-    }
-  };
-}
-
-/** Standard quantity validation message for a 1..max range: the range
- *  prompt is a required action; exceeding the limit is a validation
- *  error and reads visually stronger. */
-function quantityValidation(
-  parsed: number,
-  max: number,
-  overMessage: string,
-): { tone: 'action' | 'error'; text: string } | null {
-  if (parsed > max) return { tone: 'error', text: overMessage };
-  if (parsed < 1) {
-    return {
-      tone: 'action',
-      text: `Enter a quantity between 1 and ${max}.`,
-    };
-  }
-  return null;
+function candidateLabel(candidate: TransferCandidate): string {
+  return `${candidate.currentArea.name} — ${candidate.quantity} pcs available`;
 }
 
 /* ------------------------------------------------------------------ */
-/* One-shot dialogs (temporary wizards)                                */
+/* Source selection (several valid sources)                            */
 /* ------------------------------------------------------------------ */
-
-function MachineAssignDialog({
-  station,
-  machines,
-  initialMachine,
-  initialPn,
-  queuedQtyFor,
-  areaCards,
-  worker,
-  onBack,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps & {
-  /** Session-derived Machine monitoring state of this Area — the
-   * statuses shown and checked here follow the current assignments. */
-  machines: readonly MockAreaMachine[];
-  initialMachine: string | null;
-  initialPn: string | null;
-  queuedQtyFor: (pn: string) => number;
-  areaCards: MockAreaCard[];
-  /** Back from Step 1 to the parent dialog (PN action dialog); absent
-   * for the Machine-scan entry, which has no previous dialog step. */
-  onBack?: () => void;
-}) {
-  const [step, setStep] = useState<'select' | 'qty' | 'confirm'>('select');
-  const [machine, setMachine] = useState<string | null>(initialMachine);
-  const [pn, setPn] = useState<string | null>(initialPn);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const scanRef = useRef<HTMLInputElement>(null);
-  const max = pn ? queuedQtyFor(pn) : 0;
-  const [qty, setQty] = useState('');
-  // MAX is the default for assignment quantity.
-  useEffect(() => {
-    setQty(max > 0 ? String(max) : '');
-  }, [max]);
-  // The barcode-selection input receives focus when entering Step 1.
-  useEffect(() => {
-    if (step === 'select') scanRef.current?.focus();
-  }, [step]);
-
-  const queuedPns = Array.from(
-    new Set(
-      areaCards
-        .filter((c) => c.machines.some(([m]) => m === 'queue'))
-        .map((c) => c.pn),
-    ),
-  );
-
-  // Viewport-fit decision for the queued-PN selection (Machines always
-  // stay explicit buttons). PN buttons are the default; the compact
-  // dropdown appears ONLY while the dialog's NATURAL height with the
-  // full PN button layout exceeds the dialog's viewport height cap
-  // (the `.dlg` max-height, which already carries the required margin
-  // to the viewport edges) — never a PN-count threshold. The invisible
-  // probe copy always lays out the buttons at the cell's width, so the
-  // measurement is independent of the currently applied mode and the
-  // dialog returns to buttons as soon as a larger viewport fits them.
-  const pnCellRef = useRef<HTMLDivElement>(null);
-  const pnProbeRef = useRef<HTMLDivElement>(null);
-  const [pnCombobox, setPnCombobox] = useState(false);
-  const measurePnFit = useCallback(() => {
-    const cell = pnCellRef.current;
-    const probe = pnProbeRef.current;
-    const dlg = cell?.closest('.dlg');
-    if (!cell || !probe || !(dlg instanceof HTMLElement)) return;
-    const cap = Number.parseFloat(getComputedStyle(dlg).maxHeight);
-    if (!Number.isFinite(cap) || cap <= 0) {
-      // No measurable viewport cap (no-layout environments — tests):
-      // keep the default button presentation.
-      setPnCombobox(false);
-      return;
-    }
-    // Natural dialog height with PN buttons: the current content
-    // height with the visible PN control's height replaced by the
-    // probe's button layout height.
-    const naturalWithButtons =
-      dlg.scrollHeight - cell.offsetHeight + probe.offsetHeight;
-    // Half-pixel tolerance so subpixel rounding never flips the mode.
-    setPnCombobox(naturalWithButtons > cap + 0.5);
-  }, []);
-  // Re-evaluate whenever the measured content can change: entering the
-  // selection view (also on Back) and a changed queued-PN list.
-  useLayoutEffect(() => {
-    if (step === 'select') measurePnFit();
-  }, [step, queuedPns.length, measurePnFit]);
-  // …and whenever the viewport size changes.
-  useEffect(() => {
-    const onResize = () => measurePnFit();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, [measurePnFit]);
-
-  const parsedQty = parseInt(qty || '0', 10);
-  const pairSelected = machine !== null && pn !== null && max > 0;
-  const qtyValid = parsedQty >= 1 && parsedQty <= max;
-  const valid = pairSelected && qtyValid;
-
-  /**
-   * Step 1 barcode selection: a Machine barcode of this Area selects
-   * the Machine; a queued PN barcode selects the PN. Everything else
-   * is an inline error with no selection change — and nothing is ever
-   * recorded during selection.
-   */
-  function handleSelectScan(raw: string) {
-    const parsed = parseScan(raw);
-    if (parsed.kind === 'empty') return;
-    if (parsed.kind === 'machine') {
-      const known = MOCK_MACHINE_BARCODES[parsed.id];
-      if (!known) {
-        setScanError('Unknown Machine barcode — selection unchanged.');
-        return;
-      }
-      if (known.area !== station.area) {
-        setScanError(
-          `${known.machine} belongs to another Area — selection unchanged.`,
-        );
-        return;
-      }
-      const status = machines.find((m) => m.name === known.machine)?.status;
-      if (status === 'maintenance') {
-        setScanError(
-          `${known.machine} is inactive (maintenance) — selection unchanged.`,
-        );
-        return;
-      }
-      setMachine(known.machine);
-      setScanError(null);
-      return;
-    }
-    if (parsed.kind === 'pn') {
-      // parsed.pn is the canonical PN — the identity itself.
-      if (queuedQtyFor(parsed.pn) < 1) {
-        setScanError(
-          `${parsed.pn} has no queued quantity in this Area — selection unchanged.`,
-        );
-        return;
-      }
-      setPn(parsed.pn);
-      setScanError(null);
-      return;
-    }
-    setScanError(
-      'Scan a Machine in this Area or a Part Number currently waiting in the Area queue. Your current selections were kept.',
-    );
-  }
-
-  function goQty() {
-    if (pairSelected) setStep('qty');
-  }
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function confirm() {
-    if (!valid || !machine || !pn) return;
-    const selectedMachine = machine;
-    const selectedPn = pn;
-    onApply({
-      action: {
-        pn: selectedPn,
-        movements: ['ASSIGNED_TO_MACHINE'],
-        description: `${station.area} queue → ${selectedMachine} · qty ${parsedQty}`,
-        qty: parsedQty,
-        source: 'Area queue',
-        destination: selectedMachine,
-        machine: selectedMachine,
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Returns ${parsedQty} pcs from ${selectedMachine} to the Area queue.`,
-      },
-      update: (cards) =>
-        applyAssign(cards, {
-          pn: selectedPn,
-          area: station.area,
-          machine: selectedMachine,
-          qty: parsedQty,
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${selectedPn} × ${parsedQty} → ${selectedMachine}`,
-      detail: `${selectedMachine} is now processing this quantity. Scan the next barcode when ready.`,
-    });
-    onClose();
-  }
-
-  const keys =
-    step === 'qty'
-      ? quantityKeyHandler(qty, setQty, goConfirm)
-      : step === 'confirm'
-        ? enterKeyHandler(confirm)
-        : enterKeyHandler(goQty);
-
-  return (
-    // User-facing name is `Assign to Machine`; internally this stays the
-    // one-shot assignment wizard — no Machine context survives it.
-    <ModalDialog
-      label="Assign to Machine"
-      onClose={onCancel}
-      size="wide"
-      onKeyDown={keys}
-    >
-      <h3>Assign to Machine</h3>
-      {step === 'select' ? (
-        <>
-          <div className="sub">
-            Select a Machine and a queued Part Number, then enter the quantity
-            to assign. This assignment applies once and closes after
-            confirmation.
-          </div>
-          <input
-            ref={scanRef}
-            className="field mono"
-            autoComplete="off"
-            placeholder="Scan machine or queued part barcode… (ENTER)"
-            aria-label="Scan machine or queued part barcode"
-            onKeyDown={(e) => {
-              if (e.key !== 'Enter') return;
-              // One Enter has exactly one meaning: a filled input is a
-              // selection scan, an empty input advances once the
-              // Machine + PN pair is selected. Consuming the event in
-              // every case keeps the dialog-level handler from acting
-              // on the same keypress (never scan AND advance at once).
-              e.preventDefault();
-              e.stopPropagation();
-              const value = e.currentTarget.value;
-              if (value) {
-                handleSelectScan(value);
-                e.currentTarget.value = '';
-                return;
-              }
-              if (pairSelected) goQty();
-            }}
-          />
-          {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
-          <div className="ss-dlgrid">
-            <span className="lbl" id="ma-machine-lbl">
-              Machine
-            </span>
-            {/* Machines are ALWAYS explicit selection buttons — never a
-                dropdown; an Area's Machine list stays small and wraps. */}
-            <div
-              className="ss-choicerow"
-              role="group"
-              aria-labelledby="ma-machine-lbl"
-            >
-              {machines.map((m) => (
-                <button
-                  key={m.name}
-                  type="button"
-                  className={`pickbtn ${machine === m.name ? 'sel' : ''}`}
-                  disabled={m.status === 'maintenance'}
-                  title={
-                    m.status === 'maintenance'
-                      ? 'Under maintenance · Unavailable for production'
-                      : undefined
-                  }
-                  onClick={() => setMachine(m.name)}
-                >
-                  {m.name}
-                  <span className="s">{m.status}</span>
-                </button>
-              ))}
-            </div>
-            {/* Light separator between the two selection groups —
-                purely presentational grouping, no semantics. */}
-            <div className="ss-dlgsep" aria-hidden="true" />
-            <span className="lbl" id="ma-pn-lbl">
-              PN <span className="field-note">(queued)</span>
-            </span>
-            {queuedPns.length === 0 ? (
-              <span className="sub">No queued quantity in this Area.</span>
-            ) : (
-              <div className="ss-pncell" ref={pnCellRef}>
-                {pnCombobox ? (
-                  // The dialog with the full PN button layout would not
-                  // fit the viewport right now — compact dropdown.
-                  <select
-                    aria-label="PN (queued)"
-                    className="mono"
-                    value={pn ?? ''}
-                    onChange={(e) => setPn(e.target.value)}
-                  >
-                    <option value="" disabled>
-                      Select a queued PN…
-                    </option>
-                    {queuedPns.map((queuedPn) => (
-                      <option key={queuedPn} value={queuedPn}>
-                        {queuedPn} — queued {queuedQtyFor(queuedPn)}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div
-                    className="ss-choicerow"
-                    role="group"
-                    aria-labelledby="ma-pn-lbl"
-                  >
-                    {queuedPns.map((queuedPn) => (
-                      <button
-                        key={queuedPn}
-                        type="button"
-                        className={`pickbtn mono ${pn === queuedPn ? 'sel' : ''}`}
-                        onClick={() => setPn(queuedPn)}
-                      >
-                        <span className="pickpn" title={queuedPn}>
-                          {queuedPn}
-                        </span>
-                        <span className="s">
-                          queued {queuedQtyFor(queuedPn)}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {/* Invisible measurement copy of the full PN button
-                    layout at the cell's width (same wrapping): its
-                    height feeds the viewport-fit decision in BOTH
-                    modes. Hidden from a11y and never interactive. */}
-                <div className="ss-pnprobe" aria-hidden="true" ref={pnProbeRef}>
-                  <div className="ss-choicerow">
-                    {queuedPns.map((queuedPn) => (
-                      <button
-                        key={queuedPn}
-                        type="button"
-                        tabIndex={-1}
-                        disabled
-                        className="pickbtn mono"
-                      >
-                        <span className="pickpn">{queuedPn}</span>
-                        <span className="s">
-                          queued {queuedQtyFor(queuedPn)}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-          <StepButtons
-            onBack={onBack}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goQty,
-              disabled: !pairSelected,
-            }}
-          />
-        </>
-      ) : null}
-      {step === 'qty' && pn ? (
-        <>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <StepRecap
-            lines={[
-              <>
-                Assigning to <EntityChip>{machine}</EntityChip>. Queued
-                quantity: <b>{max} pcs</b>.
-              </>,
-              <>
-                Source: <EntityChip>Area queue</EntityChip> → Destination:{' '}
-                <EntityChip>{machine}</EntityChip>
-              </>,
-            ]}
-          />
-          <Guidance tone="info">
-            The full queued quantity is selected by default. Enter a smaller
-            quantity if needed.
-          </Guidance>
-          {(() => {
-            const v = quantityValidation(
-              parsedQty,
-              max,
-              `Quantity cannot exceed the ${max} pcs currently queued in this Area.`,
-            );
-            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-          })()}
-          <QuantityKeypad value={qty} onChange={setQty} max={max} />
-          <StepButtons
-            onBack={() => setStep('select')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </>
-      ) : null}
-      {step === 'confirm' && pn && machine ? (
-        <>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the assignment, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Assign to Machine', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
-                'primary',
-              ],
-              [
-                'Source',
-                <AreaChip areaKey={station.area}>Area queue</AreaChip>,
-                'primary',
-              ],
-              [
-                'Destination Machine',
-                <EntityChip>{machine}</EntityChip>,
-                'primary',
-              ],
-              [
-                'Remaining queued after assignment',
-                <span className="mono">{max - parsedQty} pcs</span>,
-              ],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'ASSIGNED_TO_MACHINE', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('qty')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm assignment',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </>
-      ) : null}
-    </ModalDialog>
-  );
-}
-
-function PnActionsDialog({
-  pn,
-  station,
-  hasMachines,
-  queuedQty,
-  directQty,
-  machineAssignments,
-  sources,
-  repairSources,
-  inAreaQty,
-  onPick,
-  onBack,
-  onCancel,
-}: {
-  pn: string;
-  station: MockScanStation;
-  hasMachines: boolean;
-  queuedQty: number;
-  /** Directly processing quantity (no-Machine Areas) eligible for DONE. */
-  directQty: number;
-  /** Actively Machine-assigned portions of this PN (post-v18): each
-   * gets its own DONE choice, equivalent to the Machine card's DONE
-   * row action. Empty in no-Machine Areas. */
-  machineAssignments: { machine: string; qty: number }[];
-  sources: SourceOption[];
-  repairSources: {
-    areaLabel: string;
-    qty: number;
-    flow: string;
-    note: string;
-  }[];
-  inAreaQty: number;
-  onPick: (flow: PnActionChildFlow) => void;
-  /** Back to the parent step (manual PN entry); absent for scans. */
-  onBack?: () => void;
-  onCancel: () => void;
-}) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  return (
-    <ModalDialog label="Select an action" onClose={onCancel}>
-      <h3>Select an action</h3>
-      <div className="big mono">{pn}</div>
-      <div className="sub">
-        Only available actions are shown. No changes are recorded until you
-        review and confirm an action.
-      </div>
-      {hasMachines && queuedQty > 0 ? (
-        <button
-          className="choice"
-          onClick={() =>
-            onPick({
-              kind: 'machine-assign',
-              machine: null,
-              pn,
-            })
-          }
-        >
-          <span className="cic que" aria-hidden="true">
-            ASN
-          </span>
-          <span>
-            <span className="ct1">Assign queued quantity to a Machine</span>
-            <br />
-            <span className="ct2">
-              {queuedQty} pcs waiting in the {areaName} queue — applies to one
-              assignment; the full queued quantity is selected by default.
-            </span>
-          </span>
-        </button>
-      ) : null}
-      {machineAssignments.map((assignment, index) => (
-        // One DONE choice per actively assigned Machine (post-v18) —
-        // the same one-shot DONE wizard the Machine card's DONE row
-        // action opens, with MAX defaulting to the assigned quantity.
-        <button
-          key={`${assignment.machine}-${index}`}
-          className="choice"
-          onClick={() =>
-            onPick({
-              kind: 'done',
-              pn,
-              machine: assignment.machine,
-              max: assignment.qty,
-            })
-          }
-        >
-          <span className="cic run" aria-hidden="true">
-            DONE
-          </span>
-          <span>
-            <span className="ct1">
-              Complete Area processing on {assignment.machine}
-            </span>
-            <br />
-            <span className="ct2">
-              {assignment.qty} pcs on {assignment.machine}. The finished
-              quantity leaves the Machine and moves to the finished rack, ready
-              to transfer.
-            </span>
-          </span>
-        </button>
-      ))}
-      {directQty > 0 ? (
-        <button
-          className="choice"
-          onClick={() =>
-            onPick({ kind: 'done', pn, machine: null, max: directQty })
-          }
-        >
-          <span className="cic run" aria-hidden="true">
-            DONE
-          </span>
-          <span>
-            <span className="ct1">Complete Area processing</span>
-            <br />
-            <span className="ct2">
-              {directQty} pcs in processing. The finished quantity moves to the
-              finished rack, ready to transfer to another Area.
-            </span>
-          </span>
-        </button>
-      ) : null}
-      {sources.length > 0 ? (
-        <button
-          className="choice"
-          onClick={() =>
-            sources.length === 1
-              ? onPick({
-                  kind: 'transfer',
-                  pn,
-                  source: sources[0],
-                })
-              : onPick({ kind: 'source-select', pn, sources })
-          }
-        >
-          <span className="cic run" aria-hidden="true">
-            MOVE
-          </span>
-          <span>
-            <span className="ct1">Receive more quantity from another Area</span>
-            <br />
-            <span className="ct2">
-              {sources.map((s) => `${s.qty} pcs at ${s.areaLabel}`).join(' · ')}
-              {'. '}Select the source Area before entering the quantity.
-            </span>
-          </span>
-        </button>
-      ) : null}
-      <button
-        className="choice"
-        onClick={() => onPick({ kind: 'add-qty', pn })}
-      >
-        <span className="cic add" aria-hidden="true">
-          ADD
-        </span>
-        <span>
-          <span className="ct1">Add more quantity</span>
-          <br />
-          <span className="ct2">
-            Add physical quantity found at this Area that was not transferred
-            from another Area. A reason is required.
-          </span>
-        </span>
-      </button>
-      {repairSources.length > 0 ? (
-        <button
-          className="choice"
-          onClick={() => onPick({ kind: 'repair', pn })}
-        >
-          <span className="cic rep" aria-hidden="true">
-            REP
-          </span>
-          <span>
-            <span className="ct1">Return quantity for repair</span>
-            <br />
-            <span className="ct2">
-              Return quantity to {areaName} so earlier work can be corrected.
-            </span>
-          </span>
-        </button>
-      ) : null}
-      {inAreaQty > 0 ? (
-        <button
-          className="choice"
-          onClick={() => onPick({ kind: 'scrap', pn })}
-        >
-          <span className="cic scr" aria-hidden="true">
-            SCR
-          </span>
-          <span>
-            <span className="ct1">Scrap damaged quantity</span>
-            <br />
-            <span className="ct2">
-              Scan {SCRAP_BARCODE} once for each damaged piece, then enter one
-              reason for the total. Nothing is recorded until confirmation.
-            </span>
-          </span>
-        </button>
-      ) : null}
-      <div className="row">
-        {onBack ? (
-          <button className="bigbtn ghost ss-back" onClick={onBack}>
-            ‹ Back
-          </button>
-        ) : null}
-        <button className="bigbtn ghost" onClick={onCancel}>
-          Cancel (Esc)
-        </button>
-      </div>
-    </ModalDialog>
-  );
-}
 
 function SourceSelectDialog({
-  pn,
-  sources,
+  resolution,
   onPick,
   onBack,
   onCancel,
 }: {
-  pn: string;
-  sources: SourceOption[];
-  onPick: (source: SourceOption) => void;
-  /** Back to the parent step (PN action dialog or manual PN entry);
-   * absent when the scan resolved directly to this selection. */
+  resolution: ScanResolution;
+  onPick: (candidate: TransferCandidate) => void;
   onBack?: () => void;
   onCancel: () => void;
 }) {
   return (
     <ModalDialog label="Select the source" onClose={onCancel}>
       <h3>Select the source</h3>
-      <div className="big mono">{pn}</div>
+      <div className="big mono">{resolution.partNumber}</div>
       <div className="sub">
-        This Part Number is available in more than one Area. Select one source
-        to continue.
+        This Part Number is available in more than one place. Select exactly one
+        source to continue — quantities are never combined.
       </div>
-      {sources.map((source) => (
+      {resolution.candidates.map((candidate) => (
         <button
-          key={source.areaLabel}
+          key={candidate.quantityFlowId}
           className="choice"
-          onClick={() => onPick(source)}
+          onClick={() => onPick(candidate)}
         >
           <span className="cic run" aria-hidden="true">
             SRC
           </span>
           <span>
-            <span className="ct1">
-              {source.areaLabel} — {source.qty} pcs available
-            </span>
+            <span className="ct1">{candidateLabel(candidate)}</span>
             <br />
             <span className="ct2">
-              {source.card.workOrder} · Up to {source.qty} pcs available
+              {workOrderLabel(candidate.workOrder)} ·{' '}
+              <RouteModeChip
+                mode={candidate.routeMode}
+                detail={routeDetail(candidate)}
+              />
             </span>
           </span>
         </button>
@@ -3043,94 +1111,145 @@ function SourceSelectDialog({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Transfer — quantity/review → confirmation → server write            */
+/* ------------------------------------------------------------------ */
+
 function TransferDialog({
   station,
-  pn,
-  source,
-  hasMachines,
-  worker,
+  resolution,
+  candidate,
+  destinationNote,
+  writeBlocked,
   onBack,
-  onApply,
-  onNotice,
-  onClose,
+  onDone,
   onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  source: SourceOption;
-  hasMachines: boolean;
-  /** Back from the quantity view to the parent step (source selection,
-   * PN action dialog, or manual PN entry); absent for direct scans. */
+}: {
+  station: StationContext;
+  resolution: ScanResolution;
+  candidate: TransferCandidate;
+  destinationNote: string;
+  writeBlocked: boolean;
   onBack?: () => void;
+  /** Called ONLY with a server-confirmed result. */
+  onDone: (result: TransferResult) => void;
+  onCancel: () => void;
 }) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
+  const pn = resolution.partNumber;
+  const operations = resolution.operations;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
-  const [qty, setQty] = useState(String(source.qty)); // MAX default
+  // MAX = the whole Quantity Flow, and in this release the ONLY valid
+  // quantity: partial movement needs SPLIT (a later release) and is
+  // refused clearly — never submitted.
+  const [qty, setQty] = useState(String(candidate.quantity));
   const parsedQty = parseInt(qty || '0', 10);
-  const valid = parsedQty >= 1 && parsedQty <= source.qty;
-  const destinationNote = hasMachines
-    ? `${areaName} queue (awaiting Machine)`
-    : `${areaName} — direct processing`;
-  // Quantity still actively processing at the source is treated as
-  // completed there by this transfer: one atomic command appends
-  // AREA_COMPLETED immediately before TRANSFERRED — no separate manual
-  // DONE is required first. Quantity already finished (or still
-  // queued) at the source transfers with TRANSFERRED alone.
-  const completesQty = valid ? completionRequired(source.card, parsedQty) : 0;
-  const movements: MovementType[] =
-    completesQty > 0 ? ['AREA_COMPLETED', 'TRANSFERRED'] : ['TRANSFERRED'];
+  const fullQuantity = parsedQty === candidate.quantity;
+  const [operationId, setOperationId] = useState<number | null>(
+    candidate.suggestedOperationId,
+  );
+  const operation = operations.find((item) => item.id === operationId) ?? null;
+  const operationRequired =
+    operations.length > 1 && candidate.suggestedOperationId === null;
+  const valid = fullQuantity && operation !== null;
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  // One idempotency key per transfer intent, reused verbatim on every
+  // retry — a retry after an unknown outcome replays the committed
+  // transfer instead of recording it twice.
+  const deviceEventId = useRef(newDeviceEventId());
+
+  // Route deviation (PROJECT_PROFILE §17): the station's Area is not
+  // the Planned Route's next step, or the chosen Operation is not the
+  // step's Operation. Both need explicit confirmation with a reason;
+  // the server decides authoritatively and may ask again.
+  const [serverDeviation, setServerDeviation] = useState<string | null>(null);
+  const localDeviation =
+    candidate.routeStatus === 'DEVIATION'
+      ? candidate.expectedNextArea
+        ? `The Planned Route expects this quantity at ${candidate.expectedNextArea.name} next, not at ${station.area.name}.`
+        : `${station.area.name} is not on this quantity's Planned Route.`
+      : candidate.routeStatus === 'ON_ROUTE' &&
+          candidate.expectedOperationId !== null &&
+          operation !== null &&
+          operation.id !== candidate.expectedOperationId
+        ? `The Planned Route expects Operation ${operationLabel(
+            operations.find(
+              (item) => item.id === candidate.expectedOperationId,
+            ) ?? {
+              code: '?',
+              name: null,
+            },
+          )} here, not ${operationLabel(operation)}.`
+        : null;
+  const deviation = serverDeviation ?? localDeviation;
+  const reasonMissing = deviation !== null && reason.trim() === '';
 
   function goConfirm() {
     if (valid) setStep('confirm');
   }
 
-  function confirm() {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements,
-        description: `${source.areaLabel} → ${destinationNote} · qty ${parsedQty}`,
-        qty: parsedQty,
-        source: source.areaLabel,
-        destination: areaName,
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect:
-          completesQty > 0
-            ? `Returns ${parsedQty} pcs to ${source.areaLabel} and restores their processing state there.`
-            : `Returns ${parsedQty} pcs to ${source.areaLabel}.`,
-      },
-      update: (cards) =>
-        applyTransferIn(cards, {
-          pn,
-          fromArea: source.card.area,
-          toArea: station.area,
-          qty: parsedQty,
-          destinationHasMachines: hasMachines,
-          destinationOperation:
-            areaByKey(station.area)?.operations[0] ?? areaName,
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${pn} × ${parsedQty} → ${destinationNote}`,
-      detail:
-        completesQty > 0
-          ? `${completesQty} pcs were completed at ${source.areaLabel} and transferred here.`
-          : `The quantity moved here from ${source.areaLabel}.`,
-    });
-    onClose();
+  async function confirm() {
+    if (!valid || busy || reasonMissing) return;
+    if (writeBlocked) {
+      setServerError(
+        'Connection lost — the transfer was not sent. Reconnect and confirm again; nothing was recorded.',
+      );
+      return;
+    }
+    setBusy(true);
+    setServerError(null);
+    try {
+      const result = await transferToStationArea({
+        stationId: station.stationId,
+        partNumber: pn,
+        quantityFlowId: candidate.quantityFlowId,
+        sourceAreaId: candidate.currentArea.id,
+        targetAreaId: station.area.id,
+        quantity: candidate.quantity,
+        operationId: operation!.id,
+        confirmRouteDeviation: deviation !== null,
+        routeDeviationReason: deviation !== null ? reason.trim() : null,
+        deviceEventId: deviceEventId.current,
+      });
+      onDone(result);
+    } catch (error) {
+      const asked = routeDeviationConfirmation(error);
+      if (asked) {
+        // The server sees a deviation the candidate did not show (the
+        // route position changed meanwhile): present it and require the
+        // reason before the SAME intent is resubmitted.
+        setServerDeviation(errorMessage(error));
+      } else {
+        setServerError(errorMessage(error));
+      }
+    } finally {
+      setBusy(false);
+    }
   }
+
+  const quantityGuidance =
+    parsedQty > candidate.quantity ? (
+      <Guidance tone="error">
+        Quantity cannot exceed the {candidate.quantity} pcs currently available
+        at {candidate.currentArea.name}.
+      </Guidance>
+    ) : parsedQty < candidate.quantity ? (
+      <Guidance tone="error">
+        Partial transfer is not available in this release: this quantity of{' '}
+        {candidate.quantity} pcs moves as a whole. Enter {candidate.quantity} or
+        cancel — nothing is recorded.
+      </Guidance>
+    ) : null;
 
   return (
     <ModalDialog
       label="Receive from another Area"
-      onClose={onCancel}
+      onClose={busy ? () => undefined : onCancel}
       onKeyDown={
         step === 'qty'
           ? quantityKeyHandler(qty, setQty, goConfirm)
-          : enterKeyHandler(confirm)
+          : enterKeyHandler(() => void confirm())
       }
     >
       <h3>Receive from another Area</h3>
@@ -3143,35 +1262,65 @@ function TransferDialog({
             lines={[
               <>
                 Transfer{' '}
-                <AreaChip areaKey={source.card.area}>
-                  {source.areaLabel}
+                <AreaChip area={candidate.currentArea}>
+                  {candidate.currentArea.name}
                 </AreaChip>{' '}
-                → <AreaChip areaKey={station.area}>{destinationNote}</AreaChip>
+                → <AreaChip area={station.area}>{destinationNote}</AreaChip>
               </>,
-              <WorkOrderRecapLine workOrder={source.card.workOrder} />,
+              <WorkOrderContextLine workOrder={candidate.workOrder} />,
             ]}
           />
+          {operationRequired ? (
+            <>
+              <Guidance tone="action">
+                {station.area.name} supports several Operations. Select the
+                Operation this quantity is transferred for.
+              </Guidance>
+              <div className="ss-choices" role="group" aria-label="Operation">
+                {operations.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`choice${operationId === item.id ? ' selected' : ''}`}
+                    aria-pressed={operationId === item.id}
+                    onClick={() => setOperationId(item.id)}
+                  >
+                    <span className="cic" aria-hidden="true">
+                      OP
+                    </span>
+                    <span className="ct1">{operationLabel(item)}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : operation ? (
+            <StepRecap
+              lines={[
+                <>
+                  Operation <EntityChip>{operationLabel(operation)}</EntityChip>
+                </>,
+              ]}
+            />
+          ) : (
+            <Guidance tone="error">
+              {station.area.name} has no active Operation configured. Configure
+              one in Administration → Operations before receiving quantity.
+            </Guidance>
+          )}
           <Guidance tone="info">
-            Available at {source.areaLabel}: <b>{source.qty} pcs</b>. The full
-            quantity is selected by default.
+            Available at {candidate.currentArea.name}:{' '}
+            <b>{candidate.quantity} pcs</b>. The full quantity moves as a whole.
           </Guidance>
-          {(() => {
-            const v = quantityValidation(
-              parsedQty,
-              source.qty,
-              `Quantity cannot exceed the ${source.qty} pcs currently available at the source.`,
-            );
-            return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-          })()}
-          <QuantityKeypad value={qty} onChange={setQty} max={source.qty} />
+          {quantityGuidance}
+          <QuantityKeypad
+            value={qty}
+            onChange={setQty}
+            max={candidate.quantity}
+          />
           <StepButtons
             onBack={onBack}
             onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
+            primary={{ label: 'Next', onClick: goConfirm, disabled: !valid }}
           />
         </div>
       ) : (
@@ -3186,997 +1335,84 @@ function TransferDialog({
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
+                <span className="mono">{candidate.quantity} pcs</span>,
                 'primary',
               ],
               [
                 'Source',
-                <AreaChip areaKey={source.card.area}>
-                  {source.areaLabel}
+                <AreaChip area={candidate.currentArea}>
+                  {candidate.currentArea.name}
                 </AreaChip>,
                 'primary',
               ],
               [
                 'Destination',
-                <AreaChip areaKey={station.area}>{destinationNote}</AreaChip>,
+                <AreaChip area={station.area}>{destinationNote}</AreaChip>,
                 'primary',
               ],
               [
-                'Source processing',
-                completesQty > 0
-                  ? `${completesQty} pcs will be marked complete at the source before transfer`
-                  : null,
-                undefined,
-                'warn',
-              ],
-              [
-                'Remaining at source',
-                <span className="mono">{source.qty - parsedQty} pcs</span>,
-              ],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              [
-                movements.length > 1 ? 'Recorded events' : 'Recorded event',
-                movements.length > 1 ? movements.join(', then ') : movements[0],
-                'secondary',
-              ],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('qty')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm transfer',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      )}
-    </ModalDialog>
-  );
-}
-
-function IntakeDialog({
-  station,
-  pn,
-  hasMachines,
-  worker,
-  onBack,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  hasMachines: boolean;
-  /** Back from the settings view to the parent step (manual PN entry);
-   * absent when a scan resolved directly to this wizard. */
-  onBack?: () => void;
-}) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const operations = areaByKey(station.area)?.operations ?? [];
-  const [step, setStep] = useState<'settings' | 'qty' | 'confirm'>('settings');
-  const [qty, setQty] = useState(''); // intake has no MAX and no default
-  const [requestType, setRequestType] = useState<RequestType>('MODIFY');
-  const [routeMode, setRouteMode] = useState<RouteMode>('FLOATING');
-  const [plannedRoute, setPlannedRoute] = useState('Bracket std v3');
-  const [due, setDue] = useState('');
-  const [notes, setNotes] = useState('');
-  // The stored value uses the option format `<Area> — <Operation>` from
-  // the first render on — the select's options and the recap/summary
-  // chips always agree (the initial value is never a bare Operation
-  // that matches no option).
-  const [operation, setOperation] = useState(
-    operations[0] ? `${areaName} — ${operations[0]}` : '',
-  );
-  // No field receives initial focus (post-v18): the dialog root keeps
-  // the focus ModalDialog gives it, so Enter advances to the next step
-  // immediately (a focused select would swallow Enter). Every field
-  // stays reachable by Tab or tap.
-  const parsedQty = parseInt(qty || '0', 10);
-  const settingsValid = routeMode === 'FLOATING' || plannedRoute !== '';
-  const valid = parsedQty >= 1 && settingsValid;
-  const isKnown = catalogPartNumber(pn) !== undefined;
-  // One clearly applicable blank-number MODIFY Work Order is reused;
-  // with several plausible ones an explicit selection dialog would
-  // appear (never a guess). The mock data carries one such WO.
-  const reusableInternalWo = requestType === 'MODIFY' && pn === '214-406';
-  const woBehavior = reusableInternalWo
-    ? 'Reuses the applicable internal MODIFY Work Order (WO —)'
-    : requestType === 'MODIFY'
-      ? 'Creates an internal Work Order without an external number (displays —)'
-      : 'Creates/uses the applicable Work Order';
-
-  function goQty() {
-    if (settingsValid) setStep('qty');
-  }
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function confirm() {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements: ['RECEIVED'],
-        description: `received into ${areaName}${hasMachines ? ' queue' : ''} · qty ${parsedQty} · ${requestType} · ${routeMode}`,
-        qty: parsedQty,
-        source: '—',
-        destination: areaName,
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Removes the ${parsedQty} received pcs again.`,
-      },
-      update: (cards) =>
-        applyIntroduce(cards, {
-          pn,
-          area: station.area,
-          qty: parsedQty,
-          hasMachines,
-          workOrder: `WO — · ${operation.split(' — ')[1] ?? operation} · ${requestType}`,
-          job: '— (internal)',
-          due: due || null,
-          received: todayIso(),
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${pn} × ${parsedQty} received into ${areaName}${hasMachines ? ' queue' : ''}`,
-      detail: hasMachines
-        ? 'Receipt recorded. The quantity is now waiting in the Area queue.'
-        : 'Receipt recorded. The quantity is now in processing at this Area.',
-    });
-    onClose();
-  }
-
-  const keys =
-    step === 'qty'
-      ? quantityKeyHandler(qty, setQty, goConfirm)
-      : step === 'confirm'
-        ? enterKeyHandler(confirm)
-        : enterKeyHandler(goQty);
-
-  return (
-    <ModalDialog
-      label="Receive Quantity"
-      onClose={onCancel}
-      size="wide"
-      onKeyDown={keys}
-    >
-      <h3>Receive Quantity</h3>
-      {step === 'settings' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          {/* Operator wording only. Engineering behavior behind it: the
-              PartNumber master metadata record is created on first
-              valid use (no preloaded catalog required); the canonical
-              uppercase PN string is the identity; received_date
-              defaults to the scan timestamp; the optional due date is
-              stored on the WorkOrderDemand. */}
-          {/* v15 layout: PN identity recap first, one short info line,
-              then the intake settings — never one merged paragraph. */}
-          <div className="sub">
-            {isKnown ? (
-              <>
-                This Part Number has no active production demand. Review the
-                details below before receiving quantity.
-              </>
-            ) : (
-              <>
-                New Part Number. Verify it carefully; it will be registered when
-                you confirm the receipt.
-              </>
-            )}
-          </div>
-          {/* No default-selection recap here: the defaults and dates
-              are visible directly in the fields below — the header
-              stays the PN message plus one guidance line. */}
-          <Guidance>
-            Review all details before confirming. Nothing is recorded until the
-            final confirmation.
-          </Guidance>
-          <div className="ss-dlgrid">
-            <label htmlFor="in-type">Request Type</label>
-            <select
-              id="in-type"
-              value={requestType}
-              onChange={(e) => setRequestType(e.target.value as RequestType)}
-            >
-              <option>MODIFY</option>
-              <option>NEW</option>
-            </select>
-            <label htmlFor="in-route">Route Mode</label>
-            <select
-              id="in-route"
-              value={routeMode}
-              onChange={(e) => setRouteMode(e.target.value as RouteMode)}
-            >
-              <option>FLOATING</option>
-              <option>PLANNED</option>
-            </select>
-            {routeMode === 'PLANNED' ? (
-              <>
-                <label htmlFor="in-planned">Planned Route</label>
-                <select
-                  id="in-planned"
-                  value={plannedRoute}
-                  onChange={(e) => setPlannedRoute(e.target.value)}
-                >
-                  <option>Bracket std v3</option>
-                  <option>Shaft std v2</option>
-                </select>
-              </>
-            ) : null}
-            <label htmlFor="in-due">
-              Due date <span className="field-optional">(optional)</span>
-            </label>
-            <input
-              id="in-due"
-              type="date"
-              className="mono"
-              value={due}
-              onChange={(e) => setDue(e.target.value)}
-            />
-            <label htmlFor="in-op">Starting Area · Operation</label>
-            <select
-              id="in-op"
-              value={operation}
-              onChange={(e) => setOperation(e.target.value)}
-            >
-              {operations.map((op) => (
-                <option key={op}>{`${areaName} — ${op}`}</option>
-              ))}
-            </select>
-            <label htmlFor="in-notes">Reason / notes</label>
-            <input
-              id="in-notes"
-              value={notes}
-              placeholder="Add a reason or note, if needed"
-              onChange={(e) => setNotes(e.target.value)}
-            />
-          </div>
-          <StepButtons
-            onBack={onBack}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goQty,
-              disabled: !settingsValid,
-            }}
-          />
-        </div>
-      ) : null}
-      {step === 'qty' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          {/* Compact two-line recap: the shared Request Type and Route
-              Mode chips (the route name lives inside the Route Mode
-              chip) on one line, the Work Order context on the other.
-              WO/Due values carry text emphasis only (.rval) — the WO
-              Number is `—` in every case here: MODIFY stays internal
-              (new or reused) and a NEW request has no external number
-              known at this step. */}
-          <StepRecap
-            lines={[
-              <>
-                <TypeChip type={requestType} />
-                {' · '}
-                <RouteModeChip
-                  mode={routeMode}
-                  detail={
-                    routeMode === 'PLANNED' ? plannedRoute : 'actual trace'
-                  }
-                />
-                {' · '}
-                <EntityChip>{operation}</EntityChip>
-              </>,
-              <>
-                WO <b className="rval">—</b> · Due:{' '}
-                <b className="rval">{formatIsoDate(due || null)}</b>
-                {notes ? <> · Notes: {notes}</> : null}
-              </>,
-            ]}
-          />
-          <Guidance>
-            Enter the physical quantity received. No default quantity is
-            assumed.
-          </Guidance>
-          {parsedQty < 1 ? (
-            <Guidance tone="action">Enter a positive quantity.</Guidance>
-          ) : null}
-          <QuantityKeypad value={qty} onChange={setQty} />
-          <StepButtons
-            onBack={() => setStep('settings')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : null}
-      {step === 'confirm' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the receipt, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Receive Quantity', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
-                'primary',
-              ],
-              ['Request Type', <TypeChip type={requestType} />],
-              [
-                'Route Mode',
-                // The route name lives inside the chip — no separate
-                // Planned Route row.
-                <RouteModeChip
-                  mode={routeMode}
-                  detail={
-                    routeMode === 'PLANNED' ? plannedRoute : 'actual trace'
-                  }
-                />,
-              ],
-              ['Work Order', woBehavior],
-              ['Due date', formatIsoDate(due || null)],
-              [
-                'Starting Area · Operation',
-                <EntityChip>{operation}</EntityChip>,
-                'primary',
-              ],
-              [
-                'Destination',
-                <AreaChip areaKey={station.area}>
-                  {hasMachines
-                    ? `${areaName} queue (awaiting Machine)`
-                    : `${areaName} — direct processing`}
-                </AreaChip>,
-                'primary',
-              ],
-              ['Reason / notes', notes || null],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'RECEIVED', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('qty')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm receipt',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      ) : null}
-    </ModalDialog>
-  );
-}
-
-function AddQuantityDialog({
-  station,
-  pn,
-  hasMachines,
-  worker,
-  onBack,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  hasMachines: boolean;
-  /** Back from the entry view to the parent PN action dialog. */
-  onBack?: () => void;
-}) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const [step, setStep] = useState<'entry' | 'confirm'>('entry');
-  const [qty, setQty] = useState(''); // deliberately no MAX, no default
-  const [reason, setReason] = useState('');
-  const parsedQty = parseInt(qty || '0', 10);
-  const valid = parsedQty >= 1 && reason.trim() !== '';
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function confirm() {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements: ['QUANTITY_ADJUSTED'],
-        description: `+${parsedQty} pcs at ${areaName} (INCREASE) · reason: ${reason.trim()}`,
-        qty: parsedQty,
-        source: '—',
-        destination: areaName,
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Removes the ${parsedQty} added pcs again.`,
-      },
-      update: (cards) =>
-        applyIntroduce(cards, {
-          pn,
-          area: station.area,
-          qty: parsedQty,
-          hasMachines,
-          workOrder: 'WO — · Addition',
-          job: '— (internal)',
-          due: null,
-          received: todayIso(),
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${pn} +${parsedQty} pcs at ${areaName}`,
-      detail: hasMachines
-        ? 'The quantity adjustment was recorded with your reason. The added quantity is now waiting in the Area queue.'
-        : 'The quantity adjustment was recorded with your reason. The added quantity is now in processing at this Area.',
-    });
-    onClose();
-  }
-
-  return (
-    <ModalDialog
-      label="Add more quantity"
-      onClose={onCancel}
-      onKeyDown={
-        step === 'entry'
-          ? quantityKeyHandler(qty, setQty, goConfirm)
-          : enterKeyHandler(confirm)
-      }
-    >
-      <h3>Add more quantity</h3>
-      {step === 'entry' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">
-            Add physical quantity found at this Area that was not transferred
-            from another Area. A reason is required.
-          </div>
-          <StepRecap
-            lines={[
-              <>
-                Adding at <AreaChip areaKey={station.area}>{areaName}</AreaChip>{' '}
-                →{' '}
-                <AreaChip areaKey={station.area}>
-                  {hasMachines
-                    ? `${areaName} queue (awaiting Machine)`
-                    : `${areaName} — direct processing`}
-                </AreaChip>
-              </>,
-            ]}
-          />
-          <Guidance>
-            Enter the actual quantity found. No default quantity is provided.
-          </Guidance>
-          {parsedQty < 1 ? (
-            <Guidance tone="action">A positive quantity is required.</Guidance>
-          ) : null}
-          <QuantityKeypad value={qty} onChange={setQty} />
-          <label className="ss-reasonlbl" htmlFor="addq-reason">
-            Reason <span className="field-required">(required)</span>
-          </label>
-          <div className="ss-fieldhint">
-            This reason will be included in the adjustment history.
-          </div>
-          <input
-            id="addq-reason"
-            className="field"
-            value={reason}
-            placeholder="e.g. found 2 additional blanks with the lot"
-            onChange={(e) => setReason(e.target.value)}
-          />
-          <StepButtons
-            onBack={onBack}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the quantity addition, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Add physical quantity', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">+{parsedQty} pcs</span>,
-                'primary',
-              ],
-              ['Area', <AreaChip areaKey={station.area}>{areaName}</AreaChip>],
-              [
-                'Destination',
-                <AreaChip areaKey={station.area}>
-                  {hasMachines
-                    ? `${areaName} queue (awaiting Machine)`
-                    : `${areaName} — direct processing`}
-                </AreaChip>,
-                'primary',
-              ],
-              ['Reason', reason.trim(), 'primary'],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'QUANTITY_ADJUSTED · INCREASE', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('entry')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm addition',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      )}
-    </ModalDialog>
-  );
-}
-
-function RepairDialog({
-  station,
-  pn,
-  sources,
-  worker,
-  onBack,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  sources: { areaLabel: string; qty: number; flow: string; note: string }[];
-  /** Back from the entry view to the parent PN action dialog. */
-  onBack?: () => void;
-}) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const [step, setStep] = useState<'entry' | 'confirm'>('entry');
-  const [source, setSource] = useState(
-    sources.length === 1 ? sources[0] : null,
-  );
-  const max = source?.qty ?? 0;
-  const [qty, setQty] = useState('');
-  const [reason, setReason] = useState('');
-  useEffect(() => {
-    setQty(max > 0 ? String(max) : '');
-  }, [max]);
-  const parsedQty = parseInt(qty || '0', 10);
-  const valid =
-    source !== null &&
-    parsedQty >= 1 &&
-    parsedQty <= max &&
-    reason.trim() !== '';
-  const partial = source !== null && parsedQty >= 1 && parsedQty < source.qty;
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function confirm() {
-    if (!valid || !source) return;
-    const selectedSource = source;
-    onApply({
-      action: {
-        pn,
-        movements: ['TRANSFERRED'],
-        description: `REPAIR · ${selectedSource.areaLabel} → ${areaName} · qty ${parsedQty} · reason: ${reason.trim()}`,
-        qty: parsedQty,
-        source: selectedSource.areaLabel,
-        destination: areaName,
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Returns ${parsedQty} pcs to ${selectedSource.areaLabel}.`,
-      },
-      update: (cards) =>
-        applyIntroduce(cards, {
-          pn,
-          area: station.area,
-          qty: parsedQty,
-          hasMachines: (MOCK_AREA_MACHINES[station.area] ?? []).length > 0,
-          workOrder: 'WO — · Repair',
-          job: '— (repair)',
-          due: null,
-          received: todayIso(),
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `Repair — ${pn} × ${parsedQty} returned to ${areaName}`,
-      detail: `The selected quantity was returned from ${selectedSource.areaLabel} to ${areaName} for repair.`,
-    });
-    onClose();
-  }
-
-  return (
-    <ModalDialog
-      label="Return quantity for repair"
-      onClose={onCancel}
-      size="wide"
-      onKeyDown={
-        step === 'entry'
-          ? quantityKeyHandler(qty, setQty, goConfirm)
-          : enterKeyHandler(confirm)
-      }
-    >
-      <h3>Return quantity for repair</h3>
-      {step === 'entry' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">
-            Select the source Area, enter the quantity to return, and provide
-            the repair reason. This moves existing quantity; it does not create
-            additional quantity.
-          </div>
-          <StepRecap
-            lines={[
-              <>
-                Repair destination:{' '}
-                <AreaChip areaKey={station.area}>{areaName}</AreaChip>
-              </>,
-            ]}
-          />
-          <div className="ss-dlgrid">
-            <span className="lbl">Source</span>
-            <div className="ss-choicerow">
-              {sources.map((s) => (
-                <button
-                  key={s.areaLabel}
-                  type="button"
-                  className={`pickbtn ${source?.areaLabel === s.areaLabel ? 'sel' : ''}`}
-                  onClick={() => setSource(s)}
-                >
-                  {s.areaLabel} · {s.qty} pcs · {s.flow}
-                  <span className="s">{s.note}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          {source ? (
-            <>
-              {/* MAX/default statement is an instruction, not a hazard
-                  — `info` (v15); genuine deviations keep `warn`. */}
-              <Guidance>
-                Up to {max} pcs are available. The full quantity is selected by
-                default; enter a smaller quantity for a partial return.
-              </Guidance>
-              {(() => {
-                const v = quantityValidation(
-                  parsedQty,
-                  max,
-                  `Quantity cannot exceed the ${max} pcs of the selected source flow.`,
-                );
-                return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-              })()}
-              <QuantityKeypad value={qty} onChange={setQty} max={max} />
-            </>
-          ) : null}
-          <label className="ss-reasonlbl" htmlFor="rep-reason">
-            Reason <span className="field-required">(required)</span>
-          </label>
-          <input
-            id="rep-reason"
-            className="field"
-            value={reason}
-            placeholder="Describe the work that must be corrected"
-            onChange={(e) => setReason(e.target.value)}
-          />
-          <StepButtons
-            onBack={onBack}
-            onCancel={onCancel}
-            primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the Repair movement, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Return quantity for repair', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Quantity',
-                <span className="mono">{parsedQty} pcs</span>,
-                'primary',
-              ],
-              [
-                'Source',
-                source ? (
-                  <>
-                    <EntityChip>{source.areaLabel}</EntityChip> · {source.flow}
-                  </>
+                'Operation',
+                operation ? (
+                  <EntityChip>{operationLabel(operation)}</EntityChip>
                 ) : null,
                 'primary',
               ],
               [
-                'Destination',
-                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
-                'primary',
+                'Work Order',
+                <WorkOrderContextLine workOrder={candidate.workOrder} />,
               ],
               [
-                'Effect',
-                partial
-                  ? 'Partial quantity — splits off its own Quantity Flow first'
-                  : 'Moves the whole Quantity Flow',
-                undefined,
-                partial ? 'warn' : undefined,
+                'Route',
+                <RouteModeChip
+                  mode={candidate.routeMode}
+                  detail={routeDetail(candidate)}
+                />,
+                'secondary',
               ],
-              ['Reason', reason.trim(), 'primary'],
-              ['Worker', worker, 'secondary'],
+              ['Route deviation', deviation, undefined, 'warn'],
+              ['Remaining at source', <span className="mono">0 pcs</span>],
               ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'TRANSFERRED · REPAIR intent', 'secondary'],
+              ['Recorded event', 'TRANSFERRED', 'secondary'],
             ]}
           />
-          <StepButtons
-            onBack={() => setStep('entry')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm repair',
-              onClick: confirm,
-              disabled: !valid,
-              autoFocus: true,
-            }}
-          />
-        </div>
-      )}
-    </ModalDialog>
-  );
-}
-
-function ScrapDialog({
-  station,
-  pn,
-  available,
-  worker,
-  onBack,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps & {
-  pn: string;
-  available: number;
-  /** Back from the counting view to the parent PN action dialog. */
-  onBack?: () => void;
-}) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const [step, setStep] = useState<'count' | 'confirm'>('count');
-  const [count, setCount] = useState(0);
-  const [reason, setReason] = useState('');
-  const [scanNote, setScanNote] = useState<string | null>(null);
-  const scanRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (step === 'count') scanRef.current?.focus();
-  }, [step]);
-  const valid = count >= 1 && count <= available && reason.trim() !== '';
-
-  function handleScrapScan(value: string) {
-    const parsed = parseScan(value);
-    if (parsed.kind === 'empty') return;
-    if (parsed.kind !== 'scrap') {
-      setScanNote(
-        `“${value.trim()}” is not a valid scrap barcode. Scan ${SCRAP_BARCODE} to add one piece.`,
-      );
-      return;
-    }
-    // Counting changes no production state — only the pending count.
-    setCount((c) => c + 1);
-    setScanNote(null);
-  }
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function confirm() {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements: ['SCRAPPED'],
-        description: `scrapped ${count} at ${areaName} · reason: ${reason.trim()}`,
-        qty: count,
-        source: areaName,
-        destination: 'scrap',
-        worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Restores the ${count} scrapped pcs to active quantity.`,
-      },
-      update: (cards) =>
-        applyScrap(cards, { pn, area: station.area, qty: count }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `Scrapped — ${pn} × ${count} at ${areaName}`,
-      detail: `The scrap quantity and reason were recorded. Remaining active quantity: ${available - count} pcs.`,
-    });
-    onClose();
-  }
-
-  const countKeys = (event: React.KeyboardEvent) => {
-    const target = event.target;
-    if (target instanceof HTMLButtonElement) return;
-    if (
-      target instanceof HTMLInputElement &&
-      target.getAttribute('aria-label') === 'Scrap barcode input'
-    ) {
-      return; // the scrap counting input owns its Enter handling
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      goConfirm();
-    }
-  };
-
-  return (
-    <ModalDialog
-      label="Scrap damaged quantity"
-      onClose={onCancel}
-      size="wide"
-      onKeyDown={step === 'count' ? countKeys : enterKeyHandler(confirm)}
-    >
-      <h3>Scrap damaged quantity</h3>
-      {step === 'count' ? (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          {/* Operator wording only (v15): the scrap barcode counts only
-              inside this workflow, and the single SCRAPPED operation is
-              created on the final confirmation — the canonical event
-              name appears in the confirmation summary and history
-              surfaces, never in this instruction. */}
-          <div className="sub">
-            Scan <code>{SCRAP_BARCODE}</code> once for each damaged piece, then
-            enter one reason for the total. Nothing is recorded until
-            confirmation.
-          </div>
-          <Guidance>
-            Available at {areaName}: <b>{available} pcs</b> · pending scrap{' '}
-            <b>{count}</b> · remaining after scrap{' '}
-            <b>{Math.max(0, available - count)} pcs</b>.
-          </Guidance>
-          {count > available ? (
+          {deviation !== null ? (
+            <>
+              <Guidance tone="warn">
+                Confirming records the actual transfer as a route deviation. A
+                reason is required.
+              </Guidance>
+              <input
+                aria-label="Route deviation reason"
+                className="field"
+                autoComplete="off"
+                value={reason}
+                disabled={busy}
+                placeholder="Reason for leaving the Planned Route"
+                onChange={(event) => setReason(event.target.value)}
+              />
+            </>
+          ) : null}
+          {serverError ? <Guidance tone="error">{serverError}</Guidance> : null}
+          {writeBlocked && !serverError ? (
             <Guidance tone="error">
-              Scrap count cannot exceed the {available} pcs available at{' '}
-              {areaName}.
+              Disconnected — the transfer cannot be recorded until the
+              connection returns.
             </Guidance>
           ) : null}
-          <div className="ss-scrapcount" role="status">
-            <span className="lbl">Pending scrap count</span>
-            <span className="cnt mono">{count}</span>
-            <button
-              type="button"
-              className="pickbtn"
-              disabled={count === 0}
-              onClick={() => setCount((c) => Math.max(0, c - 1))}
-            >
-              Remove one
-            </button>
-            <button
-              type="button"
-              className="pickbtn"
-              disabled={count === 0}
-              onClick={() => setCount(0)}
-            >
-              Reset
-            </button>
-          </div>
-          <input
-            ref={scanRef}
-            className="field mono"
-            placeholder={`Scan ${SCRAP_BARCODE} — Enter`}
-            aria-label="Scrap barcode input"
-            autoComplete="off"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                handleScrapScan(e.currentTarget.value);
-                e.currentTarget.value = '';
-              }
-            }}
-          />
-          {scanNote ? <Guidance tone="error">{scanNote}</Guidance> : null}
-          <label className="ss-reasonlbl" htmlFor="scrap-reason">
-            Scrap reason <span className="field-required">(required)</span>
-          </label>
-          <input
-            id="scrap-reason"
-            className="field"
-            value={reason}
-            placeholder="e.g. tool crash — gouged face"
-            onChange={(e) => setReason(e.target.value)}
-          />
           <StepButtons
-            onBack={onBack}
+            onBack={() => {
+              setServerError(null);
+              setStep('qty');
+            }}
             onCancel={onCancel}
             primary={{
-              label: 'Next',
-              onClick: goConfirm,
-              disabled: !valid,
-            }}
-          />
-        </div>
-      ) : (
-        <div>
-          <div className="big mono" title={pn}>
-            {pn}
-          </div>
-          <div className="sub">Review the scrap operation, then confirm.</div>
-          <ConfirmationSummary
-            rows={[
-              ['Action', 'Scrap damaged quantity', 'primary'],
-              ['PN', <span className="mono">{pn}</span>, 'primary'],
-              [
-                'Area',
-                <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
-                'primary',
-              ],
-              ['Machine', '—'],
-              ['Available', <span className="mono">{available} pcs</span>],
-              [
-                'Scrap quantity',
-                <span className="mono">{count} pcs</span>,
-                'primary',
-                'err',
-              ],
-              [
-                'Remaining active quantity',
-                <span className="mono">{available - count} pcs</span>,
-              ],
-              ['Reason', reason.trim(), 'primary'],
-              ['Worker', worker, 'secondary'],
-              ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'SCRAPPED', 'secondary'],
-            ]}
-          />
-          <StepButtons
-            onBack={() => setStep('count')}
-            onCancel={onCancel}
-            primary={{
-              label: 'Confirm scrap',
-              onClick: confirm,
-              disabled: !valid,
+              label: serverError
+                ? 'Retry transfer'
+                : busy
+                  ? 'Recording…'
+                  : 'Confirm transfer',
+              onClick: () => void confirm(),
+              disabled: !valid || busy || reasonMissing || writeBlocked,
               autoFocus: true,
             }}
           />
@@ -4186,664 +1422,111 @@ function ScrapDialog({
   );
 }
 
-function QueueReturnDialog({
-  station,
-  pn,
-  machine,
-  max,
-  worker,
-  finalGate,
-  writeBlocked,
-  onBadgeWorker,
-  onApply,
-  onNotice,
-  onClose,
-  onCancel,
-}: ActionDialogProps &
-  FinalGateProps & { pn: string; machine: string; max: number }) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const [step, setStep] = useState<'qty' | 'confirm'>('qty');
-  const [qty, setQty] = useState(String(max)); // MAX default
-  // Final-confirmation gate (post-v18): opened by the summary's
-  // confirming action; Cancel returns to the summary unchanged.
-  const [gate, setGate] = useState(false);
-  const parsedQty = parseInt(qty || '0', 10);
-  const valid = parsedQty >= 1 && parsedQty <= max;
+/* ------------------------------------------------------------------ */
+/* PN already in the Area                                              */
+/* ------------------------------------------------------------------ */
 
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function requestConfirm() {
-    if (!valid) return;
-    setGate(true);
-  }
-
-  function confirm(confirmedBy?: string) {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements: ['RELEASED_FROM_MACHINE'],
-        description: `${machine} → ${areaName} queue · qty ${parsedQty}`,
-        qty: parsedQty,
-        source: machine,
-        destination: 'Area queue',
-        machine,
-        worker: confirmedBy ?? worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: `Re-assigns ${parsedQty} pcs to ${machine}.`,
-      },
-      update: (cards) =>
-        applyQueueReturn(cards, {
-          pn,
-          area: station.area,
-          machine,
-          qty: parsedQty,
-        }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${pn} × ${parsedQty} returned to the ${areaName} queue`,
-      detail: `The quantity was removed from ${machine} and returned to the ${areaName} queue. It remains unfinished.`,
-    });
-    onClose();
-  }
-
-  // The key facts of the pending return — shared by the final-question
-  // and badge-scan gates.
-  const gateInfo = (
-    <>
-      Are you sure you want to return{' '}
-      <b>
-        {parsedQty} of {max} pcs
-      </b>{' '}
-      of <b className="mono">{pn}</b> running on <b>{machine}</b> back to the{' '}
-      {areaName} queue? The quantity stays unfinished.
-    </>
-  );
-
-  return (
-    <>
-      <ModalDialog
-        label="Return unfinished quantity to queue"
-        onClose={onCancel}
-        onKeyDown={
-          step === 'qty'
-            ? quantityKeyHandler(qty, setQty, goConfirm)
-            : enterKeyHandler(requestConfirm)
-        }
-      >
-        <h3>Return unfinished quantity to queue</h3>
-        {step === 'qty' ? (
-          <div>
-            <div className="big mono" title={pn}>
-              {pn}
-            </div>
-            <StepRecap
-              lines={[
-                <>
-                  <EntityChip>{machine}</EntityChip> →{' '}
-                  <EntityChip>{areaName} queue</EntityChip>
-                </>,
-              ]}
-            />
-            <Guidance tone="info">
-              <b>{max} pcs</b> are assigned to {machine}. Enter a lower quantity
-              to return only part of them.
-            </Guidance>
-            {(() => {
-              const v = quantityValidation(
-                parsedQty,
-                max,
-                `Quantity cannot exceed the ${max} pcs currently assigned on ${machine}.`,
-              );
-              return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-            })()}
-            <QuantityKeypad value={qty} onChange={setQty} max={max} />
-            <StepButtons
-              onCancel={onCancel}
-              primary={{
-                label: 'Next',
-                onClick: goConfirm,
-                disabled: !valid,
-              }}
-            />
-          </div>
-        ) : (
-          <div>
-            <div className="big mono" title={pn}>
-              {pn}
-            </div>
-            <div className="sub">Review the queue return, then confirm.</div>
-            <ConfirmationSummary
-              rows={[
-                ['Action', 'Return unfinished quantity to queue', 'primary'],
-                ['PN', <span className="mono">{pn}</span>, 'primary'],
-                [
-                  'Quantity',
-                  <span className="mono">{parsedQty} pcs</span>,
-                  'primary',
-                ],
-                [
-                  'Source Machine',
-                  <EntityChip>{machine}</EntityChip>,
-                  'primary',
-                ],
-                [
-                  'Destination',
-                  <AreaChip
-                    areaKey={station.area}
-                  >{`${areaName} queue`}</AreaChip>,
-                  'primary',
-                ],
-                [
-                  'Remaining on Machine',
-                  <span className="mono">{max - parsedQty} pcs</span>,
-                ],
-                ['Worker', worker, 'secondary'],
-                ['Scan Station', station.stationId, 'secondary'],
-                ['Recorded event', 'RELEASED_FROM_MACHINE', 'secondary'],
-              ]}
-            />
-            <StepButtons
-              onBack={() => setStep('qty')}
-              onCancel={onCancel}
-              primary={{
-                label: 'Confirm return to queue',
-                onClick: requestConfirm,
-                disabled: !valid,
-                autoFocus: true,
-              }}
-            />
-          </div>
-        )}
-      </ModalDialog>
-      {renderGate()}
-    </>
-  );
-
-  function renderGate() {
-    if (!gate) return null;
-    if (finalGate === 'question') {
-      return (
-        <ConfirmDialog
-          title="Return unfinished quantity?"
-          tone="warning"
-          confirmLabel="Yes — return to queue"
-          cancelLabel="Cancel (Esc)"
-          onConfirm={() => confirm()}
-          onCancel={() => setGate(false)}
-        >
-          {gateInfo}
-        </ConfirmDialog>
-      );
-    }
-    if (finalGate === 'badge') {
-      return (
-        <BadgeConfirmDialog
-          title="Scan badge to confirm the queue return"
-          tone="warning"
-          writeBlocked={writeBlocked}
-          onConfirm={(badgeWorker) => {
-            onBadgeWorker(badgeWorker);
-            confirm(badgeWorker.name);
-          }}
-          onCancel={() => setGate(false)}
-        >
-          {gateInfo}
-        </BadgeConfirmDialog>
-      );
-    }
-    return null;
-  }
-}
-
-/**
- * Manual DONE — complete Area processing for a selected quantity. The
- * quantity leaves its Machine (when one is involved), stays located in
- * the current Area, and waits on the finished rack for transfer
- * (`READY_TO_TRANSFER`). DONE never means Work Order completion,
- * manufacturing completion, stocking, allocation, or QC approval —
- * manufacturing completion stays `STOCKED` at the terminal Stockroom.
- */
-function DoneDialog({
-  station,
-  pn,
-  machine,
-  max,
-  worker,
-  finalGate,
-  writeBlocked,
-  onBadgeWorker,
+function InAreaDialog({
+  resolution,
+  onReceiveMore,
   onBack,
-  onApply,
-  onNotice,
-  onClose,
   onCancel,
-}: ActionDialogProps &
-  FinalGateProps & {
-    pn: string;
-    /** Machine currently processing the quantity, or null for direct
-     * Area processing (Areas without Machines). */
-    machine: string | null;
-    max: number;
-    /** Back from the quantity view to the parent PN action dialog;
-     * absent for the DONE row actions, which have no previous dialog. */
-    onBack?: () => void;
-  }) {
-  const areaName = areaByKey(station.area)?.name ?? station.area;
-  const [step, setStep] = useState<'qty' | 'confirm'>('qty');
-  // MAX defaults to the quantity at the current source position.
-  const [qty, setQty] = useState(String(max));
-  // Final-confirmation gate (post-v18): opened by the summary's
-  // confirming action; Cancel returns to the summary unchanged.
-  const [gate, setGate] = useState(false);
-  const parsedQty = parseInt(qty || '0', 10);
-  const valid = parsedQty >= 1 && parsedQty <= max;
-
-  function goConfirm() {
-    if (valid) setStep('confirm');
-  }
-
-  function requestConfirm() {
-    if (!valid) return;
-    setGate(true);
-  }
-
-  function confirm(confirmedBy?: string) {
-    if (!valid) return;
-    onApply({
-      action: {
-        pn,
-        movements: ['AREA_COMPLETED'],
-        description: `${machine ? `${machine} · ` : ''}finished at ${areaName} · qty ${parsedQty}`,
-        qty: parsedQty,
-        source: machine ?? `${areaName} processing`,
-        destination: `${areaName} — finished rack`,
-        machine: machine ?? undefined,
-        worker: confirmedBy ?? worker,
-        time: MOCK_SCAN_TIME,
-        reversalEffect: machine
-          ? `Returns ${parsedQty} pcs to ${machine} as active processing.`
-          : `Returns ${parsedQty} pcs to active processing at ${areaName}.`,
-      },
-      update: (cards) =>
-        applyDone(cards, { pn, area: station.area, machine, qty: parsedQty }),
-    });
-    onNotice({
-      kind: 'ok',
-      icon: '✓',
-      title: `${pn} × ${parsedQty} finished at ${areaName}`,
-      detail: `The finished quantity ${
-        machine ? `left ${machine} and ` : ''
-      }now waits on the finished rack, ready to move to another Area. Scan the PN at the next Area to transfer it.`,
-    });
-    onClose();
-  }
-
-  // The key facts of the pending completion — shared by the
-  // final-question and badge-scan gates.
-  const gateInfo = machine ? (
-    <>
-      Are you sure <b>{machine}</b> has finished{' '}
-      <b>
-        {parsedQty} of {max} pcs
-      </b>{' '}
-      of <b className="mono">{pn}</b>? The finished quantity moves to the{' '}
-      {areaName} finished rack, ready to transfer.
-    </>
-  ) : (
-    <>
-      Are you sure{' '}
-      <b>
-        {parsedQty} of {max} pcs
-      </b>{' '}
-      of <b className="mono">{pn}</b> have finished processing at {areaName}?
-      The finished quantity moves to the {areaName} finished rack, ready to
-      transfer.
-    </>
-  );
-
-  return (
-    <>
-      <ModalDialog
-        label="Complete Area processing"
-        onClose={onCancel}
-        onKeyDown={
-          step === 'qty'
-            ? quantityKeyHandler(qty, setQty, goConfirm)
-            : enterKeyHandler(requestConfirm)
-        }
-      >
-        <h3>Complete Area processing</h3>
-        {step === 'qty' ? (
-          <div>
-            <div className="big mono" title={pn}>
-              {pn}
-            </div>
-            <StepRecap
-              lines={[
-                machine ? (
-                  <>
-                    <EntityChip>{machine}</EntityChip> →{' '}
-                    <EntityChip>{areaName} finished rack</EntityChip>
-                  </>
-                ) : (
-                  <>
-                    <EntityChip>{areaName} processing</EntityChip> →{' '}
-                    <EntityChip>{areaName} finished rack</EntityChip>
-                  </>
-                ),
-              ]}
-            />
-            <Guidance tone="info">
-              {machine ? (
-                <>
-                  <b>{max} pcs</b> are available on {machine}. The full quantity
-                  is selected by default. Enter a smaller quantity to complete
-                  only part of it.
-                </>
-              ) : (
-                <>
-                  <b>{max} pcs</b> in process. The full quantity is selected by
-                  default. Enter a smaller quantity to complete only part of it.
-                </>
-              )}
-            </Guidance>
-            {(() => {
-              const v = quantityValidation(
-                parsedQty,
-                max,
-                machine
-                  ? `Quantity cannot exceed the ${max} pcs currently on ${machine}.`
-                  : `Quantity cannot exceed the ${max} pcs currently in processing.`,
-              );
-              return v ? <Guidance tone={v.tone}>{v.text}</Guidance> : null;
-            })()}
-            <QuantityKeypad value={qty} onChange={setQty} max={max} />
-            <StepButtons
-              onBack={onBack}
-              onCancel={onCancel}
-              primary={{
-                label: 'Next',
-                onClick: goConfirm,
-                disabled: !valid,
-              }}
-            />
-          </div>
-        ) : (
-          <div>
-            <div className="big mono" title={pn}>
-              {pn}
-            </div>
-            <div className="sub">
-              Confirm the completed quantity. It will remain on the {areaName}{' '}
-              finished rack until transferred.
-            </div>
-            <ConfirmationSummary
-              rows={[
-                ['Action', 'Complete Area processing', 'primary'],
-                ['PN', <span className="mono">{pn}</span>, 'primary'],
-                [
-                  'Quantity',
-                  <span className="mono">{parsedQty} pcs</span>,
-                  'primary',
-                ],
-                [
-                  'Area',
-                  <AreaChip areaKey={station.area}>{areaName}</AreaChip>,
-                  'primary',
-                ],
-                [
-                  'Machine',
-                  machine ? <EntityChip>{machine}</EntityChip> : null,
-                  'primary',
-                ],
-                ['Result', 'Finished — ready to move', 'primary', 'ok'],
-                ['Worker', worker, 'secondary'],
-                ['Scan Station', station.stationId, 'secondary'],
-                ['Recorded event', 'AREA_COMPLETED', 'secondary'],
-              ]}
-            />
-            <StepButtons
-              onBack={() => setStep('qty')}
-              onCancel={onCancel}
-              primary={{
-                label: 'Confirm completion',
-                onClick: requestConfirm,
-                disabled: !valid,
-                autoFocus: true,
-              }}
-            />
-          </div>
-        )}
-      </ModalDialog>
-      {renderGate()}
-    </>
-  );
-
-  function renderGate() {
-    if (!gate) return null;
-    if (finalGate === 'question') {
-      // DONE keeps the calm INFO tone (matching the badge gate) —
-      // completing work is the normal outcome, unlike a queue return
-      // or reversal, which warn.
-      return (
-        <ConfirmDialog
-          title="Confirm finished quantity?"
-          tone="info"
-          confirmLabel="Yes — finished"
-          cancelLabel="Cancel (Esc)"
-          onConfirm={() => confirm()}
-          onCancel={() => setGate(false)}
-        >
-          {gateInfo}
-        </ConfirmDialog>
-      );
-    }
-    if (finalGate === 'badge') {
-      return (
-        <BadgeConfirmDialog
-          title="Scan badge to confirm completion"
-          tone="info"
-          writeBlocked={writeBlocked}
-          onConfirm={(badgeWorker) => {
-            onBadgeWorker(badgeWorker);
-            confirm(badgeWorker.name);
-          }}
-          onCancel={() => setGate(false)}
-        >
-          {gateInfo}
-        </BadgeConfirmDialog>
-      );
-    }
-    return null;
-  }
-}
-
-function UndoConfirmDialog({
-  target,
-  reversedBy,
-  finalGate,
-  writeBlocked,
-  onBadgeWorker,
-  onConfirm,
-  onCancel,
-}: FinalGateProps & {
-  target: MockCompletedAction;
-  /**
-   * Worker recorded on the reversal — the Worker active at the moment
-   * the Undo is confirmed (§16, decided post-v18); null when the
-   * Area's Worker ID mode is Disabled. Shown separately from the
-   * original action's Worker.
-   */
-  reversedBy: string | null;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  // Final-confirmation gate (post-v18): opened by `Confirm reversal`;
-  // Cancel returns to the reversal summary unchanged.
-  const [gate, setGate] = useState(false);
-
-  function requestConfirm() {
-    setGate(true);
-  }
-
-  // The key facts of the pending reversal — shared by the
-  // final-question and badge-scan gates.
-  const gateInfo = (
-    <>
-      Are you sure you want to reverse <b>{target.movements.join(' + ')}</b> —{' '}
-      <b>{target.qty} pcs</b> of <b className="mono">{target.pn}</b>?{' '}
-      {target.reversalEffect} The original history stays recorded for audit.
-    </>
-  );
-
-  const gateDialog =
-    gate && finalGate === 'question' ? (
-      <ConfirmDialog
-        title="Reverse this action?"
-        tone="warning"
-        confirmLabel="Yes — reverse it"
-        cancelLabel="Cancel (Esc)"
-        onConfirm={onConfirm}
-        onCancel={() => setGate(false)}
-      >
-        {gateInfo}
-      </ConfirmDialog>
-    ) : gate && finalGate === 'badge' ? (
-      <BadgeConfirmDialog
-        title="Scan badge to confirm the reversal"
-        tone="warning"
-        writeBlocked={writeBlocked}
-        onConfirm={(badgeWorker) => {
-          onBadgeWorker(badgeWorker);
-          onConfirm();
-        }}
-        onCancel={() => setGate(false)}
-      >
-        {gateInfo}
-      </BadgeConfirmDialog>
-    ) : null;
-
-  return (
-    <>
-      <ModalDialog
-        label="Reverse the last Part Number action?"
-        onClose={onCancel}
-      >
-        <h3>Reverse the last Part Number action?</h3>
-        <div className="big mono">{target.pn}</div>
-        <div className="sub">
-          This will reverse the complete last action. The original history will
-          remain available for audit.
-        </div>
-        <ConfirmationSummary
-          rows={[
-            ['Original action', target.movements.join(' + '), 'primary'],
-            ['Quantity', <span className="mono">{target.qty}</span>, 'primary'],
-            [
-              'Source → destination',
-              <>
-                <EntityChip>{target.source}</EntityChip> →{' '}
-                <EntityChip>{target.destination}</EntityChip>
-              </>,
-              'primary',
-            ],
-            [
-              'Machine',
-              target.machine ? <EntityChip>{target.machine}</EntityChip> : null,
-            ],
-            ['Worker', target.worker, 'secondary'],
-            ['Time', <span className="mono">{target.time}</span>, 'secondary'],
-            ['Reversed by', reversedBy, 'secondary'],
-            ['Result after reversal', target.reversalEffect, 'primary', 'warn'],
-          ]}
-        />
-        <StepButtons
-          onCancel={onCancel}
-          primary={{
-            label: 'Confirm reversal',
-            onClick: requestConfirm,
-            danger: true,
-          }}
-        />
-      </ModalDialog>
-      {gateDialog}
-    </>
-  );
-}
-
-function ManualEntryDialog({
-  initialPn,
-  onCancel,
-  onConfirm,
 }: {
-  /** Previously entered PN, preserved when Back returns here. */
-  initialPn?: string;
+  resolution: ScanResolution;
+  onReceiveMore: () => void;
+  onBack?: () => void;
   onCancel: () => void;
-  /** Called with the canonical PN, or '' when the entry was empty. */
-  onConfirm: (pn: string) => void;
 }) {
-  const fieldRef = useRef<HTMLInputElement>(null);
-  const [entryError, setEntryError] = useState<string | null>(null);
-  useEffect(() => {
-    fieldRef.current?.focus();
-  }, []);
-  // Normalize to the canonical uppercase PN before resolving:
-  // surrounding whitespace trims away; a value with INTERNAL whitespace
-  // is invalid and stays in the dialog with an explanation — it is
-  // never silently cleaned up into a valid PN.
-  function submit() {
-    const raw = fieldRef.current?.value ?? '';
-    if (raw.trim() === '') {
-      onConfirm('');
-      return;
-    }
-    const pn = normalizePartNumber(raw);
-    if (!pn) {
-      setEntryError(
-        'A Part Number cannot contain spaces, tabs, or other whitespace inside the value. Correct the entry and try again.',
-      );
-      return;
-    }
-    onConfirm(pn);
-  }
+  const inAreaQty = resolution.inArea.reduce(
+    (sum, flow) => sum + flow.quantity,
+    0,
+  );
+  const elsewhere = resolution.candidates.reduce(
+    (sum, candidate) => sum + candidate.quantity,
+    0,
+  );
   return (
-    <ModalDialog label="Enter Part Number manually" onClose={onCancel}>
-      <h3>Enter Part Number manually</h3>
-      {/* Operator wording only — engineering detail: the entry is
-          normalized to the canonical uppercase, whitespace-free PN; an
-          unknown PN opens the intake wizard, where the PartNumber
-          master metadata record is created on first valid use. */}
+    <ModalDialog label="Select an action" onClose={onCancel}>
+      <h3>Select an action</h3>
+      <div className="big mono">{resolution.partNumber}</div>
       <div className="sub">
-        Enter the Part Number exactly as shown on the traveler or job paperwork.
-        Lowercase letters are accepted and shown in uppercase. Unknown Part
-        Numbers will open the receive workflow for review. Nothing is recorded
-        at this step.
+        <b>{inAreaQty} pcs</b> of this Part Number are already in{' '}
+        {resolution.area.name}.
       </div>
-      <input
-        aria-label="Part Number"
-        ref={fieldRef}
-        className="field mono"
-        autoComplete="off"
-        defaultValue={initialPn}
-        placeholder="Part Number, e.g. 0455-20-0118-03"
-        onChange={() => setEntryError(null)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') submit();
-        }}
-      />
-      {entryError ? <Guidance tone="error">{entryError}</Guidance> : null}
-      <StepButtons
-        onCancel={onCancel}
-        primary={{
-          label: 'Continue',
-          onClick: submit,
-        }}
-      />
+      {resolution.candidates.length > 0 ? (
+        <button className="choice" onClick={onReceiveMore}>
+          <span className="cic run" aria-hidden="true">
+            RCV
+          </span>
+          <span>
+            <span className="ct1">Receive more quantity from another Area</span>
+            <br />
+            <span className="ct2">
+              {elsewhere} pcs available in{' '}
+              {resolution.candidates.length === 1
+                ? resolution.candidates[0].currentArea.name
+                : `${resolution.candidates.length} places`}
+            </span>
+          </span>
+        </button>
+      ) : (
+        <Guidance tone="info">
+          No other quantity of this Part Number is available to receive.
+        </Guidance>
+      )}
+      <Guidance tone="info">
+        Machine assignment, completion, quantity additions, repair and scrap
+        arrive with a later release. Nothing is recorded at this step.
+      </Guidance>
+      <div className="row">
+        {onBack ? (
+          <button className="bigbtn ghost ss-back" onClick={onBack}>
+            ‹ Back
+          </button>
+        ) : null}
+        <button className="bigbtn ghost" onClick={onCancel}>
+          Cancel (Esc)
+        </button>
+      </div>
+    </ModalDialog>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Nothing to transfer                                                 */
+/* ------------------------------------------------------------------ */
+
+function NoQuantityDialog({
+  resolution,
+  onBack,
+  onCancel,
+}: {
+  resolution: ScanResolution;
+  onBack?: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <ModalDialog label="No quantity to receive" onClose={onCancel}>
+      <h3>No quantity to receive</h3>
+      <div className="big mono">{resolution.partNumber}</div>
+      <div className="sub">
+        {resolution.transferBlockedReason
+          ? resolution.transferBlockedReason
+          : resolution.hasActiveDemand
+            ? 'This Part Number has no active production quantity in another Area. Release quantity from its Work Order in Management → Work Orders first.'
+            : 'This Part Number has no active Work Order Demand and no production quantity. Receiving new quantity at the station arrives with a later release — create the demand in Management → Work Orders.'}
+      </div>
+      <Guidance tone="info">Nothing was recorded.</Guidance>
+      <div className="row">
+        {onBack ? (
+          <button className="bigbtn ghost ss-back" onClick={onBack}>
+            ‹ Back
+          </button>
+        ) : null}
+        <button className="bigbtn ghost" onClick={onCancel}>
+          Cancel (Esc)
+        </button>
+      </div>
     </ModalDialog>
   );
 }

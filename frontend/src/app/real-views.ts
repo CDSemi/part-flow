@@ -1,4 +1,4 @@
-// Real production views (Phase 3.5 + Phase 4).
+// Real production views (Phase 3.5 + Phase 4 + Phase 5).
 //
 // The views listed here read and write real server state through the
 // /api surface and ship in EVERY build — development and production
@@ -31,6 +31,11 @@ export const REAL_VIEWS: Partial<
   'work-orders': lazy(() =>
     import('../views/work-orders/WorkOrdersView').then((m) => ({
       default: m.WorkOrdersView,
+    })),
+  ),
+  'scan-station': lazy(() =>
+    import('../views/scan-station/ScanStationView').then((m) => ({
+      default: m.ScanStationView,
     })),
   ),
 };

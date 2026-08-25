@@ -9,33 +9,91 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { App } from '../App';
 
+/**
+ * Minimal real environment for the routing tests: two active Scan
+ * Stations bound to two Areas, no production quantity. The Scan Station
+ * is a real view since Phase 5, so its routes load this context from
+ * the stubbed `/api` instead of a mock registry.
+ */
+const STATIONS = [
+  { station_id: 'LATHE-ST-01', area_id: 1 },
+  { station_id: 'DEBURR-ST-01', area_id: 2 },
+];
+const AREAS = [
+  { id: 1, name: 'Lathe', color: '#3366ff' },
+  { id: 2, name: 'Deburr', color: '#33aa66' },
+];
+
+function json(body: unknown, status = 200) {
+  return Promise.resolve(new Response(JSON.stringify(body), { status }));
+}
+
 beforeEach(() => {
-  // Health answers ok; the real Phase 3.5 views (Machines,
-  // Administration) additionally load their configuration lists — an
-  // empty environment keeps these routing tests focused on navigation.
+  // Health answers ok; the real views additionally load their
+  // configuration lists — a near-empty environment keeps these routing
+  // tests focused on navigation.
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/api/barcode-configuration/')) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ detail: 'Not configured.' }), {
-            status: 404,
-          }),
+        return json({ detail: 'Not configured.' }, 404);
+      }
+      const context = /\/api\/scan-stations\/([^/]+)\/context$/.exec(url);
+      if (context) {
+        const station = STATIONS.find(
+          (s) => s.station_id === decodeURIComponent(context[1]),
+        );
+        if (!station) {
+          return json(
+            { detail: `Scan Station '${context[1]}' does not exist.` },
+            404,
+          );
+        }
+        const area = AREAS.find((a) => a.id === station.area_id)!;
+        return json({
+          station_id: station.station_id,
+          department: { id: 1, name: 'Machining' },
+          area: { ...area, description: null, is_terminal: false },
+          operations: [],
+          has_machines: false,
+        });
+      }
+      if (/\/api\/areas\/\d+\/inventory$/.test(url)) {
+        return json({
+          area: { ...AREAS[0], description: null, is_terminal: false },
+          lines: [],
+          total_part_numbers: 0,
+          total_quantity: 0,
+        });
+      }
+      if (/\/api\/scan-stations$/.test(url)) {
+        return json(STATIONS.map((s) => ({ ...s, is_active: true })));
+      }
+      if (/\/api\/areas$/.test(url)) {
+        return json(
+          AREAS.map((a) => ({
+            ...a,
+            department_id: 1,
+            barcode_value: `PF:AREA:${a.id}`,
+            description: null,
+            icon_url: null,
+            is_terminal: false,
+            is_active: true,
+          })),
         );
       }
+      if (/\/api\/departments$/.test(url)) {
+        return json([{ id: 1, name: 'Machining', is_active: true }]);
+      }
       if (
-        /\/api\/(machines|areas|departments|operations|scan-stations|work-orders|part-numbers|route-templates)/.test(
+        /\/api\/(machines|operations|work-orders|part-numbers|route-templates)/.test(
           url,
         )
       ) {
-        return Promise.resolve(
-          new Response(JSON.stringify([]), { status: 200 }),
-        );
+        return json([]);
       }
-      return Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      );
+      return json({ status: 'ok' });
     }),
   );
 });

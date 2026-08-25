@@ -84,8 +84,8 @@ test('development builds expose the remaining mock views through the dev-only re
   // exist and cover every view that is still a Phase 2 mock view;
   // production builds compile the registry to null and render the
   // not-connected state for these routes instead. Machines and
-  // Administration left this registry with Phase 3.5 — they are real
-  // views now.
+  // Administration left this registry with Phase 3.5, Work Orders with
+  // Phase 4 and the Scan Station with Phase 5 — they are real views now.
   expect(DEV_MOCK_VIEWS).not.toBeNull();
   expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(
     [
@@ -94,19 +94,18 @@ test('development builds expose the remaining mock views through the dev-only re
       'planned-routes',
       'priority',
       'production-board',
-      'scan-station',
       'tracking',
     ].sort(),
   );
 });
 
 test('the real views ship in every build', () => {
-  // Management → Machines, Administration (Phase 3.5) and Management →
-  // Work Orders (Phase 4) read real server state — they live in the
-  // always-available registry, never behind the development-only
-  // boundary.
+  // Management → Machines, Administration (Phase 3.5), Management →
+  // Work Orders (Phase 4) and the Scan Station (Phase 5) read real
+  // server state — they live in the always-available registry, never
+  // behind the development-only boundary.
   expect(Object.keys(REAL_VIEWS).sort()).toEqual(
-    ['administration', 'machines', 'work-orders'].sort(),
+    ['administration', 'machines', 'scan-station', 'work-orders'].sort(),
   );
 });
 
@@ -245,11 +244,21 @@ test('no production module reaches src/mocks/', () => {
   // The walk is meaningful only if it actually reached the real views.
   expect(graph).toContain(join('app', 'real-views.ts'));
   expect(graph).toContain(join('views', 'work-orders', 'WorkOrdersView.tsx'));
+  expect(graph).toContain(join('views', 'scan-station', 'ScanStationView.tsx'));
+  expect(graph).toContain(join('api', 'scan-station.ts'));
   expect(graph.length).toBeGreaterThan(30);
-  // ...and only if the DEV boundary really cut the mock views away.
+  // ...and only if the DEV boundary really cut the mock views away —
+  // including the mock Scan Station preview reachable from the real
+  // Scan Station view only through its DEV-guarded lazy import.
   expect(graph).toContain(join('app', 'dev-views.ts')); // statically imported
   expect(graph).not.toContain(
-    join('views', 'scan-station', 'ScanStationView.tsx'),
+    join('views', 'scan-station', 'ScanStationMockView.tsx'),
+  );
+  expect(graph).not.toContain(
+    join('views', 'scan-station', 'mock-area-state.ts'),
+  );
+  expect(graph).not.toContain(
+    join('views', 'production-board', 'ProductionBoardView.tsx'),
   );
   expect(graph).not.toContain(
     join('views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
@@ -438,4 +447,20 @@ test('the dev-only Completed Work Orders preview stays behind the DEV boundary',
   expect(workOrdersView).not.toMatch(/^import .*CompletedWorkOrdersView'/m);
   expect(workOrdersView).toContain('import.meta.env.DEV');
   expect(workOrdersView).toContain("import('./CompletedWorkOrdersView')");
+});
+
+test('the dev-only mock Scan Station preview stays behind the DEV boundary', () => {
+  // The Phase 6+ workflows (Machine assignment, DONE / QUEUE, Repair,
+  // Scrap, Undo, Worker sessions) exist only as the mock preview: the
+  // real Scan Station view may reach it only through the guarded lazy
+  // import — never through a static import that would pull the mock
+  // Area state and datasets into the production module graph.
+  const scanStationView = readFileSync(
+    join(srcDir, 'views', 'scan-station', 'ScanStationView.tsx'),
+    'utf8',
+  );
+  expect(scanStationView).not.toMatch(/^import .*ScanStationMockView/m);
+  expect(scanStationView).not.toMatch(/^import .*mock-area-state/m);
+  expect(scanStationView).toContain('import.meta.env.DEV');
+  expect(scanStationView).toContain("import('./ScanStationMockView')");
 });
