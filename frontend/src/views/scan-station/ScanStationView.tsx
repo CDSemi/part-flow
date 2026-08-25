@@ -15,7 +15,7 @@ import type { ReactNode } from 'react';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { isMockPreviewRequested } from '../../app/view-state';
-import { ApiError, errorMessage } from '../../api/client';
+import { errorMessage } from '../../api/client';
 import {
   listAreas,
   listDepartments,
@@ -32,6 +32,7 @@ import {
   getStationContext,
   resolveScan,
   routeDeviationConfirmation,
+  transferOutcomeUnknown,
   transferToStationArea,
 } from '../../api/scan-station';
 import type {
@@ -1298,10 +1299,11 @@ function TransferDialog({
       });
       onDone(result);
     } catch (error) {
-      if (!(error instanceof ApiError)) {
-        // Transport failure: the request may or may not have reached
-        // and been committed by the server. NEVER "nothing changed" —
-        // the outcome is unknown until the same request is answered.
+      if (transferOutcomeUnknown(error)) {
+        // Transport failure, timeout or 5xx: the request may or may
+        // not have reached and been committed by the server. NEVER
+        // "nothing changed" — the outcome is unknown until the same
+        // request is answered by the application.
         setOutcomeUnknown(true);
         setServerError(null);
       } else if (routeDeviationConfirmation(error)) {
@@ -1309,10 +1311,10 @@ function TransferDialog({
         // route position changed meanwhile): present it and require the
         // reason before the SAME intent is resubmitted. Nothing was
         // recorded.
-        setServerDeviation(error.message);
+        setServerDeviation(errorMessage(error));
       } else {
-        // An explicit server rejection: nothing was recorded.
-        setServerError(error.message);
+        // An explicit application rejection (4xx): nothing was recorded.
+        setServerError(errorMessage(error));
       }
     } finally {
       setBusy(false);

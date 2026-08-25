@@ -74,8 +74,16 @@ let nextMovementId: number;
 // server COMMITS the transfer and the response is lost on the way back
 // — the client can only learn the outcome by retrying the same
 // device_event_id.
+// { committedStatus }: the server COMMITS and the client receives that
+// HTTP status instead of the success body (a 5xx raised while producing
+// the response, or a reverse proxy answering 502/504 after the upstream
+// committed).
 let transferFailure:
-  null | 'network' | 'lost-response' | { status: number; body: unknown };
+  | null
+  | 'network'
+  | 'lost-response'
+  | { status: number; body: unknown }
+  | { committedStatus: number };
 let machinesFailure: boolean;
 /** While set, inventory reads stay pending until it resolves. */
 let inventoryHold: Promise<void> | null;
@@ -326,7 +334,11 @@ function handle(url: string, method: string, body: unknown): Response {
     if (transferFailure === 'network') {
       throw new TypeError('Failed to fetch');
     }
-    if (transferFailure && transferFailure !== 'lost-response') {
+    if (
+      transferFailure &&
+      transferFailure !== 'lost-response' &&
+      'status' in transferFailure
+    ) {
       const failure = transferFailure;
       return json(failure.body, failure.status);
     }
@@ -419,6 +431,15 @@ function handle(url: string, method: string, body: unknown): Response {
       // Committed on the server; the client never sees this answer.
       transferFailure = null;
       throw new TypeError('Failed to fetch');
+    }
+    if (transferFailure && 'committedStatus' in transferFailure) {
+      // Committed on the server; the client sees a gateway/server error.
+      const status = transferFailure.committedStatus;
+      transferFailure = null;
+      return new Response('<html>Bad Gateway</html>', {
+        status,
+        headers: { 'content-type': 'text/html' },
+      });
     }
     return json(result, 201);
   }
@@ -870,6 +891,85 @@ test('a lost response is an UNKNOWN outcome: frozen intent, exact retry with the
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(flows.find((f) => f.id === 104)?.areaId).toBe(2);
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test.each([502, 504, 500, 408])(
+  'HTTP %i after the server committed is an UNKNOWN outcome, and the exact retry replays without a duplicate Movement',
+  async (status) => {
+    const input = await renderStation();
+    transferFailure = { committedStatus: status };
+
+    scan('PF:PN:PLN-1'); // deviation: the reason is part of the frozen intent
+    await screen.findByRole('dialog', { name: 'Receive from another Area' });
+    fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+    fireEvent.change(
+      within(dialog()).getByLabelText('Route deviation reason'),
+      { target: { value: 'Cut backlog' } },
+    );
+    fireEvent.click(
+      within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+    );
+
+    // 1–3: committed on the server, a 5xx/408 on the client → UNKNOWN,
+    // never "nothing was changed", no Back, intent frozen.
+    await waitFor(() =>
+      expect(dialog()).toHaveTextContent('may or may not have been recorded'),
+    );
+    expect(dialog()).not.toHaveTextContent('Nothing was changed');
+    expect(dialog()).not.toHaveTextContent('nothing was recorded');
+    expect(
+      within(dialog()).queryByRole('button', { name: '‹ Back' }),
+    ).toBeNull();
+    expect(
+      within(dialog()).getByLabelText('Route deviation reason'),
+    ).toBeDisabled();
+    expect(
+      within(dialog()).queryByRole('button', { name: 'Cancel (Esc)' }),
+    ).toBeNull();
+    expect(
+      within(dialog()).getByRole('button', { name: 'Leave — check the Area' }),
+    ).toBeInTheDocument();
+    expect(transferRequests()).toHaveLength(1);
+    const first = transferRequests()[0];
+
+    // 4: byte-for-byte the same payload, same device_event_id.
+    fireEvent.click(
+      within(dialog()).getByRole('button', { name: 'Retry the same transfer' }),
+    );
+    expect(await notice()).toHaveTextContent(
+      'already recorded by the server (TRANSFERRED #500)',
+    );
+    expect(transferRequests()).toHaveLength(2);
+    const second = transferRequests()[1];
+    expect(JSON.stringify(second.body)).toBe(JSON.stringify(first.body));
+    expect(second.body.device_event_id).toBe(first.body.device_event_id);
+
+    // 5: the replay (200) closes the workflow; exactly one Movement.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(nextMovementId).toBe(501);
+    expect(committed.size).toBe(1);
+    expect(flows.find((f) => f.id === 104)?.areaId).toBe(2);
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  },
+);
+
+test('a 4xx application rejection is a pre-write refusal, not an unknown outcome', async () => {
+  await renderStation();
+  transferFailure = { status: 409, body: { detail: 'Scan Station rebound' } };
+
+  scan('PF:PN:2027-60-8114-00');
+  await screen.findByRole('dialog', { name: 'Receive from another Area' });
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await waitFor(() =>
+    expect(dialog()).toHaveTextContent('Scan Station rebound'),
+  );
+  expect(dialog()).not.toHaveTextContent('may or may not have been recorded');
+  expect(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
 });
 
 test('leaving an unknown-outcome transfer re-reads the Area instead of claiming a result', async () => {

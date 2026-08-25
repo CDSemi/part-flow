@@ -398,6 +398,23 @@ export async function transferToStationArea(
 }
 
 /**
+ * Whether a failed transfer submission leaves the write outcome UNKNOWN.
+ *
+ * A production write is only "not recorded" when the server itself
+ * rejected it before writing — an application/business rejection (4xx
+ * other than a timeout). A transport failure (no HTTP response at all),
+ * a request timeout (408) or any 5xx proves nothing: the backend may
+ * have COMMITTED and failed while producing the response, or a reverse
+ * proxy may answer 502/504 after the upstream committed. Those must be
+ * presented as an unknown outcome and retried with the same
+ * `device_event_id`, never as "nothing was changed".
+ */
+export function transferOutcomeUnknown(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return true;
+  return error.status === 408 || error.status >= 500;
+}
+
+/**
  * The route deviation a refused transfer asks the operator to confirm
  * (the backend's 409 with `confirmation_required`), or null for any
  * other failure.
