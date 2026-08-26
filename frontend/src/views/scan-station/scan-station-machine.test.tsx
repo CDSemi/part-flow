@@ -1000,6 +1000,111 @@ test('a server rejection of a stale assignment is shown in place with nothing re
   );
 });
 
+test('PN-first: after a server rejection, Back is withdrawn — the refused action dialog is never offered again', async () => {
+  await renderStation();
+  scan('PF:PN:2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Assign to Machine/ }),
+  );
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  // Before the write the parent-dialog Back is offered (v20).
+  expect(within(dlg).getByRole('button', { name: '‹ Back' })).toBeEnabled();
+  fireEvent.click(
+    within(within(dlg).getByRole('group', { name: 'Machine' })).getByRole(
+      'button',
+      { name: /Lathe 2/ },
+    ),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  expect(
+    within(dialog()).getByRole('button', { name: '‹ Back' }),
+  ).toBeEnabled();
+
+  // Meanwhile another station assigned the flow: the server refuses.
+  flows.find((f) => f.id === 100)!.state = 'ON_MACHINE';
+  flows.find((f) => f.id === 100)!.machineId = 1;
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm assignment' }),
+  );
+  await waitFor(() =>
+    expect(dialog()).toHaveTextContent(
+      'Quantity Flow 100 is already on a Machine.',
+    ),
+  );
+  // Only Retry and Cancel remain — no Back to the quantity or selection
+  // views, and so no way back to the action dialog resolved before the
+  // refusal.
+  expect(within(dialog()).queryByRole('button', { name: '‹ Back' })).toBeNull();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Retry assignment' }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: 'Select an action' })).toBeNull();
+  expect(committed.size).toBe(0);
+
+  // Cancel returns to the station re-read from the server: the flow
+  // now shows on Lathe 1, and a new PN scan resolves fresh choices.
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() =>
+    expect(machineCard('Lathe 1')).toHaveTextContent('2027-60-8114-00'),
+  );
+  scan('PF:PN:2027-60-8114-00');
+  const fresh = await screen.findByRole('dialog', { name: 'Select an action' });
+  expect(
+    within(fresh).queryByRole('button', { name: /Assign to Machine/ }),
+  ).toBeNull();
+  expect(
+    within(fresh).getByRole('button', {
+      name: /Complete Area processing on Lathe 1/,
+    }),
+  ).toBeInTheDocument();
+});
+
+test('a DONE rejection withdraws Back as well', async () => {
+  await renderStation();
+  scan('PF:PN:0455-20-0118-03');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', {
+      name: /Complete Area processing on Lathe 1/,
+    }),
+  );
+  const dlg = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  expect(within(dlg).getByRole('button', { name: '‹ Back' })).toBeEnabled();
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm completion' }),
+  );
+  // Meanwhile the quantity was returned to the queue elsewhere.
+  flows.find((f) => f.id === 103)!.state = 'QUEUED';
+  flows.find((f) => f.id === 103)!.machineId = null;
+  const gate = await screen.findByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  fireEvent.click(within(gate).getByRole('button', { name: 'Yes — finished' }));
+  await waitFor(() =>
+    expect(dialog()).toHaveTextContent('is not on the selected Machine'),
+  );
+  expect(within(dialog()).queryByRole('button', { name: '‹ Back' })).toBeNull();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
+  expect(committed.size).toBe(0);
+});
+
 test('PN-first: the action dialog offers the queued flow even when the last inventory read predates it', async () => {
   // The PN resolution is fresh; the inventory (the dialog's queued list)
   // was read before this quantity entered the queue elsewhere.

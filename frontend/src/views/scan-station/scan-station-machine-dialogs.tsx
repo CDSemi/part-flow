@@ -496,7 +496,7 @@ export function AssignToMachineDialog({
           />
           <StepButtons
             onBack={
-              write.outcomeUnknown
+              write.outcomeUnknown || write.rejected
                 ? undefined
                 : () => {
                     write.clearError();
@@ -706,7 +706,7 @@ export function MachineActionDialog({
             />
             <StepButtons
               onBack={
-                write.outcomeUnknown
+                write.outcomeUnknown || write.rejected
                   ? undefined
                   : () => {
                       write.clearError();

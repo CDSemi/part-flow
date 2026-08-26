@@ -663,8 +663,18 @@ export function MachinesView() {
             );
           }}
         >
-          <b>{dialog.machine.name}</b> will return to <b>Idle</b> — no quantity
-          is currently assigned to it.
+          {dialog.machine.assignedQuantity > 0 ? (
+            <>
+              <b>{dialog.machine.name}</b> will return to <b>Running</b> —{' '}
+              {dialog.machine.assignedQuantity} pcs are still assigned to it.
+              Maintenance never moved or released that quantity.
+            </>
+          ) : (
+            <>
+              <b>{dialog.machine.name}</b> will return to <b>Idle</b> — no
+              quantity is currently assigned to it.
+            </>
+          )}
           {clearError ? (
             <div className="err" role="alert">
               {clearError}

@@ -1128,7 +1128,7 @@ function StationView({
                       ? 'Connecting…'
                       : resolving
                         ? 'Resolving Part Number…'
-                        : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
+                        : 'Scan Part Number or Machine barcode · Press Enter'
                 }
                 aria-label="Scan barcode"
                 onKeyDown={(e) => {
@@ -1536,6 +1536,9 @@ function TransferDialog({
   // exact same request with the same device_event_id — which replays
   // the committed transfer or records it once.
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
+  // A known refusal: the dialog keeps only Retry / Cancel — Back would
+  // return to the source/action snapshot the server just refused.
+  const [rejected, setRejected] = useState(false);
   // One idempotency key per transfer intent, reused verbatim on every
   // retry — a retry after an unknown outcome replays the committed
   // transfer instead of recording it twice.
@@ -1616,10 +1619,12 @@ function TransferDialog({
         // reason before the SAME intent is resubmitted. Nothing was
         // recorded.
         setServerDeviation(errorMessage(error));
+        setRejected(true);
         onRejected?.();
       } else {
         // An explicit application rejection (4xx): nothing was recorded.
         setServerError(errorMessage(error));
+        setRejected(true);
         onRejected?.();
       }
       setBusy(false);
@@ -1849,7 +1854,7 @@ function TransferDialog({
               same device_event_id would be a different request). */}
           <StepButtons
             onBack={
-              outcomeUnknown
+              outcomeUnknown || rejected
                 ? undefined
                 : () => {
                     setServerError(null);

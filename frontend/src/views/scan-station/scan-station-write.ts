@@ -21,6 +21,12 @@ export interface OneShotWrite<T> {
   serverError: string | null;
   /** The server never answered: the write may or may not be recorded. */
   outcomeUnknown: boolean;
+  /**
+   * The server refused this intent at least once (nothing recorded).
+   * From then on the wizard offers only Retry or Cancel: Back would
+   * return to a selection snapshot the server has already refused.
+   */
+  rejected: boolean;
   /** The idempotency key of this intent, reused verbatim on retries. */
   deviceEventId: string;
   /** Send (or resend) the frozen intent. */
@@ -54,6 +60,7 @@ export function useOneShotWrite<T>({
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [outcomeUnknown, setOutcomeUnknown] = useState(false);
+  const [rejected, setRejected] = useState(false);
   const [result, setResult] = useState<T | null>(null);
 
   const submit = useCallback(async () => {
@@ -78,6 +85,7 @@ export function useOneShotWrite<T>({
         setServerError(null);
       } else {
         setServerError(errorMessage(error));
+        setRejected(true);
         onRejected?.();
       }
       setBusy(false);
@@ -94,6 +102,7 @@ export function useOneShotWrite<T>({
     busy,
     serverError,
     outcomeUnknown,
+    rejected,
     deviceEventId: deviceEventId.current,
     submit,
     clearError,

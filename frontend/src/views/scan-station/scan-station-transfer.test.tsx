@@ -1088,6 +1088,59 @@ test('a server rejection keeps the dialog open with the reason and records nothi
   );
 });
 
+test('after a server rejection, Back is withdrawn — the refused source selection is never offered again', async () => {
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const select = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  fireEvent.click(
+    within(select).getAllByRole('button', { name: /pcs available/ })[1],
+  );
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  // Before the write the parent-dialog Back is offered (v20).
+  expect(within(box).getByRole('button', { name: '‹ Back' })).toBeEnabled();
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  expect(
+    within(dialog()).getByRole('button', { name: '‹ Back' }),
+  ).toBeEnabled();
+
+  // Meanwhile the source moved: the server refuses.
+  const readsBefore = inventoryReads;
+  transferFailure = {
+    status: 409,
+    body: {
+      detail: 'Quantity Flow 102 is no longer in the confirmed source Area.',
+    },
+  };
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await waitFor(() =>
+    expect(dialog()).toHaveTextContent(
+      'no longer in the confirmed source Area',
+    ),
+  );
+  // Only Retry and Cancel remain: no Back to the quantity view, and so
+  // no way back to the source selection snapshot the server refused.
+  expect(within(dialog()).queryByRole('button', { name: '‹ Back' })).toBeNull();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Retry transfer' }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('dialog', { name: 'Select the source' }),
+  ).toBeNull();
+  // The station re-read the Area from the server on the refusal.
+  await waitFor(() => expect(inventoryReads).toBeGreaterThan(readsBefore));
+  expect(transferRequests()).toHaveLength(1);
+});
+
 test('a Planned Route deviation needs an explicit confirmation with a reason', async () => {
   await renderStation();
 

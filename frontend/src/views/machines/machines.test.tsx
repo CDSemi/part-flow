@@ -676,6 +676,31 @@ test('clearing maintenance returns the Machine to Idle', async () => {
   expect(maintenanceSwitch('Lathe 4')).toHaveAttribute('aria-checked', 'false');
 });
 
+test('clearing maintenance on a Machine that still holds quantity announces Running, not Idle', async () => {
+  // Maintenance started while quantity stayed assigned: clearing it
+  // returns the Machine to Running (PROJECT_PROFILE §8.6) — the dialog
+  // states the current server data, never a hardcoded Idle.
+  const lathe4 = state.machines.find((m) => m.name === 'Lathe 4')!;
+  lathe4.assigned_quantity = 15;
+  await renderMachines();
+
+  fireEvent.click(maintenanceSwitch('Lathe 4'));
+  const dialog = screen.getByRole('dialog', { name: 'Clear maintenance' });
+  expect(dialog.textContent).toContain('will return to Running');
+  expect(dialog.textContent).toContain('15 pcs are still assigned');
+  expect(dialog.textContent).not.toContain('Idle');
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Clear maintenance' }),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() =>
+    expect(
+      activeRow('Lathe 4').querySelector('.mg-state')?.textContent,
+    ).toMatch(/^Running · /),
+  );
+  expect(activeRow('Lathe 4').textContent).toContain('15 pcs assigned');
+});
+
 test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', async () => {
   await renderMachines();
 
