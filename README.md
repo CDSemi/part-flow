@@ -93,11 +93,10 @@ configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
 master data end to end. Every other view renders development-only mock
-data; Scan Station transfer and barcode-driven movement, Machine
-assignments, SPLIT/MERGED, Undo/corrections, the Stockroom and
-allocation-derived completion, and all remaining tracking behavior
-arrive in later phases — the movement-type check still admits
-`RECEIVED` only.
+data; Machine assignments and Area completion (`AREA_COMPLETED`),
+SPLIT/MERGED, Undo/corrections, the Stockroom and allocation-derived
+completion, and all remaining tracking behavior arrive in later phases
+— the movement-type check admits `RECEIVED` and `TRANSFERRED` only.
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)

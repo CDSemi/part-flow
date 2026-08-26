@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -219,6 +220,13 @@ test('/production-board/kiosk hides the navigation; the standard route keeps it'
   // with one shared connectivity status instead.
   expect(screen.queryByRole('navigation', { name: 'Primary' })).toBeNull();
   expect(document.querySelector('.pb-head.pbk-head')).not.toBeNull();
+
+  // The board arrived through a lazy chunk: its DOM is committed once
+  // the heading is found, but React flushes the passive effects of that
+  // (non-act) render — including the Ctrl+Shift+K keydown listener —
+  // in a later task. Flush them deterministically before the shortcut
+  // is fired, so the test never races the listener registration.
+  await act(async () => {});
 
   // Ctrl+Shift+K returns to the standard route with the normal
   // application navigation.
