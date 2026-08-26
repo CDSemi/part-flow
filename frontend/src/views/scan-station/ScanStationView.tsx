@@ -1284,8 +1284,12 @@ function TransferDialog({
     }
     setBusy(true);
     setServerError(null);
+    // Only the request itself is guarded: a server-confirmed result
+    // must never be re-classified as an unknown outcome because the
+    // completion handler failed afterwards.
+    let result: TransferResult;
     try {
-      const result = await transferToStationArea({
+      result = await transferToStationArea({
         stationId: station.stationId,
         partNumber: pn,
         quantityFlowId: candidate.quantityFlowId,
@@ -1297,7 +1301,6 @@ function TransferDialog({
         routeDeviationReason: deviation !== null ? reason.trim() : null,
         deviceEventId: deviceEventId.current,
       });
-      onDone(result);
     } catch (error) {
       if (transferOutcomeUnknown(error)) {
         // Transport failure, timeout or 5xx: the request may or may
@@ -1316,9 +1319,11 @@ function TransferDialog({
         // An explicit application rejection (4xx): nothing was recorded.
         setServerError(errorMessage(error));
       }
-    } finally {
       setBusy(false);
+      return;
     }
+    setBusy(false);
+    onDone(result);
   }
 
   const cancel = outcomeUnknown ? onAbandonUnknown : onCancel;

@@ -637,7 +637,6 @@ def transfer_to_station_area(
         )
     if flow.status != QuantityFlowStatus.ACTIVE:
         raise ConflictError(f"Quantity Flow {flow.id} is no longer active and cannot move.")
-    require_transfer_target(target)
     if flow.current_area_id == target.id:
         raise ConflictError(
             f"Quantity Flow {flow.id} is already in Area '{target.name}'. Nothing to transfer."
@@ -666,11 +665,15 @@ def transfer_to_station_area(
     # The target Area row is locked until COMMIT (same protocol as the
     # release starting Area): deactivation checks for active quantity
     # under this lock, so an inactive Area can never receive a flow.
+    # The Area flags are judged ONLY on this locked re-read — the
+    # unlocked station read above may predate a concurrent Area edit
+    # (deactivation or a terminal flag set meanwhile).
     session.refresh(target, with_for_update=True)
     if not target.is_active:
         raise ConflictError(
             f"Area '{target.name}' is inactive and cannot accept transferred quantity."
         )
+    require_transfer_target(target)
 
     assessment = assess_route(session, flow, target.id)
     operation = _resolve_operation(session, target, assessment, operation_id)

@@ -1358,6 +1358,46 @@ def test_transfer_versus_area_deactivation_has_one_serial_outcome(
     assert still_active is True
 
 
+def test_terminal_flag_set_between_station_read_and_area_lock_is_seen_under_the_lock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminal flag is judged on the LOCKED re-read of the target
+    Area, never on the unlocked station read: an Area made terminal
+    between the two is refused with nothing written."""
+    material = _Cell(client)
+    lathe = _Cell(client)
+    flow_id, pn = _release(client, material, quantity=3)
+    real = transfers._require_confirmed_station
+
+    def flip_after_station_read(
+        session: Session, station_id: str, target_area_id: int
+    ) -> tuple[models.ScanStation, models.Area]:
+        result = real(session, station_id, target_area_id)
+        with db_engine.begin() as connection:
+            connection.execute(
+                sa.update(models.Area)
+                .where(models.Area.id == lathe.area_id)
+                .values(is_terminal=True)
+            )
+        return result
+
+    monkeypatch.setattr(transfers, "_require_confirmed_station", flip_after_station_read)
+    before = _counts(db_engine)
+    response = _transfer(
+        client,
+        lathe.station_id,
+        part_number=pn,
+        quantity_flow_id=flow_id,
+        source_area_id=material.area_id,
+        quantity=3,
+        target_area_id=lathe.area_id,
+    )
+    assert response.status_code == 409, response.text
+    assert "terminal" in response.json()["detail"]
+    assert _counts(db_engine) == before
+    assert _flow_row(db_engine, flow_id).current_area_id == material.area_id
+
+
 # ---------------------------------------------------------------------------
 # Phase boundary
 # ---------------------------------------------------------------------------
