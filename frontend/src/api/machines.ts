@@ -41,6 +41,12 @@ export interface Machine {
   };
   /** ISO timestamp of the last operational state change. */
   stateChangedAt: string;
+  /**
+   * ACTIVE quantity currently assigned to the Machine (server-derived
+   * from the production projection, Phase 6). Running is derived from
+   * it; retirement is blocked while it is above zero.
+   */
+  assignedQuantity: number;
   /** Set while retired (`YYYY-MM-DD`); absent = active. */
   retiredOn?: string;
   /* Optional asset metadata — production tracking never depends on
@@ -85,6 +91,8 @@ interface MachineWire {
   maintenance_expected_return: string | null;
   state_changed_at: string;
   retired_on: string | null;
+  operational_state: 'MAINTENANCE' | 'RUNNING' | 'IDLE';
+  assigned_quantity: number;
 }
 
 interface MachineLifecycleEventWire {
@@ -115,6 +123,7 @@ function toMachine(wire: MachineWire): Machine {
         }
       : {}),
     stateChangedAt: wire.state_changed_at,
+    assignedQuantity: wire.assigned_quantity,
     retiredOn: wire.retired_on ?? undefined,
     description: wire.description ?? undefined,
     manufacturer: wire.manufacturer ?? undefined,

@@ -1,13 +1,18 @@
-// Scan Station API client (Phase 5 — GUI_DESIGN §4; PROJECT_PROFILE §15).
+// Scan Station API client (Phase 5/6 — GUI_DESIGN §4; PROJECT_PROFILE
+// §12, §15).
 //
 // The read models a Scan Station loads (station context, PN scan
-// resolution, Area inventory) and the ONE command the station records
-// in this phase: the transfer of a whole Quantity Flow into the
-// station's Area. Wire shapes are the backend's snake_case; the
-// exported types are the camelCase the views use. No business rules
-// live here — source/route/Operation resolution and the transaction
-// are the backend's (app/application/transfers.py); this module only
-// carries the confirmed intent across and reads the typed outcomes.
+// resolution, Machine scan resolution, Area inventory) and the
+// production commands the station records: the transfer of a whole
+// Quantity Flow into the station's Area (Phase 5 — completing ON_MACHINE
+// quantity implicitly since Phase 6), and the Phase 6 one-shot
+// Machine-Area actions on a whole Quantity Flow: assign to a Machine,
+// QUEUE (return to the Area queue) and DONE (complete Area processing).
+// Wire shapes are the backend's snake_case; the exported types are the
+// camelCase the views use. No business rules live here — state, Machine
+// and route resolution and every transaction are the backend's
+// (app/application/transfers.py, machine_processing.py); this module
+// only carries the confirmed intent across and reads the typed outcomes.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -41,11 +46,40 @@ export interface WorkOrderContext {
   requestType: 'NEW' | 'MODIFY';
 }
 
+/** Derived holding state of a flow in a Machine Area (PROJECT_PROFILE
+ * §12): a null Machine is QUEUED or READY_TO_TRANSFER, never "queued"
+ * by itself. */
+export type ProcessingState = 'QUEUED' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
+
+/** The actions the server reports as currently valid for a flow. */
+export type FlowAction = 'ASSIGN' | 'DONE' | 'QUEUE' | 'TRANSFER';
+
 export interface FlowInArea {
+  partNumber: string;
   quantityFlowId: number;
   quantity: number;
   routeMode: 'FLOATING' | 'PLANNED';
+  processingState: ProcessingState;
+  /** Set exactly while ON_MACHINE. */
+  machineId: number | null;
+  availableActions: FlowAction[];
   workOrder: WorkOrderContext | null;
+}
+
+export type MachineOperationalState = 'MAINTENANCE' | 'RUNNING' | 'IDLE';
+
+/** A Machine as the station read models present it, with its DERIVED
+ * operational state and the moment that state last changed. */
+export interface MachineRef {
+  id: number;
+  name: string;
+  assetTag: string;
+  barcodeValue: string;
+  operationalState: MachineOperationalState;
+  stateChangedAt: string;
+  maintenanceSince: string | null;
+  maintenanceNote: string | null;
+  maintenanceExpectedReturn: string | null;
 }
 
 interface AreaRefWire {
@@ -71,10 +105,40 @@ interface WorkOrderContextWire {
 }
 
 interface FlowInAreaWire {
+  part_number: string;
   quantity_flow_id: number;
   quantity: number;
   route_mode: 'FLOATING' | 'PLANNED';
+  processing_state: ProcessingState;
+  machine_id: number | null;
+  available_actions: FlowAction[];
   work_order: WorkOrderContextWire | null;
+}
+
+interface MachineRefWire {
+  id: number;
+  name: string;
+  asset_tag: string;
+  barcode_value: string;
+  operational_state: MachineOperationalState;
+  state_changed_at: string;
+  maintenance_since: string | null;
+  maintenance_note: string | null;
+  maintenance_expected_return: string | null;
+}
+
+function toMachineRef(wire: MachineRefWire): MachineRef {
+  return {
+    id: wire.id,
+    name: wire.name,
+    assetTag: wire.asset_tag,
+    barcodeValue: wire.barcode_value,
+    operationalState: wire.operational_state,
+    stateChangedAt: wire.state_changed_at,
+    maintenanceSince: wire.maintenance_since,
+    maintenanceNote: wire.maintenance_note,
+    maintenanceExpectedReturn: wire.maintenance_expected_return,
+  };
 }
 
 function toAreaRef(wire: AreaRefWire): AreaRef {
@@ -110,9 +174,13 @@ function toWorkOrderContext(
 
 function toFlowInArea(wire: FlowInAreaWire): FlowInArea {
   return {
+    partNumber: wire.part_number,
     quantityFlowId: wire.quantity_flow_id,
     quantity: wire.quantity,
     routeMode: wire.route_mode,
+    processingState: wire.processing_state,
+    machineId: wire.machine_id,
+    availableActions: [...wire.available_actions],
     workOrder: toWorkOrderContext(wire.work_order),
   };
 }
@@ -171,6 +239,10 @@ export interface TransferCandidate {
   quantity: number;
   routeMode: 'FLOATING' | 'PLANNED';
   currentArea: AreaRef;
+  /** ON_MACHINE quantity is completed implicitly by the transfer
+   * (AREA_COMPLETED + TRANSFERRED in one command). */
+  processingState: ProcessingState;
+  machineId: number | null;
   routeStatus: RouteStatus;
   expectedNextArea: AreaRef | null;
   /** The Operation the Planned Route expects at its next step. */
@@ -195,6 +267,8 @@ export interface ScanResolution {
   hasActiveDemand: boolean;
   /** Set when the station's Area can never receive a transfer. */
   transferBlockedReason: string | null;
+  /** Several flows match: the operator selects exactly one. */
+  requiresSelection: boolean;
 }
 
 interface TransferCandidateWire {
@@ -202,6 +276,8 @@ interface TransferCandidateWire {
   quantity: number;
   route_mode: 'FLOATING' | 'PLANNED';
   current_area: AreaRefWire;
+  processing_state: ProcessingState;
+  machine_id: number | null;
   route_status: RouteStatus;
   expected_next_area: AreaRefWire | null;
   expected_operation_id: number | null;
@@ -219,6 +295,7 @@ interface ScanResolutionWire {
   operations: OperationRefWire[];
   has_active_demand: boolean;
   transfer_blocked_reason: string | null;
+  requires_selection: boolean;
 }
 
 /**
@@ -250,6 +327,8 @@ export async function resolveScan(
       quantity: candidate.quantity,
       routeMode: candidate.route_mode,
       currentArea: toAreaRef(candidate.current_area),
+      processingState: candidate.processing_state,
+      machineId: candidate.machine_id,
       routeStatus: candidate.route_status,
       expectedNextArea: candidate.expected_next_area
         ? toAreaRef(candidate.expected_next_area)
@@ -261,6 +340,62 @@ export async function resolveScan(
     operations: wire.operations.map(toOperationRef),
     hasActiveDemand: wire.has_active_demand,
     transferBlockedReason: wire.transfer_blocked_reason,
+    requiresSelection: wire.requires_selection,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Machine scan resolution — the one-shot assignment context (Phase 6)
+// ---------------------------------------------------------------------------
+
+export interface MachineScanResolution {
+  stationId: string;
+  area: AreaRef;
+  /** The Machine preselected for the one-shot assignment. */
+  machine: MachineRef;
+  assignedQuantity: number;
+  /** Every QUEUED flow of the station's Area — never picked. */
+  queued: FlowInArea[];
+  requiresSelection: boolean;
+}
+
+interface MachineScanResolutionWire {
+  station_id: string;
+  area: AreaRefWire;
+  machine: MachineRefWire;
+  assigned_quantity: number;
+  queued: FlowInAreaWire[];
+  requires_selection: boolean;
+}
+
+/**
+ * Resolve a scanned Machine barcode (`PF:MACHINE:<asset-tag>`, verbatim
+ * scanner value) or a manually entered Asset Tag at a station into the
+ * one-shot Assign to Machine context. A read — nothing is recorded and
+ * nothing is remembered server-side: an unknown Asset Tag is 404, a
+ * retired, other-Area or maintenance Machine a 409 `ApiError`.
+ */
+export async function resolveMachineScan(
+  stationId: string,
+  input: { barcode: string } | { assetTag: string },
+): Promise<MachineScanResolution> {
+  const wire = await apiRequest<MachineScanResolutionWire>(
+    `/api/scan-stations/${encodeURIComponent(stationId)}/machine-scans/resolve`,
+    {
+      method: 'POST',
+      body:
+        'barcode' in input
+          ? { barcode: input.barcode }
+          : { asset_tag: input.assetTag },
+    },
+  );
+  return {
+    stationId: wire.station_id,
+    area: toAreaRef(wire.area),
+    machine: toMachineRef(wire.machine),
+    assignedQuantity: wire.assigned_quantity,
+    queued: wire.queued.map(toFlowInArea),
+    requiresSelection: wire.requires_selection,
   };
 }
 
@@ -308,6 +443,10 @@ export interface TransferResult {
   stationId: string;
   assignedRouteStepId: number | null;
   routeDeviation: RouteDeviation | null;
+  /** The implicit AREA_COMPLETED of the same command when the quantity
+   * was still ON_MACHINE at the source (Phase 6); null otherwise. */
+  completedMovementId: number | null;
+  completedMachineId: number | null;
   deviceEventId: string;
   occurredAt: string;
   /** false when the server replayed an already committed transfer. */
@@ -334,6 +473,8 @@ interface TransferResultWire {
   station_id: string;
   assigned_route_step_id: number | null;
   route_deviation: RouteDeviationWire | null;
+  completed_movement_id: number | null;
+  completed_machine_id: number | null;
   device_event_id: string;
   occurred_at: string;
 }
@@ -391,6 +532,8 @@ export async function transferToStationArea(
     routeDeviation: data.route_deviation
       ? toRouteDeviation(data.route_deviation)
       : null,
+    completedMovementId: data.completed_movement_id,
+    completedMachineId: data.completed_machine_id,
     deviceEventId: data.device_event_id,
     occurredAt: data.occurred_at,
     created: status === 201,
@@ -398,7 +541,8 @@ export async function transferToStationArea(
 }
 
 /**
- * Whether a failed transfer submission leaves the write outcome UNKNOWN.
+ * Whether a failed production-write submission leaves the outcome
+ * UNKNOWN.
  *
  * A production write is only "not recorded" when the server itself
  * rejected it before writing — an application/business rejection (4xx
@@ -409,9 +553,114 @@ export async function transferToStationArea(
  * presented as an unknown outcome and retried with the same
  * `device_event_id`, never as "nothing was changed".
  */
-export function transferOutcomeUnknown(error: unknown): boolean {
+export function writeOutcomeUnknown(error: unknown): boolean {
   if (!(error instanceof ApiError)) return true;
   return error.status === 408 || error.status >= 500;
+}
+
+/** The transfer's name for the shared rule above. */
+export const transferOutcomeUnknown = writeOutcomeUnknown;
+
+// ---------------------------------------------------------------------------
+// Machine-Area processing commands (Phase 6)
+// ---------------------------------------------------------------------------
+
+export type MachineActionKind = 'ASSIGN' | 'QUEUE' | 'DONE';
+
+export interface MachineActionInput {
+  stationId: string;
+  partNumber: string;
+  /** The ONE flow the operator selected. */
+  quantityFlowId: number;
+  /** ASSIGN: the Machine to assign to. QUEUE/DONE: the Machine the
+   * quantity is on — an optimistic precondition the server checks. */
+  machineId: number;
+  /** Always the flow's whole quantity until SPLIT (Phase 8). */
+  quantity: number;
+  /** Client-generated UUID, reused verbatim on every retry of the SAME
+   * confirmed intent (idempotency key). */
+  deviceEventId: string;
+}
+
+export interface MachineActionResult {
+  movementId: number;
+  movementType:
+    'ASSIGNED_TO_MACHINE' | 'RELEASED_FROM_MACHINE' | 'AREA_COMPLETED';
+  quantityFlowId: number;
+  partNumber: string;
+  quantity: number;
+  areaId: number;
+  machineId: number;
+  operationId: number;
+  stationId: string;
+  processingState: ProcessingState;
+  deviceEventId: string;
+  occurredAt: string;
+  /** false when the server replayed an already committed action. */
+  created: boolean;
+}
+
+interface MachineActionResultWire {
+  movement_id: number;
+  movement_type: MachineActionResult['movementType'];
+  quantity_flow_id: number;
+  part_number: string;
+  quantity: number;
+  area_id: number;
+  machine_id: number;
+  operation_id: number;
+  station_id: string;
+  processing_state: ProcessingState;
+  device_event_id: string;
+  occurred_at: string;
+}
+
+const MACHINE_ACTION_PATH: Record<MachineActionKind, string> = {
+  ASSIGN: 'machine-assignments',
+  QUEUE: 'machine-releases',
+  DONE: 'area-completions',
+};
+
+/**
+ * Record one confirmed in-Area Machine action. Resolves ONLY when the
+ * server confirmed the write: 201 fresh, 200 for an idempotent replay
+ * of the same `deviceEventId` + same intent. Every rejection — partial
+ * quantity, a flow that moved or changed state meanwhile, a retired,
+ * other-Area or maintenance Machine, a stale Machine precondition — is
+ * an `ApiError` and nothing was recorded.
+ */
+export async function recordMachineAction(
+  kind: MachineActionKind,
+  input: MachineActionInput,
+): Promise<MachineActionResult> {
+  const { status, data } = await apiRequestWithStatus<MachineActionResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/${MACHINE_ACTION_PATH[kind]}`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        quantity_flow_id: input.quantityFlowId,
+        machine_id: input.machineId,
+        quantity: input.quantity,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return {
+    movementId: data.movement_id,
+    movementType: data.movement_type,
+    quantityFlowId: data.quantity_flow_id,
+    partNumber: data.part_number,
+    quantity: data.quantity,
+    areaId: data.area_id,
+    machineId: data.machine_id,
+    operationId: data.operation_id,
+    stationId: data.station_id,
+    processingState: data.processing_state,
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
 }
 
 /**
@@ -445,22 +694,59 @@ export interface InventoryLine {
   flows: FlowInArea[];
 }
 
+/** One Machine card: the Machine and ONLY its ON_MACHINE quantity. */
+export interface MachineInventory {
+  machine: MachineRef;
+  lines: InventoryLine[];
+  totalQuantity: number;
+}
+
 export interface AreaInventory {
   area: AreaRef;
+  /** Every ACTIVE flow per PN whatever its state. */
   lines: InventoryLine[];
   totalPartNumbers: number;
   totalQuantity: number;
+  /** The same flows split by derived state (Phase 6): queued and
+   * finished are Area summary figures; on-Machine quantity sits on the
+   * Machine cards — every active Machine, with or without quantity. */
+  queued: InventoryLine[];
+  queuedQuantity: number;
+  machines: MachineInventory[];
+  onMachineQuantity: number;
+  finished: InventoryLine[];
+  finishedQuantity: number;
+}
+
+interface InventoryLineWire {
+  part_number: string;
+  total_quantity: number;
+  flows: FlowInAreaWire[];
 }
 
 interface AreaInventoryWire {
   area: AreaRefWire;
-  lines: {
-    part_number: string;
-    total_quantity: number;
-    flows: FlowInAreaWire[];
-  }[];
+  lines: InventoryLineWire[];
   total_part_numbers: number;
   total_quantity: number;
+  queued: InventoryLineWire[];
+  queued_quantity: number;
+  machines: {
+    machine: MachineRefWire;
+    lines: InventoryLineWire[];
+    total_quantity: number;
+  }[];
+  on_machine_quantity: number;
+  finished: InventoryLineWire[];
+  finished_quantity: number;
+}
+
+function toInventoryLines(lines: InventoryLineWire[]): InventoryLine[] {
+  return lines.map((line) => ({
+    partNumber: line.part_number,
+    totalQuantity: line.total_quantity,
+    flows: line.flows.map(toFlowInArea),
+  }));
 }
 
 export async function getAreaInventory(areaId: number): Promise<AreaInventory> {
@@ -469,12 +755,18 @@ export async function getAreaInventory(areaId: number): Promise<AreaInventory> {
   );
   return {
     area: toAreaRef(wire.area),
-    lines: wire.lines.map((line) => ({
-      partNumber: line.part_number,
-      totalQuantity: line.total_quantity,
-      flows: line.flows.map(toFlowInArea),
-    })),
+    lines: toInventoryLines(wire.lines),
     totalPartNumbers: wire.total_part_numbers,
     totalQuantity: wire.total_quantity,
+    queued: toInventoryLines(wire.queued),
+    queuedQuantity: wire.queued_quantity,
+    machines: wire.machines.map((card) => ({
+      machine: toMachineRef(card.machine),
+      lines: toInventoryLines(card.lines),
+      totalQuantity: card.total_quantity,
+    })),
+    onMachineQuantity: wire.on_machine_quantity,
+    finished: toInventoryLines(wire.finished),
+    finishedQuantity: wire.finished_quantity,
   };
 }

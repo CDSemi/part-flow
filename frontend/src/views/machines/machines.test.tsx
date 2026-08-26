@@ -38,6 +38,8 @@ interface FakeMachine {
   maintenance_expected_return: string | null;
   state_changed_at: string;
   retired_on: string | null;
+  operational_state?: 'MAINTENANCE' | 'RUNNING' | 'IDLE';
+  assigned_quantity?: number;
 }
 
 interface FakeEvent {
@@ -119,6 +121,7 @@ function fakeMachine(
     maintenance_expected_return: null,
     state_changed_at: T0,
     retired_on: null,
+    assigned_quantity: 0,
     ...extra,
   };
 }
@@ -144,6 +147,8 @@ function seedState(): FakeState {
         model: 'QT-250',
         serial_number: 'Q25-90412',
         installed_on: '2026-02-16',
+        // Phase 6: the server reports the assigned ACTIVE quantity.
+        assigned_quantity: 40,
       }),
       fakeMachine(105, 2, 'Lathe 2', 'CD-0105', {
         manufacturer: 'Mazak',
@@ -485,12 +490,18 @@ function openEdit(name: string): HTMLElement {
 test('active Machines list the derived state with the time in state', async () => {
   await renderMachines();
 
-  // No assignment exists before the Phase 6 workflows → every Machine
-  // without a maintenance override is Idle (derived, never chosen),
-  // with the age derived from the shared stateChangedAt timestamp.
+  // The state is derived, never chosen: no assigned quantity and no
+  // maintenance override → Idle, with the age derived from the shared
+  // stateChangedAt timestamp.
   const lathe2 = activeRow('Lathe 2');
   expect(lathe2.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
   expect(within(lathe2).getByRole('cell', { name: '—' })).toBeInTheDocument();
+
+  // Assigned ACTIVE quantity reported by the server (Phase 6) → Running,
+  // with the total shown in the Assigned now column.
+  const lathe1 = activeRow('Lathe 1');
+  expect(lathe1.querySelector('.mg-state')?.textContent).toMatch(/^Running · /);
+  expect(lathe1.textContent).toContain('40 pcs assigned');
 
   // Explicit maintenance override with its note and expected return.
   const lathe4 = activeRow('Lathe 4');
@@ -1282,9 +1293,8 @@ test('column headers sort the active table and cycle ascending → descending �
 test('State sorts the derived state — working machines first, Maintenance last, ties in name order', async () => {
   await renderMachines();
 
-  // Without Phase 6 assignments every non-maintenance Machine is Idle
-  // — ascending groups the Idle machines by name and puts the
-  // Maintenance override last.
+  // Running (Lathe 1 holds assigned quantity) first, then the Idle
+  // machines by name, the Maintenance override last.
   fireEvent.click(screen.getByRole('button', { name: 'Sort by State' }));
   expect(activeNames()).toEqual([
     'Lathe 1',
@@ -1299,13 +1309,13 @@ test('State sorts the derived state — working machines first, Maintenance last
   fireEvent.click(screen.getByRole('button', { name: 'Sort by State' }));
   expect(activeNames()).toEqual([
     'Lathe 4',
-    'Lathe 1',
     'Lathe 2',
     'Lathe 3',
     'Mill 1',
     'Mill 2',
     'Mill 3 — Horizontal Boring',
     'Saw 1',
+    'Lathe 1',
   ]);
 });
 

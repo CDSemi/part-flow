@@ -24,12 +24,12 @@ import {
 } from '../../api/environment';
 import type { Area, Department, Operation } from '../../api/environment';
 import { listMachines } from '../../api/machines';
-import type { Machine } from '../../api/machines';
 import { newDeviceEventId } from '../../api/production-release';
 import {
   areaRefColor,
   getAreaInventory,
   getStationContext,
+  resolveMachineScan,
   resolveScan,
   routeDeviationConfirmation,
   transferOutcomeUnknown,
@@ -38,6 +38,9 @@ import {
 import type {
   AreaInventory,
   AreaRef,
+  FlowInArea,
+  MachineActionResult,
+  MachineRef,
   OperationRef,
   ScanResolution,
   StationContext,
@@ -59,9 +62,14 @@ import { QuantityKeypad } from '../../components/QuantityKeypad';
 import { ThemeToggle } from '../../components/ThemeToggle';
 import { isTouchPrimaryDevice } from '../../components/touch-device';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { areaStats } from '../area-monitoring';
+import { areaStats, splitAssignments } from '../area-monitoring';
+import type { AreaAssignment } from '../area-monitoring';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { normalizeScanInput, parseScan } from './barcode';
+import {
+  AssignToMachineDialog,
+  MachineActionDialog,
+} from './scan-station-machine-dialogs';
 import {
   ConfirmationSummary,
   EntityChip,
@@ -83,14 +91,19 @@ import {
 import type { Notice } from './scan-station-presentation';
 
 /**
- * Scan Station — the REAL Phase 5 view (GUI_DESIGN §4; IMPLEMENTATION_
- * ROADMAP Phase 5). The Station Selector and the station itself read
- * real server state through `/api`, PN barcodes and manual entries
- * resolve on the server, and the ONE production command this phase
- * records is the source-explicit transfer of a whole Quantity Flow
- * into the station's Area — recorded by the server before anything
- * reads as success. The approved Phase 6+ workflows (Machine
- * assignment, DONE / QUEUE, Repair, Scrap, Undo, Worker sessions,
+ * Scan Station — the REAL Phase 5/6 view (GUI_DESIGN §4; IMPLEMENTATION_
+ * ROADMAP Phases 5–6). The Station Selector and the station itself read
+ * real server state through `/api`, PN and Machine barcodes and manual
+ * entries resolve on the server, and the production commands recorded
+ * here are the source-explicit transfer of a whole Quantity Flow into
+ * the station's Area (completing ON_MACHINE quantity implicitly) and
+ * the Phase 6 one-shot Machine-Area actions — `Assign to Machine`
+ * (Machine-first from a Machine scan, PN-first from a queued row), and
+ * the two distinct Machine-card actions DONE (`Complete Area
+ * processing`) and QUEUE (`Return to Area queue`) — every one recorded
+ * by the server before anything reads as success, with no Machine or
+ * PN context surviving a dialog. The remaining approved workflows
+ * (direct-processing DONE, Repair, Scrap, Undo, Worker sessions,
  * Receive Quantity from the station) are NOT implemented here: they
  * stay honest placeholders, and the mock preview of them survives only
  * behind the development-only boundary below (`?preview=mock`).
@@ -305,50 +318,93 @@ function workOrderLabel(workOrder: WorkOrderContext | null): string {
 }
 
 /**
- * One presence card per Quantity Flow currently in the Area. Phase 5
- * knows no processing states: every flow simply is "in this Area"
- * (queue in an Area with Machines, direct processing otherwise —
- * exactly what the shared card derives from an entry without Machine
- * portions). Due dates, Job Numbers and time in Area arrive with the
- * later monitoring read models.
+ * The presentation of one Area inventory: one presence card per
+ * Quantity Flow in the Area, its portion placed by the server's derived
+ * processing state — the Area queue (`queue` context), the Machine it
+ * is on (the Machine's name — the shared grouping puts it on that
+ * Machine's card), or the finished rack (`READY_TO_TRANSFER`, Area
+ * summary only). In an Area without Machines every flow is a direct
+ * portion. `flowOf` maps a rendered row back to its flow so a row
+ * action knows exactly which Quantity Flow it acts on. Due dates, Job
+ * Numbers and time in Area arrive with the later monitoring read
+ * models.
  */
-function inventoryCards(
-  inventory: AreaInventory,
-  areaKey: MockArea['key'],
-): MockAreaCard[] {
-  return inventory.lines.flatMap((line) =>
-    line.flows.map((flow) => ({
-      area: areaKey,
-      pn: line.partNumber,
-      workOrder: workOrderLabel(flow.workOrder),
-      job: '—',
-      qty: flow.quantity,
-      machines: [],
-      due: null,
-      enteredAreaAt: null,
-      received: '',
-    })),
-  );
+interface InventoryPresentation {
+  cards: MockAreaCard[];
+  machines: MockAreaMachine[];
+  machineByName: Map<string, MachineRef>;
+  flowOf: Map<MockAreaCard, FlowInArea>;
 }
 
-/** Active Machines of the Area as monitoring cards: Idle unless the
- * maintenance override applies (assignment arrives with Phase 6). */
-function areaMachineCards(
-  machines: Machine[],
-  areaId: number,
-): MockAreaMachine[] {
-  return machines
-    .filter(
-      (machine) => machine.areaId === areaId && machine.retiredOn === undefined,
-    )
-    .map((machine) => ({
+const MACHINE_CARD_STATUS: Record<
+  MachineRef['operationalState'],
+  MockAreaMachine['status']
+> = { RUNNING: 'running', IDLE: 'idle', MAINTENANCE: 'maintenance' };
+
+function presentInventory(
+  inventory: AreaInventory,
+  areaKey: MockArea['key'],
+  hasMachines: boolean,
+): InventoryPresentation {
+  const machineByName = new Map<string, MachineRef>();
+  const machineById = new Map<number, MachineRef>();
+  for (const card of inventory.machines) {
+    machineByName.set(card.machine.name, card.machine);
+    machineById.set(card.machine.id, card.machine);
+  }
+  const cards: MockAreaCard[] = [];
+  const flowOf = new Map<MockAreaCard, FlowInArea>();
+  for (const line of inventory.lines) {
+    for (const flow of line.flows) {
+      const onMachine =
+        flow.processingState === 'ON_MACHINE' && flow.machineId !== null
+          ? machineById.get(flow.machineId)
+          : undefined;
+      const card: MockAreaCard = {
+        area: areaKey,
+        pn: flow.partNumber,
+        workOrder: workOrderLabel(flow.workOrder),
+        job: '—',
+        qty: flow.quantity,
+        machines: !hasMachines
+          ? []
+          : onMachine
+            ? [[onMachine.name, flow.quantity]]
+            : flow.processingState === 'QUEUED'
+              ? [['queue', flow.quantity]]
+              : [],
+        finished:
+          flow.processingState === 'READY_TO_TRANSFER'
+            ? [{ qty: flow.quantity }]
+            : undefined,
+        due: null,
+        enteredAreaAt: null,
+        received: '',
+      };
+      cards.push(card);
+      flowOf.set(card, flow);
+    }
+  }
+  return {
+    cards,
+    machines: inventory.machines.map(({ machine }) => ({
       name: machine.name,
-      status: machine.maintenance ? 'maintenance' : 'idle',
+      status: MACHINE_CARD_STATUS[machine.operationalState],
       stateChangedAt: machine.stateChangedAt,
-      maintenanceNote: machine.maintenance?.note,
-      expectedReturn: machine.maintenance?.expectedReturn,
-    }));
+      maintenanceNote: machine.maintenanceNote ?? undefined,
+      expectedReturn: machine.maintenanceExpectedReturn ?? undefined,
+    })),
+    machineByName,
+    flowOf,
+  };
 }
+
+const EMPTY_PRESENTATION: InventoryPresentation = {
+  cards: [],
+  machines: [],
+  machineByName: new Map(),
+  flowOf: new Map(),
+};
 
 /* ------------------------------------------------------------------ */
 /* Station                                                             */
@@ -380,7 +436,25 @@ type Flow =
       parent?: Flow;
     }
   | { kind: 'in-area'; resolution: ScanResolution; parent?: Flow }
-  | { kind: 'no-quantity'; resolution: ScanResolution; parent?: Flow };
+  | { kind: 'no-quantity'; resolution: ScanResolution; parent?: Flow }
+  | {
+      // Assign to Machine: Machine-first carries the scanned Machine
+      // and the queued flows the server returned with it; PN-first
+      // carries the queued flow the action was taken on.
+      kind: 'assign';
+      machines: MachineRef[];
+      queued: FlowInArea[];
+      machineId?: number;
+      flow?: FlowInArea;
+      parent?: Flow;
+    }
+  | {
+      kind: 'machine-action';
+      action: 'DONE' | 'QUEUE';
+      flow: FlowInArea;
+      machine: MachineRef;
+      parent?: Flow;
+    };
 
 function StationView({
   stationId,
@@ -409,7 +483,6 @@ function StationView({
     [areaId],
   );
   const inventory = useApiData(loadInventory);
-  const machinesData = useApiData(listMachines);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [touchPrimary] = useState(isTouchPrimaryDevice);
@@ -625,6 +698,58 @@ function StationView({
     [stationId, ready, context, inventory, openResolution, focusScan],
   );
 
+  const resolveMachine = useCallback(
+    async (barcode: string) => {
+      setResolving(true);
+      try {
+        const resolution = await resolveMachineScan(stationId, { barcode });
+        if (ready && resolution.area.id !== ready.area.id) {
+          setFlow(null);
+          context.reload();
+          inventory.reload();
+          setNotice({
+            kind: 'warn',
+            icon: '⚠',
+            title: 'Scan Station configuration changed',
+            detail: `${stationId} is now bound to ${resolution.area.name}. The station was reloaded — scan again. No changes were recorded.`,
+          });
+          focusScan();
+          return;
+        }
+        const known = inventoryReady?.machines.map((card) => card.machine);
+        const machines = known?.some(
+          (machine) => machine.id === resolution.machine.id,
+        )
+          ? known.map((machine) =>
+              machine.id === resolution.machine.id
+                ? resolution.machine
+                : machine,
+            )
+          : [...(known ?? []), resolution.machine];
+        setFlow({
+          kind: 'assign',
+          machines,
+          queued: resolution.queued,
+          machineId: resolution.machine.id,
+        });
+      } catch (error) {
+        // A retired, other-Area or maintenance Machine, or an unknown
+        // Asset Tag: refused by the server with nothing resolved — the
+        // station stays exactly as it was.
+        focusScan();
+        setNotice({
+          kind: 'err',
+          icon: '✕',
+          title: 'Machine cannot be used here',
+          detail: `${errorMessage(error)} No changes were recorded.`,
+        });
+      } finally {
+        setResolving(false);
+      }
+    },
+    [stationId, ready, context, inventory, inventoryReady, focusScan],
+  );
+
   const blockedNotice = useCallback(() => {
     setNotice({
       kind: 'err',
@@ -666,14 +791,12 @@ function StationView({
         });
         return;
       case 'machine':
-        focusScan();
-        setNotice({
-          kind: 'err',
-          icon: '✕',
-          title: 'Machine assignment is not available yet',
-          detail:
-            'This release records transfers into the Area only. Machine barcodes will open the one-time assignment in a later release. No changes were recorded.',
-        });
+        // Machine-first (GUI_DESIGN §4.6): the scan is a one-shot
+        // shortcut into `Assign to Machine` with the Machine
+        // preselected — the server validates the Machine (active, not
+        // under maintenance, in this Area) and lists the queued
+        // quantity; nothing sticks after the dialog.
+        void resolveMachine(normalizeScanInput(raw));
         return;
       case 'area':
         focusScan();
@@ -696,7 +819,7 @@ function StationView({
         });
         return;
     }
-  }, [writeBlocked, blockedNotice, focusScan, resolvePn]);
+  }, [writeBlocked, blockedNotice, focusScan, resolvePn, resolveMachine]);
 
   // Keyboard-wedge capture (§4.4): the main input never loses a scan
   // while no dialog is open — identical to the approved presentation.
@@ -749,41 +872,152 @@ function StationView({
       candidate: TransferCandidate,
       destination: string,
     ) => {
+      // A transfer of ON_MACHINE quantity is ONE application command:
+      // the server appended AREA_COMPLETED then TRANSFERRED together.
+      const completed = result.completedMovementId !== null;
+      const events = completed
+        ? `AREA_COMPLETED #${result.completedMovementId} + TRANSFERRED #${result.movementId}`
+        : `TRANSFERRED #${result.movementId}`;
       setLastAction({
         pn: result.partNumber,
-        summary: `TRANSFERRED · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}`,
+        summary: `${completed ? 'AREA_COMPLETED + TRANSFERRED' : 'TRANSFERRED'} · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}`,
       });
       setNotice({
         kind: 'ok',
         icon: '✓',
         title: `${result.partNumber} × ${result.quantity} → ${destination}`,
         detail: result.created
-          ? `The quantity moved here from ${candidate.currentArea.name}. Recorded by the server (TRANSFERRED #${result.movementId}).`
-          : `This transfer was already recorded by the server (TRANSFERRED #${result.movementId}) — nothing was recorded twice.`,
+          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity moved here from ${candidate.currentArea.name}. Recorded by the server (${events}).`
+          : `This transfer was already recorded by the server (${events}) — nothing was recorded twice.`,
       });
-      // The Area inventory and header totals refresh from the server
+      // The station context, the Area inventory (with its Machine
+      // cards) and the header totals refresh from the server
       // (PROJECT_PROFILE §15 step 10) — never from an optimistic guess.
+      context.reload();
       inventory.reload();
       setFlow(null);
       focusScan();
     },
-    [inventory, focusScan],
+    [context, inventory, focusScan],
+  );
+
+  /** A Machine-Area action the SERVER confirmed: refresh, note, refocus. */
+  const completeMachineAction = useCallback(
+    (result: MachineActionResult, machineName: string) => {
+      const areaName = ready?.area.name ?? 'the Area';
+      const description =
+        result.movementType === 'ASSIGNED_TO_MACHINE'
+          ? `Area queue → ${machineName}`
+          : result.movementType === 'AREA_COMPLETED'
+            ? `${machineName} → Finished — ready to move`
+            : `${machineName} → ${areaName} queue`;
+      setLastAction({
+        pn: result.partNumber,
+        summary: `${result.movementType} · ${description} · qty ${result.quantity}`,
+      });
+      const outcome =
+        result.movementType === 'ASSIGNED_TO_MACHINE'
+          ? `assigned to ${machineName}`
+          : result.movementType === 'AREA_COMPLETED'
+            ? `finished on ${machineName} — on the ${areaName} finished rack, ready to transfer`
+            : `returned from ${machineName} to the ${areaName} queue — it remains unfinished`;
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.quantity} ${outcome}`,
+        detail: result.created
+          ? `Recorded by the server (${result.movementType} #${result.movementId}).`
+          : `This action was already recorded by the server (${result.movementType} #${result.movementId}) — nothing was recorded twice.`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan, ready],
+  );
+
+  const abandonUnknown = useCallback(
+    (what: string) => {
+      // The operator leaves an action whose outcome the server never
+      // answered: the Area is re-read from the server and the next scan
+      // shows where the quantity actually is.
+      setFlow(null);
+      context.reload();
+      inventory.reload();
+      setNotice({
+        kind: 'warn',
+        icon: '⚠',
+        title: `${what} outcome unknown`,
+        detail: `The server did not answer, so the ${what.toLowerCase()} may or may not have been recorded. The Area was reloaded — scan again to see where the quantity is.`,
+      });
+      focusScan();
+    },
+    [context, inventory, focusScan],
   );
 
   const area = ready ? presentationArea(ready.area, ready.operations) : null;
-  const cards = useMemo(
+  const hasMachines =
+    ready?.hasMachines ?? (inventoryReady?.machines.length ?? 0) > 0;
+  const presented = useMemo(
     () =>
-      inventoryReady && area ? inventoryCards(inventoryReady, area.key) : [],
-    [inventoryReady, area],
+      inventoryReady && area
+        ? presentInventory(inventoryReady, area.key, hasMachines)
+        : EMPTY_PRESENTATION,
+    [inventoryReady, area, hasMachines],
   );
-  const machines = useMemo(
-    () =>
-      ready && machinesData.state.status === 'ready'
-        ? areaMachineCards(machinesData.state.data, ready.area.id)
-        : [],
-    [ready, machinesData.state],
+  const { cards, machines } = presented;
+  const machineCardEntries = useMemo(
+    () => splitAssignments(cards).assigned,
+    [cards],
   );
-  const hasMachines = ready?.hasMachines ?? machines.length > 0;
+
+  /**
+   * Machine-card row actions (GUI_DESIGN §4.6): DONE and QUEUE — two
+   * distinct one-shot actions, never merged. Each opens its wizard for
+   * exactly the Quantity Flow of that row; while writes are blocked
+   * they stay disabled in place.
+   */
+  const machineRowAction = (entry: AreaAssignment) => {
+    const flowOfRow = presented.flowOf.get(entry.card);
+    const machineOfRow = presented.machineByName.get(entry.context);
+    if (!flowOfRow || !machineOfRow) return null;
+    const open = (action: 'DONE' | 'QUEUE') =>
+      setFlow({
+        kind: 'machine-action',
+        action,
+        flow: flowOfRow,
+        machine: machineOfRow,
+      });
+    return (
+      <>
+        <button
+          className="rowact done"
+          aria-label="Complete Area processing"
+          title="Complete processing — move this quantity to the finished rack, ready to transfer"
+          disabled={writeBlocked}
+          onClick={() => open('DONE')}
+        >
+          <span className="ric" aria-hidden="true">
+            ✓
+          </span>
+          DONE
+        </button>
+        <button
+          className="rowact"
+          aria-label="Return to Area queue"
+          title="Return unfinished or paused quantity to the Area queue"
+          disabled={writeBlocked}
+          onClick={() => open('QUEUE')}
+        >
+          <span className="ric" aria-hidden="true">
+            ⟲
+          </span>
+          QUEUE
+        </button>
+      </>
+    );
+  };
 
   if (context.state.status === 'loading') {
     // No scan input yet: the station is usable only once its context
@@ -862,7 +1096,9 @@ function StationView({
             Scan barcode
             <span className="spacer" />
             <span className="note">
-              Scan a Part Number to receive its quantity from another Area.
+              {hasMachines
+                ? 'Scan a Part Number to receive or assign its quantity, or a Machine to assign queued quantity to it.'
+                : 'Scan a Part Number to receive its quantity from another Area.'}
             </span>
           </div>
           <div className="ss-scanwrap">
@@ -900,10 +1136,10 @@ function StationView({
               Number will be validated before any action is recorded.
             </div>
             <DevNotice>
-              Development build — this station records real transfers on the
-              server. The mock preview of the later workflows (Machine
-              assignment, DONE, Repair, Scrap, Undo) opens with{' '}
-              <code>?preview=mock</code> on this route.
+              Development build — this station records real transfers and
+              Machine actions on the server. The mock preview of the later
+              workflows (direct-processing DONE, Repair, Scrap, Undo, Worker
+              sessions) opens with <code>?preview=mock</code> on this route.
             </DevNotice>
             <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
@@ -933,18 +1169,16 @@ function StationView({
             detail={inventory.state.message}
             onRetry={inventory.reload}
           />
-        ) : machinesData.state.status === 'error' ? (
-          <ErrorState
-            message="The Area's Machines could not be loaded."
-            detail={machinesData.state.message}
-            onRetry={machinesData.reload}
-          />
-        ) : inventoryLoading || machinesData.state.status === 'loading' ? (
+        ) : inventoryLoading ? (
           <LoadingState label="Loading Area inventory" />
         ) : (
           <AreaMachineLayout
             summary={
               area ? (
+                // In an Area with Machines the summary carries no row
+                // actions (assignment comes through PN scan, Machine
+                // scan and the action dialog; DONE / QUEUE live on the
+                // Machine cards). Direct-processing DONE is Phase 7.
                 <AreaSummaryCard
                   area={area}
                   cards={cards}
@@ -958,7 +1192,10 @@ function StationView({
               <MachineMonitoringCard
                 key={machine.name}
                 machine={machine}
-                entries={[]}
+                entries={machineCardEntries.filter(
+                  (entry) => entry.context === machine.name,
+                )}
+                rowAction={machineRowAction}
               />
             ))}
           />
@@ -996,26 +1233,67 @@ function StationView({
             completeTransfer(result, flow.candidate, destinationNote)
           }
           onCancel={cancelFlow}
-          onAbandonUnknown={() => {
-            // The operator leaves a transfer whose outcome the server
-            // never answered: the Area is re-read from the server and
-            // the next scan shows where the quantity actually is.
-            setFlow(null);
-            inventory.reload();
-            setNotice({
-              kind: 'warn',
-              icon: '⚠',
-              title: 'Transfer outcome unknown',
-              detail:
-                'The server did not answer, so the transfer may or may not have been recorded. The Area was reloaded — scan the Part Number again to see where the quantity is.',
-            });
-            focusScan();
-          }}
+          onAbandonUnknown={() => abandonUnknown('Transfer')}
+        />
+      )}
+      {flow?.kind === 'assign' && (
+        <AssignToMachineDialog
+          station={station}
+          machines={flow.machines}
+          queued={flow.queued}
+          preselectedMachineId={flow.machineId}
+          preselectedFlow={flow.flow}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={(result, machine) =>
+            completeMachineAction(result, machine.name)
+          }
+          onAbandonUnknown={() => abandonUnknown('Assignment')}
+        />
+      )}
+      {flow?.kind === 'machine-action' && (
+        <MachineActionDialog
+          kind={flow.action}
+          station={station}
+          flow={flow.flow}
+          machine={flow.machine}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={(result) => completeMachineAction(result, flow.machine.name)}
+          onAbandonUnknown={() =>
+            abandonUnknown(
+              flow.action === 'DONE' ? 'Completion' : 'Queue return',
+            )
+          }
         />
       )}
       {flow?.kind === 'in-area' && (
         <InAreaDialog
           resolution={flow.resolution}
+          hasMachines={hasMachines}
+          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
+          onAssign={(queuedFlow) =>
+            setFlow({
+              kind: 'assign',
+              machines:
+                inventoryReady?.machines.map((card) => card.machine) ?? [],
+              queued:
+                inventoryReady?.queued.flatMap((line) => line.flows) ?? [],
+              flow: queuedFlow,
+              parent: flow,
+            })
+          }
+          onComplete={(onMachineFlow, machine) =>
+            setFlow({
+              kind: 'machine-action',
+              action: 'DONE',
+              flow: onMachineFlow,
+              machine,
+              parent: flow,
+            })
+          }
           onReceiveMore={() =>
             flow.resolution.candidates.length === 1
               ? setFlow({
@@ -1269,6 +1547,10 @@ function TransferDialog({
         : null;
   const deviation = serverDeviation ?? localDeviation;
   const reasonMissing = deviation !== null && reason.trim() === '';
+  // Quantity still ON a Machine at the source is completed implicitly
+  // by this transfer (PROJECT_PROFILE §8.11): one application command
+  // appends AREA_COMPLETED then TRANSFERRED — the confirmation says so.
+  const implicitCompletion = candidate.processingState === 'ON_MACHINE';
 
   function goConfirm() {
     if (valid) setStep('confirm');
@@ -1368,6 +1650,15 @@ function TransferDialog({
                 → <AreaChip area={destination}>{destinationNote}</AreaChip>
               </>,
               <WorkOrderContextLine workOrder={candidate.workOrder} />,
+              ...(implicitCompletion
+                ? [
+                    <>
+                      This quantity is still on a Machine at{' '}
+                      {candidate.currentArea.name}: transferring it completes
+                      that processing first.
+                    </>,
+                  ]
+                : []),
             ]}
           />
           {operationRequired ? (
@@ -1481,9 +1772,23 @@ function TransferDialog({
                 'secondary',
               ],
               ['Route deviation', deviation, undefined, 'warn'],
+              [
+                'Source processing',
+                implicitCompletion
+                  ? `Completed at ${candidate.currentArea.name} by this transfer`
+                  : null,
+                'primary',
+                'warn',
+              ],
               ['Remaining at source', <span className="mono">0 pcs</span>],
               ['Scan Station', station.stationId, 'secondary'],
-              ['Recorded event', 'TRANSFERRED', 'secondary'],
+              [
+                'Recorded event',
+                implicitCompletion
+                  ? 'AREA_COMPLETED + TRANSFERRED (one command)'
+                  : 'TRANSFERRED',
+                'secondary',
+              ],
             ]}
           />
           {deviation !== null ? (
@@ -1559,11 +1864,22 @@ function TransferDialog({
 
 function InAreaDialog({
   resolution,
+  hasMachines,
+  machines,
+  onAssign,
+  onComplete,
   onReceiveMore,
   onBack,
   onCancel,
 }: {
   resolution: ScanResolution;
+  hasMachines: boolean;
+  /** The active Machines of the station's Area (for the ON_MACHINE rows). */
+  machines: MachineRef[];
+  /** PN-first assignment of ONE queued flow (GUI_DESIGN §4.7). */
+  onAssign: (flow: FlowInArea) => void;
+  /** `Complete Area processing on {Machine}` for ONE ON_MACHINE flow. */
+  onComplete: (flow: FlowInArea, machine: MachineRef) => void;
   onReceiveMore: () => void;
   onBack?: () => void;
   onCancel: () => void;
@@ -1576,6 +1892,25 @@ function InAreaDialog({
     (sum, candidate) => sum + candidate.quantity,
     0,
   );
+  // The valid choices come from the server's derived state of EACH
+  // flow (PROJECT_PROFILE §12): a queued flow offers Assign, a flow on a
+  // Machine offers completion on that Machine. Several flows of the PN
+  // are several explicit choices — never one merged action.
+  const queued = hasMachines
+    ? resolution.inArea.filter((flow) =>
+        flow.availableActions.includes('ASSIGN'),
+      )
+    : [];
+  const onMachine = hasMachines
+    ? resolution.inArea.flatMap((flow) => {
+        if (!flow.availableActions.includes('DONE')) return [];
+        const machine = machines.find((item) => item.id === flow.machineId);
+        return machine ? [{ flow, machine }] : [];
+      })
+    : [];
+  const finishedQty = resolution.inArea
+    .filter((flow) => flow.processingState === 'READY_TO_TRANSFER')
+    .reduce((sum, flow) => sum + flow.quantity, 0);
   return (
     <ModalDialog label="Select an action" onClose={onCancel}>
       <h3>Select an action</h3>
@@ -1583,7 +1918,55 @@ function InAreaDialog({
       <div className="sub">
         <b>{inAreaQty} pcs</b> of this Part Number are already in{' '}
         {resolution.area.name}.
+        {resolution.requiresSelection
+          ? ' Several separate quantities are here — every choice below names exactly one.'
+          : ''}
       </div>
+      {queued.map((flow) => (
+        <button
+          key={`assign-${flow.quantityFlowId}`}
+          className="choice"
+          onClick={() => onAssign(flow)}
+        >
+          <span className="cic run" aria-hidden="true">
+            ASG
+          </span>
+          <span>
+            <span className="ct1">Assign to Machine</span>
+            <br />
+            <span className="ct2">
+              {flow.quantity} pcs queued · {workOrderLabel(flow.workOrder)}
+            </span>
+          </span>
+        </button>
+      ))}
+      {onMachine.map(({ flow, machine }) => (
+        <button
+          key={`done-${flow.quantityFlowId}`}
+          className="choice"
+          onClick={() => onComplete(flow, machine)}
+        >
+          <span className="cic" aria-hidden="true">
+            ✓
+          </span>
+          <span>
+            <span className="ct1">
+              Complete Area processing on {machine.name}
+            </span>
+            <br />
+            <span className="ct2">
+              {flow.quantity} pcs on {machine.name} ·{' '}
+              {workOrderLabel(flow.workOrder)}
+            </span>
+          </span>
+        </button>
+      ))}
+      {finishedQty > 0 ? (
+        <Guidance tone="info">
+          {finishedQty} pcs are finished — ready to move. They leave this Area
+          through a transfer at the destination station.
+        </Guidance>
+      ) : null}
       {resolution.candidates.length > 0 ? (
         <button className="choice" onClick={onReceiveMore}>
           <span className="cic run" aria-hidden="true">
@@ -1606,8 +1989,10 @@ function InAreaDialog({
         </Guidance>
       )}
       <Guidance tone="info">
-        Machine assignment, completion, quantity additions, repair and scrap
-        arrive with a later release. Nothing is recorded at this step.
+        {hasMachines
+          ? 'Quantity additions, repair and scrap arrive with a later release.'
+          : 'Completion in an Area without Machines, quantity additions, repair and scrap arrive with a later release.'}{' '}
+        Nothing is recorded at this step.
       </Guidance>
       <div className="row">
         {onBack ? (

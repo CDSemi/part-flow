@@ -66,6 +66,12 @@ beforeEach(() => {
           lines: [],
           total_part_numbers: 0,
           total_quantity: 0,
+          queued: [],
+          queued_quantity: 0,
+          machines: [],
+          on_machine_quantity: 0,
+          finished: [],
+          finished_quantity: 0,
         });
       }
       if (/\/api\/scan-stations$/.test(url)) {

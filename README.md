@@ -107,10 +107,13 @@ Machine-Area processing commands — assign queued quantity to a Machine,
 QUEUE it back, DONE at the Machine (`AREA_COMPLETED`, deriving
 READY_TO_TRANSFER with the Area kept as location) — and the implicit
 completion of ON_MACHINE quantity on transfer (`AREA_COMPLETED` +
-`TRANSFERRED` as one command); their Scan Station entry points are not
-wired yet, so Machine, Area and scrap barcodes, Worker identity and the
-assign / DONE / QUEUE station actions stay honest placeholders; the
-approved presentation of those workflows survives as
+`TRANSFERRED` as one command) — and the Scan Station records them:
+a Machine scan opens `Assign to Machine` with the Machine preselected,
+a queued PN offers Assign, Machine cards carry the distinct DONE and
+QUEUE actions, and the inventory shows queued, per-Machine and finished
+quantity separately. Area and scrap barcodes, Worker identity,
+direct-processing DONE, Repair, Scrap and Undo stay honest
+placeholders; the approved presentation of those workflows survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5
 configuration surfaces (Administration →

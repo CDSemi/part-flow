@@ -49,7 +49,18 @@ function stationFixture(url: string): Promise<Response> {
     });
   }
   if (/\/inventory$/.test(url)) {
-    return json({ area, lines: [], total_part_numbers: 0, total_quantity: 0 });
+    return json({
+      area,
+      lines: [],
+      total_part_numbers: 0,
+      total_quantity: 0,
+      queued: [],
+      queued_quantity: 0,
+      machines: [],
+      on_machine_quantity: 0,
+      finished: [],
+      finished_quantity: 0,
+    });
   }
   return json([]);
 }

@@ -28,6 +28,8 @@ interface Flow {
   pn: string;
   qty: number;
   areaId: number;
+  /** Phase 6: the Machine the flow is on (Lathe 1 = id 1). */
+  machineId?: number;
   routeMode: 'FLOATING' | 'PLANNED';
   routeStatus?: 'ON_ROUTE' | 'DEVIATION';
   expectedNextAreaId?: number;
@@ -84,7 +86,6 @@ let transferFailure:
   | 'lost-response'
   | { status: number; body: unknown }
   | { committedStatus: number };
-let machinesFailure: boolean;
 /** While set, inventory reads stay pending until it resolves. */
 let inventoryHold: Promise<void> | null;
 let healthDown: boolean;
@@ -128,12 +129,43 @@ function workOrderWire(flow: Flow) {
 }
 
 function flowWire(flow: Flow) {
+  const state = flow.machineId !== undefined ? 'ON_MACHINE' : 'QUEUED';
   return {
+    part_number: flow.pn,
     quantity_flow_id: flow.id,
     quantity: flow.qty,
     route_mode: flow.routeMode,
+    processing_state: state,
+    machine_id: flow.machineId ?? null,
+    available_actions:
+      state === 'ON_MACHINE'
+        ? ['DONE', 'QUEUE', 'TRANSFER']
+        : ['ASSIGN', 'TRANSFER'],
     work_order: workOrderWire(flow),
   };
+}
+
+const LATHE_1 = {
+  id: 1,
+  name: 'Lathe 1',
+  asset_tag: 'CD-0001',
+  barcode_value: 'PF:MACHINE:CD-0001',
+  state_changed_at: '2026-08-25T10:00:00Z',
+  maintenance_since: null,
+  maintenance_note: null,
+  maintenance_expected_return: null,
+};
+
+function inventoryLines(items: Flow[]) {
+  const byPn = new Map<string, Flow[]>();
+  for (const flow of items) {
+    byPn.set(flow.pn, [...(byPn.get(flow.pn) ?? []), flow]);
+  }
+  return [...byPn].map(([pn, group]) => ({
+    part_number: pn,
+    total_quantity: group.reduce((s, f) => s + f.qty, 0),
+    flows: group.map(flowWire),
+  }));
 }
 
 function json(body: unknown, status = 200) {
@@ -191,7 +223,6 @@ function handle(url: string, method: string, body: unknown): Response {
     );
   }
   if (url === '/api/machines') {
-    if (machinesFailure) throw new TypeError('Failed to fetch');
     return json([
       {
         id: 1,
@@ -204,6 +235,8 @@ function handle(url: string, method: string, body: unknown): Response {
         maintenance_expected_return: null,
         state_changed_at: '2026-08-25T10:00:00Z',
         retired_on: null,
+        operational_state: 'IDLE',
+        assigned_quantity: 0,
         description: null,
         manufacturer: null,
         model: null,
@@ -240,19 +273,33 @@ function handle(url: string, method: string, body: unknown): Response {
     inventoryReads += 1;
     const areaId = Number(inventory[1]);
     const here = flows.filter((f) => f.areaId === areaId);
-    const byPn = new Map<string, Flow[]>();
-    for (const flow of here) {
-      byPn.set(flow.pn, [...(byPn.get(flow.pn) ?? []), flow]);
-    }
+    const queued = here.filter((f) => f.machineId === undefined);
+    const onMachine = here.filter((f) => f.machineId !== undefined);
+    const lines = inventoryLines(here);
+    const machineCards =
+      areaId === 2
+        ? [
+            {
+              machine: {
+                ...LATHE_1,
+                operational_state: onMachine.length ? 'RUNNING' : 'IDLE',
+              },
+              lines: inventoryLines(onMachine),
+              total_quantity: onMachine.reduce((s, f) => s + f.qty, 0),
+            },
+          ]
+        : [];
     return json({
       area: areaRef(areaId),
-      lines: [...byPn].map(([pn, items]) => ({
-        part_number: pn,
-        total_quantity: items.reduce((s, f) => s + f.qty, 0),
-        flows: items.map(flowWire),
-      })),
-      total_part_numbers: byPn.size,
+      lines,
+      total_part_numbers: lines.length,
       total_quantity: here.reduce((s, f) => s + f.qty, 0),
+      queued: inventoryLines(queued),
+      queued_quantity: queued.reduce((s, f) => s + f.qty, 0),
+      machines: machineCards,
+      on_machine_quantity: onMachine.reduce((s, f) => s + f.qty, 0),
+      finished: [],
+      finished_quantity: 0,
     });
   }
   const resolve = /^\/api\/scan-stations\/([^/]+)\/scans\/resolve$/.exec(url);
@@ -314,6 +361,8 @@ function handle(url: string, method: string, body: unknown): Response {
       transfer_blocked_reason: terminal
         ? `Area 'Stockroom' is a terminal Area. Receiving finished quantity there is the Stockroom workflow, not a transfer.`
         : null,
+      requires_selection:
+        inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);
@@ -405,7 +454,11 @@ function handle(url: string, method: string, body: unknown): Response {
     if (deviation && !request.route_deviation_reason?.trim()) {
       return json({ detail: 'A route deviation needs a reason.' }, 422);
     }
+    const completedFrom = flow.machineId;
     flow.areaId = station.area_id;
+    flow.machineId = undefined;
+    const completedMovementId =
+      completedFrom !== undefined ? nextMovementId++ : null;
     const result = {
       movement_id: nextMovementId++,
       quantity_flow_id: flow.id,
@@ -423,6 +476,8 @@ function handle(url: string, method: string, body: unknown): Response {
             confirmed: true,
           }
         : null,
+      completed_movement_id: completedMovementId,
+      completed_machine_id: completedFrom ?? null,
       device_event_id: request.device_event_id,
       occurred_at: '2026-08-25T12:00:00Z',
     };
@@ -436,7 +491,7 @@ function handle(url: string, method: string, body: unknown): Response {
       // Committed on the server; the client sees a gateway/server error.
       const status = transferFailure.committedStatus;
       transferFailure = null;
-      return new Response('<html>Bad Gateway</html>', {
+      return new Response('<html lang="">Bad Gateway</html>', {
         status,
         headers: { 'content-type': 'text/html' },
       });
@@ -499,7 +554,6 @@ beforeEach(() => {
   healthDown = false;
   inventoryReads = 0;
   resolveFailure = false;
-  machinesFailure = false;
   inventoryHold = null;
   stationAreaId = 2;
   vi.stubGlobal(
@@ -1142,11 +1196,12 @@ test('a terminal-Area station explains why it never receives a transfer', async 
   expect(box).toHaveTextContent('terminal Area');
 });
 
-test('Machine, Area, scrap and unknown barcodes are rejected without a server call', async () => {
+test('Area, scrap and unknown barcodes are rejected without a server call', async () => {
   const input = await renderStation();
 
+  // A Machine barcode is the Phase 6 Machine-first entry point and
+  // resolves on the server (scan-station-machine.test.tsx).
   for (const [barcode, title] of [
-    ['PF:MACHINE:CD-0001', 'Machine assignment is not available yet'],
     ['PF:AREA:2', 'Area barcode is not required here'],
     ['PF:SCRAP', 'Scrap barcode cannot be used here'],
     ['100482', 'Barcode not recognized'],
@@ -1363,16 +1418,4 @@ test('no false empty Area renders before the first inventory response, and a Mac
   inventoryHold = null;
   expect(await screen.findByText('Total PNs')).toBeInTheDocument();
   expect(screen.getByText('0455-20-0118-03')).toBeInTheDocument();
-});
-
-test('a Machines load failure is an error with Retry — never an empty Area', async () => {
-  machinesFailure = true;
-  await renderStation();
-
-  const error = await screen.findByRole('alert');
-  expect(error).toHaveTextContent("The Area's Machines could not be loaded.");
-  expect(screen.queryByText(/No production in/)).toBeNull();
-  machinesFailure = false;
-  fireEvent.click(within(error).getByRole('button', { name: /Retry/ }));
-  expect(await screen.findByText('Lathe 1')).toBeInTheDocument();
 });

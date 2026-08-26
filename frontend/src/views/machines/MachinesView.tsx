@@ -67,10 +67,12 @@ import {
 // no maintenance schedules, no service contracts, no cost accounting).
 //
 // Phase 3.5: this view reads and writes the real Machine registry
-// through /api/machines. Machine ASSIGNMENTS (the quantity portions on
-// a Machine) arrive with the Phase 6 production workflows — until
-// then no quantity is assigned anywhere, so the Assigned now column is
-// empty and the derived state is Idle unless Maintenance overrides it.
+// through /api/machines. Since Phase 6 the server reports the ACTIVE
+// quantity assigned to each Machine (`assignedQuantity`, derived from
+// the production projection): the state derives Running from it, the
+// Assigned now column shows the total, and retirement stays blocked
+// while it is above zero. The per-PN breakdown of that quantity arrives
+// with the monitoring read models.
 
 type PendingDialog =
   | { kind: 'new' }
@@ -157,15 +159,6 @@ function confirmIdentifier(machine: Machine): {
   return { value: machine.assetTag, label: 'Asset Tag' };
 }
 
-/**
- * Machine assignments (PN portions with quantities on one Machine)
- * arrive with the Phase 6 production workflows. Until then the system
- * holds no assigned quantity, so every Machine's assignment list is
- * empty and its assigned quantity is 0.
- */
-type Assignment = { pn: string; qty: number };
-const NO_ASSIGNMENTS: Assignment[] = [];
-
 // Long-data preview Machines (?state=long, development builds only):
 // many rows plus over-long display names, manufacturer/model/serial
 // and notes, to exercise dense-table and truncation behavior. Never
@@ -183,6 +176,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
           assetTag: tag,
           barcode: machineBarcode(tag),
           stateChangedAt: '2026-07-01T00:00:00.000Z',
+          assignedQuantity: 0,
           manufacturer: 'Long-Preview Manufacturing Equipment Co.',
           model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
           serialNumber: `LONG-PREVIEW-SERIAL-${String(100000 + n)}`,
@@ -196,6 +190,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
         assetTag: 'CD-LONG-SUPPLEMENTAL',
         barcode: machineBarcode('CD-LONG-SUPPLEMENTAL'),
         stateChangedAt: '2026-07-01T00:00:00.000Z',
+        assignedQuantity: 0,
         manufacturer:
           'Supplemental Long-Preview Precision Machinery Manufacturing',
         model: 'SUPPLEMENTAL-LONG-PREVIEW-MODEL-DESIGNATION-EXTENDED-2026',
@@ -352,10 +347,9 @@ export function MachinesView() {
       case 'machine':
         return m.name.toLowerCase();
       case 'state':
-        return STATE_SORT_RANK[effectiveMachineStatus(m, 0)];
+        return STATE_SORT_RANK[effectiveMachineStatus(m, m.assignedQuantity)];
       case 'assigned':
-        // No assigned quantity exists before the Phase 6 workflows.
-        return 0;
+        return m.assignedQuantity;
       case 'asset':
         return m.assetTag.toLowerCase();
       case 'maintenance':
@@ -484,7 +478,6 @@ export function MachinesView() {
                 key={machine.id}
                 machine={machine}
                 area={areaById.get(machine.areaId)}
-                assignments={NO_ASSIGNMENTS}
                 writeBlocked={writeBlocked}
                 onOpenEdit={() => openDialog({ kind: 'edit', machine })}
                 onToggleMaintenance={() =>
@@ -618,7 +611,7 @@ export function MachinesView() {
           machine={dialog.machine}
           areaById={areaById}
           areaChoices={areaChoices}
-          assignedQty={0}
+          assignedQty={dialog.machine.assignedQuantity}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={async (draft) => {
@@ -634,7 +627,7 @@ export function MachinesView() {
       {dialog?.kind === 'start-maintenance' ? (
         <StartMaintenanceDialog
           machine={dialog.machine}
-          assignedQty={0}
+          assignedQty={dialog.machine.assignedQuantity}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onConfirm={async (note, expectedReturn) => {
@@ -803,14 +796,12 @@ function MaintenanceSwitch({
 function ActiveMachineRow({
   machine,
   area,
-  assignments,
   writeBlocked = false,
   onOpenEdit,
   onToggleMaintenance,
 }: {
   machine: Machine;
   area: Area | undefined;
-  assignments: Assignment[];
   /** Disables the row's Maintenance switch while the backend is
    * unreachable (offline write-block); opening Edit Machine to read
    * stays available. */
@@ -818,7 +809,7 @@ function ActiveMachineRow({
   onOpenEdit: () => void;
   onToggleMaintenance: () => void;
 }) {
-  const qty = assignments.reduce((s, a) => s + a.qty, 0);
+  const qty = machine.assignedQuantity;
   const status = effectiveMachineStatus(machine, qty);
   // Shared minute clock: the state age keeps ticking while the table
   // stays open and matches the monitoring cards on every other view.
@@ -857,16 +848,13 @@ function ActiveMachineRow({
           narrow viewports (hidden with the header cell — GUI_DESIGN
           §2.5 column shedding). */}
       <td className="mg-assignedcol">
-        {assignments.length === 0 ? (
+        {qty === 0 ? (
           <span className="mg-meta">—</span>
         ) : (
-          assignments.map((a) => (
-            <div className="mg-assign" key={a.pn}>
-              {a.pn} <span className="sep">·</span>{' '}
-              <span className={`q ${status}`}>{a.qty}</span>{' '}
-              <span className="unit">pcs</span>
-            </div>
-          ))
+          <div className="mg-assign">
+            <span className={`q ${status}`}>{qty}</span>{' '}
+            <span className="unit">pcs assigned</span>
+          </div>
         )}
       </td>
       <td className="mg-metacol">
