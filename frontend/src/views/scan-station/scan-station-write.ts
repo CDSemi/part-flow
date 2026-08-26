@@ -35,12 +35,20 @@ export function useOneShotWrite<T>({
   send,
   writeBlocked,
   onDone,
+  onRejected,
 }: {
   /** The request for THIS intent; called with the frozen key. */
   send: (deviceEventId: string) => Promise<T>;
   writeBlocked: boolean;
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: T) => void;
+  /**
+   * Called after an explicit application rejection (4xx — nothing
+   * recorded). The owner uses it to re-read the Area from the server so
+   * that Back/Cancel never leave the operator with the stale state the
+   * server just refused (a flow moved meanwhile, a Machine retired…).
+   */
+  onRejected?: () => void;
 }): OneShotWrite<T> {
   const deviceEventId = useRef(newDeviceEventId());
   const [busy, setBusy] = useState(false);
@@ -70,6 +78,7 @@ export function useOneShotWrite<T>({
         setServerError(null);
       } else {
         setServerError(errorMessage(error));
+        onRejected?.();
       }
       setBusy(false);
       return;
@@ -77,7 +86,7 @@ export function useOneShotWrite<T>({
     setBusy(false);
     setResult(confirmed);
     onDone(confirmed);
-  }, [busy, writeBlocked, send, onDone]);
+  }, [busy, writeBlocked, send, onDone, onRejected]);
 
   const clearError = useCallback(() => setServerError(null), []);
 

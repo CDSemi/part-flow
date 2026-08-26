@@ -9,16 +9,20 @@ the **Phase 2 Frontend Design System and Application Shell**, the
 **Phase 3.5 Minimum Environment Setup** (persistence, the configuration
 APIs, and the real Administration/Machines frontend), and the completed
 **Phase 4 Manual Work Order Intake and Production Release** — the first
-business vertical slice, end to end — and the completed **Phase 5 Scan
+business vertical slice, end to end — the completed **Phase 5 Scan
 Station Transfer to an Area Queue** (persistence, the transfer command,
-the Scan Station read models, and the real Scan Station frontend):
+the Scan Station read models, and the real Scan Station frontend), and
+the completed **Phase 6 One-Shot Machine Assignment and Area
+Completion** (persistence, the Machine-Area processing commands, the
+Machine-first / PN-first read models, and the real Scan Station
+Machine workflows):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
   real `/api/health` connectivity integration, and the ten approved GUI
   views — the real views (Administration's minimum-environment
   sections and Management → Machines from Phase 3.5, Management →
-  Work Orders from Phase 4, and the Scan Station from Phase 5) read and
+  Work Orders from Phase 4, and the Scan Station from Phases 5–6) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -102,7 +106,7 @@ and Planned-Route deviation confirmation with a reason — Area or
 Operation (partial quantity is refused until SPLIT, Phase 8); the
 Scan Station view records it — scans resolve on the server, success is
 reported only after the server confirmed the write, and the Area
-inventory refreshes from the server. The Phase 6 backend core adds the
+inventory refreshes from the server. The completed Phase 6 adds the
 Machine-Area processing commands — assign queued quantity to a Machine,
 QUEUE it back, DONE at the Machine (`AREA_COMPLETED`, deriving
 READY_TO_TRANSFER with the Area kept as location) — and the implicit

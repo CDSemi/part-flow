@@ -12,6 +12,7 @@
 //
 // Production-safe: no mock data, no framework imports.
 
+import type { MachineStatus } from '../views/view-models';
 import { apiRequest } from './client';
 
 /** One physical Machine record as the views render it. */
@@ -47,6 +48,12 @@ export interface Machine {
    * it; retirement is blocked while it is above zero.
    */
   assignedQuantity: number;
+  /**
+   * The derived operational state as the SERVER derives it (maintenance
+   * override > assigned ACTIVE quantity = running > idle) — the same
+   * value the Scan Station Machine cards show; never re-derived here.
+   */
+  operationalState: MachineStatus;
   /** Set while retired (`YYYY-MM-DD`); absent = active. */
   retiredOn?: string;
   /* Optional asset metadata — production tracking never depends on
@@ -106,6 +113,15 @@ interface MachineLifecycleEventWire {
   to_area_id: number | null;
 }
 
+const OPERATIONAL_STATE: Record<
+  MachineWire['operational_state'],
+  MachineStatus
+> = {
+  MAINTENANCE: 'maintenance',
+  RUNNING: 'running',
+  IDLE: 'idle',
+};
+
 function toMachine(wire: MachineWire): Machine {
   return {
     id: wire.id,
@@ -124,6 +140,7 @@ function toMachine(wire: MachineWire): Machine {
       : {}),
     stateChangedAt: wire.state_changed_at,
     assignedQuantity: wire.assigned_quantity,
+    operationalState: OPERATIONAL_STATE[wire.operational_state],
     retiredOn: wire.retired_on ?? undefined,
     description: wire.description ?? undefined,
     manufacturer: wire.manufacturer ?? undefined,

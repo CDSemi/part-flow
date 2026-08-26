@@ -937,6 +937,18 @@ function StationView({
     [context, inventory, focusScan, ready],
   );
 
+  /**
+   * The server refused a write (nothing recorded — the flow moved, the
+   * Machine changed, the station was rebound…): re-read the Area so the
+   * state the operator returns to after Back/Cancel is the server's,
+   * not the one the server just rejected. The open dialog keeps its
+   * own entered values.
+   */
+  const refreshAfterRejection = useCallback(() => {
+    context.reload();
+    inventory.reload();
+  }, [context, inventory]);
+
   const abandonUnknown = useCallback(
     (what: string) => {
       // The operator leaves an action whose outcome the server never
@@ -1233,6 +1245,7 @@ function StationView({
             completeTransfer(result, flow.candidate, destinationNote)
           }
           onCancel={cancelFlow}
+          onRejected={refreshAfterRejection}
           onAbandonUnknown={() => abandonUnknown('Transfer')}
         />
       )}
@@ -1249,6 +1262,7 @@ function StationView({
           onDone={(result, machine) =>
             completeMachineAction(result, machine.name)
           }
+          onRejected={refreshAfterRejection}
           onAbandonUnknown={() => abandonUnknown('Assignment')}
         />
       )}
@@ -1262,6 +1276,7 @@ function StationView({
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
           onDone={(result) => completeMachineAction(result, flow.machine.name)}
+          onRejected={refreshAfterRejection}
           onAbandonUnknown={() =>
             abandonUnknown(
               flow.action === 'DONE' ? 'Completion' : 'Queue return',
@@ -1470,6 +1485,7 @@ function TransferDialog({
   onBack,
   onDone,
   onCancel,
+  onRejected,
   onAbandonUnknown,
 }: {
   station: StationContext;
@@ -1481,6 +1497,9 @@ function TransferDialog({
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: TransferResult) => void;
   onCancel: () => void;
+  /** The server refused the transfer (nothing recorded): the owner
+   * re-reads the Area so Back/Cancel never return to refused state. */
+  onRejected?: () => void;
   /** The operator abandons a transfer whose outcome is UNKNOWN (the
    * server never answered): the owner re-reads the Area. */
   onAbandonUnknown: () => void;
@@ -1597,9 +1616,11 @@ function TransferDialog({
         // reason before the SAME intent is resubmitted. Nothing was
         // recorded.
         setServerDeviation(errorMessage(error));
+        onRejected?.();
       } else {
         // An explicit application rejection (4xx): nothing was recorded.
         setServerError(errorMessage(error));
+        onRejected?.();
       }
       setBusy(false);
       return;

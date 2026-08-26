@@ -64,10 +64,16 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import machine_processing, machines, projections, transfers
-from app.application.errors import ConflictError
+from app.application import (
+    machine_processing,
+    machines,
+    production_release,
+    projections,
+    transfers,
+)
+from app.application.errors import ConflictError, IdempotencyConflictError
 from app.core.config import get_settings
-from app.domain.enums import ProcessingState
+from app.domain.enums import MovementType, ProcessingState
 from app.infrastructure import models
 from app.main import create_app
 
@@ -1046,6 +1052,185 @@ def test_mismatched_reuse_is_refused_within_and_across_command_kinds(
     )
     assert reused_transfer.status_code == 409
     assert _movement_count(db_engine) == count
+
+
+def test_release_ids_and_machine_command_ids_never_replay_each_other(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A ``device_event_id`` first used by the Phase 4 release (``RECEIVED``)
+    is a conflicting reuse for every Machine-Area command, and a Machine
+    command's id is a conflicting reuse for a release — the command kind
+    is compared explicitly, never inferred from the fingerprint."""
+    lathe = _Cell(client)
+    pn = _unique("PN")
+    response = client.post(
+        "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
+    )
+    assert response.status_code == 201, response.text
+    work_order_id = int(response.json()["id"])
+    demand_id = int(response.json()["demands"][0]["id"])
+    release_url = f"/api/work-orders/{work_order_id}/demands/{demand_id}/release"
+    release_id = str(uuid.uuid4())
+    release_payload = {
+        "part_number": pn,
+        "quantity": 4,
+        "route_mode": "FLOATING",
+        "starting_area_id": lathe.area_id,
+        "operation_id": lathe.operation_id,
+        "confirm_active_quantity": False,
+        "device_event_id": release_id,
+    }
+    released = client.post(release_url, json=release_payload)
+    assert released.status_code == 201, released.text
+    flow_id = int(released.json()["quantity_flow_id"])
+    count = _movement_count(db_engine)
+
+    reused = _assign(client, lathe, flow_id, pn, 4, device_event_id=release_id)
+    assert reused.status_code == 409, reused.text
+    assert _movement_count(db_engine) == count
+    assert _flow_row(db_engine, flow_id).current_machine_id is None
+
+    assign_id = str(uuid.uuid4())
+    assert _assign(client, lathe, flow_id, pn, 4, device_event_id=assign_id).status_code == 201
+    count = _movement_count(db_engine)
+    for kind in ("QUEUE", "DONE"):
+        reused = _act(
+            client,
+            kind,
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            machine_id=lathe.machine_id,
+            quantity=4,
+            device_event_id=release_id,
+        )
+        assert reused.status_code == 409, reused.text
+    # The release side: the assignment's id (a different fingerprint) and,
+    # explicitly, a Machine command whose id is replayed as a release.
+    replayed_release = client.post(
+        release_url, json={**release_payload, "confirm_active_quantity": True}
+    )
+    assert replayed_release.status_code == 200, replayed_release.text
+    reused_release = client.post(
+        release_url,
+        json={**release_payload, "confirm_active_quantity": True, "device_event_id": assign_id},
+    )
+    assert reused_release.status_code == 409, reused_release.text
+    assert _movement_count(db_engine) == count
+    assert _flow_row(db_engine, flow_id).current_machine_id == lathe.machine_id
+
+
+def test_release_replay_checks_the_command_kind_explicitly() -> None:
+    """Unit seam: a committed row of another command kind whose stored
+    fingerprint text happens to equal the release fingerprint is still a
+    conflicting reuse — the guard is the Movement type, not the
+    fingerprint's key set."""
+    fingerprint = "same-text"
+    foreign = models.PartMovement(
+        movement_type=MovementType.ASSIGNED_TO_MACHINE,
+        metadata_={production_release._FINGERPRINT_KEY: fingerprint},
+    )
+    with pytest.raises(IdempotencyConflictError):
+        production_release._replay_or_conflict(cast(Session, None), foreign, fingerprint)
+
+
+def test_leaving_quantity_keeps_running_while_another_pn_remains(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """``state_changed_at`` moves only when the derived state changes:
+    QUEUE / DONE of one PN while another PN stays on the Machine leaves
+    the Machine Running with the same state age; the last quantity
+    leaving turns it Idle and moves the timestamp."""
+    lathe = _Cell(client)
+    first_id, first_pn = _assigned(client, lathe, quantity=3)
+    running_since = _machine(client, lathe.machine_id)["state_changed_at"]
+    second_id, second_pn = _release(client, lathe, quantity=8)
+    assert _assign(client, lathe, second_id, second_pn, 8).status_code == 201
+    machine = _machine(client, lathe.machine_id)
+    assert (machine["operational_state"], machine["assigned_quantity"]) == ("RUNNING", 11)
+    assert machine["state_changed_at"] == running_since
+
+    queued = _act(
+        client,
+        "QUEUE",
+        lathe.station_id,
+        part_number=first_pn,
+        quantity_flow_id=first_id,
+        machine_id=lathe.machine_id,
+        quantity=3,
+    )
+    assert queued.status_code == 201, queued.text
+    machine = _machine(client, lathe.machine_id)
+    assert (machine["operational_state"], machine["assigned_quantity"]) == ("RUNNING", 8)
+    assert machine["state_changed_at"] == running_since
+
+    done = _act(
+        client,
+        "DONE",
+        lathe.station_id,
+        part_number=second_pn,
+        quantity_flow_id=second_id,
+        machine_id=lathe.machine_id,
+        quantity=8,
+    )
+    assert done.status_code == 201, done.text
+    machine = _machine(client, lathe.machine_id)
+    assert (machine["operational_state"], machine["assigned_quantity"]) == ("IDLE", 0)
+    assert machine["state_changed_at"] > running_since
+    assert _flow_row(db_engine, first_id).current_machine_id is None
+    assert _flow_row(db_engine, second_id).current_machine_id is None
+
+
+def test_done_race_lost_at_commit_replays(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The COMMIT-time duplicate resolution covers the leaving commands
+    too: a blinded retry of a committed DONE replays it (200, same body)
+    and leaves no second Movement and no projection change behind."""
+    lathe = _Cell(client)
+    flow_id, pn = _assigned(client, lathe, quantity=5)
+    event_id = str(uuid.uuid4())
+    real_lookup = machine_processing.committed_command
+    misses = {"remaining": 2}
+
+    def blind_then_real(session: Session, device_event_id: str) -> Any:
+        if misses["remaining"] > 0:
+            misses["remaining"] -= 1
+            return []
+        return real_lookup(session, device_event_id)
+
+    def done() -> Any:
+        return _act(
+            client,
+            "DONE",
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=flow_id,
+            machine_id=lathe.machine_id,
+            quantity=5,
+            device_event_id=event_id,
+        )
+
+    original = done()
+    assert original.status_code == 201, original.text
+    # Put the flow back on the Machine with NEW intents so the blinded
+    # retry passes validation and reaches COMMIT.
+    deburr = _Cell(client)
+    assert _transfer(client, lathe, deburr, flow_id, pn, 5).status_code == 201
+    assert _transfer(client, deburr, lathe, flow_id, pn, 5).status_code == 201
+    assert _assign(client, lathe, flow_id, pn, 5).status_code == 201
+    count = _movement_count(db_engine)
+    monkeypatch.setattr(machine_processing, "committed_command", blind_then_real)
+    try:
+        loser = done()
+    finally:
+        monkeypatch.undo()
+    assert loser.status_code == 200, loser.text
+    assert loser.json() == original.json()
+    assert misses["remaining"] == 0
+    assert _movement_count(db_engine) == count
+    assert _flow_row(db_engine, flow_id).current_machine_id == lathe.machine_id
+    assert _inventory_flow(client, lathe.area_id, flow_id)["processing_state"] == "ON_MACHINE"
 
 
 def test_assignment_race_lost_at_commit_replays(

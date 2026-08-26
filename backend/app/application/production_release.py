@@ -279,7 +279,12 @@ def _replay_or_conflict(
 ) -> ProductionRelease:
     """Resolve a duplicate ``device_event_id`` against the committed row."""
     stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
-    if stored != fingerprint:
+    # A release replays ONLY a release: an id first used by another
+    # command kind (a transfer or a Machine-Area command since Phase 6)
+    # is a conflicting reuse even if its fingerprint text happened to
+    # match — the command kind is checked explicitly, never inferred
+    # from the fingerprint's key set.
+    if stored != fingerprint or movement.movement_type != MovementType.RECEIVED:
         raise IdempotencyConflictError(
             "This device_event_id was already used for a different release"
             " request. Nothing was created — a new release intent needs a"

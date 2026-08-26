@@ -138,6 +138,7 @@ export function AssignToMachineDialog({
   onBack,
   onCancel,
   onDone,
+  onRejected,
   onAbandonUnknown,
 }: {
   station: StationContext;
@@ -158,10 +159,23 @@ export function AssignToMachineDialog({
     machine: MachineRef,
     flow: FlowInArea,
   ) => void;
+  /** The server refused the write (nothing recorded); see useOneShotWrite. */
+  onRejected?: () => void;
   onAbandonUnknown: () => void;
 }) {
   const [machineList, setMachineList] = useState(machines);
-  const [queuedList, setQueuedList] = useState(queued);
+  // PN-first: the flow the action was taken on comes from the fresh PN
+  // resolution while the queued list comes from the last inventory read,
+  // which may predate the flow entering the queue. The preselected flow
+  // is always an explicit choice of this dialog.
+  const [queuedList, setQueuedList] = useState(() =>
+    preselectedFlow === undefined ||
+    queued.some(
+      (item) => item.quantityFlowId === preselectedFlow.quantityFlowId,
+    )
+      ? queued
+      : [preselectedFlow, ...queued],
+  );
   const [machineId, setMachineId] = useState<number | null>(
     preselectedMachineId ?? null,
   );
@@ -197,6 +211,7 @@ export function AssignToMachineDialog({
 
   const write = useOneShotWrite<MachineActionResult>({
     writeBlocked,
+    onRejected,
     send: (deviceEventId) =>
       recordMachineAction('ASSIGN', {
         stationId: station.stationId,
@@ -276,7 +291,7 @@ export function AssignToMachineDialog({
       return;
     }
     setScanError(
-      'Scan a Machine barcode of this Area or a queued Part Number barcode. Nothing was changed.',
+      'Barcode not valid for this step. Scan a Machine in this Area or a PN currently waiting in the Area queue. Your current selections were not changed.',
     );
   }
 
@@ -524,6 +539,7 @@ export function MachineActionDialog({
   onBack,
   onCancel,
   onDone,
+  onRejected,
   onAbandonUnknown,
 }: {
   kind: 'DONE' | 'QUEUE';
@@ -536,6 +552,8 @@ export function MachineActionDialog({
   onCancel: () => void;
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: MachineActionResult) => void;
+  /** The server refused the write (nothing recorded); see useOneShotWrite. */
+  onRejected?: () => void;
   onAbandonUnknown: () => void;
 }) {
   const areaName = station.area.name;
@@ -553,6 +571,7 @@ export function MachineActionDialog({
 
   const write = useOneShotWrite<MachineActionResult>({
     writeBlocked,
+    onRejected,
     send: (deviceEventId) =>
       recordMachineAction(kind, {
         stationId: station.stationId,

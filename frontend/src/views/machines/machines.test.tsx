@@ -276,9 +276,20 @@ function applyEdits(machine: FakeMachine, edits: Record<string, unknown>) {
   }
 }
 
+/** The server derives the operational state: maintenance > assigned
+ * ACTIVE quantity = RUNNING > IDLE (PROJECT_PROFILE §8.6). */
+function operationalState(
+  machine: FakeMachine,
+): 'MAINTENANCE' | 'RUNNING' | 'IDLE' {
+  if (machine.operational_state !== undefined) return machine.operational_state;
+  if (machine.maintenance_since !== null) return 'MAINTENANCE';
+  return (machine.assigned_quantity ?? 0) > 0 ? 'RUNNING' : 'IDLE';
+}
+
 function machineWire(machine: FakeMachine) {
   return {
     ...machine,
+    operational_state: operationalState(machine),
     barcode_value: `PF:MACHINE:${machine.asset_tag}`,
     created_at: T0,
     updated_at: T0,
@@ -510,6 +521,26 @@ test('active Machines list the derived state with the time in state', async () =
   );
   expect(lathe4.textContent).toContain('Spindle bearing replacement');
   expect(lathe4.textContent).toContain('Expected back 2026-08-06');
+});
+
+test('the state column shows the state the SERVER derived, never a local re-derivation', async () => {
+  // The server is the single derivation of the operational state (the
+  // same value the Scan Station Machine cards show): a Machine the
+  // server reports as RUNNING renders Running even when the quantity
+  // total alone would not say so, and vice versa.
+  const lathe2 = state.machines.find((m) => m.name === 'Lathe 2')!;
+  lathe2.operational_state = 'RUNNING';
+  const lathe3 = state.machines.find((m) => m.name === 'Lathe 3')!;
+  lathe3.assigned_quantity = 12;
+  lathe3.operational_state = 'IDLE';
+  await renderMachines();
+
+  expect(activeRow('Lathe 2').querySelector('.mg-state')?.textContent).toMatch(
+    /^Running · /,
+  );
+  const row3 = activeRow('Lathe 3');
+  expect(row3.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
+  expect(row3.textContent).toContain('12 pcs assigned');
 });
 
 test('the replacement pair stays distinguishable: retired records keep their identity', async () => {

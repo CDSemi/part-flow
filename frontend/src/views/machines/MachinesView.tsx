@@ -53,7 +53,6 @@ import { formatAssetTag, machineBarcode } from '../asset-tags';
 import {
   LIFECYCLE_EVENT_LABEL,
   MACHINE_STATE_LABEL,
-  effectiveMachineStatus,
   formatStateAge,
 } from '../machine-state';
 
@@ -69,8 +68,9 @@ import {
 // Phase 3.5: this view reads and writes the real Machine registry
 // through /api/machines. Since Phase 6 the server reports the ACTIVE
 // quantity assigned to each Machine (`assignedQuantity`, derived from
-// the production projection): the state derives Running from it, the
-// Assigned now column shows the total, and retirement stays blocked
+// the production projection) and the derived state itself
+// (`operationalState`, the same derivation the Scan Station cards show):
+// the Assigned now column shows the total, and retirement stays blocked
 // while it is above zero. The per-PN breakdown of that quantity arrives
 // with the monitoring read models.
 
@@ -177,6 +177,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
           barcode: machineBarcode(tag),
           stateChangedAt: '2026-07-01T00:00:00.000Z',
           assignedQuantity: 0,
+          operationalState: 'idle',
           manufacturer: 'Long-Preview Manufacturing Equipment Co.',
           model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
           serialNumber: `LONG-PREVIEW-SERIAL-${String(100000 + n)}`,
@@ -191,6 +192,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
         barcode: machineBarcode('CD-LONG-SUPPLEMENTAL'),
         stateChangedAt: '2026-07-01T00:00:00.000Z',
         assignedQuantity: 0,
+        operationalState: 'idle',
         manufacturer:
           'Supplemental Long-Preview Precision Machinery Manufacturing',
         model: 'SUPPLEMENTAL-LONG-PREVIEW-MODEL-DESIGNATION-EXTENDED-2026',
@@ -347,7 +349,7 @@ export function MachinesView() {
       case 'machine':
         return m.name.toLowerCase();
       case 'state':
-        return STATE_SORT_RANK[effectiveMachineStatus(m, m.assignedQuantity)];
+        return STATE_SORT_RANK[m.operationalState];
       case 'assigned':
         return m.assignedQuantity;
       case 'asset':
@@ -810,7 +812,9 @@ function ActiveMachineRow({
   onToggleMaintenance: () => void;
 }) {
   const qty = machine.assignedQuantity;
-  const status = effectiveMachineStatus(machine, qty);
+  // The state is the server's derivation — the same value the Scan
+  // Station Machine cards show — never re-derived from the quantity.
+  const status = machine.operationalState;
   // Shared minute clock: the state age keeps ticking while the table
   // stays open and matches the monitoring cards on every other view.
   const now = useUiClock('minute');

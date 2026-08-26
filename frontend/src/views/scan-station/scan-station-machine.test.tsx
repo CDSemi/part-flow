@@ -106,6 +106,8 @@ let nextMovementId: number;
 /** Failure injected into the NEXT write (any command). */
 let writeFailure:
   null | 'network' | 'lost-response' | { status: number; body: unknown };
+/** The connectivity probe fails (the station goes OFFLINE). */
+let healthDown: boolean;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -244,7 +246,11 @@ function commit(deviceEventId: string, result: unknown): Response {
 }
 
 function handle(url: string, method: string, body: unknown): Response {
-  if (url === '/api/health') return json({ status: 'ok' });
+  if (url === '/api/health') {
+    return healthDown
+      ? json({ status: 'unavailable' }, 503)
+      : json({ status: 'ok' });
+  }
   if (url === '/api/scan-stations') {
     return json(STATIONS.map((s) => ({ ...s, is_active: true })));
   }
@@ -548,6 +554,7 @@ beforeEach(() => {
   requests = [];
   nextMovementId = 500;
   writeFailure = null;
+  healthDown = false;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -980,10 +987,230 @@ test('a server rejection of a stale assignment is shown in place with nothing re
   ).toBeInTheDocument();
   expect(committed.size).toBe(0);
   expect(document.querySelector('.ss-toast')).toBeNull();
+  // The refusal re-reads the Area from the server so Cancel/Back never
+  // return to the state the server just refused: the flow now shows on
+  // the Machine card it was assigned to meanwhile, not in the queue.
+  await waitFor(() => expect(reads(/\/inventory$/).length).toBe(2));
   fireEvent.keyDown(summary, { key: 'Escape' });
   expect(await notice()).toHaveTextContent(
     'Cancelled. No changes were recorded.',
   );
+  await waitFor(() =>
+    expect(machineCard('Lathe 2')).toHaveTextContent('2027-60-8114-00'),
+  );
+});
+
+test('PN-first: the action dialog offers the queued flow even when the last inventory read predates it', async () => {
+  // The PN resolution is fresh; the inventory (the dialog's queued list)
+  // was read before this quantity entered the queue elsewhere.
+  await renderStation();
+  flows.push({
+    id: 106,
+    pn: 'LATE-1',
+    qty: 2,
+    areaId: 2,
+    state: 'QUEUED',
+    machineId: null,
+  });
+  scan('PF:PN:LATE-1');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Assign to Machine/ }),
+  );
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  expect(
+    within(within(dlg).getByRole('group', { name: /PN/ })).getByRole('button', {
+      name: /LATE-1/,
+    }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.click(
+    within(within(dlg).getByRole('group', { name: 'Machine' })).getByRole(
+      'button',
+      { name: /Lathe 1/ },
+    ),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  expect(within(dialog()).getByLabelText(/^Quantity: /)).toHaveValue('2');
+});
+
+test('Machine-first and PN-first send the same assignment command with the same body shape', async () => {
+  await renderStation();
+  scan('PF:MACHINE:CD-0002');
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  fireEvent.click(
+    within(within(dlg).getByRole('group', { name: /PN/ })).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm assignment' }),
+  );
+  await notice();
+
+  // A second queued quantity, PN-first.
+  flows.push({
+    id: 107,
+    pn: 'PNFIRST-1',
+    qty: 9,
+    areaId: 2,
+    state: 'QUEUED',
+    machineId: null,
+  });
+  scan('PF:PN:PNFIRST-1');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Assign to Machine/ }),
+  );
+  const second = await screen.findByRole('dialog', {
+    name: 'Assign to Machine',
+  });
+  fireEvent.click(
+    within(within(second).getByRole('group', { name: 'Machine' })).getByRole(
+      'button',
+      { name: /Lathe 2/ },
+    ),
+  );
+  fireEvent.click(within(second).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm assignment' }),
+  );
+  await waitFor(() => expect(writes()).toHaveLength(2));
+
+  const [machineFirst, pnFirst] = writes();
+  expect(machineFirst.url).toBe(pnFirst.url);
+  expect(machineFirst.url).toMatch(/\/machine-assignments$/);
+  expect(Object.keys(machineFirst.body).sort()).toEqual(
+    Object.keys(pnFirst.body).sort(),
+  );
+  expect(Object.keys(pnFirst.body).sort()).toEqual([
+    'device_event_id',
+    'machine_id',
+    'part_number',
+    'quantity',
+    'quantity_flow_id',
+  ]);
+  expect(machineFirst.body.device_event_id).not.toBe(
+    pnFirst.body.device_event_id,
+  );
+  expect(pnFirst.body).toMatchObject({
+    machine_id: 2,
+    quantity_flow_id: 107,
+    quantity: 9,
+  });
+});
+
+test('an Area with exactly one active Machine never preselects it: PN-first still requires the explicit Machine choice', async () => {
+  // Lathe 2 and Lathe 3 leave the Area; Lathe 1 is the only active
+  // Machine of Lathe. Nothing is ever auto-assigned by Machine count.
+  const lathe2 = MACHINES.find((m) => m.id === 2)!;
+  const lathe3 = MACHINES.find((m) => m.id === 3)!;
+  lathe2.retired = true;
+  lathe3.retired = true;
+  try {
+    await renderStation();
+    scan('PF:PN:2027-60-8114-00');
+    const actions = await screen.findByRole('dialog', {
+      name: 'Select an action',
+    });
+    fireEvent.click(
+      within(actions).getByRole('button', { name: /Assign to Machine/ }),
+    );
+    const dlg = await screen.findByRole('dialog', {
+      name: 'Assign to Machine',
+    });
+    const machineGroup = within(dlg).getByRole('group', { name: 'Machine' });
+    expect(within(machineGroup).getAllByRole('button')).toHaveLength(1);
+    expect(
+      within(machineGroup).getByRole('button', { name: /Lathe 1/ }),
+    ).toHaveAttribute('aria-pressed', 'false');
+    expect(within(dlg).getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(writes()).toHaveLength(0);
+  } finally {
+    lathe2.retired = false;
+    lathe3.retired = false;
+  }
+});
+
+test('a repeated Confirm sends exactly one request per intent', async () => {
+  await renderStation();
+  scan('PF:MACHINE:CD-0001');
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  fireEvent.click(
+    within(within(dlg).getByRole('group', { name: /PN/ })).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  const confirm = within(dialog()).getByRole('button', {
+    name: 'Confirm assignment',
+  });
+  fireEvent.click(confirm);
+  fireEvent.click(confirm);
+  fireEvent.keyDown(dialog(), { key: 'Enter' });
+  await notice();
+  expect(writes()).toHaveLength(1);
+  expect(committed.size).toBe(1);
+});
+
+/* ============ Offline ============ */
+
+test('a final Confirm is disabled while disconnected, and nothing is sent', async () => {
+  await renderStation();
+  scan('PF:MACHINE:CD-0001');
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  fireEvent.click(
+    within(within(dlg).getByRole('group', { name: /PN/ })).getByRole('button', {
+      name: /2027-60-8114-00/,
+    }),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  const confirm = within(dialog()).getByRole('button', {
+    name: 'Confirm assignment',
+  });
+  expect(confirm).toBeEnabled();
+
+  healthDown = true;
+  await waitFor(() => expect(confirm).toBeDisabled(), { timeout: 4000 });
+  fireEvent.click(confirm);
+  fireEvent.keyDown(dialog(), { key: 'Enter' });
+  expect(writes()).toHaveLength(0);
+  expect(committed.size).toBe(0);
+});
+
+test('the DONE final question is disabled while disconnected, and nothing is sent', async () => {
+  await renderStation();
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const dlg = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm completion' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  const yes = within(gate).getByRole('button', { name: 'Yes — finished' });
+  expect(yes).toBeEnabled();
+
+  healthDown = true;
+  await waitFor(() => expect(yes).toBeDisabled(), { timeout: 4000 });
+  fireEvent.click(yes);
+  expect(writes()).toHaveLength(0);
+  expect(committed.size).toBe(0);
 });
 
 test('a lost response freezes the intent and the retry replays the committed assignment under the same device_event_id', async () => {
