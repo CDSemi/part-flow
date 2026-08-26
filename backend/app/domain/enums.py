@@ -40,12 +40,53 @@ class MovementType(StrEnum):
     Phase 3 needs only RECEIVED — the first Movement of every
     QuantityFlow. Phase 5 adds TRANSFERRED — the Scan Station move of a
     whole QuantityFlow from its current Area into the station's Area.
-    Later phases widen this additively (ASSIGNED_TO_MACHINE,
-    AREA_COMPLETED, ...); none of those values exist yet.
+    Phase 6 adds the Machine-Area processing events: ASSIGNED_TO_MACHINE
+    (queued quantity becomes ON_MACHINE), RELEASED_FROM_MACHINE (the
+    QUEUE action — unfinished quantity returns to the Area queue) and
+    AREA_COMPLETED (the DONE action — processing at the current Area is
+    complete, the quantity waits as READY_TO_TRANSFER). Later phases
+    widen this additively (SPLIT, MERGED, REVERSED, STOCKED, ...); none
+    of those values exist yet.
     """
 
     RECEIVED = "RECEIVED"
     TRANSFERRED = "TRANSFERRED"
+    ASSIGNED_TO_MACHINE = "ASSIGNED_TO_MACHINE"
+    RELEASED_FROM_MACHINE = "RELEASED_FROM_MACHINE"
+    AREA_COMPLETED = "AREA_COMPLETED"
+
+
+class ProcessingState(StrEnum):
+    """Derived holding state of ACTIVE quantity in a Machine Area
+    (PROJECT_PROFILE §12 Area Processing States).
+
+    Never stored: derived from the flow's latest Movement — an
+    ASSIGNED_TO_MACHINE makes it ON_MACHINE (the projection then
+    carries the Machine), an AREA_COMPLETED makes it READY_TO_TRANSFER
+    (finished, waiting on the Area's rack with NO Machine), and every
+    other latest Movement (RECEIVED, TRANSFERRED, RELEASED_FROM_MACHINE)
+    leaves it QUEUED. A NULL current Machine therefore never means
+    "queued" by itself. Direct processing (PROCESSING, Phase 7) does
+    not exist yet.
+    """
+
+    QUEUED = "QUEUED"
+    ON_MACHINE = "ON_MACHINE"
+    READY_TO_TRANSFER = "READY_TO_TRANSFER"
+
+
+class MachineOperationalState(StrEnum):
+    """Derived operational state of a Machine (PROJECT_PROFILE §8.6).
+
+    Never chosen by users and never stored: an explicit Maintenance
+    override wins; otherwise assigned ACTIVE quantity means Running;
+    otherwise Idle. `machines.state_changed_at` records when this
+    derived value last changed.
+    """
+
+    MAINTENANCE = "MAINTENANCE"
+    RUNNING = "RUNNING"
+    IDLE = "IDLE"
 
 
 class QuantityFlowStatus(StrEnum):

@@ -30,8 +30,10 @@ GUI_DESIGN §4.7:
 - concurrency: two transfers of one flow serialize on the flow row
   lock with exactly one winner; transfer versus Area deactivation has
   one serial outcome;
-- committed Movements cannot be updated or deleted; no Phase 6+
-  behavior (no Machine, no ``AREA_COMPLETED``) leaks in.
+- committed Movements cannot be updated or deleted; queued quantity
+  still transfers with ``TRANSFERRED`` alone (the implicit
+  ``AREA_COMPLETED`` of ON_MACHINE quantity is covered by the Phase 6
+  suite) and no Phase 7+ column leaks in.
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
@@ -1403,7 +1405,12 @@ def test_terminal_flag_set_between_station_read_and_area_lock_is_seen_under_the_
 # ---------------------------------------------------------------------------
 
 
-def test_no_phase6_plus_behavior_leaks_in(client: TestClient, db_engine: Engine) -> None:
+def test_queued_quantity_transfers_with_transferred_alone(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Phase 6 boundary: the implicit AREA_COMPLETED belongs to ON_MACHINE
+    quantity only — a queued flow still records TRANSFERRED alone, and no
+    Phase 7+ column exists."""
     material = _Cell(client)
     lathe = _Cell(client)
     flow_id, pn = _release(client, material, quantity=1)
@@ -1426,9 +1433,13 @@ def test_no_phase6_plus_behavior_leaks_in(client: TestClient, db_engine: Engine)
         )
     # RECEIVED then TRANSFERRED alone — no AREA_COMPLETED, no Machine events.
     assert types == {"RECEIVED", "TRANSFERRED"}
+    assert response.json()["completed_movement_id"] is None
+    assert response.json()["completed_machine_id"] is None
     columns = {column.name for column in models.PartMovement.__table__.columns}
-    assert columns.isdisjoint({"worker_id", "scan_session_id", "movement_reason", "machine_id"})
-    assert "current_machine_id" not in {c.name for c in models.QuantityFlow.__table__.columns}
+    assert columns.isdisjoint(
+        {"worker_id", "scan_session_id", "movement_reason", "reverses_movement_id"}
+    )
+    assert "parent_flow_id" not in {c.name for c in models.QuantityFlow.__table__.columns}
 
 
 # ---------------------------------------------------------------------------

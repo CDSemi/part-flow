@@ -42,6 +42,11 @@ Deliberate surface decisions:
   event; a recorded Discard sends no draft. The optional
   ``actor`` travels as the nullable, reference-free value Phase 3.5
   defines — authenticated actor identity arrives with Phase 14.
+- Every Machine response carries the DERIVED operational state
+  (``operational_state``: MAINTENANCE > RUNNING > IDLE, PROJECT_PROFILE
+  §8.6) and the ACTIVE quantity currently assigned to the Machine
+  (``assigned_quantity``, Phase 6) — read-model values, never stored
+  and never client-writable.
 """
 
 import datetime
@@ -49,6 +54,7 @@ from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
 
 from app.api.dependencies import SessionDep
 from app.application import machines
@@ -82,6 +88,10 @@ class MachineResponse(BaseModel):
     retired_on: datetime.date | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    # Derived (PROJECT_PROFILE §8.6): Maintenance override wins, else
+    # assigned ACTIVE quantity means Running, else Idle.
+    operational_state: Literal["MAINTENANCE", "RUNNING", "IDLE"]
+    assigned_quantity: int
 
 
 class MachineLifecycleEventResponse(BaseModel):
@@ -173,23 +183,52 @@ class MachineReactivateRequest(BaseModel):
     actor: str | None = None
 
 
-def _machine_response(machine: Machine) -> MachineResponse:
-    return MachineResponse.model_validate(machine)
+_STORED_FIELDS = (
+    "id",
+    "area_id",
+    "name",
+    "asset_tag",
+    "barcode_value",
+    "description",
+    "manufacturer",
+    "model",
+    "serial_number",
+    "installed_on",
+    "notes",
+    "maintenance_since",
+    "maintenance_note",
+    "maintenance_expected_return",
+    "state_changed_at",
+    "retired_on",
+    "created_at",
+    "updated_at",
+)
+
+
+def _machine_response(machine: Machine, assigned: int) -> MachineResponse:
+    return MachineResponse(
+        **{name: getattr(machine, name) for name in _STORED_FIELDS},
+        operational_state=machines.operational_state(machine, assigned).value,
+        assigned_quantity=assigned,
+    )
+
+
+def _one(session: Session, machine: Machine) -> MachineResponse:
+    return _machine_response(machine, machines.assigned_quantity(session, machine.id))
 
 
 @router.get("/machines")
 def list_machines(
     session: SessionDep, lifecycle: Literal["active", "retired", "all"] = "all"
 ) -> list[MachineResponse]:
-    return [
-        _machine_response(machine)
-        for machine in machines.list_machines(session, lifecycle=lifecycle)
-    ]
+    listed = machines.list_machines(session, lifecycle=lifecycle)
+    assigned = machines.assigned_quantities(session, [machine.id for machine in listed])
+    return [_machine_response(machine, assigned.get(machine.id, 0)) for machine in listed]
 
 
 @router.get("/machines/{machine_id}")
 def get_machine(machine_id: int, session: SessionDep) -> MachineResponse:
-    return _machine_response(machines.get_machine(session, machine_id))
+    return _one(session, machines.get_machine(session, machine_id))
 
 
 @router.post("/machines", status_code=201)
@@ -206,7 +245,7 @@ def create_machine(body: MachineCreateRequest, session: SessionDep) -> MachineRe
         notes=body.notes,
         expected_asset_tag=body.expected_asset_tag,
     )
-    return _machine_response(machine)
+    return _one(session, machine)
 
 
 @router.patch("/machines/{machine_id}")
@@ -214,7 +253,7 @@ def update_machine(
     machine_id: int, body: MachineUpdateRequest, session: SessionDep
 ) -> MachineResponse:
     machine = machines.update_machine(session, machine_id, **body.model_dump(exclude_unset=True))
-    return _machine_response(machine)
+    return _one(session, machine)
 
 
 @router.post("/machines/{machine_id}/maintenance", status_code=201)
@@ -224,12 +263,12 @@ def start_maintenance(
     machine = machines.start_maintenance(
         session, machine_id, note=body.note, expected_return=body.expected_return
     )
-    return _machine_response(machine)
+    return _one(session, machine)
 
 
 @router.delete("/machines/{machine_id}/maintenance")
 def clear_maintenance(machine_id: int, session: SessionDep) -> MachineResponse:
-    return _machine_response(machines.clear_maintenance(session, machine_id))
+    return _one(session, machines.clear_maintenance(session, machine_id))
 
 
 @router.post("/machines/{machine_id}/retire")
@@ -243,7 +282,7 @@ def retire_machine(
         actor=body.actor,
         edits=body.edits.model_dump(exclude_unset=True) if body.edits is not None else None,
     )
-    return _machine_response(machine)
+    return _one(session, machine)
 
 
 @router.post("/machines/{machine_id}/reactivate")
@@ -261,7 +300,7 @@ def reactivate_machine(
         area_id=body.area_id,
         actor=body.actor,
     )
-    return _machine_response(machine)
+    return _one(session, machine)
 
 
 @router.get("/machines/{machine_id}/lifecycle-events")

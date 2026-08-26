@@ -5,32 +5,31 @@ PostgreSQL database (created and dropped by the module fixture), then
 verifies the Phase 5 invariants PostgreSQL must enforce
 (IMPLEMENTATION_ROADMAP Phase 5; SLICE1_DATA_MODEL §18):
 
-- exact head boundary: exactly the Phase 3 + 3.5 + 4 tables — Phase 5
+- exact Phase 5 boundary: exactly the Phase 3 + 3.5 + 4 tables — Phase 5
   adds no table — and no Phase 6+ column pre-implemented;
 - the movement-type CHECK admits exactly `RECEIVED` and `TRANSFERRED`;
 - `part_movements.station_id`: nullable, a foreign key to
   `scan_stations.station_id`, NULL on a RECEIVED release;
 - the per-type shape CHECK: RECEIVED has no source Area; TRANSFERRED
   needs a source Area different from its destination and a Station;
-- the stored shape CHECK is the one the model declares (byte-equal
-  expression), and models↔migration metadata parity holds at head;
+- the stored shape CHECK is the one the Phase 5 migration declares;
 - TRANSFERRED rows are append-only exactly like RECEIVED rows;
 - clean downgrade back to the Phase 4 boundary
   (`0005_phase4_release_index`) with a successful re-upgrade, and the
   downgrade refusing to drop TRANSFERRED history.
 
-The module fixture migrates head → base → head, so a downgrade that
-leaves any object behind fails the module before any test runs. Every
-test runs in its own rolled-back transaction against isolated data.
+The module fixture migrates `0006_phase5_transfer` → base → back, so a
+downgrade that leaves any object behind fails the module before any
+test runs. Every test runs in its own rolled-back transaction against
+isolated data.
 
-Phase 5 is the current head, so this module carries the head-level
-coverage (models↔migration parity, exact table set). When a later phase
-adds its migration, pin this module to `0006_phase5_transfer` and move
-the head-level coverage into that phase's schema test.
+This module is pinned to `0006_phase5_transfer` (the Phase 5 boundary);
+the head-level coverage (models↔migration parity, exact table set at
+head) lives in test_phase6_schema.py — the same handoff the earlier
+phase modules made.
 """
 
 import datetime
-import importlib.util
 import os
 import uuid
 from collections.abc import Iterator
@@ -50,6 +49,7 @@ from app.infrastructure import models
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 _PHASE4_REVISION = "0005_phase4_release_index"
+_PHASE5_REVISION = "0006_phase5_transfer"
 
 _EXPECTED_TABLES = {
     "departments",
@@ -99,14 +99,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated 0006 → base → 0006 through real Alembic runs."""
     name = "partflow_test_phase5_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE5_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE5_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -193,7 +193,7 @@ def _rejected(connection: Connection, values: dict[str, Any]) -> None:
 
 
 class TestMigrationSchema:
-    def test_head_creates_exactly_the_phase5_boundary(self, migrated_engine: Engine) -> None:
+    def test_phase5_creates_exactly_the_phase5_boundary(self, migrated_engine: Engine) -> None:
         tables = set(inspect(migrated_engine).get_table_names())
         # Phase 5 adds no table: no workers, scan_sessions, or
         # work_order_allocations pre-implemented.
@@ -248,7 +248,7 @@ class TestMigrationSchema:
         for absent in ("ASSIGNED_TO_MACHINE", "AREA_COMPLETED", "SPLIT", "REVERSED", "STOCKED"):
             assert absent not in check_clause
 
-    def test_shape_check_is_the_one_the_model_declares(self, connection: Connection) -> None:
+    def test_shape_check_is_the_one_the_migration_declares(self, connection: Connection) -> None:
         names = set(
             connection.scalars(
                 sa.text(
@@ -259,25 +259,17 @@ class TestMigrationSchema:
         )
         assert "ck_part_movements_movement_shape" in names
         assert "ck_part_movements_received_shape" not in names
-        # Byte-equal to the mapping's expression: the migration inlines
-        # it deliberately (never importing the mutable model module).
-        spec = importlib.util.spec_from_file_location(
-            "phase5_transfer_migration",
-            _BACKEND_DIR / "alembic" / "versions" / "20260825_0006_phase5_transfer.py",
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        assert module._PHASE5_SHAPE == models.MOVEMENT_SHAPE_SQL
-
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
+        # The Phase 5 expression (the mapping now declares the Phase 6
+        # widening; parity at head is asserted by test_phase6_schema).
+        stored = connection.execute(
+            sa.text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                " WHERE conname = 'ck_part_movements_movement_shape'"
+            )
+        ).scalar_one()
+        for fragment in ("'RECEIVED'", "'TRANSFERRED'", "station_id IS NOT NULL"):
+            assert fragment in stored
+        assert "AREA_COMPLETED" not in stored
 
     def test_downgrade_restores_the_phase4_boundary(self, admin_engine: Engine) -> None:
         name = "partflow_test_phase5_downgrade"
@@ -285,7 +277,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE5_REVISION)
             command.downgrade(config, _PHASE4_REVISION)
             engine = create_engine(url)
             try:
@@ -308,7 +300,7 @@ class TestMigrationSchema:
                 assert "TRANSFERRED" not in checks["ck_part_movements_movement_type"]
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE5_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 
@@ -321,7 +313,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE5_REVISION)
             engine = create_engine(url)
             try:
                 with engine.connect() as connection:
@@ -353,10 +345,13 @@ class TestMovementShape:
     def test_transferred_canonical_shape_is_accepted(self, connection: Connection) -> None:
         seed = _Seed(connection)
         movement_id = _insert(connection, seed.movement())
+        # Phase 5 columns only: the mapping already declares the Phase 6
+        # Machine columns, which this pinned database does not have.
+        table = models.PartMovement.__table__
         row = connection.execute(
-            sa.select(models.PartMovement.__table__).where(
-                models.PartMovement.__table__.c.id == movement_id
-            )
+            sa.select(
+                table.c.movement_type, table.c.from_area_id, table.c.to_area_id, table.c.station_id
+            ).where(table.c.id == movement_id)
         ).one()
         assert row.movement_type == "TRANSFERRED"
         assert row.from_area_id == seed.area_a and row.to_area_id == seed.area_b

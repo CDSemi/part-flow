@@ -9,7 +9,11 @@ completed Area/Operation configuration fields, `scan_stations`,
 Machine Asset Tag format configuration; plus the Phase 4 generic
 append-only `audit_events` table for master-data and business-demand
 changes (SLICE1_DATA_MODEL §16); plus the Phase 5 Movement widening
-(`TRANSFERRED`, `part_movements.station_id`). Business rules stay in the
+(`TRANSFERRED`, `part_movements.station_id`); plus the Phase 6 Machine
+assignment and Area completion widening (`quantity_flows.current_machine_id`,
+the Movement Machine references, the application-command sequence, and
+the `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
+types). Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -115,13 +119,42 @@ MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
 PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
-# transfer). Reused verbatim by the Phase 5 migration so the stored
-# CHECK and the mapping never drift.
+# transfer; Phase 6 Machine assignment and Area completion). Reused
+# verbatim by the Phase 6 migration so the stored CHECK and the mapping
+# never drift. RECEIVED introduces quantity (no source Area, no
+# Machine); TRANSFERRED moves between two DIFFERENT Areas at a Station
+# and references no Machine (a transfer from ON_MACHINE quantity is
+# preceded by its own AREA_COMPLETED); the three in-Area Movements stay
+# in ONE Area at a Station and carry exactly the Machine reference
+# their meaning requires — assignment a destination Machine only,
+# release and completion a source Machine only (Phase 6 completes
+# Machine-assigned quantity only; Phase 7 widens completion to direct
+# processing without a Machine).
 MOVEMENT_SHAPE_SQL = (
-    "(movement_type = 'RECEIVED' AND from_area_id IS NULL)"
+    "(movement_type = 'RECEIVED' AND from_area_id IS NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
     " OR (movement_type = 'TRANSFERRED' AND from_area_id IS NOT NULL"
-    " AND from_area_id <> to_area_id AND station_id IS NOT NULL)"
+    " AND from_area_id <> to_area_id AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'ASSIGNED_TO_MACHINE'"
+    " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NOT NULL)"
+    " OR (movement_type = 'RELEASED_FROM_MACHINE'"
+    " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NOT NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'AREA_COMPLETED'"
+    " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NOT NULL AND destination_machine_id IS NULL)"
 )
+
+# Row-level idempotency guarantee of the application-command model
+# (Phase 6): one `device_event_id` identifies one command, which may
+# append several Movements numbered by `command_sequence`. Referenced
+# by the commands that translate a race lost at COMMIT into a replay.
+DEVICE_EVENT_ID_CONSTRAINT = "uq_part_movements_device_event_id_command_sequence"
 
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
@@ -283,8 +316,10 @@ class Machine(Base):
     RETIRED → ACTIVE reactivation (raise-on-change trigger owned by the
     Phase 3.5 migration) — every other capacity move is a replacement
     (retire + new record). The operational Running/Idle state is
-    derived (assignment arrives with Phase 6) and never stored; only
-    the explicit maintenance override and `state_changed_at` persist.
+    derived (Running = ACTIVE quantity whose projection
+    `quantity_flows.current_machine_id` references the Machine, Phase 6)
+    and never stored; only the explicit maintenance override and
+    `state_changed_at` persist.
     """
 
     __tablename__ = "machines"
@@ -705,12 +740,14 @@ class AssignedRouteStep(Base):
 class QuantityFlow(Base):
     """Traceable production portion of PN quantity (PROJECT_PROFILE §8.7).
 
-    `current_area_id` is the maintained current-position projection: set
-    by the creating INSERT itself and updated inside Movement
-    transactions, while PartMovement history remains the source of truth
-    it must stay rebuildable from. `current_machine_id` and
-    `parent_flow_id` are canonical later-phase columns and deliberately
-    do not exist yet.
+    `current_area_id` and `current_machine_id` are the maintained
+    current-position projection: the Area is set by the creating INSERT
+    itself and both are updated inside Movement transactions, while
+    PartMovement history remains the source of truth they must stay
+    rebuildable from (the Machine is the destination Machine of the
+    flow's latest Movement — NULL unless that Movement is an
+    `ASSIGNED_TO_MACHINE`). `parent_flow_id` is a canonical later-phase
+    column and deliberately does not exist yet.
     """
 
     __tablename__ = "quantity_flows"
@@ -734,6 +771,14 @@ class QuantityFlow(Base):
         Integer,
         ForeignKey("areas.id", name="fk_quantity_flows_current_area_id_areas"),
         nullable=False,
+    )
+    # The current executor while the quantity is ON_MACHINE (Phase 6);
+    # NULL while queued or finished (READY_TO_TRANSFER) in the Area —
+    # the two are told apart by the latest Movement, never by this
+    # column alone.
+    current_machine_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("machines.id", name="fk_quantity_flows_current_machine_id_machines"),
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -768,6 +813,7 @@ class QuantityFlow(Base):
             postgresql_where=text(f"status = '{QuantityFlowStatus.ACTIVE}'"),
         ),
         Index("ix_quantity_flows_current_area_id", "current_area_id"),
+        Index("ix_quantity_flows_current_machine_id", "current_machine_id"),
     )
 
 
@@ -778,9 +824,13 @@ class PartMovement(Base):
     created by the Phase 3 migration), never only in application
     convention. `station_id` (Phase 5) records the stable Scan Station
     identity of a scan-driven Movement for audit (PROJECT_PROFILE §15);
-    the remaining canonical later-phase columns (`worker_id`,
-    `scan_session_id`, `movement_reason`, `reverses_movement_id`,
-    Machine columns) deliberately do not exist yet.
+    `source_machine_id` / `destination_machine_id` (Phase 6) are the
+    Machine references of the assignment, release and completion
+    Movements; `command_sequence` (Phase 6) numbers the Movements of
+    one application command — one `device_event_id` per command. The
+    remaining canonical later-phase columns (`worker_id`,
+    `scan_session_id`, `movement_reason`, `reverses_movement_id`)
+    deliberately do not exist yet.
     """
 
     __tablename__ = "part_movements"
@@ -824,6 +874,18 @@ class PartMovement(Base):
         Text,
         ForeignKey("scan_stations.station_id", name="fk_part_movements_station_id_scan_stations"),
     )
+    # Machine references (PROJECT_PROFILE §8.11): the Machine the
+    # quantity left (release, completion) and the Machine it was
+    # assigned to (assignment). Which one a type carries is fixed by
+    # the shape CHECK.
+    source_machine_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("machines.id", name="fk_part_movements_source_machine_id_machines"),
+    )
+    destination_machine_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("machines.id", name="fk_part_movements_destination_machine_id_machines"),
+    )
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     server_received_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -831,6 +893,12 @@ class PartMovement(Base):
     # Idempotency key: one id per submission, reused on transport
     # retries; uniqueness guarantees at-most-once recording.
     device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Position inside the application command identified by
+    # `device_event_id` (Phase 6): 1 for every single-Movement command;
+    # 1, 2 for the atomic AREA_COMPLETED + TRANSFERRED transfer. All
+    # rows of one command share the id, so `WHERE device_event_id = …`
+    # yields the complete command — what Undo (Phase 9) reverses.
+    command_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
 
     __table_args__ = (
@@ -842,17 +910,19 @@ class PartMovement(Base):
             name="fk_part_movements_quantity_flow_id_part_number_quantity_flows",
         ),
         CheckConstraint(
-            f"movement_type IN ('{MovementType.RECEIVED}', '{MovementType.TRANSFERRED}')",
+            "movement_type IN ("
+            + ", ".join(f"'{movement_type}'" for movement_type in MovementType)
+            + ")",
             name=conv("ck_part_movements_movement_type"),
         ),
         CheckConstraint("quantity > 0", name=conv("ck_part_movements_quantity_positive")),
         # Movement-shape rule per type (widens per movement type in the
-        # phase that adds it): RECEIVED introduces quantity, so it has
-        # no source Area; TRANSFERRED moves quantity between two
-        # DIFFERENT Areas and is always scan-driven, so it records the
-        # Scan Station it was recorded at.
+        # phase that adds it) — see MOVEMENT_SHAPE_SQL.
         CheckConstraint(MOVEMENT_SHAPE_SQL, name=conv("ck_part_movements_movement_shape")),
-        UniqueConstraint("device_event_id", name="uq_part_movements_device_event_id"),
+        CheckConstraint(
+            "command_sequence >= 1", name=conv("ck_part_movements_command_sequence_positive")
+        ),
+        UniqueConstraint("device_event_id", "command_sequence", name=DEVICE_EVENT_ID_CONSTRAINT),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
     )
 

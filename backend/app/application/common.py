@@ -7,6 +7,7 @@ back to the same user-facing ``ConflictError`` through the constraint
 name. These helpers carry no business rules of their own.
 """
 
+import uuid
 from typing import Final, NoReturn
 
 from sqlalchemy.exc import IntegrityError
@@ -44,6 +45,20 @@ def required_flag(value: object, label: str) -> bool:
     if not isinstance(value, bool):
         raise InvalidInputError(f"{label} must be true or false.")
     return value
+
+
+def device_event_id_text(value: object) -> str:
+    """Normalize the client-generated idempotency key of a production command.
+
+    One UUID per submission, reused on every transport retry (SLICE1
+    §14); canonical text form so the same id always compares equal.
+    """
+    if not isinstance(value, str):
+        raise InvalidInputError("device_event_id must be text.")
+    try:
+        return str(uuid.UUID(value.strip()))
+    except ValueError:
+        raise InvalidInputError("device_event_id must be a UUID.") from None
 
 
 def commit(session: Session, conflict_messages: dict[str, str]) -> None:

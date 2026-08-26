@@ -19,12 +19,16 @@ current-position projection:
   per PN, refreshed by the station after every confirmed transfer
   (PROJECT_PROFILE §15 step 10).
 
-Nothing here writes. Phase 5 boundaries: no Worker/Machine barcode
-resolution (Phases 6+), no Receive Quantity intake from the station
-(the resolution reports whether active demand exists so the UI can
-present the honest placeholder), no processing states (queued/on
-machine/done arrive with Phases 6–7 — Phase 5 quantity in an Area is
-simply "in this Area").
+Nothing here writes. Every flow is reported with its DERIVED
+processing state (Phase 6 — QUEUED / ON_MACHINE / READY_TO_TRANSFER,
+from the flow's latest Movement) and the Machine it is on, so a
+station can offer only the currently valid actions (assign on queued
+rows, DONE/QUEUE on Machine rows) and a transfer of ON_MACHINE
+quantity can announce the implicit completion. Boundaries: no
+Worker/Machine barcode resolution here (a Machine scan resolves in the
+Machines surface), no Receive Quantity intake from the station (the
+resolution reports whether active demand exists so the UI can present
+the honest placeholder), no direct processing state (Phase 7).
 """
 
 from typing import Final, Literal, NamedTuple
@@ -33,7 +37,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.application.errors import InvalidInputError, NotFoundError
+from app.application.machine_processing import latest_movements
 from app.application.part_numbers import canonical_part_number
+from app.application.projections import processing_state_of
 from app.application.transfers import (
     RouteStatus,
     active_area_operations,
@@ -41,7 +47,7 @@ from app.application.transfers import (
     require_production_station,
     suggested_operation_id,
 )
-from app.domain.enums import MovementType, QuantityFlowStatus
+from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
 from app.infrastructure.models import (
     PART_NUMBER_BARCODE_PREFIX,
     Area,
@@ -131,6 +137,10 @@ class FlowInArea(NamedTuple):
     quantity_flow_id: int
     quantity: int
     route_mode: str
+    # Derived from the latest Movement (PROJECT_PROFILE §12): a NULL
+    # Machine is QUEUED or READY_TO_TRANSFER, never "queued" by itself.
+    processing_state: ProcessingState
+    machine_id: int | None
     work_order: WorkOrderContext | None
 
 
@@ -139,6 +149,10 @@ class TransferCandidate(NamedTuple):
     quantity: int
     route_mode: str
     current_area: Area
+    # ON_MACHINE quantity is completed implicitly by the transfer
+    # (AREA_COMPLETED + TRANSFERRED) — the confirmation says so.
+    processing_state: ProcessingState
+    machine_id: int | None
     route_status: RouteStatus
     expected_next_area: Area | None
     # The Operation the Planned Route expects at the next step (None:
@@ -212,6 +226,7 @@ def resolve_part_number_scan(
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
+    latest = latest_movements(session, [flow.id for flow in flows])
     operations = active_area_operations(session, area.id)
     area_names: dict[int, Area] = {area.id: area}
 
@@ -226,9 +241,17 @@ def resolve_part_number_scan(
     in_area: list[FlowInArea] = []
     candidates: list[TransferCandidate] = []
     for flow in flows:
+        state = processing_state_of(latest[flow.id].movement_type)
         if flow.current_area_id == area.id:
             in_area.append(
-                FlowInArea(flow.id, flow.quantity, flow.route_mode, contexts.get(flow.id))
+                FlowInArea(
+                    flow.id,
+                    flow.quantity,
+                    flow.route_mode,
+                    state,
+                    flow.current_machine_id,
+                    contexts.get(flow.id),
+                )
             )
             continue
         assessment = assess_route(session, flow, area.id)
@@ -239,6 +262,8 @@ def resolve_part_number_scan(
                 quantity=flow.quantity,
                 route_mode=flow.route_mode,
                 current_area=_area(flow.current_area_id),
+                processing_state=state,
+                machine_id=flow.current_machine_id,
                 route_status=assessment.status,
                 expected_next_area=_area(expected.area_id) if expected is not None else None,
                 expected_operation_id=expected.operation_id if expected is not None else None,
@@ -311,10 +336,18 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
+    latest = latest_movements(session, [flow.id for flow in flows])
     grouped: dict[str, list[FlowInArea]] = {}
     for flow in flows:
         grouped.setdefault(flow.part_number, []).append(
-            FlowInArea(flow.id, flow.quantity, flow.route_mode, contexts.get(flow.id))
+            FlowInArea(
+                flow.id,
+                flow.quantity,
+                flow.route_mode,
+                processing_state_of(latest[flow.id].movement_type),
+                flow.current_machine_id,
+                contexts.get(flow.id),
+            )
         )
     lines = [
         InventoryLine(pn, sum(item.quantity for item in items), items)

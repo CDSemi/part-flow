@@ -64,35 +64,43 @@ Rules owned here:
   check under it, then the Scan Station row lock and its
   precondition, then validation, then the writes. Any failure before
   COMMIT leaves zero writes.
-- Row locks held until COMMIT (lock order: flow → station → target
-  Area → Operation): the target Area exactly like the release starting
-  Area, so Area deactivation (which checks for active quantity under
-  the same lock) and a transfer into that Area have one serial
-  outcome; the selected Operation, re-validated under its lock, so
-  Operation deactivation and a transfer recording it also have one
+- Row locks held until COMMIT (lock order: flow → station → source
+  Machine → target Area → Operation): the target Area exactly like the
+  release starting Area, so Area deactivation (which checks for active
+  quantity under the same lock) and a transfer into that Area have one
+  serial outcome; the selected Operation, re-validated under its lock,
+  so Operation deactivation and a transfer recording it also have one
   serial outcome.
-- The projection update (`quantity_flows.current_area_id`) is written
-  in the same transaction as the Movement and stays rebuildable from
-  Movement history alone (SLICE1 §15) — verified by the projection
-  replay.
-- Explicitly NOT here (later phases): `AREA_COMPLETED` (Phase 6/7 —
-  Phase 5 records `TRANSFERRED` alone), Machine assignment (Phase 6),
-  SPLIT/MERGED (Phase 8), Repair/Scrap/Undo (Phase 9), Worker sessions
-  (Phase 6+), Stockroom `STOCKED` (Phase 10) — a transfer into a
+- Implicit Area completion (Phase 6; PROJECT_PROFILE §8.11, §15): a
+  transfer of quantity that is still ON_MACHINE completes processing
+  at the source Area — ONE application command appends
+  `AREA_COMPLETED` (command_sequence 1, the source Machine recorded)
+  immediately followed by `TRANSFERRED` (command_sequence 2), both
+  under the same `device_event_id`, either both written or neither.
+  The source Machine row is locked so its derived state is re-judged
+  under the lock. Quantity that is QUEUED or already READY_TO_TRANSFER
+  transfers with `TRANSFERRED` alone. A replay of the whole command
+  returns the original result including the completion Movement.
+- The projection update (`quantity_flows.current_area_id`, and
+  `current_machine_id` cleared) is written in the same transaction as
+  the Movements and stays rebuildable from Movement history alone
+  (SLICE1 §15) — verified by the projection replay.
+- Explicitly NOT here (later phases): direct-processing completion
+  (Phase 7), SPLIT/MERGED (Phase 8), Repair/Scrap/Undo (Phase 9),
+  Worker sessions, Stockroom `STOCKED` (Phase 10) — a transfer into a
   terminal Area is therefore refused.
 """
 
 import datetime
 import hashlib
 import json
-import uuid
 from typing import Any, Final, Literal, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application.common import optional_text, required_flag
+from app.application.common import device_event_id_text, optional_text, required_flag
 from app.application.errors import (
     ConflictError,
     IdempotencyConflictError,
@@ -100,11 +108,21 @@ from app.application.errors import (
     NotFoundError,
     RouteDeviationConfirmationRequiredError,
 )
+from app.application.machine_processing import (
+    FINGERPRINT_KEY,
+    command_metadata,
+    committed_command,
+    latest_movement,
+)
+from app.application.machines import assigned_quantity, lock_machine, note_assignment_change
 from app.application.part_numbers import canonical_part_number
-from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
+from app.application.projections import processing_state_of
+from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
+    DEVICE_EVENT_ID_CONSTRAINT,
     Area,
     AssignedRouteStep,
+    Machine,
     Operation,
     PartMovement,
     QuantityFlow,
@@ -113,12 +131,12 @@ from app.infrastructure.models import (
 
 # Keys of the immutable TRANSFERRED metadata. The fingerprint is the
 # idempotency comparison value (same mechanism as the RECEIVED release,
-# SLICE1 §14); the route-deviation block records a confirmed deviation
-# (PROJECT_PROFILE §17 step 4).
-_FINGERPRINT_KEY: Final = "request_fingerprint"
+# SLICE1 §14; shared with the in-Area commands); the route-deviation
+# block records a confirmed deviation (PROJECT_PROFILE §17 step 4).
+_FINGERPRINT_KEY: Final = FINGERPRINT_KEY
 _ROUTE_DEVIATION_KEY: Final = "route_deviation"
 
-_DEVICE_EVENT_ID_CONSTRAINT: Final = "uq_part_movements_device_event_id"
+_DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
 
 RouteStatus = Literal["FLOATING", "ON_ROUTE", "DEVIATION"]
 DeviationKind = Literal["AREA", "OPERATION"]
@@ -159,6 +177,12 @@ class AreaTransfer(NamedTuple):
     station_id: str
     assigned_route_step_id: int | None
     route_deviation: dict[str, Any] | None
+    # The implicit AREA_COMPLETED of the same command when the quantity
+    # was still ON_MACHINE at the source (Phase 6): its Movement id and
+    # the Machine it left; None for a transfer of queued or finished
+    # quantity.
+    completed_movement_id: int | None
+    completed_machine_id: int | None
     device_event_id: str
     occurred_at: datetime.datetime
     created: bool
@@ -393,15 +417,6 @@ def _validated_quantity(value: object) -> int:
     return value
 
 
-def _normalized_device_event_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise InvalidInputError("device_event_id must be text.")
-    try:
-        return str(uuid.UUID(value.strip()))
-    except ValueError:
-        raise InvalidInputError("device_event_id must be a UUID.") from None
-
-
 def _request_fingerprint(
     *,
     station_id: str,
@@ -440,17 +455,22 @@ def _request_fingerprint(
 # ---------------------------------------------------------------------------
 
 
-def _committed_transfer(session: Session, device_event_id: str) -> PartMovement | None:
-    return session.scalar(
-        select(PartMovement).where(PartMovement.device_event_id == device_event_id)
-    )
+def _committed_transfer(session: Session, device_event_id: str) -> list[PartMovement]:
+    """The whole command recorded under the id — one or two Movements."""
+    return committed_command(session, device_event_id)
 
 
-def _result_from_movement(movement: PartMovement, *, created: bool) -> AreaTransfer:
-    if movement.from_area_id is None or movement.station_id is None:
+def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaTransfer:
+    movement = command[-1]
+    completed = command[0] if len(command) == 2 else None
+    if (
+        movement.from_area_id is None
+        or movement.station_id is None
+        or (completed is not None and completed.source_machine_id is None)
+    ):
         # The database shape CHECK makes this unreachable for a
-        # TRANSFERRED row; a RECEIVED row reusing the id is a client
-        # defect caught by the fingerprint check before this point.
+        # TRANSFERRED command; another kind of row reusing the id is a
+        # client defect caught by the fingerprint check before this point.
         raise IdempotencyConflictError(
             "This device_event_id belongs to a different kind of production"
             " event. Nothing was recorded — a new intent needs a new"
@@ -467,21 +487,38 @@ def _result_from_movement(movement: PartMovement, *, created: bool) -> AreaTrans
         station_id=movement.station_id,
         assigned_route_step_id=movement.assigned_route_step_id,
         route_deviation=(movement.metadata_ or {}).get(_ROUTE_DEVIATION_KEY),
+        completed_movement_id=completed.id if completed is not None else None,
+        completed_machine_id=completed.source_machine_id if completed is not None else None,
         device_event_id=movement.device_event_id,
         occurred_at=movement.occurred_at,
         created=created,
     )
 
 
-def _replay_or_conflict(movement: PartMovement, fingerprint: str) -> AreaTransfer:
+def _replay_or_conflict(command: list[PartMovement], fingerprint: str) -> AreaTransfer:
+    """A committed command replays only as the SAME transfer intent.
+
+    The command is a transfer when its last Movement is the TRANSFERRED
+    row and, when two rows exist, the first is its implicit
+    AREA_COMPLETED; every row carries the same fingerprint.
+    """
+    movement = command[-1]
     stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
-    if stored != fingerprint or movement.movement_type != MovementType.TRANSFERRED:
+    well_formed = movement.movement_type == MovementType.TRANSFERRED and (
+        len(command) == 1
+        or (
+            len(command) == 2
+            and command[0].movement_type == MovementType.AREA_COMPLETED
+            and (command[0].metadata_ or {}).get(_FINGERPRINT_KEY) == stored
+        )
+    )
+    if stored != fingerprint or not well_formed:
         raise IdempotencyConflictError(
             "This device_event_id was already used for a different production"
             " request. Nothing was recorded — a new transfer intent needs a new"
             " device_event_id."
         )
-    return _result_from_movement(movement, created=False)
+    return _result_from_command(command, created=False)
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +627,7 @@ def transfer_to_station_area(
     confirmed_quantity = _validated_quantity(quantity)
     deviation_confirmed = required_flag(confirm_route_deviation, "confirm_route_deviation")
     reason = optional_text(route_deviation_reason)
-    event_id = _normalized_device_event_id(device_event_id)
+    event_id = device_event_id_text(device_event_id)
     fingerprint = _request_fingerprint(
         station_id=station_id,
         quantity_flow_id=quantity_flow_id,
@@ -606,7 +643,7 @@ def transfer_to_station_area(
     # Before any station/Area/Operation state is read: a committed
     # transfer replays whatever the configuration looks like now.
     committed = _committed_transfer(session, event_id)
-    if committed is not None:
+    if committed:
         return _replay_or_conflict(committed, fingerprint)
 
     # -- Source flow under row lock ------------------------------------
@@ -619,7 +656,7 @@ def transfer_to_station_area(
 
     # -- Idempotency RE-CHECK after the blocking lock --------------------
     committed = _committed_transfer(session, event_id)
-    if committed is not None:
+    if committed:
         return _replay_or_conflict(committed, fingerprint)
 
     # -- Station context under the station row lock ---------------------
@@ -661,6 +698,24 @@ def transfer_to_station_area(
     source = session.get(Area, source_area_id)
     if source is None:  # pragma: no cover - FK guarantees the row
         raise InvalidInputError(f"Area {source_area_id} does not exist.")
+
+    # -- Source processing state (Phase 6) ------------------------------
+    # Derived from the flow's latest Movement: ON_MACHINE quantity is
+    # completed implicitly by this transfer (AREA_COMPLETED first), so
+    # the source Machine is locked now — lock order flow → station →
+    # Machine → target Area → Operation. Queued or finished quantity
+    # transfers with TRANSFERRED alone.
+    latest = latest_movement(session, flow.id)
+    source_machine: Machine | None = None
+    if processing_state_of(latest.movement_type) == ProcessingState.ON_MACHINE:
+        if flow.current_machine_id is None:  # pragma: no cover - projection invariant
+            raise ConflictError(
+                f"Quantity Flow {flow.id} is on a Machine according to its history but"
+                " its projection carries none. Nothing was transferred."
+            )
+        source_machine = lock_machine(session, flow.current_machine_id)
+        if source_machine is None:  # pragma: no cover - FK guarantees the row
+            raise ConflictError(f"Machine {flow.current_machine_id} does not exist.")
 
     # The target Area row is locked until COMMIT (same protocol as the
     # release starting Area): deactivation checks for active quantity
@@ -706,27 +761,75 @@ def transfer_to_station_area(
             )
 
     # -- Writes — all inside the one open transaction ------------------
-    metadata: dict[str, Any] = {_FINGERPRINT_KEY: fingerprint}
+    # One application command: the implicit AREA_COMPLETED (when the
+    # quantity was ON_MACHINE) then the TRANSFERRED, numbered by
+    # command_sequence under the one device_event_id — both or neither.
+    command: list[PartMovement] = []
+    size = 2 if source_machine is not None else 1
+    # Read before any Movement is staged (no autoflush surprises).
+    assigned_before = assigned_quantity(session, source_machine.id) if source_machine else 0
+    metadata = command_metadata("TRANSFER", fingerprint, size=size)
+    if source_machine is not None:
+        command.append(
+            PartMovement(
+                quantity_flow_id=flow.id,
+                part_number=pn,
+                movement_type=MovementType.AREA_COMPLETED,
+                quantity=flow.quantity,
+                from_area_id=source.id,
+                to_area_id=source.id,
+                operation_id=latest.operation_id,
+                assigned_route_step_id=None,
+                station_id=station.station_id,
+                source_machine_id=source_machine.id,
+                destination_machine_id=None,
+                occurred_at=func.now(),
+                server_received_at=func.now(),
+                device_event_id=event_id,
+                command_sequence=1,
+                metadata_=metadata,
+            )
+        )
+    transfer_metadata: dict[str, Any] = dict(metadata)
     if deviation is not None:
-        metadata[_ROUTE_DEVIATION_KEY] = {**deviation, "confirmed": True, "reason": reason}
-    movement = PartMovement(
-        quantity_flow_id=flow.id,
-        part_number=pn,
-        movement_type=MovementType.TRANSFERRED,
-        quantity=flow.quantity,
-        from_area_id=source.id,
-        to_area_id=target.id,
-        operation_id=operation.id,
-        assigned_route_step_id=matched_step.id if matched_step is not None else None,
-        station_id=station.station_id,
-        occurred_at=func.now(),
-        server_received_at=func.now(),
-        device_event_id=event_id,
-        metadata_=metadata,
+        transfer_metadata[_ROUTE_DEVIATION_KEY] = {
+            **deviation,
+            "confirmed": True,
+            "reason": reason,
+        }
+    command.append(
+        PartMovement(
+            quantity_flow_id=flow.id,
+            part_number=pn,
+            movement_type=MovementType.TRANSFERRED,
+            quantity=flow.quantity,
+            from_area_id=source.id,
+            to_area_id=target.id,
+            operation_id=operation.id,
+            assigned_route_step_id=matched_step.id if matched_step is not None else None,
+            station_id=station.station_id,
+            occurred_at=func.now(),
+            server_received_at=func.now(),
+            device_event_id=event_id,
+            command_sequence=size,
+            metadata_=transfer_metadata,
+        )
     )
-    session.add(movement)
-    # Projection update in the same transaction (SLICE1 §15).
+    # Added in command order: the unit of work inserts rows of one
+    # table in that order, so the BIGSERIAL ids follow it (the
+    # projection replay defines "latest" by id).
+    session.add_all(command)
+    # Projection update in the same transaction (SLICE1 §15): the Area
+    # moves, the Machine — if any — clears, and its derived state is
+    # re-judged under the Machine lock.
+    if source_machine is not None:
+        note_assignment_change(
+            source_machine,
+            assigned_before=assigned_before,
+            assigned_after=assigned_before - flow.quantity,
+        )
     flow.current_area_id = target.id
+    flow.current_machine_id = None
     flow.updated_at = func.now()
 
     try:
@@ -738,7 +841,7 @@ def transfer_to_station_area(
             # A concurrent submission with the same device_event_id won
             # the race at COMMIT: nothing of this attempt persisted.
             winner = _committed_transfer(session, event_id)
-            if winner is not None:
+            if winner:
                 return _replay_or_conflict(winner, fingerprint)
         raise
-    return _result_from_movement(movement, created=True)
+    return _result_from_command(command, created=True)

@@ -31,6 +31,30 @@ Surface:
   deviation without a reason and for partial quantity.
 - ``GET  /areas/{area_id}/inventory`` — the ACTIVE quantity currently
   in an Area grouped per PN, the refresh source after a transfer.
+
+Phase 6 — the one-shot Machine-Area processing commands, each ONE
+whole QuantityFlow, 201 fresh / 200 idempotent replay / 409 mismatched
+reuse, 422 for partial quantity, 409 for a flow not in the station's
+Area, a wrong processing state, or a retired / other-Area /
+maintenance Machine:
+
+- ``POST /scan-stations/{station_id}/machine-assignments`` — assign
+  QUEUED quantity to a Machine (``ASSIGNED_TO_MACHINE`` →
+  ``ON_MACHINE``); Machine-first and PN-first entry points both land
+  here.
+- ``POST /scan-stations/{station_id}/machine-releases`` — the QUEUE
+  action: ON_MACHINE quantity returns to the Area queue
+  (``RELEASED_FROM_MACHINE`` → ``QUEUED``).
+- ``POST /scan-stations/{station_id}/area-completions`` — the DONE
+  action: ON_MACHINE quantity completes processing at the Area
+  (``AREA_COMPLETED`` → ``READY_TO_TRANSFER``, Machine cleared, Area
+  kept).
+
+The transfer response additionally reports the implicit
+``AREA_COMPLETED`` (``completed_movement_id`` / ``completed_machine_id``)
+appended in the same command when the quantity was still ON_MACHINE.
+Every flow in the read models carries its derived ``processing_state``
+and ``machine_id``.
 """
 
 import datetime
@@ -40,7 +64,7 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.dependencies import SessionDep
-from app.application import scan_station, transfers
+from app.application import machine_processing, scan_station, transfers
 from app.application.scan_station import FlowInArea, WorkOrderContext
 from app.infrastructure.models import Area, Operation
 
@@ -75,10 +99,17 @@ class WorkOrderContextResponse(BaseModel):
     request_type: str
 
 
+ProcessingStateLiteral = Literal["QUEUED", "ON_MACHINE", "READY_TO_TRANSFER"]
+
+
 class FlowInAreaResponse(BaseModel):
     quantity_flow_id: int
     quantity: int
     route_mode: str
+    # Derived from the flow's latest Movement (PROJECT_PROFILE §12);
+    # machine_id is set exactly while ON_MACHINE.
+    processing_state: ProcessingStateLiteral
+    machine_id: int | None
     work_order: WorkOrderContextResponse | None
 
 
@@ -117,6 +148,8 @@ def _flow(item: FlowInArea) -> FlowInAreaResponse:
         quantity_flow_id=item.quantity_flow_id,
         quantity=item.quantity,
         route_mode=item.route_mode,
+        processing_state=item.processing_state.value,
+        machine_id=item.machine_id,
         work_order=_work_order(item.work_order),
     )
 
@@ -172,6 +205,10 @@ class TransferCandidateResponse(BaseModel):
     quantity: int
     route_mode: str
     current_area: AreaRef
+    # ON_MACHINE quantity is completed implicitly by the transfer
+    # (AREA_COMPLETED + TRANSFERRED in one command).
+    processing_state: ProcessingStateLiteral
+    machine_id: int | None
     # FLOATING: no route expectation. ON_ROUTE: the station's Area is
     # the next Planned Route step. DEVIATION: the transfer needs the
     # explicit route-deviation confirmation.
@@ -221,6 +258,8 @@ def resolve_scan(
                 quantity=candidate.quantity,
                 route_mode=candidate.route_mode,
                 current_area=_area_ref(candidate.current_area),
+                processing_state=candidate.processing_state.value,
+                machine_id=candidate.machine_id,
                 route_status=candidate.route_status,
                 expected_next_area=(
                     _area_ref(candidate.expected_next_area)
@@ -286,6 +325,10 @@ class AreaTransferResponse(BaseModel):
     assigned_route_step_id: int | None
     # Present when the transfer was a confirmed route deviation.
     route_deviation: dict[str, object] | None
+    # Present when the quantity was ON_MACHINE at the source: the
+    # implicit AREA_COMPLETED of the same command and the Machine left.
+    completed_movement_id: int | None
+    completed_machine_id: int | None
     device_event_id: str
     occurred_at: datetime.datetime
 
@@ -322,9 +365,119 @@ def transfer_to_station_area(
         station_id=result.station_id,
         assigned_route_step_id=result.assigned_route_step_id,
         route_deviation=result.route_deviation,
+        completed_movement_id=result.completed_movement_id,
+        completed_machine_id=result.completed_machine_id,
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Machine-Area processing commands (Phase 6)
+# ---------------------------------------------------------------------------
+
+
+class MachineProcessingRequest(BaseModel):
+    """One confirmed in-Area action on ONE whole QuantityFlow.
+
+    ``machine_id`` is the Machine to assign to (assignment) or the
+    Machine the quantity is on (QUEUE / DONE — an optimistic
+    precondition). ``quantity`` is strict and must be the flow's whole
+    quantity until SPLIT (Phase 8).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    quantity_flow_id: int
+    machine_id: int
+    quantity: StrictInt
+    device_event_id: str
+
+
+class MachineProcessingResponse(BaseModel):
+    """The committed action, read from its immutable Movement."""
+
+    movement_id: int
+    movement_type: str
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    area_id: int
+    machine_id: int
+    operation_id: int
+    station_id: str
+    processing_state: ProcessingStateLiteral
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+def _processing_response(
+    result: machine_processing.MachineProcessingResult, response: Response
+) -> MachineProcessingResponse:
+    response.status_code = 201 if result.created else 200
+    return MachineProcessingResponse(
+        movement_id=result.movement_id,
+        movement_type=result.movement_type,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        area_id=result.area_id,
+        machine_id=result.machine_id,
+        operation_id=result.operation_id,
+        station_id=result.station_id,
+        processing_state=result.processing_state.value,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
+
+
+@router.post("/scan-stations/{station_id}/machine-assignments")
+def assign_to_machine(
+    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+) -> MachineProcessingResponse:
+    result = machine_processing.assign_to_machine(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_id=body.quantity_flow_id,
+        machine_id=body.machine_id,
+        quantity=body.quantity,
+        device_event_id=body.device_event_id,
+    )
+    return _processing_response(result, response)
+
+
+@router.post("/scan-stations/{station_id}/machine-releases")
+def release_to_queue(
+    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+) -> MachineProcessingResponse:
+    result = machine_processing.release_to_queue(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_id=body.quantity_flow_id,
+        machine_id=body.machine_id,
+        quantity=body.quantity,
+        device_event_id=body.device_event_id,
+    )
+    return _processing_response(result, response)
+
+
+@router.post("/scan-stations/{station_id}/area-completions")
+def complete_at_machine(
+    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+) -> MachineProcessingResponse:
+    result = machine_processing.complete_at_machine(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_id=body.quantity_flow_id,
+        machine_id=body.machine_id,
+        quantity=body.quantity,
+        device_event_id=body.device_event_id,
+    )
+    return _processing_response(result, response)
 
 
 # ---------------------------------------------------------------------------

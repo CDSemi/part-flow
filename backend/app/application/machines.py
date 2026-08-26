@@ -35,18 +35,26 @@ IMPLEMENTATION_ROADMAP Phase 3.5):
   operational state (so ``state_changed_at`` resets), updating the
   note/expected return while it is active changes neither the start
   time nor the state, and clearing it resets ``state_changed_at``
-  again. In Phase 3.5 the derived state is Maintenance-else-Idle —
-  Running requires assignment data that arrives with Phase 6.
+  again — to Running when quantity is still assigned, else to Idle.
 - Retirement and reactivation commit atomically with their
   ``machine_lifecycle_events`` row: one transaction, no lifecycle
   change without its event and no event without its change. Events are
   append-only (database trigger) and carry a nullable, reference-free
   actor — no Worker/User linkage in Phase 3.5.
-- Retirement while active quantity is assigned is blocked by the
-  production workflow (PROJECT_PROFILE §8.6). Assignment persistence
-  (``current_machine_id``) arrives with Phase 6, so in Phase 3.5 no
-  assignment can exist and the blocker has nothing to check yet — the
-  rule gains its data-backed enforcement in Phase 6.
+- Retirement while active quantity is assigned is blocked
+  (PROJECT_PROFILE §8.6): the Machine row is locked ``FOR UPDATE``
+  first and the assigned ACTIVE quantity (``quantity_flows
+  .current_machine_id``, Phase 6) is counted under that lock, so
+  retirement and an assignment in flight have one serial outcome —
+  the assignment holds the same Machine lock until COMMIT and re-reads
+  the row under it. Retirement takes no flow lock, so it never
+  contradicts the production lock order (flow → station → Machine →
+  Area → Operation).
+- The operational state is derived, never stored (PROJECT_PROFILE
+  §8.6): Maintenance override wins, else assigned ACTIVE quantity means
+  Running, else Idle. ``state_changed_at`` moves only when that derived
+  value actually changes — the production commands call
+  ``note_assignment_change`` under the Machine lock for exactly that.
 - Reactivation may move the Machine forward-only to another active
   Area when the physical machine moved while retired; the lifecycle
   event records the previous → current pair. It is blocked when the
@@ -76,12 +84,18 @@ from app.application.common import (
 )
 from app.application.environment import require_active_area
 from app.application.errors import ConflictError, NotFoundError
-from app.domain.enums import MachineLifecycleEventType, MachineLifecycleState
+from app.domain.enums import (
+    MachineLifecycleEventType,
+    MachineLifecycleState,
+    MachineOperationalState,
+    QuantityFlowStatus,
+)
 from app.infrastructure.models import (
     Area,
     Machine,
     MachineAssetTagConfig,
     MachineLifecycleEvent,
+    QuantityFlow,
 )
 
 _MACHINE_ASSET_TAG_CONFIG_ID: Final = 1
@@ -120,6 +134,73 @@ def get_machine(session: Session, machine_id: int) -> Machine:
     if machine is None:
         raise NotFoundError(f"Machine {machine_id} does not exist.")
     return machine
+
+
+def lock_machine(session: Session, machine_id: int) -> Machine | None:
+    """The Machine row locked until COMMIT and RE-READ under that lock.
+
+    ``populate_existing`` matters: a Machine already in the Session
+    identity map (an earlier unlocked listing) would otherwise come back
+    stale — a retirement or maintenance start committed meanwhile would
+    go unseen behind the lock that was meant to see it.
+    """
+    return session.get(Machine, machine_id, with_for_update=True, populate_existing=True)
+
+
+def assigned_quantity(
+    session: Session, machine_id: int, *, exclude_flow_id: int | None = None
+) -> int:
+    """ACTIVE quantity whose projection currently references the Machine.
+
+    Correct for decisions only under the Machine row lock: every
+    command that sets or clears ``current_machine_id`` holds it.
+    """
+    query = select(func.coalesce(func.sum(QuantityFlow.quantity), 0)).where(
+        QuantityFlow.current_machine_id == machine_id,
+        QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+    )
+    if exclude_flow_id is not None:
+        query = query.where(QuantityFlow.id != exclude_flow_id)
+    return int(session.scalar(query) or 0)
+
+
+def assigned_quantities(session: Session, machine_ids: list[int]) -> dict[int, int]:
+    """Assigned ACTIVE quantity per Machine for read models (unlocked)."""
+    if not machine_ids:
+        return {}
+    rows = session.execute(
+        select(QuantityFlow.current_machine_id, func.sum(QuantityFlow.quantity))
+        .where(
+            QuantityFlow.current_machine_id.in_(machine_ids),
+            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+        )
+        .group_by(QuantityFlow.current_machine_id)
+    )
+    return {int(machine_id): int(total) for machine_id, total in rows}
+
+
+def operational_state(machine: Machine, assigned: int) -> MachineOperationalState:
+    """Derived operational state (PROJECT_PROFILE §8.6): never chosen, never stored."""
+    if machine.maintenance_since is not None:
+        return MachineOperationalState.MAINTENANCE
+    if assigned > 0:
+        return MachineOperationalState.RUNNING
+    return MachineOperationalState.IDLE
+
+
+def note_assignment_change(machine: Machine, *, assigned_before: int, assigned_after: int) -> None:
+    """Restart the state age only when the derived state really changes.
+
+    Called by the production commands under the Machine row lock with
+    the assigned quantity before and after their write. Under a
+    Maintenance override the derived state is Maintenance either way,
+    so nothing moves; Idle ↔ Running moves ``state_changed_at``.
+    """
+    before = operational_state(machine, assigned_before)
+    after = operational_state(machine, assigned_after)
+    if before != after:
+        machine.state_changed_at = func.now()
+        machine.updated_at = func.now()
 
 
 def list_lifecycle_events(session: Session, machine_id: int) -> list[MachineLifecycleEvent]:
@@ -422,8 +503,9 @@ def clear_maintenance(session: Session, machine_id: int) -> Machine:
     _require_not_retired(machine, "clear maintenance")
     if machine.maintenance_since is None:
         raise ConflictError(f"Machine '{machine.name}' is not under maintenance.")
-    # Clearing the override changes the derived state again (to Idle in
-    # Phase 3.5; to Running once Phase 6 assignment data can say so).
+    # Clearing the override changes the derived state again (to Running
+    # when quantity is still assigned, otherwise to Idle) — either way
+    # the state age restarts.
     machine.maintenance_since = None
     machine.maintenance_note = None
     machine.maintenance_expected_return = None
@@ -456,15 +538,24 @@ def retire_machine(
     transaction: if any validation or write fails, none of the three
     persists. A recorded Discard simply sends no draft.
     """
-    machine = get_machine(session, machine_id)
+    # The Machine row lock is taken FIRST: an assignment in flight holds
+    # the same lock until its COMMIT (and re-reads the row under it), so
+    # either it committed before this count — and the retirement is
+    # refused — or it re-reads a retired Machine and is refused itself.
+    machine = lock_machine(session, machine_id)
+    if machine is None:
+        raise NotFoundError(f"Machine {machine_id} does not exist.")
     if machine.retired_on is not None:
         raise ConflictError(f"Machine '{machine.name}' is already retired.")
+    assigned = assigned_quantity(session, machine.id)
+    if assigned > 0:
+        raise ConflictError(
+            f"Machine '{machine.name}' still holds {assigned} pcs of active quantity"
+            " assigned to it. Complete (DONE) or return the quantity to the queue"
+            " through the production workflow before retiring the Machine."
+        )
     if edits:
         _apply_edits(session, machine, **edits)
-    # The assigned-quantity blocker (PROJECT_PROFILE §8.6) has nothing
-    # to check in Phase 3.5: assignment persistence arrives with
-    # Phase 6, so no quantity can be assigned yet. Phase 6 must add the
-    # data-backed check here.
     machine.retired_on = func.current_date()
     machine.updated_at = func.now()
     session.add(

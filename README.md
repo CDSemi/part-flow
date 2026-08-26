@@ -47,11 +47,18 @@ the Scan Station read models, and the real Scan Station frontend):
   command that moves a whole Quantity Flow, appending the immutable
   `TRANSFERRED` Movement and updating the current-position projection
   in one idempotent transaction, and `GET /api/areas/{id}/inventory`),
+  the Phase 6 Machine-Area processing commands
+  (`POST /api/scan-stations/{id}/machine-assignments`,
+  `…/machine-releases` (QUEUE) and `…/area-completions` (DONE) — each
+  one whole Quantity Flow, one idempotent transaction; a transfer of
+  ON_MACHINE quantity appends `AREA_COMPLETED` + `TRANSFERRED` as one
+  command under one `device_event_id`; `/api/machines` responses carry
+  the derived `operational_state` and `assigned_quantity`),
   all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
-  SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4 and
-  Phase 5 schema (`app/infrastructure/models.py`)
+  SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4,
+  Phase 5 and Phase 6 schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
@@ -66,7 +73,12 @@ the Scan Station read models, and the real Scan Station frontend):
   the released-quantity derivation over `part_movements`) and the
   Phase 5 Movement widening (`TRANSFERRED` admitted by the movement-type
   check, `part_movements.station_id` recording the Scan Station of a
-  scan-driven Movement, and the per-type Movement shape check)
+  scan-driven Movement, and the per-type Movement shape check) and the
+  Phase 6 Machine assignment widening (`quantity_flows.current_machine_id`,
+  the Movement Machine references, `part_movements.command_sequence`
+  with `UNIQUE (device_event_id, command_sequence)`, and the
+  `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
+  types with their shape branches)
 - Docker Compose development stack with health checks
 
 **Two production commands exist**: Management → Work Orders (Phase 4)
@@ -84,9 +96,15 @@ and Planned-Route deviation confirmation with a reason — Area or
 Operation (partial quantity is refused until SPLIT, Phase 8); the
 Scan Station view records it — scans resolve on the server, success is
 reported only after the server confirmed the write, and the Area
-inventory refreshes from the server. Machine, Area and scrap barcodes,
-Worker identity and every Phase 6+ station action stay honest
-placeholders; the approved presentation of those workflows survives as
+inventory refreshes from the server. The Phase 6 backend core adds the
+Machine-Area processing commands — assign queued quantity to a Machine,
+QUEUE it back, DONE at the Machine (`AREA_COMPLETED`, deriving
+READY_TO_TRANSFER with the Area kept as location) — and the implicit
+completion of ON_MACHINE quantity on transfer (`AREA_COMPLETED` +
+`TRANSFERRED` as one command); their Scan Station entry points are not
+wired yet, so Machine, Area and scrap barcodes, Worker identity and the
+assign / DONE / QUEUE station actions stay honest placeholders; the
+approved presentation of those workflows survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5
 configuration surfaces (Administration →
@@ -389,10 +407,11 @@ integration):
   (upgrade → downgrade → upgrade; each phase module stops at its own
   boundary revision — `0002_phase3_domain` for Phase 3,
   `0003_phase35_environment` for Phase 3.5, `0005_phase4_release_index`
-  for Phase 4 — while the Phase 5 module carries the head-level
-  coverage: the widened movement-type and per-type shape checks,
-  `station_id`, the downgrade that refuses to drop `TRANSFERRED`
-  history, and models↔migration parity); and the API tests exercise the endpoints
+  for Phase 4, `0006_phase5_transfer` for Phase 5 — while the Phase 6
+  module carries the head-level coverage: the Machine columns, the
+  command sequence and its composite idempotency key, the widened
+  movement-type and per-type shape checks, the downgrade that refuses
+  to drop Phase 6 history, and models↔migration parity); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save
@@ -412,7 +431,14 @@ integration):
   and invalid-input rejection with zero writes, idempotent replay —
   independent of later station changes — and conflict, concurrent
   transfers of one flow, and transfer versus Area deactivation,
-  station rebind and Operation deactivation) — all
+  station rebind and Operation deactivation) and the Phase 6
+  Machine-Area processing (derived QUEUED / ON_MACHINE /
+  READY_TO_TRANSFER states, assign / QUEUE / DONE with their exact
+  Movement shapes and Machine state derivation, the implicit
+  `AREA_COMPLETED` + `TRANSFERRED` command and its whole-command
+  replay, refusals with zero writes, cross-kind idempotency conflicts,
+  the assigned-quantity retirement blocker, and the assign-versus-assign,
+  assign-versus-retirement and DONE-versus-transfer races) — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`
@@ -514,7 +540,7 @@ backend/
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

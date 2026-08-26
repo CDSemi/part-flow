@@ -33,7 +33,8 @@ Rules owned here:
   canonical PN, quantity, Route Mode, RouteTemplate when `PLANNED`,
   starting Area, Operation, and the initiating WorkOrderDemand
   context. It is persisted in the `RECEIVED` metadata: the Movement
-  row, found via `UNIQUE (device_event_id)`, IS the idempotency record
+  row, found via `UNIQUE (device_event_id, command_sequence)` (a release
+  is a one-Movement command), IS the idempotency record
   — no separate idempotency table or framework exists.
 - The WorkOrderDemand context is informational release context for
   audit display (SLICE1 §3/§11): no `work_order_demand_id` FK exists
@@ -81,6 +82,7 @@ from app.application.errors import (
 from app.application.part_numbers import canonical_part_number
 from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
+    DEVICE_EVENT_ID_CONSTRAINT,
     Area,
     AssignedRoute,
     AssignedRouteStep,
@@ -101,7 +103,7 @@ _CONTEXT_KEY: Final = "context"
 _DEMAND_ID_KEY: Final = "work_order_demand_id"
 _ACTOR_KEY: Final = "actor"
 
-_DEVICE_EVENT_ID_CONSTRAINT: Final = "uq_part_movements_device_event_id"
+_DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
 
 # Namespace of the per-PN advisory lock key, hashed together with the
 # canonical PN so release serialization never collides with any other
@@ -226,8 +228,13 @@ def _acquire_part_number_release_lock(session: Session, part_number: str) -> Non
 
 
 def _committed_release(session: Session, device_event_id: str) -> PartMovement | None:
+    # A release is a one-Movement command; the first row of whatever
+    # command reused the id is enough for the fingerprint comparison.
     return session.scalar(
-        select(PartMovement).where(PartMovement.device_event_id == device_event_id)
+        select(PartMovement)
+        .where(PartMovement.device_event_id == device_event_id)
+        .order_by(PartMovement.command_sequence)
+        .limit(1)
     )
 
 
