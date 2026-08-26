@@ -70,6 +70,7 @@ duplicate.
 """
 
 import datetime
+from collections.abc import Iterable
 from typing import Any, Final, Literal
 
 from sqlalchemy import func, select, update
@@ -145,6 +146,28 @@ def lock_machine(session: Session, machine_id: int) -> Machine | None:
     go unseen behind the lock that was meant to see it.
     """
     return session.get(Machine, machine_id, with_for_update=True, populate_existing=True)
+
+
+def areas_with_machines(session: Session, area_ids: Iterable[int] | None = None) -> set[int]:
+    """The Areas that currently have at least one ACTIVE (non-retired) Machine.
+
+    The Area mode follows from its Machines (PROJECT_PROFILE §12): an
+    Area in this set uses QUEUE_AND_ASSIGN, any other Area processes
+    directly. There is no stored mode and no per-Area configuration.
+    ``area_ids`` narrows the lookup; None considers every Area.
+    """
+    query = select(Machine.area_id).where(Machine.retired_on.is_(None)).distinct()
+    if area_ids is not None:
+        wanted = set(area_ids)
+        if not wanted:
+            return set()
+        query = query.where(Machine.area_id.in_(wanted))
+    return {int(area_id) for area_id in session.scalars(query)}
+
+
+def area_has_machines(session: Session, area_id: int) -> bool:
+    """Whether the Area has an active Machine — its processing mode (§12)."""
+    return area_id in areas_with_machines(session, [area_id])
 
 
 def assigned_quantity(

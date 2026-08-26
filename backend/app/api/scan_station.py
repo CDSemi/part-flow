@@ -48,7 +48,11 @@ maintenance Machine:
 - ``POST /scan-stations/{station_id}/area-completions`` — the DONE
   action: ON_MACHINE quantity completes processing at the Area
   (``AREA_COMPLETED`` → ``READY_TO_TRANSFER``, Machine cleared, Area
-  kept).
+  kept). Phase 7: the same endpoint WITHOUT ``machine_id`` is the
+  direct-processing DONE of an Area without Machines (PROCESSING →
+  ``AREA_COMPLETED`` with no Machine → ``READY_TO_TRANSFER``); a DONE
+  without a Machine on quantity in a Machine Area, or with a Machine on
+  directly processing quantity, is 409 with nothing recorded.
 
 - ``POST /scan-stations/{station_id}/machine-scans/resolve`` — a
   Machine barcode (``PF:MACHINE:<asset-tag>``) or a manual Asset Tag
@@ -60,14 +64,19 @@ maintenance Machine:
 
 The transfer response additionally reports the implicit
 ``AREA_COMPLETED`` (``completed_movement_id`` / ``completed_machine_id``)
-appended in the same command when the quantity was still ON_MACHINE.
-Every flow in the read models carries its derived ``processing_state``,
+appended in the same command when the quantity was still actively
+processing — ON_MACHINE (the Machine reported) or, Phase 7, PROCESSING
+in an Area without Machines (``completed_machine_id`` null). Every flow
+in the read models carries its derived ``processing_state`` (from its
+latest Movement and the mode of the Area it is in — an Area without
+Machines holds arriving quantity as PROCESSING, never queued),
 ``machine_id`` and ``available_actions`` (PN-first: QUEUED → ASSIGN,
-TRANSFER; ON_MACHINE → DONE, QUEUE, TRANSFER; READY_TO_TRANSFER →
-TRANSFER), the PN resolution flags ``requires_selection`` when several
-flows match, and the Area inventory splits queued quantity, quantity per
-Machine card (ON_MACHINE only, with the derived Machine state) and
-finished quantity.
+TRANSFER; PROCESSING → DONE, TRANSFER; ON_MACHINE → DONE, QUEUE,
+TRANSFER; READY_TO_TRANSFER → TRANSFER), the PN resolution flags
+``requires_selection`` when several flows match, and the Area inventory
+reports the Area mode (``has_machines``) and splits queued quantity,
+quantity per Machine card (ON_MACHINE only, with the derived Machine
+state), directly processing quantity and finished quantity.
 """
 
 import datetime
@@ -77,7 +86,7 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.dependencies import SessionDep
-from app.application import machine_processing, scan_station, transfers
+from app.application import direct_processing, machine_processing, scan_station, transfers
 from app.application.scan_station import FlowInArea, MachineInventory, WorkOrderContext
 from app.domain.enums import MachineOperationalState
 from app.infrastructure.models import Area, Machine, Operation
@@ -113,7 +122,7 @@ class WorkOrderContextResponse(BaseModel):
     request_type: str
 
 
-ProcessingStateLiteral = Literal["QUEUED", "ON_MACHINE", "READY_TO_TRANSFER"]
+ProcessingStateLiteral = Literal["QUEUED", "PROCESSING", "ON_MACHINE", "READY_TO_TRANSFER"]
 FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
 MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
 
@@ -123,8 +132,8 @@ class FlowInAreaResponse(BaseModel):
     quantity_flow_id: int
     quantity: int
     route_mode: str
-    # Derived from the flow's latest Movement (PROJECT_PROFILE §12);
-    # machine_id is set exactly while ON_MACHINE.
+    # Derived from the flow's latest Movement and the Area's mode
+    # (PROJECT_PROFILE §12); machine_id is set exactly while ON_MACHINE.
     processing_state: ProcessingStateLiteral
     machine_id: int | None
     # The actions currently valid for this flow (PN-first, §15).
@@ -261,8 +270,8 @@ class TransferCandidateResponse(BaseModel):
     quantity: int
     route_mode: str
     current_area: AreaRef
-    # ON_MACHINE quantity is completed implicitly by the transfer
-    # (AREA_COMPLETED + TRANSFERRED in one command).
+    # ON_MACHINE and PROCESSING quantity is completed implicitly by the
+    # transfer (AREA_COMPLETED + TRANSFERRED in one command).
     processing_state: ProcessingStateLiteral
     machine_id: int | None
     # FLOATING: no route expectation. ON_ROUTE: the station's Area is
@@ -428,8 +437,9 @@ class AreaTransferResponse(BaseModel):
     assigned_route_step_id: int | None
     # Present when the transfer was a confirmed route deviation.
     route_deviation: dict[str, object] | None
-    # Present when the quantity was ON_MACHINE at the source: the
-    # implicit AREA_COMPLETED of the same command and the Machine left.
+    # Present when the quantity was actively processing at the source:
+    # the implicit AREA_COMPLETED of the same command, and the Machine
+    # left (ON_MACHINE) — null for directly processing quantity.
     completed_movement_id: int | None
     completed_machine_id: int | None
     device_event_id: str
@@ -498,6 +508,25 @@ class MachineProcessingRequest(BaseModel):
     device_event_id: str
 
 
+class AreaCompletionRequest(BaseModel):
+    """The confirmed DONE on ONE whole QuantityFlow.
+
+    With ``machine_id``: the Machine the quantity is on (optimistic
+    precondition) in a Machine Area. Without it (Phase 7): the
+    direct-processing DONE of an Area without Machines — the same
+    wizard without a Machine field. The two are distinct intents under
+    one ``device_event_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    quantity_flow_id: int
+    machine_id: int | None = None
+    quantity: StrictInt
+    device_event_id: str
+
+
 class MachineProcessingResponse(BaseModel):
     """The committed action, read from its immutable Movement."""
 
@@ -507,7 +536,8 @@ class MachineProcessingResponse(BaseModel):
     part_number: str
     quantity: int
     area_id: int
-    machine_id: int
+    # Null for a direct-processing DONE (Area without Machines).
+    machine_id: int | None
     operation_id: int
     station_id: str
     processing_state: ProcessingStateLiteral
@@ -568,18 +598,28 @@ def release_to_queue(
 
 
 @router.post("/scan-stations/{station_id}/area-completions")
-def complete_at_machine(
-    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+def complete_area_processing(
+    station_id: str, body: AreaCompletionRequest, session: SessionDep, response: Response
 ) -> MachineProcessingResponse:
-    result = machine_processing.complete_at_machine(
-        session,
-        station_id=station_id,
-        part_number=body.part_number,
-        quantity_flow_id=body.quantity_flow_id,
-        machine_id=body.machine_id,
-        quantity=body.quantity,
-        device_event_id=body.device_event_id,
-    )
+    if body.machine_id is None:
+        result = direct_processing.complete_direct_processing(
+            session,
+            station_id=station_id,
+            part_number=body.part_number,
+            quantity_flow_id=body.quantity_flow_id,
+            quantity=body.quantity,
+            device_event_id=body.device_event_id,
+        )
+    else:
+        result = machine_processing.complete_at_machine(
+            session,
+            station_id=station_id,
+            part_number=body.part_number,
+            quantity_flow_id=body.quantity_flow_id,
+            machine_id=body.machine_id,
+            quantity=body.quantity,
+            device_event_id=body.device_event_id,
+        )
     return _processing_response(result, response)
 
 
@@ -604,6 +644,10 @@ class MachineInventoryResponse(BaseModel):
 
 class AreaInventoryResponse(BaseModel):
     area: AreaRef
+    # The Area mode (PROJECT_PROFILE §12): true → queued / Machine cards
+    # / finished; false → directly processing / finished, with no
+    # placeholder cards and structurally zero queued/on-Machine figures.
+    has_machines: bool
     # Every ACTIVE flow per PN whatever its state (Phase 5 shape).
     lines: list[InventoryLineResponse]
     total_part_numbers: int
@@ -615,6 +659,9 @@ class AreaInventoryResponse(BaseModel):
     queued_quantity: int
     machines: list[MachineInventoryResponse]
     on_machine_quantity: int
+    # Phase 7: directly processing quantity (Areas without Machines).
+    processing: list[InventoryLineResponse]
+    processing_quantity: int
     finished: list[InventoryLineResponse]
     finished_quantity: int
 
@@ -643,6 +690,7 @@ def get_area_inventory(area_id: int, session: SessionDep) -> AreaInventoryRespon
     inventory = scan_station.area_inventory(session, area_id)
     return AreaInventoryResponse(
         area=_area_ref(inventory.area),
+        has_machines=inventory.has_machines,
         lines=_lines(inventory.lines),
         total_part_numbers=inventory.total_part_numbers,
         total_quantity=inventory.total_quantity,
@@ -650,6 +698,8 @@ def get_area_inventory(area_id: int, session: SessionDep) -> AreaInventoryRespon
         queued_quantity=inventory.queued_quantity,
         machines=[_machine_card(card) for card in inventory.machines],
         on_machine_quantity=inventory.on_machine_quantity,
+        processing=_lines(inventory.processing),
+        processing_quantity=inventory.processing_quantity,
         finished=_lines(inventory.finished),
         finished_quantity=inventory.finished_quantity,
     )

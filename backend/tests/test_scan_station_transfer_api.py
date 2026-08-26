@@ -31,9 +31,17 @@ GUI_DESIGN §4.7:
   lock with exactly one winner; transfer versus Area deactivation has
   one serial outcome;
 - committed Movements cannot be updated or deleted; queued quantity
-  still transfers with ``TRANSFERRED`` alone (the implicit
-  ``AREA_COMPLETED`` of ON_MACHINE quantity is covered by the Phase 6
-  suite) and no Phase 7+ column leaks in.
+  (a Machine Area) still transfers with ``TRANSFERRED`` alone (the
+  implicit ``AREA_COMPLETED`` of ON_MACHINE quantity is covered by the
+  Phase 6 suite) and no Phase 8+ column leaks in.
+
+The cells of this module have NO Machines, so since Phase 7 their
+quantity is directly processing (PROCESSING) and a transfer out of them
+completes it implicitly (``AREA_COMPLETED`` without a Machine, then
+``TRANSFERRED``, one command): the Phase 5 rules verified here — source
+and destination explicitness, route assessment, Operation resolution,
+idempotency, locking — are unchanged by that; the direct-processing
+suite covers the completion itself.
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
@@ -138,6 +146,17 @@ def _create_station(client: TestClient, area_id: int, **overrides: Any) -> str:
     response = client.post("/api/scan-stations", json=payload)
     assert response.status_code == 201, response.text
     return str(response.json()["station_id"])
+
+
+def _create_machine(client: TestClient, area_id: int) -> int:
+    """A Machine makes the Area a QUEUE_AND_ASSIGN Area (PROJECT_PROFILE §12)."""
+    configured = client.put(
+        "/api/barcode-configuration/machine-asset-tag-format", json={"prefix": "CD-", "digits": 4}
+    )
+    assert configured.status_code == 200, configured.text
+    response = client.post("/api/machines", json={"area_id": area_id, "name": _unique("Lathe")})
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
 
 
 class _Cell:
@@ -569,7 +588,15 @@ def test_floating_transfer_exact_shape_projection_and_inventory(
     assert flow.quantity == 40 and flow.status == "ACTIVE"
 
     after = _counts(db_engine)
-    assert after["part_movements"] == before["part_movements"] + 1
+    # Material has no Machines: the quantity was directly processing,
+    # so the transfer completed it implicitly first (Phase 7) — the
+    # AREA_COMPLETED (no Machine) and the TRANSFERRED are one command.
+    assert after["part_movements"] == before["part_movements"] + 2
+    completed = _movement_row(db_engine, body["completed_movement_id"])
+    assert completed.movement_type == "AREA_COMPLETED"
+    assert completed.source_machine_id is None and body["completed_machine_id"] is None
+    assert completed.device_event_id == movement.device_event_id == event_id
+    assert (completed.command_sequence, movement.command_sequence) == (1, 2)
     assert after["quantity_flows"] == before["quantity_flows"]  # moved, not created
     assert after["assigned_routes"] == before["assigned_routes"]
     assert after["audit_events"] == before["audit_events"]  # Movement IS the audit record
@@ -1030,7 +1057,9 @@ def test_same_device_event_id_replays_the_original_after_the_flow_moved_on(
     assert replay.status_code == 200, replay.text
     assert replay.json() == original.json()
     after = _counts(db_engine)
-    assert after["part_movements"] == before["part_movements"] + 1  # onward only
+    # Onward only — Lathe here has no Machines, so the onward transfer
+    # completed the directly processing quantity implicitly (2 rows).
+    assert after["part_movements"] == before["part_movements"] + 2
     assert _flow_row(db_engine, flow_id).current_area_id == deburr.area_id
 
     # Same id, different request: explicit conflict, nothing recorded.
@@ -1409,12 +1438,14 @@ def test_terminal_flag_set_between_station_read_and_area_lock_is_seen_under_the_
 def test_queued_quantity_transfers_with_transferred_alone(
     client: TestClient, db_engine: Engine
 ) -> None:
-    """Phase 6 boundary: the implicit AREA_COMPLETED belongs to ON_MACHINE
-    quantity only — a queued flow still records TRANSFERRED alone, and no
-    Phase 7+ column exists."""
+    """The implicit AREA_COMPLETED belongs to actively processing quantity
+    only — a QUEUED flow (an Area with a Machine, never assigned) records
+    TRANSFERRED alone, and no Phase 8+ column exists."""
     material = _Cell(client)
+    _create_machine(client, material.area_id)
     lathe = _Cell(client)
     flow_id, pn = _release(client, material, quantity=1)
+    assert client.get(f"/api/areas/{material.area_id}/inventory").json()["queued_quantity"] == 1
     response = _transfer(
         client,
         lathe.station_id,

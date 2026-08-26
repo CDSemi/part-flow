@@ -20,11 +20,16 @@ The three one-shot Scan Station commands of an Area with Machines
   never merge. DONE is quantity-scoped — never a PN status, never
   `STOCKED`.
 
-The holding state is DERIVED from the flow's latest Movement
-(`app.application.projections.processing_state_of`): a NULL
-`current_machine_id` is either QUEUED or READY_TO_TRANSFER, and the two
-are never confused — assignment accepts QUEUED only, QUEUE and DONE
-accept ON_MACHINE only.
+The holding state is DERIVED from the flow's latest Movement and the
+Area's mode (`app.application.projections.processing_state_of`): a
+NULL `current_machine_id` is QUEUED, PROCESSING (an Area without
+Machines, Phase 7) or READY_TO_TRANSFER, and the three are never
+confused — assignment accepts QUEUED only, QUEUE and Machine DONE
+accept ON_MACHINE only. The shared command protocol below (flow +
+station locks, whole-quantity check, in-Area Movement shape, commit or
+replay) is reused by the direct-processing DONE
+(`app.application.direct_processing`), which submits the same `DONE`
+command kind without a Machine.
 
 Rules owned here:
 
@@ -63,10 +68,9 @@ Rules owned here:
   is no new Operation choice), the Station is the one the command was
   recorded at. No snapshot step: an in-Area event creates no route
   visit (PROJECT_PROFILE §8.11).
-- Explicitly NOT here: direct Area processing (Phase 7), SPLIT/MERGED
-  (Phase 8), Worker identity, Undo (Phase 9 — the command relationship
-  it needs is `device_event_id` + `command_sequence`), Repair, Scrap,
-  Stockroom.
+- Explicitly NOT here: SPLIT/MERGED (Phase 8), Worker identity, Undo
+  (Phase 9 — the command relationship it needs is `device_event_id` +
+  `command_sequence`), Repair, Scrap, Stockroom.
 """
 
 import datetime
@@ -86,6 +90,7 @@ from app.application.errors import (
     NotFoundError,
 )
 from app.application.machines import (
+    area_has_machines,
     assigned_quantity,
     lock_machine,
     note_assignment_change,
@@ -134,7 +139,9 @@ class MachineProcessingResult(NamedTuple):
     part_number: str
     quantity: int
     area_id: int
-    machine_id: int
+    # The Machine assigned to / left; None for a direct-processing DONE
+    # (an Area without Machines, Phase 7).
+    machine_id: int | None
     operation_id: int
     station_id: str
     processing_state: ProcessingState
@@ -192,16 +199,21 @@ def _validated_quantity(value: object, action: str) -> int:
     return value
 
 
-def _request_fingerprint(
+def request_fingerprint(
     *,
     kind: CommandKind,
     station_id: str,
     quantity_flow_id: int,
     part_number: str,
-    machine_id: int,
+    machine_id: int | None,
     quantity: int,
 ) -> str:
-    """Deterministic canonical hash of the normalized request (SLICE1 §14)."""
+    """Deterministic canonical hash of the normalized request (SLICE1 §14).
+
+    ``machine_id`` is None only for the direct-processing DONE: the
+    same ``device_event_id`` reused for a Machine DONE (or vice versa)
+    is a different intent and an explicit conflict.
+    """
     normalized = {
         "command": kind,
         "station_id": station_id,
@@ -230,13 +242,20 @@ def committed_command(session: Session, device_event_id: str) -> list[PartMoveme
     )
 
 
-def _result_from_movement(movement: PartMovement, *, created: bool) -> MachineProcessingResult:
+def result_from_movement(movement: PartMovement, *, created: bool) -> MachineProcessingResult:
     machine_id = (
         movement.destination_machine_id
         if movement.movement_type == MovementType.ASSIGNED_TO_MACHINE
         else movement.source_machine_id
     )
-    if movement.from_area_id is None or movement.station_id is None or machine_id is None:
+    # A NULL Machine is the shape of exactly one in-Area type: the
+    # direct-processing AREA_COMPLETED (Phase 7).
+    machine_less = movement.movement_type == MovementType.AREA_COMPLETED
+    if (
+        movement.from_area_id is None
+        or movement.station_id is None
+        or (machine_id is None and not machine_less)
+    ):
         # The shape CHECK makes this unreachable for the three in-Area
         # types; reaching it means the id belongs to another command.
         raise IdempotencyConflictError(
@@ -254,14 +273,17 @@ def _result_from_movement(movement: PartMovement, *, created: bool) -> MachinePr
         machine_id=machine_id,
         operation_id=movement.operation_id,
         station_id=movement.station_id,
-        processing_state=processing_state_of(movement.movement_type),
+        # The state the Movement itself left: ON_MACHINE, READY_TO_TRANSFER,
+        # or — for a release — QUEUED, since a Machine was active in the
+        # Area when the quantity was released from it.
+        processing_state=processing_state_of(movement.movement_type, direct_processing=False),
         device_event_id=movement.device_event_id,
         occurred_at=movement.occurred_at,
         created=created,
     )
 
 
-def _replay_or_conflict(
+def replay_or_conflict(
     command: list[PartMovement], kind: CommandKind, fingerprint: str
 ) -> MachineProcessingResult:
     movement = command[0]
@@ -276,7 +298,7 @@ def _replay_or_conflict(
             " request. Nothing was recorded — a new intent needs a new"
             " device_event_id."
         )
-    return _result_from_movement(movement, created=False)
+    return result_from_movement(movement, created=False)
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +306,21 @@ def _replay_or_conflict(
 # ---------------------------------------------------------------------------
 
 
-class _Context(NamedTuple):
+class CommandContext(NamedTuple):
+    """The locked flow and station of one in-Area command, validated."""
+
     flow: QuantityFlow
     station: ScanStation
     area: Area
     latest: PartMovement
+    # Derived from the latest Movement and the Area's mode (§12).
     state: ProcessingState
+    # The Area mode at the moment of the command: True when the Area
+    # has no active Machine (direct processing, Phase 7).
+    direct_processing: bool
 
 
-def _lock_flow_and_station(
+def lock_flow_and_station(
     session: Session,
     *,
     station_id: str,
@@ -300,7 +328,7 @@ def _lock_flow_and_station(
     part_number: str,
     quantity: int,
     action: str,
-) -> _Context:
+) -> CommandContext:
     """The flow and the station under their row locks, validated.
 
     Lock order flow → station. The station must be active and bound to
@@ -350,10 +378,14 @@ def _lock_flow_and_station(
             " or cancel — nothing was recorded."
         )
     latest = latest_movement(session, flow.id)
-    return _Context(flow, station, area, latest, processing_state_of(latest.movement_type))
+    direct = not area_has_machines(session, area.id)
+    state = processing_state_of(latest.movement_type, direct_processing=direct)
+    return CommandContext(flow, station, area, latest, state, direct)
 
 
-def _machine_on_flow(session: Session, context: _Context, machine_id: int, action: str) -> Machine:
+def _machine_on_flow(
+    session: Session, context: CommandContext, machine_id: int, action: str
+) -> Machine:
     """The Machine the flow is actually on, locked; the submitted one is a precondition."""
     if context.state != ProcessingState.ON_MACHINE or context.flow.current_machine_id is None:
         if context.state == ProcessingState.READY_TO_TRANSFER:
@@ -361,6 +393,12 @@ def _machine_on_flow(session: Session, context: _Context, machine_id: int, actio
                 f"Quantity Flow {context.flow.id} has already completed processing at"
                 f" Area '{context.area.name}' (DONE) and waits for transfer — it is not"
                 f" on a Machine. Nothing was recorded."
+            )
+        if context.state == ProcessingState.PROCESSING:
+            raise ConflictError(
+                f"Quantity Flow {context.flow.id} is processed directly by Area"
+                f" '{context.area.name}', which has no Machines — it is not on a Machine."
+                f" {action} applies to Machine-assigned quantity only. Nothing was recorded."
             )
         raise ConflictError(
             f"Quantity Flow {context.flow.id} is queued in Area '{context.area.name}',"
@@ -379,7 +417,7 @@ def _machine_on_flow(session: Session, context: _Context, machine_id: int, actio
     return machine
 
 
-def _commit_or_replay(
+def commit_or_replay(
     session: Session,
     movement: PartMovement,
     *,
@@ -397,13 +435,13 @@ def _commit_or_replay(
             # the race at COMMIT: nothing of this attempt persisted.
             winner = committed_command(session, event_id)
             if winner:
-                return _replay_or_conflict(winner, kind, fingerprint)
+                return replay_or_conflict(winner, kind, fingerprint)
         raise
-    return _result_from_movement(movement, created=True)
+    return result_from_movement(movement, created=True)
 
 
-def _in_area_movement(
-    context: _Context,
+def in_area_movement(
+    context: CommandContext,
     *,
     movement_type: MovementType,
     source_machine_id: int | None,
@@ -450,7 +488,7 @@ def assign_to_machine(
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity, "Assignment")
     event_id = device_event_id_text(device_event_id)
-    fingerprint = _request_fingerprint(
+    fingerprint = request_fingerprint(
         kind="ASSIGN",
         station_id=station_id,
         quantity_flow_id=quantity_flow_id,
@@ -460,9 +498,9 @@ def assign_to_machine(
     )
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, "ASSIGN", fingerprint)
+        return replay_or_conflict(committed, "ASSIGN", fingerprint)
 
-    context = _lock_flow_and_station(
+    context = lock_flow_and_station(
         session,
         station_id=station_id,
         quantity_flow_id=quantity_flow_id,
@@ -472,7 +510,7 @@ def assign_to_machine(
     )
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, "ASSIGN", fingerprint)
+        return replay_or_conflict(committed, "ASSIGN", fingerprint)
 
     if context.state == ProcessingState.ON_MACHINE:
         raise ConflictError(
@@ -484,6 +522,13 @@ def assign_to_machine(
             f"Quantity Flow {context.flow.id} has completed processing at Area"
             f" '{context.area.name}' (DONE) and waits for transfer — finished quantity is"
             " not assigned to a Machine. Nothing was recorded."
+        )
+    if context.state == ProcessingState.PROCESSING:
+        # Exactly two Area modes (§12): an Area without Machines never
+        # queues or assigns — there is no Machine of that Area to lock.
+        raise ConflictError(
+            f"Area '{context.area.name}' has no Machines and processes quantity directly"
+            " — there is nothing to assign. Nothing was recorded."
         )
 
     # -- The Machine under its row lock, re-read under the lock --------
@@ -511,7 +556,7 @@ def assign_to_machine(
     # later autoflush would otherwise surface a lost idempotency race
     # as a flush error instead of at COMMIT.
     before = assigned_quantity(session, machine.id, exclude_flow_id=context.flow.id)
-    movement = _in_area_movement(
+    movement = in_area_movement(
         context,
         movement_type=MovementType.ASSIGNED_TO_MACHINE,
         source_machine_id=None,
@@ -525,7 +570,7 @@ def assign_to_machine(
     note_assignment_change(
         machine, assigned_before=before, assigned_after=before + context.flow.quantity
     )
-    return _commit_or_replay(
+    return commit_or_replay(
         session, movement, kind="ASSIGN", event_id=event_id, fingerprint=fingerprint
     )
 
@@ -545,7 +590,7 @@ def _leave_machine(
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity, action)
     event_id = device_event_id_text(device_event_id)
-    fingerprint = _request_fingerprint(
+    fingerprint = request_fingerprint(
         kind=kind,
         station_id=station_id,
         quantity_flow_id=quantity_flow_id,
@@ -555,9 +600,9 @@ def _leave_machine(
     )
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, kind, fingerprint)
+        return replay_or_conflict(committed, kind, fingerprint)
 
-    context = _lock_flow_and_station(
+    context = lock_flow_and_station(
         session,
         station_id=station_id,
         quantity_flow_id=quantity_flow_id,
@@ -567,12 +612,12 @@ def _leave_machine(
     )
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, kind, fingerprint)
+        return replay_or_conflict(committed, kind, fingerprint)
 
     machine = _machine_on_flow(session, context, machine_id, action)
 
     before = assigned_quantity(session, machine.id)
-    movement = _in_area_movement(
+    movement = in_area_movement(
         context,
         movement_type=_MOVEMENT_TYPE_BY_KIND[kind],
         source_machine_id=machine.id,
@@ -589,7 +634,7 @@ def _leave_machine(
     note_assignment_change(
         machine, assigned_before=before, assigned_after=before - context.flow.quantity
     )
-    return _commit_or_replay(
+    return commit_or_replay(
         session, movement, kind=kind, event_id=event_id, fingerprint=fingerprint
     )
 

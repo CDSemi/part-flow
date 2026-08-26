@@ -71,24 +71,34 @@ Rules owned here:
   serial outcome; the selected Operation, re-validated under its lock,
   so Operation deactivation and a transfer recording it also have one
   serial outcome.
-- Implicit Area completion (Phase 6; PROJECT_PROFILE §8.11, §15): a
-  transfer of quantity that is still ON_MACHINE completes processing
-  at the source Area — ONE application command appends
-  `AREA_COMPLETED` (command_sequence 1, the source Machine recorded)
-  immediately followed by `TRANSFERRED` (command_sequence 2), both
-  under the same `device_event_id`, either both written or neither.
-  The source Machine row is locked so its derived state is re-judged
-  under the lock. Quantity that is QUEUED or already READY_TO_TRANSFER
-  transfers with `TRANSFERRED` alone. A replay of the whole command
-  returns the original result including the completion Movement.
+- Implicit Area completion (Phase 6 and 7; PROJECT_PROFILE §8.11,
+  §15): a transfer of quantity that is still actively processing —
+  ON_MACHINE in a Machine Area, or PROCESSING in an Area without
+  Machines (direct processing, Phase 7) — completes processing at the
+  source Area: ONE application command appends `AREA_COMPLETED`
+  (command_sequence 1; the source Machine recorded for ON_MACHINE
+  quantity, NO Machine for directly processing quantity) immediately
+  followed by `TRANSFERRED` (command_sequence 2), both under the same
+  `device_event_id`, either both written or neither. The source
+  Machine row, when there is one, is locked so its derived state is
+  re-judged under the lock. Quantity that is QUEUED or already
+  READY_TO_TRANSFER transfers with `TRANSFERRED` alone. A replay of the
+  whole command returns the original result including the completion
+  Movement. The source Area's mode is judged from its active Machines
+  under the flow lock.
+- Destination mode (Phase 7): a transfer into an Area without Machines
+  hands the quantity to direct processing — no queue, Machine NULL,
+  the Operation recorded on the `TRANSFERRED` (an Area with several
+  active Operations needs the explicit choice; nothing is picked).
+  Nothing here differs from a Machine Area: the destination mode is a
+  derivation of the read models, not a branch of the write.
 - The projection update (`quantity_flows.current_area_id`, and
   `current_machine_id` cleared) is written in the same transaction as
   the Movements and stays rebuildable from Movement history alone
   (SLICE1 §15) — verified by the projection replay.
-- Explicitly NOT here (later phases): direct-processing completion
-  (Phase 7), SPLIT/MERGED (Phase 8), Repair/Scrap/Undo (Phase 9),
-  Worker sessions, Stockroom `STOCKED` (Phase 10) — a transfer into a
-  terminal Area is therefore refused.
+- Explicitly NOT here (later phases): SPLIT/MERGED (Phase 8),
+  Repair/Scrap/Undo (Phase 9), Worker sessions, Stockroom `STOCKED`
+  (Phase 10) — a transfer into a terminal Area is therefore refused.
 """
 
 import datetime
@@ -114,9 +124,14 @@ from app.application.machine_processing import (
     committed_command,
     latest_movement,
 )
-from app.application.machines import assigned_quantity, lock_machine, note_assignment_change
+from app.application.machines import (
+    area_has_machines,
+    assigned_quantity,
+    lock_machine,
+    note_assignment_change,
+)
 from app.application.part_numbers import canonical_part_number
-from app.application.projections import processing_state_of
+from app.application.projections import is_actively_processing, processing_state_of
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -178,9 +193,10 @@ class AreaTransfer(NamedTuple):
     assigned_route_step_id: int | None
     route_deviation: dict[str, Any] | None
     # The implicit AREA_COMPLETED of the same command when the quantity
-    # was still ON_MACHINE at the source (Phase 6): its Movement id and
-    # the Machine it left; None for a transfer of queued or finished
-    # quantity.
+    # was still actively processing at the source: its Movement id, and
+    # the Machine it left (ON_MACHINE, Phase 6) or None for directly
+    # processing quantity (Phase 7). Both None for a transfer of queued
+    # or finished quantity.
     completed_movement_id: int | None
     completed_machine_id: int | None
     device_event_id: str
@@ -463,11 +479,7 @@ def _committed_transfer(session: Session, device_event_id: str) -> list[PartMove
 def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaTransfer:
     movement = command[-1]
     completed = command[0] if len(command) == 2 else None
-    if (
-        movement.from_area_id is None
-        or movement.station_id is None
-        or (completed is not None and completed.source_machine_id is None)
-    ):
+    if movement.from_area_id is None or movement.station_id is None:
         # The database shape CHECK makes this unreachable for a
         # TRANSFERRED command; another kind of row reusing the id is a
         # client defect caught by the fingerprint check before this point.
@@ -699,15 +711,22 @@ def transfer_to_station_area(
     if source is None:  # pragma: no cover - FK guarantees the row
         raise InvalidInputError(f"Area {source_area_id} does not exist.")
 
-    # -- Source processing state (Phase 6) ------------------------------
-    # Derived from the flow's latest Movement: ON_MACHINE quantity is
-    # completed implicitly by this transfer (AREA_COMPLETED first), so
-    # the source Machine is locked now — lock order flow → station →
-    # Machine → target Area → Operation. Queued or finished quantity
-    # transfers with TRANSFERRED alone.
+    # -- Source processing state (Phase 6 / 7) --------------------------
+    # Derived from the flow's latest Movement and the source Area's mode
+    # (its active Machines, judged now under the flow lock): actively
+    # processing quantity — ON_MACHINE, or PROCESSING in an Area without
+    # Machines — is completed implicitly by this transfer (AREA_COMPLETED
+    # first). An ON_MACHINE source locks its Machine now — lock order
+    # flow → station → Machine → target Area → Operation; a directly
+    # processing source has no Machine to lock. Queued or finished
+    # quantity transfers with TRANSFERRED alone.
     latest = latest_movement(session, flow.id)
+    source_state = processing_state_of(
+        latest.movement_type, direct_processing=not area_has_machines(session, source.id)
+    )
+    completes_source = is_actively_processing(source_state)
     source_machine: Machine | None = None
-    if processing_state_of(latest.movement_type) == ProcessingState.ON_MACHINE:
+    if source_state == ProcessingState.ON_MACHINE:
         if flow.current_machine_id is None:  # pragma: no cover - projection invariant
             raise ConflictError(
                 f"Quantity Flow {flow.id} is on a Machine according to its history but"
@@ -762,14 +781,15 @@ def transfer_to_station_area(
 
     # -- Writes — all inside the one open transaction ------------------
     # One application command: the implicit AREA_COMPLETED (when the
-    # quantity was ON_MACHINE) then the TRANSFERRED, numbered by
+    # quantity was actively processing — with its source Machine, or
+    # none for direct processing) then the TRANSFERRED, numbered by
     # command_sequence under the one device_event_id — both or neither.
     command: list[PartMovement] = []
-    size = 2 if source_machine is not None else 1
+    size = 2 if completes_source else 1
     # Read before any Movement is staged (no autoflush surprises).
     assigned_before = assigned_quantity(session, source_machine.id) if source_machine else 0
     metadata = command_metadata("TRANSFER", fingerprint, size=size)
-    if source_machine is not None:
+    if completes_source:
         command.append(
             PartMovement(
                 quantity_flow_id=flow.id,
@@ -781,7 +801,7 @@ def transfer_to_station_area(
                 operation_id=latest.operation_id,
                 assigned_route_step_id=None,
                 station_id=station.station_id,
-                source_machine_id=source_machine.id,
+                source_machine_id=source_machine.id if source_machine is not None else None,
                 destination_machine_id=None,
                 occurred_at=func.now(),
                 server_received_at=func.now(),

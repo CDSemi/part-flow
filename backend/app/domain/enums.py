@@ -57,20 +57,25 @@ class MovementType(StrEnum):
 
 
 class ProcessingState(StrEnum):
-    """Derived holding state of ACTIVE quantity in a Machine Area
+    """Derived holding state of ACTIVE quantity in an Area
     (PROJECT_PROFILE §12 Area Processing States).
 
-    Never stored: derived from the flow's latest Movement — an
-    ASSIGNED_TO_MACHINE makes it ON_MACHINE (the projection then
-    carries the Machine), an AREA_COMPLETED makes it READY_TO_TRANSFER
-    (finished, waiting on the Area's rack with NO Machine), and every
-    other latest Movement (RECEIVED, TRANSFERRED, RELEASED_FROM_MACHINE)
-    leaves it QUEUED. A NULL current Machine therefore never means
-    "queued" by itself. Direct processing (PROCESSING, Phase 7) does
-    not exist yet.
+    Never stored: derived from the flow's latest Movement AND the mode
+    of the Area it is in — exactly two Area modes exist and the mode
+    follows from the Area's Machines (an Area with one or more active
+    Machines uses QUEUE_AND_ASSIGN; an Area without Machines processes
+    directly; no per-Area configuration). An ASSIGNED_TO_MACHINE makes
+    it ON_MACHINE (the projection then carries the Machine), an
+    AREA_COMPLETED makes it READY_TO_TRANSFER (finished, waiting on the
+    Area's rack with NO Machine), and every other latest Movement
+    (RECEIVED, TRANSFERRED, RELEASED_FROM_MACHINE) leaves it QUEUED in
+    a Machine Area or PROCESSING — actively processing, owned directly
+    by the Area, Machine NULL — in an Area without Machines (Phase 7).
+    A NULL current Machine therefore never means "queued" by itself.
     """
 
     QUEUED = "QUEUED"
+    PROCESSING = "PROCESSING"
     ON_MACHINE = "ON_MACHINE"
     READY_TO_TRANSFER = "READY_TO_TRANSFER"
 

@@ -1481,7 +1481,10 @@ def test_assignment_versus_retirement_retirement_first(
     assert "retired" in results["assign"].message
     assert _machine(client, lathe.machine_id)["retired_on"] is not None
     assert _flow_row(db_engine, flow_id).current_machine_id is None
-    assert _inventory_flow(client, lathe.area_id, flow_id)["processing_state"] == "QUEUED"
+    # The Area mode follows from its ACTIVE Machines (PROJECT_PROFILE
+    # §12): its only Machine retired, the Area now processes directly
+    # and the never-assigned quantity reads PROCESSING (Phase 7).
+    assert _inventory_flow(client, lathe.area_id, flow_id)["processing_state"] == "PROCESSING"
 
 
 def test_done_versus_transfer_of_one_flow_has_one_serial_outcome(
@@ -1913,12 +1916,15 @@ def test_inventory_separates_queued_on_machine_and_finished_quantity(
 
 
 def test_inventory_of_an_area_without_machines_has_no_cards(client: TestClient) -> None:
+    """An Area without Machines has no queue: its quantity is directly
+    processing (Phase 7), never queued, and no placeholder card exists."""
     material = _Cell(client, machine_count=0)
     _release(client, material, quantity=3)
     inventory = _inventory(client, material.area_id)
+    assert inventory["has_machines"] is False
     assert inventory["machines"] == []
-    assert inventory["queued_quantity"] == 3 and inventory["on_machine_quantity"] == 0
-    assert inventory["finished_quantity"] == 0
+    assert inventory["queued_quantity"] == 0 and inventory["on_machine_quantity"] == 0
+    assert inventory["processing_quantity"] == 3 and inventory["finished_quantity"] == 0
     assert (
         client.get(f"/api/scan-stations/{material.station_id}/context").json()["has_machines"]
         is False

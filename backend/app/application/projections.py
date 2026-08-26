@@ -14,6 +14,7 @@ from typing import NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.application.machines import areas_with_machines
 from app.domain.enums import MovementType, ProcessingState
 from app.infrastructure.models import PartMovement
 
@@ -26,21 +27,31 @@ class CurrentPosition(NamedTuple):
     processing_state: ProcessingState
 
 
-def processing_state_of(movement_type: str) -> ProcessingState:
+def processing_state_of(movement_type: str, *, direct_processing: bool) -> ProcessingState:
     """The holding state a flow's LATEST Movement leaves it in (§12).
 
     Only an ``ASSIGNED_TO_MACHINE`` puts quantity on a Machine and only
     an ``AREA_COMPLETED`` finishes it; every other Movement — the
     arrival in an Area (``RECEIVED``, ``TRANSFERRED``) and the return
-    from a Machine (``RELEASED_FROM_MACHINE``) — leaves it queued. A
-    NULL Machine alone never means queued: finished quantity has no
-    Machine either.
+    from a Machine (``RELEASED_FROM_MACHINE``) — leaves it held by the
+    Area: QUEUED in an Area with Machines (QUEUE_AND_ASSIGN), PROCESSING
+    in an Area without Machines, which directly owns and processes the
+    quantity (Phase 7; ``direct_processing`` is that Area mode, judged
+    from the Area's active Machines — never configured). A NULL
+    Machine alone never means queued: finished and directly processing
+    quantity have no Machine either.
     """
     if movement_type == MovementType.ASSIGNED_TO_MACHINE:
         return ProcessingState.ON_MACHINE
     if movement_type == MovementType.AREA_COMPLETED:
         return ProcessingState.READY_TO_TRANSFER
-    return ProcessingState.QUEUED
+    return ProcessingState.PROCESSING if direct_processing else ProcessingState.QUEUED
+
+
+def is_actively_processing(state: ProcessingState) -> bool:
+    """Quantity a transfer completes implicitly (PROJECT_PROFILE §8.11):
+    ON_MACHINE in a Machine Area, PROCESSING in an Area without Machines."""
+    return state in (ProcessingState.ON_MACHINE, ProcessingState.PROCESSING)
 
 
 def _latest_movements(session: Session) -> list[PartMovement]:
@@ -65,16 +76,26 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
     BIGSERIAL write order): the Area is its ``to_area_id``; the Machine
     is its ``destination_machine_id``, which is set exactly on an
     ``ASSIGNED_TO_MACHINE`` (shape CHECK) — so a release, a completion
-    and a transfer all clear it. Every flow appears: a QuantityFlow's
-    first Movement is always its ``RECEIVED``.
+    and a transfer all clear it; the holding state follows from the
+    Movement type and the Area's current mode (Machines or not). Every
+    flow appears: a QuantityFlow's first Movement is always its
+    ``RECEIVED``.
     """
+    latest = _latest_movements(session)
+    # The Area mode is part of the derivation (§12): the same arrival
+    # Movement is QUEUED in a Machine Area and PROCESSING in an Area
+    # without Machines.
+    machine_areas = areas_with_machines(session, {movement.to_area_id for movement in latest})
     return {
         movement.quantity_flow_id: CurrentPosition(
             area_id=movement.to_area_id,
             machine_id=movement.destination_machine_id,
-            processing_state=processing_state_of(movement.movement_type),
+            processing_state=processing_state_of(
+                movement.movement_type,
+                direct_processing=movement.to_area_id not in machine_areas,
+            ),
         )
-        for movement in _latest_movements(session)
+        for movement in latest
     }
 
 

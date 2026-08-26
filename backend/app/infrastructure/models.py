@@ -13,7 +13,8 @@ changes (SLICE1_DATA_MODEL §16); plus the Phase 5 Movement widening
 assignment and Area completion widening (`quantity_flows.current_machine_id`,
 the Movement Machine references, the application-command sequence, and
 the `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
-types). Business rules stay in the
+types); plus the Phase 7 direct-processing widening (an `AREA_COMPLETED`
+without a Machine for an Area without Machines). Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -119,17 +120,19 @@ MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
 PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
-# transfer; Phase 6 Machine assignment and Area completion). Reused
-# verbatim by the Phase 6 migration so the stored CHECK and the mapping
-# never drift. RECEIVED introduces quantity (no source Area, no
-# Machine); TRANSFERRED moves between two DIFFERENT Areas at a Station
-# and references no Machine (a transfer from ON_MACHINE quantity is
-# preceded by its own AREA_COMPLETED); the three in-Area Movements stay
-# in ONE Area at a Station and carry exactly the Machine reference
-# their meaning requires — assignment a destination Machine only,
-# release and completion a source Machine only (Phase 6 completes
-# Machine-assigned quantity only; Phase 7 widens completion to direct
-# processing without a Machine).
+# transfer; Phase 6 Machine assignment and Area completion; Phase 7
+# direct-processing completion). Reused verbatim by the Phase 7
+# migration so the stored CHECK and the mapping never drift. RECEIVED
+# introduces quantity (no source Area, no Machine); TRANSFERRED moves
+# between two DIFFERENT Areas at a Station and references no Machine (a
+# transfer from actively processing quantity is preceded by its own
+# AREA_COMPLETED); the three in-Area Movements stay in ONE Area at a
+# Station and carry exactly the Machine reference their meaning
+# requires — assignment a destination Machine only, release a source
+# Machine only, completion a source Machine when the quantity left a
+# Machine (Phase 6) or NO Machine when it was directly processed by an
+# Area without Machines (Phase 7); a completion never has a
+# destination Machine.
 MOVEMENT_SHAPE_SQL = (
     "(movement_type = 'RECEIVED' AND from_area_id IS NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
@@ -146,8 +149,7 @@ MOVEMENT_SHAPE_SQL = (
     " AND source_machine_id IS NOT NULL AND destination_machine_id IS NULL)"
     " OR (movement_type = 'AREA_COMPLETED'"
     " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
-    " AND station_id IS NOT NULL"
-    " AND source_machine_id IS NOT NULL AND destination_machine_id IS NULL)"
+    " AND station_id IS NOT NULL AND destination_machine_id IS NULL)"
 )
 
 # Row-level idempotency guarantee of the application-command model

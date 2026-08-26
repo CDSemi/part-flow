@@ -28,31 +28,42 @@ current-position projection:
   sticky Machine state; the next scan starts fresh.
 
 Nothing here writes. Every flow is reported with its DERIVED
-processing state (Phase 6 — QUEUED / ON_MACHINE / READY_TO_TRANSFER,
-from the flow's latest Movement), the Machine it is on, and the
-actions currently valid for it (``available_actions``: QUEUED → ASSIGN,
-plus TRANSFER as in Phase 5; ON_MACHINE → DONE, QUEUE, TRANSFER — the
-transfer completing implicitly; READY_TO_TRANSFER → TRANSFER only), so a
-station offers exactly the valid choices. Several matching flows are
-always returned as they are with ``requires_selection`` set — the
-operator selects exactly one, nothing is picked. The Area inventory
-separates queued quantity, quantity on each Machine (the Machine cards
-— ON_MACHINE quantity only, with the derived Machine operational state)
-and finished quantity (READY_TO_TRANSFER — Area summary, never a
-Machine card). Boundaries: no Worker barcodes, no Receive Quantity
-intake from the station (the resolution reports whether active demand
-exists so the UI can present the honest placeholder), no direct
-processing state (Phase 7).
+processing state (from the flow's latest Movement AND the mode of the
+Area it is in — Phase 6 QUEUED / ON_MACHINE / READY_TO_TRANSFER in a
+Machine Area, Phase 7 PROCESSING in an Area without Machines, which
+directly owns the quantity with no queue and no Machine), the Machine
+it is on, and the actions currently valid for it
+(``available_actions``: QUEUED → ASSIGN, plus TRANSFER as in Phase 5;
+ON_MACHINE → DONE, QUEUE, TRANSFER — the transfer completing
+implicitly; PROCESSING → DONE, TRANSFER — the direct-processing DONE
+without a Machine, the transfer completing implicitly;
+READY_TO_TRANSFER → TRANSFER only), so a station offers exactly the
+valid choices. Several matching flows are always returned as they are
+with ``requires_selection`` set — the operator selects exactly one,
+nothing is picked. The Area inventory separates queued quantity,
+quantity on each Machine (the Machine cards — ON_MACHINE quantity only,
+with the derived Machine operational state), directly processing
+quantity (Areas without Machines — no placeholder cards, no
+queued/on-Machine figures) and finished quantity (READY_TO_TRANSFER —
+Area summary, never a Machine card). Boundaries: no Worker barcodes, no
+Receive Quantity intake from the station (the resolution reports
+whether active demand exists so the UI can present the honest
+placeholder).
 """
 
 from typing import Final, Literal, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machine_processing import latest_movements
-from app.application.machines import assigned_quantities, operational_state
+from app.application.machines import (
+    area_has_machines,
+    areas_with_machines,
+    assigned_quantities,
+    operational_state,
+)
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import processing_state_of
 from app.application.transfers import (
@@ -103,17 +114,14 @@ def station_context(session: Session, station_id: str) -> StationContext:
     department = session.get(Department, area.department_id)
     if department is None:  # pragma: no cover - FK guarantees the row
         raise InvalidInputError(f"Department {area.department_id} does not exist.")
-    machine_count = session.scalar(
-        select(func.count())
-        .select_from(Machine)
-        .where(Machine.area_id == area.id, Machine.retired_on.is_(None))
-    )
     return StationContext(
         station=station,
         area=area,
         department=department,
         operations=active_area_operations(session, area.id),
-        has_machines=bool(machine_count),
+        # The Area mode (PROJECT_PROFILE §12): follows from its active
+        # Machines — the same judgement every command and derivation uses.
+        has_machines=area_has_machines(session, area.id),
     )
 
 
@@ -154,14 +162,17 @@ def part_number_from_scan(barcode: object | None, part_number: object | None) ->
 
 FlowAction = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
 
-# The actions valid for a flow in a Machine Area by its derived state
-# (PROJECT_PROFILE §12 Area Processing States; §15 PN-first). TRANSFER
-# is recorded at the DESTINATION station; it is listed here so the
-# source station can say whether the quantity may leave — from
-# ON_MACHINE it completes implicitly (AREA_COMPLETED + TRANSFERRED),
-# from QUEUED it leaves unprocessed exactly as in Phase 5.
+# The actions valid for a flow by its derived state (PROJECT_PROFILE
+# §12 Area Processing States; §15 PN-first). TRANSFER is recorded at
+# the DESTINATION station; it is listed here so the source station can
+# say whether the quantity may leave — from ON_MACHINE and PROCESSING
+# it completes implicitly (AREA_COMPLETED + TRANSFERRED), from QUEUED it
+# leaves unprocessed exactly as in Phase 5. PROCESSING (an Area without
+# Machines, Phase 7) offers the direct-processing DONE — no ASSIGN and
+# no QUEUE ever exist there.
 _ACTIONS_BY_STATE: Final[dict[ProcessingState, tuple[FlowAction, ...]]] = {
     ProcessingState.QUEUED: ("ASSIGN", "TRANSFER"),
+    ProcessingState.PROCESSING: ("DONE", "TRANSFER"),
     ProcessingState.ON_MACHINE: ("DONE", "QUEUE", "TRANSFER"),
     ProcessingState.READY_TO_TRANSFER: ("TRANSFER",),
 }
@@ -183,8 +194,9 @@ class FlowInArea(NamedTuple):
     quantity_flow_id: int
     quantity: int
     route_mode: str
-    # Derived from the latest Movement (PROJECT_PROFILE §12): a NULL
-    # Machine is QUEUED or READY_TO_TRANSFER, never "queued" by itself.
+    # Derived from the latest Movement and the Area's mode (PROJECT_PROFILE
+    # §12): a NULL Machine is QUEUED, PROCESSING or READY_TO_TRANSFER,
+    # never "queued" by itself.
     processing_state: ProcessingState
     machine_id: int | None
     available_actions: list[FlowAction]
@@ -196,8 +208,8 @@ class TransferCandidate(NamedTuple):
     quantity: int
     route_mode: str
     current_area: Area
-    # ON_MACHINE quantity is completed implicitly by the transfer
-    # (AREA_COMPLETED + TRANSFERRED) — the confirmation says so.
+    # ON_MACHINE and PROCESSING quantity is completed implicitly by the
+    # transfer (AREA_COMPLETED + TRANSFERRED) — the confirmation says so.
     processing_state: ProcessingState
     machine_id: int | None
     route_status: RouteStatus
@@ -278,6 +290,8 @@ def resolve_part_number_scan(
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = latest_movements(session, [flow.id for flow in flows])
+    # Every flow's state depends on the mode of the Area it is in.
+    machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
     operations = active_area_operations(session, area.id)
     area_names: dict[int, Area] = {area.id: area}
 
@@ -292,7 +306,10 @@ def resolve_part_number_scan(
     in_area: list[FlowInArea] = []
     candidates: list[TransferCandidate] = []
     for flow in flows:
-        state = processing_state_of(latest[flow.id].movement_type)
+        state = processing_state_of(
+            latest[flow.id].movement_type,
+            direct_processing=flow.current_area_id not in machine_areas,
+        )
         if flow.current_area_id == area.id:
             in_area.append(
                 FlowInArea(
@@ -467,7 +484,10 @@ def resolve_machine_scan(
             contexts.get(flow.id),
         )
         for flow in flows
-        if processing_state_of(latest[flow.id].movement_type) == ProcessingState.QUEUED
+        # The resolved Machine is active and in this Area, so the Area
+        # is a Machine Area: its held quantity is QUEUED, never PROCESSING.
+        if processing_state_of(latest[flow.id].movement_type, direct_processing=False)
+        == ProcessingState.QUEUED
     ]
     return MachineScanResolution(
         station=station,
@@ -508,6 +528,11 @@ class MachineInventory(NamedTuple):
 
 class AreaInventory(NamedTuple):
     area: Area
+    # The Area mode (PROJECT_PROFILE §12): with Machines the quantity
+    # splits into queued / Machine cards / finished; without Machines
+    # into directly processing / finished — no placeholder cards and no
+    # queued or on-Machine figures (they are structurally zero).
+    has_machines: bool
     # Every ACTIVE flow in the Area per PN, whatever its state (the
     # Phase 5 shape, kept).
     lines: list[InventoryLine]
@@ -518,6 +543,9 @@ class AreaInventory(NamedTuple):
     queued_quantity: int
     machines: list[MachineInventory]
     on_machine_quantity: int
+    # Phase 7: directly processing quantity of an Area without Machines.
+    processing: list[InventoryLine]
+    processing_quantity: int
     finished: list[InventoryLine]
     finished_quantity: int
 
@@ -536,9 +564,13 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     """ACTIVE quantity currently in an Area, per PN and per processing state.
 
     ``lines`` keeps every flow per PN; ``queued`` / ``machines`` /
-    ``finished`` split the same flows by their derived state so the
-    three never double-count: queued and finished quantity are Area
-    summary figures, on-Machine quantity is grouped per Machine card.
+    ``processing`` / ``finished`` split the same flows by their derived
+    state so they never double-count: queued, directly processing and
+    finished quantity are Area summary figures, on-Machine quantity is
+    grouped per Machine card. Exactly one of the two Area modes applies
+    (``has_machines``): a Machine Area never has directly processing
+    quantity, an Area without Machines never has queued or on-Machine
+    quantity.
     """
     area = session.get(Area, area_id)
     if area is None:
@@ -555,9 +587,20 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = latest_movements(session, [flow.id for flow in flows])
+    active_machines = list(
+        session.scalars(
+            select(Machine)
+            .where(Machine.area_id == area.id, Machine.retired_on.is_(None))
+            .order_by(Machine.name, Machine.id)
+        )
+    )
+    # The Area mode and the Machine cards come from the SAME listing.
+    has_machines = bool(active_machines)
     items: list[FlowInArea] = []
     for flow in flows:
-        state = processing_state_of(latest[flow.id].movement_type)
+        state = processing_state_of(
+            latest[flow.id].movement_type, direct_processing=not has_machines
+        )
         items.append(
             FlowInArea(
                 flow.part_number,
@@ -572,18 +615,14 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     lines = _lines(items)
     queued = _lines([item for item in items if item.processing_state == ProcessingState.QUEUED])
+    processing = _lines(
+        [item for item in items if item.processing_state == ProcessingState.PROCESSING]
+    )
     finished = _lines(
         [item for item in items if item.processing_state == ProcessingState.READY_TO_TRANSFER]
     )
     on_machine = [item for item in items if item.processing_state == ProcessingState.ON_MACHINE]
 
-    active_machines = list(
-        session.scalars(
-            select(Machine)
-            .where(Machine.area_id == area.id, Machine.retired_on.is_(None))
-            .order_by(Machine.name, Machine.id)
-        )
-    )
     cards = []
     for machine in active_machines:
         # The card's quantity and the derived state come from the SAME
@@ -601,6 +640,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     return AreaInventory(
         area=area,
+        has_machines=has_machines,
         lines=lines,
         total_part_numbers=len(lines),
         total_quantity=sum(line.total_quantity for line in lines),
@@ -608,6 +648,8 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         queued_quantity=sum(line.total_quantity for line in queued),
         machines=cards,
         on_machine_quantity=sum(item.quantity for item in on_machine),
+        processing=processing,
+        processing_quantity=sum(line.total_quantity for line in processing),
         finished=finished,
         finished_quantity=sum(line.total_quantity for line in finished),
     )
