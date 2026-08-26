@@ -19,16 +19,30 @@ current-position projection:
   per PN, refreshed by the station after every confirmed transfer
   (PROJECT_PROFILE §15 step 10).
 
+- the Machine scan resolution (Phase 6, PROJECT_PROFILE §15
+  Machine-first) — a ``PF:MACHINE:<asset-tag>`` barcode resolved at the
+  station into a **one-shot assignment context**: the Machine
+  preselected (active, not under maintenance, in the station's Area)
+  and the QUEUED flows of that Area the operator may select or scan a
+  PN for. Nothing is remembered server-side — no Machine session, no
+  sticky Machine state; the next scan starts fresh.
+
 Nothing here writes. Every flow is reported with its DERIVED
 processing state (Phase 6 — QUEUED / ON_MACHINE / READY_TO_TRANSFER,
-from the flow's latest Movement) and the Machine it is on, so a
-station can offer only the currently valid actions (assign on queued
-rows, DONE/QUEUE on Machine rows) and a transfer of ON_MACHINE
-quantity can announce the implicit completion. Boundaries: no
-Worker/Machine barcode resolution here (a Machine scan resolves in the
-Machines surface), no Receive Quantity intake from the station (the
-resolution reports whether active demand exists so the UI can present
-the honest placeholder), no direct processing state (Phase 7).
+from the flow's latest Movement), the Machine it is on, and the
+actions currently valid for it (``available_actions``: QUEUED → ASSIGN,
+plus TRANSFER as in Phase 5; ON_MACHINE → DONE, QUEUE, TRANSFER — the
+transfer completing implicitly; READY_TO_TRANSFER → TRANSFER only), so a
+station offers exactly the valid choices. Several matching flows are
+always returned as they are with ``requires_selection`` set — the
+operator selects exactly one, nothing is picked. The Area inventory
+separates queued quantity, quantity on each Machine (the Machine cards
+— ON_MACHINE quantity only, with the derived Machine operational state)
+and finished quantity (READY_TO_TRANSFER — Area summary, never a
+Machine card). Boundaries: no Worker barcodes, no Receive Quantity
+intake from the station (the resolution reports whether active demand
+exists so the UI can present the honest placeholder), no direct
+processing state (Phase 7).
 """
 
 from typing import Final, Literal, NamedTuple
@@ -36,8 +50,9 @@ from typing import Final, Literal, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.application.errors import InvalidInputError, NotFoundError
+from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machine_processing import latest_movements
+from app.application.machines import assigned_quantities, operational_state
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import processing_state_of
 from app.application.transfers import (
@@ -47,8 +62,14 @@ from app.application.transfers import (
     require_production_station,
     suggested_operation_id,
 )
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
+from app.domain.enums import (
+    MachineOperationalState,
+    MovementType,
+    ProcessingState,
+    QuantityFlowStatus,
+)
 from app.infrastructure.models import (
+    MACHINE_BARCODE_PREFIX,
     PART_NUMBER_BARCODE_PREFIX,
     Area,
     Department,
@@ -118,12 +139,36 @@ def part_number_from_scan(barcode: object | None, part_number: object | None) ->
     if not isinstance(barcode, str):
         raise InvalidInputError("The scanned barcode must be text.")
     scanned = barcode.strip()
+    if scanned.startswith(MACHINE_BARCODE_PREFIX):
+        raise InvalidInputError(
+            "This is a Machine barcode (PF:MACHINE:…). A Machine scan starts the"
+            " one-shot Assign to Machine workflow — it is not a Part Number."
+        )
     if not scanned.startswith(PART_NUMBER_BARCODE_PREFIX):
         raise InvalidInputError(
             "Unknown barcode. Scan a Part Number barcode (PF:PN:…) or enter the"
             " Part Number manually."
         )
     return canonical_part_number(scanned[len(PART_NUMBER_BARCODE_PREFIX) :])
+
+
+FlowAction = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
+
+# The actions valid for a flow in a Machine Area by its derived state
+# (PROJECT_PROFILE §12 Area Processing States; §15 PN-first). TRANSFER
+# is recorded at the DESTINATION station; it is listed here so the
+# source station can say whether the quantity may leave — from
+# ON_MACHINE it completes implicitly (AREA_COMPLETED + TRANSFERRED),
+# from QUEUED it leaves unprocessed exactly as in Phase 5.
+_ACTIONS_BY_STATE: Final[dict[ProcessingState, tuple[FlowAction, ...]]] = {
+    ProcessingState.QUEUED: ("ASSIGN", "TRANSFER"),
+    ProcessingState.ON_MACHINE: ("DONE", "QUEUE", "TRANSFER"),
+    ProcessingState.READY_TO_TRANSFER: ("TRANSFER",),
+}
+
+
+def available_actions(state: ProcessingState) -> list[FlowAction]:
+    return list(_ACTIONS_BY_STATE[state])
 
 
 class WorkOrderContext(NamedTuple):
@@ -134,6 +179,7 @@ class WorkOrderContext(NamedTuple):
 
 
 class FlowInArea(NamedTuple):
+    part_number: str
     quantity_flow_id: int
     quantity: int
     route_mode: str
@@ -141,6 +187,7 @@ class FlowInArea(NamedTuple):
     # Machine is QUEUED or READY_TO_TRANSFER, never "queued" by itself.
     processing_state: ProcessingState
     machine_id: int | None
+    available_actions: list[FlowAction]
     work_order: WorkOrderContext | None
 
 
@@ -181,6 +228,10 @@ class ScanResolution(NamedTuple):
     # Set when the station's Area can never receive a transfer
     # (terminal Area): candidates are still listed for information.
     transfer_blocked_reason: str | None
+    # More than one flow of the PN in the Area (or more than one
+    # transfer candidate): the operator must select exactly one before
+    # any action — nothing is picked or combined (PROJECT_PROFILE §15).
+    requires_selection: bool
 
 
 def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
@@ -245,11 +296,13 @@ def resolve_part_number_scan(
         if flow.current_area_id == area.id:
             in_area.append(
                 FlowInArea(
+                    flow.part_number,
                     flow.id,
                     flow.quantity,
                     flow.route_mode,
                     state,
                     flow.current_machine_id,
+                    available_actions(state),
                     contexts.get(flow.id),
                 )
             )
@@ -299,6 +352,131 @@ def resolve_part_number_scan(
         operations=operations,
         has_active_demand=has_active_demand,
         transfer_blocked_reason=blocked,
+        requires_selection=len(in_area) > 1 or (not in_area and len(candidates) > 1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Machine scan resolution — the one-shot assignment context (Phase 6)
+# ---------------------------------------------------------------------------
+
+
+def asset_tag_from_scan(barcode: object | None, asset_tag: object | None) -> str:
+    """The Asset Tag from a scanned ``PF:MACHINE:`` barcode or a manual entry.
+
+    Exactly one of the two is given. The barcode must carry the exact
+    ``PF:MACHINE:`` prefix (a PN barcode or an unknown barcode is refused
+    — never treated as a Machine); the entire suffix is the Asset Tag.
+    """
+    if (barcode is None) == (asset_tag is None):
+        raise InvalidInputError("Provide exactly one of a scanned barcode or an Asset Tag.")
+    if asset_tag is not None:
+        if not isinstance(asset_tag, str) or not asset_tag.strip():
+            raise InvalidInputError("The Asset Tag must not be empty.")
+        return asset_tag.strip()
+    if not isinstance(barcode, str):
+        raise InvalidInputError("The scanned barcode must be text.")
+    scanned = barcode.strip()
+    if scanned.startswith(PART_NUMBER_BARCODE_PREFIX):
+        raise InvalidInputError(
+            "This is a Part Number barcode (PF:PN:…), not a Machine barcode."
+            " Scan the Machine's Asset Tag label to assign quantity to it."
+        )
+    tag = (
+        scanned[len(MACHINE_BARCODE_PREFIX) :] if scanned.startswith(MACHINE_BARCODE_PREFIX) else ""
+    )
+    if not tag:
+        raise InvalidInputError(
+            "Unknown barcode. Scan a Machine barcode (PF:MACHINE:<asset-tag>) to start"
+            " the Assign to Machine workflow."
+        )
+    return tag
+
+
+class MachineScanResolution(NamedTuple):
+    """The one-shot assignment context a Machine scan opens (§15 Machine-first).
+
+    The Machine is preselected; ``queued`` lists every QUEUED flow of the
+    station's Area (all PNs) the operator may select or scan a PN for —
+    several are returned as they are (``requires_selection``). Nothing is
+    stored: the context lives in the dialog only.
+    """
+
+    station: ScanStation
+    area: Area
+    machine: Machine
+    operational_state: MachineOperationalState
+    assigned_quantity: int
+    queued: list[FlowInArea]
+    requires_selection: bool
+
+
+def resolve_machine_scan(
+    session: Session, station_id: str, *, barcode: object | None, asset_tag: object | None
+) -> MachineScanResolution:
+    """Resolve a Machine barcode at a station into the assignment context.
+
+    Refused with nothing resolved (PROJECT_PROFILE §15 "clearly reject"):
+    an unknown Asset Tag, a retired Machine (accepts no new scans), a
+    Machine of another Area (invalid Area/Machine combination) and a
+    Machine under maintenance (accepts no new assignment). The
+    assignment command re-validates all of this under the Machine row
+    lock — this read only prepares the dialog.
+    """
+    station, area = require_production_station(session, station_id)
+    tag = asset_tag_from_scan(barcode, asset_tag)
+    machine = session.scalar(select(Machine).where(Machine.asset_tag == tag))
+    if machine is None:
+        raise NotFoundError(f"No Machine has the Asset Tag '{tag}'. Nothing was resolved.")
+    if machine.retired_on is not None:
+        raise ConflictError(
+            f"Machine '{machine.name}' ({machine.asset_tag}) is retired and accepts no scans."
+        )
+    if machine.area_id != area.id:
+        raise ConflictError(
+            f"Machine '{machine.name}' ({machine.asset_tag}) belongs to another Area."
+            f" Scan Station '{station_id}' assigns quantity in Area '{area.name}' only."
+        )
+    if machine.maintenance_since is not None:
+        raise ConflictError(
+            f"Machine '{machine.name}' ({machine.asset_tag}) is under maintenance and"
+            " accepts no new assignment."
+        )
+    assigned = assigned_quantities(session, [machine.id]).get(machine.id, 0)
+    flows = list(
+        session.scalars(
+            select(QuantityFlow)
+            .where(
+                QuantityFlow.current_area_id == area.id,
+                QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+            )
+            .order_by(QuantityFlow.part_number, QuantityFlow.id)
+        )
+    )
+    latest = latest_movements(session, [flow.id for flow in flows])
+    contexts = _work_order_contexts(session, [flow.id for flow in flows])
+    queued = [
+        FlowInArea(
+            flow.part_number,
+            flow.id,
+            flow.quantity,
+            flow.route_mode,
+            ProcessingState.QUEUED,
+            None,
+            available_actions(ProcessingState.QUEUED),
+            contexts.get(flow.id),
+        )
+        for flow in flows
+        if processing_state_of(latest[flow.id].movement_type) == ProcessingState.QUEUED
+    ]
+    return MachineScanResolution(
+        station=station,
+        area=area,
+        machine=machine,
+        operational_state=operational_state(machine, assigned),
+        assigned_quantity=assigned,
+        queued=queued,
+        requires_selection=len(queued) > 1,
     )
 
 
@@ -313,15 +491,55 @@ class InventoryLine(NamedTuple):
     flows: list[FlowInArea]
 
 
-class AreaInventory(NamedTuple):
-    area: Area
+class MachineInventory(NamedTuple):
+    """One Machine card: the Machine and the ON_MACHINE quantity it holds.
+
+    Every active (non-retired) Machine of the Area appears, with or
+    without quantity — a Machine card holds ONLY actively assigned
+    quantity; finished quantity belongs to the Area summary
+    (PROJECT_PROFILE §12).
+    """
+
+    machine: Machine
+    operational_state: MachineOperationalState
     lines: list[InventoryLine]
-    total_part_numbers: int
     total_quantity: int
 
 
+class AreaInventory(NamedTuple):
+    area: Area
+    # Every ACTIVE flow in the Area per PN, whatever its state (the
+    # Phase 5 shape, kept).
+    lines: list[InventoryLine]
+    total_part_numbers: int
+    total_quantity: int
+    # Phase 6 separation by derived processing state.
+    queued: list[InventoryLine]
+    queued_quantity: int
+    machines: list[MachineInventory]
+    on_machine_quantity: int
+    finished: list[InventoryLine]
+    finished_quantity: int
+
+
+def _lines(flows: list[FlowInArea]) -> list[InventoryLine]:
+    grouped: dict[str, list[FlowInArea]] = {}
+    for item in flows:
+        grouped.setdefault(item.part_number, []).append(item)
+    return [
+        InventoryLine(pn, sum(item.quantity for item in items), items)
+        for pn, items in grouped.items()
+    ]
+
+
 def area_inventory(session: Session, area_id: int) -> AreaInventory:
-    """ACTIVE quantity currently in an Area, grouped per canonical PN."""
+    """ACTIVE quantity currently in an Area, per PN and per processing state.
+
+    ``lines`` keeps every flow per PN; ``queued`` / ``machines`` /
+    ``finished`` split the same flows by their derived state so the
+    three never double-count: queued and finished quantity are Area
+    summary figures, on-Machine quantity is grouped per Machine card.
+    """
     area = session.get(Area, area_id)
     if area is None:
         raise NotFoundError(f"Area {area_id} does not exist.")
@@ -337,25 +555,59 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = latest_movements(session, [flow.id for flow in flows])
-    grouped: dict[str, list[FlowInArea]] = {}
+    items: list[FlowInArea] = []
     for flow in flows:
-        grouped.setdefault(flow.part_number, []).append(
+        state = processing_state_of(latest[flow.id].movement_type)
+        items.append(
             FlowInArea(
+                flow.part_number,
                 flow.id,
                 flow.quantity,
                 flow.route_mode,
-                processing_state_of(latest[flow.id].movement_type),
+                state,
                 flow.current_machine_id,
+                available_actions(state),
                 contexts.get(flow.id),
             )
         )
-    lines = [
-        InventoryLine(pn, sum(item.quantity for item in items), items)
-        for pn, items in grouped.items()
-    ]
+    lines = _lines(items)
+    queued = _lines([item for item in items if item.processing_state == ProcessingState.QUEUED])
+    finished = _lines(
+        [item for item in items if item.processing_state == ProcessingState.READY_TO_TRANSFER]
+    )
+    on_machine = [item for item in items if item.processing_state == ProcessingState.ON_MACHINE]
+
+    active_machines = list(
+        session.scalars(
+            select(Machine)
+            .where(Machine.area_id == area.id, Machine.retired_on.is_(None))
+            .order_by(Machine.name, Machine.id)
+        )
+    )
+    cards = []
+    for machine in active_machines:
+        # The card's quantity and the derived state come from the SAME
+        # ON_MACHINE flows (a flow on a Machine is always in the
+        # Machine's Area), so the two can never disagree.
+        held = [item for item in on_machine if item.machine_id == machine.id]
+        held_quantity = sum(item.quantity for item in held)
+        cards.append(
+            MachineInventory(
+                machine=machine,
+                operational_state=operational_state(machine, held_quantity),
+                lines=_lines(held),
+                total_quantity=held_quantity,
+            )
+        )
     return AreaInventory(
         area=area,
         lines=lines,
         total_part_numbers=len(lines),
         total_quantity=sum(line.total_quantity for line in lines),
+        queued=queued,
+        queued_quantity=sum(line.total_quantity for line in queued),
+        machines=cards,
+        on_machine_quantity=sum(item.quantity for item in on_machine),
+        finished=finished,
+        finished_quantity=sum(line.total_quantity for line in finished),
     )

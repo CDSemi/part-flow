@@ -34,7 +34,14 @@ IMPLEMENTATION_ROADMAP Phase 6, PROJECT_PROFILE §7 Area Completion,
 - concurrency: two assignments of one flow, assign versus retirement
   (both arrival orders), DONE versus transfer of one flow — each with
   exactly one serial outcome;
-- the projection replay rebuilds Area, Machine and state from history.
+- the projection replay rebuilds Area, Machine and state from history;
+- Phase 6 read models: Machine barcode resolution (``PF:MACHINE:``,
+  manual Asset Tag; unknown, PN, retired, other-Area, maintenance
+  refused) into the one-shot Machine-first context with the queued
+  flows of the Area and no sticky state; PN-first ``available_actions``
+  per derived state and ``requires_selection`` on ambiguity; the Area
+  inventory split into queued / per-Machine (ON_MACHINE only) /
+  finished with Machine cards reconciling with ``/api/machines``.
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
@@ -178,9 +185,14 @@ class _Cell:
         return self.machine_ids[0]
 
 
-def _release(client: TestClient, cell: _Cell, *, quantity: int = 25) -> tuple[int, str]:
-    """Release one FLOATING flow into the cell's Area: (quantity_flow_id, pn)."""
-    pn = _unique("PN")
+def _release(
+    client: TestClient, cell: _Cell, *, quantity: int = 25, part_number: str | None = None
+) -> tuple[int, str]:
+    """Release one FLOATING flow into the cell's Area: (quantity_flow_id, pn).
+
+    A second release of the same PN confirms the existing active
+    quantity (SLICE1 §8.2) and yields a second flow of that PN."""
+    pn = part_number or _unique("PN")
     response = client.post(
         "/api/work-orders", json={"lines": [{"part_number": pn, "requested_quantity": 500}]}
     )
@@ -195,7 +207,7 @@ def _release(client: TestClient, cell: _Cell, *, quantity: int = 25) -> tuple[in
             "route_mode": "FLOATING",
             "starting_area_id": cell.area_id,
             "operation_id": cell.operation_id,
-            "confirm_active_quantity": False,
+            "confirm_active_quantity": part_number is not None,
             "device_event_id": str(uuid.uuid4()),
         },
     )
@@ -1391,3 +1403,338 @@ def test_projection_replay_rebuilds_area_machine_and_state_from_history(
     assert rebuilt[moved_id] == (deburr.area_id, None, ProcessingState.QUEUED)
     for flow_id in (queued_id, on_machine_id, finished_id, moved_id):
         _assert_replay_matches(db_engine, flow_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 read models — Machine-first, PN-first, inventory separation
+# ---------------------------------------------------------------------------
+
+
+def _resolve_machine(client: TestClient, station_id: str, **body: Any) -> Any:
+    return client.post(f"/api/scan-stations/{station_id}/machine-scans/resolve", json=body)
+
+
+def _resolve_pn(client: TestClient, station_id: str, **body: Any) -> Any:
+    return client.post(f"/api/scan-stations/{station_id}/scans/resolve", json=body)
+
+
+def _inventory(client: TestClient, area_id: int) -> dict[str, Any]:
+    response = client.get(f"/api/areas/{area_id}/inventory")
+    assert response.status_code == 200, response.text
+    return cast(dict[str, Any], response.json())
+
+
+def test_machine_scan_resolves_the_one_shot_assignment_context(
+    client: TestClient, db_engine: Engine
+) -> None:
+    lathe = _Cell(client, machine_count=2)
+    machine = _machine(client, lathe.machine_id)
+    queued_a, pn_a = _release(client, lathe, quantity=5)
+    queued_b, pn_b = _release(client, lathe, quantity=7)
+    on_machine_id, on_pn = _assigned(client, lathe, quantity=3)
+    finished_id, finished_pn = _assigned(client, lathe, quantity=2)
+    assert (
+        _act(
+            client,
+            "DONE",
+            lathe.station_id,
+            part_number=finished_pn,
+            quantity_flow_id=finished_id,
+            machine_id=lathe.machine_id,
+            quantity=2,
+        ).status_code
+        == 201
+    )
+    count = _movement_count(db_engine)
+
+    response = _resolve_machine(client, lathe.station_id, barcode=machine["barcode_value"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["station_id"] == lathe.station_id
+    assert body["area"]["id"] == lathe.area_id
+    assert body["machine"]["id"] == lathe.machine_id
+    assert body["machine"]["asset_tag"] == machine["asset_tag"]
+    assert body["machine"]["barcode_value"] == f"PF:MACHINE:{machine['asset_tag']}"
+    assert body["machine"]["operational_state"] == "RUNNING"
+    assert body["assigned_quantity"] == 3
+    # Only QUEUED flows are offered — every PN of the Area, never the
+    # ON_MACHINE or the finished quantity; several → explicit selection.
+    assert [(f["quantity_flow_id"], f["part_number"]) for f in body["queued"]] == sorted(
+        [(queued_a, pn_a), (queued_b, pn_b)], key=lambda item: item[1]
+    )
+    assert all(f["processing_state"] == "QUEUED" for f in body["queued"])
+    assert all(f["available_actions"] == ["ASSIGN", "TRANSFER"] for f in body["queued"])
+    assert {f["quantity_flow_id"] for f in body["queued"]}.isdisjoint({on_machine_id, finished_id})
+    assert body["requires_selection"] is True
+    # The manual Asset Tag entry resolves identically; nothing was written
+    # and nothing sticks — a second resolution is the same fresh context.
+    manual = _resolve_machine(client, lathe.station_id, asset_tag=f"  {machine['asset_tag']} ")
+    assert manual.status_code == 200 and manual.json() == body
+    assert _movement_count(db_engine) == count
+    assert on_pn != pn_a
+
+
+def test_machine_first_assignment_uses_the_resolved_context(
+    client: TestClient, db_engine: Engine
+) -> None:
+    lathe = _Cell(client)
+    flow_id, pn = _release(client, lathe, quantity=4)
+    machine = _machine(client, lathe.machine_id)
+    context = _resolve_machine(client, lathe.station_id, barcode=machine["barcode_value"]).json()
+    assert context["requires_selection"] is False
+    assert context["machine"]["operational_state"] == "IDLE"
+    selected = context["queued"][0]
+    assert (selected["quantity_flow_id"], selected["part_number"]) == (flow_id, pn)
+
+    response = _assign(
+        client, lathe, flow_id, pn, selected["quantity"], machine_id=context["machine"]["id"]
+    )
+    assert response.status_code == 201, response.text
+    after = _resolve_machine(client, lathe.station_id, barcode=machine["barcode_value"]).json()
+    assert after["queued"] == []
+    assert after["assigned_quantity"] == 4
+    assert after["machine"]["operational_state"] == "RUNNING"
+    assert after["machine"]["state_changed_at"] > context["machine"]["state_changed_at"]
+
+
+def test_machine_scan_refusals_resolve_nothing(client: TestClient, db_engine: Engine) -> None:
+    lathe = _Cell(client, machine_count=2)
+    other = _Cell(client)
+    _release(client, lathe, quantity=1)
+    retired_id = lathe.machine_ids[1]
+    retired_tag = _machine(client, retired_id)["asset_tag"]
+    assert client.post(f"/api/machines/{retired_id}/retire", json={}).status_code == 200
+    maintained_id = _create_machine(client, lathe.area_id)
+    maintained_tag = _machine(client, maintained_id)["asset_tag"]
+    assert client.post(f"/api/machines/{maintained_id}/maintenance", json={}).status_code == 201
+    other_tag = _machine(client, other.machine_id)["asset_tag"]
+    count = _movement_count(db_engine)
+
+    unknown = _resolve_machine(client, lathe.station_id, barcode="PF:MACHINE:NOPE-9999")
+    assert unknown.status_code == 404 and "NOPE-9999" in unknown.json()["detail"]
+    retired = _resolve_machine(client, lathe.station_id, asset_tag=retired_tag)
+    assert retired.status_code == 409 and "retired" in retired.json()["detail"]
+    elsewhere = _resolve_machine(client, lathe.station_id, asset_tag=other_tag)
+    assert elsewhere.status_code == 409 and "another Area" in elsewhere.json()["detail"]
+    maintained = _resolve_machine(client, lathe.station_id, asset_tag=maintained_tag)
+    assert maintained.status_code == 409 and "maintenance" in maintained.json()["detail"]
+    for body, fragment in (
+        ({"barcode": "PF:PN:2027-60-8114-00"}, "Part Number barcode"),
+        ({"barcode": "PF:AREA:1"}, "Unknown barcode"),
+        ({"barcode": "CD-0001"}, "Unknown barcode"),
+        ({"barcode": "PF:MACHINE:"}, "Unknown barcode"),
+        ({"asset_tag": "   "}, "must not be empty"),
+        ({}, "exactly one"),
+        ({"barcode": "PF:MACHINE:X", "asset_tag": "X"}, "exactly one"),
+    ):
+        rejected = _resolve_machine(client, lathe.station_id, **body)
+        assert rejected.status_code == 422, rejected.text
+        assert fragment in rejected.json()["detail"]
+    # A Machine barcode on the PN scan is named as such, never a PN.
+    pn_scan = _resolve_pn(client, lathe.station_id, barcode=f"PF:MACHINE:{other_tag}")
+    assert pn_scan.status_code == 422 and "Machine barcode" in pn_scan.json()["detail"]
+    # Station context is judged first.
+    inactive_station = _create_station(client, lathe.area_id)
+    client.patch(f"/api/scan-stations/{inactive_station}", json={"is_active": False})
+    assert _resolve_machine(client, inactive_station, asset_tag=other_tag).status_code == 409
+    assert _resolve_machine(client, "NO-SUCH", asset_tag=other_tag).status_code == 404
+    assert _movement_count(db_engine) == count
+
+
+def test_resolved_machine_context_is_re_validated_by_the_command(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The context is one-shot and never a session: a Machine retired or
+    put under maintenance after the scan refuses the assignment."""
+    lathe = _Cell(client, machine_count=2)
+    flow_id, pn = _release(client, lathe, quantity=6)
+    tags = [_machine(client, machine_id)["asset_tag"] for machine_id in lathe.machine_ids]
+    for tag in tags:
+        assert _resolve_machine(client, lathe.station_id, asset_tag=tag).status_code == 200
+    count = _movement_count(db_engine)
+
+    assert client.post(f"/api/machines/{lathe.machine_ids[0]}/retire", json={}).status_code == 200
+    stale_retired = _assign(client, lathe, flow_id, pn, 6, machine_id=lathe.machine_ids[0])
+    assert stale_retired.status_code == 409 and "retired" in stale_retired.json()["detail"]
+    assert (
+        client.post(f"/api/machines/{lathe.machine_ids[1]}/maintenance", json={}).status_code == 201
+    )
+    stale_maintenance = _assign(client, lathe, flow_id, pn, 6, machine_id=lathe.machine_ids[1])
+    assert stale_maintenance.status_code == 409
+    assert "maintenance" in stale_maintenance.json()["detail"]
+    assert _movement_count(db_engine) == count
+    assert _inventory_flow(client, lathe.area_id, flow_id)["processing_state"] == "QUEUED"
+
+
+def test_pn_first_reports_the_valid_actions_per_processing_state(
+    client: TestClient, db_engine: Engine
+) -> None:
+    lathe = _Cell(client)
+    deburr = _Cell(client)
+    queued_id, pn = _release(client, lathe, quantity=5)
+    on_machine_id, _ = _release(client, lathe, quantity=6, part_number=pn)
+    finished_id, _ = _release(client, lathe, quantity=7, part_number=pn)
+    for flow_id, quantity in ((on_machine_id, 6), (finished_id, 7)):
+        assert _assign(client, lathe, flow_id, pn, quantity).status_code == 201
+    assert (
+        _act(
+            client,
+            "DONE",
+            lathe.station_id,
+            part_number=pn,
+            quantity_flow_id=finished_id,
+            machine_id=lathe.machine_id,
+            quantity=7,
+        ).status_code
+        == 201
+    )
+
+    resolved = _resolve_pn(client, lathe.station_id, barcode=f"PF:PN:{pn}")
+    assert resolved.status_code == 200, resolved.text
+    body = resolved.json()
+    assert body["resolution"] == "ALREADY_IN_AREA"
+    # Three flows of one PN in the Area: always an explicit selection.
+    assert body["requires_selection"] is True
+    by_id = {flow["quantity_flow_id"]: flow for flow in body["in_area"]}
+    assert set(by_id) == {queued_id, on_machine_id, finished_id}
+    assert by_id[queued_id]["processing_state"] == "QUEUED"
+    assert by_id[queued_id]["machine_id"] is None
+    assert by_id[queued_id]["available_actions"] == ["ASSIGN", "TRANSFER"]
+    assert by_id[on_machine_id]["processing_state"] == "ON_MACHINE"
+    assert by_id[on_machine_id]["machine_id"] == lathe.machine_id
+    assert by_id[on_machine_id]["available_actions"] == ["DONE", "QUEUE", "TRANSFER"]
+    assert by_id[finished_id]["processing_state"] == "READY_TO_TRANSFER"
+    assert by_id[finished_id]["machine_id"] is None
+    assert by_id[finished_id]["available_actions"] == ["TRANSFER"]
+    assert all(flow["part_number"] == pn for flow in body["in_area"])
+
+    # Seen from another station, the same three flows are transfer
+    # candidates carrying their state — several → explicit selection.
+    elsewhere = _resolve_pn(client, deburr.station_id, part_number=pn).json()
+    assert elsewhere["resolution"] == "TRANSFER_SOURCE_AVAILABLE"
+    assert elsewhere["requires_selection"] is True
+    states = {c["quantity_flow_id"]: c["processing_state"] for c in elsewhere["candidates"]}
+    assert states == {
+        queued_id: "QUEUED",
+        on_machine_id: "ON_MACHINE",
+        finished_id: "READY_TO_TRANSFER",
+    }
+
+
+def test_single_flow_needs_no_selection(client: TestClient) -> None:
+    lathe = _Cell(client)
+    deburr = _Cell(client)
+    _, pn = _release(client, lathe, quantity=5)
+    here = _resolve_pn(client, lathe.station_id, part_number=pn).json()
+    assert len(here["in_area"]) == 1 and here["requires_selection"] is False
+    elsewhere = _resolve_pn(client, deburr.station_id, part_number=pn).json()
+    assert len(elsewhere["candidates"]) == 1 and elsewhere["requires_selection"] is False
+    nothing = _resolve_pn(client, deburr.station_id, part_number=_unique("PN")).json()
+    assert nothing["resolution"] == "NO_TRANSFERABLE_QUANTITY"
+    assert nothing["requires_selection"] is False
+
+
+def test_inventory_separates_queued_on_machine_and_finished_quantity(
+    client: TestClient, db_engine: Engine
+) -> None:
+    lathe = _Cell(client, machine_count=3)
+    machine_a, machine_b, machine_c = lathe.machine_ids
+    queued_id, queued_pn = _release(client, lathe, quantity=10)
+    a1_id, a1_pn = _release(client, lathe, quantity=20)
+    a2_id, a2_pn = _release(client, lathe, quantity=30)
+    b_id, b_pn = _release(client, lathe, quantity=40)
+    finished_id, finished_pn = _release(client, lathe, quantity=50)
+    for flow_id, pn, quantity, machine_id in (
+        (a1_id, a1_pn, 20, machine_a),
+        (a2_id, a2_pn, 30, machine_a),
+        (b_id, b_pn, 40, machine_b),
+        (finished_id, finished_pn, 50, machine_c),
+    ):
+        assert (
+            _assign(client, lathe, flow_id, pn, quantity, machine_id=machine_id).status_code == 201
+        )
+    assert (
+        _act(
+            client,
+            "DONE",
+            lathe.station_id,
+            part_number=finished_pn,
+            quantity_flow_id=finished_id,
+            machine_id=machine_c,
+            quantity=50,
+        ).status_code
+        == 201
+    )
+
+    inventory = _inventory(client, lathe.area_id)
+    # Area summary: queued and finished; Machine cards: ON_MACHINE only.
+    assert [(line["part_number"], line["total_quantity"]) for line in inventory["queued"]] == [
+        (queued_pn, 10)
+    ]
+    assert inventory["queued_quantity"] == 10
+    assert [(line["part_number"], line["total_quantity"]) for line in inventory["finished"]] == [
+        (finished_pn, 50)
+    ]
+    assert inventory["finished_quantity"] == 50
+    assert inventory["on_machine_quantity"] == 90
+    assert inventory["total_quantity"] == 10 + 90 + 50
+    assert inventory["total_part_numbers"] == 5
+    cards = {card["machine"]["id"]: card for card in inventory["machines"]}
+    assert set(cards) == {machine_a, machine_b, machine_c}  # every active Machine
+    assert cards[machine_a]["total_quantity"] == 50
+    assert {line["part_number"] for line in cards[machine_a]["lines"]} == {a1_pn, a2_pn}
+    assert cards[machine_a]["machine"]["operational_state"] == "RUNNING"
+    assert cards[machine_b]["total_quantity"] == 40
+    assert cards[machine_b]["machine"]["operational_state"] == "RUNNING"
+    # The finished quantity left Machine C's card: idle and empty.
+    assert cards[machine_c]["total_quantity"] == 0 and cards[machine_c]["lines"] == []
+    assert cards[machine_c]["machine"]["operational_state"] == "IDLE"
+    on_cards = {
+        flow["quantity_flow_id"]
+        for card in inventory["machines"]
+        for line in card["lines"]
+        for flow in line["flows"]
+    }
+    assert on_cards == {a1_id, a2_id, b_id}
+    assert all(
+        flow["processing_state"] == "ON_MACHINE" and flow["machine_id"] == card["machine"]["id"]
+        for card in inventory["machines"]
+        for line in card["lines"]
+        for flow in line["flows"]
+    )
+
+    # Reconciliation with the Machines management read model.
+    for machine_id, card in cards.items():
+        managed = _machine(client, machine_id)
+        assert managed["operational_state"] == card["machine"]["operational_state"]
+        assert managed["assigned_quantity"] == card["total_quantity"]
+        assert managed["state_changed_at"] == card["machine"]["state_changed_at"]
+    listed = {m["id"]: m for m in client.get("/api/machines").json()}
+    assert listed[machine_a]["assigned_quantity"] == 50
+    assert listed[machine_c]["operational_state"] == "IDLE"
+
+    # A retired Machine is no card; a maintained one keeps its quantity
+    # on its card with the Maintenance state.
+    assert client.post(f"/api/machines/{machine_c}/retire", json={}).status_code == 200
+    assert client.post(f"/api/machines/{machine_b}/maintenance", json={}).status_code == 201
+    inventory = _inventory(client, lathe.area_id)
+    cards = {card["machine"]["id"]: card for card in inventory["machines"]}
+    assert set(cards) == {machine_a, machine_b}
+    assert cards[machine_b]["machine"]["operational_state"] == "MAINTENANCE"
+    assert cards[machine_b]["machine"]["maintenance_since"] is not None
+    assert cards[machine_b]["total_quantity"] == 40
+    assert inventory["on_machine_quantity"] == 90
+    _assert_replay_matches(db_engine, finished_id)
+
+
+def test_inventory_of_an_area_without_machines_has_no_cards(client: TestClient) -> None:
+    material = _Cell(client, machine_count=0)
+    _release(client, material, quantity=3)
+    inventory = _inventory(client, material.area_id)
+    assert inventory["machines"] == []
+    assert inventory["queued_quantity"] == 3 and inventory["on_machine_quantity"] == 0
+    assert inventory["finished_quantity"] == 0
+    assert (
+        client.get(f"/api/scan-stations/{material.station_id}/context").json()["has_machines"]
+        is False
+    )

@@ -52,8 +52,14 @@ the Scan Station read models, and the real Scan Station frontend):
   `…/machine-releases` (QUEUE) and `…/area-completions` (DONE) — each
   one whole Quantity Flow, one idempotent transaction; a transfer of
   ON_MACHINE quantity appends `AREA_COMPLETED` + `TRANSFERRED` as one
-  command under one `device_event_id`; `/api/machines` responses carry
-  the derived `operational_state` and `assigned_quantity`),
+  command under one `device_event_id`;
+  `POST /api/scan-stations/{id}/machine-scans/resolve` — a
+  `PF:MACHINE:` barcode resolved into the one-shot Machine-first
+  assignment context with the Area's queued flows; the PN resolution
+  and the Area inventory carry each flow's derived processing state,
+  Machine and valid actions, the inventory split into queued / per
+  Machine card (ON_MACHINE only) / finished; `/api/machines` responses
+  carry the derived `operational_state` and `assigned_quantity`),
   all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
@@ -437,8 +443,12 @@ integration):
   Movement shapes and Machine state derivation, the implicit
   `AREA_COMPLETED` + `TRANSFERRED` command and its whole-command
   replay, refusals with zero writes, cross-kind idempotency conflicts,
-  the assigned-quantity retirement blocker, and the assign-versus-assign,
-  assign-versus-retirement and DONE-versus-transfer races) — all
+  the assigned-quantity retirement blocker, the assign-versus-assign,
+  assign-versus-retirement and DONE-versus-transfer races, Machine
+  barcode resolution into the one-shot Machine-first context, PN-first
+  actions and selection ambiguity, and the queued / on-Machine /
+  finished inventory split reconciling with the Machines read model)
+  — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
   be allowed to create databases (the Compose and CI `partflow_user`

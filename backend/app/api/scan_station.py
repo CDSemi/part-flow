@@ -50,11 +50,24 @@ maintenance Machine:
   (``AREA_COMPLETED`` → ``READY_TO_TRANSFER``, Machine cleared, Area
   kept).
 
+- ``POST /scan-stations/{station_id}/machine-scans/resolve`` — a
+  Machine barcode (``PF:MACHINE:<asset-tag>``) or a manual Asset Tag
+  resolved at the station into the ONE-SHOT assignment context: the
+  Machine preselected (404 unknown; 409 retired, other Area, or under
+  maintenance) and the QUEUED flows of the station's Area to select or
+  scan a PN for (several → ``requires_selection``). A read: nothing is
+  stored, no Machine session exists — the next scan starts fresh.
+
 The transfer response additionally reports the implicit
 ``AREA_COMPLETED`` (``completed_movement_id`` / ``completed_machine_id``)
 appended in the same command when the quantity was still ON_MACHINE.
-Every flow in the read models carries its derived ``processing_state``
-and ``machine_id``.
+Every flow in the read models carries its derived ``processing_state``,
+``machine_id`` and ``available_actions`` (PN-first: QUEUED → ASSIGN,
+TRANSFER; ON_MACHINE → DONE, QUEUE, TRANSFER; READY_TO_TRANSFER →
+TRANSFER), the PN resolution flags ``requires_selection`` when several
+flows match, and the Area inventory splits queued quantity, quantity per
+Machine card (ON_MACHINE only, with the derived Machine state) and
+finished quantity.
 """
 
 import datetime
@@ -65,8 +78,9 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.dependencies import SessionDep
 from app.application import machine_processing, scan_station, transfers
-from app.application.scan_station import FlowInArea, WorkOrderContext
-from app.infrastructure.models import Area, Operation
+from app.application.scan_station import FlowInArea, MachineInventory, WorkOrderContext
+from app.domain.enums import MachineOperationalState
+from app.infrastructure.models import Area, Machine, Operation
 
 router = APIRouter(prefix="/api")
 
@@ -100,9 +114,12 @@ class WorkOrderContextResponse(BaseModel):
 
 
 ProcessingStateLiteral = Literal["QUEUED", "ON_MACHINE", "READY_TO_TRANSFER"]
+FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
+MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
 
 
 class FlowInAreaResponse(BaseModel):
+    part_number: str
     quantity_flow_id: int
     quantity: int
     route_mode: str
@@ -110,7 +127,44 @@ class FlowInAreaResponse(BaseModel):
     # machine_id is set exactly while ON_MACHINE.
     processing_state: ProcessingStateLiteral
     machine_id: int | None
+    # The actions currently valid for this flow (PN-first, §15).
+    available_actions: list[FlowActionLiteral]
     work_order: WorkOrderContextResponse | None
+
+
+class MachineRef(BaseModel):
+    id: int
+    name: str
+    asset_tag: str
+    barcode_value: str
+    # Derived (PROJECT_PROFILE §8.6) with the moment it last changed.
+    operational_state: MachineStateLiteral
+    state_changed_at: datetime.datetime
+    maintenance_since: datetime.datetime | None
+    maintenance_note: str | None
+    maintenance_expected_return: datetime.date | None
+
+
+def _machine_state(state: MachineOperationalState) -> MachineStateLiteral:
+    if state is MachineOperationalState.MAINTENANCE:
+        return "MAINTENANCE"
+    if state is MachineOperationalState.RUNNING:
+        return "RUNNING"
+    return "IDLE"
+
+
+def _machine_ref(machine: Machine, state: MachineStateLiteral) -> MachineRef:
+    return MachineRef(
+        id=machine.id,
+        name=machine.name,
+        asset_tag=machine.asset_tag,
+        barcode_value=machine.barcode_value,
+        operational_state=state,
+        state_changed_at=machine.state_changed_at,
+        maintenance_since=machine.maintenance_since,
+        maintenance_note=machine.maintenance_note,
+        maintenance_expected_return=machine.maintenance_expected_return,
+    )
 
 
 def _area_ref(area: Area) -> AreaRef:
@@ -145,11 +199,13 @@ def _work_order(context: WorkOrderContext | None) -> WorkOrderContextResponse | 
 
 def _flow(item: FlowInArea) -> FlowInAreaResponse:
     return FlowInAreaResponse(
+        part_number=item.part_number,
         quantity_flow_id=item.quantity_flow_id,
         quantity=item.quantity,
         route_mode=item.route_mode,
         processing_state=item.processing_state.value,
         machine_id=item.machine_id,
+        available_actions=list(item.available_actions),
         work_order=_work_order(item.work_order),
     )
 
@@ -237,6 +293,8 @@ class ScanResolveResponse(BaseModel):
     operations: list[OperationRef]
     has_active_demand: bool
     transfer_blocked_reason: str | None
+    # Several flows match: the operator must select exactly one.
+    requires_selection: bool
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -275,6 +333,51 @@ def resolve_scan(
         operations=[_operation_ref(operation) for operation in result.operations],
         has_active_demand=result.has_active_demand,
         transfer_blocked_reason=result.transfer_blocked_reason,
+        requires_selection=result.requires_selection,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Machine scan resolution — one-shot assignment context (Phase 6)
+# ---------------------------------------------------------------------------
+
+
+class MachineScanResolveRequest(BaseModel):
+    """Exactly one of a scanned Machine barcode or a manually entered Asset Tag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    barcode: str | None = None
+    asset_tag: str | None = None
+
+
+class MachineScanResolveResponse(BaseModel):
+    """The one-shot Assign to Machine context. Nothing is stored server-side."""
+
+    station_id: str
+    area: AreaRef
+    machine: MachineRef
+    assigned_quantity: int
+    # Every QUEUED flow of the Area, all PNs, in PN order — never
+    # picked; more than one means the operator selects or scans a PN.
+    queued: list[FlowInAreaResponse]
+    requires_selection: bool
+
+
+@router.post("/scan-stations/{station_id}/machine-scans/resolve")
+def resolve_machine_scan(
+    station_id: str, body: MachineScanResolveRequest, session: SessionDep
+) -> MachineScanResolveResponse:
+    result = scan_station.resolve_machine_scan(
+        session, station_id, barcode=body.barcode, asset_tag=body.asset_tag
+    )
+    return MachineScanResolveResponse(
+        station_id=result.station.station_id,
+        area=_area_ref(result.area),
+        machine=_machine_ref(result.machine, _machine_state(result.operational_state)),
+        assigned_quantity=result.assigned_quantity,
+        queued=[_flow(item) for item in result.queued],
+        requires_selection=result.requires_selection,
     )
 
 
@@ -491,11 +594,48 @@ class InventoryLineResponse(BaseModel):
     flows: list[FlowInAreaResponse]
 
 
+class MachineInventoryResponse(BaseModel):
+    """One Machine card: ON_MACHINE quantity only (PROJECT_PROFILE §12)."""
+
+    machine: MachineRef
+    lines: list[InventoryLineResponse]
+    total_quantity: int
+
+
 class AreaInventoryResponse(BaseModel):
     area: AreaRef
+    # Every ACTIVE flow per PN whatever its state (Phase 5 shape).
     lines: list[InventoryLineResponse]
     total_part_numbers: int
     total_quantity: int
+    # Phase 6: the same flows split by derived state — queued and
+    # finished are Area summary figures; on-Machine quantity sits on
+    # the Machine cards (every active Machine, with or without quantity).
+    queued: list[InventoryLineResponse]
+    queued_quantity: int
+    machines: list[MachineInventoryResponse]
+    on_machine_quantity: int
+    finished: list[InventoryLineResponse]
+    finished_quantity: int
+
+
+def _lines(lines: list[scan_station.InventoryLine]) -> list[InventoryLineResponse]:
+    return [
+        InventoryLineResponse(
+            part_number=line.part_number,
+            total_quantity=line.total_quantity,
+            flows=[_flow(item) for item in line.flows],
+        )
+        for line in lines
+    ]
+
+
+def _machine_card(card: MachineInventory) -> MachineInventoryResponse:
+    return MachineInventoryResponse(
+        machine=_machine_ref(card.machine, _machine_state(card.operational_state)),
+        lines=_lines(card.lines),
+        total_quantity=card.total_quantity,
+    )
 
 
 @router.get("/areas/{area_id}/inventory")
@@ -503,14 +643,13 @@ def get_area_inventory(area_id: int, session: SessionDep) -> AreaInventoryRespon
     inventory = scan_station.area_inventory(session, area_id)
     return AreaInventoryResponse(
         area=_area_ref(inventory.area),
-        lines=[
-            InventoryLineResponse(
-                part_number=line.part_number,
-                total_quantity=line.total_quantity,
-                flows=[_flow(item) for item in line.flows],
-            )
-            for line in inventory.lines
-        ],
+        lines=_lines(inventory.lines),
         total_part_numbers=inventory.total_part_numbers,
         total_quantity=inventory.total_quantity,
+        queued=_lines(inventory.queued),
+        queued_quantity=inventory.queued_quantity,
+        machines=[_machine_card(card) for card in inventory.machines],
+        on_machine_quantity=inventory.on_machine_quantity,
+        finished=_lines(inventory.finished),
+        finished_quantity=inventory.finished_quantity,
     )

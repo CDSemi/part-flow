@@ -394,7 +394,8 @@ def test_barcode_and_manual_entry_resolve_the_canonical_pn(client: TestClient) -
 @pytest.mark.parametrize(
     ("body", "fragment"),
     [
-        ({"barcode": "PF:MACHINE:CD-0001"}, "Unknown barcode"),
+        # A Machine barcode is recognized as such — it is still not a PN scan.
+        ({"barcode": "PF:MACHINE:CD-0001"}, "Machine barcode"),
         ({"barcode": "PF:AREA:1"}, "Unknown barcode"),
         ({"barcode": "PF:SCRAP"}, "Unknown barcode"),
         ({"barcode": "2027-60-8114-00"}, "Unknown barcode"),  # raw PN text is not a barcode
