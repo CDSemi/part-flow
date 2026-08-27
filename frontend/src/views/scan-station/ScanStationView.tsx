@@ -350,18 +350,17 @@ const MACHINE_CARD_STATUS: Record<
 function presentInventory(
   inventory: AreaInventory,
   areaKey: MockArea['key'],
-  hasMachines: boolean,
-  operations: OperationRef[],
 ): InventoryPresentation {
+  // The Area mode is the inventory's own — the SERVER's judgement from
+  // the Area's active Machines at the moment this inventory was read
+  // (PROJECT_PROFILE §12), consistent with the flow states it carries.
+  const hasMachines = inventory.hasMachines;
   const machineByName = new Map<string, MachineRef>();
   const machineById = new Map<number, MachineRef>();
   for (const card of inventory.machines) {
     machineByName.set(card.machine.name, card.machine);
     machineById.set(card.machine.id, card.machine);
   }
-  const externalOperationIds = new Set(
-    operations.filter((operation) => operation.isExternal).map((o) => o.id),
-  );
   const cards: MockAreaCard[] = [];
   const flowOf = new Map<MockAreaCard, FlowInArea>();
   for (const line of inventory.lines) {
@@ -372,10 +371,10 @@ function presentInventory(
           : undefined;
       // Direct processing at an external Operation (an outside vendor)
       // is the `vendor` portion of the shared presentation — decided by
-      // the flow's recorded Operation, never by the Area's name.
+      // the flow's RECORDED Operation (active or not), never by the
+      // Area's name or the station's active Operations.
       const external =
-        flow.processingState === 'PROCESSING' &&
-        externalOperationIds.has(flow.operationId);
+        flow.processingState === 'PROCESSING' && flow.operation.isExternal;
       const card: MockAreaCard = {
         area: areaKey,
         pn: flow.partNumber,
@@ -993,22 +992,20 @@ function StationView({
 
   const area = ready ? presentationArea(ready.area, ready.operations) : null;
   // The Area mode is the SERVER's judgement (PROJECT_PROFILE §12 — it
-  // follows from the Area's active Machines): the station context
-  // carries it, and the inventory carries the same flag.
+  // follows from the Area's active Machines). The rendered inventory
+  // is the FRESHEST read of it — it is re-read after every action and
+  // carries the flow states derived under the same mode — so it wins
+  // over the station context loaded earlier: a first Machine added or
+  // the last one retired since the page loaded never leaves the
+  // presentation or the actions on a stale mode.
   const hasMachines =
-    ready?.hasMachines ?? inventoryReady?.hasMachines ?? false;
-  const operations = ready?.operations;
+    inventoryReady?.hasMachines ?? ready?.hasMachines ?? false;
   const presented = useMemo(
     () =>
       inventoryReady && area
-        ? presentInventory(
-            inventoryReady,
-            area.key,
-            hasMachines,
-            operations ?? [],
-          )
+        ? presentInventory(inventoryReady, area.key)
         : EMPTY_PRESENTATION,
-    [inventoryReady, area, hasMachines, operations],
+    [inventoryReady, area],
   );
   const { cards, machines } = presented;
   const machineCardEntries = useMemo(
@@ -1345,11 +1342,6 @@ function StationView({
           station={station}
           flow={flow.flow}
           machine={flow.machine}
-          operation={
-            station.operations.find(
-              (item) => item.id === flow.flow.operationId,
-            ) ?? null
-          }
           writeBlocked={writeBlocked}
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
@@ -1367,7 +1359,6 @@ function StationView({
       {flow?.kind === 'in-area' && (
         <InAreaDialog
           resolution={flow.resolution}
-          hasMachines={hasMachines}
           machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
           onAssign={(queuedFlow) =>
             setFlow({
@@ -1978,7 +1969,6 @@ function TransferDialog({
 
 function InAreaDialog({
   resolution,
-  hasMachines,
   machines,
   onAssign,
   onComplete,
@@ -1987,7 +1977,6 @@ function InAreaDialog({
   onCancel,
 }: {
   resolution: ScanResolution;
-  hasMachines: boolean;
   /** The active Machines of the station's Area (for the ON_MACHINE rows). */
   machines: MachineRef[];
   /** PN-first assignment of ONE queued flow (GUI_DESIGN §4.7). */
@@ -2009,30 +1998,29 @@ function InAreaDialog({
     0,
   );
   // The valid choices come from the server's derived state of EACH
-  // flow (PROJECT_PROFILE §12): a queued flow offers Assign, a flow on a
-  // Machine offers completion on that Machine, a directly processing
-  // flow of an Area without Machines offers completion without one.
-  // Several flows of the PN are several explicit choices — never one
-  // merged action.
-  const queued = hasMachines
-    ? resolution.inArea.filter((flow) =>
-        flow.availableActions.includes('ASSIGN'),
-      )
-    : [];
-  const onMachine = hasMachines
-    ? resolution.inArea.flatMap((flow) => {
-        if (!flow.availableActions.includes('DONE')) return [];
-        const machine = machines.find((item) => item.id === flow.machineId);
-        return machine ? [{ flow, machine }] : [];
-      })
-    : [];
-  const processing = hasMachines
-    ? []
-    : resolution.inArea.filter(
-        (flow) =>
-          flow.processingState === 'PROCESSING' &&
-          flow.availableActions.includes('DONE'),
-      );
+  // flow, just resolved (PROJECT_PROFILE §12) — never from an Area mode
+  // loaded earlier: a queued flow offers Assign, a flow on a Machine
+  // offers completion on that Machine, a directly processing flow of an
+  // Area without Machines offers completion without one. Several flows
+  // of the PN are several explicit choices — never one merged action.
+  const queued = resolution.inArea.filter((flow) =>
+    flow.availableActions.includes('ASSIGN'),
+  );
+  const onMachine = resolution.inArea.flatMap((flow) => {
+    if (
+      flow.processingState !== 'ON_MACHINE' ||
+      !flow.availableActions.includes('DONE')
+    ) {
+      return [];
+    }
+    const machine = machines.find((item) => item.id === flow.machineId);
+    return machine ? [{ flow, machine }] : [];
+  });
+  const processing = resolution.inArea.filter(
+    (flow) =>
+      flow.processingState === 'PROCESSING' &&
+      flow.availableActions.includes('DONE'),
+  );
   const finishedQty = resolution.inArea
     .filter((flow) => flow.processingState === 'READY_TO_TRANSFER')
     .reduce((sum, flow) => sum + flow.quantity, 0);

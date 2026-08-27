@@ -194,10 +194,14 @@ class FlowInArea(NamedTuple):
     quantity_flow_id: int
     quantity: int
     route_mode: str
-    # The Operation the quantity is in the Area for — recorded on its
-    # latest Movement (the arrival, or carried forward by the in-Area
-    # events). A direct-processing Area names it on the DONE summary.
-    operation_id: int
+    # The Operation the quantity is in the Area for — the one RECORDED
+    # on its latest Movement (the arrival, or carried forward by the
+    # in-Area events), loaded whatever its current activation: existing
+    # quantity keeps its recorded Operation even after that Operation
+    # was deactivated, independent of the active Operations a station
+    # offers for NEW arrivals. A direct-processing Area names it on the
+    # DONE summary and tells external processing apart by it.
+    operation: Operation
     # Derived from the latest Movement and the Area's mode (PROJECT_PROFILE
     # §12): a NULL Machine is QUEUED, PROCESSING or READY_TO_TRANSFER,
     # never "queued" by itself.
@@ -250,6 +254,15 @@ class ScanResolution(NamedTuple):
     requires_selection: bool
 
 
+def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> dict[int, Operation]:
+    """The Operations recorded on the latest Movements, active or not."""
+    operation_ids = {movement.operation_id for movement in latest.values()}
+    if not operation_ids:
+        return {}
+    rows = session.scalars(select(Operation).where(Operation.id.in_(operation_ids)))
+    return {operation.id: operation for operation in rows}
+
+
 def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
     """The initiating Work Order Demand of each flow, from its RECEIVED context."""
     if not flow_ids:
@@ -294,6 +307,7 @@ def resolve_part_number_scan(
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = latest_movements(session, [flow.id for flow in flows])
+    recorded = _recorded_operations(session, latest)
     # Every flow's state depends on the mode of the Area it is in.
     machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
     operations = active_area_operations(session, area.id)
@@ -321,7 +335,7 @@ def resolve_part_number_scan(
                     flow.id,
                     flow.quantity,
                     flow.route_mode,
-                    latest[flow.id].operation_id,
+                    recorded[latest[flow.id].operation_id],
                     state,
                     flow.current_machine_id,
                     available_actions(state),
@@ -476,6 +490,7 @@ def resolve_machine_scan(
         )
     )
     latest = latest_movements(session, [flow.id for flow in flows])
+    recorded = _recorded_operations(session, latest)
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     queued = [
         FlowInArea(
@@ -483,7 +498,7 @@ def resolve_machine_scan(
             flow.id,
             flow.quantity,
             flow.route_mode,
-            latest[flow.id].operation_id,
+            recorded[latest[flow.id].operation_id],
             ProcessingState.QUEUED,
             None,
             available_actions(ProcessingState.QUEUED),
@@ -593,6 +608,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = latest_movements(session, [flow.id for flow in flows])
+    recorded = _recorded_operations(session, latest)
     active_machines = list(
         session.scalars(
             select(Machine)
@@ -613,7 +629,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
                 flow.id,
                 flow.quantity,
                 flow.route_mode,
-                latest[flow.id].operation_id,
+                recorded[latest[flow.id].operation_id],
                 state,
                 flow.current_machine_id,
                 available_actions(state),

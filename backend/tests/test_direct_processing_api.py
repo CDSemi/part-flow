@@ -387,7 +387,8 @@ def test_released_quantity_in_an_area_without_machines_is_processing(
     flow = _inventory_flow(client, plating.area_id, flow_id)
     assert flow["processing_state"] == "PROCESSING"
     assert flow["machine_id"] is None
-    assert flow["operation_id"] == plating.operation_id
+    assert flow["operation"]["id"] == plating.operation_id
+    assert flow["operation"]["is_active"] is True
     assert flow["available_actions"] == ["DONE", "TRANSFER"]
     history = _movements(db_engine, flow_id)
     assert [m.movement_type for m in history] == ["RECEIVED"]
@@ -469,7 +470,41 @@ def test_several_operations_need_an_explicit_choice_before_direct_processing(
     assert _movements(db_engine, flow_id)[-1].operation_id == chosen
     arrived = _inventory_flow(client, external.area_id, flow_id)
     assert arrived["processing_state"] == "PROCESSING"
-    assert arrived["operation_id"] == chosen  # the explicit choice, on the read model too
+    assert arrived["operation"]["id"] == chosen  # the explicit choice, on the read model too
+
+
+def test_existing_quantity_keeps_its_recorded_operation_after_deactivation(
+    client: TestClient,
+) -> None:
+    """The read models present the Operation RECORDED on the quantity —
+    active or not — independent of the active Operations the station
+    offers for new arrivals (which no longer include it)."""
+    external = _Cell(client, operation_count=2)
+    recorded_id, other_id = external.operation_ids
+    flow_id, pn = _release(client, external, quantity=3)
+    assert _inventory_flow(client, external.area_id, flow_id)["operation"]["id"] == recorded_id
+
+    marked = client.patch(f"/api/operations/{recorded_id}", json={"is_external": True})
+    assert marked.status_code == 200, marked.text
+    deactivated = client.patch(f"/api/operations/{recorded_id}", json={"is_active": False})
+    assert deactivated.status_code == 200, deactivated.text
+
+    context = _context(client, external.station_id)
+    assert [op["id"] for op in context["operations"]] == [other_id]
+    for flow in (
+        _inventory_flow(client, external.area_id, flow_id),
+        _resolve_pn(client, external.station_id, pn)["in_area"][0],
+    ):
+        assert flow["operation"]["id"] == recorded_id
+        assert flow["operation"]["is_external"] is True
+        assert flow["operation"]["is_active"] is False
+        assert flow["processing_state"] == "PROCESSING"
+    resolved = _resolve_pn(client, external.station_id, pn)
+    assert [op["id"] for op in resolved["operations"]] == [other_id]
+    # The direct DONE still carries the recorded Operation forward.
+    done = _done(client, external, flow_id, pn, 3)
+    assert done.status_code == 201, done.text
+    assert done.json()["operation_id"] == recorded_id
 
 
 # ---------------------------------------------------------------------------

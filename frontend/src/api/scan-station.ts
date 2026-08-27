@@ -58,14 +58,26 @@ export type ProcessingState =
 /** The actions the server reports as currently valid for a flow. */
 export type FlowAction = 'ASSIGN' | 'DONE' | 'QUEUE' | 'TRANSFER';
 
+/** The Operation RECORDED on a flow's latest Movement, as recorded —
+ * whatever its current activation. Existing quantity keeps it even
+ * after the Operation was deactivated; it is independent of the active
+ * Operations a station offers for new arrivals. */
+export interface RecordedOperation {
+  id: number;
+  code: string;
+  name: string | null;
+  isExternal: boolean;
+  isActive: boolean;
+}
+
 export interface FlowInArea {
   partNumber: string;
   quantityFlowId: number;
   quantity: number;
   routeMode: 'FLOATING' | 'PLANNED';
-  /** The Operation recorded on the flow's latest Movement — the one
-   * the quantity is in the Area for. */
-  operationId: number;
+  /** The Operation the quantity is in the Area for (recorded, not
+   * looked up among the station's active Operations). */
+  operation: RecordedOperation;
   processingState: ProcessingState;
   /** Set exactly while ON_MACHINE. */
   machineId: number | null;
@@ -116,7 +128,13 @@ interface FlowInAreaWire {
   quantity_flow_id: number;
   quantity: number;
   route_mode: 'FLOATING' | 'PLANNED';
-  operation_id: number;
+  operation: {
+    id: number;
+    code: string;
+    name: string | null;
+    is_external: boolean;
+    is_active: boolean;
+  };
   processing_state: ProcessingState;
   machine_id: number | null;
   available_actions: FlowAction[];
@@ -186,7 +204,13 @@ function toFlowInArea(wire: FlowInAreaWire): FlowInArea {
     quantityFlowId: wire.quantity_flow_id,
     quantity: wire.quantity,
     routeMode: wire.route_mode,
-    operationId: wire.operation_id,
+    operation: {
+      id: wire.operation.id,
+      code: wire.operation.code,
+      name: wire.operation.name,
+      isExternal: wire.operation.is_external,
+      isActive: wire.operation.is_active,
+    },
     processingState: wire.processing_state,
     machineId: wire.machine_id,
     availableActions: [...wire.available_actions],

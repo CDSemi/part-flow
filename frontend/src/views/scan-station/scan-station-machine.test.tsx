@@ -154,7 +154,11 @@ function flowWire(flow: Flow) {
     quantity_flow_id: flow.id,
     quantity: flow.qty,
     route_mode: 'FLOATING',
-    operation_id: OPERATIONS.find((o) => o.area_id === flow.areaId)!.id,
+    operation: {
+      ...OPERATIONS.find((o) => o.area_id === flow.areaId)!,
+      is_external: false,
+      is_active: true,
+    },
     processing_state: flow.state,
     machine_id: flow.machineId,
     available_actions: actionsOf(flow.state),

@@ -274,9 +274,13 @@ export function AreaPnList({
 }) {
   return (
     <ul className="mc-list">
-      {entries.map((entry) => (
+      {entries.map((entry, index) => (
+        // Several separate quantities of one PN under one Work Order
+        // are several rows: the position keeps the key unique so a
+        // state change (queue ↔ direct processing) never leaves a
+        // stale row behind.
         <AreaPnRow
-          key={`${entry.card.pn}-${entry.card.workOrder}-${entry.state}-${entry.context}`}
+          key={`${entry.card.pn}-${entry.card.workOrder}-${entry.state}-${entry.context}-${index}`}
           entry={entry}
           action={rowAction?.(entry)}
           directLabel={directLabel}

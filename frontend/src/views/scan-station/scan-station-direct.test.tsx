@@ -35,6 +35,8 @@ interface Flow {
   areaId: number;
   state: State;
   machineId: number | null;
+  /** The Operation recorded on the flow (defaults to the Area's first). */
+  operationId?: number;
 }
 
 const AREAS = [
@@ -42,10 +44,20 @@ const AREAS = [
   { id: 3, name: 'Deburr', color: '#33aa66' },
   { id: 6, name: 'Plating', color: '#aa33aa' },
 ];
-/** Plating's Operation is external (an outside vendor). */
+/** Plating's Operation is external (an outside vendor). Deburr has a
+ * second, DEACTIVATED external Operation (`ANODIZE`) that existing
+ * quantity may still have been recorded for. */
 const OPERATIONS = [
   { id: 20, area_id: 2, code: 'TURNING', name: 'Turning', is_external: false },
   { id: 30, area_id: 3, code: 'DEBURR', name: 'Deburring', is_external: false },
+  {
+    id: 31,
+    area_id: 3,
+    code: 'ANODIZE',
+    name: 'Anodizing (vendor)',
+    is_external: true,
+    inactive: true,
+  },
   { id: 60, area_id: 6, code: 'PLATE', name: 'Plating', is_external: true },
 ];
 const STATIONS = [
@@ -64,8 +76,14 @@ const LATHE_1 = {
   maintenance_expected_return: null,
 };
 
-/** The Area mode follows from its Machines: only Lathe has one. */
-const hasMachines = (areaId: number) => areaId === 2;
+/** The Area mode follows from its Machines: only Lathe has one — unless
+ * a test moves an Area between the modes (a first Machine added, the
+ * last one retired) after the station context was loaded. */
+let machineAreas: Set<number>;
+const hasMachines = (areaId: number) => machineAreas.has(areaId);
+/** What the station CONTEXT reports when it was loaded — a test may
+ * pin it to a stale value to simulate the mode changing afterwards. */
+let contextHasMachines: ((areaId: number) => boolean) | null;
 
 let flows: Flow[];
 let committed: Map<string, unknown>;
@@ -87,8 +105,25 @@ function areaRef(areaId: number) {
   };
 }
 
+/** The ACTIVE Operations a station offers for new arrivals. */
 function operationsOf(areaId: number) {
-  return OPERATIONS.filter((o) => o.area_id === areaId);
+  return OPERATIONS.filter((o) => o.area_id === areaId && !o.inactive).map(
+    ({ id, code, name, is_external }) => ({ id, code, name, is_external }),
+  );
+}
+
+/** The Operation RECORDED on a flow — active or not. */
+function recordedOperation(flow: Flow) {
+  const operation =
+    OPERATIONS.find((o) => o.id === flow.operationId) ??
+    OPERATIONS.find((o) => o.area_id === flow.areaId)!;
+  return {
+    id: operation.id,
+    code: operation.code,
+    name: operation.name,
+    is_external: operation.is_external,
+    is_active: !operation.inactive,
+  };
 }
 
 function actionsOf(state: State) {
@@ -107,7 +142,7 @@ function flowWire(flow: Flow) {
     quantity_flow_id: flow.id,
     quantity: flow.qty,
     route_mode: 'FLOATING',
-    operation_id: operationsOf(flow.areaId)[0].id,
+    operation: recordedOperation(flow),
     processing_state: flow.state,
     machine_id: flow.machineId,
     available_actions: actionsOf(flow.state),
@@ -240,7 +275,7 @@ function handle(url: string, method: string, body: unknown): Response {
       department: { id: 1, name: 'Finishing' },
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
-      has_machines: hasMachines(station.area_id),
+      has_machines: (contextHasMachines ?? hasMachines)(station.area_id),
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -328,7 +363,7 @@ function handle(url: string, method: string, body: unknown): Response {
       quantity: flow.qty,
       area_id: flow.areaId,
       machine_id: request.machine_id ?? null,
-      operation_id: operationsOf(flow.areaId)[0].id,
+      operation_id: recordedOperation(flow).id,
       station_id: station.station_id,
       processing_state: flow.state,
       device_event_id: request.device_event_id,
@@ -424,6 +459,8 @@ beforeEach(() => {
       machineId: null,
     },
   ];
+  machineAreas = new Set([2]);
+  contextHasMachines = null;
   committed = new Map();
   requests = [];
   nextMovementId = 500;
@@ -988,4 +1025,172 @@ test('while disconnected the row DONE is disabled in place and the final Confirm
       }),
     ).toBeDisabled(),
   );
+});
+
+/* ============ Area mode: the freshest server read wins ============ */
+
+test('a first Machine added after the station loaded: the fresh inventory (Machine Area, queued flows) wins over the stale context — queue, Machine card, no direct DONE', async () => {
+  // The context was loaded while Plating had no Machines; a Machine
+  // was added since, so every inventory read reports the Machine Area
+  // and its quantity as QUEUED.
+  contextHasMachines = () => false;
+  machineAreas = new Set([2, 6]);
+  flows.find((f) => f.id === 200)!.state = 'QUEUED';
+  await renderStation();
+
+  expect(document.querySelector('.abd-machine')).not.toBeNull();
+  const summary = summaryCard();
+  expect(
+    within(summary).getByText('Area queue — awaiting Machine'),
+  ).toBeInTheDocument();
+  expect(within(summary).queryByText('In processing')).toBeNull();
+  expect(row('2027-60-8114-00')).toHaveTextContent('Awaiting Machine');
+  expect(
+    within(summary).queryByRole('button', { name: 'Complete Area processing' }),
+  ).toBeNull();
+  const stats = screen.getByLabelText('Area statistics');
+  expect(stats).toHaveTextContent('Queued');
+  expect(stats).not.toHaveTextContent('Processing');
+  // PN-first: the choices follow the flow states just resolved.
+  scan('PF:PN:2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  expect(within(actions).getByText('Assign to Machine')).toBeInTheDocument();
+  expect(
+    within(actions).queryByRole('button', {
+      name: /^Complete Area processing/,
+    }),
+  ).toBeNull();
+  fireEvent.keyDown(actions, { key: 'Escape' });
+});
+
+test('the last Machine retired after the station loaded: the fresh inventory (no Machines, processing flows) wins over the stale context — In processing, direct DONE, no cards', async () => {
+  contextHasMachines = () => true;
+  machineAreas = new Set();
+  flows.find((f) => f.id === 220)!.state = 'PROCESSING';
+  await renderStation('LATHE-ST-01');
+
+  expect(document.querySelector('.abd-machine')).toBeNull();
+  const summary = summaryCard();
+  expect(
+    within(summary).getByText('In processing', { selector: '.abd-grp' }),
+  ).toBeInTheDocument();
+  expect(
+    within(summary).queryByText('Area queue — awaiting Machine'),
+  ).toBeNull();
+  expect(row('LATHE-Q')).toHaveTextContent('In processing');
+  expect(
+    within(row('LATHE-Q')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toBeInTheDocument();
+  const stats = screen.getByLabelText('Area statistics');
+  expect(stats).toHaveTextContent('Processing');
+  expect(stats).not.toHaveTextContent('Queued');
+  scan('PF:PN:LATHE-Q');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  expect(within(actions).queryByText('Assign to Machine')).toBeNull();
+  expect(
+    within(actions).getByRole('button', { name: /^Complete Area processing/ }),
+  ).toBeInTheDocument();
+  fireEvent.keyDown(actions, { key: 'Escape' });
+});
+
+test('the mode changing while the station is open is picked up by the next inventory read: after a DONE in a now-Machine Area the presentation follows the server, not the loaded context', async () => {
+  const input = await renderStation('DEBURR-ST-01');
+  expect(
+    within(summaryCard()).getAllByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toHaveLength(2);
+  // A Machine is added to Deburr while the station is open; from now on
+  // the server reports the Machine Area with queued quantity. The
+  // context reload after the action reports it too — but the
+  // presentation must never depend on that.
+  machineAreas = new Set([2, 3]);
+  contextHasMachines = (areaId) => areaId === 2;
+  for (const flow of flows) {
+    if (flow.areaId === 3 && flow.state === 'PROCESSING') flow.state = 'QUEUED';
+  }
+  // The operator's pending direct DONE is refused by the server (the
+  // Area has Machines now) and the Area is re-read.
+  fireEvent.click(
+    within(summaryCard()).getAllByRole('button', {
+      name: 'Complete Area processing',
+    })[0],
+  );
+  const dlg = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm completion' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  fireEvent.click(within(gate).getByRole('button', { name: 'Yes — finished' }));
+  await waitFor(() => expect(dialog()).toHaveTextContent('Area has Machines'));
+  expect(committed.size).toBe(0);
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  await waitFor(() =>
+    expect(document.querySelector('.abd-machine')).not.toBeNull(),
+  );
+  expect(
+    within(summaryCard()).getByText('Area queue — awaiting Machine'),
+  ).toBeInTheDocument();
+  expect(
+    within(summaryCard()).queryByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  ).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+/* ============ Recorded Operation, active or not ============ */
+
+test('existing quantity keeps its RECORDED Operation: an inactive external Operation still reads External processing and names itself on the DONE recap and summary, while the station offers only the active Operation', async () => {
+  // 211 was recorded for ANODIZE, deactivated since; the station's
+  // active Operations no longer include it.
+  flows.find((f) => f.id === 211)!.operationId = 31;
+  await renderStation('DEBURR-ST-01');
+  const header = document.querySelector('.ss-id') as HTMLElement;
+  expect(header).toHaveTextContent('Deburring');
+  expect(header).not.toHaveTextContent('Anodizing');
+
+  const rows = within(summaryCard())
+    .getAllByText('118-052')
+    .map((pn) => pn.closest('li') as HTMLElement);
+  const [recordedActive, recordedInactive] = rows;
+  expect(recordedActive).toHaveTextContent('In processing');
+  expect(recordedInactive).toHaveTextContent('External processing');
+  fireEvent.click(
+    within(recordedInactive).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const dlg = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  expect(dlg).toHaveTextContent('Anodizing (vendor)');
+  expect(dlg).not.toHaveTextContent('Deburring');
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  const summary = dialog();
+  expect(summaryTerms(summary)).toContain('Operation');
+  expect(summary).toHaveTextContent('Anodizing (vendor)');
+  expect(summary).not.toHaveTextContent('Deburring');
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Confirm completion' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  fireEvent.click(within(gate).getByRole('button', { name: 'Yes — finished' }));
+  expect(await notice()).toHaveTextContent('118-052 × 7 finished at Deburr');
+  expect(writes()[0].body).toMatchObject({ quantity_flow_id: 211 });
 });

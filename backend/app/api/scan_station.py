@@ -127,13 +127,26 @@ FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
 MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
 
 
+class RecordedOperationRef(BaseModel):
+    """The Operation recorded on a flow's latest Movement — presented as
+    recorded, whatever its current activation (an inactive Operation is
+    still the one existing quantity is in the Area for)."""
+
+    id: int
+    code: str
+    name: str | None
+    is_external: bool
+    is_active: bool
+
+
 class FlowInAreaResponse(BaseModel):
     part_number: str
     quantity_flow_id: int
     quantity: int
     route_mode: str
-    # The Operation recorded on the flow's latest Movement.
-    operation_id: int
+    # The Operation recorded on the flow's latest Movement — independent
+    # of the active Operations the station offers for new arrivals.
+    operation: RecordedOperationRef
     # Derived from the flow's latest Movement and the Area's mode
     # (PROJECT_PROFILE §12); machine_id is set exactly while ON_MACHINE.
     processing_state: ProcessingStateLiteral
@@ -214,7 +227,13 @@ def _flow(item: FlowInArea) -> FlowInAreaResponse:
         quantity_flow_id=item.quantity_flow_id,
         quantity=item.quantity,
         route_mode=item.route_mode,
-        operation_id=item.operation_id,
+        operation=RecordedOperationRef(
+            id=item.operation.id,
+            code=item.operation.code,
+            name=item.operation.name,
+            is_external=item.operation.is_external,
+            is_active=item.operation.is_active,
+        ),
         processing_state=item.processing_state.value,
         machine_id=item.machine_id,
         available_actions=list(item.available_actions),

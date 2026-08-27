@@ -14,7 +14,6 @@ import type {
   MachineActionResult,
   MachineRef,
   MachineScanResolution,
-  OperationRef,
   StationContext,
 } from '../../api/scan-station';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -541,7 +540,6 @@ export function MachineActionDialog({
   station,
   flow,
   machine,
-  operation,
   writeBlocked,
   onBack,
   onCancel,
@@ -559,9 +557,6 @@ export function MachineActionDialog({
    * the wizard then renders no Machine field and the server records an
    * `AREA_COMPLETED` without a Machine. QUEUE always names a Machine. */
   machine: MachineRef | null;
-  /** The Operation the quantity is in the Area for (the flow's
-   * recorded Operation), named on the direct-processing summary. */
-  operation: OperationRef | null;
   writeBlocked: boolean;
   onBack?: () => void;
   onCancel: () => void;
@@ -670,6 +665,18 @@ export function MachineActionDialog({
                     {areaName} {isDone ? 'finished rack' : 'queue'}
                   </EntityChip>
                 </>,
+                // Direct processing: the Operation RECORDED on the
+                // quantity, as recorded — active or not.
+                ...(machine === null
+                  ? [
+                      <>
+                        Operation{' '}
+                        <EntityChip>
+                          {operationLabel(flow.operation)}
+                        </EntityChip>
+                      </>,
+                    ]
+                  : []),
               ]}
             />
             <Guidance tone="info">
@@ -725,9 +732,12 @@ export function MachineActionDialog({
                   'primary',
                 ],
                 [
+                  // The Operation RECORDED on the quantity (active or
+                  // not) — never looked up among the station's active
+                  // Operations.
                   'Operation',
-                  machine === null && operation ? (
-                    <EntityChip>{operationLabel(operation)}</EntityChip>
+                  machine === null ? (
+                    <EntityChip>{operationLabel(flow.operation)}</EntityChip>
                   ) : null,
                   'primary',
                 ],
