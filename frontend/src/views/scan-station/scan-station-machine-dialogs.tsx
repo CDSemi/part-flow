@@ -14,6 +14,7 @@ import type {
   MachineActionResult,
   MachineRef,
   MachineScanResolution,
+  OperationRef,
   StationContext,
 } from '../../api/scan-station';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -29,7 +30,11 @@ import {
   StepRecap,
 } from './scan-station-presentation';
 import { useOneShotWrite } from './scan-station-write';
-import { enterKeyHandler, quantityKeyHandler } from './scan-station-wizard';
+import {
+  enterKeyHandler,
+  operationLabel,
+  quantityKeyHandler,
+} from './scan-station-wizard';
 
 /**
  * The Phase 6 one-shot Machine-Area dialogs of the REAL Scan Station
@@ -527,7 +532,8 @@ export function AssignToMachineDialog({
 }
 
 /* ------------------------------------------------------------------ */
-/* DONE / QUEUE — the two distinct Machine-card actions                */
+/* DONE / QUEUE — the two distinct Machine-card actions, and the       */
+/* direct-processing DONE (Phase 7): the same wizard without a Machine */
 /* ------------------------------------------------------------------ */
 
 export function MachineActionDialog({
@@ -535,6 +541,7 @@ export function MachineActionDialog({
   station,
   flow,
   machine,
+  operation,
   writeBlocked,
   onBack,
   onCancel,
@@ -544,9 +551,17 @@ export function MachineActionDialog({
 }: {
   kind: 'DONE' | 'QUEUE';
   station: StationContext;
-  /** The ON_MACHINE flow the row action was taken on. */
+  /** The ON_MACHINE flow the row action was taken on — or, with
+   * `machine: null`, the PROCESSING flow of an Area without Machines. */
   flow: FlowInArea;
-  machine: MachineRef;
+  /** The Machine the quantity is on; null for the direct-processing
+   * DONE of an Area without Machines (GUI_DESIGN §4.6 exception) —
+   * the wizard then renders no Machine field and the server records an
+   * `AREA_COMPLETED` without a Machine. QUEUE always names a Machine. */
+  machine: MachineRef | null;
+  /** The Operation the quantity is in the Area for (the flow's
+   * recorded Operation), named on the direct-processing summary. */
+  operation: OperationRef | null;
   writeBlocked: boolean;
   onBack?: () => void;
   onCancel: () => void;
@@ -577,7 +592,7 @@ export function MachineActionDialog({
         stationId: station.stationId,
         partNumber: pn,
         quantityFlowId: flow.quantityFlowId,
-        machineId: machine.id,
+        machineId: machine?.id ?? null,
         quantity: max,
         deviceEventId,
       }),
@@ -604,16 +619,28 @@ export function MachineActionDialog({
     : 'Return unfinished quantity to queue';
   const what = isDone ? 'completion' : 'queue return';
   const cancel = write.outcomeUnknown ? onAbandonUnknown : onCancel;
+  // Where the quantity is now: on the Machine, or in the Area's own
+  // direct processing (no Machine).
+  const position = machine ? machine.name : `${areaName} processing`;
   const gateInfo = isDone ? (
     <>
-      Are you sure <b>{machine.name}</b> has finished <b>{max} pcs</b> of{' '}
-      <b className="mono">{pn}</b>? The finished quantity moves to the{' '}
-      {areaName} finished rack, ready to transfer.
+      Are you sure{' '}
+      {machine ? (
+        <>
+          <b>{machine.name}</b> has finished
+        </>
+      ) : (
+        <>
+          <b>{areaName}</b> has finished processing
+        </>
+      )}{' '}
+      <b>{max} pcs</b> of <b className="mono">{pn}</b>? The finished quantity
+      moves to the {areaName} finished rack, ready to transfer.
     </>
   ) : (
     <>
       Are you sure you want to return <b>{max} pcs</b> of{' '}
-      <b className="mono">{pn}</b> running on <b>{machine.name}</b> back to the{' '}
+      <b className="mono">{pn}</b> running on <b>{position}</b> back to the{' '}
       {areaName} queue? The quantity stays unfinished.
     </>
   );
@@ -638,7 +665,7 @@ export function MachineActionDialog({
             <StepRecap
               lines={[
                 <>
-                  <EntityChip>{machine.name}</EntityChip> →{' '}
+                  <EntityChip>{position}</EntityChip> →{' '}
                   <EntityChip>
                     {areaName} {isDone ? 'finished rack' : 'queue'}
                   </EntityChip>
@@ -646,10 +673,17 @@ export function MachineActionDialog({
               ]}
             />
             <Guidance tone="info">
-              <b>{max} pcs</b> are on {machine.name}. The full quantity{' '}
-              {isDone ? 'completes' : 'returns to the queue'} as a whole.
+              <b>{max} pcs</b> are{' '}
+              {machine ? `on ${machine.name}` : `in processing at ${areaName}`}.
+              The full quantity {isDone ? 'completes' : 'returns to the queue'}{' '}
+              as a whole.
             </Guidance>
-            {fullQuantityGuidance(parsedQty, max, `on ${machine.name}`, what)}
+            {fullQuantityGuidance(
+              parsedQty,
+              max,
+              machine ? `on ${machine.name}` : `in processing at ${areaName}`,
+              what,
+            )}
             <QuantityKeypad value={qty} onChange={setQty} max={max} />
             <StepButtons
               onBack={onBack}
@@ -685,7 +719,18 @@ export function MachineActionDialog({
                   <AreaChip area={station.area}>{areaName}</AreaChip>,
                   'primary',
                 ],
-                ['Machine', <EntityChip>{machine.name}</EntityChip>, 'primary'],
+                [
+                  'Machine',
+                  machine ? <EntityChip>{machine.name}</EntityChip> : null,
+                  'primary',
+                ],
+                [
+                  'Operation',
+                  machine === null && operation ? (
+                    <EntityChip>{operationLabel(operation)}</EntityChip>
+                  ) : null,
+                  'primary',
+                ],
                 [
                   'Result',
                   isDone

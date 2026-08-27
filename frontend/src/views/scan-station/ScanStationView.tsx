@@ -87,26 +87,35 @@ import {
   NOTICE_OK_MS,
   NOTICE_WARN_MS,
   quantityKeyHandler,
+  operationLabel,
 } from './scan-station-wizard';
 import type { Notice } from './scan-station-presentation';
 
 /**
- * Scan Station — the REAL Phase 5/6 view (GUI_DESIGN §4; IMPLEMENTATION_
- * ROADMAP Phases 5–6). The Station Selector and the station itself read
- * real server state through `/api`, PN and Machine barcodes and manual
- * entries resolve on the server, and the production commands recorded
- * here are the source-explicit transfer of a whole Quantity Flow into
- * the station's Area (completing ON_MACHINE quantity implicitly) and
- * the Phase 6 one-shot Machine-Area actions — `Assign to Machine`
- * (Machine-first from a Machine scan, PN-first from a queued row), and
- * the two distinct Machine-card actions DONE (`Complete Area
- * processing`) and QUEUE (`Return to Area queue`) — every one recorded
- * by the server before anything reads as success, with no Machine or
- * PN context surviving a dialog. The remaining approved workflows
- * (direct-processing DONE, Repair, Scrap, Undo, Worker sessions,
- * Receive Quantity from the station) are NOT implemented here: they
- * stay honest placeholders, and the mock preview of them survives only
- * behind the development-only boundary below (`?preview=mock`).
+ * Scan Station — the REAL Phase 5/6/7 view (GUI_DESIGN §4;
+ * IMPLEMENTATION_ROADMAP Phases 5–7). The Station Selector and the
+ * station itself read real server state through `/api`, PN and Machine
+ * barcodes and manual entries resolve on the server, and the production
+ * commands recorded here are the source-explicit transfer of a whole
+ * Quantity Flow into the station's Area (completing actively
+ * processing quantity — ON_MACHINE or directly processing —
+ * implicitly), the Phase 6 one-shot Machine-Area actions — `Assign to
+ * Machine` (Machine-first from a Machine scan, PN-first from a queued
+ * row), and the two distinct Machine-card actions DONE (`Complete Area
+ * processing`) and QUEUE (`Return to Area queue`) — and the Phase 7
+ * direct-processing DONE of an Area without Machines (the same
+ * `Complete Area processing` wizard without a Machine, from the
+ * actively processing `In this Area now` rows or the PN action dialog;
+ * GUI_DESIGN §4.6 direct-processing exception). The Area mode (with
+ * Machines → queue and assign; without → direct processing) and every
+ * flow's holding state come from the server's read models — never from
+ * an Area name, a CSS class or a local guess. Every command is
+ * recorded by the server before anything reads as success, with no
+ * Machine or PN context surviving a dialog. The remaining approved
+ * workflows (Repair, Scrap, Undo, Worker sessions, Receive Quantity
+ * from the station) are NOT implemented here: they stay honest
+ * placeholders, and the mock preview of them survives only behind the
+ * development-only boundary below (`?preview=mock`).
  */
 
 // Development-only preview of the mock Scan Station (Phase 6+
@@ -191,10 +200,6 @@ async function loadSelectorData(): Promise<SelectorData> {
     operationsByArea,
     machineCountByArea,
   };
-}
-
-function operationLabel(operation: Pick<Operation, 'code' | 'name'>): string {
-  return operation.name ?? operation.code;
 }
 
 function StationSelector() {
@@ -322,12 +327,13 @@ function workOrderLabel(workOrder: WorkOrderContext | null): string {
  * Quantity Flow in the Area, its portion placed by the server's derived
  * processing state — the Area queue (`queue` context), the Machine it
  * is on (the Machine's name — the shared grouping puts it on that
- * Machine's card), or the finished rack (`READY_TO_TRANSFER`, Area
- * summary only). In an Area without Machines every flow is a direct
- * portion. `flowOf` maps a rendered row back to its flow so a row
- * action knows exactly which Quantity Flow it acts on. Due dates, Job
- * Numbers and time in Area arrive with the later monitoring read
- * models.
+ * Machine's card), the direct processing of an Area without Machines
+ * (`PROCESSING` — a direct portion, or the `vendor` context when the
+ * flow's Operation is an external one, so the row reads `External
+ * processing`), or the finished rack (`READY_TO_TRANSFER`, Area summary
+ * only). `flowOf` maps a rendered row back to its flow so a row action
+ * knows exactly which Quantity Flow it acts on. Due dates, Job Numbers
+ * and time in Area arrive with the later monitoring read models.
  */
 interface InventoryPresentation {
   cards: MockAreaCard[];
@@ -345,6 +351,7 @@ function presentInventory(
   inventory: AreaInventory,
   areaKey: MockArea['key'],
   hasMachines: boolean,
+  operations: OperationRef[],
 ): InventoryPresentation {
   const machineByName = new Map<string, MachineRef>();
   const machineById = new Map<number, MachineRef>();
@@ -352,6 +359,9 @@ function presentInventory(
     machineByName.set(card.machine.name, card.machine);
     machineById.set(card.machine.id, card.machine);
   }
+  const externalOperationIds = new Set(
+    operations.filter((operation) => operation.isExternal).map((o) => o.id),
+  );
   const cards: MockAreaCard[] = [];
   const flowOf = new Map<MockAreaCard, FlowInArea>();
   for (const line of inventory.lines) {
@@ -360,6 +370,12 @@ function presentInventory(
         flow.processingState === 'ON_MACHINE' && flow.machineId !== null
           ? machineById.get(flow.machineId)
           : undefined;
+      // Direct processing at an external Operation (an outside vendor)
+      // is the `vendor` portion of the shared presentation — decided by
+      // the flow's recorded Operation, never by the Area's name.
+      const external =
+        flow.processingState === 'PROCESSING' &&
+        externalOperationIds.has(flow.operationId);
       const card: MockAreaCard = {
         area: areaKey,
         pn: flow.partNumber,
@@ -367,7 +383,9 @@ function presentInventory(
         job: '—',
         qty: flow.quantity,
         machines: !hasMachines
-          ? []
+          ? external
+            ? [['vendor', flow.quantity]]
+            : []
           : onMachine
             ? [[onMachine.name, flow.quantity]]
             : flow.processingState === 'QUEUED'
@@ -449,10 +467,13 @@ type Flow =
       parent?: Flow;
     }
   | {
+      // DONE / QUEUE on Machine-assigned quantity, or (Phase 7) the
+      // direct-processing DONE — `machine: null`, DONE only — of an
+      // Area without Machines.
       kind: 'machine-action';
       action: 'DONE' | 'QUEUE';
       flow: FlowInArea;
-      machine: MachineRef;
+      machine: MachineRef | null;
       parent?: Flow;
     };
 
@@ -901,15 +922,17 @@ function StationView({
     [context, inventory, focusScan],
   );
 
-  /** A Machine-Area action the SERVER confirmed: refresh, note, refocus. */
+  /** An in-Area action the SERVER confirmed: refresh, note, refocus.
+   * `machineName` is null for the direct-processing DONE (Phase 7). */
   const completeMachineAction = useCallback(
-    (result: MachineActionResult, machineName: string) => {
+    (result: MachineActionResult, machineName: string | null) => {
       const areaName = ready?.area.name ?? 'the Area';
+      const source = machineName ?? `${areaName} processing`;
       const description =
         result.movementType === 'ASSIGNED_TO_MACHINE'
           ? `Area queue → ${machineName}`
           : result.movementType === 'AREA_COMPLETED'
-            ? `${machineName} → Finished — ready to move`
+            ? `${source} → Finished — ready to move`
             : `${machineName} → ${areaName} queue`;
       setLastAction({
         pn: result.partNumber,
@@ -919,7 +942,7 @@ function StationView({
         result.movementType === 'ASSIGNED_TO_MACHINE'
           ? `assigned to ${machineName}`
           : result.movementType === 'AREA_COMPLETED'
-            ? `finished on ${machineName} — on the ${areaName} finished rack, ready to transfer`
+            ? `finished ${machineName ? `on ${machineName}` : `at ${areaName}`} — on the ${areaName} finished rack, ready to transfer`
             : `returned from ${machineName} to the ${areaName} queue — it remains unfinished`;
       setNotice({
         kind: 'ok',
@@ -969,14 +992,23 @@ function StationView({
   );
 
   const area = ready ? presentationArea(ready.area, ready.operations) : null;
+  // The Area mode is the SERVER's judgement (PROJECT_PROFILE §12 — it
+  // follows from the Area's active Machines): the station context
+  // carries it, and the inventory carries the same flag.
   const hasMachines =
-    ready?.hasMachines ?? (inventoryReady?.machines.length ?? 0) > 0;
+    ready?.hasMachines ?? inventoryReady?.hasMachines ?? false;
+  const operations = ready?.operations;
   const presented = useMemo(
     () =>
       inventoryReady && area
-        ? presentInventory(inventoryReady, area.key, hasMachines)
+        ? presentInventory(
+            inventoryReady,
+            area.key,
+            hasMachines,
+            operations ?? [],
+          )
         : EMPTY_PRESENTATION,
-    [inventoryReady, area, hasMachines],
+    [inventoryReady, area, hasMachines, operations],
   );
   const { cards, machines } = presented;
   const machineCardEntries = useMemo(
@@ -990,6 +1022,28 @@ function StationView({
    * exactly the Quantity Flow of that row; while writes are blocked
    * they stay disabled in place.
    */
+  const doneRowAction = (flowOfRow: FlowInArea, machine: MachineRef | null) => (
+    <button
+      className="rowact done"
+      aria-label="Complete Area processing"
+      title="Complete processing — move this quantity to the finished rack, ready to transfer"
+      disabled={writeBlocked}
+      onClick={() =>
+        setFlow({
+          kind: 'machine-action',
+          action: 'DONE',
+          flow: flowOfRow,
+          machine,
+        })
+      }
+    >
+      <span className="ric" aria-hidden="true">
+        ✓
+      </span>
+      DONE
+    </button>
+  );
+
   const machineRowAction = (entry: AreaAssignment) => {
     const flowOfRow = presented.flowOf.get(entry.card);
     const machineOfRow = presented.machineByName.get(entry.context);
@@ -1003,18 +1057,7 @@ function StationView({
       });
     return (
       <>
-        <button
-          className="rowact done"
-          aria-label="Complete Area processing"
-          title="Complete processing — move this quantity to the finished rack, ready to transfer"
-          disabled={writeBlocked}
-          onClick={() => open('DONE')}
-        >
-          <span className="ric" aria-hidden="true">
-            ✓
-          </span>
-          DONE
-        </button>
+        {doneRowAction(flowOfRow, machineOfRow)}
         <button
           className="rowact"
           aria-label="Return to Area queue"
@@ -1030,6 +1073,34 @@ function StationView({
       </>
     );
   };
+
+  /**
+   * `In this Area now` row actions (GUI_DESIGN §4.6, direct-processing
+   * exception): in an Area WITHOUT Machines exactly the actively
+   * processing rows carry the single DONE — the same wizard with no
+   * Machine. Decided by explicit semantic data — the server's Area mode
+   * (no Machines, not terminal) and the flow's derived PROCESSING state
+   * reported with a DONE action — never by the Area name or CSS.
+   * Finished rows never carry it; there is no QUEUE here. An Area with
+   * Machines shows no row action on this card (DONE / QUEUE live on the
+   * Machine cards).
+   */
+  const directRowAction =
+    hasMachines || !area || area.terminal
+      ? undefined
+      : (entry: AreaAssignment) => {
+          const flowOfRow = presented.flowOf.get(entry.card);
+          if (
+            !flowOfRow ||
+            entry.qty <= 0 ||
+            (entry.state !== 'direct' && entry.state !== 'vendor') ||
+            flowOfRow.processingState !== 'PROCESSING' ||
+            !flowOfRow.availableActions.includes('DONE')
+          ) {
+            return null;
+          }
+          return doneRowAction(flowOfRow, null);
+        };
 
   if (context.state.status === 'loading') {
     // No scan input yet: the station is usable only once its context
@@ -1110,7 +1181,7 @@ function StationView({
             <span className="note">
               {hasMachines
                 ? 'Scan a Part Number to receive or assign its quantity, or a Machine to assign queued quantity to it.'
-                : 'Scan a Part Number to receive its quantity from another Area.'}
+                : 'Scan a Part Number to receive its quantity from another Area or to complete its processing here.'}
             </span>
           </div>
           <div className="ss-scanwrap">
@@ -1148,9 +1219,9 @@ function StationView({
               Number will be validated before any action is recorded.
             </div>
             <DevNotice>
-              Development build — this station records real transfers and
-              Machine actions on the server. The mock preview of the later
-              workflows (direct-processing DONE, Repair, Scrap, Undo, Worker
+              Development build — this station records real transfers, Machine
+              actions and direct-processing completions on the server. The mock
+              preview of the later workflows (Repair, Scrap, Undo, Worker
               sessions) opens with <code>?preview=mock</code> on this route.
             </DevNotice>
             <div className="ss-lastpnlabel">Last Action</div>
@@ -1190,12 +1261,14 @@ function StationView({
                 // In an Area with Machines the summary carries no row
                 // actions (assignment comes through PN scan, Machine
                 // scan and the action dialog; DONE / QUEUE live on the
-                // Machine cards). Direct-processing DONE is Phase 7.
+                // Machine cards); without Machines its actively
+                // processing rows carry the single direct DONE.
                 <AreaSummaryCard
                   area={area}
                   cards={cards}
                   machines={machines}
                   title="In this Area now"
+                  rowAction={directRowAction}
                   showStats={false}
                 />
               ) : null
@@ -1272,10 +1345,17 @@ function StationView({
           station={station}
           flow={flow.flow}
           machine={flow.machine}
+          operation={
+            station.operations.find(
+              (item) => item.id === flow.flow.operationId,
+            ) ?? null
+          }
           writeBlocked={writeBlocked}
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
-          onDone={(result) => completeMachineAction(result, flow.machine.name)}
+          onDone={(result) =>
+            completeMachineAction(result, flow.machine?.name ?? null)
+          }
           onRejected={refreshAfterRejection}
           onAbandonUnknown={() =>
             abandonUnknown(
@@ -1300,11 +1380,11 @@ function StationView({
               parent: flow,
             })
           }
-          onComplete={(onMachineFlow, machine) =>
+          onComplete={(processingFlow, machine) =>
             setFlow({
               kind: 'machine-action',
               action: 'DONE',
-              flow: onMachineFlow,
+              flow: processingFlow,
               machine,
               parent: flow,
             })
@@ -1569,10 +1649,15 @@ function TransferDialog({
         : null;
   const deviation = serverDeviation ?? localDeviation;
   const reasonMissing = deviation !== null && reason.trim() === '';
-  // Quantity still ON a Machine at the source is completed implicitly
-  // by this transfer (PROJECT_PROFILE §8.11): one application command
-  // appends AREA_COMPLETED then TRANSFERRED — the confirmation says so.
-  const implicitCompletion = candidate.processingState === 'ON_MACHINE';
+  // Quantity still actively processing at the source — on a Machine, or
+  // directly processed by an Area without Machines — is completed
+  // implicitly by this transfer (PROJECT_PROFILE §8.11): one application
+  // command appends AREA_COMPLETED then TRANSFERRED — the confirmation
+  // says so. Queued or finished quantity transfers with TRANSFERRED
+  // alone and never duplicates a completion.
+  const implicitCompletion =
+    candidate.processingState === 'ON_MACHINE' ||
+    candidate.processingState === 'PROCESSING';
 
   function goConfirm() {
     if (valid) setStep('confirm');
@@ -1679,8 +1764,11 @@ function TransferDialog({
               ...(implicitCompletion
                 ? [
                     <>
-                      This quantity is still on a Machine at{' '}
-                      {candidate.currentArea.name}: transferring it completes
+                      This quantity is still{' '}
+                      {candidate.processingState === 'ON_MACHINE'
+                        ? 'on a Machine'
+                        : 'in processing'}{' '}
+                      at {candidate.currentArea.name}: transferring it completes
                       that processing first.
                     </>,
                   ]
@@ -1808,13 +1896,13 @@ function TransferDialog({
               ],
               ['Remaining at source', <span className="mono">0 pcs</span>],
               ['Scan Station', station.stationId, 'secondary'],
-              [
-                'Recorded event',
-                implicitCompletion
-                  ? 'AREA_COMPLETED + TRANSFERRED (one command)'
-                  : 'TRANSFERRED',
-                'secondary',
-              ],
+              implicitCompletion
+                ? [
+                    'Recorded events',
+                    'AREA_COMPLETED, then TRANSFERRED (one command)',
+                    'secondary',
+                  ]
+                : ['Recorded event', 'TRANSFERRED', 'secondary'],
             ]}
           />
           {deviation !== null ? (
@@ -1904,8 +1992,10 @@ function InAreaDialog({
   machines: MachineRef[];
   /** PN-first assignment of ONE queued flow (GUI_DESIGN §4.7). */
   onAssign: (flow: FlowInArea) => void;
-  /** `Complete Area processing on {Machine}` for ONE ON_MACHINE flow. */
-  onComplete: (flow: FlowInArea, machine: MachineRef) => void;
+  /** `Complete Area processing on {Machine}` for ONE ON_MACHINE flow, or
+   * (Phase 7, `machine: null`) `Complete Area processing` for ONE
+   * directly processing flow of an Area without Machines. */
+  onComplete: (flow: FlowInArea, machine: MachineRef | null) => void;
   onReceiveMore: () => void;
   onBack?: () => void;
   onCancel: () => void;
@@ -1920,8 +2010,10 @@ function InAreaDialog({
   );
   // The valid choices come from the server's derived state of EACH
   // flow (PROJECT_PROFILE §12): a queued flow offers Assign, a flow on a
-  // Machine offers completion on that Machine. Several flows of the PN
-  // are several explicit choices — never one merged action.
+  // Machine offers completion on that Machine, a directly processing
+  // flow of an Area without Machines offers completion without one.
+  // Several flows of the PN are several explicit choices — never one
+  // merged action.
   const queued = hasMachines
     ? resolution.inArea.filter((flow) =>
         flow.availableActions.includes('ASSIGN'),
@@ -1934,6 +2026,13 @@ function InAreaDialog({
         return machine ? [{ flow, machine }] : [];
       })
     : [];
+  const processing = hasMachines
+    ? []
+    : resolution.inArea.filter(
+        (flow) =>
+          flow.processingState === 'PROCESSING' &&
+          flow.availableActions.includes('DONE'),
+      );
   const finishedQty = resolution.inArea
     .filter((flow) => flow.processingState === 'READY_TO_TRANSFER')
     .reduce((sum, flow) => sum + flow.quantity, 0);
@@ -1987,6 +2086,25 @@ function InAreaDialog({
           </span>
         </button>
       ))}
+      {processing.map((flow) => (
+        <button
+          key={`done-${flow.quantityFlowId}`}
+          className="choice"
+          onClick={() => onComplete(flow, null)}
+        >
+          <span className="cic" aria-hidden="true">
+            ✓
+          </span>
+          <span>
+            <span className="ct1">Complete Area processing</span>
+            <br />
+            <span className="ct2">
+              {flow.quantity} pcs in processing ·{' '}
+              {workOrderLabel(flow.workOrder)}
+            </span>
+          </span>
+        </button>
+      ))}
       {finishedQty > 0 ? (
         <Guidance tone="info">
           {finishedQty} pcs are finished — ready to move. They leave this Area
@@ -2015,9 +2133,7 @@ function InAreaDialog({
         </Guidance>
       )}
       <Guidance tone="info">
-        {hasMachines
-          ? 'Quantity additions, repair and scrap arrive with a later release.'
-          : 'Completion in an Area without Machines, quantity additions, repair and scrap arrive with a later release.'}{' '}
+        Quantity additions, repair and scrap arrive with a later release.
         Nothing is recorded at this step.
       </Guidance>
       <div className="row">

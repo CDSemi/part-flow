@@ -51,6 +51,7 @@ function stationFixture(url: string): Promise<Response> {
   if (/\/inventory$/.test(url)) {
     return json({
       area,
+      has_machines: false,
       lines: [],
       total_part_numbers: 0,
       total_quantity: 0,
@@ -58,6 +59,8 @@ function stationFixture(url: string): Promise<Response> {
       queued_quantity: 0,
       machines: [],
       on_machine_quantity: 0,
+      processing: [],
+      processing_quantity: 0,
       finished: [],
       finished_quantity: 0,
     });

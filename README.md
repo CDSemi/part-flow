@@ -15,10 +15,11 @@ the Scan Station read models, and the real Scan Station frontend), and
 the completed **Phase 6 One-Shot Machine Assignment and Area
 Completion** (persistence, the Machine-Area processing commands, the
 Machine-first / PN-first read models, and the real Scan Station
-Machine workflows), plus the backend of **Phase 7 Direct Area
-Processing (Areas Without Machines)** — the derived `PROCESSING` state,
-the direct-processing DONE without a Machine and the implicit
-completion on transfer (the frontend does not render it yet):
+Machine workflows), and the completed **Phase 7 Direct Area Processing
+(Areas Without Machines)** — the derived `PROCESSING` state, the
+direct-processing DONE without a Machine, the implicit completion on
+transfer, and the real Scan Station direct-processing presentation and
+`DONE`:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -121,9 +122,16 @@ completion of ON_MACHINE quantity on transfer (`AREA_COMPLETED` +
 a Machine scan opens `Assign to Machine` with the Machine preselected,
 a queued PN offers Assign, Machine cards carry the distinct DONE and
 QUEUE actions, and the inventory shows queued, per-Machine and finished
-quantity separately. Area and scrap barcodes, Worker identity,
-direct-processing DONE, Repair, Scrap and Undo stay honest
-placeholders; the approved presentation of those workflows survives as
+quantity separately. The completed Phase 7 adds direct Area processing:
+an Area without Machines holds arriving quantity as `PROCESSING` (no
+queue, no Machine, the Operation recorded), the Scan Station renders
+it as `In processing` / `External processing` with the single `DONE`
+row action and the PN-first `Complete Area processing` choice — the
+same Area Completion wizard without a Machine field, recorded as a
+Machine-less `AREA_COMPLETED` — and a transfer of directly processing
+quantity completes it implicitly (`AREA_COMPLETED`, then `TRANSFERRED`
+as one command). Area and scrap barcodes, Worker identity, Repair,
+Scrap and Undo stay honest placeholders; the approved presentation of those workflows survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5
 configuration surfaces (Administration →

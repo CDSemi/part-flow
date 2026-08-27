@@ -132,6 +132,8 @@ class FlowInAreaResponse(BaseModel):
     quantity_flow_id: int
     quantity: int
     route_mode: str
+    # The Operation recorded on the flow's latest Movement.
+    operation_id: int
     # Derived from the flow's latest Movement and the Area's mode
     # (PROJECT_PROFILE §12); machine_id is set exactly while ON_MACHINE.
     processing_state: ProcessingStateLiteral
@@ -212,6 +214,7 @@ def _flow(item: FlowInArea) -> FlowInAreaResponse:
         quantity_flow_id=item.quantity_flow_id,
         quantity=item.quantity,
         route_mode=item.route_mode,
+        operation_id=item.operation_id,
         processing_state=item.processing_state.value,
         machine_id=item.machine_id,
         available_actions=list(item.available_actions),

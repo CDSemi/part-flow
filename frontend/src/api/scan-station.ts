@@ -46,10 +46,14 @@ export interface WorkOrderContext {
   requestType: 'NEW' | 'MODIFY';
 }
 
-/** Derived holding state of a flow in a Machine Area (PROJECT_PROFILE
- * §12): a null Machine is QUEUED or READY_TO_TRANSFER, never "queued"
- * by itself. */
-export type ProcessingState = 'QUEUED' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
+/** Derived holding state of a flow (PROJECT_PROFILE §12), from its
+ * latest Movement AND the mode of the Area it is in: QUEUED /
+ * ON_MACHINE in an Area with Machines, PROCESSING — owned directly by
+ * an Area without Machines, no queue, no Machine (Phase 7) — and
+ * READY_TO_TRANSFER on the finished rack. A null Machine is never
+ * "queued" by itself. */
+export type ProcessingState =
+  'QUEUED' | 'PROCESSING' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
 
 /** The actions the server reports as currently valid for a flow. */
 export type FlowAction = 'ASSIGN' | 'DONE' | 'QUEUE' | 'TRANSFER';
@@ -59,6 +63,9 @@ export interface FlowInArea {
   quantityFlowId: number;
   quantity: number;
   routeMode: 'FLOATING' | 'PLANNED';
+  /** The Operation recorded on the flow's latest Movement — the one
+   * the quantity is in the Area for. */
+  operationId: number;
   processingState: ProcessingState;
   /** Set exactly while ON_MACHINE. */
   machineId: number | null;
@@ -109,6 +116,7 @@ interface FlowInAreaWire {
   quantity_flow_id: number;
   quantity: number;
   route_mode: 'FLOATING' | 'PLANNED';
+  operation_id: number;
   processing_state: ProcessingState;
   machine_id: number | null;
   available_actions: FlowAction[];
@@ -178,6 +186,7 @@ function toFlowInArea(wire: FlowInAreaWire): FlowInArea {
     quantityFlowId: wire.quantity_flow_id,
     quantity: wire.quantity,
     routeMode: wire.route_mode,
+    operationId: wire.operation_id,
     processingState: wire.processing_state,
     machineId: wire.machine_id,
     availableActions: [...wire.available_actions],
@@ -239,8 +248,8 @@ export interface TransferCandidate {
   quantity: number;
   routeMode: 'FLOATING' | 'PLANNED';
   currentArea: AreaRef;
-  /** ON_MACHINE quantity is completed implicitly by the transfer
-   * (AREA_COMPLETED + TRANSFERRED in one command). */
+  /** ON_MACHINE and PROCESSING quantity is completed implicitly by the
+   * transfer (AREA_COMPLETED + TRANSFERRED in one command). */
   processingState: ProcessingState;
   machineId: number | null;
   routeStatus: RouteStatus;
@@ -444,7 +453,10 @@ export interface TransferResult {
   assignedRouteStepId: number | null;
   routeDeviation: RouteDeviation | null;
   /** The implicit AREA_COMPLETED of the same command when the quantity
-   * was still ON_MACHINE at the source (Phase 6); null otherwise. */
+   * was still actively processing at the source: the Movement id, and
+   * the Machine it left (ON_MACHINE, Phase 6) — null for directly
+   * processing quantity (Phase 7). Both null for queued or finished
+   * quantity. */
   completedMovementId: number | null;
   completedMachineId: number | null;
   deviceEventId: string;
@@ -573,8 +585,10 @@ export interface MachineActionInput {
   /** The ONE flow the operator selected. */
   quantityFlowId: number;
   /** ASSIGN: the Machine to assign to. QUEUE/DONE: the Machine the
-   * quantity is on — an optimistic precondition the server checks. */
-  machineId: number;
+   * quantity is on — an optimistic precondition the server checks.
+   * DONE only: null for the direct-processing completion of an Area
+   * without Machines (Phase 7) — the request carries no Machine. */
+  machineId: number | null;
   /** Always the flow's whole quantity until SPLIT (Phase 8). */
   quantity: number;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
@@ -590,7 +604,8 @@ export interface MachineActionResult {
   partNumber: string;
   quantity: number;
   areaId: number;
-  machineId: number;
+  /** null for a direct-processing completion (no Machine involved). */
+  machineId: number | null;
   operationId: number;
   stationId: string;
   processingState: ProcessingState;
@@ -607,7 +622,7 @@ interface MachineActionResultWire {
   part_number: string;
   quantity: number;
   area_id: number;
-  machine_id: number;
+  machine_id: number | null;
   operation_id: number;
   station_id: string;
   processing_state: ProcessingState;
@@ -622,12 +637,16 @@ const MACHINE_ACTION_PATH: Record<MachineActionKind, string> = {
 };
 
 /**
- * Record one confirmed in-Area Machine action. Resolves ONLY when the
- * server confirmed the write: 201 fresh, 200 for an idempotent replay
- * of the same `deviceEventId` + same intent. Every rejection — partial
+ * Record one confirmed in-Area action. Resolves ONLY when the server
+ * confirmed the write: 201 fresh, 200 for an idempotent replay of the
+ * same `deviceEventId` + same intent. Every rejection — partial
  * quantity, a flow that moved or changed state meanwhile, a retired,
- * other-Area or maintenance Machine, a stale Machine precondition — is
- * an `ApiError` and nothing was recorded.
+ * other-Area or maintenance Machine, a stale Machine precondition, a
+ * Machine-less DONE on quantity in an Area with Machines — is an
+ * `ApiError` and nothing was recorded. A DONE with `machineId: null`
+ * is the direct-processing completion (Phase 7): the request omits
+ * `machine_id`, so the server records an `AREA_COMPLETED` without a
+ * Machine — the same endpoint, a distinct intent.
  */
 export async function recordMachineAction(
   kind: MachineActionKind,
@@ -640,7 +659,7 @@ export async function recordMachineAction(
       body: {
         part_number: input.partNumber,
         quantity_flow_id: input.quantityFlowId,
-        machine_id: input.machineId,
+        ...(input.machineId === null ? {} : { machine_id: input.machineId }),
         quantity: input.quantity,
         device_event_id: input.deviceEventId,
       },
@@ -703,6 +722,10 @@ export interface MachineInventory {
 
 export interface AreaInventory {
   area: AreaRef;
+  /** The Area mode (PROJECT_PROFILE §12), decided by the server from
+   * the Area's active Machines: true → queued / Machine cards /
+   * finished; false → directly processing / finished with no cards. */
+  hasMachines: boolean;
   /** Every ACTIVE flow per PN whatever its state. */
   lines: InventoryLine[];
   totalPartNumbers: number;
@@ -714,6 +737,9 @@ export interface AreaInventory {
   queuedQuantity: number;
   machines: MachineInventory[];
   onMachineQuantity: number;
+  /** Phase 7: directly processing quantity of an Area without Machines. */
+  processing: InventoryLine[];
+  processingQuantity: number;
   finished: InventoryLine[];
   finishedQuantity: number;
 }
@@ -726,6 +752,7 @@ interface InventoryLineWire {
 
 interface AreaInventoryWire {
   area: AreaRefWire;
+  has_machines: boolean;
   lines: InventoryLineWire[];
   total_part_numbers: number;
   total_quantity: number;
@@ -737,6 +764,8 @@ interface AreaInventoryWire {
     total_quantity: number;
   }[];
   on_machine_quantity: number;
+  processing: InventoryLineWire[];
+  processing_quantity: number;
   finished: InventoryLineWire[];
   finished_quantity: number;
 }
@@ -755,6 +784,7 @@ export async function getAreaInventory(areaId: number): Promise<AreaInventory> {
   );
   return {
     area: toAreaRef(wire.area),
+    hasMachines: wire.has_machines,
     lines: toInventoryLines(wire.lines),
     totalPartNumbers: wire.total_part_numbers,
     totalQuantity: wire.total_quantity,
@@ -766,6 +796,8 @@ export async function getAreaInventory(areaId: number): Promise<AreaInventory> {
       totalQuantity: card.total_quantity,
     })),
     onMachineQuantity: wire.on_machine_quantity,
+    processing: toInventoryLines(wire.processing),
+    processingQuantity: wire.processing_quantity,
     finished: toInventoryLines(wire.finished),
     finishedQuantity: wire.finished_quantity,
   };

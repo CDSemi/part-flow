@@ -128,19 +128,33 @@ function workOrderWire(flow: Flow) {
     : null;
 }
 
+/** The Area mode follows from its Machines: only Lathe (id 2) has one. */
+const areaHasMachines = (areaId: number) => areaId === 2;
+
+/** The server's derived state (PROJECT_PROFILE §12): ON_MACHINE on a
+ * Machine, QUEUED in the Machine Area, PROCESSING — direct processing —
+ * everywhere else (Phase 7). */
+function stateOf(flow: Flow) {
+  if (flow.machineId !== undefined) return 'ON_MACHINE';
+  return areaHasMachines(flow.areaId) ? 'QUEUED' : 'PROCESSING';
+}
+
 function flowWire(flow: Flow) {
-  const state = flow.machineId !== undefined ? 'ON_MACHINE' : 'QUEUED';
+  const state = stateOf(flow);
   return {
     part_number: flow.pn,
     quantity_flow_id: flow.id,
     quantity: flow.qty,
     route_mode: flow.routeMode,
+    operation_id: activeOperations(flow.areaId)[0]?.id ?? 0,
     processing_state: state,
     machine_id: flow.machineId ?? null,
     available_actions:
       state === 'ON_MACHINE'
         ? ['DONE', 'QUEUE', 'TRANSFER']
-        : ['ASSIGN', 'TRANSFER'],
+        : state === 'PROCESSING'
+          ? ['DONE', 'TRANSFER']
+          : ['ASSIGN', 'TRANSFER'],
     work_order: workOrderWire(flow),
   };
 }
@@ -265,7 +279,7 @@ function handle(url: string, method: string, body: unknown): Response {
       department: { id: 1, name: 'Machining' },
       area: areaRef(areaId),
       operations: activeOperations(areaId).map(operationRef),
-      has_machines: areaId === 2,
+      has_machines: areaHasMachines(areaId),
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -273,7 +287,8 @@ function handle(url: string, method: string, body: unknown): Response {
     inventoryReads += 1;
     const areaId = Number(inventory[1]);
     const here = flows.filter((f) => f.areaId === areaId);
-    const queued = here.filter((f) => f.machineId === undefined);
+    const queued = here.filter((f) => stateOf(f) === 'QUEUED');
+    const processing = here.filter((f) => stateOf(f) === 'PROCESSING');
     const onMachine = here.filter((f) => f.machineId !== undefined);
     const lines = inventoryLines(here);
     const machineCards =
@@ -291,6 +306,7 @@ function handle(url: string, method: string, body: unknown): Response {
         : [];
     return json({
       area: areaRef(areaId),
+      has_machines: areaHasMachines(areaId),
       lines,
       total_part_numbers: lines.length,
       total_quantity: here.reduce((s, f) => s + f.qty, 0),
@@ -298,6 +314,8 @@ function handle(url: string, method: string, body: unknown): Response {
       queued_quantity: queued.reduce((s, f) => s + f.qty, 0),
       machines: machineCards,
       on_machine_quantity: onMachine.reduce((s, f) => s + f.qty, 0),
+      processing: inventoryLines(processing),
+      processing_quantity: processing.reduce((s, f) => s + f.qty, 0),
       finished: [],
       finished_quantity: 0,
     });
@@ -454,11 +472,14 @@ function handle(url: string, method: string, body: unknown): Response {
     if (deviation && !request.route_deviation_reason?.trim()) {
       return json({ detail: 'A route deviation needs a reason.' }, 422);
     }
+    // Actively processing quantity — on a Machine, or directly
+    // processed by an Area without Machines — is completed implicitly:
+    // AREA_COMPLETED (the Machine left, or none) then TRANSFERRED.
     const completedFrom = flow.machineId;
+    const completesSource = stateOf(flow) !== 'QUEUED';
     flow.areaId = station.area_id;
     flow.machineId = undefined;
-    const completedMovementId =
-      completedFrom !== undefined ? nextMovementId++ : null;
+    const completedMovementId = completesSource ? nextMovementId++ : null;
     const result = {
       movement_id: nextMovementId++,
       quantity_flow_id: flow.id,
@@ -726,12 +747,18 @@ test('a scanned PN elsewhere resolves on the server and transfers as a whole flo
       'Work Order',
       'Route',
       'Scan Station',
-      'Recorded event',
+      'Recorded events',
     ]),
   );
   expect(summary).toHaveTextContent('12 pcs');
   expect(summary).toHaveTextContent('LATHE-ST-01');
-  expect(summary).toHaveTextContent('TRANSFERRED');
+  // Material has no Machines: its quantity is directly processing, so
+  // the transfer completes that processing first (Phase 7) — one
+  // command, both events named.
+  expect(summary).toHaveTextContent('Completed at Material by this transfer');
+  expect(summary).toHaveTextContent(
+    'AREA_COMPLETED, then TRANSFERRED (one command)',
+  );
   // Nothing recorded before Confirm.
   expect(transferRequests()).toHaveLength(0);
 
@@ -742,7 +769,7 @@ test('a scanned PN elsewhere resolves on the server and transfers as a whole flo
     '2027-60-8114-00 × 12 → Lathe queue (awaiting Machine)',
   );
   expect(await notice()).toHaveTextContent(
-    'Recorded by the server (TRANSFERRED #500)',
+    'Recorded by the server (AREA_COMPLETED #500 + TRANSFERRED #501)',
   );
   const [request] = transferRequests();
   expect(request.body).toMatchObject({
@@ -937,7 +964,7 @@ test('a lost response is an UNKNOWN outcome: frozen intent, exact retry with the
     within(dialog()).getByRole('button', { name: 'Retry the same transfer' }),
   );
   expect(await notice()).toHaveTextContent(
-    'already recorded by the server (TRANSFERRED #500)',
+    'already recorded by the server (AREA_COMPLETED #500 + TRANSFERRED #501)',
   );
   expect(transferRequests()).toHaveLength(2);
   // Byte-for-byte the same request — same key, same reason, same intent.
@@ -991,16 +1018,17 @@ test.each([502, 504, 500, 408])(
       within(dialog()).getByRole('button', { name: 'Retry the same transfer' }),
     );
     expect(await notice()).toHaveTextContent(
-      'already recorded by the server (TRANSFERRED #500)',
+      'already recorded by the server (AREA_COMPLETED #500 + TRANSFERRED #501)',
     );
     expect(transferRequests()).toHaveLength(2);
     const second = transferRequests()[1];
     expect(JSON.stringify(second.body)).toBe(JSON.stringify(first.body));
     expect(second.body.device_event_id).toBe(first.body.device_event_id);
 
-    // 5: the replay (200) closes the workflow; exactly one Movement.
+    // 5: the replay (200) closes the workflow; exactly one command
+    // (its AREA_COMPLETED + TRANSFERRED) — nothing recorded twice.
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(nextMovementId).toBe(501);
+    expect(nextMovementId).toBe(502);
     expect(committed.size).toBe(1);
     expect(flows.find((f) => f.id === 104)?.areaId).toBe(2);
     await waitFor(() => expect(document.activeElement).toBe(input));

@@ -63,6 +63,7 @@ beforeEach(() => {
       if (/\/api\/areas\/\d+\/inventory$/.test(url)) {
         return json({
           area: { ...AREAS[0], description: null, is_terminal: false },
+          has_machines: false,
           lines: [],
           total_part_numbers: 0,
           total_quantity: 0,
@@ -70,6 +71,8 @@ beforeEach(() => {
           queued_quantity: 0,
           machines: [],
           on_machine_quantity: 0,
+          processing: [],
+          processing_quantity: 0,
           finished: [],
           finished_quantity: 0,
         });

@@ -387,6 +387,7 @@ def test_released_quantity_in_an_area_without_machines_is_processing(
     flow = _inventory_flow(client, plating.area_id, flow_id)
     assert flow["processing_state"] == "PROCESSING"
     assert flow["machine_id"] is None
+    assert flow["operation_id"] == plating.operation_id
     assert flow["available_actions"] == ["DONE", "TRANSFER"]
     history = _movements(db_engine, flow_id)
     assert [m.movement_type for m in history] == ["RECEIVED"]
@@ -466,7 +467,9 @@ def test_several_operations_need_an_explicit_choice_before_direct_processing(
     assert accepted.status_code == 201, accepted.text
     assert accepted.json()["operation_id"] == chosen
     assert _movements(db_engine, flow_id)[-1].operation_id == chosen
-    assert _inventory_flow(client, external.area_id, flow_id)["processing_state"] == "PROCESSING"
+    arrived = _inventory_flow(client, external.area_id, flow_id)
+    assert arrived["processing_state"] == "PROCESSING"
+    assert arrived["operation_id"] == chosen  # the explicit choice, on the read model too
 
 
 # ---------------------------------------------------------------------------

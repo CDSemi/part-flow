@@ -124,3 +124,11 @@ export function quantityValidation(
   }
   return null;
 }
+
+/** Operator-facing Operation label: the name when configured, else the code. */
+export function operationLabel(operation: {
+  code: string;
+  name: string | null;
+}): string {
+  return operation.name ?? operation.code;
+}

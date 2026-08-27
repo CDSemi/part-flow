@@ -194,6 +194,10 @@ class FlowInArea(NamedTuple):
     quantity_flow_id: int
     quantity: int
     route_mode: str
+    # The Operation the quantity is in the Area for — recorded on its
+    # latest Movement (the arrival, or carried forward by the in-Area
+    # events). A direct-processing Area names it on the DONE summary.
+    operation_id: int
     # Derived from the latest Movement and the Area's mode (PROJECT_PROFILE
     # §12): a NULL Machine is QUEUED, PROCESSING or READY_TO_TRANSFER,
     # never "queued" by itself.
@@ -317,6 +321,7 @@ def resolve_part_number_scan(
                     flow.id,
                     flow.quantity,
                     flow.route_mode,
+                    latest[flow.id].operation_id,
                     state,
                     flow.current_machine_id,
                     available_actions(state),
@@ -478,6 +483,7 @@ def resolve_machine_scan(
             flow.id,
             flow.quantity,
             flow.route_mode,
+            latest[flow.id].operation_id,
             ProcessingState.QUEUED,
             None,
             available_actions(ProcessingState.QUEUED),
@@ -607,6 +613,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
                 flow.id,
                 flow.quantity,
                 flow.route_mode,
+                latest[flow.id].operation_id,
                 state,
                 flow.current_machine_id,
                 available_actions(state),

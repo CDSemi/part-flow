@@ -22,7 +22,7 @@ import { App } from '../../App';
 // the DONE / QUEUE distinction, implicit completion on transfer, the
 // refreshes after success and focus restoration.
 
-type State = 'QUEUED' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
+type State = 'QUEUED' | 'PROCESSING' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
 
 interface Flow {
   id: number;
@@ -143,7 +143,9 @@ function actionsOf(state: State) {
     ? ['ASSIGN', 'TRANSFER']
     : state === 'ON_MACHINE'
       ? ['DONE', 'QUEUE', 'TRANSFER']
-      : ['TRANSFER'];
+      : state === 'PROCESSING'
+        ? ['DONE', 'TRANSFER']
+        : ['TRANSFER'];
 }
 
 function flowWire(flow: Flow) {
@@ -152,6 +154,7 @@ function flowWire(flow: Flow) {
     quantity_flow_id: flow.id,
     quantity: flow.qty,
     route_mode: 'FLOATING',
+    operation_id: OPERATIONS.find((o) => o.area_id === flow.areaId)!.id,
     processing_state: flow.state,
     machine_id: flow.machineId,
     available_actions: actionsOf(flow.state),
@@ -197,6 +200,7 @@ function inventory(areaId: number) {
   const all = lines(here);
   return json({
     area: areaRef(areaId),
+    has_machines: areaId === 2,
     lines: all,
     total_part_numbers: all.length,
     total_quantity: here.reduce((s, f) => s + f.qty, 0),
@@ -215,6 +219,8 @@ function inventory(areaId: number) {
       },
     ),
     on_machine_quantity: byState('ON_MACHINE').reduce((s, f) => s + f.qty, 0),
+    processing: lines(byState('PROCESSING')),
+    processing_quantity: byState('PROCESSING').reduce((s, f) => s + f.qty, 0),
     finished: lines(byState('READY_TO_TRANSFER')),
     finished_quantity: byState('READY_TO_TRANSFER').reduce(
       (s, f) => s + f.qty,
@@ -473,10 +479,12 @@ function handle(url: string, method: string, body: unknown): Response {
     if (failed) return failed;
     const flow = flows.find((f) => f.id === request.quantity_flow_id)!;
     const completedFrom = flow.state === 'ON_MACHINE' ? flow.machineId : null;
-    const completedMovementId =
-      completedFrom !== null ? nextMovementId++ : null;
+    const completesSource =
+      flow.state === 'ON_MACHINE' || flow.state === 'PROCESSING';
+    const completedMovementId = completesSource ? nextMovementId++ : null;
     flow.areaId = station.area_id;
-    flow.state = 'QUEUED';
+    // The destination mode decides the arrival state (Lathe has Machines).
+    flow.state = station.area_id === 2 ? 'QUEUED' : 'PROCESSING';
     flow.machineId = null;
     return commit(request.device_event_id, {
       movement_id: nextMovementId++,
@@ -546,7 +554,8 @@ beforeEach(() => {
       pn: 'CUT-1',
       qty: 6,
       areaId: 3,
-      state: 'QUEUED',
+      // Cut has no Machines: its quantity is directly processing.
+      state: 'PROCESSING',
       machineId: null,
     },
   ];
@@ -667,20 +676,26 @@ test('the inventory separates queued, per-Machine and finished quantity', async 
   expect(within(stats).getByText('4')).toBeInTheDocument(); // done
 });
 
-test('an Area without Machines shows no Machine cards and no DONE action', async () => {
+test('an Area without Machines shows no Machine cards, no queue and no Machine actions', async () => {
   await renderStation('CUT-ST-01');
   expect(document.querySelector('.abd-machine')).toBeNull();
   expect(
-    screen.queryByRole('button', { name: 'Complete Area processing' }),
-  ).toBeNull();
-  expect(
     screen.getByText('In processing', { selector: '.abd-grp' }),
   ).toBeInTheDocument();
+  expect(screen.queryByText('Area queue — awaiting Machine')).toBeNull();
+  // Phase 7: the directly processing row carries the single DONE —
+  // never QUEUE (the direct-processing suite covers the wizard).
+  expect(
+    screen.getByRole('button', { name: 'Complete Area processing' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole('button', { name: 'Return to Area queue' }),
+  ).toBeNull();
 
   scan('PF:PN:CUT-1');
   const actions = await screen.findByRole('dialog');
   expect(within(actions).queryByText('Assign to Machine')).toBeNull();
-  expect(actions).toHaveTextContent('Completion in an Area without Machines');
+  expect(within(actions).queryByText(/on Lathe/)).toBeNull();
   fireEvent.keyDown(actions, { key: 'Escape' });
 });
 
@@ -1548,7 +1563,7 @@ test('transferring ON_MACHINE quantity announces the implicit completion and rep
   const summary = dialog();
   expect(summary).toHaveTextContent('Completed at Lathe by this transfer');
   expect(summary).toHaveTextContent(
-    'AREA_COMPLETED + TRANSFERRED (one command)',
+    'AREA_COMPLETED, then TRANSFERRED (one command)',
   );
   fireEvent.click(
     within(summary).getByRole('button', { name: 'Confirm transfer' }),
