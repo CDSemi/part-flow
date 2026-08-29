@@ -20,7 +20,9 @@ Surface:
   it returns all of them — the client must make the operator select
   exactly one.
 - ``POST /scan-stations/{station_id}/transfers`` — the confirmed
-  transfer of ONE whole QuantityFlow into the station's Area. 201 on a
+  transfer of ONE QuantityFlow — whole, or a part of it (Phase 8: the
+  flow splits first inside the same command) — into the station's
+  Area. 201 on a
   fresh transfer, 200 on an idempotent replay (same ``device_event_id``
   + same confirmed intent — whatever happened to the station, Area
   or Operation since), 409 on a mismatched reuse, 409 on a station
@@ -28,13 +30,14 @@ Surface:
   409 with ``confirmation_required`` when a PLANNED flow leaves its
   route (a different Area OR a different Operation than the planned
   step) and the deviation is not yet confirmed, 422 for a confirmed
-  deviation without a reason and for partial quantity.
+  deviation without a reason and for a quantity exceeding the source.
 - ``GET  /areas/{area_id}/inventory`` — the ACTIVE quantity currently
   in an Area grouped per PN, the refresh source after a transfer.
 
 Phase 6 — the one-shot Machine-Area processing commands, each ONE
-whole QuantityFlow, 201 fresh / 200 idempotent replay / 409 mismatched
-reuse, 422 for partial quantity, 409 for a flow not in the station's
+QuantityFlow (whole, or since Phase 8 a part of it), 201 fresh / 200
+idempotent replay / 409 mismatched reuse, 422 for a quantity exceeding
+the flow, 409 for a flow not in the station's
 Area, a wrong processing state, or a retired / other-Area /
 maintenance Machine:
 

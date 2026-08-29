@@ -39,7 +39,11 @@ Rules owned here:
   every Movement; same id + same fingerprint replays the original
   result, a mismatch is an explicit conflict, a race lost at COMMIT
   replays the winner. Lock order: source flows ascending by id →
-  station → Machine.
+  station → Machine. The result is built from the immutable MERGED
+  rows ALONE: the shared holding state and Machine the merge produced
+  are recorded in the command's metadata (``merge`` block) at merge
+  time, so a replay returns the identical original response whatever
+  the resulting flow, the Machine or the Area's mode did since.
 - Not here: SPLIT (partial-quantity actions split inside their own
   command, `machine_processing.split_if_partial`), Undo (Phase 9).
 """
@@ -47,7 +51,7 @@ Rules owned here:
 import datetime
 import hashlib
 import json
-from typing import NamedTuple
+from typing import Any, Final, NamedTuple
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -78,6 +82,11 @@ from app.infrastructure.models import (
     QuantityFlow,
     ScanStation,
 )
+
+# Immutable record of the context the merge produced (the sources'
+# shared state and Machine), written on every MERGED row of the command
+# and read back verbatim on replay — never re-derived from current state.
+MERGE_KEY: Final = "merge"
 
 
 class MergeResult(NamedTuple):
@@ -122,9 +131,7 @@ def _request_fingerprint(*, station_id: str, part_number: str, flow_ids: list[in
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _result_from_command(
-    session: Session, command: list[PartMovement], *, created: bool
-) -> MergeResult:
+def _result_from_command(command: list[PartMovement], *, created: bool) -> MergeResult:
     result_row = command[-1]
     sources = command[:-1]
     if result_row.from_area_id is None or result_row.station_id is None:
@@ -133,26 +140,26 @@ def _result_from_command(
             " event. Nothing was recorded — a new intent needs a new"
             " device_event_id."
         )
-    flow = session.get(QuantityFlow, result_row.quantity_flow_id)
-    if flow is None:  # pragma: no cover - FK guarantees the row
-        raise ConflictError(f"Quantity Flow {result_row.quantity_flow_id} does not exist.")
-    # The state the merge produced is the sources' shared state — derived
-    # by lineage from the result row itself, judged in the Area's mode.
-    effective = effective_latest_movement(session, flow.id)
-    state = processing_state_of(
-        effective.movement_type,
-        direct_processing=not area_has_machines(session, result_row.to_area_id),
-    )
+    # The context the merge produced, as recorded at merge time on the
+    # immutable row — a replay never consults the resulting flow, the
+    # Machine or the Area's current mode.
+    recorded = (result_row.metadata_ or {}).get(MERGE_KEY)
+    if not isinstance(recorded, dict) or "processing_state" not in recorded:
+        raise IdempotencyConflictError(  # pragma: no cover - written by this module
+            "This device_event_id belongs to a different kind of production"
+            " event. Nothing was recorded — a new intent needs a new"
+            " device_event_id."
+        )
     return MergeResult(
         movement_id=result_row.id,
         quantity_flow_id=result_row.quantity_flow_id,
         part_number=result_row.part_number,
         quantity=result_row.quantity,
         area_id=result_row.to_area_id,
-        machine_id=effective.destination_machine_id,
+        machine_id=recorded.get("machine_id"),
         operation_id=result_row.operation_id,
         station_id=result_row.station_id,
-        processing_state=state,
+        processing_state=ProcessingState(recorded["processing_state"]),
         source_quantity_flow_ids=[row.quantity_flow_id for row in sources],
         device_event_id=result_row.device_event_id,
         occurred_at=result_row.occurred_at,
@@ -160,9 +167,7 @@ def _result_from_command(
     )
 
 
-def _replay_or_conflict(
-    session: Session, command: list[PartMovement], fingerprint: str
-) -> MergeResult:
+def _replay_or_conflict(command: list[PartMovement], fingerprint: str) -> MergeResult:
     stored = (command[-1].metadata_ or {}).get(FINGERPRINT_KEY)
     well_formed = (
         len(command) >= 3
@@ -175,7 +180,7 @@ def _replay_or_conflict(
             " request. Nothing was recorded — a new intent needs a new"
             " device_event_id."
         )
-    return _result_from_command(session, command, created=False)
+    return _result_from_command(command, created=False)
 
 
 def _refuse(reason: str) -> ConflictError:
@@ -200,7 +205,7 @@ def merge_flows(
     fingerprint = _request_fingerprint(station_id=station_id, part_number=pn, flow_ids=flow_ids)
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(committed, fingerprint)
 
     # -- Source flows under their row locks, ascending id ----------------
     flows: list[QuantityFlow] = []
@@ -211,7 +216,7 @@ def merge_flows(
         flows.append(flow)
     committed = committed_command(session, event_id)
     if committed:
-        return _replay_or_conflict(session, committed, fingerprint)
+        return _replay_or_conflict(committed, fingerprint)
 
     # -- Station under its row lock, bound to the flows' Area -----------
     station = session.get(ScanStation, station_id, with_for_update=True)
@@ -281,7 +286,10 @@ def merge_flows(
 
     # -- Writes — all inside the one open transaction ------------------
     operation_id = next(iter(operations))
-    metadata = command_metadata("MERGE", fingerprint, size=len(flows) + 1)
+    metadata: dict[str, Any] = {
+        **command_metadata("MERGE", fingerprint, size=len(flows) + 1),
+        MERGE_KEY: {"processing_state": state.value, "machine_id": machine_id},
+    }
     staged = stage_merge(
         session,
         sources=flows,
@@ -300,6 +308,6 @@ def merge_flows(
         if getattr(diagnostics, "constraint_name", None) == DEVICE_EVENT_ID_CONSTRAINT:
             winner = committed_command(session, event_id)
             if winner:
-                return _replay_or_conflict(session, winner, fingerprint)
+                return _replay_or_conflict(winner, fingerprint)
         raise
-    return _result_from_command(session, staged.movements, created=True)
+    return _result_from_command(staged.movements, created=True)

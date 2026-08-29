@@ -1099,6 +1099,8 @@ def test_merge_of_planned_flows_needs_an_equal_snapshot_and_position(
         result_steps[0].id
     )
     assert response.json()["quantity"] == 12
+    # Mixed provenance (two Route Templates): the result records none.
+    assert _route_provenance(db_engine, row.assigned_route_id) is None
     # The result is on its route: Lathe is its next step.
     resolved = _resolve_pn(client, lathe.station_id, pn)
     assert [c["quantity_flow_id"] for c in resolved["candidates"]] == [result]
@@ -1300,6 +1302,151 @@ def test_partial_command_replays_as_a_whole_and_rejects_a_different_payload(
         device_event_id=assign_id,
     )
     assert mismatch.status_code == 409
+
+
+def _route_provenance(engine: Engine, assigned_route_id: int) -> int | None:
+    with engine.connect() as connection:
+        value = connection.execute(
+            sa.select(models.AssignedRoute.source_route_template_id).where(
+                models.AssignedRoute.id == assigned_route_id
+            )
+        ).scalar_one()
+        return None if value is None else int(value)
+
+
+def test_planned_merge_keeps_the_provenance_only_when_every_source_shares_it(
+    client: TestClient, db_engine: Engine
+) -> None:
+    material = _Cell(client)
+    lathe = _Cell(client)
+    template = _create_route_template(db_engine, [(material.area_id, None), (lathe.area_id, None)])
+    twin = _create_route_template(db_engine, [(material.area_id, None), (lathe.area_id, None)])
+    pn = _unique("PN")
+    a = _release(client, material, quantity=1, part_number=pn, route_template_id=template)
+    b = _release(client, material, quantity=2, part_number=pn, route_template_id=template)
+    # A split child inherits its source's provenance.
+    split = _act(client, "DONE", material, b.flow_id, pn, 1)
+    assert split.status_code == 201, split.text
+    remainder = split.json()["remainder_quantity_flow_id"]
+    assert _route_provenance(db_engine, _flow_row(db_engine, remainder).assigned_route_id) == (
+        template
+    )
+    # Same template everywhere: the result keeps it.
+    same = _merge(client, material, pn, [a.flow_id, remainder])
+    assert same.status_code == 201, same.text
+    same_result = same.json()["quantity_flow_id"]
+    assert _route_provenance(db_engine, _flow_row(db_engine, same_result).assigned_route_id) == (
+        template
+    )
+    # A structurally identical snapshot from another template: still
+    # mergeable, but the result records NO provenance — never the first
+    # source's.
+    c = _release(client, material, quantity=3, part_number=pn, route_template_id=twin)
+    mixed = _merge(client, material, pn, [same_result, c.flow_id])
+    assert mixed.status_code == 201, mixed.text
+    mixed_route = _flow_row(db_engine, mixed.json()["quantity_flow_id"]).assigned_route_id
+    assert mixed_route is not None
+    assert _route_provenance(db_engine, mixed_route) is None
+    assert [(s.sequence, s.area_id) for s in _snapshot_steps(db_engine, mixed_route)] == [
+        (10, material.area_id),
+        (20, lathe.area_id),
+    ]
+    # And the reverse order of sources gives the same answer.
+    d = _release(client, material, quantity=4, part_number=pn, route_template_id=template)
+    e = _release(client, material, quantity=5, part_number=pn, route_template_id=twin)
+    reverse = _merge(client, material, pn, [e.flow_id, d.flow_id])
+    assert reverse.status_code == 201, reverse.text
+    assert (
+        _route_provenance(
+            db_engine, _flow_row(db_engine, reverse.json()["quantity_flow_id"]).assigned_route_id
+        )
+        is None
+    )
+
+
+def test_merge_replay_is_the_original_response_whatever_happened_since(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The replay is rebuilt from the immutable MERGED command alone: the
+    resulting flow moving on, changing state, or the Area changing mode
+    never alters it, and nothing is written."""
+    lathe = _Cell(client, machine_count=1)
+    deburr = _Cell(client)
+    pn = _unique("PN")
+    flows = [_release(client, lathe, quantity=q, part_number=pn).flow_id for q in (3, 4)]
+    event_id = str(uuid.uuid4())
+    original = _merge(client, lathe, pn, flows, device_event_id=event_id)
+    assert original.status_code == 201, original.text
+    assert original.json()["processing_state"] == "QUEUED"
+    assert original.json()["machine_id"] is None
+    result = original.json()["quantity_flow_id"]
+
+    # The result continues: Assign → DONE → Transfer (and a partial one).
+    assert (
+        _act(client, "ASSIGN", lathe, result, pn, 7, machine_id=lathe.machine_id).status_code == 201
+    )
+    assert (
+        _act(client, "DONE", lathe, result, pn, 7, machine_id=lathe.machine_id).status_code == 201
+    )
+    assert _transfer(client, lathe, deburr, result, pn, 2).status_code == 201
+    after = _counts(db_engine)
+    replay = _merge(client, lathe, pn, flows, device_event_id=event_id)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == original.json()
+    assert _counts(db_engine) == after
+
+    # ON_MACHINE merge: the recorded Machine survives the result leaving it.
+    on = [_assigned(client, lathe, quantity=q).flow_id for q in (1, 2)]
+    on_event = str(uuid.uuid4())
+    on_pn = _flow_row(db_engine, on[0]).part_number
+    # Both sources share one PN only when released as such: re-release.
+    second = _release(client, lathe, quantity=2, part_number=on_pn)
+    assert (
+        _act(
+            client, "ASSIGN", lathe, second.flow_id, on_pn, 2, machine_id=lathe.machine_id
+        ).status_code
+        == 201
+    )
+    on_original = _merge(client, lathe, on_pn, [on[0], second.flow_id], device_event_id=on_event)
+    assert on_original.status_code == 201, on_original.text
+    assert on_original.json()["machine_id"] == lathe.machine_id
+    assert on_original.json()["processing_state"] == "ON_MACHINE"
+    on_result = on_original.json()["quantity_flow_id"]
+    assert (
+        _act(client, "QUEUE", lathe, on_result, on_pn, 3, machine_id=lathe.machine_id).status_code
+        == 201
+    )
+    after = _counts(db_engine)
+    on_replay = _merge(client, lathe, on_pn, [on[0], second.flow_id], device_event_id=on_event)
+    assert on_replay.status_code == 200 and on_replay.json() == on_original.json()
+    assert _counts(db_engine) == after
+
+
+def test_merge_replay_ignores_an_area_mode_change(client: TestClient, db_engine: Engine) -> None:
+    plating = _Cell(client)
+    pn = _unique("PN")
+    flows = [_release(client, plating, quantity=q, part_number=pn).flow_id for q in (5, 6)]
+    event_id = str(uuid.uuid4())
+    original = _merge(client, plating, pn, flows, device_event_id=event_id)
+    assert original.status_code == 201, original.text
+    assert original.json()["processing_state"] == "PROCESSING"
+    # The first Machine turns the Area into a QUEUE_AND_ASSIGN Area: the
+    # result now READS as QUEUED, the original merge response does not change.
+    machine_id = _create_machine(client, plating.area_id)
+    result = original.json()["quantity_flow_id"]
+    assert _inventory_flows(client, plating.area_id)[result]["processing_state"] == "QUEUED"
+    after = _counts(db_engine)
+    replay = _merge(client, plating, pn, flows, device_event_id=event_id)
+    assert replay.status_code == 200 and replay.json() == original.json()
+    assert replay.json()["processing_state"] == "PROCESSING"
+    assert _counts(db_engine) == after
+    # And back: retire the Machine, the replay is still the original.
+    retired = client.post(f"/api/machines/{machine_id}/retire", json={"reason": "audit"})
+    assert retired.status_code == 200, retired.text
+    assert _inventory_flows(client, plating.area_id)[result]["processing_state"] == "PROCESSING"
+    again = _merge(client, plating, pn, flows, device_event_id=event_id)
+    assert again.status_code == 200 and again.json() == original.json()
+    assert _counts(db_engine) == after
 
 
 def test_merge_replays_and_rejects_a_different_set(client: TestClient, db_engine: Engine) -> None:

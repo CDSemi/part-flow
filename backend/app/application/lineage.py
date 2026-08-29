@@ -126,17 +126,22 @@ class SnapshotCopy(NamedTuple):
     steps: dict[int, AssignedRouteStep]
 
 
-def copy_assigned_route(session: Session, assigned_route_id: int) -> SnapshotCopy:
+def copy_assigned_route(
+    session: Session, assigned_route_id: int, *, source_route_template_id: int | None
+) -> SnapshotCopy:
     """An independent copy of a flow's snapshot for a new flow (flushed).
 
-    The provenance (`source_route_template_id`) is carried over; the
+    The provenance recorded on the copy is the caller's: a split child
+    carries its source's `source_route_template_id`; a merge result
+    carries it only when every source snapshot agrees (`shared_provenance`),
+    else NULL — never one source's provenance picked arbitrarily. The
     copy is otherwise as independent of the original as the original is
     of its template (PROJECT_PROFILE §8.10).
     """
     original = session.get(AssignedRoute, assigned_route_id)
     if original is None:  # pragma: no cover - FK guarantees the row
         raise ValueError(f"AssignedRoute {assigned_route_id} does not exist.")
-    route = AssignedRoute(source_route_template_id=original.source_route_template_id)
+    route = AssignedRoute(source_route_template_id=source_route_template_id)
     session.add(route)
     flush(session, {})
     steps = [
@@ -207,13 +212,44 @@ def _descendant(source: QuantityFlow, quantity: int, assigned_route_id: int | No
     )
 
 
+def shared_provenance(session: Session, flows: list[QuantityFlow]) -> int | None:
+    """The one `source_route_template_id` every PLANNED flow's snapshot carries, else None.
+
+    Structurally equal snapshots may descend from different Route
+    Templates (or from none); a merge result then records no
+    provenance rather than guessing one.
+    """
+    route_ids = {flow.assigned_route_id for flow in flows if flow.assigned_route_id is not None}
+    if not route_ids:
+        return None
+    provenance = {
+        session.get_one(AssignedRoute, route_id).source_route_template_id for route_id in route_ids
+    }
+    return next(iter(provenance)) if len(provenance) == 1 else None
+
+
 def _child_snapshot(
-    session: Session, source: QuantityFlow, known_step_id: int | None
+    session: Session,
+    source: QuantityFlow,
+    known_step_id: int | None,
+    *,
+    source_route_template_id: int | None = None,
+    inherit_provenance: bool = True,
 ) -> tuple[int | None, dict[int, AssignedRouteStep], int | None]:
-    """(copied route id, copied steps by sequence, copied last-known step id)."""
+    """(copied route id, copied steps by sequence, copied last-known step id).
+
+    By default the copy inherits the source snapshot's provenance (a
+    split child); a merge passes the sources' shared provenance instead.
+    """
     if source.assigned_route_id is None:
         return None, {}, None
-    copy = copy_assigned_route(session, source.assigned_route_id)
+    if inherit_provenance:
+        source_route_template_id = session.get_one(
+            AssignedRoute, source.assigned_route_id
+        ).source_route_template_id
+    copy = copy_assigned_route(
+        session, source.assigned_route_id, source_route_template_id=source_route_template_id
+    )
     known_sequence = next(
         (
             step.sequence
@@ -389,13 +425,20 @@ def stage_merge(
     The result inherits the shared PN, Area, Machine and route mode;
     a PLANNED result gets its own snapshot copy of the first source's
     snapshot (every source's snapshot was validated structurally equal)
-    at the shared last-known step. Movements are returned unstaged
-    (see `stage_split`).
+    at the shared last-known step, with the provenance every source
+    shares — or none when the sources descend from different Route
+    Templates. Movements are returned unstaged (see `stage_split`).
     """
     ordered = sorted(sources, key=lambda flow: flow.id)
     first = ordered[0]
     area_id = first.current_area_id
-    route_id, _, known = _child_snapshot(session, first, last_known_step_id(session, first.id))
+    route_id, _, known = _child_snapshot(
+        session,
+        first,
+        last_known_step_id(session, first.id),
+        source_route_template_id=shared_provenance(session, ordered),
+        inherit_provenance=False,
+    )
     result = _descendant(first, sum(flow.quantity for flow in ordered), route_id)
     session.add(result)
     flush(session, {})
