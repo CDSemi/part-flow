@@ -23,7 +23,7 @@ GUI_DESIGN §4.7:
 - route deviation: refused until explicitly confirmed, then recorded on
   the Movement with no snapshot step;
 - invalid station/source/Operation/route/quantity input rejected with
-  ZERO writes — including partial quantity (Phase 5 moves whole flows);
+  ZERO writes — including exceeding quantity (partial quantity splits since Phase 8);
 - idempotency: same ``device_event_id`` + same request replays the
   original result (also after the flow moved on and when the race is
   lost at COMMIT); a different request is an explicit conflict;
@@ -895,26 +895,28 @@ def test_operation_resolution_at_the_destination(client: TestClient, db_engine: 
 # ---------------------------------------------------------------------------
 
 
-def test_partial_quantity_is_refused_clearly_with_no_write(
+def test_exceeding_and_invalid_quantity_are_refused_clearly_with_no_write(
     client: TestClient, db_engine: Engine
 ) -> None:
+    """A smaller quantity is a partial transfer since Phase 8 (it splits
+    the flow first — test_quantity_split_merge_api); a larger one still
+    exceeds the source and writes nothing."""
     material = _Cell(client)
     lathe = _Cell(client)
     flow_id, pn = _release(client, material, quantity=30)
     before = _counts(db_engine)
 
-    for quantity, fragment in ((29, "Partial transfer is not supported yet"), (31, "exceeds")):
-        response = _transfer(
-            client,
-            lathe.station_id,
-            part_number=pn,
-            quantity_flow_id=flow_id,
-            source_area_id=material.area_id,
-            quantity=quantity,
-        )
-        assert response.status_code == 422, response.text
-        assert fragment in response.json()["detail"]
-        assert "30 pcs" in response.json()["detail"]
+    response = _transfer(
+        client,
+        lathe.station_id,
+        part_number=pn,
+        quantity_flow_id=flow_id,
+        source_area_id=material.area_id,
+        quantity=31,
+    )
+    assert response.status_code == 422, response.text
+    assert "exceeds" in response.json()["detail"]
+    assert "30 pcs" in response.json()["detail"]
     for invalid in (0, -5, True, 1.5, "30"):
         response = _transfer(
             client,

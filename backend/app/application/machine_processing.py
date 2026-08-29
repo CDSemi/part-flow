@@ -36,9 +36,15 @@ Rules owned here:
 - Source and Machine are always EXPLICIT: the command takes exactly one
   QuantityFlow chosen by the operator and one Machine (scanned or
   selected). Nothing is picked, ranked, combined or auto-assigned.
-- Whole-QuantityFlow only (temporary limitation until SPLIT, Phase 8):
-  a smaller quantity is refused with a clear message and no write; a
-  larger one exceeds the source.
+- Partial quantity (Phase 8): a quantity smaller than the flow's is
+  applied by SPLITTING the flow first, atomically inside the same
+  command — the source closes, a selected child of exactly the
+  requested quantity receives the action, the remainder child keeps
+  the source's state — so the command's Movements are the three
+  `SPLIT` rows (sequence 1–3) followed by the action row (4), all
+  under one `device_event_id` (`app.application.lineage`). The whole
+  quantity never splits (no SPLIT when the action uses everything); a
+  larger quantity exceeds the source and is refused.
 - Idempotency exactly like the transfer (SLICE1 §14): the request
   fingerprint (command kind, station, flow, PN, Machine, quantity) is
   stored on the Movement; same `device_event_id` + same fingerprint
@@ -68,9 +74,9 @@ Rules owned here:
   is no new Operation choice), the Station is the one the command was
   recorded at. No snapshot step: an in-Area event creates no route
   visit (PROJECT_PROFILE §8.11).
-- Explicitly NOT here: SPLIT/MERGED (Phase 8), Worker identity, Undo
-  (Phase 9 — the command relationship it needs is `device_event_id` +
-  `command_sequence`), Repair, Scrap, Stockroom.
+- Explicitly NOT here: the explicit merge (`app.application.merges`),
+  Worker identity, Undo (Phase 9 — the command relationship it needs is
+  `device_event_id` + `command_sequence`), Repair, Scrap, Stockroom.
 """
 
 import datetime
@@ -89,6 +95,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
+from app.application.lineage import SplitRecord, split_prefix, stage_split
 from app.application.machines import (
     area_has_machines,
     assigned_quantity,
@@ -96,7 +103,7 @@ from app.application.machines import (
     note_assignment_change,
 )
 from app.application.part_numbers import canonical_part_number
-from app.application.projections import processing_state_of
+from app.application.projections import effective_latest_movement, processing_state_of
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -115,7 +122,7 @@ from app.infrastructure.models import (
 FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
 
-CommandKind = Literal["ASSIGN", "QUEUE", "DONE", "TRANSFER"]
+CommandKind = Literal["ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE"]
 
 _MOVEMENT_TYPE_BY_KIND: Final[dict[CommandKind, MovementType]] = {
     "ASSIGN": MovementType.ASSIGNED_TO_MACHINE,
@@ -145,43 +152,15 @@ class MachineProcessingResult(NamedTuple):
     operation_id: int
     station_id: str
     processing_state: ProcessingState
+    # Set when the command split the flow first (Phase 8): the consumed
+    # source, the remainder child that kept the source's state, and its
+    # quantity. All None for a whole-flow command.
+    source_quantity_flow_id: int | None
+    remainder_quantity_flow_id: int | None
+    remainder_quantity: int | None
     device_event_id: str
     occurred_at: datetime.datetime
     created: bool
-
-
-# ---------------------------------------------------------------------------
-# Derived state (shared with the read models and the transfer)
-# ---------------------------------------------------------------------------
-
-
-def latest_movement(session: Session, flow_id: int) -> PartMovement:
-    """The flow's newest Movement — the row its derived position follows."""
-    movement = session.scalar(
-        select(PartMovement)
-        .where(PartMovement.quantity_flow_id == flow_id)
-        .order_by(PartMovement.id.desc())
-        .limit(1)
-    )
-    if movement is None:  # pragma: no cover - every flow starts with RECEIVED
-        raise ConflictError(f"Quantity Flow {flow_id} has no Movement history.")
-    return movement
-
-
-def latest_movements(session: Session, flow_ids: list[int]) -> dict[int, PartMovement]:
-    """The newest Movement per flow, for read models (unlocked)."""
-    if not flow_ids:
-        return {}
-    latest = (
-        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
-        .where(PartMovement.quantity_flow_id.in_(flow_ids))
-        .group_by(PartMovement.quantity_flow_id)
-        .subquery()
-    )
-    rows = session.scalars(
-        select(PartMovement).join(latest, latest.c.movement_id == PartMovement.id)
-    )
-    return {movement.quantity_flow_id: movement for movement in rows}
 
 
 def command_metadata(kind: CommandKind, fingerprint: str, *, size: int = 1) -> dict[str, Any]:
@@ -242,7 +221,21 @@ def committed_command(session: Session, device_event_id: str) -> list[PartMoveme
     )
 
 
-def result_from_movement(movement: PartMovement, *, created: bool) -> MachineProcessingResult:
+def result_from_command(command: list[PartMovement], *, created: bool) -> MachineProcessingResult:
+    """The result of one in-Area command: its optional SPLIT prefix + ONE action row."""
+    split, action = split_prefix(command)
+    if len(action) != 1:
+        raise IdempotencyConflictError(
+            "This device_event_id belongs to a different kind of production"
+            " event. Nothing was recorded — a new intent needs a new"
+            " device_event_id."
+        )
+    return result_from_movement(action[0], split=split, created=created)
+
+
+def result_from_movement(
+    movement: PartMovement, *, split: SplitRecord | None, created: bool
+) -> MachineProcessingResult:
     machine_id = (
         movement.destination_machine_id
         if movement.movement_type == MovementType.ASSIGNED_TO_MACHINE
@@ -277,6 +270,9 @@ def result_from_movement(movement: PartMovement, *, created: bool) -> MachinePro
         # or — for a release — QUEUED, since a Machine was active in the
         # Area when the quantity was released from it.
         processing_state=processing_state_of(movement.movement_type, direct_processing=False),
+        source_quantity_flow_id=split.source_quantity_flow_id if split else None,
+        remainder_quantity_flow_id=split.remainder_quantity_flow_id if split else None,
+        remainder_quantity=split.remainder_quantity if split else None,
         device_event_id=movement.device_event_id,
         occurred_at=movement.occurred_at,
         created=created,
@@ -286,19 +282,21 @@ def result_from_movement(movement: PartMovement, *, created: bool) -> MachinePro
 def replay_or_conflict(
     command: list[PartMovement], kind: CommandKind, fingerprint: str
 ) -> MachineProcessingResult:
-    movement = command[0]
+    _, action = split_prefix(command)
+    movement = action[-1]
     stored = (movement.metadata_ or {}).get(FINGERPRINT_KEY)
     if (
-        len(command) != 1
+        len(action) != 1
         or stored != fingerprint
         or movement.movement_type != _MOVEMENT_TYPE_BY_KIND[kind]
+        or any((row.metadata_ or {}).get(FINGERPRINT_KEY) != stored for row in command)
     ):
         raise IdempotencyConflictError(
             "This device_event_id was already used for a different production"
             " request. Nothing was recorded — a new intent needs a new"
             " device_event_id."
         )
-    return result_from_movement(movement, created=False)
+    return result_from_command(command, created=False)
 
 
 # ---------------------------------------------------------------------------
@@ -312,12 +310,21 @@ class CommandContext(NamedTuple):
     flow: QuantityFlow
     station: ScanStation
     area: Area
+    # The flow's effective latest position-bearing Movement — its own,
+    # or the one it inherits through its lineage (Phase 8).
     latest: PartMovement
-    # Derived from the latest Movement and the Area's mode (§12).
+    # Derived from that Movement and the Area's mode (§12).
     state: ProcessingState
     # The Area mode at the moment of the command: True when the Area
     # has no active Machine (direct processing, Phase 7).
     direct_processing: bool
+    # The confirmed quantity: the whole flow, or a part of it (Phase 8
+    # — the command splits the flow first and acts on the selected child).
+    quantity: int
+
+    @property
+    def partial(self) -> bool:
+        return self.quantity < self.flow.quantity
 
 
 def lock_flow_and_station(
@@ -352,7 +359,7 @@ def lock_flow_and_station(
             f" ('{flow.part_number}'). {action} applies to the scanned PN's own quantity."
         )
     if flow.status != QuantityFlowStatus.ACTIVE:
-        raise ConflictError(f"Quantity Flow {flow.id} is no longer active.")
+        raise ConflictError(no_longer_active(flow))
     if station.area_id != flow.current_area_id:
         raise ConflictError(
             f"Quantity Flow {flow.id} is not in the Area Scan Station '{station_id}' is"
@@ -366,21 +373,59 @@ def lock_flow_and_station(
         raise ConflictError(
             f"Area '{area.name}' is inactive and accepts no production use. Nothing was recorded."
         )
-    if quantity != flow.quantity:
-        if quantity > flow.quantity:
-            raise InvalidInputError(
-                f"{action} quantity {quantity} exceeds the {flow.quantity} pcs at the"
-                " source position. Nothing was recorded."
-            )
+    if quantity > flow.quantity:
         raise InvalidInputError(
-            f"Partial {action.lower()} is not supported yet: this Quantity Flow holds"
-            f" {flow.quantity} pcs and is handled as a whole. Enter {flow.quantity} pcs"
-            " or cancel — nothing was recorded."
+            f"{action} quantity {quantity} exceeds the {flow.quantity} pcs at the"
+            " source position. Nothing was recorded."
         )
-    latest = latest_movement(session, flow.id)
+    latest = effective_latest_movement(session, flow.id)
     direct = not area_has_machines(session, area.id)
     state = processing_state_of(latest.movement_type, direct_processing=direct)
-    return CommandContext(flow, station, area, latest, state, direct)
+    return CommandContext(flow, station, area, latest, state, direct, quantity)
+
+
+def no_longer_active(flow: QuantityFlow) -> str:
+    """Why a closed flow refuses every production command (Phase 8)."""
+    if flow.status == QuantityFlowStatus.SPLIT:
+        return (
+            f"Quantity Flow {flow.id} was split into separate quantities and is no"
+            " longer active — act on one of its resulting quantities. Reload the"
+            " station and scan again. Nothing was recorded."
+        )
+    if flow.status == QuantityFlowStatus.MERGED:
+        return (
+            f"Quantity Flow {flow.id} was merged into another quantity and is no"
+            " longer active — act on the merged quantity. Reload the station and"
+            " scan again. Nothing was recorded."
+        )
+    return f"Quantity Flow {flow.id} is no longer active. Nothing was recorded."
+
+
+def split_if_partial(
+    session: Session, context: CommandContext, *, event_id: str, metadata: dict[str, Any]
+) -> tuple[CommandContext, list[PartMovement], int]:
+    """Split the flow when the confirmed quantity is a part of it (Phase 8).
+
+    Returns the context to act on — the SELECTED child in place of the
+    source, carrying exactly the confirmed quantity and the source's
+    position — with the staged SPLIT Movements and the next
+    `command_sequence`; a whole-flow command returns unchanged with no
+    Movements and sequence 1. The remainder child keeps the source's
+    state by lineage. Called after every validation and every read the
+    command needs, and before its own Movement is staged.
+    """
+    if not context.partial:
+        return context, [], 1
+    staged = stage_split(
+        session,
+        source=context.flow,
+        selected_quantity=context.quantity,
+        operation_id=context.latest.operation_id,
+        station_id=context.station.station_id,
+        event_id=event_id,
+        metadata=metadata,
+    )
+    return context._replace(flow=staged.selected), staged.movements, staged.next_sequence
 
 
 def _machine_on_flow(
@@ -419,7 +464,7 @@ def _machine_on_flow(
 
 def commit_or_replay(
     session: Session,
-    movement: PartMovement,
+    command: list[PartMovement],
     *,
     kind: CommandKind,
     event_id: str,
@@ -437,7 +482,7 @@ def commit_or_replay(
             if winner:
                 return replay_or_conflict(winner, kind, fingerprint)
         raise
-    return result_from_movement(movement, created=True)
+    return result_from_command(command, created=True)
 
 
 def in_area_movement(
@@ -447,6 +492,7 @@ def in_area_movement(
     source_machine_id: int | None,
     destination_machine_id: int | None,
     event_id: str,
+    sequence: int,
     metadata: dict[str, Any],
 ) -> PartMovement:
     return PartMovement(
@@ -464,9 +510,14 @@ def in_area_movement(
         occurred_at=func.now(),
         server_received_at=func.now(),
         device_event_id=event_id,
-        command_sequence=1,
+        command_sequence=sequence,
         metadata_=metadata,
     )
+
+
+def command_size(context: CommandContext, action_rows: int) -> int:
+    """How many Movements the command appends: the SPLIT prefix + its own."""
+    return (3 if context.partial else 0) + action_rows
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +535,7 @@ def assign_to_machine(
     quantity: object,
     device_event_id: object,
 ) -> MachineProcessingResult:
-    """Assign one whole QUEUED QuantityFlow to a Machine, ONE transaction."""
+    """Assign QUEUED quantity to a Machine, ONE transaction (a part of it splits first)."""
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity, "Assignment")
     event_id = device_event_id_text(device_event_id)
@@ -552,26 +603,34 @@ def assign_to_machine(
         )
 
     # -- Writes — all inside the one open transaction ------------------
-    # The assigned quantity is read BEFORE the Movement is staged: a
+    # The assigned quantity is read BEFORE any Movement is staged: a
     # later autoflush would otherwise surface a lost idempotency race
     # as a flush error instead of at COMMIT.
     before = assigned_quantity(session, machine.id, exclude_flow_id=context.flow.id)
+    metadata = command_metadata("ASSIGN", fingerprint, size=command_size(context, 1))
+    context, command, sequence = split_if_partial(
+        session, context, event_id=event_id, metadata=metadata
+    )
     movement = in_area_movement(
         context,
         movement_type=MovementType.ASSIGNED_TO_MACHINE,
         source_machine_id=None,
         destination_machine_id=machine.id,
         event_id=event_id,
-        metadata=command_metadata("ASSIGN", fingerprint),
+        sequence=sequence,
+        metadata=metadata,
     )
-    session.add(movement)
+    command.append(movement)
+    # Added in command order: the unit of work inserts rows of one
+    # table in that order, so the BIGSERIAL ids follow it.
+    session.add_all(command)
     context.flow.current_machine_id = machine.id
     context.flow.updated_at = func.now()
     note_assignment_change(
         machine, assigned_before=before, assigned_after=before + context.flow.quantity
     )
     return commit_or_replay(
-        session, movement, kind="ASSIGN", event_id=event_id, fingerprint=fingerprint
+        session, command, kind="ASSIGN", event_id=event_id, fingerprint=fingerprint
     )
 
 
@@ -617,15 +676,23 @@ def _leave_machine(
     machine = _machine_on_flow(session, context, machine_id, action)
 
     before = assigned_quantity(session, machine.id)
+    metadata = command_metadata(kind, fingerprint, size=command_size(context, 1))
+    # A partial QUEUE / DONE leaves the remainder ON the Machine: only
+    # the selected child leaves it.
+    context, command, sequence = split_if_partial(
+        session, context, event_id=event_id, metadata=metadata
+    )
     movement = in_area_movement(
         context,
         movement_type=_MOVEMENT_TYPE_BY_KIND[kind],
         source_machine_id=machine.id,
         destination_machine_id=None,
         event_id=event_id,
-        metadata=command_metadata(kind, fingerprint),
+        sequence=sequence,
+        metadata=metadata,
     )
-    session.add(movement)
+    command.append(movement)
+    session.add_all(command)
     # The Machine clears from the position either way; the Area stays
     # the location. QUEUED versus READY_TO_TRANSFER is told apart by
     # the Movement just appended, never by the cleared column.
@@ -634,9 +701,7 @@ def _leave_machine(
     note_assignment_change(
         machine, assigned_before=before, assigned_after=before - context.flow.quantity
     )
-    return commit_or_replay(
-        session, movement, kind=kind, event_id=event_id, fingerprint=fingerprint
-    )
+    return commit_or_replay(session, command, kind=kind, event_id=event_id, fingerprint=fingerprint)
 
 
 def release_to_queue(
@@ -649,7 +714,7 @@ def release_to_queue(
     quantity: object,
     device_event_id: object,
 ) -> MachineProcessingResult:
-    """QUEUE: return one whole ON_MACHINE QuantityFlow to the Area queue."""
+    """QUEUE: return ON_MACHINE quantity to the Area queue (a part of it splits first)."""
     return _leave_machine(
         session,
         kind="QUEUE",
@@ -672,7 +737,7 @@ def complete_at_machine(
     quantity: object,
     device_event_id: object,
 ) -> MachineProcessingResult:
-    """DONE: complete processing of one whole ON_MACHINE QuantityFlow at its Area."""
+    """DONE: complete processing of ON_MACHINE quantity at its Area (a part splits first)."""
     return _leave_machine(
         session,
         kind="DONE",

@@ -19,7 +19,10 @@ Machine workflows), and the completed **Phase 7 Direct Area Processing
 (Areas Without Machines)** — the derived `PROCESSING` state, the
 direct-processing DONE without a Machine, the implicit completion on
 transfer, and the real Scan Station direct-processing presentation and
-`DONE`:
+`DONE`, plus the **Phase 8 Quantity SPLIT and MERGED backend core**
+(persistence and lineage, partial quantity on every Scan Station
+command, the explicit merge; the Scan Station quantity view still
+refuses partial quantity until its Phase 8 wiring):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -58,11 +61,16 @@ transfer, and the real Scan Station direct-processing presentation and
   the Phase 6 Machine-Area processing commands
   (`POST /api/scan-stations/{id}/machine-assignments`,
   `…/machine-releases` (QUEUE) and `…/area-completions` (DONE) — each
-  one whole Quantity Flow, one idempotent transaction; since Phase 7
+  one Quantity Flow, whole or — since Phase 8 — in part (the flow is
+  split first inside the same command), one idempotent transaction;
+  since Phase 7
   `…/area-completions` without `machine_id` is the direct-processing
   DONE of an Area without Machines; a transfer of ON_MACHINE or
   directly processing quantity appends `AREA_COMPLETED` + `TRANSFERRED`
   as one command under one `device_event_id`;
+  `POST /api/scan-stations/{id}/merges` (Phase 8) — the explicit merge of
+  named Quantity Flows of one PN with one identical production context
+  into one resulting flow, ancestry kept, never automatic;
   `POST /api/scan-stations/{id}/machine-scans/resolve` — a
   `PF:MACHINE:` barcode resolved into the one-shot Machine-first
   assignment context with the Area's queued flows; the PN resolution
@@ -74,7 +82,7 @@ transfer, and the real Scan Station direct-processing presentation and
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
   SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4,
-  Phase 5, Phase 6 and Phase 7 schema (`app/infrastructure/models.py`)
+  Phase 5, Phase 6, Phase 7 and Phase 8 schema (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
@@ -94,8 +102,11 @@ transfer, and the real Scan Station direct-processing presentation and
   the Movement Machine references, `part_movements.command_sequence`
   with `UNIQUE (device_event_id, command_sequence)`, and the
   `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
-  types with their shape branches) and the Phase 7 direct-processing
-  widening (an `AREA_COMPLETED` without a Machine)
+  types with their shape branches), the Phase 7 direct-processing
+  widening (an `AREA_COMPLETED` without a Machine) and the Phase 8
+  quantity lineage (`SPLIT` / `MERGED` types, the Quantity Flow
+  lifecycle closure and the append-only `quantity_flow_lineage` edge
+  table)
 - Docker Compose development stack with health checks
 
 **Two production commands exist**: Management → Work Orders (Phase 4)
@@ -110,7 +121,7 @@ and updating the current position in one idempotent transaction, with
 explicit source selection, the confirmed destination Area as a
 precondition on the station binding, destination Operation resolution
 and Planned-Route deviation confirmation with a reason — Area or
-Operation (partial quantity is refused until SPLIT, Phase 8); the
+Operation (partial quantity splits the flow first since Phase 8); the
 Scan Station view records it — scans resolve on the server, success is
 reported only after the server confirmed the write, and the Area
 inventory refreshes from the server. The completed Phase 6 adds the
@@ -130,7 +141,15 @@ row action and the PN-first `Complete Area processing` choice — the
 same Area Completion wizard without a Machine field, recorded as a
 Machine-less `AREA_COMPLETED` — and a transfer of directly processing
 quantity completes it implicitly (`AREA_COMPLETED`, then `TRANSFERRED`
-as one command). Area and scrap barcodes, Worker identity, Repair,
+as one command). The Phase 8 backend core adds partial quantity on
+every one of those commands — the source Quantity Flow is split
+atomically inside the same command (three `SPLIT` Movements, then the
+action), the selected part receives the action, the remainder keeps
+the source's state, the closed source leaves the inventory and the
+lineage edges keep the ancestry — and the explicit merge of Quantity
+Flows of one PN with one identical production context (`MERGED`,
+N → 1); the Scan Station quantity view still refuses partial quantity
+until its Phase 8 wiring. Area and scrap barcodes, Worker identity, Repair,
 Scrap and Undo stay honest placeholders; the approved presentation of those workflows survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5
@@ -435,10 +454,12 @@ integration):
   boundary revision — `0002_phase3_domain` for Phase 3,
   `0003_phase35_environment` for Phase 3.5, `0005_phase4_release_index`
   for Phase 4, `0006_phase5_transfer` for Phase 5,
-  `0007_phase6_machine_assignment` for Phase 6 — while the Phase 7
-  module carries the head-level coverage: the widened `AREA_COMPLETED`
-  shape branch, the downgrade that refuses to drop a Machine-less
-  completion, and models↔migration parity); and the API tests exercise the endpoints
+  `0007_phase6_machine_assignment` for Phase 6,
+  `0008_phase7_direct_processing` for Phase 7 — while the Phase 8
+  module carries the head-level coverage: the `SPLIT` / `MERGED` types
+  and their shape branch, the flow lifecycle checks, the append-only
+  lineage edge table, the downgrade that refuses to drop lineage
+  history, and models↔migration parity); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save
@@ -476,7 +497,14 @@ integration):
   `AREA_COMPLETED` + `TRANSFERRED` command and its database-level
   atomicity, DONE-versus-transfer and DONE-versus-DONE races, the
   projection replay, the Area mode following its active Machines, and
-  the Machine-Area regressions)
+  the Machine-Area regressions) and the Phase 8 quantity lineage
+  (partial Assign / QUEUE / DONE / direct DONE / Transfer from every
+  source state with conservation, lineage and the untouched demand,
+  the full-quantity regression, PLANNED snapshot copies and the child's
+  recorded step or deviation, the explicit merge with every
+  incompatibility refused, whole-command replay and conflicting reuse,
+  concurrent and stale commands, and the projection replay across a
+  lineage tree)
   — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
@@ -579,7 +607,7 @@ backend/
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

@@ -16,8 +16,8 @@ IMPLEMENTATION_ROADMAP Phase 6, PROJECT_PROFILE §7 Area Completion,
   auto-assignment in a single-Machine Area;
 - assign refusals with ZERO writes: retired, other-Area and maintenance
   Machines, unknown Machine, flow not in the station's Area, inactive
-  station, ON_MACHINE and READY_TO_TRANSFER flows, partial and
-  exceeding quantity, PN mismatch;
+  station, ON_MACHINE and READY_TO_TRANSFER flows, exceeding
+  quantity, PN mismatch;
 - QUEUE: ``RELEASED_FROM_MACHINE`` clears the Machine and derives
   QUEUED (never completed); DONE: ``AREA_COMPLETED`` clears the Machine,
   keeps the Area and derives READY_TO_TRANSFER; both refuse queued or
@@ -515,9 +515,8 @@ def test_assign_refuses_wrong_station_state_quantity_and_pn(
         quantity=10,
     )
     assert elsewhere.status_code == 409 and "not in the Area" in elsewhere.json()["detail"]
-    # Partial and exceeding quantity: refused, never written.
-    partial = _assign(client, lathe, flow_id, pn, 4)
-    assert partial.status_code == 422 and "Partial" in partial.json()["detail"]
+    # Exceeding quantity: refused, never written (a smaller quantity
+    # splits the flow first — Phase 8, test_quantity_split_merge_api).
     exceeding = _assign(client, lathe, flow_id, pn, 11)
     assert exceeding.status_code == 422 and "exceeds" in exceeding.json()["detail"]
     for bad in (0, -1, 2.5, "10", True):
@@ -725,16 +724,6 @@ def test_queue_and_done_refuse_queued_quantity_and_a_stale_machine(
         quantity=2,
     )
     assert stale.status_code == 409 and "not on the selected Machine" in stale.json()["detail"]
-    partial = _act(
-        client,
-        kind,
-        lathe.station_id,
-        part_number=pn,
-        quantity_flow_id=flow_id,
-        machine_id=lathe.machine_id,
-        quantity=1,
-    )
-    assert partial.status_code == 422 and "Partial" in partial.json()["detail"]
     assert _movement_count(db_engine) == count
     assert _flow_row(db_engine, flow_id).current_machine_id == lathe.machine_id
 
@@ -890,19 +879,27 @@ def test_finished_quantity_transfers_with_transferred_alone(
     _assert_replay_matches(db_engine, flow_id)
 
 
-def test_partial_transfer_of_on_machine_quantity_writes_nothing(
+def test_partial_transfer_of_on_machine_quantity_splits_and_leaves_the_rest_on_the_machine(
     client: TestClient, db_engine: Engine
 ) -> None:
+    """Phase 8: only the selected part completes and moves; the remainder
+    stays ON_MACHINE (full lineage coverage in test_quantity_split_merge_api)."""
     lathe = _Cell(client)
     deburr = _Cell(client)
     flow_id, pn = _assigned(client, lathe, quantity=20)
     count = _movement_count(db_engine)
     response = _transfer(client, lathe, deburr, flow_id, pn, 10)
-    assert response.status_code == 422 and "Partial" in response.json()["detail"]
-    assert _movement_count(db_engine) == count
-    flow_row = _flow_row(db_engine, flow_id)
-    assert flow_row.current_area_id == lathe.area_id
-    assert flow_row.current_machine_id == lathe.machine_id
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["completed_machine_id"] == lathe.machine_id
+    assert body["source_quantity_flow_id"] == flow_id and body["remainder_quantity"] == 10
+    assert _movement_count(db_engine) == count + 5
+    assert _flow_row(db_engine, flow_id).status == "SPLIT"
+    remainder = _flow_row(db_engine, body["remainder_quantity_flow_id"])
+    assert remainder.current_area_id == lathe.area_id
+    assert remainder.current_machine_id == lathe.machine_id
+    moved = _flow_row(db_engine, body["quantity_flow_id"])
+    assert moved.current_area_id == deburr.area_id and moved.current_machine_id is None
     assert _machine(client, lathe.machine_id)["operational_state"] == "RUNNING"
 
 

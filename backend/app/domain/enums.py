@@ -2,9 +2,8 @@
 
 Framework-independent business vocabulary. Where the canonical Slice 1
 schema defines a CHECK constraint (request_type, route_mode,
-movement_type), the Infrastructure layer enforces these values in
-PostgreSQL; QuantityFlowStatus is not CHECK-constrained — ACTIVE is
-only the creation default. Each enumeration widens additively in the
+movement_type, and — from Phase 8 — the QuantityFlow status), the
+Infrastructure layer enforces these values in PostgreSQL. Each enumeration widens additively in the
 phase that introduces new values — no future value is pre-declared
 here.
 """
@@ -44,9 +43,16 @@ class MovementType(StrEnum):
     (queued quantity becomes ON_MACHINE), RELEASED_FROM_MACHINE (the
     QUEUE action — unfinished quantity returns to the Area queue) and
     AREA_COMPLETED (the DONE action — processing at the current Area is
-    complete, the quantity waits as READY_TO_TRANSFER). Later phases
-    widen this additively (SPLIT, MERGED, REVERSED, STOCKED, ...); none
-    of those values exist yet.
+    complete, the quantity waits as READY_TO_TRANSFER). Phase 8 adds
+    the two quantity-lineage events: SPLIT (one QuantityFlow is consumed
+    into child flows — recorded on the consumed source AND on every
+    child) and MERGED (several QuantityFlows of one PN are consumed into
+    one resulting flow — recorded on every consumed source AND on the
+    result). Neither is a position change: a lineage event keeps the
+    Area, the Machine, the Operation and the holding state of the
+    quantity it carries, which are derived by following the lineage to
+    the last position-bearing Movement. Later phases widen this
+    additively (REVERSED, STOCKED, ...); none of those values exist yet.
     """
 
     RECEIVED = "RECEIVED"
@@ -54,6 +60,22 @@ class MovementType(StrEnum):
     ASSIGNED_TO_MACHINE = "ASSIGNED_TO_MACHINE"
     RELEASED_FROM_MACHINE = "RELEASED_FROM_MACHINE"
     AREA_COMPLETED = "AREA_COMPLETED"
+    SPLIT = "SPLIT"
+    MERGED = "MERGED"
+
+
+class LineageRelation(StrEnum):
+    """How a child QuantityFlow descends from a parent (Phase 8).
+
+    One row per (parent, child) edge of `quantity_flow_lineage`: a
+    SPLIT edge fans one parent out to several children (1 → N), a
+    MERGED edge fans several parents into one child (N → 1). Both are
+    the same edge shape, so a single table reconstructs either
+    direction without forcing N → 1 into a single parent column.
+    """
+
+    SPLIT = "SPLIT"
+    MERGED = "MERGED"
 
 
 class ProcessingState(StrEnum):
@@ -97,11 +119,18 @@ class MachineOperationalState(StrEnum):
 class QuantityFlowStatus(StrEnum):
     """Lifecycle status of a QuantityFlow.
 
-    ACTIVE is the creation default (SLICE1_DATA_MODEL §9); closing
-    statuses arrive with the phases that close flows.
+    ACTIVE is the creation default (SLICE1_DATA_MODEL §9). Phase 8 adds
+    the two consumption closures: SPLIT (the flow was consumed into its
+    child flows) and MERGED (the flow was consumed into a resulting
+    flow). A closed flow keeps its history and its last position but
+    is never active inventory again; `closed_at` is set exactly for a
+    non-ACTIVE status (CHECK). Later closures (STOCKED, ...) arrive
+    with their phases.
     """
 
     ACTIVE = "ACTIVE"
+    SPLIT = "SPLIT"
+    MERGED = "MERGED"
 
 
 class WorkOrderStatus(StrEnum):

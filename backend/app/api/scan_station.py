@@ -77,6 +77,23 @@ TRANSFER; READY_TO_TRANSFER → TRANSFER), the PN resolution flags
 reports the Area mode (``has_machines``) and splits queued quantity,
 quantity per Machine card (ON_MACHINE only, with the derived Machine
 state), directly processing quantity and finished quantity.
+
+Phase 8 — partial quantity and the explicit merge:
+
+- every command above accepts a ``quantity`` smaller than the flow's:
+  the flow is SPLIT first inside the same command (the source closes,
+  the selected child receives the action, the remainder keeps the
+  source's state) and the response names the consumed
+  ``source_quantity_flow_id`` and the ``remainder_quantity_flow_id``
+  with its quantity (all null for a whole-flow command); the whole
+  quantity never splits, a larger quantity stays 422;
+- ``POST /scan-stations/{station_id}/merges`` — merge at least two
+  ACTIVE flows of ONE PN in the station's Area into one resulting flow
+  (201 fresh / 200 replay / 409 mismatched reuse; 409 with nothing
+  recorded when the flows' production context differs — state,
+  Machine, Operation or route context — or a flow is not in the Area).
+  Never automatic: only the flows named are merged. Closed (split or
+  merged) flows never appear in the read models again.
 """
 
 import datetime
@@ -86,7 +103,7 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.dependencies import SessionDep
-from app.application import direct_processing, machine_processing, scan_station, transfers
+from app.application import direct_processing, machine_processing, merges, scan_station, transfers
 from app.application.scan_station import FlowInArea, MachineInventory, WorkOrderContext
 from app.domain.enums import MachineOperationalState
 from app.infrastructure.models import Area, Machine, Operation
@@ -432,7 +449,7 @@ class AreaTransferRequest(BaseModel):
     # bound to exactly this Area when the transfer is recorded.
     target_area_id: int
     # Strict: a quantity is an integer, never a coerced bool/float/text.
-    # Phase 5 accepts only the flow's whole quantity.
+    # The whole flow, or a part of it (Phase 8 — split first).
     quantity: StrictInt
     # Optional when the destination resolves it (single Operation or
     # route-step Operation); required when several are configured.
@@ -464,6 +481,11 @@ class AreaTransferResponse(BaseModel):
     # left (ON_MACHINE) — null for directly processing quantity.
     completed_movement_id: int | None
     completed_machine_id: int | None
+    # Present when only a part of the source moved (Phase 8): the
+    # consumed source flow and the remainder left at the source.
+    source_quantity_flow_id: int | None
+    remainder_quantity_flow_id: int | None
+    remainder_quantity: int | None
     device_event_id: str
     occurred_at: datetime.datetime
 
@@ -502,6 +524,9 @@ def transfer_to_station_area(
         route_deviation=result.route_deviation,
         completed_movement_id=result.completed_movement_id,
         completed_machine_id=result.completed_machine_id,
+        source_quantity_flow_id=result.source_quantity_flow_id,
+        remainder_quantity_flow_id=result.remainder_quantity_flow_id,
+        remainder_quantity=result.remainder_quantity,
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )
@@ -513,12 +538,12 @@ def transfer_to_station_area(
 
 
 class MachineProcessingRequest(BaseModel):
-    """One confirmed in-Area action on ONE whole QuantityFlow.
+    """One confirmed in-Area action on ONE QuantityFlow, whole or in part.
 
     ``machine_id`` is the Machine to assign to (assignment) or the
     Machine the quantity is on (QUEUE / DONE — an optimistic
-    precondition). ``quantity`` is strict and must be the flow's whole
-    quantity until SPLIT (Phase 8).
+    precondition). ``quantity`` is strict; smaller than the flow's it
+    splits the flow first (Phase 8).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -531,7 +556,7 @@ class MachineProcessingRequest(BaseModel):
 
 
 class AreaCompletionRequest(BaseModel):
-    """The confirmed DONE on ONE whole QuantityFlow.
+    """The confirmed DONE on ONE QuantityFlow, whole or in part.
 
     With ``machine_id``: the Machine the quantity is on (optimistic
     precondition) in a Machine Area. Without it (Phase 7): the
@@ -563,6 +588,10 @@ class MachineProcessingResponse(BaseModel):
     operation_id: int
     station_id: str
     processing_state: ProcessingStateLiteral
+    # Present when only a part of the flow was acted on (Phase 8).
+    source_quantity_flow_id: int | None
+    remainder_quantity_flow_id: int | None
+    remainder_quantity: int | None
     device_event_id: str
     occurred_at: datetime.datetime
 
@@ -582,6 +611,9 @@ def _processing_response(
         operation_id=result.operation_id,
         station_id=result.station_id,
         processing_state=result.processing_state.value,
+        source_quantity_flow_id=result.source_quantity_flow_id,
+        remainder_quantity_flow_id=result.remainder_quantity_flow_id,
+        remainder_quantity=result.remainder_quantity,
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )
@@ -643,6 +675,68 @@ def complete_area_processing(
             device_event_id=body.device_event_id,
         )
     return _processing_response(result, response)
+
+
+# ---------------------------------------------------------------------------
+# Explicit merge (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+class MergeRequest(BaseModel):
+    """The confirmed merge of the named ACTIVE flows of one PN in the station's Area."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    quantity_flow_ids: list[StrictInt]
+    device_event_id: str
+
+
+class MergeResponse(BaseModel):
+    """The committed merge, read from its immutable MERGED Movements."""
+
+    movement_id: int
+    # The resulting flow.
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    area_id: int
+    machine_id: int | None
+    operation_id: int
+    station_id: str
+    processing_state: ProcessingStateLiteral
+    # The consumed sources, ascending id.
+    source_quantity_flow_ids: list[int]
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+@router.post("/scan-stations/{station_id}/merges")
+def merge_flows(
+    station_id: str, body: MergeRequest, session: SessionDep, response: Response
+) -> MergeResponse:
+    result = merges.merge_flows(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_ids=body.quantity_flow_ids,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return MergeResponse(
+        movement_id=result.movement_id,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        area_id=result.area_id,
+        machine_id=result.machine_id,
+        operation_id=result.operation_id,
+        station_id=result.station_id,
+        processing_state=result.processing_state.value,
+        source_quantity_flow_ids=result.source_quantity_flow_ids,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
 
 
 # ---------------------------------------------------------------------------

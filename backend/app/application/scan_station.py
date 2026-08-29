@@ -27,8 +27,12 @@ current-position projection:
   PN for. Nothing is remembered server-side — no Machine session, no
   sticky Machine state; the next scan starts fresh.
 
-Nothing here writes. Every flow is reported with its DERIVED
-processing state (from the flow's latest Movement AND the mode of the
+Nothing here writes. Only ACTIVE flows are inventory: a flow consumed
+by a SPLIT or a MERGED (Phase 8) is closed and never listed again —
+its children or its merge result are. Every flow is reported with its
+DERIVED processing state (from the flow's effective latest
+position-bearing Movement — its own, or the one inherited through its
+lineage — AND the mode of the
 Area it is in — Phase 6 QUEUED / ON_MACHINE / READY_TO_TRANSFER in a
 Machine Area, Phase 7 PROCESSING in an Area without Machines, which
 directly owns the quantity with no queue and no Machine), the Machine
@@ -57,7 +61,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.application.machine_processing import latest_movements
 from app.application.machines import (
     area_has_machines,
     areas_with_machines,
@@ -65,7 +68,11 @@ from app.application.machines import (
     operational_state,
 )
 from app.application.part_numbers import canonical_part_number
-from app.application.projections import processing_state_of
+from app.application.projections import (
+    effective_latest_movements,
+    origin_flow_ids,
+    processing_state_of,
+)
 from app.application.transfers import (
     RouteStatus,
     active_area_operations,
@@ -264,7 +271,27 @@ def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> d
 
 
 def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
-    """The initiating Work Order Demand of each flow, from its RECEIVED context."""
+    """The initiating Work Order Demand of each flow, from its RECEIVED context.
+
+    A flow created by a SPLIT or a MERGED (Phase 8) has no RECEIVED of
+    its own: its context is the one of the released flow(s) it descends
+    from — reported only when every origin names the same demand, so a
+    merge of quantity from different demands carries no single context
+    rather than a guessed one.
+    """
+    if not flow_ids:
+        return {}
+    origins = {flow_id: origin_flow_ids(session, flow_id) for flow_id in flow_ids}
+    received = _received_contexts(session, sorted(set[int]().union(*origins.values())))
+    contexts: dict[int, WorkOrderContext] = {}
+    for flow_id, origin_ids in origins.items():
+        found = {received[origin] for origin in origin_ids if origin in received}
+        if len(found) == 1:
+            contexts[flow_id] = next(iter(found))
+    return contexts
+
+
+def _received_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
     if not flow_ids:
         return {}
     demand_id_value = PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
@@ -306,7 +333,7 @@ def resolve_part_number_scan(
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
-    latest = latest_movements(session, [flow.id for flow in flows])
+    latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
     # Every flow's state depends on the mode of the Area it is in.
     machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
@@ -489,7 +516,7 @@ def resolve_machine_scan(
             .order_by(QuantityFlow.part_number, QuantityFlow.id)
         )
     )
-    latest = latest_movements(session, [flow.id for flow in flows])
+    latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     queued = [
@@ -607,7 +634,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
-    latest = latest_movements(session, [flow.id for flow in flows])
+    latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
     active_machines = list(
         session.scalars(

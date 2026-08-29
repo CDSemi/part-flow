@@ -16,19 +16,20 @@ verifies the Phase 7 invariants PostgreSQL must enforce
 - every other type's shape unchanged: RECEIVED / TRANSFERRED never
   reference a Machine, assignment needs exactly a destination Machine,
   release exactly a source Machine;
-- the stored shape CHECK is the one the model declares (byte-equal
-  expression), the Phase 6 expression the migration re-declares for its
-  downgrade equals the Phase 6 migration's, and models↔migration
-  metadata parity holds at head;
+- the stored shape CHECK at the Phase 7 revision is the one the Phase 7
+  migration declares, and the Phase 6 expression it re-declares for its
+  downgrade equals the Phase 6 migration's;
 - a Machine-less completion is append-only like every Movement;
 - clean downgrade back to the Phase 6 boundary with a successful
   re-upgrade, and the downgrade refusing to drop Phase 7 history (a
   completion without a Machine cannot satisfy the Phase 6 shape).
 
-Phase 7 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to
-`0008_phase7_direct_processing` and move the head-level coverage into
-that phase's schema test.
+Pinned to `0008_phase7_direct_processing` since Phase 8 added
+`0009_phase8_split_merge`; the head-level coverage (models↔migration
+parity, exact table set, the shape CHECK equal to the model's
+expression) lives in `test_phase8_schema.py`. The Phase 7 shape
+assertions below hold at the Phase 7 revision, whose expression the
+Phase 8 migration re-declares byte-equal for its downgrade.
 """
 
 import datetime
@@ -103,14 +104,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated to the Phase 7 revision → base → Phase 7."""
     name = "partflow_test_phase7_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE7_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE7_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -251,10 +252,13 @@ def _shape_check(connection: Connection) -> str:
 
 
 class TestMigrationSchema:
-    def test_head_creates_exactly_the_phase7_boundary(self, migrated_engine: Engine) -> None:
+    def test_phase7_revision_creates_exactly_the_phase7_boundary(
+        self, migrated_engine: Engine
+    ) -> None:
         tables = set(inspect(migrated_engine).get_table_names())
         # Phase 7 adds no table: no workers, scan_sessions, or
-        # work_order_allocations pre-implemented.
+        # work_order_allocations pre-implemented (quantity_flow_lineage
+        # is Phase 8, test_phase8_schema).
         assert tables == _EXPECTED_TABLES | {"alembic_version"}
 
     def test_phase7_adds_no_column_and_no_phase8_plus_column(self, migrated_engine: Engine) -> None:
@@ -280,7 +284,9 @@ class TestMigrationSchema:
             {"machine_assignment_mode", "assignment_mode", "worker_identification_mode"}
         )
 
-    def test_movement_type_check_is_unchanged(self, connection: Connection) -> None:
+    def test_movement_type_check_is_unchanged_at_the_phase7_revision(
+        self, connection: Connection
+    ) -> None:
         check_clause = connection.execute(
             sa.text(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
@@ -298,7 +304,9 @@ class TestMigrationSchema:
         for absent in ("SPLIT", "MERGED", "REVERSED", "STOCKED", "SCRAPPED", "PROCESSING"):
             assert absent not in check_clause
 
-    def test_shape_check_is_the_one_the_model_declares(self, connection: Connection) -> None:
+    def test_shape_check_is_the_one_the_phase7_migration_declares(
+        self, connection: Connection
+    ) -> None:
         names = set(
             connection.scalars(
                 sa.text(
@@ -308,30 +316,23 @@ class TestMigrationSchema:
             )
         )
         assert "ck_part_movements_movement_shape" in names
-        # Byte-equal to the mapping's expression: the migration inlines
-        # it deliberately (never importing the mutable model module),
-        # and re-declares the Phase 6 expression for its downgrade.
+        # The migration inlines its expression deliberately (never
+        # importing the mutable model module) and re-declares the Phase 6
+        # expression for its downgrade; the head-level byte-equality
+        # with the model lives in test_phase8_schema (Phase 8 widened
+        # the model's expression with the lineage branch).
         phase7 = _load_migration(
             "20260826_0008_phase7_direct_processing.py", "phase7_direct_processing_migration"
         )
         phase6 = _load_migration(
             "20260826_0007_phase6_machine_assignment.py", "phase6_machine_assignment_migration"
         )
-        assert phase7._PHASE7_SHAPE == models.MOVEMENT_SHAPE_SQL
+        assert phase7._PHASE7_SHAPE in models.MOVEMENT_SHAPE_SQL
         assert phase7._PHASE6_SHAPE == phase6._PHASE6_SHAPE
         assert phase7._PHASE7_SHAPE != phase7._PHASE6_SHAPE
         # The widening is exactly the completion's source Machine.
         stored = _shape_check(connection)
         assert stored.count("source_machine_id IS NOT NULL") == 1  # RELEASED only
-
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
 
     def test_downgrade_restores_the_phase6_boundary(self, admin_engine: Engine) -> None:
         name = "partflow_test_phase7_downgrade"
@@ -339,7 +340,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE7_REVISION)
             command.downgrade(config, _PHASE6_REVISION)
             engine = create_engine(url)
             try:
@@ -355,7 +356,7 @@ class TestMigrationSchema:
                     connection.rollback()
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE7_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 
@@ -368,7 +369,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE7_REVISION)
             engine = create_engine(url)
             try:
                 with engine.connect() as connection:

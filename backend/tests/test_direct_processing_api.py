@@ -22,7 +22,7 @@ per IMPLEMENTATION_ROADMAP Phase 7, PROJECT_PROFILE §7 Area Completion,
 - the manual DONE without a Machine: exactly one immutable
   ``AREA_COMPLETED`` with ``source_machine_id`` NULL, the Operation
   carried forward, the Station recorded, the Area kept, deriving
-  READY_TO_TRANSFER; refusals with ZERO writes (partial and exceeding
+  READY_TO_TRANSFER; refusals with ZERO writes (exceeding
   quantity, PN mismatch, already finished, a station of another Area,
   an inactive station, quantity in a Machine Area, and the Machine-Area
   commands — DONE with a Machine, QUEUE, ASSIGN — on directly
@@ -63,7 +63,13 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import direct_processing, machine_processing, projections, transfers
+from app.application import (
+    direct_processing,
+    machine_processing,
+    machines,
+    projections,
+    transfers,
+)
 from app.application.errors import ConflictError, IdempotencyConflictError
 from app.core.config import get_settings
 from app.domain.enums import ProcessingState
@@ -584,8 +590,6 @@ def test_direct_done_refusals_write_nothing(client: TestClient, db_engine: Engin
     flow_id, pn = _release(client, plating, quantity=10)
     count = _movement_count(db_engine)
 
-    partial = _done(client, plating, flow_id, pn, 4)
-    assert partial.status_code == 422 and "Partial completion" in partial.json()["detail"]
     exceeding = _done(client, plating, flow_id, pn, 11)
     assert exceeding.status_code == 422 and "exceeds" in exceeding.json()["detail"]
     wrong_pn = _done(client, plating, flow_id, _unique("PN"), 10)
@@ -911,17 +915,29 @@ def test_finished_direct_quantity_transfers_with_transferred_alone(
     assert _inventory_flow(client, deburr.area_id, flow_id)["processing_state"] == "PROCESSING"
 
 
-def test_partial_transfer_of_processing_quantity_writes_nothing(
+def test_partial_transfer_of_processing_quantity_splits_and_completes_the_part(
     client: TestClient, db_engine: Engine
 ) -> None:
+    """Phase 8: the selected part is completed and transferred, the
+    remainder keeps processing directly (the full lineage coverage
+    lives in test_quantity_split_merge_api)."""
     plating = _Cell(client)
     deburr = _Cell(client)
     flow_id, pn = _release(client, plating, quantity=6)
     count = _movement_count(db_engine)
     response = _transfer(client, plating, deburr, flow_id, pn, 2)
-    assert response.status_code == 422 and "Partial transfer" in response.json()["detail"]
-    assert _movement_count(db_engine) == count
-    assert _inventory_flow(client, plating.area_id, flow_id)["processing_state"] == "PROCESSING"
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["source_quantity_flow_id"] == flow_id
+    assert body["remainder_quantity"] == 4
+    assert body["completed_movement_id"] is not None and body["completed_machine_id"] is None
+    # 3 SPLIT + AREA_COMPLETED + TRANSFERRED, one command.
+    assert _movement_count(db_engine) == count + 5
+    assert _flow_row(db_engine, flow_id).status == "SPLIT"
+    remainder = _inventory_flow(client, plating.area_id, body["remainder_quantity_flow_id"])
+    assert remainder["processing_state"] == "PROCESSING" and remainder["quantity"] == 4
+    moved = _inventory_flow(client, deburr.area_id, body["quantity_flow_id"])
+    assert moved["processing_state"] == "PROCESSING" and moved["quantity"] == 2
 
 
 def test_implicit_direct_completion_is_all_or_nothing(
@@ -1076,10 +1092,10 @@ def test_two_direct_dones_of_one_flow_serialize_with_one_winner(
 ) -> None:
     plating = _Cell(client)
     flow_id, pn = _release(client, plating, quantity=3)
-    pause = _Pause(machine_processing.latest_movement)
-    # The first DONE pauses after reading its latest Movement — under the
+    pause = _Pause(machines.area_has_machines)
+    # The first DONE pauses after judging the Area mode — under the
     # flow lock, before its write; the second blocks on the flow lock.
-    monkeypatch.setattr(machine_processing, "latest_movement", pause)
+    monkeypatch.setattr(machine_processing, "area_has_machines", pause)
     results: dict[str, Any] = {}
 
     def run_done(name: str) -> Callable[[], Any]:

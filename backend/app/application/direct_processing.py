@@ -20,8 +20,8 @@ What direct processing means for the immutable history (PROJECT_PROFILE
   silently) and NO Machine; the derived holding state is `PROCESSING`
   (`app.application.projections.processing_state_of`). No assignment,
   queue or Machine event exists for the quantity.
-- **Manual DONE** — `complete_direct_processing` below: one whole
-  PROCESSING QuantityFlow completes processing at its Area and waits as
+- **Manual DONE** — `complete_direct_processing` below: PROCESSING
+  quantity (the whole flow or a part of it) completes processing at its Area and waits as
   `READY_TO_TRANSFER` on the finished rack. Exactly one immutable
   `AREA_COMPLETED` Movement is appended, with `source_machine_id` NULL
   (the Movement shape widened by migration 0008), the Operation carried
@@ -44,8 +44,10 @@ mismatched reuse — including a Machine DONE reusing a direct DONE id —
 is an explicit conflict; a race lost at COMMIT replays the winner),
 serialization on the flow row lock (a DONE and a transfer of one flow
 have exactly one winner), the Scan Station row lock with the
-station-bound-to-the-flow's-Area precondition, and whole-QuantityFlow
-only — partial DONE is refused with zero writes until SPLIT (Phase 8).
+station-bound-to-the-flow's-Area precondition. Partial DONE (Phase 8):
+a quantity smaller than the flow's splits the flow first inside the
+same command — only the selected child completes, the remainder keeps
+processing directly (`app.application.machine_processing.split_if_partial`).
 
 The Area's mode is judged at the command under the flow lock: a DONE
 without a Machine on quantity in an Area that HAS Machines is refused
@@ -56,7 +58,7 @@ Area later, or the last one retired, changes the Area's mode for the
 quantity it holds from then on — the history stays exactly what was
 recorded.
 
-Explicitly NOT here: SPLIT/MERGED and partial completion (Phase 8),
+Explicitly NOT here: the explicit merge (`app.application.merges`),
 Worker identity, Undo (Phase 9), Repair, Scrap, Stockroom.
 """
 
@@ -68,12 +70,14 @@ from app.application.errors import ConflictError, InvalidInputError
 from app.application.machine_processing import (
     MachineProcessingResult,
     command_metadata,
+    command_size,
     commit_or_replay,
     committed_command,
     in_area_movement,
     lock_flow_and_station,
     replay_or_conflict,
     request_fingerprint,
+    split_if_partial,
 )
 from app.application.part_numbers import canonical_part_number
 from app.domain.enums import MovementType, ProcessingState
@@ -96,7 +100,7 @@ def complete_direct_processing(
     quantity: object,
     device_event_id: object,
 ) -> MachineProcessingResult:
-    """DONE without a Machine: complete one whole PROCESSING QuantityFlow, ONE transaction.
+    """DONE without a Machine: complete PROCESSING quantity, ONE transaction.
 
     Same protocol as the Machine-Area commands: input shape →
     fingerprint → idempotency fast path → flow lock → idempotency
@@ -157,20 +161,28 @@ def complete_direct_processing(
             f" '{context.area.name}' has none. Nothing was recorded."
         )
 
-    # -- The one write, inside the open transaction ----------------------
+    # -- The writes, inside the open transaction ------------------------
+    metadata = command_metadata("DONE", fingerprint, size=command_size(context, 1))
+    # A partial DONE: only the selected child finishes, the remainder
+    # keeps processing directly (Phase 8).
+    context, command, sequence = split_if_partial(
+        session, context, event_id=event_id, metadata=metadata
+    )
     movement = in_area_movement(
         context,
         movement_type=MovementType.AREA_COMPLETED,
         source_machine_id=None,
         destination_machine_id=None,
         event_id=event_id,
-        metadata=command_metadata("DONE", fingerprint),
+        sequence=sequence,
+        metadata=metadata,
     )
-    session.add(movement)
+    command.append(movement)
+    session.add_all(command)
     # Projection: the Area stays, the Machine was and stays NULL; the
     # finished state is told by the Movement just appended.
     context.flow.current_machine_id = None
     context.flow.updated_at = func.now()
     return commit_or_replay(
-        session, movement, kind="DONE", event_id=event_id, fingerprint=fingerprint
+        session, command, kind="DONE", event_id=event_id, fingerprint=fingerprint
     )

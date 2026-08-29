@@ -14,7 +14,10 @@ assignment and Area completion widening (`quantity_flows.current_machine_id`,
 the Movement Machine references, the application-command sequence, and
 the `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
 types); plus the Phase 7 direct-processing widening (an `AREA_COMPLETED`
-without a Machine for an Area without Machines). Business rules stay in the
+without a Machine for an Area without Machines); plus the Phase 8
+quantity lineage (the `SPLIT` / `MERGED` types, the QuantityFlow
+lifecycle closure, and the append-only `quantity_flow_lineage` edge
+table). Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -68,6 +71,7 @@ from sqlalchemy.sql.elements import conv
 from app.domain.enums import (
     AuditEntityType,
     AuditEventType,
+    LineageRelation,
     MachineLifecycleEventType,
     MachineLifecycleState,
     MovementType,
@@ -121,8 +125,9 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
 # transfer; Phase 6 Machine assignment and Area completion; Phase 7
-# direct-processing completion). Reused verbatim by the Phase 7
-# migration so the stored CHECK and the mapping never drift. RECEIVED
+# direct-processing completion; Phase 8 quantity lineage). Reused
+# verbatim by the Phase 8 migration so the stored CHECK and the mapping
+# never drift. RECEIVED
 # introduces quantity (no source Area, no Machine); TRANSFERRED moves
 # between two DIFFERENT Areas at a Station and references no Machine (a
 # transfer from actively processing quantity is preceded by its own
@@ -132,7 +137,11 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 # Machine only, completion a source Machine when the quantity left a
 # Machine (Phase 6) or NO Machine when it was directly processed by an
 # Area without Machines (Phase 7); a completion never has a
-# destination Machine.
+# destination Machine. The two lineage events SPLIT / MERGED (Phase 8)
+# record consumption and descent inside ONE Area at a Station and
+# reference no Machine: the Machine and the holding state of the
+# quantity they carry are derived by following the lineage to the last
+# position-bearing Movement, never re-stated on the lineage row.
 MOVEMENT_SHAPE_SQL = (
     "(movement_type = 'RECEIVED' AND from_area_id IS NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
@@ -150,6 +159,10 @@ MOVEMENT_SHAPE_SQL = (
     " OR (movement_type = 'AREA_COMPLETED'"
     " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
     " AND station_id IS NOT NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type IN ('SPLIT', 'MERGED')"
+    " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
 )
 
 # Row-level idempotency guarantee of the application-command model
@@ -748,8 +761,12 @@ class QuantityFlow(Base):
     PartMovement history remains the source of truth they must stay
     rebuildable from (the Machine is the destination Machine of the
     flow's latest Movement — NULL unless that Movement is an
-    `ASSIGNED_TO_MACHINE`). `parent_flow_id` is a canonical later-phase
-    column and deliberately does not exist yet.
+    `ASSIGNED_TO_MACHINE`). Lineage (Phase 8) is not a column here: a
+    consumed flow closes (`status` SPLIT / MERGED with `closed_at`) and
+    the `quantity_flow_lineage` edges name its children — one parent to
+    several children for a SPLIT, several parents to one child for a
+    MERGED — so both directions reconstruct without a single
+    `parent_flow_id` that could not express N → 1.
     """
 
     __tablename__ = "quantity_flows"
@@ -795,6 +812,16 @@ class QuantityFlow(Base):
             CANONICAL_PART_NUMBER_SQL, name=conv("ck_quantity_flows_part_number_canonical")
         ),
         CheckConstraint("quantity > 0", name=conv("ck_quantity_flows_quantity_positive")),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{status}'" for status in QuantityFlowStatus) + ")",
+            name=conv("ck_quantity_flows_status"),
+        ),
+        # A flow is closed exactly when it left ACTIVE (Phase 8): the
+        # closure timestamp and the status can never disagree.
+        CheckConstraint(
+            f"(status = '{QuantityFlowStatus.ACTIVE}') = (closed_at IS NULL)",
+            name=conv("ck_quantity_flows_status_closed_at"),
+        ),
         CheckConstraint(
             f"route_mode IN ('{RouteMode.FLOATING}', '{RouteMode.PLANNED}')",
             name=conv("ck_quantity_flows_route_mode"),
@@ -926,6 +953,61 @@ class PartMovement(Base):
         ),
         UniqueConstraint("device_event_id", "command_sequence", name=DEVICE_EVENT_ID_CONSTRAINT),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
+    )
+
+
+class QuantityFlowLineage(Base):
+    """One descent edge between QuantityFlows (Phase 8; PROJECT_PROFILE §8.7, §11).
+
+    Append-only (raise-on-write trigger owned by migration 0009). A
+    SPLIT command writes one edge per child (1 → N), a MERGED command
+    one edge per consumed source (N → 1); `device_event_id` names the
+    application command that recorded the edge — the same id its
+    `SPLIT` / `MERGED` Movements carry — so the command, its Movements
+    and its edges are one auditable unit. The parent's consumption and
+    the child's descent are the immutable Movements; this table is the
+    queryable graph that rebuilds ancestry and active descendants.
+    """
+
+    __tablename__ = "quantity_flow_lineage"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    relation: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_flow_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "quantity_flows.id", name="fk_quantity_flow_lineage_parent_flow_id_quantity_flows"
+        ),
+        nullable=False,
+    )
+    child_flow_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "quantity_flows.id", name="fk_quantity_flow_lineage_child_flow_id_quantity_flows"
+        ),
+        nullable=False,
+    )
+    device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN (" + ", ".join(f"'{relation}'" for relation in LineageRelation) + ")",
+            name=conv("ck_quantity_flow_lineage_relation"),
+        ),
+        CheckConstraint(
+            "parent_flow_id <> child_flow_id",
+            name=conv("ck_quantity_flow_lineage_parent_child_distinct"),
+        ),
+        UniqueConstraint(
+            "parent_flow_id",
+            "child_flow_id",
+            name="uq_quantity_flow_lineage_parent_flow_id_child_flow_id",
+        ),
+        Index("ix_quantity_flow_lineage_parent_flow_id", "parent_flow_id"),
+        Index("ix_quantity_flow_lineage_child_flow_id", "child_flow_id"),
     )
 
 

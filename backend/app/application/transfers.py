@@ -50,11 +50,17 @@ Rules owned here:
   Operation of the matched route step, else the single active
   Operation, else an explicit choice — several active Operations
   without a choice are an ambiguity that blocks the write.
-- Phase 5 moves WHOLE QuantityFlows only (ROADMAP Phase 5 temporary
-  limitation): the confirmed quantity must equal the flow's quantity.
-  A smaller quantity is refused with a clear message and no write —
-  partial movement is SPLIT (Phase 8) and is never claimed; a larger
-  quantity exceeds the source (PROJECT_PROFILE §6 rule 7).
+- Partial quantity (Phase 8): a confirmed quantity smaller than the
+  flow's SPLITS the flow first, atomically inside the same command —
+  the source closes, a selected child of exactly the confirmed
+  quantity (with its own route snapshot copy when PLANNED) is the one
+  completed and transferred, the remainder child stays at the source
+  in exactly the source's state (`app.application.lineage`). The
+  command's Movements are then the three `SPLIT` rows (sequence 1–3)
+  followed by the action rows (4, or 4–5 with the implicit completion)
+  under one `device_event_id`, replayed as a whole. The whole quantity
+  never splits; a larger quantity exceeds the source (PROJECT_PROFILE
+  §6 rule 7) and is refused.
 - Order of operations mirrors the release command: idempotency check
   first — before ANY station/Area/Operation state is consulted, so a
   transport retry of a committed transfer replays the original result
@@ -96,9 +102,10 @@ Rules owned here:
   `current_machine_id` cleared) is written in the same transaction as
   the Movements and stays rebuildable from Movement history alone
   (SLICE1 §15) — verified by the projection replay.
-- Explicitly NOT here (later phases): SPLIT/MERGED (Phase 8),
-  Repair/Scrap/Undo (Phase 9), Worker sessions, Stockroom `STOCKED`
-  (Phase 10) — a transfer into a terminal Area is therefore refused.
+- Explicitly NOT here (later phases): the explicit merge
+  (`app.application.merges`), Repair/Scrap/Undo (Phase 9), Worker
+  sessions, Stockroom `STOCKED` (Phase 10) — a transfer into a terminal
+  Area is therefore refused.
 """
 
 import datetime
@@ -118,11 +125,12 @@ from app.application.errors import (
     NotFoundError,
     RouteDeviationConfirmationRequiredError,
 )
+from app.application.lineage import split_prefix, stage_split
 from app.application.machine_processing import (
     FINGERPRINT_KEY,
     command_metadata,
     committed_command,
-    latest_movement,
+    no_longer_active,
 )
 from app.application.machines import (
     area_has_machines,
@@ -131,7 +139,11 @@ from app.application.machines import (
     note_assignment_change,
 )
 from app.application.part_numbers import canonical_part_number
-from app.application.projections import is_actively_processing, processing_state_of
+from app.application.projections import (
+    effective_latest_movement,
+    is_actively_processing,
+    processing_state_of,
+)
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -199,6 +211,13 @@ class AreaTransfer(NamedTuple):
     # or finished quantity.
     completed_movement_id: int | None
     completed_machine_id: int | None
+    # Set when the command split the source first (Phase 8): the
+    # consumed source flow, the remainder child that stayed at the
+    # source in its state, and its quantity. All None for a whole-flow
+    # transfer.
+    source_quantity_flow_id: int | None
+    remainder_quantity_flow_id: int | None
+    remainder_quantity: int | None
     device_event_id: str
     occurred_at: datetime.datetime
     created: bool
@@ -476,9 +495,32 @@ def _committed_transfer(session: Session, device_event_id: str) -> list[PartMove
     return committed_command(session, device_event_id)
 
 
+def _remap_assessment(
+    assessment: RouteAssessment, steps_by_sequence: dict[int, AssignedRouteStep]
+) -> RouteAssessment:
+    """The same assessment expressed in a split child's own snapshot copy.
+
+    The child's snapshot is a structural copy of its parent's, so every
+    step maps by sequence; the recorded step and deviation must point
+    into the CHILD's snapshot (cross-table agreement with the flow's own
+    AssignedRoute).
+    """
+
+    def _step(step: AssignedRouteStep | None) -> AssignedRouteStep | None:
+        return None if step is None else steps_by_sequence[step.sequence]
+
+    return RouteAssessment(
+        assessment.status,
+        _step(assessment.matched_step),
+        _step(assessment.expected_next_step),
+        _step(assessment.last_known_step),
+    )
+
+
 def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaTransfer:
-    movement = command[-1]
-    completed = command[0] if len(command) == 2 else None
+    split, action = split_prefix(command)
+    movement = action[-1]
+    completed = action[0] if len(action) == 2 else None
     if movement.from_area_id is None or movement.station_id is None:
         # The database shape CHECK makes this unreachable for a
         # TRANSFERRED command; another kind of row reusing the id is a
@@ -501,6 +543,9 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
         route_deviation=(movement.metadata_ or {}).get(_ROUTE_DEVIATION_KEY),
         completed_movement_id=completed.id if completed is not None else None,
         completed_machine_id=completed.source_machine_id if completed is not None else None,
+        source_quantity_flow_id=split.source_quantity_flow_id if split else None,
+        remainder_quantity_flow_id=split.remainder_quantity_flow_id if split else None,
+        remainder_quantity=split.remainder_quantity if split else None,
         device_event_id=movement.device_event_id,
         occurred_at=movement.occurred_at,
         created=created,
@@ -510,19 +555,21 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
 def _replay_or_conflict(command: list[PartMovement], fingerprint: str) -> AreaTransfer:
     """A committed command replays only as the SAME transfer intent.
 
-    The command is a transfer when its last Movement is the TRANSFERRED
-    row and, when two rows exist, the first is its implicit
-    AREA_COMPLETED; every row carries the same fingerprint.
+    The command is a transfer when — after its optional SPLIT prefix
+    (Phase 8) — its last Movement is the TRANSFERRED row and, when two
+    action rows exist, the first is its implicit AREA_COMPLETED; every
+    row of the command carries the same fingerprint.
     """
-    movement = command[-1]
+    _, action = split_prefix(command)
+    movement = action[-1]
     stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
-    well_formed = movement.movement_type == MovementType.TRANSFERRED and (
-        len(command) == 1
-        or (
-            len(command) == 2
-            and command[0].movement_type == MovementType.AREA_COMPLETED
-            and (command[0].metadata_ or {}).get(_FINGERPRINT_KEY) == stored
+    well_formed = (
+        movement.movement_type == MovementType.TRANSFERRED
+        and (
+            len(action) == 1
+            or (len(action) == 2 and action[0].movement_type == MovementType.AREA_COMPLETED)
         )
+        and all((row.metadata_ or {}).get(_FINGERPRINT_KEY) == stored for row in command)
     )
     if stored != fingerprint or not well_formed:
         raise IdempotencyConflictError(
@@ -626,7 +673,7 @@ def transfer_to_station_area(
     route_deviation_reason: str | None,
     device_event_id: object,
 ) -> AreaTransfer:
-    """Move one whole QuantityFlow into the station's Area, ONE transaction.
+    """Move a QuantityFlow — or a part of it — into the station's Area, ONE transaction.
 
     Validates everything before any write; a replayed submission (same
     ``device_event_id`` + same confirmed intent) returns the original
@@ -685,7 +732,7 @@ def transfer_to_station_area(
             f" ('{flow.part_number}'). A transfer moves the scanned PN's own quantity."
         )
     if flow.status != QuantityFlowStatus.ACTIVE:
-        raise ConflictError(f"Quantity Flow {flow.id} is no longer active and cannot move.")
+        raise ConflictError(no_longer_active(flow))
     if flow.current_area_id == target.id:
         raise ConflictError(
             f"Quantity Flow {flow.id} is already in Area '{target.name}'. Nothing to transfer."
@@ -696,17 +743,12 @@ def transfer_to_station_area(
             " since the source was chosen. Scan the Part Number again to see the current"
             " sources."
         )
-    if confirmed_quantity != flow.quantity:
-        if confirmed_quantity > flow.quantity:
-            raise InvalidInputError(
-                f"Transfer quantity {confirmed_quantity} exceeds the {flow.quantity} pcs"
-                f" available in the source. Nothing was transferred."
-            )
+    if confirmed_quantity > flow.quantity:
         raise InvalidInputError(
-            f"Partial transfer is not supported yet: this Quantity Flow holds"
-            f" {flow.quantity} pcs and moves as a whole. Transfer {flow.quantity} pcs"
-            " or cancel — nothing was transferred."
+            f"Transfer quantity {confirmed_quantity} exceeds the {flow.quantity} pcs"
+            f" available in the source. Nothing was transferred."
         )
+    partial = confirmed_quantity < flow.quantity
     source = session.get(Area, source_area_id)
     if source is None:  # pragma: no cover - FK guarantees the row
         raise InvalidInputError(f"Area {source_area_id} does not exist.")
@@ -720,7 +762,7 @@ def transfer_to_station_area(
     # flow → station → Machine → target Area → Operation; a directly
     # processing source has no Machine to lock. Queued or finished
     # quantity transfers with TRANSFERRED alone.
-    latest = latest_movement(session, flow.id)
+    latest = effective_latest_movement(session, flow.id)
     source_state = processing_state_of(
         latest.movement_type, direct_processing=not area_has_machines(session, source.id)
     )
@@ -780,15 +822,48 @@ def transfer_to_station_area(
             )
 
     # -- Writes — all inside the one open transaction ------------------
-    # One application command: the implicit AREA_COMPLETED (when the
-    # quantity was actively processing — with its source Machine, or
-    # none for direct processing) then the TRANSFERRED, numbered by
-    # command_sequence under the one device_event_id — both or neither.
+    # One application command: the SPLIT prefix when only a part moves
+    # (Phase 8), the implicit AREA_COMPLETED (when the quantity was
+    # actively processing — with its source Machine, or none for direct
+    # processing) then the TRANSFERRED, numbered by command_sequence
+    # under the one device_event_id — all or nothing.
     command: list[PartMovement] = []
-    size = 2 if completes_source else 1
+    action_rows = 2 if completes_source else 1
+    size = (3 if partial else 0) + action_rows
     # Read before any Movement is staged (no autoflush surprises).
     assigned_before = assigned_quantity(session, source_machine.id) if source_machine else 0
     metadata = command_metadata("TRANSFER", fingerprint, size=size)
+    sequence = 1
+    if partial:
+        # The source closes; the SELECTED child (its own snapshot copy
+        # when PLANNED, positioned where the source was) is what
+        # completes and moves; the remainder stays at the source in the
+        # source's state. Route references are re-expressed in the
+        # child's snapshot.
+        staged = stage_split(
+            session,
+            source=flow,
+            selected_quantity=confirmed_quantity,
+            operation_id=latest.operation_id,
+            station_id=station.station_id,
+            event_id=event_id,
+            metadata=metadata,
+        )
+        command.extend(staged.movements)
+        sequence = staged.next_sequence
+        flow = staged.selected
+        if staged.selected_steps:
+            assessment = _remap_assessment(assessment, staged.selected_steps)
+            matched_step = (
+                staged.selected_steps[matched_step.sequence] if matched_step is not None else None
+            )
+            if deviation is not None:
+                deviation = route_deviation_context(
+                    assessment,
+                    kind=deviation["kind"],
+                    target_area_id=target.id,
+                    operation_id=operation.id,
+                )
     if completes_source:
         command.append(
             PartMovement(
@@ -806,10 +881,11 @@ def transfer_to_station_area(
                 occurred_at=func.now(),
                 server_received_at=func.now(),
                 device_event_id=event_id,
-                command_sequence=1,
+                command_sequence=sequence,
                 metadata_=metadata,
             )
         )
+        sequence += 1
     transfer_metadata: dict[str, Any] = dict(metadata)
     if deviation is not None:
         transfer_metadata[_ROUTE_DEVIATION_KEY] = {
@@ -831,7 +907,7 @@ def transfer_to_station_area(
             occurred_at=func.now(),
             server_received_at=func.now(),
             device_event_id=event_id,
-            command_sequence=size,
+            command_sequence=sequence,
             metadata_=transfer_metadata,
         )
     )
@@ -846,7 +922,7 @@ def transfer_to_station_area(
         note_assignment_change(
             source_machine,
             assigned_before=assigned_before,
-            assigned_after=assigned_before - flow.quantity,
+            assigned_after=assigned_before - confirmed_quantity,
         )
     flow.current_area_id = target.id
     flow.current_machine_id = None
