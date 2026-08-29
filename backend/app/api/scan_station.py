@@ -22,8 +22,7 @@ Surface:
 - ``POST /scan-stations/{station_id}/transfers`` — the confirmed
   transfer of ONE QuantityFlow — whole, or a part of it (Phase 8: the
   flow splits first inside the same command) — into the station's
-  Area. 201 on a
-  fresh transfer, 200 on an idempotent replay (same ``device_event_id``
+  Area. 201 on a fresh transfer, 200 on an idempotent replay (same ``device_event_id``
   + same confirmed intent — whatever happened to the station, Area
   or Operation since), 409 on a mismatched reuse, 409 on a station
   deactivated or rebound away from the confirmed destination Area,
@@ -96,7 +95,10 @@ Phase 8 — partial quantity and the explicit merge:
   recorded when the flows' production context differs — state,
   Machine, Operation or route context — or a flow is not in the Area).
   Never automatic: only the flows named are merged. Closed (split or
-  merged) flows never appear in the read models again.
+  merged) flows never appear in the read models again. The PN
+  resolution reports ``combine_groups`` — the in-Area flows the server
+  judges combinable by the same rule — so the station offers
+  `Combine quantities` for exactly those.
 """
 
 import datetime
@@ -346,6 +348,9 @@ class ScanResolveResponse(BaseModel):
     transfer_blocked_reason: str | None
     # Several flows match: the operator must select exactly one.
     requires_selection: bool
+    # Phase 8: the groups of in-Area flows the server judges combinable
+    # (`Combine quantities`); the client offers the action for these only.
+    combine_groups: list[list[int]]
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -385,6 +390,7 @@ def resolve_scan(
         has_active_demand=result.has_active_demand,
         transfer_blocked_reason=result.transfer_blocked_reason,
         requires_selection=result.requires_selection,
+        combine_groups=result.combine_groups,
     )
 
 

@@ -409,6 +409,11 @@ body.prodmode #ssthemebtn{display:inline-flex}
 .choice{display:flex;align-items:center;gap:14px;width:100%;text-align:left;border:2px solid var(--border);
   background:var(--panel2);border-radius:12px;padding:14px 16px;margin-bottom:10px;min-height:66px;transition:border-color .12s}
 .choice:hover{border-color:var(--info-t)}
+/* Phase 8 Combine quantities: selectable portions — the selected ones
+   carry the action color edge, never color alone (aria-pressed). */
+.ss-choices{display:grid;gap:6px;margin-bottom:10px}
+.ss-choices .choice{margin-bottom:0}
+.ss-choices .choice.selected{border-color:var(--info);box-shadow:inset 3px 0 0 var(--info)}
 .choice .cic{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex:none}
 .choice .cic.run{background:rgba(49,210,135,.15);color:var(--ok-t)}
 .choice .cic.que{background:rgba(255,178,36,.15);color:var(--warn-t)}
@@ -2764,7 +2769,7 @@ function ssOpenFlow(flow){
 function ssRenderFlow(){
   const render={'machine-assign':ssDlgMachineAssign,'pn-actions':ssDlgPnActions,'source-select':ssDlgSourceSelect,
     'transfer':ssDlgTransfer,'intake':ssDlgIntake,'add-qty':ssDlgAddQty,'repair':ssDlgRepair,'scrap':ssDlgScrap,
-    'queue-return':ssDlgQueueReturn,'done':ssDlgDone,'undo':ssDlgUndo,'manual-pn':ssDlgManual}[ssFlow.kind];
+    'queue-return':ssDlgQueueReturn,'done':ssDlgDone,'combine':ssDlgCombine,'undo':ssDlgUndo,'manual-pn':ssDlgManual}[ssFlow.kind];
   if(!render){ ssFlow=null; return; }
   render();
   ssAutofocus();
@@ -2823,7 +2828,7 @@ function ssRecap(lines){
    stay present but quiet. */
 const SS_SUM_PRIMARY=['Action','PN','Quantity','Source','Destination','Destination Machine','Source Machine',
   'Machine','Area','Reason','Result','Starting Area · Operation','Scrap quantity','Original action',
-  'Source → destination','Result after reversal'];
+  'Source → destination','Result after reversal','Selected quantities','Resulting quantity','State','Operation'];
 const SS_SUM_SECONDARY=['Worker','Scan Station','Recorded event','Recorded events','Time'];
 const SS_SUM_CHIP=['Source','Destination','Destination Machine','Source Machine','Machine','Area',
   'Request Type','Route Mode','Starting Area · Operation'];
@@ -2937,7 +2942,7 @@ document.getElementById('ssovl').addEventListener('keydown',e=>{
 /* step sequencing: Enter/Next advances; only the confirmation confirms */
 const SS_STEP_ORDER={'machine-assign':['select','qty','confirm'],'intake':['settings','qty','confirm'],
   'transfer':['qty','confirm'],'add-qty':['entry','confirm'],'repair':['entry','confirm'],
-  'scrap':['count','confirm'],'queue-return':['qty','confirm'],'done':['qty','confirm']};
+  'scrap':['count','confirm'],'queue-return':['qty','confirm'],'done':['qty','confirm'],'combine':['select','confirm']};
 function ssNextCurrent(){
   const f=ssFlow; if(!f||!ssStepValid()) return;
   const order=SS_STEP_ORDER[f.kind]; if(!order) return;
@@ -2970,6 +2975,7 @@ function ssStepValid(){
     case 'scrap': return f.count>=1&&f.count<=f.available&&!!(f.reason||'').trim();
     case 'queue-return': return q>=1&&q<=f.max;
     case 'done': return q>=1&&q<=f.max;
+    case 'combine': return f.selected.length>=2;
   }
   return true;
 }
@@ -2999,7 +3005,7 @@ function ssConfirmCurrent(){
   if(!ssFlow) return;
   const fn={'machine-assign':ssConfirmMachineAssign,'transfer':ssConfirmTransfer,'intake':ssConfirmIntake,
     'add-qty':ssConfirmAddQty,'repair':ssConfirmRepair,'scrap':ssConfirmScrap,'queue-return':ssConfirmQueueReturn,
-    'done':ssConfirmDone,'undo':ssConfirmUndo,'manual-pn':ssConfirmManual}[ssFlow.kind];
+    'done':ssConfirmDone,'combine':ssConfirmCombine,'undo':ssConfirmUndo,'manual-pn':ssConfirmManual}[ssFlow.kind];
   if(fn) fn();
 }
 
@@ -3139,6 +3145,12 @@ function ssDlgPnActions(){
   if(!hasM&&ssProcessingQty(f.pn)>0)
     h+=ssChoice('run','DONE','Complete Area processing',
       ssProcessingQty(f.pn)+' pcs in processing. The finished quantity moves to the finished rack, ready to transfer to another Area.','ssPADone()');
+  /* Phase 8: offered only for portions the server reports combinable
+     (one identical state / Machine / Operation / route context). */
+  const comb=ssCombinable(f.pn);
+  if(comb.length>=2)
+    h+=ssChoice('run','⊕','Combine quantities',
+      comb.map(c=>c.qty+' pcs').join(' + ')+' · '+ssPortionState(comb[0])+' · '+ssPortionOp(comb[0])+'. Select the quantities to combine into one; nothing is combined automatically.','ssPACombine()');
   h+=ssChoice('add','ADD','Add more quantity',
     'Add physical quantity found at this Area that was not transferred from another Area. A reason is required.','ssPAAdd()');
   if(reps.length)
@@ -3157,6 +3169,75 @@ function ssPAReceive(){
   else ssOpenFlow({kind:'source-select',pn:pn,sources:sources});
 }
 function ssPADone(){ ssOpenFlow({kind:'done',pn:ssFlow.pn,machine:null,max:ssProcessingQty(ssFlow.pn)}); }
+function ssPACombine(){ const c=ssCombinable(ssFlow.pn); ssOpenFlow({kind:'combine',pn:ssFlow.pn,portions:c,selected:c.map((_,i)=>i),fromActions:true}); }
+
+/* ---- Combine quantities (Phase 8): the operator-facing MERGED workflow.
+   The mock stands in for the server's judgement of what may combine:
+   whole portions of one PN in this Area with one identical context
+   (here: directly processing, no finished part) — the real station
+   takes the groups from the PN resolution and never judges itself. ---- */
+function ssCombinable(pn){
+  return ssCardsFor(pn).filter(c=>!c.mach.length&&!(c.fin||[]).length);
+}
+function ssPortionState(c){ return !c.mach.length?'In processing':'Queued'; }
+function ssPortionOp(c){ const parts=c.wo.split(' · '); return parts[1]||'—'; }
+function ssCombineToggle(i){
+  const f=ssFlow; if(!f||f.kind!=='combine') return;
+  f.selected=f.selected.indexOf(i)>=0?f.selected.filter(x=>x!==i):f.selected.concat([i]);
+  ssRenderFlow();
+}
+function ssDlgCombine(){
+  const f=ssFlow, areaName=ssArea().name;
+  if(!f.step) f.step='select';
+  const chosen=f.selected.map(i=>f.portions[i]);
+  const total=chosen.reduce((s,c)=>s+c.qty,0);
+  const parts=chosen.map(c=>c.qty+' pcs').join(' + ');
+  const ctx=f.portions[0], state=ssPortionState(ctx), op=ssPortionOp(ctx);
+  if(f.step==='select'){
+    ssDlg().innerHTML='<h3>Combine quantities</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+      '<div class="sub">These separate quantities of this Part Number are in '+areaName+' in the same state. Select at least two to combine into one quantity. Nothing is combined until you confirm.</div>'+
+      '<div class="ss-choices" role="group" aria-label="Quantities to combine">'+
+      f.portions.map((c,i)=>{ const on=f.selected.indexOf(i)>=0;
+        return '<button type="button" class="choice'+(on?' selected':'')+'" aria-pressed="'+on+'" onclick="ssCombineToggle('+i+')">'+
+          '<span class="cic" aria-hidden="true">'+(on?'✓':'')+'</span><span><span class="ct1">'+c.qty+' pcs · '+ssPortionState(c)+' · '+ssPortionOp(c)+'</span></span></button>'; }).join('')+
+      '</div>'+
+      (chosen.length>=2?ssGuide('info','Result: <b>'+total+' pcs · '+state+' · '+op+'</b> ('+parts+').')
+        :ssGuide('action','Select at least two quantities to combine.'))+
+      ssStepButtons({back:f.fromActions?"ssOpenFlow({kind:'pn-actions',pn:ssFlow.pn})":null,label:'Next'});
+  } else {
+    ssDlg().innerHTML='<h3>Combine quantities</h3><div class="big mono" title="'+f.pn+'">'+f.pn+'</div>'+
+      '<div class="sub">Review the combine, then confirm. The selected quantities become one quantity in '+areaName+'; their history is kept.</div>'+
+      ssConfirmSummary([
+        ['Action','Combine quantities'],
+        ['PN','<span class="mono">'+f.pn+'</span>'],
+        ['Area',ssAreaChip(ssAreaColor(ssStation.area),areaName)],
+        ['Selected quantities','<span class="mono">'+parts+'</span>'],
+        ['Resulting quantity','<span class="mono">'+parts+' → '+total+' pcs</span>'],
+        ['State',state],
+        ['Operation',ssChip(op)],
+        ['Worker',ssWorker],
+        ['Scan Station',ssStation.id],
+        ['Recorded event','MERGED']])+
+      ssStepButtons({back:"ssSetStep('select')",label:'Confirm combine',autofocus:true});
+  }
+  ssUpdate();
+}
+function ssConfirmCombine(){
+  const f=ssFlow; if(f.step!=='confirm'||!ssStepValid()) return;
+  const chosen=f.selected.map(i=>f.portions[i]);
+  const total=chosen.reduce((s,c)=>s+c.qty,0), parts=chosen.map(c=>c.qty+' pcs').join(' + ');
+  const areaName=ssArea().name;
+  /* the sources close and one resulting quantity takes their place —
+     the totals of the Area are unchanged */
+  chosen[0].qty=total; chosen[0].tia='now';
+  chosen.slice(1).forEach(c=>{ const i=AB_CARDS.indexOf(c); if(i>=0) AB_CARDS.splice(i,1); });
+  ssRecord({pn:f.pn,movementType:'MERGED',description:parts+' → '+total+' pcs in '+areaName,
+    qty:total,source:parts,destination:areaName,worker:ssWorker,time:MOCK_SCAN_TIME,
+    reversalEffect:'Restores the '+chosen.length+' separate quantities ('+parts+') in '+areaName+'.'});
+  feedback('ok',f.pn+': '+parts+' → '+total+' pcs combined',
+    'The selected quantities are now one quantity in '+areaName+'; the totals are unchanged and the history of every part is kept.','✓');
+  ssCloseDlg();
+}
 function ssPAAdd(){ ssOpenFlow({kind:'add-qty',pn:ssFlow.pn}); }
 function ssPARepair(){ ssOpenFlow({kind:'repair',pn:ssFlow.pn}); }
 function ssPAScrap(){ ssOpenFlow({kind:'scrap',pn:ssFlow.pn,available:ssInAreaQty(ssFlow.pn),count:0,reason:''}); }
@@ -3763,6 +3844,10 @@ const AB_CARDS=[
      Scan Station exactly this row carries the DONE action — the
      direct-processing exception (GUI_DESIGN §4.6/§4.10). */
   {area:'deburr',pn:'81-1042',wo:'WO 007021 · Deburring',job:'18615',qty:6,mach:[],due:'7 days left',dcls:'ok',tia:'2h 20m',prio:0,d:7},
+  /* Phase 8: a second portion of the same PN that arrived separately —
+     same Area, same state, same Operation: the PN action dialog offers
+     `Combine quantities` for the two (never combined automatically). */
+  {area:'deburr',pn:'81-1042',wo:'WO 007021 · Deburring',job:'18615',qty:4,mach:[],due:'7 days left',dcls:'ok',tia:'35m',prio:0,d:7},
   {area:'external',pn:'142-260',wo:'WO 007005 · Plating',job:'18031',qty:20,mach:[['vendor',20]],due:'overdue 6 days',dcls:'late',tia:'4d 02h',prio:2,d:-6,scrapped:2},
   {area:'stockroom',pn:'309-127',wo:'WO 006996 · stocked',job:'17740',qty:50,mach:[],due:'allocated 50/50',dcls:'ok',tia:'—',prio:0,d:999}
 ];

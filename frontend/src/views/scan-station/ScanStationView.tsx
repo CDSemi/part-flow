@@ -38,6 +38,7 @@ import {
 import type {
   AreaInventory,
   AreaRef,
+  CombineResult,
   FlowInArea,
   MachineActionResult,
   MachineRef,
@@ -66,6 +67,7 @@ import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { normalizeScanInput, parseScan } from './barcode';
+import { CombineQuantitiesDialog } from './scan-station-combine-dialog';
 import {
   AssignToMachineDialog,
   MachineActionDialog,
@@ -87,7 +89,9 @@ import {
   NOTICE_OK_MS,
   NOTICE_WARN_MS,
   quantityKeyHandler,
+  quantityValid,
   operationLabel,
+  portionLabel,
 } from './scan-station-wizard';
 import type { Notice } from './scan-station-presentation';
 
@@ -473,6 +477,14 @@ type Flow =
       action: 'DONE' | 'QUEUE';
       flow: FlowInArea;
       machine: MachineRef | null;
+      parent?: Flow;
+    }
+  | {
+      // Combine quantities (Phase 8): ONE server-reported combinable
+      // group of the PN's in-Area portions.
+      kind: 'combine';
+      partNumber: string;
+      portions: FlowInArea[];
       parent?: Flow;
     };
 
@@ -898,17 +910,24 @@ function StationView({
       const events = completed
         ? `AREA_COMPLETED #${result.completedMovementId} + TRANSFERRED #${result.movementId}`
         : `TRANSFERRED #${result.movementId}`;
+      // A part of the source moved (Phase 8): the server split the
+      // flow first (SPLIT rows of the same command) and the remainder
+      // stays at the source in its previous state.
+      const split =
+        result.remainderQuantity !== null
+          ? ` SPLIT · ${result.remainderQuantity} pcs remain at ${candidate.currentArea.name}.`
+          : '';
       setLastAction({
         pn: result.partNumber,
-        summary: `${completed ? 'AREA_COMPLETED + TRANSFERRED' : 'TRANSFERRED'} · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}`,
+        summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${completed ? 'AREA_COMPLETED + TRANSFERRED' : 'TRANSFERRED'} · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
       });
       setNotice({
         kind: 'ok',
         icon: '✓',
         title: `${result.partNumber} × ${result.quantity} → ${destination}`,
         detail: result.created
-          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity moved here from ${candidate.currentArea.name}. Recorded by the server (${events}).`
-          : `This transfer was already recorded by the server (${events}) — nothing was recorded twice.`,
+          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity moved here from ${candidate.currentArea.name}.${split} Recorded by the server (${events}).`
+          : `This transfer was already recorded by the server (${events}) — nothing was recorded twice.${split}`,
       });
       // The station context, the Area inventory (with its Machine
       // cards) and the header totals refresh from the server
@@ -933,9 +952,21 @@ function StationView({
           : result.movementType === 'AREA_COMPLETED'
             ? `${source} → Finished — ready to move`
             : `${machineName} → ${areaName} queue`;
+      // A part of the flow was acted on (Phase 8): the server split it
+      // first; the remainder keeps its previous place and state.
+      const remainderWhere =
+        result.movementType === 'ASSIGNED_TO_MACHINE'
+          ? `in the ${areaName} queue`
+          : machineName
+            ? `on ${machineName}`
+            : `in ${areaName} processing`;
+      const split =
+        result.remainderQuantity !== null
+          ? ` SPLIT · ${result.remainderQuantity} pcs remain ${remainderWhere}.`
+          : '';
       setLastAction({
         pn: result.partNumber,
-        summary: `${result.movementType} · ${description} · qty ${result.quantity}`,
+        summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${result.movementType} · ${description} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
       });
       const outcome =
         result.movementType === 'ASSIGNED_TO_MACHINE'
@@ -948,8 +979,33 @@ function StationView({
         icon: '✓',
         title: `${result.partNumber} × ${result.quantity} ${outcome}`,
         detail: result.created
-          ? `Recorded by the server (${result.movementType} #${result.movementId}).`
-          : `This action was already recorded by the server (${result.movementType} #${result.movementId}) — nothing was recorded twice.`,
+          ? `Recorded by the server (${result.movementType} #${result.movementId}).${split}`
+          : `This action was already recorded by the server (${result.movementType} #${result.movementId}) — nothing was recorded twice.${split}`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan, ready],
+  );
+
+  /** A combine the SERVER confirmed (Phase 8): refresh, note, refocus. */
+  const completeCombine = useCallback(
+    (result: CombineResult, selected: FlowInArea[]) => {
+      const areaName = ready?.area.name ?? 'the Area';
+      const parts = selected.map((flow) => `${flow.quantity} pcs`).join(' + ');
+      setLastAction({
+        pn: result.partNumber,
+        summary: `MERGED · ${parts} → ${result.quantity} pcs in ${areaName}`,
+      });
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber}: ${parts} → ${result.quantity} pcs combined`,
+        detail: result.created
+          ? `The selected quantities are now one quantity in ${areaName}; the totals are unchanged and the history of every part is kept. Recorded by the server (MERGED #${result.movementId}).`
+          : `This combine was already recorded by the server (MERGED #${result.movementId}) — nothing was recorded twice.`,
       });
       context.reload();
       inventory.reload();
@@ -1356,6 +1412,20 @@ function StationView({
           }
         />
       )}
+      {flow?.kind === 'combine' && (
+        <CombineQuantitiesDialog
+          station={station}
+          partNumber={flow.partNumber}
+          portions={flow.portions}
+          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={completeCombine}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Combine')}
+        />
+      )}
       {flow?.kind === 'in-area' && (
         <InAreaDialog
           resolution={flow.resolution}
@@ -1377,6 +1447,14 @@ function StationView({
               action: 'DONE',
               flow: processingFlow,
               machine,
+              parent: flow,
+            })
+          }
+          onCombine={(portions) =>
+            setFlow({
+              kind: 'combine',
+              partNumber: flow.resolution.partNumber,
+              portions,
               parent: flow,
             })
           }
@@ -1582,12 +1660,18 @@ function TransferDialog({
   // owner already verified both agree before opening this dialog).
   const destination = resolution.area;
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
-  // MAX = the whole Quantity Flow, and in this release the ONLY valid
-  // quantity: partial movement needs SPLIT (a later release) and is
-  // refused clearly — never submitted.
+  // MAX = the whole Quantity Flow (the default); any quantity from 1 to
+  // MAX is valid (GUI_DESIGN §4.8, Phase 8) — a smaller quantity moves
+  // only that part: the SERVER splits the flow inside the same command
+  // and the remainder stays at the source in its state. The client
+  // never splits anything.
   const [qty, setQty] = useState(String(candidate.quantity));
   const parsedQty = parseInt(qty || '0', 10);
-  const fullQuantity = parsedQty === candidate.quantity;
+  const validQuantity = quantityValid(parsedQty, candidate.quantity);
+  // The quantity confirmed on the quantity step — frozen for the
+  // summary and the request.
+  const [confirmed, setConfirmed] = useState(candidate.quantity);
+  const partial = confirmed < candidate.quantity;
   // Several active Operations at the destination ALWAYS take an
   // explicit choice — the Planned Route's expected Operation is
   // guidance shown beside the choice, never a pre-selection that hides
@@ -1597,7 +1681,7 @@ function TransferDialog({
     operationRequired ? null : (candidate.suggestedOperationId ?? null),
   );
   const operation = operations.find((item) => item.id === operationId) ?? null;
-  const valid = fullQuantity && operation !== null;
+  const valid = validQuantity && operation !== null;
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -1651,7 +1735,9 @@ function TransferDialog({
     candidate.processingState === 'PROCESSING';
 
   function goConfirm() {
-    if (valid) setStep('confirm');
+    if (!valid) return;
+    setConfirmed(parsedQty);
+    setStep('confirm');
   }
 
   async function confirm() {
@@ -1675,7 +1761,7 @@ function TransferDialog({
         quantityFlowId: candidate.quantityFlowId,
         sourceAreaId: candidate.currentArea.id,
         targetAreaId: destination.id,
-        quantity: candidate.quantity,
+        quantity: confirmed,
         operationId: operation!.id,
         confirmRouteDeviation: deviation !== null,
         routeDeviationReason: deviation !== null ? reason.trim() : null,
@@ -1718,11 +1804,10 @@ function TransferDialog({
         Quantity cannot exceed the {candidate.quantity} pcs currently available
         at {candidate.currentArea.name}.
       </Guidance>
-    ) : parsedQty < candidate.quantity ? (
+    ) : parsedQty < 1 ? (
       <Guidance tone="error">
-        Partial transfer is not available in this release: this quantity of{' '}
-        {candidate.quantity} pcs moves as a whole. Enter {candidate.quantity} or
-        cancel — nothing is recorded.
+        Enter a quantity from 1 to {candidate.quantity} pcs — nothing is
+        recorded until then.
       </Guidance>
     ) : null;
 
@@ -1816,7 +1901,14 @@ function TransferDialog({
           )}
           <Guidance tone="info">
             Available at {candidate.currentArea.name}:{' '}
-            <b>{candidate.quantity} pcs</b>. The full quantity moves as a whole.
+            <b>{candidate.quantity} pcs</b> (MAX). A smaller quantity moves only
+            that part — the rest stays at {candidate.currentArea.name}
+            {implicitCompletion
+              ? candidate.processingState === 'ON_MACHINE'
+                ? ' on its Machine'
+                : ' in processing'
+              : ''}
+            .
           </Guidance>
           {quantityGuidance}
           <QuantityKeypad
@@ -1842,7 +1934,9 @@ function TransferDialog({
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
-                <span className="mono">{candidate.quantity} pcs</span>,
+                <span className="mono">
+                  {confirmed} pcs{partial ? ` of ${candidate.quantity}` : ''}
+                </span>,
                 'primary',
               ],
               [
@@ -1880,12 +1974,29 @@ function TransferDialog({
               [
                 'Source processing',
                 implicitCompletion
-                  ? `Completed at ${candidate.currentArea.name} by this transfer`
+                  ? `Completed at ${candidate.currentArea.name} by this transfer${
+                      partial ? ' — the transferred part only' : ''
+                    }`
                   : null,
                 'primary',
                 'warn',
               ],
-              ['Remaining at source', <span className="mono">0 pcs</span>],
+              [
+                'Remaining at source',
+                <span className="mono">
+                  {candidate.quantity - confirmed} pcs
+                  {partial
+                    ? candidate.processingState === 'ON_MACHINE'
+                      ? ' — stays on its Machine'
+                      : candidate.processingState === 'PROCESSING'
+                        ? ' — stays in processing'
+                        : candidate.processingState === 'QUEUED'
+                          ? ' — stays queued'
+                          : ' — stays finished'
+                    : ''}
+                </span>,
+                partial ? 'primary' : undefined,
+              ],
               ['Scan Station', station.stationId, 'secondary'],
               implicitCompletion
                 ? [
@@ -1972,6 +2083,7 @@ function InAreaDialog({
   machines,
   onAssign,
   onComplete,
+  onCombine,
   onReceiveMore,
   onBack,
   onCancel,
@@ -1985,6 +2097,9 @@ function InAreaDialog({
    * (Phase 7, `machine: null`) `Complete Area processing` for ONE
    * directly processing flow of an Area without Machines. */
   onComplete: (flow: FlowInArea, machine: MachineRef | null) => void;
+  /** `Combine quantities` (Phase 8) for ONE server-reported combinable
+   * group of the PN's portions in the Area. */
+  onCombine: (portions: FlowInArea[]) => void;
   onReceiveMore: () => void;
   onBack?: () => void;
   onCancel: () => void;
@@ -2024,6 +2139,18 @@ function InAreaDialog({
   const finishedQty = resolution.inArea
     .filter((flow) => flow.processingState === 'READY_TO_TRANSFER')
     .reduce((sum, flow) => sum + flow.quantity, 0);
+  // Combine quantities (Phase 8): offered for exactly the groups the
+  // SERVER judged combinable — never derived here, never automatic.
+  const combineGroups = resolution.combineGroups
+    .map((ids) =>
+      ids.flatMap((id) => {
+        const portion = resolution.inArea.find(
+          (flow) => flow.quantityFlowId === id,
+        );
+        return portion ? [portion] : [];
+      }),
+    )
+    .filter((portions) => portions.length >= 2);
   return (
     <ModalDialog label="Select an action" onClose={onCancel}>
       <h3>Select an action</h3>
@@ -2089,6 +2216,28 @@ function InAreaDialog({
             <span className="ct2">
               {flow.quantity} pcs in processing ·{' '}
               {workOrderLabel(flow.workOrder)}
+            </span>
+          </span>
+        </button>
+      ))}
+      {combineGroups.map((portions) => (
+        <button
+          key={`combine-${portions.map((flow) => flow.quantityFlowId).join('-')}`}
+          className="choice"
+          onClick={() => onCombine(portions)}
+        >
+          <span className="cic" aria-hidden="true">
+            ⊕
+          </span>
+          <span>
+            <span className="ct1">Combine quantities</span>
+            <br />
+            <span className="ct2">
+              {portions.map((flow) => `${flow.quantity} pcs`).join(' + ')} ·{' '}
+              {portionLabel(portions[0], machines)
+                .split(' · ')
+                .slice(1)
+                .join(' · ')}
             </span>
           </span>
         </button>

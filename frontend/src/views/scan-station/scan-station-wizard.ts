@@ -4,6 +4,7 @@
 // quantity-step key handling, and quantity validation. Production-safe
 // — no mock imports.
 
+import type { FlowInArea, MachineRef } from '../../api/scan-station';
 import { applyQuantityKey } from '../../components/quantity-input';
 
 export const NOTICE_OK_MS = 4000;
@@ -123,6 +124,49 @@ export function quantityValidation(
     };
   }
   return null;
+}
+
+/**
+ * Quantity validation of the production wizards (GUI_DESIGN §4.8,
+ * Phase 8): any whole number from 1 to MAX is valid — a smaller
+ * quantity acts on that part only and the SERVER splits the flow inside
+ * the same command; 0 and anything above MAX are refused before
+ * submission. The client never splits anything itself.
+ */
+export function quantityValid(parsed: number, max: number): boolean {
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= max;
+}
+
+/** How a portion of quantity reads to the operator (Phase 8 Combine):
+ * its holding state, and where — never an internal flow id. */
+export function portionState(
+  flow: FlowInArea,
+  machines: Pick<MachineRef, 'id' | 'name'>[],
+): string {
+  switch (flow.processingState) {
+    case 'QUEUED':
+      return 'Queued';
+    case 'PROCESSING':
+      return flow.operation.isExternal
+        ? 'External processing'
+        : 'In processing';
+    case 'ON_MACHINE': {
+      const machine = machines.find((item) => item.id === flow.machineId);
+      return machine ? `On ${machine.name}` : 'On Machine';
+    }
+    case 'READY_TO_TRANSFER':
+      return 'Finished — ready to move';
+  }
+}
+
+/** `6 pcs · In processing · Milling` — the operator's view of one portion. */
+export function portionLabel(
+  flow: FlowInArea,
+  machines: Pick<MachineRef, 'id' | 'name'>[],
+): string {
+  return `${flow.quantity} pcs · ${portionState(flow, machines)} · ${operationLabel(
+    flow.operation,
+  )}`;
 }
 
 /** Operator-facing Operation label: the name when configured, else the code. */

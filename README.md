@@ -19,17 +19,17 @@ Machine workflows), and the completed **Phase 7 Direct Area Processing
 (Areas Without Machines)** — the derived `PROCESSING` state, the
 direct-processing DONE without a Machine, the implicit completion on
 transfer, and the real Scan Station direct-processing presentation and
-`DONE`, plus the **Phase 8 Quantity SPLIT and MERGED backend core**
-(persistence and lineage, partial quantity on every Scan Station
-command, the explicit merge; the Scan Station quantity view still
-refuses partial quantity until its Phase 8 wiring):
+`DONE`, and the completed **Phase 8 Quantity SPLIT and MERGED
+Workflows** (persistence and lineage, partial quantity on every Scan
+Station command, the explicit merge, and the real Scan Station partial
+quantity and `Combine quantities` workflows):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
   real `/api/health` connectivity integration, and the ten approved GUI
   views — the real views (Administration's minimum-environment
   sections and Management → Machines from Phase 3.5, Management →
-  Work Orders from Phase 4, and the Scan Station from Phases 5–6) read and
+  Work Orders from Phase 4, and the Scan Station from Phases 5–8) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -141,15 +141,19 @@ row action and the PN-first `Complete Area processing` choice — the
 same Area Completion wizard without a Machine field, recorded as a
 Machine-less `AREA_COMPLETED` — and a transfer of directly processing
 quantity completes it implicitly (`AREA_COMPLETED`, then `TRANSFERRED`
-as one command). The Phase 8 backend core adds partial quantity on
+as one command). Phase 8 adds partial quantity on
 every one of those commands — the source Quantity Flow is split
 atomically inside the same command (three `SPLIT` Movements, then the
 action), the selected part receives the action, the remainder keeps
 the source's state, the closed source leaves the inventory and the
 lineage edges keep the ancestry — and the explicit merge of Quantity
 Flows of one PN with one identical production context (`MERGED`,
-N → 1); the Scan Station quantity view still refuses partial quantity
-until its Phase 8 wiring. Area and scrap barcodes, Worker identity, Repair,
+N → 1). The Scan Station records both: every wizard accepts 1..MAX and
+shows the remainder before and after the write (the server splits, the
+client never does), and the PN action dialog offers `Combine
+quantities` for exactly the groups the server reports combinable —
+source selection, a result preview, `Confirm combine`, success only
+after the server. Area and scrap barcodes, Worker identity, Repair,
 Scrap and Undo stay honest placeholders; the approved presentation of those workflows survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5

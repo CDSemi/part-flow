@@ -44,6 +44,11 @@ Rules owned here:
   are recorded in the command's metadata (``merge`` block) at merge
   time, so a replay returns the identical original response whatever
   the resulting flow, the Machine or the Area's mode did since.
+- The read models offer `Combine quantities` ONLY for flows this
+  module judges compatible (`combinable_groups` — the same context key
+  the command enforces, `merge_context`), so the frontend never carries
+  a compatibility rule of its own; the command re-judges under the
+  locks and remains the authority.
 - Not here: SPLIT (partial-quantity actions split inside their own
   command, `machine_processing.split_if_partial`), Undo (Phase 9).
 """
@@ -64,7 +69,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
-from app.application.lineage import route_context, stage_merge
+from app.application.lineage import RouteContext, route_context, stage_merge
 from app.application.machine_processing import (
     FINGERPRINT_KEY,
     command_metadata,
@@ -87,6 +92,52 @@ from app.infrastructure.models import (
 # shared state and Machine), written on every MERGED row of the command
 # and read back verbatim on replay — never re-derived from current state.
 MERGE_KEY: Final = "merge"
+
+
+class MergeContext(NamedTuple):
+    """The production context a merge needs to be identical across its sources.
+
+    One value per flow; flows merge only when every value is equal —
+    the resulting flow then has exactly this context, nothing guessed.
+    """
+
+    processing_state: ProcessingState
+    machine_id: int | None
+    operation_id: int
+    route: RouteContext
+
+
+def merge_context(
+    session: Session, flow: QuantityFlow, latest: PartMovement, *, direct_processing: bool
+) -> MergeContext:
+    return MergeContext(
+        processing_state=processing_state_of(
+            latest.movement_type, direct_processing=direct_processing
+        ),
+        machine_id=flow.current_machine_id,
+        operation_id=latest.operation_id,
+        route=route_context(session, flow),
+    )
+
+
+def combinable_groups(
+    session: Session,
+    flows: list[QuantityFlow],
+    latest: dict[int, PartMovement],
+    *,
+    direct_processing: bool,
+) -> list[list[int]]:
+    """The groups of at least two ACTIVE flows (one PN, one Area) that may merge.
+
+    Read-model helper: every group is one identical `merge_context`;
+    flows without a partner form no group. Ascending flow ids within a
+    group, groups ordered by their first flow.
+    """
+    grouped: dict[MergeContext, list[int]] = {}
+    for flow in sorted(flows, key=lambda item: item.id):
+        key = merge_context(session, flow, latest[flow.id], direct_processing=direct_processing)
+        grouped.setdefault(key, []).append(flow.id)
+    return [ids for ids in grouped.values() if len(ids) >= 2]
 
 
 class MergeResult(NamedTuple):
@@ -251,29 +302,31 @@ def merge_flows(
             )
     direct = not area_has_machines(session, area.id)
     latest = {flow.id: effective_latest_movement(session, flow.id) for flow in flows}
-    states = {
-        flow.id: processing_state_of(latest[flow.id].movement_type, direct_processing=direct)
+    contexts = {
+        flow.id: merge_context(session, flow, latest[flow.id], direct_processing=direct)
         for flow in flows
     }
-    if len(set(states.values())) != 1:
-        raise _refuse(
-            "they are in different processing states ("
-            + ", ".join(f"{flow.id}: {states[flow.id].value}" for flow in flows)
-            + ")."
-        )
-    machines = {flow.current_machine_id for flow in flows}
-    if len(machines) != 1:
-        raise _refuse("they are not on the same Machine.")
-    operations = {latest[flow.id].operation_id for flow in flows}
-    if len(operations) != 1:
-        raise _refuse("they are recorded for different Operations.")
-    contexts = {route_context(session, flow) for flow in flows}
-    if len(contexts) != 1:
+    if len(set(contexts.values())) != 1:
+        # The same key the read model groups by; the message names the
+        # first component that differs.
+        if len({context.processing_state for context in contexts.values()}) != 1:
+            raise _refuse(
+                "they are in different processing states ("
+                + ", ".join(
+                    f"{flow.id}: {contexts[flow.id].processing_state.value}" for flow in flows
+                )
+                + ")."
+            )
+        if len({context.machine_id for context in contexts.values()}) != 1:
+            raise _refuse("they are not on the same Machine.")
+        if len({context.operation_id for context in contexts.values()}) != 1:
+            raise _refuse("they are recorded for different Operations.")
         raise _refuse(
             "their route context differs (route mode, Planned Route snapshot or route position)."
         )
-    state = next(iter(states.values()))
-    machine_id = next(iter(machines))
+    shared = next(iter(contexts.values()))
+    state = shared.processing_state
+    machine_id = shared.machine_id
     if (state == ProcessingState.ON_MACHINE) != (machine_id is not None):  # pragma: no cover
         raise ConflictError("The Machine projection disagrees with the derived state.")
     if machine_id is not None:
@@ -285,7 +338,7 @@ def merge_flows(
         assigned_quantity(session, machine.id)
 
     # -- Writes — all inside the one open transaction ------------------
-    operation_id = next(iter(operations))
+    operation_id = shared.operation_id
     metadata: dict[str, Any] = {
         **command_metadata("MERGE", fingerprint, size=len(flows) + 1),
         MERGE_KEY: {"processing_state": state.value, "machine_id": machine_id},

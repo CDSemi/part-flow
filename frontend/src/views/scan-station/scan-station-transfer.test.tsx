@@ -385,6 +385,7 @@ function handle(url: string, method: string, body: unknown): Response {
         : null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
+      combine_groups: [],
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);
@@ -731,7 +732,7 @@ test('a scanned PN elsewhere resolves on the server and transfers as a whole flo
   expect(box).toHaveTextContent('Lathe queue (awaiting Machine)');
   expect(box).toHaveTextContent('WO 007003');
   expect(box).toHaveTextContent('Turning'); // the single Operation resolves itself
-  expect(box).toHaveTextContent('The full quantity moves as a whole');
+  expect(box).toHaveTextContent('Available at Material: 12 pcs (MAX)');
   expect(quantityInput(box)).toHaveValue('12');
 
   fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
@@ -904,7 +905,7 @@ test('an Area with several Operations makes the operator choose one', async () =
   expect(transferRequests()[0].body.operation_id).toBe(30);
 });
 
-test('partial quantity is refused clearly and never submitted', async () => {
+test('a quantity of 0 or above MAX is refused clearly and never submitted', async () => {
   await renderStation();
 
   scan('PF:PN:2027-60-8114-00');
@@ -912,14 +913,11 @@ test('partial quantity is refused clearly and never submitted', async () => {
     name: 'Receive from another Area',
   });
   const quantity = quantityInput(box);
-  fireEvent.change(quantity, { target: { value: '5' } });
-  expect(box).toHaveTextContent(
-    'Partial transfer is not available in this release',
-  );
-  expect(box).toHaveTextContent('Enter 12 or cancel');
+  fireEvent.change(quantity, { target: { value: '0' } });
+  expect(box).toHaveTextContent('Enter a quantity from 1 to 12 pcs');
   expect(within(box).getByRole('button', { name: 'Next' })).toBeDisabled();
   fireEvent.keyDown(box, { key: 'Enter' }); // Enter never advances an invalid quantity
-  expect(box).toHaveTextContent('The full quantity moves as a whole');
+  expect(box).toHaveTextContent('Available at Material: 12 pcs (MAX)');
   fireEvent.change(quantity, { target: { value: '13' } });
   expect(box).toHaveTextContent('Quantity cannot exceed the 12 pcs');
   expect(within(box).getByRole('button', { name: 'Next' })).toBeDisabled();

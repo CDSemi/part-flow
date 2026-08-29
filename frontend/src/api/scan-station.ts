@@ -3,11 +3,15 @@
 //
 // The read models a Scan Station loads (station context, PN scan
 // resolution, Machine scan resolution, Area inventory) and the
-// production commands the station records: the transfer of a whole
-// Quantity Flow into the station's Area (Phase 5 — completing ON_MACHINE
-// quantity implicitly since Phase 6), and the Phase 6 one-shot
-// Machine-Area actions on a whole Quantity Flow: assign to a Machine,
-// QUEUE (return to the Area queue) and DONE (complete Area processing).
+// production commands the station records: the transfer of a Quantity
+// Flow into the station's Area (Phase 5 — completing ON_MACHINE
+// quantity implicitly since Phase 6), the Phase 6 one-shot Machine-Area
+// actions: assign to a Machine, QUEUE (return to the Area queue) and
+// DONE (complete Area processing), and — Phase 8 — `Combine quantities`
+// (the explicit merge of the server-judged combinable flows of one PN).
+// Since Phase 8 every command accepts a quantity smaller than the flow's:
+// the server splits the flow first inside the same command and reports
+// the consumed source and the remainder; the client never splits.
 // Wire shapes are the backend's snake_case; the exported types are the
 // camelCase the views use. No business rules live here — state, Machine
 // and route resolution and every transaction are the backend's
@@ -302,6 +306,11 @@ export interface ScanResolution {
   transferBlockedReason: string | null;
   /** Several flows match: the operator selects exactly one. */
   requiresSelection: boolean;
+  /** Phase 8: the groups (flow ids, at least two each) of in-Area flows
+   * the SERVER judges combinable — one identical production context
+   * per group. The station offers `Combine quantities` for exactly
+   * these; it never judges compatibility itself. */
+  combineGroups: number[][];
 }
 
 interface TransferCandidateWire {
@@ -329,6 +338,7 @@ interface ScanResolutionWire {
   has_active_demand: boolean;
   transfer_blocked_reason: string | null;
   requires_selection: boolean;
+  combine_groups: number[][];
 }
 
 /**
@@ -374,6 +384,7 @@ export async function resolveScan(
     hasActiveDemand: wire.has_active_demand,
     transferBlockedReason: wire.transfer_blocked_reason,
     requiresSelection: wire.requires_selection,
+    combineGroups: wire.combine_groups,
   };
 }
 
@@ -445,7 +456,8 @@ export interface TransferInput {
   /** The destination Area the operator confirmed (station binding
    * precondition — the backend refuses a rebound station). */
   targetAreaId: number;
-  /** Phase 5: always the flow's whole quantity. */
+  /** The confirmed quantity: the whole flow, or a part of it (Phase 8 —
+   * the server splits the flow first inside the same command). */
   quantity: number;
   /** null when the destination resolves the Operation itself. */
   operationId: number | null;
@@ -483,6 +495,13 @@ export interface TransferResult {
    * quantity. */
   completedMovementId: number | null;
   completedMachineId: number | null;
+  /** Phase 8 — set when only a part of the source moved: the consumed
+   * source flow, and the remainder flow left at the source in the
+   * source's state with its quantity. All null for a whole-flow
+   * transfer. `quantityFlowId` is then the moved child. */
+  sourceQuantityFlowId: number | null;
+  remainderQuantityFlowId: number | null;
+  remainderQuantity: number | null;
   deviceEventId: string;
   occurredAt: string;
   /** false when the server replayed an already committed transfer. */
@@ -511,6 +530,9 @@ interface TransferResultWire {
   route_deviation: RouteDeviationWire | null;
   completed_movement_id: number | null;
   completed_machine_id: number | null;
+  source_quantity_flow_id: number | null;
+  remainder_quantity_flow_id: number | null;
+  remainder_quantity: number | null;
   device_event_id: string;
   occurred_at: string;
 }
@@ -530,8 +552,8 @@ function toRouteDeviation(wire: RouteDeviationWire): RouteDeviation {
  * Record the confirmed transfer. Resolves ONLY when the server
  * confirmed the write: 201 for a fresh transfer, 200 for an idempotent
  * replay of the same `deviceEventId` + same intent (a retry after an
- * unknown outcome). Every rejection — partial quantity, a station
- * rebound since the confirmation, an Operation deactivated meanwhile,
+ * unknown outcome). Every rejection — a quantity exceeding the source,
+ * a station rebound since the confirmation, an Operation deactivated meanwhile,
  * a route deviation not yet confirmed — is an `ApiError` and nothing
  * was recorded.
  */
@@ -570,6 +592,9 @@ export async function transferToStationArea(
       : null,
     completedMovementId: data.completed_movement_id,
     completedMachineId: data.completed_machine_id,
+    sourceQuantityFlowId: data.source_quantity_flow_id,
+    remainderQuantityFlowId: data.remainder_quantity_flow_id,
+    remainderQuantity: data.remainder_quantity,
     deviceEventId: data.device_event_id,
     occurredAt: data.occurred_at,
     created: status === 201,
@@ -613,7 +638,8 @@ export interface MachineActionInput {
    * DONE only: null for the direct-processing completion of an Area
    * without Machines (Phase 7) — the request carries no Machine. */
   machineId: number | null;
-  /** Always the flow's whole quantity until SPLIT (Phase 8). */
+  /** The confirmed quantity: the whole flow, or a part of it (Phase 8 —
+   * the server splits the flow first inside the same command). */
   quantity: number;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
@@ -633,6 +659,13 @@ export interface MachineActionResult {
   operationId: number;
   stationId: string;
   processingState: ProcessingState;
+  /** Phase 8 — set when only a part of the flow was acted on: the
+   * consumed source flow and the remainder flow that kept the source's
+   * state, with its quantity. All null for a whole-flow action;
+   * `quantityFlowId` is then the acted-on child. */
+  sourceQuantityFlowId: number | null;
+  remainderQuantityFlowId: number | null;
+  remainderQuantity: number | null;
   deviceEventId: string;
   occurredAt: string;
   /** false when the server replayed an already committed action. */
@@ -650,6 +683,9 @@ interface MachineActionResultWire {
   operation_id: number;
   station_id: string;
   processing_state: ProcessingState;
+  source_quantity_flow_id: number | null;
+  remainder_quantity_flow_id: number | null;
+  remainder_quantity: number | null;
   device_event_id: string;
   occurred_at: string;
 }
@@ -663,8 +699,8 @@ const MACHINE_ACTION_PATH: Record<MachineActionKind, string> = {
 /**
  * Record one confirmed in-Area action. Resolves ONLY when the server
  * confirmed the write: 201 fresh, 200 for an idempotent replay of the
- * same `deviceEventId` + same intent. Every rejection — partial
- * quantity, a flow that moved or changed state meanwhile, a retired,
+ * same `deviceEventId` + same intent. Every rejection — a quantity
+ * exceeding the flow, a flow that moved or changed state meanwhile, a retired,
  * other-Area or maintenance Machine, a stale Machine precondition, a
  * Machine-less DONE on quantity in an Area with Machines — is an
  * `ApiError` and nothing was recorded. A DONE with `machineId: null`
@@ -700,6 +736,98 @@ export async function recordMachineAction(
     operationId: data.operation_id,
     stationId: data.station_id,
     processingState: data.processing_state,
+    sourceQuantityFlowId: data.source_quantity_flow_id,
+    remainderQuantityFlowId: data.remainder_quantity_flow_id,
+    remainderQuantity: data.remainder_quantity,
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Combine quantities — the explicit merge (Phase 8)
+// ---------------------------------------------------------------------------
+
+export interface CombineInput {
+  stationId: string;
+  partNumber: string;
+  /** The flows the operator selected (at least two) from one
+   * server-reported combinable group. */
+  quantityFlowIds: number[];
+  /** Client-generated UUID, reused verbatim on every retry of the SAME
+   * confirmed intent (idempotency key). */
+  deviceEventId: string;
+}
+
+export interface CombineResult {
+  movementId: number;
+  /** The resulting flow. */
+  quantityFlowId: number;
+  partNumber: string;
+  quantity: number;
+  areaId: number;
+  machineId: number | null;
+  operationId: number;
+  stationId: string;
+  processingState: ProcessingState;
+  /** The consumed sources, ascending id. */
+  sourceQuantityFlowIds: number[];
+  deviceEventId: string;
+  occurredAt: string;
+  /** false when the server replayed an already committed combine. */
+  created: boolean;
+}
+
+interface CombineResultWire {
+  movement_id: number;
+  quantity_flow_id: number;
+  part_number: string;
+  quantity: number;
+  area_id: number;
+  machine_id: number | null;
+  operation_id: number;
+  station_id: string;
+  processing_state: ProcessingState;
+  source_quantity_flow_ids: number[];
+  device_event_id: string;
+  occurred_at: string;
+}
+
+/**
+ * Combine the selected quantities of one PN in the station's Area into
+ * one (the backend's MERGED command). Resolves ONLY when the server
+ * confirmed the write: 201 fresh, 200 for an idempotent replay of the
+ * same `deviceEventId` + same selection. Every rejection — a flow that
+ * moved, changed state or was consumed meanwhile, a production context
+ * the server no longer judges identical — is an `ApiError` and nothing
+ * was recorded. Nothing is ever combined automatically.
+ */
+export async function combineQuantities(
+  input: CombineInput,
+): Promise<CombineResult> {
+  const { status, data } = await apiRequestWithStatus<CombineResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/merges`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        quantity_flow_ids: input.quantityFlowIds,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return {
+    movementId: data.movement_id,
+    quantityFlowId: data.quantity_flow_id,
+    partNumber: data.part_number,
+    quantity: data.quantity,
+    areaId: data.area_id,
+    machineId: data.machine_id,
+    operationId: data.operation_id,
+    stationId: data.station_id,
+    processingState: data.processing_state,
+    sourceQuantityFlowIds: data.source_quantity_flow_ids,
     deviceEventId: data.device_event_id,
     occurredAt: data.occurred_at,
     created: status === 201,

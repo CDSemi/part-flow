@@ -67,6 +67,7 @@ from app.application.machines import (
     assigned_quantities,
     operational_state,
 )
+from app.application.merges import combinable_groups
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import (
     effective_latest_movements,
@@ -259,6 +260,12 @@ class ScanResolution(NamedTuple):
     # transfer candidate): the operator must select exactly one before
     # any action — nothing is picked or combined (PROJECT_PROFILE §15).
     requires_selection: bool
+    # Phase 8 `Combine quantities`: the groups of in-Area flows whose
+    # production context is identical per the merge command's own rule
+    # (`merges.combinable_groups`) — at least two per group. The station
+    # offers the combine action for exactly these; it never judges
+    # compatibility itself, and nothing is ever combined automatically.
+    combine_groups: list[list[int]]
 
 
 def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> dict[int, Operation]:
@@ -349,6 +356,7 @@ def resolve_part_number_scan(
         return area_names[area_id]
 
     in_area: list[FlowInArea] = []
+    in_area_flows: list[QuantityFlow] = []
     candidates: list[TransferCandidate] = []
     for flow in flows:
         state = processing_state_of(
@@ -356,6 +364,7 @@ def resolve_part_number_scan(
             direct_processing=flow.current_area_id not in machine_areas,
         )
         if flow.current_area_id == area.id:
+            in_area_flows.append(flow)
             in_area.append(
                 FlowInArea(
                     flow.part_number,
@@ -416,6 +425,9 @@ def resolve_part_number_scan(
         has_active_demand=has_active_demand,
         transfer_blocked_reason=blocked,
         requires_selection=len(in_area) > 1 or (not in_area and len(candidates) > 1),
+        combine_groups=combinable_groups(
+            session, in_area_flows, latest, direct_processing=area.id not in machine_areas
+        ),
     )
 
 

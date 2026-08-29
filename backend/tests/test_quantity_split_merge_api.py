@@ -1748,3 +1748,60 @@ def test_projection_replay_rebuilds_active_descendants_and_merge_results(
     with Session(db_engine) as session:
         for flow_id in (merged10, done1, processing1):
             assert projections.origin_flow_ids(session, flow_id) == {root.flow_id}
+
+
+# ---------------------------------------------------------------------------
+# Read model: the combinable groups the station offers `Combine quantities` for
+# ---------------------------------------------------------------------------
+
+
+def test_pn_resolution_reports_exactly_the_combinable_groups(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The server, by the merge command's own rule, names the in-Area
+    flows that may combine; a lone flow forms no group, an incompatible
+    flow joins none, and a group merges as reported."""
+    lathe = _Cell(client, machine_count=2)
+    pn = _unique("PN")
+    queued_a = _release(client, lathe, quantity=1, part_number=pn)
+    queued_b = _release(client, lathe, quantity=2, part_number=pn)
+    on_first = _release(client, lathe, quantity=3, part_number=pn)
+    on_first_too = _release(client, lathe, quantity=4, part_number=pn)
+    on_second = _release(client, lathe, quantity=5, part_number=pn)
+    for released, machine_id in (
+        (on_first, lathe.machine_ids[0]),
+        (on_first_too, lathe.machine_ids[0]),
+        (on_second, lathe.machine_ids[1]),
+    ):
+        quantity = _flow_row(db_engine, released.flow_id).quantity
+        assert (
+            _act(
+                client, "ASSIGN", lathe, released.flow_id, pn, quantity, machine_id=machine_id
+            ).status_code
+            == 201
+        )
+    resolved = _resolve_pn(client, lathe.station_id, pn)
+    assert resolved["combine_groups"] == [
+        [queued_a.flow_id, queued_b.flow_id],
+        [on_first.flow_id, on_first_too.flow_id],
+    ]
+    # Every reported group merges; a group crossing Machines never was offered.
+    merged = _merge(client, lathe, pn, resolved["combine_groups"][1])
+    assert merged.status_code == 201, merged.text
+    assert merged.json()["machine_id"] == lathe.machine_ids[0]
+    resolved = _resolve_pn(client, lathe.station_id, pn)
+    assert resolved["combine_groups"] == [[queued_a.flow_id, queued_b.flow_id]]
+    # One flow of a PN, or PLANNED beside FLOATING: no group.
+    alone = _resolve_pn(client, lathe.station_id, _release(client, lathe, quantity=9).part_number)
+    assert alone["combine_groups"] == []
+    template = _create_route_template(db_engine, [(lathe.area_id, None)])
+    planned = _release(client, lathe, quantity=6, part_number=pn, route_template_id=template)
+    resolved = _resolve_pn(client, lathe.station_id, pn)
+    assert planned.flow_id not in {flow for group in resolved["combine_groups"] for flow in group}
+    # A direct-processing Area groups PROCESSING quantity, never with finished quantity.
+    plating = _Cell(client)
+    p_pn = _unique("PN")
+    processing = [_release(client, plating, quantity=q, part_number=p_pn).flow_id for q in (6, 4)]
+    finished = _release(client, plating, quantity=2, part_number=p_pn)
+    assert _act(client, "DONE", plating, finished.flow_id, p_pn, 2).status_code == 201
+    assert _resolve_pn(client, plating.station_id, p_pn)["combine_groups"] == [processing]

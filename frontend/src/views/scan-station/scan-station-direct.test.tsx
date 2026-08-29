@@ -312,6 +312,7 @@ function handle(url: string, method: string, body: unknown): Response {
       transfer_blocked_reason: null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
+      combine_groups: [],
     });
   }
 
@@ -729,7 +730,7 @@ test('the row DONE opens the Area Completion wizard without a Machine field, rec
   await waitFor(() => expect(document.activeElement).toBe(input));
 });
 
-test('a partial quantity is refused inside the wizard and never submitted; the final question can be declined', async () => {
+test('0 and an exceeding quantity are refused inside the wizard and never submitted; the final question can be declined', async () => {
   await renderStation();
   fireEvent.click(
     within(row('2027-60-8114-00')).getByRole('button', {
@@ -740,13 +741,16 @@ test('a partial quantity is refused inside the wizard and never submitted; the f
     name: 'Complete Area processing',
   });
   const quantity = within(dlg).getByLabelText(/^Quantity: /);
-  fireEvent.change(quantity, { target: { value: '5' } });
-  expect(dlg).toHaveTextContent(/whole|as a whole|12 pcs/);
+  fireEvent.change(quantity, { target: { value: '0' } });
+  expect(dlg).toHaveTextContent('Enter a quantity from 1 to 12 pcs');
   expect(within(dlg).getByRole('button', { name: 'Next' })).toBeDisabled();
   fireEvent.keyDown(quantity, { key: 'Enter' });
   expect(
     within(dlg).queryByRole('button', { name: 'Confirm completion' }),
   ).toBeNull();
+  fireEvent.change(quantity, { target: { value: '13' } });
+  expect(dlg).toHaveTextContent('Quantity cannot exceed the 12 pcs');
+  expect(within(dlg).getByRole('button', { name: 'Next' })).toBeDisabled();
   fireEvent.change(quantity, { target: { value: '12' } });
   fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
   fireEvent.click(

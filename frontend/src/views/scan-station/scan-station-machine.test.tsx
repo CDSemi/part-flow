@@ -345,6 +345,7 @@ function handle(url: string, method: string, body: unknown): Response {
       transfer_blocked_reason: null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
+      combine_groups: [],
     });
   }
 
@@ -1479,7 +1480,7 @@ test('QUEUE returns the quantity to the queue as a distinct action that never re
   ).toBeGreaterThan(0);
 });
 
-test('the final question can be declined, and a partial DONE quantity is refused and never submitted', async () => {
+test('the final question can be declined, and a DONE quantity of 0 or above MAX is refused and never submitted', async () => {
   await renderStation();
   fireEvent.click(
     within(machineCard('Lathe 1')).getByRole('button', {
@@ -1490,14 +1491,17 @@ test('the final question can be declined, and a partial DONE quantity is refused
     name: 'Complete Area processing',
   });
   fireEvent.change(within(dlg).getByLabelText(/^Quantity: /), {
-    target: { value: '2' },
+    target: { value: '0' },
   });
-  expect(dlg).toHaveTextContent(
-    'Partial completion is not available in this release',
-  );
+  expect(dlg).toHaveTextContent('Enter a quantity from 1 to 3 pcs');
   expect(within(dlg).getByRole('button', { name: 'Next' })).toBeDisabled();
   fireEvent.keyDown(dlg, { key: 'Enter' });
-  expect(dlg).toHaveTextContent('Partial completion');
+  expect(dlg).toHaveTextContent('Enter a quantity from 1 to 3 pcs');
+  fireEvent.change(within(dlg).getByLabelText(/^Quantity: /), {
+    target: { value: '4' },
+  });
+  expect(dlg).toHaveTextContent('Quantity cannot exceed the 3 pcs');
+  expect(within(dlg).getByRole('button', { name: 'Next' })).toBeDisabled();
   fireEvent.change(within(dlg).getByLabelText(/^Quantity: /), {
     target: { value: '3' },
   });

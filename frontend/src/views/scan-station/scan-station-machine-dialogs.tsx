@@ -33,6 +33,7 @@ import {
   enterKeyHandler,
   operationLabel,
   quantityKeyHandler,
+  quantityValid,
 } from './scan-station-wizard';
 
 /**
@@ -69,12 +70,11 @@ const RECORDED_EVENT: Record<MachineActionKind, string> = {
   DONE: 'AREA_COMPLETED',
 };
 
-/** Whole-flow-only guidance (SPLIT arrives with a later release). */
-function fullQuantityGuidance(
+/** The pre-submission quantity guidance (GUI_DESIGN §4.8, Phase 8). */
+function quantityGuidance(
   parsed: number,
   max: number,
   where: string,
-  action: string,
 ): ReactNode {
   if (parsed > max) {
     return (
@@ -83,16 +83,19 @@ function fullQuantityGuidance(
       </Guidance>
     );
   }
-  if (parsed < max) {
+  if (parsed < 1) {
     return (
       <Guidance tone="error">
-        Partial {action} is not available in this release: this quantity of{' '}
-        {max} pcs is handled as a whole. Enter {max} or cancel — nothing is
-        recorded.
+        Enter a quantity from 1 to {max} pcs — nothing is recorded until then.
       </Guidance>
     );
   }
   return null;
+}
+
+/** `Remaining …` summary value: what stays behind after a partial action. */
+function remaining(max: number, confirmed: number): ReactNode {
+  return <span className="mono">{max - confirmed} pcs</span>;
 }
 
 /** The shared unknown-outcome / rejection / offline guidance block. */
@@ -202,7 +205,11 @@ export function AssignToMachineDialog({
   const [qty, setQty] = useState('');
   const max = flow?.quantity ?? 0;
   const parsedQty = parseInt(qty || '0', 10);
-  const fullQuantity = flow !== null && parsedQty === max;
+  const validQuantity = flow !== null && quantityValid(parsedQty, max);
+  // The quantity the operator confirmed on the quantity step — frozen
+  // for the summary and the request (a part of the flow, or all of it).
+  const [confirmed, setConfirmed] = useState(0);
+  const partial = flow !== null && confirmed < max;
 
   function goQty() {
     if (!pairSelected) return;
@@ -210,7 +217,9 @@ export function AssignToMachineDialog({
     setStep('qty');
   }
   function goConfirm() {
-    if (fullQuantity) setStep('confirm');
+    if (!validQuantity) return;
+    setConfirmed(parsedQty);
+    setStep('confirm');
   }
 
   const write = useOneShotWrite<MachineActionResult>({
@@ -222,7 +231,7 @@ export function AssignToMachineDialog({
         partNumber: flow!.partNumber,
         quantityFlowId: flow!.quantityFlowId,
         machineId: machine!.id,
-        quantity: flow!.quantity,
+        quantity: confirmed,
         deviceEventId,
       }),
     onDone: useCallback(
@@ -435,13 +444,13 @@ export function AssignToMachineDialog({
             ]}
           />
           <Guidance tone="info">
-            The full queued quantity moves to the Machine as a whole.
+            Available: <b>{flow.quantity} pcs</b> queued (MAX). A smaller
+            quantity assigns only that part — the rest stays in the queue.
           </Guidance>
-          {fullQuantityGuidance(
+          {quantityGuidance(
             parsedQty,
             flow.quantity,
             'queued for this Part Number',
-            'assignment',
           )}
           <QuantityKeypad value={qty} onChange={setQty} max={flow.quantity} />
           <StepButtons
@@ -450,7 +459,7 @@ export function AssignToMachineDialog({
             primary={{
               label: 'Next',
               onClick: goConfirm,
-              disabled: !fullQuantity,
+              disabled: !validQuantity,
             }}
           />
         </>
@@ -471,7 +480,9 @@ export function AssignToMachineDialog({
               ],
               [
                 'Quantity',
-                <span className="mono">{flow.quantity} pcs</span>,
+                <span className="mono">
+                  {confirmed} pcs{partial ? ` of ${flow.quantity}` : ''}
+                </span>,
                 'primary',
               ],
               [
@@ -486,7 +497,8 @@ export function AssignToMachineDialog({
               ],
               [
                 'Remaining queued after assignment',
-                <span className="mono">0 pcs</span>,
+                remaining(flow.quantity, confirmed),
+                partial ? 'primary' : undefined,
               ],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', RECORDED_EVENT.ASSIGN, 'secondary'],
@@ -572,7 +584,11 @@ export function MachineActionDialog({
   const [step, setStep] = useState<'qty' | 'confirm'>('qty');
   const [qty, setQty] = useState(String(max));
   const parsedQty = parseInt(qty || '0', 10);
-  const fullQuantity = parsedQty === max;
+  const validQuantity = quantityValid(parsedQty, max);
+  // The quantity confirmed on the quantity step — frozen for the
+  // summary, the final question and the request.
+  const [confirmed, setConfirmed] = useState(max);
+  const partial = confirmed < max;
   // Final-confirmation gate (GUI_DESIGN §4.6, post-v18): the summary's
   // primary opens ONE more question — DONE in the information tone,
   // QUEUE in the warning tone — before anything is recorded. Worker
@@ -588,17 +604,19 @@ export function MachineActionDialog({
         partNumber: pn,
         quantityFlowId: flow.quantityFlowId,
         machineId: machine?.id ?? null,
-        quantity: max,
+        quantity: confirmed,
         deviceEventId,
       }),
     onDone,
   });
 
   function goConfirm() {
-    if (fullQuantity) setStep('confirm');
+    if (!validQuantity) return;
+    setConfirmed(parsedQty);
+    setStep('confirm');
   }
   function requestConfirm() {
-    if (!fullQuantity || write.busy || writeBlocked) return;
+    if (write.busy || writeBlocked) return;
     if (write.outcomeUnknown || write.serverError) {
       // The intent was already confirmed through the gate: a retry
       // resends the SAME request without asking the question again.
@@ -629,14 +647,27 @@ export function MachineActionDialog({
           <b>{areaName}</b> has finished processing
         </>
       )}{' '}
-      <b>{max} pcs</b> of <b className="mono">{pn}</b>? The finished quantity
-      moves to the {areaName} finished rack, ready to transfer.
+      <b>{confirmed} pcs</b> of <b className="mono">{pn}</b>? The finished
+      quantity moves to the {areaName} finished rack, ready to transfer.
+      {partial ? (
+        <>
+          {' '}
+          The remaining <b>{max - confirmed} pcs</b> stay{' '}
+          {machine ? `on ${machine.name}` : 'in processing'}.
+        </>
+      ) : null}
     </>
   ) : (
     <>
-      Are you sure you want to return <b>{max} pcs</b> of{' '}
+      Are you sure you want to return <b>{confirmed} pcs</b> of{' '}
       <b className="mono">{pn}</b> running on <b>{position}</b> back to the{' '}
       {areaName} queue? The quantity stays unfinished.
+      {partial ? (
+        <>
+          {' '}
+          The remaining <b>{max - confirmed} pcs</b> stay on {position}.
+        </>
+      ) : null}
     </>
   );
 
@@ -681,15 +712,15 @@ export function MachineActionDialog({
             />
             <Guidance tone="info">
               <b>{max} pcs</b> are{' '}
-              {machine ? `on ${machine.name}` : `in processing at ${areaName}`}.
-              The full quantity {isDone ? 'completes' : 'returns to the queue'}{' '}
-              as a whole.
+              {machine ? `on ${machine.name}` : `in processing at ${areaName}`}{' '}
+              (MAX). A smaller quantity{' '}
+              {isDone ? 'completes' : 'returns to the queue'} only that part —
+              the rest stays {machine ? `on ${machine.name}` : 'in processing'}.
             </Guidance>
-            {fullQuantityGuidance(
+            {quantityGuidance(
               parsedQty,
               max,
               machine ? `on ${machine.name}` : `in processing at ${areaName}`,
-              what,
             )}
             <QuantityKeypad value={qty} onChange={setQty} max={max} />
             <StepButtons
@@ -698,7 +729,7 @@ export function MachineActionDialog({
               primary={{
                 label: 'Next',
                 onClick: goConfirm,
-                disabled: !fullQuantity,
+                disabled: !validQuantity,
               }}
             />
           </div>
@@ -718,7 +749,9 @@ export function MachineActionDialog({
                 ['PN', <span className="mono">{pn}</span>, 'primary'],
                 [
                   'Quantity',
-                  <span className="mono">{max} pcs</span>,
+                  <span className="mono">
+                    {confirmed} pcs{partial ? ` of ${max}` : ''}
+                  </span>,
                   'primary',
                 ],
                 [
@@ -748,6 +781,15 @@ export function MachineActionDialog({
                     : 'Queued — awaiting Machine',
                   'primary',
                   isDone ? 'ok' : 'warn',
+                ],
+                [
+                  machine
+                    ? `Remaining on ${machine.name}`
+                    : 'Remaining in processing',
+                  // Shown for a partial action only: the full-quantity
+                  // summary stays exactly the Phase 6/7 one.
+                  partial ? remaining(max, confirmed) : null,
+                  'primary',
                 ],
                 ['Scan Station', station.stationId, 'secondary'],
                 ['Recorded event', RECORDED_EVENT[kind], 'secondary'],
