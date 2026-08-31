@@ -24,15 +24,21 @@ per IMPLEMENTATION_ROADMAP Phase 9 and PROJECT_PROFILE §8.11, §11, §14:
 - quantity conservation and the §11 reconciliation
   `introduced = active + scrapped` (no `STOCKED` yet);
 - idempotency (whole-command replay, conflicting reuse), zero-write
-  refusals for invalid/stale input, and the projection replay.
+  refusals for invalid/stale input, and the projection replay;
+- the addition's existing-quantity precondition under concurrency: the
+  WITNESS flow row lock makes "the last ACTIVE quantity leaves the
+  Area" and "Add more quantity" one serial outcome in both orders — an
+  addition never commits on a stale precondition, and the loser writes
+  nothing.
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
 """
 
 import os
+import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -826,4 +832,180 @@ def test_reconciliation_introduced_equals_active_plus_scrapped(
     scrapped = _resolve(client, material, released.part_number)["scrapped_quantity"]
     assert introduced == 15
     assert introduced == active + scrapped
+    _assert_projection_matches_replay(db_engine)
+
+
+# ---------------------------------------------------------------------------
+# Addition versus the last quantity leaving the Area (the witness lock)
+# ---------------------------------------------------------------------------
+
+
+class _Pause:
+    """Test seam: the FIRST call pauses after completing — while the
+    caller holds whatever locks it acquired so far — until released;
+    later calls pass through."""
+
+    def __init__(self, real: Callable[..., Any]) -> None:
+        self.real = real
+        self.first_inside = threading.Event()
+        self.let_first_finish = threading.Event()
+        self._guard = threading.Lock()
+        self._paused_once = False
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        result = self.real(*args, **kwargs)
+        with self._guard:
+            should_pause = not self._paused_once
+            self._paused_once = True
+        if should_pause:
+            self.first_inside.set()
+            assert self.let_first_finish.wait(timeout=20), "test deadlock: never released"
+        return result
+
+
+def _run_collecting(results: dict[str, Any], name: str, action: Callable[[], Any]) -> None:
+    try:
+        results[name] = action()
+    except Exception as exc:  # noqa: BLE001 — collected for assertions
+        results[name] = exc
+
+
+def test_addition_never_commits_on_a_stale_existing_quantity_precondition(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remover wins the race: the last ACTIVE quantity is scrapped
+    AFTER the addition read its station context but BEFORE it judged
+    the precondition — the authoritative under-lock re-check refuses
+    the addition with zero writes (serial order: scrap, then a refused
+    addition), and the refused id keeps no idempotency residue."""
+    from app.application import transfers
+
+    material = _Cell(client)
+    released = _release(client, material, quantity=10)
+    addition_event = str(uuid.uuid4())
+
+    # The seam wraps the function quantity_events imported from
+    # transfers; the patch replaces the quantity_events attribute.
+    pause = _Pause(transfers.require_production_station)
+    monkeypatch.setattr("app.application.quantity_events.require_production_station", pause)
+    results: dict[str, Any] = {}
+    addition = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "addition",
+            lambda: _add(client, material, released.part_number, 5, device_event_id=addition_event),
+        ),
+    )
+    addition.start()
+    # The addition paused after its unlocked station read, holding no
+    # lock: the scrap of the LAST active quantity commits meanwhile.
+    assert pause.first_inside.wait(timeout=20)
+    scrapped = _scrap(client, material, released.flow_id, released.part_number, 10)
+    assert scrapped.status_code == 201, scrapped.text
+    pause.let_first_finish.set()
+    addition.join(timeout=30)
+    assert not addition.is_alive()
+
+    response = results["addition"]
+    assert not isinstance(response, Exception), response
+    assert response.status_code == 409, response.text
+    assert "has no active quantity in Area" in response.json()["detail"]
+    # Zero writes: no QUANTITY_ADJUSTED row, no new flow, nothing under
+    # the addition's device_event_id.
+    with db_engine.connect() as connection:
+        movements = models.PartMovement.__table__
+        assert (
+            connection.execute(
+                sa.select(sa.func.count())
+                .select_from(movements)
+                .where(
+                    movements.c.part_number == released.part_number,
+                    movements.c.movement_type == "QUANTITY_ADJUSTED",
+                )
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                sa.select(sa.func.count())
+                .select_from(movements)
+                .where(movements.c.device_event_id == addition_event)
+            ).scalar_one()
+            == 0
+        )
+    assert _active_total(db_engine, released.part_number) == 0
+    _assert_projection_matches_replay(db_engine)
+    # No idempotency residue: once quantity exists again, the SAME id
+    # with the SAME payload records a fresh addition.
+    _release(client, material, quantity=4, part_number=released.part_number)
+    retried = _add(client, material, released.part_number, 5, device_event_id=addition_event)
+    assert retried.status_code == 201, retried.text
+    assert _active_total(db_engine, released.part_number) == 9
+    _assert_projection_matches_replay(db_engine)
+
+
+def test_addition_witness_lock_serializes_the_remover_behind_the_commit(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The addition wins the race: it holds the witness flow row lock
+    until COMMIT, so a concurrent scrap of that last quantity BLOCKS
+    and applies only after the addition committed beside
+    still-existing quantity — the outcome equals the serial order
+    "addition, then scrap", with quantity conserved and the projection
+    replay agreeing."""
+    from app.application import transfers
+
+    material = _Cell(client)
+    released = _release(client, material, quantity=10)
+
+    # Pause the addition AFTER the Operation resolution: at this point
+    # it holds the witness flow lock (and the Area/Operation locks) and
+    # has not yet committed.
+    pause = _Pause(transfers.resolve_arrival_operation)
+    monkeypatch.setattr("app.application.quantity_events.resolve_arrival_operation", pause)
+    results: dict[str, Any] = {}
+    addition = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "addition",
+            lambda: _add(client, material, released.part_number, 5),
+        ),
+    )
+    addition.start()
+    assert pause.first_inside.wait(timeout=20)
+    remover = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "scrap",
+            lambda: _scrap(client, material, released.flow_id, released.part_number, 10),
+        ),
+    )
+    remover.start()
+    # The scrap needs the witness's row lock and must wait for the
+    # addition's COMMIT — it cannot finish while the addition holds it.
+    remover.join(timeout=1.0)
+    assert remover.is_alive(), "the scrap should block behind the witness flow lock"
+    pause.let_first_finish.set()
+    addition.join(timeout=30)
+    remover.join(timeout=30)
+    assert not addition.is_alive() and not remover.is_alive()
+
+    added = results["addition"]
+    scrapped = results["scrap"]
+    assert not isinstance(added, Exception), added
+    assert not isinstance(scrapped, Exception), scrapped
+    # Serial order "addition, then scrap": both commit, the addition
+    # beside quantity that still existed, the scrap afterwards.
+    assert added.status_code == 201, added.text
+    assert scrapped.status_code == 201, scrapped.text
+    new_flow = int(added.json()["quantity_flow_id"])
+    assert _flow_row(db_engine, new_flow).status == "ACTIVE"
+    assert _flow_row(db_engine, released.flow_id).status == "SCRAPPED"
+    # Conservation and the §11 reconciliation: introduced 15 = active 5
+    # + scrapped 10.
+    assert _active_total(db_engine, released.part_number) == 5
+    assert _resolve(client, material, released.part_number)["scrapped_quantity"] == 10
     _assert_projection_matches_replay(db_engine)

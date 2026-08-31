@@ -92,6 +92,7 @@ from app.domain.enums import (
 )
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
+    Area,
     Machine,
     PartMovement,
     QuantityFlow,
@@ -390,6 +391,49 @@ def _addition_replay_or_conflict(
     return _addition_result(command, created=False)
 
 
+def _lock_witness_flow(session: Session, part_number: str, area: Area) -> QuantityFlow | None:
+    """One ACTIVE flow of the PN in the Area, locked until COMMIT — or None.
+
+    The authoritative "existing in-Area quantity" precondition of the
+    addition: candidates are picked with a fresh-snapshot SELECT, then
+    locked and RE-READ under the row lock (``populate_existing``), so a
+    candidate that was transferred away, scrapped or consumed between
+    the pick and the lock is discarded and the next one tried; None
+    means no ACTIVE flow of the PN remains in the Area at this moment.
+    Holding the returned row's lock until COMMIT guarantees the witness
+    is still there when the addition commits — every command that
+    could remove it serializes behind the same flow row lock.
+    """
+    for _ in range(1_000):  # bounded defensively; one retry is the realistic worst case
+        candidate_id = session.scalar(
+            select(QuantityFlow.id)
+            .where(
+                QuantityFlow.part_number == part_number,
+                QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+                QuantityFlow.current_area_id == area.id,
+            )
+            .order_by(QuantityFlow.id)
+            .limit(1)
+        )
+        if candidate_id is None:
+            return None
+        witness = session.get(
+            QuantityFlow, candidate_id, with_for_update=True, populate_existing=True
+        )
+        if (
+            witness is not None
+            and witness.status == QuantityFlowStatus.ACTIVE
+            and witness.current_area_id == area.id
+        ):
+            return witness
+        # The candidate left the Area or closed while we waited for its
+        # lock; the next SELECT sees the committed state and re-picks.
+    raise ConflictError(  # pragma: no cover - defensive bound
+        f"Could not establish the existing quantity of Part Number '{part_number}'"
+        f" in Area '{area.name}'. Nothing was recorded."
+    )
+
+
 def add_quantity(
     session: Session,
     *,
@@ -405,7 +449,10 @@ def add_quantity(
     Creates a new FLOATING QuantityFlow with its `QUANTITY_ADJUSTED ·
     INCREASE` first Movement; requested quantities are never touched.
     Order: input shape → fingerprint → idempotency fast path → station
-    context → the in-Area precondition → the locked Area re-read → the
+    context → the in-Area precondition under the WITNESS flow row lock
+    (held until COMMIT, so removing the last in-Area quantity and the
+    addition have one serial outcome) → the idempotency re-check → the
+    locked Area re-read → the
     Operation lock → the writes → COMMIT (or replay of a race winner).
     """
     pn = canonical_part_number(part_number)
@@ -427,22 +474,32 @@ def add_quantity(
     station, area = require_production_station(session, station_id)
     # The addition exists only beside existing quantity (GUI_DESIGN
     # §4.7 item 3): a PN with nothing ACTIVE in this Area is received
-    # through the intake workflow, never through an addition.
-    existing = session.scalar(
-        select(QuantityFlow.id)
-        .where(
-            QuantityFlow.part_number == pn,
-            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-            QuantityFlow.current_area_id == area.id,
-        )
-        .limit(1)
-    )
-    if existing is None:
+    # through the intake workflow, never through an addition. The
+    # precondition is judged AUTHORITATIVELY under a row lock: one
+    # ACTIVE flow of the PN in this Area — the witness — is locked
+    # `FOR UPDATE` and re-read under the lock, and the lock is held
+    # until COMMIT. Every command that could move or close that flow
+    # (transfer, scrap, split, merge, undo) takes the flow row lock
+    # first, so the addition and the removal of the last in-Area
+    # quantity have one serial outcome: the remover either committed
+    # before (the re-pick below sees the new state and refuses, or
+    # finds another witness) or blocks behind the witness lock until
+    # the addition committed beside still-existing quantity. The lock
+    # order — witness flow → Area → Operation — is a sub-sequence of
+    # the established flow → station → Machine → Area → Operation
+    # order, so no cycle is possible.
+    if _lock_witness_flow(session, pn, area) is None:
         raise ConflictError(
             f"Part Number '{pn}' has no active quantity in Area '{area.name}'."
             " Add more quantity applies beside existing quantity only — use"
             " Receive Quantity or a transfer instead. Nothing was recorded."
         )
+    # Idempotency RE-CHECK after the blocking lock (SLICE1 §14), same
+    # protocol as every command that waits on a row lock: a transport
+    # retry that raced the original submission replays it here.
+    committed = committed_command(session, event_id)
+    if committed:
+        return _addition_replay_or_conflict(committed, fingerprint)
     # The Area row locked until COMMIT, flags judged on the locked
     # re-read (the same protocol as a transfer destination): Area
     # deactivation and an addition have one serial outcome.
