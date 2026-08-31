@@ -2,21 +2,29 @@
 // §12, §15).
 //
 // The read models a Scan Station loads (station context, PN scan
-// resolution, Machine scan resolution, Area inventory) and the
-// production commands the station records: the transfer of a Quantity
-// Flow into the station's Area (Phase 5 — completing ON_MACHINE
-// quantity implicitly since Phase 6), the Phase 6 one-shot Machine-Area
-// actions: assign to a Machine, QUEUE (return to the Area queue) and
-// DONE (complete Area processing), and — Phase 8 — `Combine quantities`
-// (the explicit merge of the server-judged combinable flows of one PN).
+// resolution, Machine scan resolution, Area inventory, the Phase 9
+// undo preview) and the production commands the station records: the
+// transfer of a Quantity Flow into the station's Area (Phase 5 —
+// completing ON_MACHINE quantity implicitly since Phase 6; carrying
+// the explicit Repair intent since Phase 9), the Phase 6 one-shot
+// Machine-Area actions: assign to a Machine, QUEUE (return to the Area
+// queue) and DONE (complete Area processing), the Phase 8 `Combine
+// quantities` (the explicit merge of the server-judged combinable
+// flows of one PN), and the Phase 9 corrections: Scrap (one auditable
+// SCRAPPED operation per confirmation), the quantity addition
+// (`QUANTITY_ADJUSTED · INCREASE` on a NEW Quantity Flow) and the
+// command-level Undo (compensating REVERSED Movements for one complete
+// committed command, previewed through `undo-preview` before anything
+// is submitted).
 // Since Phase 8 every command accepts a quantity smaller than the flow's:
 // the server splits the flow first inside the same command and reports
 // the consumed source and the remainder; the client never splits.
 // Wire shapes are the backend's snake_case; the exported types are the
 // camelCase the views use. No business rules live here — state, Machine
 // and route resolution and every transaction are the backend's
-// (app/application/transfers.py, machine_processing.py); this module
-// only carries the confirmed intent across and reads the typed outcomes.
+// (app/application/transfers.py, machine_processing.py,
+// quantity_events.py, undo.py); this module only carries the confirmed
+// intent across and reads the typed outcomes.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -59,8 +67,10 @@ export interface WorkOrderContext {
 export type ProcessingState =
   'QUEUED' | 'PROCESSING' | 'ON_MACHINE' | 'READY_TO_TRANSFER';
 
-/** The actions the server reports as currently valid for a flow. */
-export type FlowAction = 'ASSIGN' | 'DONE' | 'QUEUE' | 'TRANSFER';
+/** The actions the server reports as currently valid for a flow.
+ * `SCRAP` (Phase 9) is reported in every state — damaged quantity can
+ * be scrapped wherever it physically is. */
+export type FlowAction = 'ASSIGN' | 'DONE' | 'QUEUE' | 'TRANSFER' | 'SCRAP';
 
 /** The Operation RECORDED on a flow's latest Movement, as recorded —
  * whatever its current activation. Existing quantity keeps it even
@@ -287,6 +297,10 @@ export interface TransferCandidate {
   /** The Operation the destination resolves to without a choice; null
    * means the operator must choose one of the Area's Operations. */
   suggestedOperationId: number | null;
+  /** Phase 9: the station's Area was previously visited by this
+   * quantity — only then may `Return quantity for repair` be offered.
+   * Never inferred by the client; the server judges the history. */
+  repairAvailable: boolean;
   workOrder: WorkOrderContext | null;
 }
 
@@ -311,6 +325,8 @@ export interface ScanResolution {
    * per group. The station offers `Combine quantities` for exactly
    * these; it never judges compatibility itself. */
   combineGroups: number[][];
+  /** Phase 9: the PN's total scrapped quantity, net of reversed scraps. */
+  scrappedQuantity: number;
 }
 
 interface TransferCandidateWire {
@@ -324,6 +340,7 @@ interface TransferCandidateWire {
   expected_next_area: AreaRefWire | null;
   expected_operation_id: number | null;
   suggested_operation_id: number | null;
+  repair_available: boolean;
   work_order: WorkOrderContextWire | null;
 }
 
@@ -339,6 +356,7 @@ interface ScanResolutionWire {
   transfer_blocked_reason: string | null;
   requires_selection: boolean;
   combine_groups: number[][];
+  scrapped_quantity: number;
 }
 
 /**
@@ -378,6 +396,7 @@ export async function resolveScan(
         : null,
       expectedOperationId: candidate.expected_operation_id,
       suggestedOperationId: candidate.suggested_operation_id,
+      repairAvailable: candidate.repair_available,
       workOrder: toWorkOrderContext(candidate.work_order),
     })),
     operations: wire.operations.map(toOperationRef),
@@ -385,6 +404,7 @@ export async function resolveScan(
     transferBlockedReason: wire.transfer_blocked_reason,
     requiresSelection: wire.requires_selection,
     combineGroups: wire.combine_groups,
+    scrappedQuantity: wire.scrapped_quantity,
   };
 }
 
@@ -463,6 +483,11 @@ export interface TransferInput {
   operationId: number | null;
   confirmRouteDeviation: boolean;
   routeDeviationReason: string | null;
+  /** Phase 9: the explicit `Return quantity for repair` intent — the
+   * same transfer command recorded with the Repair movement intent and
+   * its mandatory reason. Never inferred: the operator chose Repair. */
+  repair: boolean;
+  repairReason: string | null;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
@@ -502,6 +527,11 @@ export interface TransferResult {
   sourceQuantityFlowId: number | null;
   remainderQuantityFlowId: number | null;
   remainderQuantity: number | null;
+  /** Phase 9 — set for a Repair: the typed intent recorded on the
+   * TRANSFERRED row (`REPAIR`) and its mandatory reason. Both null for
+   * a plain transfer. */
+  movementReason: string | null;
+  reason: string | null;
   deviceEventId: string;
   occurredAt: string;
   /** false when the server replayed an already committed transfer. */
@@ -533,6 +563,8 @@ interface TransferResultWire {
   source_quantity_flow_id: number | null;
   remainder_quantity_flow_id: number | null;
   remainder_quantity: number | null;
+  movement_reason: string | null;
+  reason: string | null;
   device_event_id: string;
   occurred_at: string;
 }
@@ -573,6 +605,8 @@ export async function transferToStationArea(
         operation_id: input.operationId,
         confirm_route_deviation: input.confirmRouteDeviation,
         route_deviation_reason: input.routeDeviationReason,
+        repair: input.repair,
+        repair_reason: input.repairReason,
         device_event_id: input.deviceEventId,
       },
     },
@@ -595,6 +629,8 @@ export async function transferToStationArea(
     sourceQuantityFlowId: data.source_quantity_flow_id,
     remainderQuantityFlowId: data.remainder_quantity_flow_id,
     remainderQuantity: data.remainder_quantity,
+    movementReason: data.movement_reason,
+    reason: data.reason,
     deviceEventId: data.device_event_id,
     occurredAt: data.occurred_at,
     created: status === 201,
@@ -853,6 +889,429 @@ export function routeDeviationConfirmation(
   const deviation = record.route_deviation;
   if (!deviation || typeof deviation !== 'object') return null;
   return toRouteDeviation(deviation as RouteDeviationWire);
+}
+
+// ---------------------------------------------------------------------------
+// Scrap and quantity addition (Phase 9)
+// ---------------------------------------------------------------------------
+
+export interface ScrapInput {
+  stationId: string;
+  partNumber: string;
+  /** The ONE flow the damaged quantity is scrapped from. */
+  quantityFlowId: number;
+  /** The total counted with the scrap barcode; smaller than the flow's
+   * it splits the flow first (Phase 8) and the remainder keeps its
+   * state and place. */
+  quantity: number;
+  /** The one common scrap reason — mandatory. */
+  reason: string;
+  /** Client-generated UUID, reused verbatim on every retry of the SAME
+   * confirmed intent (idempotency key). */
+  deviceEventId: string;
+}
+
+export interface ScrapResult {
+  movementId: number;
+  /** The flow the scrap closed (the source, or the selected child of a
+   * partial scrap). */
+  quantityFlowId: number;
+  partNumber: string;
+  quantity: number;
+  areaId: number;
+  /** The Machine the scrapped quantity left; null unless ON_MACHINE. */
+  machineId: number | null;
+  reason: string;
+  stationId: string;
+  /** Phase 8 — set when only a part of the source was scrapped. */
+  sourceQuantityFlowId: number | null;
+  remainderQuantityFlowId: number | null;
+  remainderQuantity: number | null;
+  deviceEventId: string;
+  occurredAt: string;
+  /** false when the server replayed an already committed scrap. */
+  created: boolean;
+}
+
+interface ScrapResultWire {
+  movement_id: number;
+  quantity_flow_id: number;
+  part_number: string;
+  quantity: number;
+  area_id: number;
+  machine_id: number | null;
+  reason: string;
+  station_id: string;
+  source_quantity_flow_id: number | null;
+  remainder_quantity_flow_id: number | null;
+  remainder_quantity: number | null;
+  device_event_id: string;
+  occurred_at: string;
+}
+
+/**
+ * Record one confirmed Scrap — ONE auditable SCRAPPED operation for the
+ * total counted quantity, with its mandatory reason. Resolves ONLY when
+ * the server confirmed the write: 201 fresh, 200 for an idempotent
+ * replay of the same `deviceEventId` + same intent. Every rejection —
+ * a quantity exceeding the flow, a flow that moved or was consumed
+ * meanwhile — is an `ApiError` and nothing was recorded.
+ */
+export async function scrapQuantity(input: ScrapInput): Promise<ScrapResult> {
+  const { status, data } = await apiRequestWithStatus<ScrapResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/scraps`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        quantity_flow_id: input.quantityFlowId,
+        quantity: input.quantity,
+        reason: input.reason,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return {
+    movementId: data.movement_id,
+    quantityFlowId: data.quantity_flow_id,
+    partNumber: data.part_number,
+    quantity: data.quantity,
+    areaId: data.area_id,
+    machineId: data.machine_id,
+    reason: data.reason,
+    stationId: data.station_id,
+    sourceQuantityFlowId: data.source_quantity_flow_id,
+    remainderQuantityFlowId: data.remainder_quantity_flow_id,
+    remainderQuantity: data.remainder_quantity,
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
+}
+
+export interface QuantityAdditionInput {
+  stationId: string;
+  partNumber: string;
+  /** The entered quantity — no MAX and no default (GUI_DESIGN §4.7). */
+  quantity: number;
+  /** Mandatory. */
+  reason: string;
+  /** null when the Area resolves its single active Operation itself;
+   * required when several are configured. */
+  operationId: number | null;
+  /** Client-generated UUID, reused verbatim on every retry of the SAME
+   * confirmed intent (idempotency key). */
+  deviceEventId: string;
+}
+
+export interface QuantityAdditionResult {
+  movementId: number;
+  /** The NEW Quantity Flow the addition introduced. */
+  quantityFlowId: number;
+  partNumber: string;
+  quantity: number;
+  areaId: number;
+  operationId: number;
+  /** QUEUED (Area with Machines) or PROCESSING (Area without). */
+  processingState: ProcessingState;
+  reason: string;
+  stationId: string;
+  deviceEventId: string;
+  occurredAt: string;
+  /** false when the server replayed an already committed addition. */
+  created: boolean;
+}
+
+interface QuantityAdditionResultWire {
+  movement_id: number;
+  quantity_flow_id: number;
+  part_number: string;
+  quantity: number;
+  area_id: number;
+  operation_id: number;
+  processing_state: ProcessingState;
+  reason: string;
+  station_id: string;
+  device_event_id: string;
+  occurred_at: string;
+}
+
+/**
+ * Record one confirmed quantity addition (`Add more quantity`): found
+ * physical quantity enters as a NEW FLOATING Quantity Flow recorded as
+ * `QUANTITY_ADJUSTED · INCREASE` with its mandatory reason — never as
+ * a transfer, never changing any requested quantity. Resolves ONLY
+ * when the server confirmed the write: 201 fresh, 200 for an
+ * idempotent replay. A PN with no active quantity in the station's
+ * Area is refused (that is the receive workflow, not an addition) and
+ * nothing was recorded.
+ */
+export async function addQuantity(
+  input: QuantityAdditionInput,
+): Promise<QuantityAdditionResult> {
+  const { status, data } =
+    await apiRequestWithStatus<QuantityAdditionResultWire>(
+      `/api/scan-stations/${encodeURIComponent(input.stationId)}/quantity-additions`,
+      {
+        method: 'POST',
+        body: {
+          part_number: input.partNumber,
+          quantity: input.quantity,
+          reason: input.reason,
+          ...(input.operationId === null
+            ? {}
+            : { operation_id: input.operationId }),
+          device_event_id: input.deviceEventId,
+        },
+      },
+    );
+  return {
+    movementId: data.movement_id,
+    quantityFlowId: data.quantity_flow_id,
+    partNumber: data.part_number,
+    quantity: data.quantity,
+    areaId: data.area_id,
+    operationId: data.operation_id,
+    processingState: data.processing_state,
+    reason: data.reason,
+    stationId: data.station_id,
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Undo (Phase 9 — PROJECT_PROFILE §16)
+// ---------------------------------------------------------------------------
+
+export type FlowStatus =
+  'ACTIVE' | 'SPLIT' | 'MERGED' | 'SCRAPPED' | 'REVERSED';
+
+/** One original Movement of the command an Undo would reverse. */
+export interface UndoMovementSummary {
+  movementId: number;
+  movementType: string;
+  /** `REPAIR` on a Repair transfer; null otherwise. */
+  movementReason: string | null;
+  quantity: number;
+  fromArea: AreaRef | null;
+  toArea: AreaRef;
+  machineId: number | null;
+  operationId: number;
+}
+
+/** The effect of the reversal on one Quantity Flow, for the summary. */
+export interface RestoredFlowPreview {
+  quantityFlowId: number;
+  quantity: number;
+  /** ACTIVE: reopened/repositioned with the restored Area/Machine.
+   * REVERSED: the command created this flow, so it closes. */
+  status: FlowStatus;
+  area: AreaRef | null;
+  machineId: number | null;
+  processingState: ProcessingState | null;
+}
+
+/** The §16 summary confirmation of undoing one complete command — a
+ * read: original action, quantity, source/destination, Machine,
+ * timestamp, the exact effect of the reversal, and whether Undo is
+ * currently eligible (the command re-judges under its locks). */
+export interface UndoPreview {
+  reversesDeviceEventId: string;
+  stationId: string;
+  /** The command kind as recorded (TRANSFER, ASSIGN, QUEUE, DONE,
+   * MERGE, SCRAP, ADD); null for a row recorded without one. */
+  kind: string | null;
+  partNumber: string;
+  quantity: number;
+  occurredAt: string;
+  eligible: boolean;
+  ineligibleReason: string | null;
+  movements: UndoMovementSummary[];
+  restored: RestoredFlowPreview[];
+}
+
+interface UndoMovementSummaryWire {
+  movement_id: number;
+  movement_type: string;
+  movement_reason: string | null;
+  quantity: number;
+  from_area: AreaRefWire | null;
+  to_area: AreaRefWire;
+  machine_id: number | null;
+  operation_id: number;
+}
+
+interface RestoredFlowPreviewWire {
+  quantity_flow_id: number;
+  quantity: number;
+  status: FlowStatus;
+  area: AreaRefWire | null;
+  machine_id: number | null;
+  processing_state: ProcessingState | null;
+}
+
+interface UndoPreviewWire {
+  reverses_device_event_id: string;
+  station_id: string;
+  kind: string | null;
+  part_number: string;
+  quantity: number;
+  occurred_at: string;
+  eligible: boolean;
+  ineligible_reason: string | null;
+  movements: UndoMovementSummaryWire[];
+  restored: RestoredFlowPreviewWire[];
+}
+
+/**
+ * Load the summary confirmation of undoing the command recorded under
+ * `deviceEventId` (GUI_DESIGN §4.5). A read — nothing is locked and
+ * nothing is recorded; the Undo command itself re-judges eligibility
+ * authoritatively under its row locks.
+ */
+export async function getUndoPreview(
+  stationId: string,
+  deviceEventId: string,
+): Promise<UndoPreview> {
+  const wire = await apiRequest<UndoPreviewWire>(
+    `/api/scan-stations/${encodeURIComponent(stationId)}/undo-preview/${encodeURIComponent(deviceEventId)}`,
+  );
+  return {
+    reversesDeviceEventId: wire.reverses_device_event_id,
+    stationId: wire.station_id,
+    kind: wire.kind,
+    partNumber: wire.part_number,
+    quantity: wire.quantity,
+    occurredAt: wire.occurred_at,
+    eligible: wire.eligible,
+    ineligibleReason: wire.ineligible_reason,
+    movements: wire.movements.map((item) => ({
+      movementId: item.movement_id,
+      movementType: item.movement_type,
+      movementReason: item.movement_reason,
+      quantity: item.quantity,
+      fromArea: item.from_area ? toAreaRef(item.from_area) : null,
+      toArea: toAreaRef(item.to_area),
+      machineId: item.machine_id,
+      operationId: item.operation_id,
+    })),
+    restored: wire.restored.map((item) => ({
+      quantityFlowId: item.quantity_flow_id,
+      quantity: item.quantity,
+      status: item.status,
+      area: item.area ? toAreaRef(item.area) : null,
+      machineId: item.machine_id,
+      processingState: item.processing_state,
+    })),
+  };
+}
+
+export interface UndoInput {
+  stationId: string;
+  partNumber: string;
+  /** The command to reverse — every Movement recorded under it. */
+  reversesDeviceEventId: string;
+  /** The Undo's OWN idempotency key (a new production event), reused
+   * verbatim on every retry of the same reversal. */
+  deviceEventId: string;
+}
+
+export interface ReversedMovement {
+  movementId: number;
+  reversesMovementId: number;
+  originalMovementType: string;
+}
+
+export interface RestoredFlow {
+  quantityFlowId: number;
+  quantity: number;
+  status: FlowStatus;
+  currentAreaId: number | null;
+  currentMachineId: number | null;
+}
+
+export interface UndoResult {
+  reversesDeviceEventId: string;
+  /** The reversed command's kind as recorded (TRANSFER, ASSIGN, …). */
+  reversedKind: string | null;
+  partNumber: string;
+  stationId: string;
+  movements: ReversedMovement[];
+  flows: RestoredFlow[];
+  deviceEventId: string;
+  occurredAt: string;
+  /** false when the server replayed an already committed Undo. */
+  created: boolean;
+}
+
+interface UndoResultWire {
+  reverses_device_event_id: string;
+  reversed_kind: string | null;
+  part_number: string;
+  station_id: string;
+  movements: {
+    movement_id: number;
+    reverses_movement_id: number;
+    original_movement_type: string;
+  }[];
+  flows: {
+    quantity_flow_id: number;
+    quantity: number;
+    status: FlowStatus;
+    current_area_id: number | null;
+    current_machine_id: number | null;
+  }[];
+  device_event_id: string;
+  occurred_at: string;
+}
+
+/**
+ * Reverse one complete committed command (the confirmed Undo). The
+ * original history is never deleted: the server appends one
+ * compensating REVERSED Movement per original row and restores every
+ * involved flow. Resolves ONLY when the server confirmed the write:
+ * 201 fresh, 200 for an idempotent replay of the same `deviceEventId`.
+ * Every rejection — already reversed, no longer the most recent
+ * operation, recorded elsewhere, a retired Machine or deactivated Area
+ * in the way — is an `ApiError` and nothing was reversed.
+ */
+export async function undoProductionCommand(
+  input: UndoInput,
+): Promise<UndoResult> {
+  const { status, data } = await apiRequestWithStatus<UndoResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/undos`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        reverses_device_event_id: input.reversesDeviceEventId,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return {
+    reversesDeviceEventId: data.reverses_device_event_id,
+    reversedKind: data.reversed_kind,
+    partNumber: data.part_number,
+    stationId: data.station_id,
+    movements: data.movements.map((item) => ({
+      movementId: item.movement_id,
+      reversesMovementId: item.reverses_movement_id,
+      originalMovementType: item.original_movement_type,
+    })),
+    flows: data.flows.map((item) => ({
+      quantityFlowId: item.quantity_flow_id,
+      quantity: item.quantity,
+      status: item.status,
+      currentAreaId: item.current_area_id,
+      currentMachineId: item.current_machine_id,
+    })),
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
 }
 
 // ---------------------------------------------------------------------------

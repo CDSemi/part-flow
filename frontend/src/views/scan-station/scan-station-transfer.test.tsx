@@ -155,10 +155,10 @@ function flowWire(flow: Flow) {
     machine_id: flow.machineId ?? null,
     available_actions:
       state === 'ON_MACHINE'
-        ? ['DONE', 'QUEUE', 'TRANSFER']
+        ? ['DONE', 'QUEUE', 'TRANSFER', 'SCRAP']
         : state === 'PROCESSING'
-          ? ['DONE', 'TRANSFER']
-          : ['ASSIGN', 'TRANSFER'],
+          ? ['DONE', 'TRANSFER', 'SCRAP']
+          : ['ASSIGN', 'TRANSFER', 'SCRAP'],
     work_order: workOrderWire(flow),
   };
 }
@@ -377,6 +377,7 @@ function handle(url: string, method: string, body: unknown): Response {
             : null,
         expected_operation_id: flow.expectedOperationId ?? null,
         suggested_operation_id: ops.length === 1 ? ops[0].id : null,
+        repair_available: false,
       })),
       operations: ops.map(operationRef),
       has_active_demand: mine.length > 0,
@@ -386,6 +387,7 @@ function handle(url: string, method: string, body: unknown): Response {
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
       combine_groups: [],
+      scrapped_quantity: 0,
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);
@@ -495,6 +497,8 @@ function handle(url: string, method: string, body: unknown): Response {
       operation_id: operationId,
       station_id: station.station_id,
       assigned_route_step_id: null,
+      movement_reason: null,
+      reason: null,
       route_deviation: deviation
         ? {
             kind: areaDeviation ? 'AREA' : 'OPERATION',
@@ -1223,7 +1227,7 @@ test('while disconnected, scanning is disabled and nothing is sent', async () =>
 
 /* ============ Other resolutions and barcodes ============ */
 
-test('a PN already in the Area offers only to receive more from another Area', async () => {
+test('a PN already in the Area offers to receive more from another Area', async () => {
   flows.push({
     id: 105,
     pn: '0455-20-0118-03',
@@ -1241,7 +1245,15 @@ test('a PN already in the Area offers only to receive more from another Area', a
   expect(actions).toHaveTextContent(
     '3 pcs of this Part Number are already in Lathe',
   );
-  expect(actions).toHaveTextContent('arrive with a later release');
+  // Phase 9: the correction choices are real — the placeholder note is
+  // gone; Repair is absent because no source is repair-eligible here.
+  expect(
+    within(actions).getByRole('button', { name: /Add more quantity/ }),
+  ).toBeInTheDocument();
+  expect(
+    within(actions).getByRole('button', { name: /Scrap damaged quantity/ }),
+  ).toBeInTheDocument();
+  expect(actions).not.toHaveTextContent('Return quantity for repair');
   fireEvent.click(
     within(actions).getByRole('button', {
       name: /Receive more quantity from another Area/,

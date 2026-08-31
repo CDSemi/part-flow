@@ -29,6 +29,7 @@ import {
   areaRefColor,
   getAreaInventory,
   getStationContext,
+  getUndoPreview,
   resolveMachineScan,
   resolveScan,
   routeDeviationConfirmation,
@@ -43,10 +44,14 @@ import type {
   MachineActionResult,
   MachineRef,
   OperationRef,
+  QuantityAdditionResult,
   ScanResolution,
+  ScrapResult,
   StationContext,
   TransferCandidate,
   TransferResult,
+  UndoPreview,
+  UndoResult,
   WorkOrderContext,
 } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
@@ -68,6 +73,11 @@ import type { AreaAssignment } from '../area-monitoring';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { normalizeScanInput, parseScan } from './barcode';
 import { CombineQuantitiesDialog } from './scan-station-combine-dialog';
+import {
+  AddQuantityDialog,
+  ScrapDialog,
+  UndoDialog,
+} from './scan-station-correction-dialogs';
 import {
   AssignToMachineDialog,
   MachineActionDialog,
@@ -110,16 +120,23 @@ import type { Notice } from './scan-station-presentation';
  * direct-processing DONE of an Area without Machines (the same
  * `Complete Area processing` wizard without a Machine, from the
  * actively processing `In this Area now` rows or the PN action dialog;
- * GUI_DESIGN §4.6 direct-processing exception). The Area mode (with
- * Machines → queue and assign; without → direct processing) and every
- * flow's holding state come from the server's read models — never from
- * an Area name, a CSS class or a local guess. Every command is
- * recorded by the server before anything reads as success, with no
- * Machine or PN context surviving a dialog. The remaining approved
- * workflows (Repair, Scrap, Undo, Worker sessions, Receive Quantity
- * from the station) are NOT implemented here: they stay honest
- * placeholders, and the mock preview of them survives only behind the
- * development-only boundary below (`?preview=mock`).
+ * GUI_DESIGN §4.6 direct-processing exception), and the Phase 9
+ * corrections: `Add more quantity`, `Return quantity for repair`
+ * (the transfer command with the explicit Repair intent), `Scrap
+ * damaged quantity` (the PF:SCRAP counting workflow — the barcode
+ * counts ONLY inside it) and the command-level Undo from the Last
+ * Scanned PN block (the server's undo preview → structured summary →
+ * final warning question → one confirmed reversal that keeps the
+ * original history). The Area mode (with Machines → queue and assign;
+ * without → direct processing) and every flow's holding state come
+ * from the server's read models — never from an Area name, a CSS
+ * class or a local guess. Every command is recorded by the server
+ * before anything reads as success, with no Machine or PN context
+ * surviving a dialog. The remaining approved workflows (Worker
+ * sessions and their badge gates, Receive Quantity from the station)
+ * are NOT implemented here: they stay honest placeholders, and the
+ * mock preview of them survives only behind the development-only
+ * boundary below (`?preview=mock`).
  */
 
 // Development-only preview of the mock Scan Station (Phase 6+
@@ -431,10 +448,16 @@ const EMPTY_PRESENTATION: InventoryPresentation = {
 /* Station                                                             */
 /* ------------------------------------------------------------------ */
 
-/** The last confirmed action of this station session (Last Action block). */
+/** One confirmed action of this station session (Last Action block).
+ * `deviceEventId` identifies the complete application command, so the
+ * Undo of §4.5 reverses exactly it; the station keeps the session's
+ * completed actions as a stack — after a confirmed Undo the Last
+ * Scanned PN advances to the previous completed operation, whose
+ * eligibility the server re-judges when Undo opens. */
 interface LastAction {
   pn: string;
   summary: string;
+  deviceEventId: string;
 }
 
 /**
@@ -486,6 +509,43 @@ type Flow =
       partNumber: string;
       portions: FlowInArea[];
       parent?: Flow;
+    }
+  | {
+      // Add more quantity (Phase 9): found physical quantity recorded
+      // as QUANTITY_ADJUSTED · INCREASE beside the existing quantity.
+      kind: 'add-qty';
+      resolution: ScanResolution;
+      parent?: Flow;
+    }
+  | {
+      // Return quantity for repair (Phase 9): several repair-eligible
+      // sources take an explicit selection first — never auto-picked.
+      kind: 'repair-select';
+      resolution: ScanResolution;
+      parent?: Flow;
+    }
+  | {
+      // The repair transfer itself: the SAME transfer wizard with the
+      // explicit Repair intent and its mandatory reason.
+      kind: 'repair';
+      resolution: ScanResolution;
+      candidate: TransferCandidate;
+      parent?: Flow;
+    }
+  | {
+      // Scrap damaged quantity (Phase 9): ONE flow, counted with
+      // PF:SCRAP inside the workflow only.
+      kind: 'scrap';
+      resolution: ScanResolution;
+      flow: FlowInArea;
+      parent?: Flow;
+    }
+  | {
+      // Undo (Phase 9, §4.5): entered from the Last Scanned PN block —
+      // no parent, no Back. The server's preview is loaded first.
+      kind: 'undo';
+      entry: LastAction;
+      preview: UndoPreview;
     };
 
 function StationView({
@@ -521,7 +581,14 @@ function StationView({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   const [resolving, setResolving] = useState(false);
-  const [lastAction, setLastAction] = useState<LastAction | null>(null);
+  // The session's completed commands, oldest first (§4.5): the top is
+  // the Last Scanned PN, and Undo targets exactly it. A confirmed Undo
+  // pops it, so the block advances to the previous operation.
+  const [history, setHistory] = useState<LastAction[]>([]);
+  const lastAction = history.length > 0 ? history[history.length - 1] : null;
+  const recordAction = useCallback((entry: LastAction) => {
+    setHistory((stack) => [...stack, entry]);
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
@@ -813,13 +880,15 @@ function StationView({
         void resolvePn({ barcode: normalizeScanInput(raw) });
         return;
       case 'scrap':
+        // PF:SCRAP counts ONLY inside the Scrap workflow (§4.9): the
+        // main input always rejects it with nothing recorded.
         focusScan();
         setNotice({
           kind: 'err',
           icon: '✕',
           title: 'Scrap barcode cannot be used here',
           detail:
-            'Scrap recording is not available at this station in this release. No changes were recorded.',
+            'Scan the Part Number, select “Scrap damaged quantity,” then scan the scrap barcode. No changes were recorded.',
         });
         return;
       case 'machine':
@@ -897,12 +966,14 @@ function StationView({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [flow, writeBlocked, resolving, handleScan]);
 
-  /** A transfer the SERVER confirmed: refresh the Area, note it, refocus. */
+  /** A transfer the SERVER confirmed: refresh the Area, note it, refocus.
+   * `repair` marks the Phase 9 Repair intent of the same command. */
   const completeTransfer = useCallback(
     (
       result: TransferResult,
       candidate: TransferCandidate,
       destination: string,
+      repair = false,
     ) => {
       // A transfer of ON_MACHINE quantity is ONE application command:
       // the server appended AREA_COMPLETED then TRANSFERRED together.
@@ -917,17 +988,18 @@ function StationView({
         result.remainderQuantity !== null
           ? ` SPLIT · ${result.remainderQuantity} pcs remain at ${candidate.currentArea.name}.`
           : '';
-      setLastAction({
+      recordAction({
         pn: result.partNumber,
-        summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${completed ? 'AREA_COMPLETED + TRANSFERRED' : 'TRANSFERRED'} · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
+        summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${completed ? 'AREA_COMPLETED + TRANSFERRED' : 'TRANSFERRED'}${repair ? ' · REPAIR' : ''} · ${candidate.currentArea.name} → ${destination} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
+        deviceEventId: result.deviceEventId,
       });
       setNotice({
         kind: 'ok',
         icon: '✓',
-        title: `${result.partNumber} × ${result.quantity} → ${destination}`,
+        title: `${result.partNumber} × ${result.quantity} → ${destination}${repair ? ' for repair' : ''}`,
         detail: result.created
-          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity moved here from ${candidate.currentArea.name}.${split} Recorded by the server (${events}).`
-          : `This transfer was already recorded by the server (${events}) — nothing was recorded twice.${split}`,
+          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity ${repair ? 'returned here for repair' : 'moved here'} from ${candidate.currentArea.name}.${split} Recorded by the server (${events}).`
+          : `This ${repair ? 'repair' : 'transfer'} was already recorded by the server (${events}) — nothing was recorded twice.${split}`,
       });
       // The station context, the Area inventory (with its Machine
       // cards) and the header totals refresh from the server
@@ -937,7 +1009,7 @@ function StationView({
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan],
+    [context, inventory, focusScan, recordAction],
   );
 
   /** An in-Area action the SERVER confirmed: refresh, note, refocus.
@@ -964,9 +1036,10 @@ function StationView({
         result.remainderQuantity !== null
           ? ` SPLIT · ${result.remainderQuantity} pcs remain ${remainderWhere}.`
           : '';
-      setLastAction({
+      recordAction({
         pn: result.partNumber,
         summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${result.movementType} · ${description} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
+        deviceEventId: result.deviceEventId,
       });
       const outcome =
         result.movementType === 'ASSIGNED_TO_MACHINE'
@@ -987,7 +1060,7 @@ function StationView({
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready],
+    [context, inventory, focusScan, ready, recordAction],
   );
 
   /** A combine the SERVER confirmed (Phase 8): refresh, note, refocus. */
@@ -995,9 +1068,10 @@ function StationView({
     (result: CombineResult, selected: FlowInArea[]) => {
       const areaName = ready?.area.name ?? 'the Area';
       const parts = selected.map((flow) => `${flow.quantity} pcs`).join(' + ');
-      setLastAction({
+      recordAction({
         pn: result.partNumber,
         summary: `MERGED · ${parts} → ${result.quantity} pcs in ${areaName}`,
+        deviceEventId: result.deviceEventId,
       });
       setNotice({
         kind: 'ok',
@@ -1012,8 +1086,118 @@ function StationView({
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready],
+    [context, inventory, focusScan, ready, recordAction],
   );
+
+  /** A scrap the SERVER confirmed (Phase 9): refresh, note, refocus. */
+  const completeScrap = useCallback(
+    (result: ScrapResult) => {
+      const areaName = ready?.area.name ?? 'the Area';
+      const split =
+        result.remainderQuantity !== null
+          ? ` SPLIT · ${result.remainderQuantity} pcs remain active.`
+          : '';
+      recordAction({
+        pn: result.partNumber,
+        summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}SCRAPPED · ${areaName} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
+        deviceEventId: result.deviceEventId,
+      });
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.quantity} scrapped at ${areaName}`,
+        detail: result.created
+          ? `The scrap quantity and reason were recorded — the quantity leaves active production.${split} Recorded by the server (SCRAPPED #${result.movementId}).`
+          : `This scrap was already recorded by the server (SCRAPPED #${result.movementId}) — nothing was recorded twice.${split}`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan, ready, recordAction],
+  );
+
+  /** An addition the SERVER confirmed (Phase 9): refresh, note, refocus. */
+  const completeAddition = useCallback(
+    (result: QuantityAdditionResult) => {
+      const areaName = ready?.area.name ?? 'the Area';
+      recordAction({
+        pn: result.partNumber,
+        summary: `QUANTITY_ADJUSTED · INCREASE · +${result.quantity} pcs at ${areaName}`,
+        deviceEventId: result.deviceEventId,
+      });
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} +${result.quantity} pcs at ${areaName}`,
+        detail: result.created
+          ? `The quantity adjustment was recorded with your reason. The added quantity is now ${
+              result.processingState === 'QUEUED'
+                ? 'waiting in the Area queue'
+                : 'in processing at this Area'
+            }. Recorded by the server (QUANTITY_ADJUSTED #${result.movementId}).`
+          : `This addition was already recorded by the server (QUANTITY_ADJUSTED #${result.movementId}) — nothing was recorded twice.`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan, ready, recordAction],
+  );
+
+  /** An Undo the SERVER confirmed (Phase 9, §4.5): the undone entry
+   * leaves the session stack — the Last Scanned PN advances to the
+   * previous completed operation — and the Area is re-read. The
+   * original history stays; the reversal is its own recorded event. */
+  const completeUndo = useCallback(
+    (result: UndoResult, entry: LastAction) => {
+      setHistory((stack) =>
+        stack.filter((item) => item.deviceEventId !== entry.deviceEventId),
+      );
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} — action reversed`,
+        detail: result.created
+          ? `The complete action was reversed and the previous state restored. The original history stays recorded for audit (REVERSED × ${result.movements.length}).`
+          : `This reversal was already recorded by the server — nothing was reversed twice.`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan],
+  );
+
+  /**
+   * Open the Undo of the most recent completed command (§4.5): the
+   * server's undo preview serves the structured summary — original
+   * action, quantity, source/destination, Machine, timestamp, and the
+   * effect of the reversal — before anything can be submitted. A
+   * preview that cannot be loaded changes nothing.
+   */
+  const openUndo = useCallback(async () => {
+    const entry = history.length > 0 ? history[history.length - 1] : null;
+    if (!entry || writeBlocked) return;
+    setResolving(true);
+    try {
+      const preview = await getUndoPreview(stationId, entry.deviceEventId);
+      setFlow({ kind: 'undo', entry, preview });
+    } catch (error) {
+      focusScan();
+      setNotice({
+        kind: 'err',
+        icon: '✕',
+        title: 'The reversal summary could not be loaded',
+        detail: `${errorMessage(error)} No changes were recorded.`,
+      });
+    } finally {
+      setResolving(false);
+    }
+  }, [history, writeBlocked, stationId, focusScan]);
 
   /**
    * The server refused a write (nothing recorded — the flow moved, the
@@ -1273,9 +1457,10 @@ function StationView({
             </div>
             <DevNotice>
               Development build — this station records real transfers, Machine
-              actions and direct-processing completions on the server. The mock
-              preview of the later workflows (Repair, Scrap, Undo, Worker
-              sessions) opens with <code>?preview=mock</code> on this route.
+              actions, completions and the correction workflows (Undo, Repair,
+              Scrap, quantity additions) on the server. The mock preview of the
+              later workflows (Worker sessions) opens with{' '}
+              <code>?preview=mock</code> on this route.
             </DevNotice>
             <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
@@ -1285,13 +1470,21 @@ function StationView({
                   {lastAction?.summary ?? 'No Part Number actions yet'}
                 </span>
               </div>
-              {/* Undo reverses a complete application command (Phase 9);
-                  until then the action region stays present and
-                  disabled — never a hidden control. */}
+              {/* Undo reverses the complete most recent command of this
+                  session (§4.5): the server's preview serves the
+                  summary confirmation first, and eligibility is the
+                  server's judgement. With nothing to reverse — or while
+                  writes are blocked — the action region stays present
+                  and disabled, never a hidden control. */}
               <button
                 className="ss-undo zone-action"
-                disabled
-                title="Undo is not available in this release"
+                disabled={writeBlocked || resolving || !lastAction}
+                title={
+                  lastAction
+                    ? 'Reverse the complete last action'
+                    : 'No completed Part Number action to reverse yet'
+                }
+                onClick={() => void openUndo()}
               >
                 ⟲ UNDO
               </button>
@@ -1375,6 +1568,86 @@ function StationView({
           onAbandonUnknown={() => abandonUnknown('Transfer')}
         />
       )}
+      {flow?.kind === 'repair-select' && (
+        <SourceSelectDialog
+          resolution={flow.resolution}
+          candidates={flow.resolution.candidates.filter(
+            (candidate) => candidate.repairAvailable,
+          )}
+          title="Select the repair source"
+          sub="This Part Number is available in more than one place that can return quantity here for repair. Select exactly one source to continue — quantities are never combined."
+          onPick={(candidate) =>
+            setFlow({
+              kind: 'repair',
+              resolution: flow.resolution,
+              candidate,
+              parent: flow,
+            })
+          }
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+        />
+      )}
+      {flow?.kind === 'repair' && (
+        <TransferDialog
+          repair
+          station={station}
+          resolution={flow.resolution}
+          candidate={flow.candidate}
+          destinationNote={destinationNote}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onDone={(result) =>
+            completeTransfer(result, flow.candidate, destinationNote, true)
+          }
+          onCancel={cancelFlow}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Repair')}
+        />
+      )}
+      {flow?.kind === 'add-qty' && (
+        <AddQuantityDialog
+          station={station}
+          partNumber={flow.resolution.partNumber}
+          hasMachines={hasMachines}
+          operations={flow.resolution.operations}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={completeAddition}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Addition')}
+        />
+      )}
+      {flow?.kind === 'scrap' && (
+        <ScrapDialog
+          station={station}
+          flow={flow.flow}
+          machine={
+            inventoryReady?.machines
+              .map((card) => card.machine)
+              .find((machine) => machine.id === flow.flow.machineId) ?? null
+          }
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={completeScrap}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Scrap')}
+        />
+      )}
+      {flow?.kind === 'undo' && (
+        <UndoDialog
+          station={station}
+          preview={flow.preview}
+          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
+          writeBlocked={writeBlocked}
+          onCancel={cancelFlow}
+          onDone={(result) => completeUndo(result, flow.entry)}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Reversal')}
+        />
+      )}
       {flow?.kind === 'assign' && (
         <AssignToMachineDialog
           station={station}
@@ -1455,6 +1728,40 @@ function StationView({
               kind: 'combine',
               partNumber: flow.resolution.partNumber,
               portions,
+              parent: flow,
+            })
+          }
+          onAdd={() =>
+            setFlow({
+              kind: 'add-qty',
+              resolution: flow.resolution,
+              parent: flow,
+            })
+          }
+          onRepair={() => {
+            const repairable = flow.resolution.candidates.filter(
+              (candidate) => candidate.repairAvailable,
+            );
+            if (repairable.length === 1) {
+              setFlow({
+                kind: 'repair',
+                resolution: flow.resolution,
+                candidate: repairable[0],
+                parent: flow,
+              });
+            } else {
+              setFlow({
+                kind: 'repair-select',
+                resolution: flow.resolution,
+                parent: flow,
+              });
+            }
+          }}
+          onScrap={(scrapFlow) =>
+            setFlow({
+              kind: 'scrap',
+              resolution: flow.resolution,
+              flow: scrapFlow,
               parent: flow,
             })
           }
@@ -1568,24 +1875,29 @@ function candidateLabel(candidate: TransferCandidate): string {
 
 function SourceSelectDialog({
   resolution,
+  candidates,
+  title = 'Select the source',
+  sub = 'This Part Number is available in more than one place. Select exactly one source to continue — quantities are never combined.',
   onPick,
   onBack,
   onCancel,
 }: {
   resolution: ScanResolution;
+  /** The candidates offered (default: all of the resolution's) — the
+   * repair selection narrows to the repair-eligible sources only. */
+  candidates?: TransferCandidate[];
+  title?: string;
+  sub?: string;
   onPick: (candidate: TransferCandidate) => void;
   onBack?: () => void;
   onCancel: () => void;
 }) {
   return (
-    <ModalDialog label="Select the source" onClose={onCancel}>
-      <h3>Select the source</h3>
+    <ModalDialog label={title} onClose={onCancel}>
+      <h3>{title}</h3>
       <div className="big mono">{resolution.partNumber}</div>
-      <div className="sub">
-        This Part Number is available in more than one place. Select exactly one
-        source to continue — quantities are never combined.
-      </div>
-      {resolution.candidates.map((candidate) => (
+      <div className="sub">{sub}</div>
+      {(candidates ?? resolution.candidates).map((candidate) => (
         <button
           key={candidate.quantityFlowId}
           className="choice"
@@ -1631,6 +1943,7 @@ function TransferDialog({
   candidate,
   destinationNote,
   writeBlocked,
+  repair = false,
   onBack,
   onDone,
   onCancel,
@@ -1642,6 +1955,11 @@ function TransferDialog({
   candidate: TransferCandidate;
   destinationNote: string;
   writeBlocked: boolean;
+  /** Phase 9: the explicit `Return quantity for repair` intent — the
+   * SAME transfer command recorded with the Repair movement intent and
+   * its mandatory reason. Only the operator's explicit choice sets it;
+   * a previously visited destination alone never does. */
+  repair?: boolean;
   onBack?: () => void;
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: TransferResult) => void;
@@ -1681,7 +1999,13 @@ function TransferDialog({
     operationRequired ? null : (candidate.suggestedOperationId ?? null),
   );
   const operation = operations.find((item) => item.id === operationId) ?? null;
-  const valid = validQuantity && operation !== null;
+  // The mandatory repair reason (Phase 9) — separate from a route
+  // deviation's reason: the two are distinct recorded facts.
+  const [repairReason, setRepairReason] = useState('');
+  const valid =
+    validQuantity &&
+    operation !== null &&
+    (!repair || repairReason.trim() !== '');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -1744,7 +2068,7 @@ function TransferDialog({
     if (!valid || busy || reasonMissing) return;
     if (writeBlocked) {
       setServerError(
-        'Connection lost — the transfer was not sent. Reconnect and confirm again; nothing was recorded.',
+        `Connection lost — the ${repair ? 'repair' : 'transfer'} was not sent. Reconnect and confirm again; nothing was recorded.`,
       );
       return;
     }
@@ -1765,6 +2089,8 @@ function TransferDialog({
         operationId: operation!.id,
         confirmRouteDeviation: deviation !== null,
         routeDeviationReason: deviation !== null ? reason.trim() : null,
+        repair,
+        repairReason: repair ? repairReason.trim() : null,
         deviceEventId: deviceEventId.current,
       });
     } catch (error) {
@@ -1797,6 +2123,10 @@ function TransferDialog({
   }
 
   const cancel = outcomeUnknown ? onAbandonUnknown : onCancel;
+  const what = repair ? 'repair' : 'transfer';
+  const title = repair
+    ? 'Return quantity for repair'
+    : 'Receive from another Area';
 
   const quantityGuidance =
     parsedQty > candidate.quantity ? (
@@ -1813,7 +2143,7 @@ function TransferDialog({
 
   return (
     <ModalDialog
-      label="Receive from another Area"
+      label={title}
       onClose={busy ? () => undefined : cancel}
       onKeyDown={
         step === 'qty'
@@ -1821,16 +2151,23 @@ function TransferDialog({
           : enterKeyHandler(() => void confirm())
       }
     >
-      <h3>Receive from another Area</h3>
+      <h3>{title}</h3>
       {step === 'qty' ? (
         <div>
           <div className="big mono" title={pn}>
             {pn}
           </div>
+          {repair ? (
+            <div className="sub">
+              Return quantity to {destination.name} so earlier work can be
+              corrected. This moves existing quantity; it does not create
+              additional quantity. A reason is required.
+            </div>
+          ) : null}
           <StepRecap
             lines={[
               <>
-                Transfer{' '}
+                {repair ? 'Repair return' : 'Transfer'}{' '}
                 <AreaChip area={candidate.currentArea}>
                   {candidate.currentArea.name}
                 </AreaChip>{' '}
@@ -1901,8 +2238,9 @@ function TransferDialog({
           )}
           <Guidance tone="info">
             Available at {candidate.currentArea.name}:{' '}
-            <b>{candidate.quantity} pcs</b> (MAX). A smaller quantity moves only
-            that part — the rest stays at {candidate.currentArea.name}
+            <b>{candidate.quantity} pcs</b> (MAX). A smaller quantity{' '}
+            {repair ? 'returns' : 'moves'} only that part — the rest stays at{' '}
+            {candidate.currentArea.name}
             {implicitCompletion
               ? candidate.processingState === 'ON_MACHINE'
                 ? ' on its Machine'
@@ -1916,6 +2254,21 @@ function TransferDialog({
             onChange={setQty}
             max={candidate.quantity}
           />
+          {repair ? (
+            <>
+              <label className="ss-reasonlbl" htmlFor="repair-reason">
+                Reason <span className="field-required">(required)</span>
+              </label>
+              <input
+                id="repair-reason"
+                className="field"
+                autoComplete="off"
+                value={repairReason}
+                placeholder="Describe the work that must be corrected"
+                onChange={(event) => setRepairReason(event.target.value)}
+              />
+            </>
+          ) : null}
           <StepButtons
             onBack={onBack}
             onCancel={onCancel}
@@ -1927,10 +2280,10 @@ function TransferDialog({
           <div className="big mono" title={pn}>
             {pn}
           </div>
-          <div className="sub">Review the transfer, then confirm.</div>
+          <div className="sub">Review the {what}, then confirm.</div>
           <ConfirmationSummary
             rows={[
-              ['Action', 'Receive from another Area', 'primary'],
+              ['Action', title, 'primary'],
               ['PN', <span className="mono">{pn}</span>, 'primary'],
               [
                 'Quantity',
@@ -1970,6 +2323,7 @@ function TransferDialog({
                 />,
                 'secondary',
               ],
+              ['Reason', repair ? repairReason.trim() : null, 'primary'],
               ['Route deviation', deviation, undefined, 'warn'],
               [
                 'Source processing',
@@ -2001,10 +2355,16 @@ function TransferDialog({
               implicitCompletion
                 ? [
                     'Recorded events',
-                    'AREA_COMPLETED, then TRANSFERRED (one command)',
+                    repair
+                      ? 'AREA_COMPLETED, then TRANSFERRED · REPAIR intent (one command)'
+                      : 'AREA_COMPLETED, then TRANSFERRED (one command)',
                     'secondary',
                   ]
-                : ['Recorded event', 'TRANSFERRED', 'secondary'],
+                : [
+                    'Recorded event',
+                    repair ? 'TRANSFERRED · REPAIR intent' : 'TRANSFERRED',
+                    'secondary',
+                  ],
             ]}
           />
           {deviation !== null ? (
@@ -2026,8 +2386,8 @@ function TransferDialog({
           ) : null}
           {outcomeUnknown ? (
             <Guidance tone="warn">
-              The server did not answer — this transfer may or may not have been
-              recorded. Retry the exact same transfer to find out: the server
+              The server did not answer — this {what} may or may not have been
+              recorded. Retry the exact same {what} to find out: the server
               answers with the recorded result, or records it once. Nothing can
               be changed until then.
             </Guidance>
@@ -2035,8 +2395,8 @@ function TransferDialog({
           {serverError ? <Guidance tone="error">{serverError}</Guidance> : null}
           {writeBlocked && !serverError && !outcomeUnknown ? (
             <Guidance tone="error">
-              Disconnected — the transfer cannot be recorded until the
-              connection returns.
+              Disconnected — the {what} cannot be recorded until the connection
+              returns.
             </Guidance>
           ) : null}
           {/* With the outcome unknown the intent is frozen: no Back to
@@ -2057,12 +2417,14 @@ function TransferDialog({
             }
             primary={{
               label: outcomeUnknown
-                ? 'Retry the same transfer'
+                ? `Retry the same ${what}`
                 : serverError
-                  ? 'Retry transfer'
+                  ? `Retry ${what}`
                   : busy
                     ? 'Recording…'
-                    : 'Confirm transfer',
+                    : repair
+                      ? 'Confirm repair'
+                      : 'Confirm transfer',
               onClick: () => void confirm(),
               disabled: !valid || busy || reasonMissing || writeBlocked,
               autoFocus: true,
@@ -2084,6 +2446,9 @@ function InAreaDialog({
   onAssign,
   onComplete,
   onCombine,
+  onAdd,
+  onRepair,
+  onScrap,
   onReceiveMore,
   onBack,
   onCancel,
@@ -2100,6 +2465,14 @@ function InAreaDialog({
   /** `Combine quantities` (Phase 8) for ONE server-reported combinable
    * group of the PN's portions in the Area. */
   onCombine: (portions: FlowInArea[]) => void;
+  /** `Add more quantity` (Phase 9): found physical quantity beside the
+   * existing in-Area quantity, with a mandatory reason. */
+  onAdd: () => void;
+  /** `Return quantity for repair` (Phase 9): offered only when the
+   * server marked at least one candidate repair-eligible. */
+  onRepair: () => void;
+  /** `Scrap damaged quantity` (Phase 9) for ONE in-Area flow. */
+  onScrap: (flow: FlowInArea) => void;
   onReceiveMore: () => void;
   onBack?: () => void;
   onCancel: () => void;
@@ -2151,6 +2524,17 @@ function InAreaDialog({
       }),
     )
     .filter((portions) => portions.length >= 2);
+  // Repair (Phase 9) is offered only for the sources the SERVER marked
+  // repair-eligible (this Area previously visited) — never inferred
+  // here, and never replacing the normal transfer to the same Area.
+  const repairable = resolution.candidates.filter(
+    (candidate) => candidate.repairAvailable,
+  );
+  // Scrap (Phase 9): one explicit choice per in-Area quantity the
+  // server reports scrappable.
+  const scrappable = resolution.inArea.filter((flow) =>
+    flow.availableActions.includes('SCRAP'),
+  );
   return (
     <ModalDialog label="Select an action" onClose={onCancel}>
       <h3>Select an action</h3>
@@ -2160,6 +2544,9 @@ function InAreaDialog({
         {resolution.area.name}.
         {resolution.requiresSelection
           ? ' Several separate quantities are here — every choice below names exactly one.'
+          : ''}
+        {resolution.scrappedQuantity > 0
+          ? ` ${resolution.scrappedQuantity} pcs scrapped.`
           : ''}
       </div>
       {queued.map((flow) => (
@@ -2269,10 +2656,57 @@ function InAreaDialog({
           No other quantity of this Part Number is available to receive.
         </Guidance>
       )}
-      <Guidance tone="info">
-        Quantity additions, repair and scrap arrive with a later release.
-        Nothing is recorded at this step.
-      </Guidance>
+      <button className="choice" onClick={onAdd}>
+        <span className="cic add" aria-hidden="true">
+          ADD
+        </span>
+        <span>
+          <span className="ct1">Add more quantity</span>
+          <br />
+          <span className="ct2">
+            Add physical quantity found at this Area that was not transferred
+            from another Area. A reason is required.
+          </span>
+        </span>
+      </button>
+      {repairable.length > 0 ? (
+        <button className="choice" onClick={onRepair}>
+          <span className="cic rep" aria-hidden="true">
+            REP
+          </span>
+          <span>
+            <span className="ct1">Return quantity for repair</span>
+            <br />
+            <span className="ct2">
+              Return quantity to {resolution.area.name} so earlier work can be
+              corrected.{' '}
+              {repairable
+                .map(
+                  (candidate) =>
+                    `${candidate.quantity} pcs at ${candidate.currentArea.name}`,
+                )
+                .join(' · ')}
+              .
+            </span>
+          </span>
+        </button>
+      ) : null}
+      {scrappable.map((flow) => (
+        <button
+          key={`scrap-${flow.quantityFlowId}`}
+          className="choice"
+          onClick={() => onScrap(flow)}
+        >
+          <span className="cic scr" aria-hidden="true">
+            SCR
+          </span>
+          <span>
+            <span className="ct1">Scrap damaged quantity</span>
+            <br />
+            <span className="ct2">{portionLabel(flow, machines)}</span>
+          </span>
+        </button>
+      ))}
       <div className="row">
         {onBack ? (
           <button className="bigbtn ghost ss-back" onClick={onBack}>
@@ -2311,6 +2745,12 @@ function NoQuantityDialog({
             ? 'This Part Number has no active production quantity in another Area. Release quantity from its Work Order in Management → Work Orders first.'
             : 'This Part Number has no active Work Order Demand and no production quantity. Receiving new quantity at the station arrives with a later release — create the demand in Management → Work Orders.'}
       </div>
+      {resolution.scrappedQuantity > 0 ? (
+        <Guidance tone="info">
+          {resolution.scrappedQuantity} pcs of this Part Number are recorded as
+          scrapped.
+        </Guidance>
+      ) : null}
       <Guidance tone="info">Nothing was recorded.</Guidance>
       <div className="row">
         {onBack ? (

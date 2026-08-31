@@ -22,13 +22,14 @@ transfer, and the real Scan Station direct-processing presentation and
 `DONE`, and the completed **Phase 8 Quantity SPLIT and MERGED
 Workflows** (persistence and lineage, partial quantity on every Scan
 Station command, the explicit merge, and the real Scan Station partial
-quantity and `Combine quantities` workflows), plus the **Phase 9
-Undo, Corrections, and Auditable Quantity Events backend** —
+quantity and `Combine quantities` workflows), and the completed **Phase 9
+Undo, Corrections, and Auditable Quantity Events** —
 command-level Undo with compensating `REVERSED` Movements and a
 preview read model, Repair as `TRANSFERRED · movement_reason REPAIR`,
 Scrap (`SCRAPPED`) and quantity additions (`QUANTITY_ADJUSTED ·
-INCREASE`); the Scan Station frontend for those workflows is still
-pending:
+INCREASE`), and the real Scan Station correction workflows on that
+API (`Add more quantity`, `Return quantity for repair`, the PF:SCRAP
+counting Scrap workflow, and Undo from the Last Scanned PN block):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -180,22 +181,24 @@ shows the remainder before and after the write (the server splits, the
 client never does), and the PN action dialog offers `Combine
 quantities` for exactly the groups the server reports combinable —
 source selection, a result preview, `Confirm combine`, success only
-after the server. The Phase 9 backend adds the correction
-workflows behind that station surface: command-level Undo (one
-complete command reversed through compensating `REVERSED` Movements,
-the §16 preview confirmation, projection restored from the
-reversal-aware derivation), Repair as the explicit transfer intent,
-Scrap and quantity additions — while in the Scan Station VIEW those
-workflows (Area and scrap barcodes, Worker identity, Repair, Scrap,
-Undo, Add quantity) stay honest placeholders until the Phase 9
-frontend lands; the approved presentation survives as
-a development-only mock preview (`?preview=mock` on a Scan Station
-route) that never enters a production build. The Phase 3.5
+after the server. Phase 9 adds the correction
+workflows end to end: command-level Undo (one complete command
+reversed through compensating `REVERSED` Movements, the §16 preview
+confirmation, projection restored from the reversal-aware
+derivation), Repair as the explicit transfer intent, Scrap and
+quantity additions — and the Scan Station VIEW records all of them
+(`Add more quantity`, `Return quantity for repair`, the PF:SCRAP
+counting Scrap workflow, and Undo from the Last Scanned PN block with
+the final warning question); Worker identity, badge gates and Area
+barcodes stay honest placeholders, and the approved presentation of
+the remaining workflows survives as a development-only mock preview
+(`?preview=mock` on a Scan Station route) that never enters a
+production build. The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
 master data end to end. Every other view renders development-only mock
-data; the Phase 9 Scan Station frontend, the Stockroom and
+data; the Stockroom and
 allocation-derived completion (Phase 10), and the remaining tracking
 behavior arrive next — the movement-type check admits the
 Phase 3–9 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,

@@ -99,7 +99,7 @@ function remaining(max: number, confirmed: number): ReactNode {
 }
 
 /** The shared unknown-outcome / rejection / offline guidance block. */
-function WriteGuidance({
+export function WriteGuidance({
   outcomeUnknown,
   serverError,
   writeBlocked,

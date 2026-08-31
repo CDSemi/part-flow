@@ -128,12 +128,12 @@ function recordedOperation(flow: Flow) {
 
 function actionsOf(state: State) {
   return state === 'QUEUED'
-    ? ['ASSIGN', 'TRANSFER']
+    ? ['ASSIGN', 'TRANSFER', 'SCRAP']
     : state === 'ON_MACHINE'
-      ? ['DONE', 'QUEUE', 'TRANSFER']
+      ? ['DONE', 'QUEUE', 'TRANSFER', 'SCRAP']
       : state === 'PROCESSING'
-        ? ['DONE', 'TRANSFER']
-        : ['TRANSFER'];
+        ? ['DONE', 'TRANSFER', 'SCRAP']
+        : ['TRANSFER', 'SCRAP'];
 }
 
 function flowWire(flow: Flow) {
@@ -306,6 +306,7 @@ function handle(url: string, method: string, body: unknown): Response {
         expected_next_area: null,
         expected_operation_id: null,
         suggested_operation_id: operationsOf(station.area_id)[0].id,
+        repair_available: false,
       })),
       operations: operationsOf(station.area_id),
       has_active_demand: true,
@@ -313,6 +314,7 @@ function handle(url: string, method: string, body: unknown): Response {
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
       combine_groups: [],
+      scrapped_quantity: 0,
     });
   }
 
@@ -403,6 +405,8 @@ function handle(url: string, method: string, body: unknown): Response {
       operation_id: request.operation_id ?? operationsOf(station.area_id)[0].id,
       station_id: station.station_id,
       assigned_route_step_id: null,
+      movement_reason: null,
+      reason: null,
       route_deviation: null,
       completed_movement_id: completedMovementId,
       completed_machine_id: completedFrom,
