@@ -65,6 +65,9 @@ let nextMovementId: number;
 let nextFlowId: number;
 let writeFailure:
   null | 'network' | 'lost-response' | { status: number; body: unknown };
+// When set, the resolution reports exactly these groups — a test seam
+// for a stale server judgement naming flows no longer in the Area.
+let combineGroupsOverride: number[][] | null;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -331,7 +334,7 @@ function handle(url: string, method: string, body: unknown): Response {
       transfer_blocked_reason: null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
-      combine_groups: combineGroups(inArea),
+      combine_groups: combineGroupsOverride ?? combineGroups(inArea),
     });
   }
 
@@ -597,6 +600,7 @@ beforeEach(() => {
   nextMovementId = 500;
   nextFlowId = 900;
   writeFailure = null;
+  combineGroupsOverride = null;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -993,6 +997,26 @@ test('`Combine quantities` is offered exactly for the server-reported combinable
   });
   expect(
     within(single).queryByRole('button', { name: /Combine quantities/ }),
+  ).toBeNull();
+});
+
+test('a stale server group whose portions are no longer all in the Area offers no Combine action', async () => {
+  // The server judged 320 combinable with a flow that has since been
+  // consumed (999 is not in the resolution): fewer than two portions
+  // resolve, so the station renders no Combine choice — it never
+  // substitutes its own judgement for the server's.
+  combineGroupsOverride = [
+    [320, 999],
+    [998, 999],
+  ];
+  await renderStation('PLATING-ST-01');
+  scan('PF:PN:PN-D');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  expect(actions).toHaveTextContent('Several separate quantities are here');
+  expect(
+    within(actions).queryByRole('button', { name: /Combine quantities/ }),
   ).toBeNull();
 });
 

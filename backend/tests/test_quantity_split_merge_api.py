@@ -729,6 +729,48 @@ def test_partial_transfer_from_every_source_state(client: TestClient, db_engine:
         assert _active_quantity(db_engine, released.part_number) == 10
         _assert_projection_matches_history(db_engine, released.flow_id, selected, remainder)
     assert client.get(f"/api/machines/{lathe.machine_id}").json()["assigned_quantity"] == 6
+    # A PROCESSING source (direct-processing Area): the partial transfer
+    # implicitly completes ONLY the selected part (one Machine-less
+    # AREA_COMPLETED on the child), and the remainder stays PROCESSING
+    # at the source Area.
+    mill = _Cell(client)
+    # The `finished` case's transferred child: 4 pcs PROCESSING at deburr.
+    processing_source = next(
+        flow_id
+        for flow_id, flow in _inventory_flows(client, deburr.area_id).items()
+        if flow["part_number"] == finished.part_number
+    )
+    event_id = str(uuid.uuid4())
+    response = _transfer(
+        client,
+        deburr,
+        mill,
+        processing_source,
+        finished.part_number,
+        1,
+        device_event_id=event_id,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    child, rest_id = body["quantity_flow_id"], body["remainder_quantity_flow_id"]
+    assert body["source_quantity_flow_id"] == processing_source
+    assert body["quantity"] == 1 and body["remainder_quantity"] == 3
+    assert body["completed_machine_id"] is None
+    assert body["completed_movement_id"] is not None
+    _assert_split_command(
+        db_engine,
+        event_id,
+        source=processing_source,
+        selected=child,
+        remainder=rest_id,
+        action=["AREA_COMPLETED", "TRANSFERRED"],
+    )
+    rest = _flow_row(db_engine, rest_id)
+    assert rest.current_area_id == deburr.area_id and rest.current_machine_id is None
+    assert _inventory_flows(client, deburr.area_id)[rest_id]["processing_state"] == "PROCESSING"
+    assert _inventory_flows(client, mill.area_id)[child]["processing_state"] == "PROCESSING"
+    assert _active_quantity(db_engine, finished.part_number) == 10
+    _assert_projection_matches_history(db_engine, processing_source, child, rest_id)
 
 
 def test_full_quantity_commands_never_split(client: TestClient, db_engine: Engine) -> None:

@@ -76,7 +76,7 @@ from app.application.machine_processing import (
     committed_command,
     no_longer_active,
 )
-from app.application.machines import area_has_machines, assigned_quantity, lock_machine
+from app.application.machines import area_has_machines, lock_machine
 from app.application.part_numbers import canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
@@ -333,9 +333,8 @@ def merge_flows(
         machine = lock_machine(session, machine_id)
         if machine is None:  # pragma: no cover - FK guarantees the row
             raise ConflictError(f"Machine {machine_id} does not exist.")
-        # Read before any Movement is staged; the assigned total is
+        # The Machine row lock alone is needed: the assigned total is
         # unchanged by a merge, so the derived Machine state never moves.
-        assigned_quantity(session, machine.id)
 
     # -- Writes — all inside the one open transaction ------------------
     operation_id = shared.operation_id

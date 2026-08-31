@@ -55,7 +55,8 @@ quantity and `Combine quantities` workflows):
   `POST /api/scan-stations/{id}/scans/resolve` — PN barcode/manual
   entry resolved into in-Area quantity and explicit transfer
   candidates, `POST /api/scan-stations/{id}/transfers` — the one
-  command that moves a whole Quantity Flow, appending the immutable
+  command that moves a Quantity Flow, whole or — since Phase 8 — in
+  part (the flow is split first inside the same command), appending the immutable
   `TRANSFERRED` Movement and updating the current-position projection
   in one idempotent transaction, and `GET /api/areas/{id}/inventory`),
   the Phase 6 Machine-Area processing commands
@@ -109,13 +110,13 @@ quantity and `Combine quantities` workflows):
   table)
 - Docker Compose development stack with health checks
 
-**Two production commands exist**: Management → Work Orders (Phase 4)
+**Management → Work Orders (Phase 4)**
 saves business demand and, as a separate explicit action, releases
 production quantity — creating a Quantity Flow and appending an
 immutable `RECEIVED` Part Movement in one transaction. Saving demand
 never creates production quantity, and a demand may be released in
 parts until its remaining quantity is exhausted. The Phase 5 backend
-transfer moves one whole Quantity Flow into the Area an active Scan
+transfer moves one Quantity Flow into the Area an active Scan
 Station is bound to — appending the immutable `TRANSFERRED` Movement
 and updating the current position in one idempotent transaction, with
 explicit source selection, the confirmed destination Area as a
@@ -161,10 +162,11 @@ configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
 master data end to end. Every other view renders development-only mock
-data; Machine assignments and Area completion (`AREA_COMPLETED`),
-SPLIT/MERGED, Undo/corrections, the Stockroom and allocation-derived
-completion, and all remaining tracking behavior arrive in later phases
-— the movement-type check admits `RECEIVED` and `TRANSFERRED` only.
+data; Undo/corrections (Phase 9), the Stockroom and
+allocation-derived completion (Phase 10), and the remaining tracking
+behavior arrive in later phases — the movement-type check admits the
+Phase 3–8 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
+`RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`).
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
