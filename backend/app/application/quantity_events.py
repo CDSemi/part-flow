@@ -40,9 +40,12 @@ Station offers it (GUI_DESIGN §4.7 item 3): the PN must already have
 ACTIVE quantity in the station's Area — introducing a PN with no
 quantity there is the Receive Quantity intake, a different workflow.
 The added quantity enters the Area queue (Area with Machines) or
-direct processing (Area without Machines) — derived, not stored — and
-the target Area row is locked like a transfer destination, so Area
-deactivation and an addition have one serial outcome.
+direct processing (Area without Machines) — derived, not stored. The
+Scan Station row is locked and re-read under the lock (active, still
+bound to the resolved Area — a rebound or deactivated station refuses
+with zero writes) and the target Area row is locked like a transfer
+destination, so a station configuration change, an Area deactivation
+and an addition each have one serial outcome.
 
 Both commands: invalid, stale or conflicting input performs no write;
 replay of the same `device_event_id` + same intent returns the
@@ -64,7 +67,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.application.common import device_event_id_text, flush, required_text
-from app.application.errors import ConflictError, IdempotencyConflictError, InvalidInputError
+from app.application.errors import (
+    ConflictError,
+    IdempotencyConflictError,
+    InvalidInputError,
+    NotFoundError,
+)
 from app.application.lineage import split_prefix
 from app.application.machine_processing import (
     FINGERPRINT_KEY,
@@ -96,6 +104,7 @@ from app.infrastructure.models import (
     Machine,
     PartMovement,
     QuantityFlow,
+    ScanStation,
 )
 
 # Immutable record of the addition's direction and the state it entered
@@ -451,7 +460,10 @@ def add_quantity(
     Order: input shape → fingerprint → idempotency fast path → station
     context → the in-Area precondition under the WITNESS flow row lock
     (held until COMMIT, so removing the last in-Area quantity and the
-    addition have one serial outcome) → the idempotency re-check → the
+    addition have one serial outcome) → the STATION row lock with the
+    authoritative active/binding re-check (a station deactivated or
+    rebound meanwhile is refused with nothing written) → the
+    idempotency re-check → the
     locked Area re-read → the
     Operation lock → the writes → COMMIT (or replay of a race winner).
     """
@@ -494,7 +506,35 @@ def add_quantity(
             " Add more quantity applies beside existing quantity only — use"
             " Receive Quantity or a transfer instead. Nothing was recorded."
         )
-    # Idempotency RE-CHECK after the blocking lock (SLICE1 §14), same
+    # The Scan Station row locked until COMMIT and RE-READ under the
+    # lock, judged AUTHORITATIVELY there (the unlocked read above may
+    # predate a concurrent configuration change): the station must
+    # still be active and still bound to exactly the Area the addition
+    # was resolved for — a station deactivated or rebound meanwhile is
+    # refused with nothing written, so a `QUANTITY_ADJUSTED` can never
+    # carry the `station_id` of a station that no longer belongs to
+    # its Area. The rebinding/deactivation UPDATE blocks behind this
+    # lock, so a configuration change and an addition have one serial
+    # outcome. Lock position: witness flow → STATION → Area →
+    # Operation — the established order.
+    locked_station = session.get(
+        ScanStation, station_id, with_for_update=True, populate_existing=True
+    )
+    if locked_station is None:  # pragma: no cover - it existed on the read above
+        raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
+    station = locked_station
+    if not station.is_active:
+        raise ConflictError(
+            f"Scan Station '{station_id}' is inactive and accepts no production use."
+            " Nothing was recorded."
+        )
+    if station.area_id != area.id:
+        raise ConflictError(
+            f"Scan Station '{station_id}' is no longer bound to Area '{area.name}' —"
+            " its configuration changed since the addition was prepared. Reload the"
+            " station and confirm the addition again. Nothing was recorded."
+        )
+    # Idempotency RE-CHECK after the blocking locks (SLICE1 §14), same
     # protocol as every command that waits on a row lock: a transport
     # retry that raced the original submission replays it here.
     committed = committed_command(session, event_id)

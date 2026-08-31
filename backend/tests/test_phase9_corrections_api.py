@@ -29,7 +29,12 @@ per IMPLEMENTATION_ROADMAP Phase 9 and PROJECT_PROFILE §8.11, §11, §14:
   WITNESS flow row lock makes "the last ACTIVE quantity leaves the
   Area" and "Add more quantity" one serial outcome in both orders — an
   addition never commits on a stale precondition, and the loser writes
-  nothing.
+  nothing;
+- the addition's station precondition under concurrency: the Scan
+  Station row lock with its under-lock active/binding re-check makes a
+  station rebind/deactivation and an addition one serial outcome in
+  both orders — a `QUANTITY_ADJUSTED` never carries the station of an
+  Area it no longer belongs to, and a refused addition writes nothing.
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
@@ -1008,4 +1013,191 @@ def test_addition_witness_lock_serializes_the_remover_behind_the_commit(
     # + scrapped 10.
     assert _active_total(db_engine, released.part_number) == 5
     assert _resolve(client, material, released.part_number)["scrapped_quantity"] == 10
+    _assert_projection_matches_replay(db_engine)
+
+
+# ---------------------------------------------------------------------------
+# Addition versus a Scan Station reconfiguration (the station lock)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reconfigure", "restore", "refusal"),
+    [
+        pytest.param(
+            lambda other: {"area_id": other.area_id},
+            lambda cell: {"area_id": cell.area_id},
+            "no longer bound to Area",
+            id="rebound",
+        ),
+        pytest.param(
+            lambda other: {"is_active": False},
+            lambda cell: {"is_active": True},
+            "inactive and accepts no production use",
+            id="deactivated",
+        ),
+    ],
+)
+def test_addition_rejects_a_station_reconfigured_before_its_authoritative_lock(
+    client: TestClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    reconfigure: Callable[[Any], dict[str, Any]],
+    restore: Callable[[Any], dict[str, Any]],
+    refusal: str,
+) -> None:
+    """The configuration change wins the race: the station is rebound
+    to another Area (or deactivated) AFTER the addition's unlocked
+    station read but BEFORE its authoritative station lock — the
+    under-lock re-check refuses the addition with zero writes, so a
+    `QUANTITY_ADJUSTED` never carries the station of an Area it no
+    longer belongs to, and the refused id keeps no idempotency
+    residue."""
+    from app.application import transfers
+
+    cell = _Cell(client)
+    other = _Cell(client)
+    released = _release(client, cell, quantity=10)
+    addition_event = str(uuid.uuid4())
+
+    pause = _Pause(transfers.require_production_station)
+    monkeypatch.setattr("app.application.quantity_events.require_production_station", pause)
+    results: dict[str, Any] = {}
+    addition = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "addition",
+            lambda: _add(client, cell, released.part_number, 5, device_event_id=addition_event),
+        ),
+    )
+    addition.start()
+    # The addition paused after its unlocked station read: the
+    # configuration change commits meanwhile.
+    assert pause.first_inside.wait(timeout=20)
+    changed = client.patch(f"/api/scan-stations/{cell.station_id}", json=reconfigure(other))
+    assert changed.status_code == 200, changed.text
+    pause.let_first_finish.set()
+    addition.join(timeout=30)
+    assert not addition.is_alive()
+
+    response = results["addition"]
+    assert not isinstance(response, Exception), response
+    assert response.status_code == 409, response.text
+    assert refusal in response.json()["detail"]
+    # Zero writes: no QUANTITY_ADJUSTED row, nothing under the
+    # addition's device_event_id, the existing quantity untouched.
+    with db_engine.connect() as connection:
+        movements = models.PartMovement.__table__
+        assert (
+            connection.execute(
+                sa.select(sa.func.count())
+                .select_from(movements)
+                .where(
+                    movements.c.part_number == released.part_number,
+                    movements.c.movement_type == "QUANTITY_ADJUSTED",
+                )
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                sa.select(sa.func.count())
+                .select_from(movements)
+                .where(movements.c.device_event_id == addition_event)
+            ).scalar_one()
+            == 0
+        )
+    assert _active_total(db_engine, released.part_number) == 10
+    _assert_projection_matches_replay(db_engine)
+    # No idempotency residue: with the configuration restored, the SAME
+    # id with the SAME payload records a fresh addition.
+    restored = client.patch(f"/api/scan-stations/{cell.station_id}", json=restore(cell))
+    assert restored.status_code == 200, restored.text
+    retried = _add(client, cell, released.part_number, 5, device_event_id=addition_event)
+    assert retried.status_code == 201, retried.text
+    assert _active_total(db_engine, released.part_number) == 15
+    _assert_projection_matches_replay(db_engine)
+
+
+def test_addition_station_lock_serializes_a_concurrent_rebind(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The addition wins the race: it holds the Scan Station row lock
+    until COMMIT, so a concurrent rebind BLOCKS and applies only after
+    the addition committed — the `QUANTITY_ADJUSTED` was recorded into
+    the Area the station was still bound to, the outcome equal to the
+    serial order "addition, then rebind"."""
+    from app.application import transfers
+
+    cell = _Cell(client)
+    other = _Cell(client)
+    released = _release(client, cell, quantity=10)
+
+    # Pause the addition AFTER the Operation resolution: it now holds
+    # the witness flow, station, Area and Operation locks, uncommitted.
+    pause = _Pause(transfers.resolve_arrival_operation)
+    monkeypatch.setattr("app.application.quantity_events.resolve_arrival_operation", pause)
+    results: dict[str, Any] = {}
+    addition = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "addition",
+            lambda: _add(client, cell, released.part_number, 5),
+        ),
+    )
+    addition.start()
+    assert pause.first_inside.wait(timeout=20)
+    rebind = threading.Thread(
+        target=_run_collecting,
+        args=(
+            results,
+            "rebind",
+            lambda: client.patch(
+                f"/api/scan-stations/{cell.station_id}", json={"area_id": other.area_id}
+            ),
+        ),
+    )
+    rebind.start()
+    # The rebinding UPDATE needs the station row lock and must wait for
+    # the addition's COMMIT.
+    rebind.join(timeout=1.0)
+    assert rebind.is_alive(), "the rebind should block behind the station row lock"
+    pause.let_first_finish.set()
+    addition.join(timeout=30)
+    rebind.join(timeout=30)
+    assert not addition.is_alive() and not rebind.is_alive()
+
+    added = results["addition"]
+    rebound = results["rebind"]
+    assert not isinstance(added, Exception), added
+    assert not isinstance(rebound, Exception), rebound
+    # Serial order "addition, then rebind": the addition recorded into
+    # the Area the station was bound to at its COMMIT, the rebind
+    # applied afterwards.
+    assert added.status_code == 201, added.text
+    assert rebound.status_code == 200, rebound.text
+    body = added.json()
+    assert body["area_id"] == cell.area_id
+    assert body["station_id"] == cell.station_id
+    new_flow = int(body["quantity_flow_id"])
+    row = _flow_row(db_engine, new_flow)
+    assert row.status == "ACTIVE"
+    assert row.current_area_id == cell.area_id
+    with db_engine.connect() as connection:
+        movement = connection.execute(
+            sa.select(models.PartMovement.__table__).where(
+                models.PartMovement.__table__.c.quantity_flow_id == new_flow
+            )
+        ).one()
+        station_row = connection.execute(
+            sa.select(models.ScanStation.__table__).where(
+                models.ScanStation.__table__.c.station_id == cell.station_id
+            )
+        ).one()
+    assert movement.to_area_id == cell.area_id
+    assert movement.station_id == cell.station_id
+    assert station_row.area_id == other.area_id
+    assert _active_total(db_engine, released.part_number) == 15
     _assert_projection_matches_replay(db_engine)
