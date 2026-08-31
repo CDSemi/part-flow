@@ -51,8 +51,20 @@ class MovementType(StrEnum):
     result). Neither is a position change: a lineage event keeps the
     Area, the Machine, the Operation and the holding state of the
     quantity it carries, which are derived by following the lineage to
-    the last position-bearing Movement. Later phases widen this
-    additively (REVERSED, STOCKED, ...); none of those values exist yet.
+    the last position-bearing Movement. Phase 9 adds the three
+    correction/quantity-event types (PROJECT_PROFILE §8.11, §11, §16):
+    SCRAPPED (damaged quantity removed from active production — the
+    flow, or the split-off part, closes), QUANTITY_ADJUSTED (the
+    intentional, reasoned addition of physical quantity — direction
+    INCREASE, recorded in the Movement metadata — introducing a new
+    QuantityFlow exactly like a RECEIVED does, never altering any
+    requested quantity), and REVERSED (the compensating Movement of a
+    command-level Undo: one REVERSED row per original Movement,
+    referencing it through ``reverses_movement_id``; the original is
+    preserved and the derived state is restored by EXCLUDING the
+    reversed pair from every derivation, never by re-stating state on
+    the REVERSED row). Later phases widen this additively (STOCKED,
+    ...); none of those values exist yet.
     """
 
     RECEIVED = "RECEIVED"
@@ -62,6 +74,35 @@ class MovementType(StrEnum):
     AREA_COMPLETED = "AREA_COMPLETED"
     SPLIT = "SPLIT"
     MERGED = "MERGED"
+    SCRAPPED = "SCRAPPED"
+    QUANTITY_ADJUSTED = "QUANTITY_ADJUSTED"
+    REVERSED = "REVERSED"
+
+
+class MovementReason(StrEnum):
+    """Typed, optional movement intent (PROJECT_PROFILE §8.11, §14).
+
+    First value REPAIR: an explicit return of quantity to a previously
+    visited Area to correct earlier work — always ``movement_type =
+    TRANSFERRED``, always chosen explicitly by the user (never inferred
+    from route history), never a Work Order Demand and never a Request
+    Type. The free-text explanation stays in the separate ``reason``
+    column and is mandatory for a Repair.
+    """
+
+    REPAIR = "REPAIR"
+
+
+class AdjustmentDirection(StrEnum):
+    """Direction of a ``QUANTITY_ADJUSTED`` Movement (PROJECT_PROFILE §8.11).
+
+    Phase 9 records only INCREASE (the intentional addition of physical
+    quantity); the direction lives in the Movement metadata
+    (``adjustment.direction``). Removal of damaged quantity is never an
+    adjustment — it is the canonical ``SCRAPPED`` event.
+    """
+
+    INCREASE = "INCREASE"
 
 
 class LineageRelation(StrEnum):
@@ -122,15 +163,22 @@ class QuantityFlowStatus(StrEnum):
     ACTIVE is the creation default (SLICE1_DATA_MODEL §9). Phase 8 adds
     the two consumption closures: SPLIT (the flow was consumed into its
     child flows) and MERGED (the flow was consumed into a resulting
-    flow). A closed flow keeps its history and its last position but
-    is never active inventory again; `closed_at` is set exactly for a
-    non-ACTIVE status (CHECK). Later closures (STOCKED, ...) arrive
-    with their phases.
+    flow). Phase 9 adds SCRAPPED (the flow's damaged quantity was
+    removed from active production by a confirmed Scrap) and REVERSED
+    (the command that CREATED the flow — a SPLIT, a MERGED or a
+    QUANTITY_ADJUSTED addition — was undone, so the flow never counts
+    as quantity again; a flow closed by a command that is later undone
+    reopens as ACTIVE instead). A closed flow keeps its history and its
+    last position but is never active inventory again; `closed_at` is
+    set exactly for a non-ACTIVE status (CHECK). Later closures
+    (STOCKED, ...) arrive with their phases.
     """
 
     ACTIVE = "ACTIVE"
     SPLIT = "SPLIT"
     MERGED = "MERGED"
+    SCRAPPED = "SCRAPPED"
+    REVERSED = "REVERSED"
 
 
 class WorkOrderStatus(StrEnum):

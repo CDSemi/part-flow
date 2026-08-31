@@ -122,7 +122,7 @@ from app.infrastructure.models import (
 FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
 
-CommandKind = Literal["ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE"]
+CommandKind = Literal["ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE", "SCRAP", "ADD", "UNDO"]
 
 _MOVEMENT_TYPE_BY_KIND: Final[dict[CommandKind, MovementType]] = {
     "ASSIGN": MovementType.ASSIGNED_TO_MACHINE,
@@ -397,6 +397,16 @@ def no_longer_active(flow: QuantityFlow) -> str:
             f"Quantity Flow {flow.id} was merged into another quantity and is no"
             " longer active — act on the merged quantity. Reload the station and"
             " scan again. Nothing was recorded."
+        )
+    if flow.status == QuantityFlowStatus.SCRAPPED:
+        return (
+            f"Quantity Flow {flow.id} was scrapped and left active production."
+            " Reload the station and scan again. Nothing was recorded."
+        )
+    if flow.status == QuantityFlowStatus.REVERSED:
+        return (
+            f"Quantity Flow {flow.id} no longer exists: the action that created it"
+            " was reversed. Reload the station and scan again. Nothing was recorded."
         )
     return f"Quantity Flow {flow.id} is no longer active. Nothing was recorded."
 

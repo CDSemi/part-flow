@@ -1470,9 +1470,9 @@ def test_queued_quantity_transfers_with_transferred_alone(
     assert response.json()["completed_movement_id"] is None
     assert response.json()["completed_machine_id"] is None
     columns = {column.name for column in models.PartMovement.__table__.columns}
-    assert columns.isdisjoint(
-        {"worker_id", "scan_session_id", "movement_reason", "reverses_movement_id"}
-    )
+    # movement_reason / reverses_movement_id arrived with Phase 9; the
+    # Worker columns stay deferred (Phase 13).
+    assert columns.isdisjoint({"worker_id", "scan_session_id"})
     assert "parent_flow_id" not in {c.name for c in models.QuantityFlow.__table__.columns}
 
 

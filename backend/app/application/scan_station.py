@@ -57,8 +57,8 @@ placeholder).
 
 from typing import Final, Literal, NamedTuple
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, aliased
 
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
@@ -73,6 +73,7 @@ from app.application.projections import (
     effective_latest_movements,
     origin_flow_ids,
     processing_state_of,
+    visited_area_ids,
 )
 from app.application.transfers import (
     RouteStatus,
@@ -168,7 +169,7 @@ def part_number_from_scan(barcode: object | None, part_number: object | None) ->
     return canonical_part_number(scanned[len(PART_NUMBER_BARCODE_PREFIX) :])
 
 
-FlowAction = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
+FlowAction = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER", "SCRAP"]
 
 # The actions valid for a flow by its derived state (PROJECT_PROFILE
 # §12 Area Processing States; §15 PN-first). TRANSFER is recorded at
@@ -177,12 +178,14 @@ FlowAction = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
 # it completes implicitly (AREA_COMPLETED + TRANSFERRED), from QUEUED it
 # leaves unprocessed exactly as in Phase 5. PROCESSING (an Area without
 # Machines, Phase 7) offers the direct-processing DONE — no ASSIGN and
-# no QUEUE ever exist there.
+# no QUEUE ever exist there. SCRAP (Phase 9) removes damaged quantity
+# from active production and is valid in every state — a partial scrap
+# splits inside the command and the remainder keeps its state.
 _ACTIONS_BY_STATE: Final[dict[ProcessingState, tuple[FlowAction, ...]]] = {
-    ProcessingState.QUEUED: ("ASSIGN", "TRANSFER"),
-    ProcessingState.PROCESSING: ("DONE", "TRANSFER"),
-    ProcessingState.ON_MACHINE: ("DONE", "QUEUE", "TRANSFER"),
-    ProcessingState.READY_TO_TRANSFER: ("TRANSFER",),
+    ProcessingState.QUEUED: ("ASSIGN", "TRANSFER", "SCRAP"),
+    ProcessingState.PROCESSING: ("DONE", "TRANSFER", "SCRAP"),
+    ProcessingState.ON_MACHINE: ("DONE", "QUEUE", "TRANSFER", "SCRAP"),
+    ProcessingState.READY_TO_TRANSFER: ("TRANSFER", "SCRAP"),
 }
 
 
@@ -238,6 +241,12 @@ class TransferCandidate(NamedTuple):
     # The Operation the destination resolves to without a choice, if
     # any; None means the operator must choose among ``operations``.
     suggested_operation_id: int | None
+    # Phase 9 Repair (PROJECT_PROFILE §14): True when the station's
+    # Area is one this quantity actually visited before (effective,
+    # lineage-aware history) — only then may the station offer `Return
+    # quantity for repair` for this candidate. The intent itself stays
+    # an explicit operator choice, never a suggestion.
+    repair_available: bool
     work_order: WorkOrderContext | None
 
 
@@ -266,6 +275,29 @@ class ScanResolution(NamedTuple):
     # offers the combine action for exactly these; it never judges
     # compatibility itself, and nothing is ever combined automatically.
     combine_groups: list[list[int]]
+    # Phase 9: the PN's total scrapped quantity (net of reversed
+    # scraps) — displayed wherever the PN is presented operationally
+    # (PROJECT_PROFILE §11 Scrap).
+    scrapped_quantity: int
+
+
+def scrapped_quantity_of(session: Session, part_number: str) -> int:
+    """The PN's total scrapped quantity, net of reversed scraps (Phase 9).
+
+    The sum of every effective ``SCRAPPED`` Movement of the PN — a
+    scrap that was undone (its row referenced by a ``REVERSED``) never
+    counts. This is the `scrapped` term of the §11 reconciliation
+    `introduced = active + stocked + scrapped`.
+    """
+    reversal = aliased(PartMovement)
+    total = session.scalar(
+        select(func.coalesce(func.sum(PartMovement.quantity), 0)).where(
+            PartMovement.part_number == part_number,
+            PartMovement.movement_type == MovementType.SCRAPPED,
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+    )
+    return int(total or 0)
 
 
 def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> dict[int, Operation]:
@@ -393,6 +425,7 @@ def resolve_part_number_scan(
                 expected_next_area=_area(expected.area_id) if expected is not None else None,
                 expected_operation_id=expected.operation_id if expected is not None else None,
                 suggested_operation_id=suggested_operation_id(operations, assessment),
+                repair_available=area.id in visited_area_ids(session, flow.id),
                 work_order=contexts.get(flow.id),
             )
         )
@@ -428,6 +461,7 @@ def resolve_part_number_scan(
         combine_groups=combinable_groups(
             session, in_area_flows, latest, direct_processing=area.id not in machine_areas
         ),
+        scrapped_quantity=scrapped_quantity_of(session, pn),
     )
 
 

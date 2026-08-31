@@ -418,7 +418,16 @@ class TestMovementShape:
         seed = _Seed(connection)
         movement_id = _insert(connection, seed.movement(movement_type, direct=direct))
         table = models.PartMovement.__table__
-        row = connection.execute(sa.select(table).where(table.c.id == movement_id)).one()
+        # Column-explicit: the model has later-phase columns the pinned
+        # Phase 7 schema does not.
+        row = connection.execute(
+            sa.select(
+                table.c.movement_type,
+                table.c.command_sequence,
+                table.c.source_machine_id,
+                table.c.destination_machine_id,
+            ).where(table.c.id == movement_id)
+        ).one()
         assert row.movement_type == movement_type
         assert row.command_sequence == 1
         if movement_type == "AREA_COMPLETED":

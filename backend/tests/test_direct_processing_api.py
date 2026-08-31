@@ -395,7 +395,7 @@ def test_released_quantity_in_an_area_without_machines_is_processing(
     assert flow["machine_id"] is None
     assert flow["operation"]["id"] == plating.operation_id
     assert flow["operation"]["is_active"] is True
-    assert flow["available_actions"] == ["DONE", "TRANSFER"]
+    assert flow["available_actions"] == ["DONE", "TRANSFER", "SCRAP"]
     history = _movements(db_engine, flow_id)
     assert [m.movement_type for m in history] == ["RECEIVED"]
     assert history[0].operation_id == plating.operation_id
@@ -404,7 +404,7 @@ def test_released_quantity_in_an_area_without_machines_is_processing(
     resolved = _resolve_pn(client, plating.station_id, pn)
     assert resolved["resolution"] == "ALREADY_IN_AREA"
     assert resolved["in_area"][0]["processing_state"] == "PROCESSING"
-    assert resolved["in_area"][0]["available_actions"] == ["DONE", "TRANSFER"]
+    assert resolved["in_area"][0]["available_actions"] == ["DONE", "TRANSFER", "SCRAP"]
     assert resolved["requires_selection"] is False
 
     inventory = _inventory(client, plating.area_id)
@@ -558,7 +558,7 @@ def test_direct_done_records_one_machine_less_completion(
     assert flow_row.current_machine_id is None
     flow = _inventory_flow(client, plating.area_id, flow_id)
     assert flow["processing_state"] == "READY_TO_TRANSFER"
-    assert flow["available_actions"] == ["TRANSFER"]
+    assert flow["available_actions"] == ["TRANSFER", "SCRAP"]
     inventory = _inventory(client, plating.area_id)
     assert inventory["processing_quantity"] == 0 and inventory["finished_quantity"] == 7
     assert inventory["machines"] == [] and inventory["queued_quantity"] == 0
@@ -1197,7 +1197,7 @@ def test_the_area_mode_follows_from_its_active_machines(
     assert _context(client, cell.station_id)["has_machines"] is True
     flow = _inventory_flow(client, cell.area_id, flow_id)
     assert flow["processing_state"] == "QUEUED"
-    assert flow["available_actions"] == ["ASSIGN", "TRANSFER"]
+    assert flow["available_actions"] == ["ASSIGN", "TRANSFER", "SCRAP"]
     inventory = _inventory(client, cell.area_id)
     assert inventory["queued_quantity"] == 5 and inventory["processing_quantity"] == 0
     assert [card["machine"]["id"] for card in inventory["machines"]] == [machine_id]
@@ -1210,7 +1210,7 @@ def test_the_area_mode_follows_from_its_active_machines(
     assert _context(client, cell.station_id)["has_machines"] is False
     flow = _inventory_flow(client, cell.area_id, flow_id)
     assert flow["processing_state"] == "PROCESSING"
-    assert flow["available_actions"] == ["DONE", "TRANSFER"]
+    assert flow["available_actions"] == ["DONE", "TRANSFER", "SCRAP"]
     assert _inventory(client, cell.area_id)["machines"] == []
     _assert_replay_matches(db_engine, flow_id, ProcessingState.PROCESSING)
     assert [m.movement_type for m in _movements(db_engine, flow_id)] == ["RECEIVED"]

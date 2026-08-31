@@ -99,6 +99,46 @@ Phase 8 — partial quantity and the explicit merge:
   resolution reports ``combine_groups`` — the in-Area flows the server
   judges combinable by the same rule — so the station offers
   `Combine quantities` for exactly those.
+
+Phase 9 — Undo, corrections, and auditable quantity events
+(PROJECT_PROFILE §8.11, §11, §14, §16):
+
+- the transfer accepts the explicit Repair intent (``repair`` +
+  mandatory ``repair_reason``): the same command records
+  ``movement_reason = REPAIR`` and the reason on the ``TRANSFERRED``
+  row; 409 when the destination was never visited by the quantity —
+  Repair returns quantity to correct earlier work, anything else is a
+  normal transfer. The PN resolution marks each transfer candidate
+  ``repair_available`` (the station's Area is previously visited) and
+  reports the PN's ``scrapped_quantity`` (net of reversed scraps);
+- ``POST /scan-stations/{station_id}/scraps`` — one confirmed Scrap =
+  ONE auditable ``SCRAPPED`` operation with its mandatory reason; the
+  flow (or the split-off part — partial via the same in-command SPLIT)
+  closes and leaves active production, history and lineage complete;
+- ``POST /scan-stations/{station_id}/quantity-additions`` — found
+  physical quantity enters as a NEW FLOATING QuantityFlow with a
+  ``QUANTITY_ADJUSTED · INCREASE`` Movement (mandatory reason, no
+  demand change ever); 409 when the PN has no active quantity in the
+  station's Area (that is the Receive Quantity intake, not an
+  addition);
+- ``GET /scan-stations/{station_id}/undo-preview/{device_event_id}`` —
+  the §16 summary confirmation of undoing one complete command:
+  original action, quantity, source/destination, Machine, timestamp,
+  the exact effect of the reversal, and whether Undo is currently
+  eligible (with the reason when it is not). A read, no locks;
+- ``POST /scan-stations/{station_id}/undos`` — reverse the COMPLETE
+  command recorded under ``reverses_device_event_id`` as one: a
+  compensating ``REVERSED`` Movement per original row (originals
+  preserved, at most one reversal each — DB-enforced), flows the
+  command closed reopen, flows it created close as ``REVERSED``, and
+  the projection is restored from the reversal-aware derivation. 201
+  fresh / 200 idempotent replay of the Undo's own ``device_event_id``
+  / 409 mismatched reuse; 409 with nothing written when the command is
+  ineligible: recorded by Management or at another station, already
+  reversed, itself a reversal, no longer the most recent operation of
+  its quantity, or restoring onto a retired Machine or into a
+  deactivated Area. No Worker identity and no role authorization
+  exist yet (Phases 13/14) — nothing here pretends otherwise.
 """
 
 import datetime
@@ -108,7 +148,15 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
 from app.api.dependencies import SessionDep
-from app.application import direct_processing, machine_processing, merges, scan_station, transfers
+from app.application import (
+    direct_processing,
+    machine_processing,
+    merges,
+    quantity_events,
+    scan_station,
+    transfers,
+    undo,
+)
 from app.application.scan_station import FlowInArea, MachineInventory, WorkOrderContext
 from app.domain.enums import MachineOperationalState
 from app.infrastructure.models import Area, Machine, Operation
@@ -145,8 +193,9 @@ class WorkOrderContextResponse(BaseModel):
 
 
 ProcessingStateLiteral = Literal["QUEUED", "PROCESSING", "ON_MACHINE", "READY_TO_TRANSFER"]
-FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER"]
+FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER", "SCRAP"]
 MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
+FlowStatusLiteral = Literal["ACTIVE", "SPLIT", "MERGED", "SCRAPPED", "REVERSED"]
 
 
 class RecordedOperationRef(BaseModel):
@@ -331,6 +380,9 @@ class TransferCandidateResponse(BaseModel):
     # The Operation the transfer resolves to without a choice; null
     # means the operator must choose one of ``operations``.
     suggested_operation_id: int | None
+    # Phase 9: the station's Area was previously visited by this
+    # quantity — only then is `Return quantity for repair` offered.
+    repair_available: bool
     work_order: WorkOrderContextResponse | None
 
 
@@ -351,6 +403,8 @@ class ScanResolveResponse(BaseModel):
     # Phase 8: the groups of in-Area flows the server judges combinable
     # (`Combine quantities`); the client offers the action for these only.
     combine_groups: list[list[int]]
+    # Phase 9: the PN's total scrapped quantity, net of reversed scraps.
+    scrapped_quantity: int
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -382,6 +436,7 @@ def resolve_scan(
                 ),
                 expected_operation_id=candidate.expected_operation_id,
                 suggested_operation_id=candidate.suggested_operation_id,
+                repair_available=candidate.repair_available,
                 work_order=_work_order(candidate.work_order),
             )
             for candidate in result.candidates
@@ -391,6 +446,7 @@ def resolve_scan(
         transfer_blocked_reason=result.transfer_blocked_reason,
         requires_selection=result.requires_selection,
         combine_groups=result.combine_groups,
+        scrapped_quantity=result.scrapped_quantity,
     )
 
 
@@ -468,6 +524,12 @@ class AreaTransferRequest(BaseModel):
     # mandatory reason (§17 step 7) recorded on the Movement.
     confirm_route_deviation: StrictBool = False
     route_deviation_reason: str | None = None
+    # Phase 9 Repair (PROJECT_PROFILE §14): the explicit `Return
+    # quantity for repair` intent — the same transfer command recorded
+    # as `movement_reason = REPAIR` with its mandatory reason. Never
+    # inferred; the destination must be previously visited.
+    repair: StrictBool = False
+    repair_reason: str | None = None
     device_event_id: str
 
 
@@ -495,6 +557,9 @@ class AreaTransferResponse(BaseModel):
     source_quantity_flow_id: int | None
     remainder_quantity_flow_id: int | None
     remainder_quantity: int | None
+    # Present for a Repair (Phase 9): the typed intent and its reason.
+    movement_reason: str | None
+    reason: str | None
     device_event_id: str
     occurred_at: datetime.datetime
 
@@ -517,6 +582,8 @@ def transfer_to_station_area(
         operation_id=body.operation_id,
         confirm_route_deviation=body.confirm_route_deviation,
         route_deviation_reason=body.route_deviation_reason,
+        repair=body.repair,
+        repair_reason=body.repair_reason,
         device_event_id=body.device_event_id,
     )
     response.status_code = 201 if result.created else 200
@@ -536,6 +603,8 @@ def transfer_to_station_area(
         source_quantity_flow_id=result.source_quantity_flow_id,
         remainder_quantity_flow_id=result.remainder_quantity_flow_id,
         remainder_quantity=result.remainder_quantity,
+        movement_reason=result.movement_reason,
+        reason=result.reason,
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )
@@ -743,6 +812,322 @@ def merge_flows(
         station_id=result.station_id,
         processing_state=result.processing_state.value,
         source_quantity_flow_ids=result.source_quantity_flow_ids,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scrap and quantity addition (Phase 9)
+# ---------------------------------------------------------------------------
+
+
+class ScrapRequest(BaseModel):
+    """The confirmed Scrap of damaged quantity — one auditable operation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    quantity_flow_id: int
+    # The total counted with PF:SCRAP; smaller than the flow's it
+    # splits the flow first (Phase 8) and the remainder keeps its state.
+    quantity: StrictInt
+    # The one common scrap reason — mandatory.
+    reason: str
+    device_event_id: str
+
+
+class ScrapResponse(BaseModel):
+    """The committed Scrap, read from its immutable SCRAPPED Movement."""
+
+    movement_id: int
+    # The flow the scrap closed (the source, or the selected child of a
+    # partial scrap).
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    area_id: int
+    # The Machine the scrapped quantity left; null unless ON_MACHINE.
+    machine_id: int | None
+    reason: str
+    station_id: str
+    # Present when only a part of the source was scrapped (Phase 8).
+    source_quantity_flow_id: int | None
+    remainder_quantity_flow_id: int | None
+    remainder_quantity: int | None
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+@router.post("/scan-stations/{station_id}/scraps")
+def scrap_quantity(
+    station_id: str, body: ScrapRequest, session: SessionDep, response: Response
+) -> ScrapResponse:
+    result = quantity_events.scrap_flow(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_id=body.quantity_flow_id,
+        quantity=body.quantity,
+        reason=body.reason,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return ScrapResponse(
+        movement_id=result.movement_id,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        area_id=result.area_id,
+        machine_id=result.machine_id,
+        reason=result.reason,
+        station_id=result.station_id,
+        source_quantity_flow_id=result.source_quantity_flow_id,
+        remainder_quantity_flow_id=result.remainder_quantity_flow_id,
+        remainder_quantity=result.remainder_quantity,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
+
+
+class QuantityAdditionRequest(BaseModel):
+    """The confirmed addition of found physical quantity (Add more quantity).
+
+    Recorded as `QUANTITY_ADJUSTED · INCREASE` on a NEW QuantityFlow —
+    never hidden as a transfer, never changing a requested quantity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    # No MAX and no default (GUI_DESIGN §4.7): the entered quantity.
+    quantity: StrictInt
+    # Mandatory.
+    reason: str
+    # Optional when the Area resolves it (single active Operation);
+    # required when several are configured.
+    operation_id: int | None = None
+    device_event_id: str
+
+
+class QuantityAdditionResponse(BaseModel):
+    """The committed addition, read from its immutable Movement."""
+
+    movement_id: int
+    # The NEW QuantityFlow the addition introduced.
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    area_id: int
+    operation_id: int
+    # QUEUED (Area with Machines) or PROCESSING (Area without).
+    processing_state: ProcessingStateLiteral
+    reason: str
+    station_id: str
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+@router.post("/scan-stations/{station_id}/quantity-additions")
+def add_quantity(
+    station_id: str, body: QuantityAdditionRequest, session: SessionDep, response: Response
+) -> QuantityAdditionResponse:
+    result = quantity_events.add_quantity(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity=body.quantity,
+        reason=body.reason,
+        operation_id=body.operation_id,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return QuantityAdditionResponse(
+        movement_id=result.movement_id,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        area_id=result.area_id,
+        operation_id=result.operation_id,
+        processing_state=result.processing_state.value,
+        reason=result.reason,
+        station_id=result.station_id,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Undo (Phase 9 — PROJECT_PROFILE §16)
+# ---------------------------------------------------------------------------
+
+
+class UndoMovementSummaryResponse(BaseModel):
+    """One original Movement of the command, for the summary confirmation."""
+
+    movement_id: int
+    movement_type: str
+    movement_reason: str | None
+    quantity: int
+    from_area: AreaRef | None
+    to_area: AreaRef
+    machine_id: int | None
+    operation_id: int
+
+
+class RestoredFlowResponse(BaseModel):
+    """The effect of the reversal on one Quantity Flow."""
+
+    quantity_flow_id: int
+    quantity: int
+    # ACTIVE: reopened/repositioned with the restored Area/Machine.
+    # REVERSED: the command created this flow, so it closes.
+    status: FlowStatusLiteral
+    current_area_id: int | None
+    current_machine_id: int | None
+
+
+class RestoredFlowPreviewResponse(BaseModel):
+    quantity_flow_id: int
+    quantity: int
+    status: FlowStatusLiteral
+    area: AreaRef | None
+    machine_id: int | None
+    processing_state: ProcessingStateLiteral | None
+
+
+class UndoPreviewResponse(BaseModel):
+    """The §16 summary confirmation of undoing one command — a read.
+
+    ``eligible`` says whether the Undo command would currently be
+    accepted and ``ineligible_reason`` why not; the command itself
+    re-judges everything under its row locks.
+    """
+
+    reverses_device_event_id: str
+    station_id: str
+    # The command kind as recorded (TRANSFER, ASSIGN, QUEUE, DONE,
+    # MERGE, SCRAP, ADD); null for a pre-Phase-6 row without one.
+    kind: str | None
+    part_number: str
+    quantity: int
+    occurred_at: datetime.datetime
+    eligible: bool
+    ineligible_reason: str | None
+    movements: list[UndoMovementSummaryResponse]
+    restored: list[RestoredFlowPreviewResponse]
+
+
+@router.get("/scan-stations/{station_id}/undo-preview/{device_event_id}")
+def get_undo_preview(
+    station_id: str, device_event_id: str, session: SessionDep
+) -> UndoPreviewResponse:
+    result = undo.undo_preview(session, station_id, device_event_id)
+    return UndoPreviewResponse(
+        reverses_device_event_id=result.reverses_device_event_id,
+        station_id=result.station_id,
+        kind=result.kind,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        occurred_at=result.occurred_at,
+        eligible=result.eligible,
+        ineligible_reason=result.ineligible_reason,
+        movements=[
+            UndoMovementSummaryResponse(
+                movement_id=item.movement_id,
+                movement_type=item.movement_type,
+                movement_reason=item.movement_reason,
+                quantity=item.quantity,
+                from_area=_area_ref(item.from_area) if item.from_area is not None else None,
+                to_area=_area_ref(item.to_area),
+                machine_id=item.machine_id,
+                operation_id=item.operation_id,
+            )
+            for item in result.movements
+        ],
+        restored=[
+            RestoredFlowPreviewResponse(
+                quantity_flow_id=item.quantity_flow_id,
+                quantity=item.quantity,
+                status=item.status.value,
+                area=_area_ref(item.area) if item.area is not None else None,
+                machine_id=item.machine_id,
+                processing_state=(
+                    item.processing_state.value if item.processing_state is not None else None
+                ),
+            )
+            for item in result.restored
+        ],
+    )
+
+
+class UndoRequest(BaseModel):
+    """The confirmed reversal of one complete committed command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    # The command to reverse — every Movement recorded under it.
+    reverses_device_event_id: str
+    # The Undo's OWN idempotency key (a new production event).
+    device_event_id: str
+
+
+class ReversedMovementResponse(BaseModel):
+    movement_id: int
+    reverses_movement_id: int
+    original_movement_type: str
+
+
+class UndoResponse(BaseModel):
+    """The committed Undo, read from its immutable REVERSED Movements."""
+
+    reverses_device_event_id: str
+    # The reversed command's kind as recorded (TRANSFER, ASSIGN, ...).
+    reversed_kind: str | None
+    part_number: str
+    station_id: str
+    movements: list[ReversedMovementResponse]
+    flows: list[RestoredFlowResponse]
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+@router.post("/scan-stations/{station_id}/undos")
+def undo_production_command(
+    station_id: str, body: UndoRequest, session: SessionDep, response: Response
+) -> UndoResponse:
+    result = undo.undo_command(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        reverses_device_event_id=body.reverses_device_event_id,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return UndoResponse(
+        reverses_device_event_id=result.reverses_device_event_id,
+        reversed_kind=result.reversed_kind,
+        part_number=result.part_number,
+        station_id=result.station_id,
+        movements=[
+            ReversedMovementResponse(
+                movement_id=item.movement_id,
+                reverses_movement_id=item.reverses_movement_id,
+                original_movement_type=item.original_movement_type,
+            )
+            for item in result.movements
+        ],
+        flows=[
+            RestoredFlowResponse(
+                quantity_flow_id=item.quantity_flow_id,
+                quantity=item.quantity,
+                status=item.status.value,
+                current_area_id=item.current_area_id,
+                current_machine_id=item.current_machine_id,
+            )
+            for item in result.flows
+        ],
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )

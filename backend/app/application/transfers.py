@@ -102,10 +102,19 @@ Rules owned here:
   `current_machine_id` cleared) is written in the same transaction as
   the Movements and stays rebuildable from Movement history alone
   (SLICE1 §15) — verified by the projection replay.
-- Explicitly NOT here (later phases): the explicit merge
-  (`app.application.merges`), Repair/Scrap/Undo (Phase 9), Worker
-  sessions, Stockroom `STOCKED` (Phase 10) — a transfer into a terminal
-  Area is therefore refused.
+- Repair (Phase 9, PROJECT_PROFILE §14): the explicit `repair` intent
+  records the SAME transfer command with `movement_reason = REPAIR`
+  and a mandatory reason on the `TRANSFERRED` row — no separate Repair
+  aggregate, workflow identity or Request Type. The destination must
+  be previously visited by the quantity (effective lineage-aware
+  history); partial Repair rides on the same SPLIT machinery; a route
+  deviation of a PLANNED flow is confirmed separately, exactly like a
+  normal transfer's.
+- Explicitly NOT here (their own modules / later phases): the explicit
+  merge (`app.application.merges`), Scrap and quantity additions
+  (`app.application.quantity_events`), Undo (`app.application.undo`),
+  Worker sessions (Phase 13), Stockroom `STOCKED` (Phase 10) — a
+  transfer into a terminal Area is therefore refused.
 """
 
 import datetime
@@ -143,8 +152,16 @@ from app.application.projections import (
     effective_latest_movement,
     is_actively_processing,
     processing_state_of,
+    reversed_movement_ids,
+    visited_area_ids,
 )
-from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus, RouteMode
+from app.domain.enums import (
+    MovementReason,
+    MovementType,
+    ProcessingState,
+    QuantityFlowStatus,
+    RouteMode,
+)
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     Area,
@@ -218,6 +235,11 @@ class AreaTransfer(NamedTuple):
     source_quantity_flow_id: int | None
     remainder_quantity_flow_id: int | None
     remainder_quantity: int | None
+    # Phase 9 Repair (PROJECT_PROFILE §14): the typed movement intent
+    # (`REPAIR`) and its mandatory free-text reason — both None for a
+    # normal transfer.
+    movement_reason: str | None
+    reason: str | None
     device_event_id: str
     occurred_at: datetime.datetime
     created: bool
@@ -306,6 +328,9 @@ def assess_route(session: Session, flow: QuantityFlow, target_area_id: int) -> R
         .where(
             PartMovement.quantity_flow_id == flow.id,
             PartMovement.assigned_route_step_id.is_not(None),
+            # An undone transfer never happened for the route position
+            # (Phase 9): the reversal restores the prior expectation.
+            PartMovement.id.not_in(reversed_movement_ids(flow.id)),
         )
         .order_by(PartMovement.id.desc())
         .limit(1)
@@ -441,6 +466,22 @@ def _resolve_operation(
     return operation
 
 
+def resolve_arrival_operation(
+    session: Session, area: Area, requested_operation_id: int | None
+) -> Operation:
+    """Resolve, lock and re-validate the Operation of a route-less arrival.
+
+    The same SLICE1 §12 resolution as the transfer destination — the
+    single active Operation, else an explicit choice, several without
+    one being an ambiguity that blocks the write — without any route
+    expectation. Used by the Phase 9 quantity addition, whose new flow
+    is FLOATING by definition.
+    """
+    return _resolve_operation(
+        session, area, RouteAssessment("FLOATING", None, None, None), requested_operation_id
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input normalization — pure shape checks, no database access
 # ---------------------------------------------------------------------------
@@ -462,12 +503,16 @@ def _request_fingerprint(
     quantity: int,
     operation_id: int | None,
     route_deviation_reason: str | None,
+    movement_reason: str | None,
+    reason: str | None,
 ) -> str:
     """Deterministic canonical hash of the normalized request (SLICE1 §14).
 
     Covers the whole CONFIRMED intent — station, flow, PN, source and
-    destination Area, quantity, Operation choice, and the deviation
-    reason when one was given. The explicit confirmation flag itself is
+    destination Area, quantity, Operation choice, the deviation
+    reason when one was given, and (Phase 9) the Repair intent with its
+    reason — a Repair and a normal transfer are different intents under
+    one ``device_event_id``. The explicit confirmation flag itself is
     intent-to-proceed, not request content (like the release's
     active-quantity confirmation), and is excluded.
     """
@@ -480,6 +525,8 @@ def _request_fingerprint(
         "quantity": quantity,
         "operation_id": operation_id,
         "route_deviation_reason": route_deviation_reason,
+        "movement_reason": movement_reason,
+        "reason": reason,
     }
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -546,6 +593,8 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
         source_quantity_flow_id=split.source_quantity_flow_id if split else None,
         remainder_quantity_flow_id=split.remainder_quantity_flow_id if split else None,
         remainder_quantity=split.remainder_quantity if split else None,
+        movement_reason=movement.movement_reason,
+        reason=movement.reason,
         device_event_id=movement.device_event_id,
         occurred_at=movement.occurred_at,
         created=created,
@@ -671,6 +720,8 @@ def transfer_to_station_area(
     operation_id: int | None,
     confirm_route_deviation: object,
     route_deviation_reason: str | None,
+    repair: object = False,
+    repair_reason: str | None = None,
     device_event_id: object,
 ) -> AreaTransfer:
     """Move a QuantityFlow — or a part of it — into the station's Area, ONE transaction.
@@ -680,12 +731,39 @@ def transfer_to_station_area(
     committed result and creates nothing — whatever happened to the
     station, Area or Operation since; a mismatched reuse is an explicit
     idempotency conflict that creates nothing.
+
+    Repair (Phase 9, PROJECT_PROFILE §14): with ``repair`` the SAME
+    command records the transfer as the explicit Repair intent —
+    ``movement_reason = REPAIR`` with the mandatory ``repair_reason``
+    on the ``TRANSFERRED`` row; there is no separate Repair aggregate,
+    no Request Type and no Work Order Demand. The destination must be
+    an Area the quantity actually visited before (its effective,
+    lineage-aware Movement history) — correcting earlier work is what
+    Repair means; any other move stays a normal transfer. The intent
+    is never inferred: a transfer into a previously visited Area
+    without the flag stays a normal transfer, and a Planned Route
+    deviation is confirmed separately exactly as for a normal transfer
+    (§17 — the Repair reason never doubles as the deviation reason).
     """
     # -- Pure input shape (no database) -------------------------------
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity)
     deviation_confirmed = required_flag(confirm_route_deviation, "confirm_route_deviation")
     reason = optional_text(route_deviation_reason)
+    repair_intent = required_flag(repair, "repair")
+    repair_text = optional_text(repair_reason)
+    if repair_intent and repair_text is None:
+        raise InvalidInputError(
+            "A Repair needs a reason. Enter why the quantity returns for repair —"
+            " nothing is recorded until then."
+        )
+    if not repair_intent and repair_text is not None:
+        raise InvalidInputError(
+            "A repair reason was given without the Repair intent. Choose 'Return"
+            " quantity for repair' explicitly, or remove the reason. Nothing was"
+            " transferred."
+        )
+    movement_reason = MovementReason.REPAIR.value if repair_intent else None
     event_id = device_event_id_text(device_event_id)
     fingerprint = _request_fingerprint(
         station_id=station_id,
@@ -696,6 +774,8 @@ def transfer_to_station_area(
         quantity=confirmed_quantity,
         operation_id=operation_id,
         route_deviation_reason=reason,
+        movement_reason=movement_reason,
+        reason=repair_text,
     )
 
     # -- Idempotency fast path (SLICE1 §14) ------------------------------
@@ -790,6 +870,18 @@ def transfer_to_station_area(
             f"Area '{target.name}' is inactive and cannot accept transferred quantity."
         )
     require_transfer_target(target)
+
+    # -- Repair destination (Phase 9, PROJECT_PROFILE §14) ---------------
+    # Repair returns quantity to a previously visited Area to correct
+    # earlier work; the effective, lineage-aware history decides what
+    # was visited (an undone transfer was no visit). Work at a new Area
+    # is a normal transfer, never a Repair.
+    if repair_intent and target.id not in visited_area_ids(session, flow.id):
+        raise ConflictError(
+            f"Area '{target.name}' is not an Area this quantity has been in before."
+            " A Repair returns quantity to a previously visited Area to correct"
+            " earlier work — use a normal transfer instead. Nothing was transferred."
+        )
 
     assessment = assess_route(session, flow, target.id)
     operation = _resolve_operation(session, target, assessment, operation_id)
@@ -904,6 +996,8 @@ def transfer_to_station_area(
             operation_id=operation.id,
             assigned_route_step_id=matched_step.id if matched_step is not None else None,
             station_id=station.station_id,
+            movement_reason=movement_reason,
+            reason=repair_text,
             occurred_at=func.now(),
             server_received_at=func.now(),
             device_event_id=event_id,

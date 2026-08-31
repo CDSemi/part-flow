@@ -21,13 +21,28 @@ up the lineage. Every read model and command derives the state from
 that effective Movement (`effective_latest_movements`), never from the
 lineage row itself, which is why a lineage row re-states neither the
 Machine nor the state.
+
+Reversal-aware derivation (Phase 9, PROJECT_PROFILE §16): a
+command-level Undo appends one compensating `REVERSED` Movement per
+original Movement (`reverses_movement_id`) and never touches the
+originals. The restored state is derived by EXCLUDING the reversed
+pair — every `REVERSED` row and every Movement one references — from
+the derivations: the effective position-bearing Movement of a flow
+whose newest command was undone is simply the Movement before that
+command, which restores the Area, the Machine, the Operation, the
+route position and the holding state at once, also through a lineage
+walk (an undone SPLIT/MERGED reopens its sources — their lineage
+edges no longer count, `consumed_flow_ids`). A `SCRAPPED` closes its
+flow, so it never bears an active position either. Nothing here reads
+state off a `REVERSED` row beyond its `to_area_id`, which by
+construction of the compensating motion is the restored Area.
 """
 
 from collections.abc import Iterable
 from typing import Final, NamedTuple
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Select, func, select
+from sqlalchemy.orm import Session, aliased
 
 from app.application.errors import ConflictError
 from app.application.machines import areas_with_machines
@@ -36,6 +51,30 @@ from app.infrastructure.models import PartMovement, QuantityFlowLineage
 
 # The two Movement types that record descent instead of a position.
 LINEAGE_MOVEMENT_TYPES: Final = (MovementType.SPLIT, MovementType.MERGED)
+
+# Movement types that never bear an active position: descent (Phase 8),
+# the removal from active production, and the compensating reversal
+# (Phase 9) — a flow whose newest effective Movement is one of these is
+# closed, or derives its position from an earlier Movement.
+NON_POSITION_BEARING_TYPES: Final = (
+    MovementType.SPLIT,
+    MovementType.MERGED,
+    MovementType.SCRAPPED,
+    MovementType.REVERSED,
+)
+
+
+def reversed_movement_ids(flow_id: int) -> Select[tuple[int | None]]:
+    """The Movements of one flow undone by a ``REVERSED`` row (subquery).
+
+    A compensating row always belongs to the same flow as its original,
+    so the per-flow filter is complete. Used with ``.not_in`` to
+    exclude the undone originals from every derivation.
+    """
+    return select(PartMovement.reverses_movement_id).where(
+        PartMovement.quantity_flow_id == flow_id,
+        PartMovement.reverses_movement_id.is_not(None),
+    )
 
 
 class CurrentPosition(NamedTuple):
@@ -51,7 +90,9 @@ def processing_state_of(movement_type: str, *, direct_processing: bool) -> Proce
 
     Only an ``ASSIGNED_TO_MACHINE`` puts quantity on a Machine and only
     an ``AREA_COMPLETED`` finishes it; every other Movement — the
-    arrival in an Area (``RECEIVED``, ``TRANSFERRED``) and the return
+    arrival in an Area (``RECEIVED``, ``TRANSFERRED``, and since
+    Phase 9 the ``QUANTITY_ADJUSTED`` addition, which arrives exactly
+    like a release) and the return
     from a Machine (``RELEASED_FROM_MACHINE``) — leaves it held by the
     Area: QUEUED in an Area with Machines (QUEUE_AND_ASSIGN), PROCESSING
     in an Area without Machines, which directly owns and processes the
@@ -59,11 +100,12 @@ def processing_state_of(movement_type: str, *, direct_processing: bool) -> Proce
     from the Area's active Machines — never configured). A NULL
     Machine alone never means queued: finished and directly processing
     quantity have no Machine either. A lineage event (``SPLIT``,
-    ``MERGED``) never reaches this function: the caller resolves the
+    ``MERGED``), a ``SCRAPPED`` and a ``REVERSED`` (Phase 9) never
+    reach this function: the caller resolves the
     position-bearing Movement first (`effective_latest_movements`).
     """
-    if movement_type in LINEAGE_MOVEMENT_TYPES:  # pragma: no cover - caller contract
-        raise ConflictError(f"{movement_type} is a lineage event and carries no holding state.")
+    if movement_type in NON_POSITION_BEARING_TYPES:  # pragma: no cover - caller contract
+        raise ConflictError(f"{movement_type} carries no holding state to derive.")
     if movement_type == MovementType.ASSIGNED_TO_MACHINE:
         return ProcessingState.ON_MACHINE
     if movement_type == MovementType.AREA_COMPLETED:
@@ -83,19 +125,32 @@ def is_actively_processing(state: ProcessingState) -> bool:
 
 
 def latest_movements(session: Session, flow_ids: Iterable[int] | None) -> dict[int, PartMovement]:
-    """The newest Movement per flow, lineage events INCLUDED (unlocked).
+    """The newest EFFECTIVE Movement per flow, lineage events INCLUDED (unlocked).
 
     "Latest" is the highest Movement id — the append-only BIGSERIAL
-    write order. ``None`` considers every flow. This is the row whose
-    ``to_area_id`` is the flow's current Area; the holding state and
-    the Machine come from `effective_latest_movements`.
+    write order — after excluding every ``REVERSED`` row and every
+    Movement one reverses (Phase 9: an undone command never bears
+    state; a ``REVERSED`` row's own ``to_area_id`` IS the restored
+    Area, but the Movement before the undone command states the same
+    Area, so exclusion keeps one uniform rule). ``None`` considers
+    every flow. A flow whose every Movement was reversed (its creating
+    command was undone) is absent — it is never active inventory. This
+    is the row whose ``to_area_id`` is the flow's current Area; the
+    holding state and the Machine come from
+    `effective_latest_movements`.
     """
     wanted = None if flow_ids is None else list(flow_ids)
     if wanted is not None and not wanted:
         return {}
-    latest = select(
-        PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id")
-    ).group_by(PartMovement.quantity_flow_id)
+    reversal = aliased(PartMovement)
+    latest = (
+        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
+        .where(
+            PartMovement.movement_type != MovementType.REVERSED,
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.quantity_flow_id)
+    )
     if wanted is not None:
         latest = latest.where(PartMovement.quantity_flow_id.in_(wanted))
     newest = latest.subquery()
@@ -106,19 +161,25 @@ def latest_movements(session: Session, flow_ids: Iterable[int] | None) -> dict[i
 
 
 def _latest_position_bearing(
-    session: Session, flow_id: int, before_movement_id: int | None
+    session: Session,
+    flow_id: int,
+    before_movement_id: int | None,
+    exclude_device_event_id: str | None,
 ) -> PartMovement | None:
     query = (
         select(PartMovement)
         .where(
             PartMovement.quantity_flow_id == flow_id,
-            PartMovement.movement_type.not_in(LINEAGE_MOVEMENT_TYPES),
+            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
+            PartMovement.id.not_in(reversed_movement_ids(flow_id)),
         )
         .order_by(PartMovement.id.desc())
         .limit(1)
     )
     if before_movement_id is not None:
         query = query.where(PartMovement.id < before_movement_id)
+    if exclude_device_event_id is not None:
+        query = query.where(PartMovement.device_event_id != exclude_device_event_id)
     return session.scalar(query)
 
 
@@ -139,22 +200,30 @@ def parent_flow_ids(session: Session, child_flow_id: int) -> list[int]:
     )
 
 
-def effective_latest_movement(session: Session, flow_id: int) -> PartMovement:
+def effective_latest_movement(
+    session: Session, flow_id: int, *, exclude_device_event_id: str | None = None
+) -> PartMovement:
     """The newest POSITION-BEARING Movement the flow's state follows.
 
-    The flow's own newest non-lineage Movement when it has one; else
+    The flow's own newest non-lineage, non-reversed Movement when it
+    has one; else
     the flow was created by a lineage event and inherits its parent's
     position: the parent's newest non-lineage Movement written before
     the child's creating Movement, recursively. A merge validated that
     every source held the same position (`app.application.merges`), so
     the lowest parent id is a deterministic, equivalent choice. Every
     flow ultimately descends from a released flow whose first Movement
-    is its ``RECEIVED``, so the walk always terminates on a Movement.
+    is its ``RECEIVED`` (or, Phase 9, a ``QUANTITY_ADJUSTED``
+    addition), so the walk always terminates on a Movement — except
+    for a flow whose whole history was reversed, which is closed and
+    never derived. ``exclude_device_event_id`` additionally ignores
+    one command's rows: the Undo command uses it to derive the state a
+    reversal restores BEFORE its compensating rows exist.
     """
     current = flow_id
     bound: int | None = None
     for _ in range(10_000):  # bounded defensively; lineage depth is tiny in practice
-        movement = _latest_position_bearing(session, current, bound)
+        movement = _latest_position_bearing(session, current, bound, exclude_device_event_id)
         if movement is not None:
             return movement
         parents = parent_flow_ids(session, current)
@@ -177,19 +246,72 @@ def effective_latest_movements(
 # ---------------------------------------------------------------------------
 
 
-def consumed_flow_ids(session: Session, flow_ids: Iterable[int] | None = None) -> set[int]:
-    """The flows history says were consumed — every parent of a lineage edge.
+def _reversed_command_ids() -> Select[tuple[str]]:
+    """The ``device_event_id`` of every command that was undone (subquery).
 
-    The stored lifecycle (`quantity_flows.status` SPLIT / MERGED) must
-    agree with this set: a flow is closed exactly when it was consumed.
+    A command is undone exactly when one of its Movements is referenced
+    by a ``REVERSED`` row (an Undo always reverses the complete
+    command, PROJECT_PROFILE §16). The append-only lineage edges of an
+    undone SPLIT/MERGED stay stored but no longer count.
     """
-    query = select(QuantityFlowLineage.parent_flow_id).distinct()
+    original = aliased(PartMovement)
+    return (
+        select(original.device_event_id)
+        .join(PartMovement, PartMovement.reverses_movement_id == original.id)
+        .distinct()
+    )
+
+
+def consumed_flow_ids(session: Session, flow_ids: Iterable[int] | None = None) -> set[int]:
+    """The flows history says were consumed — every parent of an EFFECTIVE edge.
+
+    An edge of an undone SPLIT/MERGED command (Phase 9) is void: its
+    parent was reopened by the reversal and counts as consumed no
+    longer. The stored lifecycle (`quantity_flows.status`) must
+    agree with this set: a flow is closed as SPLIT / MERGED exactly
+    when it is effectively consumed.
+    """
+    query = (
+        select(QuantityFlowLineage.parent_flow_id)
+        .where(QuantityFlowLineage.device_event_id.not_in(_reversed_command_ids()))
+        .distinct()
+    )
     if flow_ids is not None:
         wanted = list(flow_ids)
         if not wanted:
             return set()
         query = query.where(QuantityFlowLineage.parent_flow_id.in_(wanted))
     return {int(flow_id) for flow_id in session.scalars(query)}
+
+
+def visited_area_ids(session: Session, flow_id: int) -> set[int]:
+    """Every Area the flow's quantity has actually been in (Repair, §14).
+
+    The ``to_area_id`` of every effective position-bearing Movement of
+    the flow and of every lineage ancestor's Movements written before
+    the descent — reversed history excluded: an undone transfer is not
+    a visit. This is the set a Repair may return the quantity to.
+    """
+    visited: set[int] = set()
+    frontier: list[tuple[int, int | None]] = [(flow_id, None)]
+    seen: set[int] = set()
+    while frontier:
+        current, bound = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        query = select(PartMovement.to_area_id).where(
+            PartMovement.quantity_flow_id == current,
+            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
+            PartMovement.id.not_in(reversed_movement_ids(current)),
+        )
+        if bound is not None:
+            query = query.where(PartMovement.id < bound)
+        visited.update(int(area_id) for area_id in session.scalars(query.distinct()))
+        parent_bound = _first_movement_id(session, current)
+        for parent in parent_flow_ids(session, current):
+            frontier.append((parent, parent_bound))
+    return visited
 
 
 def origin_flow_ids(session: Session, flow_id: int) -> set[int]:
@@ -224,21 +346,31 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
 
     The projection is defined by the flow's Movements and lineage
     (SLICE1 §15): the Area is the ``to_area_id`` of the flow's newest
-    Movement (a lineage event stays in the Area it happened in); the
+    effective Movement (a lineage event stays in the Area it happened
+    in; reversed history never counts); the
     Machine is the ``destination_machine_id`` of the flow's effective
     newest position-bearing Movement, which is set exactly on an
     ``ASSIGNED_TO_MACHINE`` (shape CHECK) — so a release, a completion
     and a transfer all clear it and a lineage event keeps it; the
     holding state follows from that Movement's type and the Area's
-    current mode (Machines or not). A flow consumed by a SPLIT or a
-    MERGED (a parent in the lineage graph, `consumed_flow_ids`) is
-    closed and therefore absent — it is never active inventory. Every
+    current mode (Machines or not). Absent — never active inventory —
+    are: a flow consumed by an effective SPLIT or MERGED (a parent in
+    the effective lineage graph, `consumed_flow_ids`), a flow whose
+    newest effective Movement is its ``SCRAPPED`` (Phase 9 — its
+    quantity left active production), and a flow with no effective
+    Movement at all (the command that created it was undone). Every
     other flow appears: a QuantityFlow's first Movement is always its
-    ``RECEIVED`` or the lineage event that created it.
+    ``RECEIVED``, a ``QUANTITY_ADJUSTED`` addition, or the lineage
+    event that created it — and an undone Scrap or consumption leaves
+    the flow exactly where its remaining effective history says.
     """
     latest = latest_movements(session, None)
     consumed = consumed_flow_ids(session)
-    active_ids = [flow_id for flow_id in latest if flow_id not in consumed]
+    active_ids = [
+        flow_id
+        for flow_id, movement in latest.items()
+        if flow_id not in consumed and movement.movement_type != MovementType.SCRAPPED
+    ]
     effective = effective_latest_movements(session, active_ids)
     # The Area mode is part of the derivation (§12): the same arrival
     # Movement is QUEUED in a Machine Area and PROCESSING in an Area

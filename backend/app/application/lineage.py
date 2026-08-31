@@ -53,6 +53,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.application.common import flush
+from app.application.projections import reversed_movement_ids
 from app.domain.enums import LineageRelation, MovementType, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     AssignedRoute,
@@ -86,12 +87,18 @@ def snapshot_steps(session: Session, assigned_route_id: int) -> list[AssignedRou
 
 
 def last_known_step_id(session: Session, flow_id: int) -> int | None:
-    """The snapshot step the flow's newest step-referencing Movement fulfilled."""
+    """The snapshot step the flow's newest step-referencing Movement fulfilled.
+
+    Reversed Movements do not count (Phase 9): an undone transfer never
+    happened for the route position — the reversal restores the
+    expectation the flow had before it.
+    """
     return session.scalar(
         select(PartMovement.assigned_route_step_id)
         .where(
             PartMovement.quantity_flow_id == flow_id,
             PartMovement.assigned_route_step_id.is_not(None),
+            PartMovement.id.not_in(reversed_movement_ids(flow_id)),
         )
         .order_by(PartMovement.id.desc())
         .limit(1)

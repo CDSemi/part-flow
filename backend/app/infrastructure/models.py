@@ -125,8 +125,9 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
 # transfer; Phase 6 Machine assignment and Area completion; Phase 7
-# direct-processing completion; Phase 8 quantity lineage). Reused
-# verbatim by the Phase 8 migration so the stored CHECK and the mapping
+# direct-processing completion; Phase 8 quantity lineage; Phase 9
+# corrections and auditable quantity events). Reused
+# verbatim by the Phase 9 migration so the stored CHECK and the mapping
 # never drift. RECEIVED
 # introduces quantity (no source Area, no Machine); TRANSFERRED moves
 # between two DIFFERENT Areas at a Station and references no Machine (a
@@ -142,6 +143,16 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 # reference no Machine: the Machine and the holding state of the
 # quantity they carry are derived by following the lineage to the last
 # position-bearing Movement, never re-stated on the lineage row.
+# Phase 9: SCRAPPED removes quantity from active production inside ONE
+# Area at a Station and may name the source Machine the quantity left
+# (never a destination Machine); QUANTITY_ADJUSTED introduces quantity
+# (no source Area, like RECEIVED) but is always scan-driven (Station
+# NOT NULL) and references no Machine; REVERSED records the
+# compensating motion of a command-level Undo at a Station — its
+# from/to pair may cross Areas (reversing a TRANSFERRED) or stay in one
+# (reversing an in-Area event), and it never re-states a Machine: the
+# restored state is derived by EXCLUDING the reversed pair from the
+# derivations, so re-stating it here could only drift.
 MOVEMENT_SHAPE_SQL = (
     "(movement_type = 'RECEIVED' AND from_area_id IS NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
@@ -163,7 +174,37 @@ MOVEMENT_SHAPE_SQL = (
     " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
     " AND station_id IS NOT NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'SCRAPPED'"
+    " AND from_area_id IS NOT NULL AND from_area_id = to_area_id"
+    " AND station_id IS NOT NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'QUANTITY_ADJUSTED' AND from_area_id IS NULL"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'REVERSED' AND from_area_id IS NOT NULL"
+    " AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
 )
+
+# Typed movement intent (PROJECT_PROFILE §8.11, §14): the only Phase 9
+# value is REPAIR, and it exists only on a TRANSFERRED Movement.
+MOVEMENT_REASON_SQL = (
+    "movement_reason IS NULL OR (movement_reason = 'REPAIR' AND movement_type = 'TRANSFERRED')"
+)
+
+# The free-text explanation is mandatory exactly where the domain
+# requires one (PROJECT_PROFILE §8.11): Scrap, quantity adjustment, and
+# every Movement carrying a typed movement_reason (Repair). Other
+# Movements may carry none (an Undo reason becomes required only when
+# the Phase 13+ configuration for it exists).
+MOVEMENT_REASON_REQUIRED_SQL = (
+    "reason IS NOT NULL"
+    " OR (movement_type NOT IN ('SCRAPPED', 'QUANTITY_ADJUSTED')"
+    " AND movement_reason IS NULL)"
+)
+
+# A REVERSED Movement references exactly the original it compensates
+# (PROJECT_PROFILE §16); no other type references one.
+MOVEMENT_REVERSES_SQL = "(movement_type = 'REVERSED') = (reverses_movement_id IS NOT NULL)"
 
 # Row-level idempotency guarantee of the application-command model
 # (Phase 6): one `device_event_id` identifies one command, which may
@@ -856,10 +897,14 @@ class PartMovement(Base):
     `source_machine_id` / `destination_machine_id` (Phase 6) are the
     Machine references of the assignment, release and completion
     Movements; `command_sequence` (Phase 6) numbers the Movements of
-    one application command — one `device_event_id` per command. The
-    remaining canonical later-phase columns (`worker_id`,
-    `scan_session_id`, `movement_reason`, `reverses_movement_id`)
-    deliberately do not exist yet.
+    one application command — one `device_event_id` per command;
+    `movement_reason` / `reason` / `reverses_movement_id` (Phase 9) are
+    the typed movement intent (REPAIR), the mandatory free-text
+    explanation of Repair/Scrap/quantity adjustments, and the original
+    Movement a compensating `REVERSED` row undoes — at most one
+    reversal per original (UNIQUE), so a command can never be undone
+    twice. The remaining canonical later-phase columns (`worker_id`,
+    `scan_session_id`) deliberately do not exist yet.
     """
 
     __tablename__ = "part_movements"
@@ -928,6 +973,23 @@ class PartMovement(Base):
     # rows of one command share the id, so `WHERE device_event_id = …`
     # yields the complete command — what Undo (Phase 9) reverses.
     command_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # Typed movement intent (Phase 9, PROJECT_PROFILE §8.11/§14): REPAIR
+    # on a TRANSFERRED marks the explicit return of quantity to a
+    # previously visited Area — never inferred, never a Request Type.
+    movement_reason: Mapped[str | None] = mapped_column(Text)
+    # Free-text explanation (Phase 9): mandatory for Repair, Scrap and
+    # quantity adjustments (CHECK); optional elsewhere.
+    reason: Mapped[str | None] = mapped_column(Text)
+    # The original Movement this compensating REVERSED row undoes
+    # (Phase 9, PROJECT_PROFILE §16): set exactly on a REVERSED row, at
+    # most one reversal per original — the original itself is never
+    # touched.
+    reverses_movement_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "part_movements.id", name="fk_part_movements_reverses_movement_id_part_movements"
+        ),
+    )
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
 
     __table_args__ = (
@@ -951,7 +1013,17 @@ class PartMovement(Base):
         CheckConstraint(
             "command_sequence >= 1", name=conv("ck_part_movements_command_sequence_positive")
         ),
+        CheckConstraint(MOVEMENT_REASON_SQL, name=conv("ck_part_movements_movement_reason")),
+        CheckConstraint(
+            MOVEMENT_REASON_REQUIRED_SQL, name=conv("ck_part_movements_reason_required")
+        ),
+        CheckConstraint(MOVEMENT_REVERSES_SQL, name=conv("ck_part_movements_reverses_shape")),
         UniqueConstraint("device_event_id", "command_sequence", name=DEVICE_EVENT_ID_CONSTRAINT),
+        # At most one reversal per original Movement (PROJECT_PROFILE
+        # §16): the database, not only the eligibility check, refuses a
+        # second Undo of the same command — including a race between
+        # two concurrent Undo submissions.
+        UniqueConstraint("reverses_movement_id", name="uq_part_movements_reverses_movement_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
     )
 

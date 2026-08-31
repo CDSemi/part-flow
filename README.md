@@ -22,7 +22,13 @@ transfer, and the real Scan Station direct-processing presentation and
 `DONE`, and the completed **Phase 8 Quantity SPLIT and MERGED
 Workflows** (persistence and lineage, partial quantity on every Scan
 Station command, the explicit merge, and the real Scan Station partial
-quantity and `Combine quantities` workflows):
+quantity and `Combine quantities` workflows), plus the **Phase 9
+Undo, Corrections, and Auditable Quantity Events backend** —
+command-level Undo with compensating `REVERSED` Movements and a
+preview read model, Repair as `TRANSFERRED · movement_reason REPAIR`,
+Scrap (`SCRAPPED`) and quantity additions (`QUANTITY_ADJUSTED ·
+INCREASE`); the Scan Station frontend for those workflows is still
+pending:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -74,7 +80,22 @@ quantity and `Combine quantities` workflows):
   into one resulting flow, ancestry kept, never automatic;
   `POST /api/scan-stations/{id}/machine-scans/resolve` — a
   `PF:MACHINE:` barcode resolved into the one-shot Machine-first
-  assignment context with the Area's queued flows; the PN resolution
+  assignment context with the Area's queued flows;
+  the Phase 9 correction commands —
+  `POST /api/scan-stations/{id}/scraps` (one auditable `SCRAPPED`
+  operation per confirmation, mandatory reason, partial via the same
+  in-command SPLIT), `POST /api/scan-stations/{id}/quantity-additions`
+  (`QUANTITY_ADJUSTED · INCREASE` introducing a new FLOATING flow
+  beside existing in-Area quantity, mandatory reason, requested
+  quantities untouched), the transfer's explicit `repair` intent
+  (`movement_reason = REPAIR` with a mandatory reason, previously
+  visited destinations only), and
+  `GET /api/scan-stations/{id}/undo-preview/{device_event_id}` +
+  `POST /api/scan-stations/{id}/undos` — the §16 summary confirmation
+  and the command-level Undo that reverses one complete committed
+  command with compensating `REVERSED` Movements, the originals
+  preserved and the projection restored from the reversal-aware
+  derivation; the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
@@ -83,7 +104,8 @@ quantity and `Combine quantities` workflows):
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
   SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4,
-  Phase 5, Phase 6, Phase 7 and Phase 8 schema (`app/infrastructure/models.py`)
+  Phase 5, Phase 6, Phase 7, Phase 8 and Phase 9 schema
+  (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
   master, Work Orders and demand, route templates and snapshots,
@@ -104,10 +126,14 @@ quantity and `Combine quantities` workflows):
   with `UNIQUE (device_event_id, command_sequence)`, and the
   `ASSIGNED_TO_MACHINE` / `RELEASED_FROM_MACHINE` / `AREA_COMPLETED`
   types with their shape branches), the Phase 7 direct-processing
-  widening (an `AREA_COMPLETED` without a Machine) and the Phase 8
+  widening (an `AREA_COMPLETED` without a Machine), the Phase 8
   quantity lineage (`SPLIT` / `MERGED` types, the Quantity Flow
   lifecycle closure and the append-only `quantity_flow_lineage` edge
-  table)
+  table) and the Phase 9 corrections widening (`SCRAPPED` /
+  `QUANTITY_ADJUSTED` / `REVERSED` types with their shape branches,
+  `movement_reason`, the mandatory `reason`, the UNIQUE
+  `reverses_movement_id`, and the `SCRAPPED` / `REVERSED` flow
+  statuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -154,19 +180,27 @@ shows the remainder before and after the write (the server splits, the
 client never does), and the PN action dialog offers `Combine
 quantities` for exactly the groups the server reports combinable —
 source selection, a result preview, `Confirm combine`, success only
-after the server. Area and scrap barcodes, Worker identity, Repair,
-Scrap and Undo stay honest placeholders; the approved presentation of those workflows survives as
+after the server. The Phase 9 backend adds the correction
+workflows behind that station surface: command-level Undo (one
+complete command reversed through compensating `REVERSED` Movements,
+the §16 preview confirmation, projection restored from the
+reversal-aware derivation), Repair as the explicit transfer intent,
+Scrap and quantity additions — while in the Scan Station VIEW those
+workflows (Area and scrap barcodes, Worker identity, Repair, Scrap,
+Undo, Add quantity) stay honest placeholders until the Phase 9
+frontend lands; the approved presentation survives as
 a development-only mock preview (`?preview=mock` on a Scan Station
 route) that never enters a production build. The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
 master data end to end. Every other view renders development-only mock
-data; Undo/corrections (Phase 9), the Stockroom and
+data; the Phase 9 Scan Station frontend, the Stockroom and
 allocation-derived completion (Phase 10), and the remaining tracking
-behavior arrive in later phases — the movement-type check admits the
-Phase 3–8 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
-`RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`).
+behavior arrive next — the movement-type check admits the
+Phase 3–9 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
+`RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
+`SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`).
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
@@ -461,11 +495,14 @@ integration):
   `0003_phase35_environment` for Phase 3.5, `0005_phase4_release_index`
   for Phase 4, `0006_phase5_transfer` for Phase 5,
   `0007_phase6_machine_assignment` for Phase 6,
-  `0008_phase7_direct_processing` for Phase 7 — while the Phase 8
-  module carries the head-level coverage: the `SPLIT` / `MERGED` types
-  and their shape branch, the flow lifecycle checks, the append-only
-  lineage edge table, the downgrade that refuses to drop lineage
-  history, and models↔migration parity); and the API tests exercise the endpoints
+  `0008_phase7_direct_processing` for Phase 7,
+  `0009_phase8_split_merge` for Phase 8 — while the Phase 9
+  module carries the head-level coverage: the `SCRAPPED` /
+  `QUANTITY_ADJUSTED` / `REVERSED` types and their shape branches, the
+  movement-reason and mandatory-reason checks, the UNIQUE
+  `reverses_movement_id`, the widened flow lifecycle, the downgrade
+  that refuses to drop Phase 9 history, and models↔migration
+  parity); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save

@@ -559,9 +559,9 @@ def test_partial_assign_splits_and_assigns_only_the_selected_part(
     flows = _inventory_flows(client, lathe.area_id)
     assert released.flow_id not in flows
     assert flows[selected]["processing_state"] == "ON_MACHINE"
-    assert flows[selected]["available_actions"] == ["DONE", "QUEUE", "TRANSFER"]
+    assert flows[selected]["available_actions"] == ["DONE", "QUEUE", "TRANSFER", "SCRAP"]
     assert flows[remainder]["processing_state"] == "QUEUED"
-    assert flows[remainder]["available_actions"] == ["ASSIGN", "TRANSFER"]
+    assert flows[remainder]["available_actions"] == ["ASSIGN", "TRANSFER", "SCRAP"]
     for flow_id in (selected, remainder):
         assert flows[flow_id]["work_order"]["work_order_demand_id"] == released.demand_id
         assert flows[flow_id]["operation"]["id"] == lathe.operation_id
@@ -578,7 +578,10 @@ def test_partial_assign_splits_and_assigns_only_the_selected_part(
 
 @pytest.mark.parametrize(
     ("kind", "selected_state", "selected_actions"),
-    [("QUEUE", "QUEUED", ["ASSIGN", "TRANSFER"]), ("DONE", "READY_TO_TRANSFER", ["TRANSFER"])],
+    [
+        ("QUEUE", "QUEUED", ["ASSIGN", "TRANSFER", "SCRAP"]),
+        ("DONE", "READY_TO_TRANSFER", ["TRANSFER", "SCRAP"]),
+    ],
 )
 def test_partial_queue_and_machine_done_leave_the_remainder_on_the_machine(
     client: TestClient,
@@ -650,7 +653,7 @@ def test_partial_direct_done_leaves_the_remainder_processing(
     flows = _inventory_flows(client, plating.area_id)
     assert flows[selected]["processing_state"] == "READY_TO_TRANSFER"
     assert flows[remainder]["processing_state"] == "PROCESSING"
-    assert flows[remainder]["available_actions"] == ["DONE", "TRANSFER"]
+    assert flows[remainder]["available_actions"] == ["DONE", "TRANSFER", "SCRAP"]
     inventory = _inventory(client, plating.area_id)
     assert inventory["processing_quantity"] == 4 and inventory["finished_quantity"] == 5
     _assert_projection_matches_history(db_engine, released.flow_id, selected, remainder)
@@ -1058,7 +1061,7 @@ def test_merge_combines_compatible_flows_and_keeps_ancestry(
     flows = _inventory_flows(client, lathe.area_id)
     assert set(flows) == {result, split.json()["quantity_flow_id"]}
     assert flows[result]["processing_state"] == "QUEUED"
-    assert flows[result]["available_actions"] == ["ASSIGN", "TRANSFER"]
+    assert flows[result]["available_actions"] == ["ASSIGN", "TRANSFER", "SCRAP"]
     # Two demands feed the result: no single Work Order context is guessed.
     assert flows[result]["work_order"] is None
     with Session(db_engine) as session:

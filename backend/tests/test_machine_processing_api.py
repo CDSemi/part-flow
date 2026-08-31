@@ -1648,7 +1648,7 @@ def test_machine_scan_resolves_the_one_shot_assignment_context(
         [(queued_a, pn_a), (queued_b, pn_b)], key=lambda item: item[1]
     )
     assert all(f["processing_state"] == "QUEUED" for f in body["queued"])
-    assert all(f["available_actions"] == ["ASSIGN", "TRANSFER"] for f in body["queued"])
+    assert all(f["available_actions"] == ["ASSIGN", "TRANSFER", "SCRAP"] for f in body["queued"])
     assert {f["quantity_flow_id"] for f in body["queued"]}.isdisjoint({on_machine_id, finished_id})
     assert body["requires_selection"] is True
     # The manual Asset Tag entry resolves identically; nothing was written
@@ -1784,13 +1784,13 @@ def test_pn_first_reports_the_valid_actions_per_processing_state(
     assert set(by_id) == {queued_id, on_machine_id, finished_id}
     assert by_id[queued_id]["processing_state"] == "QUEUED"
     assert by_id[queued_id]["machine_id"] is None
-    assert by_id[queued_id]["available_actions"] == ["ASSIGN", "TRANSFER"]
+    assert by_id[queued_id]["available_actions"] == ["ASSIGN", "TRANSFER", "SCRAP"]
     assert by_id[on_machine_id]["processing_state"] == "ON_MACHINE"
     assert by_id[on_machine_id]["machine_id"] == lathe.machine_id
-    assert by_id[on_machine_id]["available_actions"] == ["DONE", "QUEUE", "TRANSFER"]
+    assert by_id[on_machine_id]["available_actions"] == ["DONE", "QUEUE", "TRANSFER", "SCRAP"]
     assert by_id[finished_id]["processing_state"] == "READY_TO_TRANSFER"
     assert by_id[finished_id]["machine_id"] is None
-    assert by_id[finished_id]["available_actions"] == ["TRANSFER"]
+    assert by_id[finished_id]["available_actions"] == ["TRANSFER", "SCRAP"]
     assert all(flow["part_number"] == pn for flow in body["in_area"])
 
     # Seen from another station, the same three flows are transfer
