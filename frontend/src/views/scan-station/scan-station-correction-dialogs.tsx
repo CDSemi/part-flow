@@ -722,17 +722,18 @@ export function UndoDialog({
   return (
     <>
       <ModalDialog
-        label="Reverse the last Part Number action?"
+        label="Reverse this Part Number action?"
         onClose={write.busy ? () => undefined : cancel}
         onKeyDown={enterKeyHandler(requestConfirm)}
       >
-        <h3>Reverse the last Part Number action?</h3>
+        <h3>Reverse this Part Number action?</h3>
         <div className="big mono" title={pn}>
           {pn}
         </div>
         <div className="sub">
-          This will reverse the complete last action. The original history will
-          remain available for audit.
+          This will reverse the complete recorded action shown below — the most
+          recent operation of this quantity that can still be reversed. The
+          original history will remain available for audit.
         </div>
         <ConfirmationSummary
           rows={[

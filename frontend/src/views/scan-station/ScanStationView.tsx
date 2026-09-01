@@ -590,21 +590,25 @@ function StationView({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   const [resolving, setResolving] = useState(false);
-  // The session's completed commands, oldest first (§4.5): the top is
-  // the Last Scanned PN. Undo targets the most recent ELIGIBLE
-  // completed PN operation — the server's undo preview is the
-  // authority, and `openUndo` walks this stack newest-first (reads
-  // only) until the server reports one eligible. A confirmed Undo
-  // removes the reversed entry, so the block advances to the previous
-  // operation and the next Undo walks the preview again.
+  // The session's completed commands, oldest first — the RAW session
+  // log (§4.5). The Last Scanned PN block and the Undo action never
+  // read its top directly: they follow `undoTarget` below.
   const [history, setHistory] = useState<LastAction[]>([]);
-  const lastAction = history.length > 0 ? history[history.length - 1] : null;
-  // Set when a full preview walk found NOTHING eligible: Undo disables
-  // until new activity changes what the walk could find.
-  const [undoExhausted, setUndoExhausted] = useState(false);
+  // The most recent ELIGIBLE completed PN operation — the entry the
+  // Undo action would reverse and the one the Last Scanned PN block
+  // shows. The server's undo preview is the authority: a command this
+  // station just completed starts as the target (the server confirmed
+  // it as the newest operation an instant ago), every Undo click
+  // re-walks the raw log newest-first through the preview (reads
+  // only), and after a confirmed Undo — or a walk that found nothing —
+  // the target re-resolves from the server. null with commands in the
+  // log means "nothing currently reversible": Undo disables, and the
+  // verdict is revalidated on the next server sync (below), never
+  // cached for good.
+  const [undoTarget, setUndoTarget] = useState<LastAction | null>(null);
   const recordAction = useCallback((entry: LastAction) => {
     setHistory((stack) => [...stack, entry]);
-    setUndoExhausted(false);
+    setUndoTarget(entry);
   }, []);
 
   useEffect(() => {
@@ -1186,7 +1190,11 @@ function StationView({
       setHistory((stack) =>
         stack.filter((item) => item.deviceEventId !== entry.deviceEventId),
       );
-      setUndoExhausted(false);
+      // The next eligible previous operation is the SERVER's judgement,
+      // never the raw log top (which may be a newer ineligible
+      // command): clear the target and let the eligibility walk below
+      // re-resolve it — until then Undo stays disabled.
+      setUndoTarget(null);
       setNotice({
         kind: 'ok',
         icon: '✓',
@@ -1204,26 +1212,24 @@ function StationView({
   );
 
   /**
-   * Open the Undo of the most recent ELIGIBLE completed PN operation
-   * (§4.5): the session's completed commands are walked newest-first
-   * through the server's undo preview — the authority on eligibility —
-   * until one is reported eligible; a newer command the server judges
-   * ineligible is skipped, never blocking an older eligible one. The
-   * walk is reads only: nothing is locked and nothing is written. The
-   * first eligible preview serves the structured summary — original
-   * action, quantity, source/destination, Machine, timestamp, and the
-   * effect of the reversal — before anything can be submitted. With
-   * nothing eligible, Undo disables until new activity changes what
-   * the walk could find. A preview that cannot be loaded changes
-   * nothing.
+   * Walk the session's completed commands newest-first through the
+   * server's undo preview — the authority on eligibility — and return
+   * the most recent ELIGIBLE completed PN operation with its preview
+   * (§4.5), or null with the newest ineligibility reason. Reads only:
+   * nothing is locked and nothing is written. An id the server no
+   * longer previews (404) is skipped; any other failure aborts the
+   * walk (the caller decides what that means).
    */
-  const openUndo = useCallback(async () => {
-    if (history.length === 0 || writeBlocked) return;
-    setResolving(true);
-    try {
+  const walkUndoEligibility = useCallback(
+    async (
+      stack: LastAction[],
+    ): Promise<{
+      found: { entry: LastAction; preview: UndoPreview } | null;
+      newestReason: string | null;
+    }> => {
       let newestReason: string | null = null;
-      for (let index = history.length - 1; index >= 0; index -= 1) {
-        const entry = history[index];
+      for (let index = stack.length - 1; index >= 0; index -= 1) {
+        const entry = stack[index];
         let preview: UndoPreview;
         try {
           preview = await getUndoPreview(stationId, entry.deviceEventId);
@@ -1233,40 +1239,99 @@ function StationView({
             // here): keep walking to the older operations.
             continue;
           }
-          // The preview could not be loaded (network, server error):
-          // the walk stops and nothing changes.
-          focusScan();
-          setNotice({
-            kind: 'err',
-            icon: '✕',
-            title: 'The reversal summary could not be loaded',
-            detail: `${errorMessage(error)} No changes were recorded.`,
-          });
-          return;
+          throw error;
         }
         if (preview.eligible) {
-          setFlow({ kind: 'undo', entry, preview });
-          return;
+          return { found: { entry, preview }, newestReason };
         }
         newestReason ??= preview.ineligibleReason;
       }
+      return { found: null, newestReason };
+    },
+    [stationId],
+  );
+
+  /**
+   * Re-resolve the Undo target whenever nothing is currently offered
+   * while completed commands exist — after a confirmed Undo (advance
+   * to the next eligible previous operation) and on every later server
+   * sync (the freshest Area inventory read), so a "nothing reversible"
+   * verdict is never cached for good: when the server's eligibility
+   * changes, the next sync re-runs the walk and re-enables Undo. Reads
+   * only; a failed walk leaves the target unresolved for the next sync.
+   */
+  useEffect(() => {
+    if (history.length === 0 || undoTarget !== null || writeBlocked) return;
+    // Each run walks with the state it saw; a newer run (fresher
+    // history or a fresher server sync) supersedes it — only the
+    // latest walk may apply its result.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const walk = await walkUndoEligibility(history);
+        if (!cancelled && walk.found) setUndoTarget(walk.found.entry);
+      } catch {
+        // Transient (network, server error): the next sync retries.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [history, undoTarget, writeBlocked, inventoryReady, walkUndoEligibility]);
+
+  /**
+   * Open the Undo of the most recent ELIGIBLE completed PN operation
+   * (§4.5): every click re-walks the raw session log newest-first
+   * through the server's undo preview, so the command offered is
+   * always the server's current judgement — a newer command judged
+   * ineligible is skipped, never blocking an older eligible one, and
+   * the Last Scanned PN context follows the found target. The first
+   * eligible preview serves the structured summary — original action,
+   * quantity, source/destination, Machine, timestamp, and the effect
+   * of the reversal — before anything can be submitted. With nothing
+   * eligible, the target clears and Undo disables (revalidated on the
+   * next server sync). A preview walk that cannot complete changes
+   * nothing.
+   */
+  const openUndo = useCallback(async () => {
+    if (history.length === 0 || writeBlocked) return;
+    setResolving(true);
+    try {
+      const walk = await walkUndoEligibility(history);
+      if (walk.found) {
+        setUndoTarget(walk.found.entry);
+        setFlow({
+          kind: 'undo',
+          entry: walk.found.entry,
+          preview: walk.found.preview,
+        });
+        return;
+      }
       // The walk exhausted the session's commands with nothing
       // eligible — no reversal can be offered right now.
-      setUndoExhausted(true);
+      setUndoTarget(null);
       focusScan();
       setNotice({
         kind: 'warn',
         icon: '⚠',
         title: 'Nothing can be reversed',
         detail: `${
-          newestReason ??
+          walk.newestReason ??
           'No completed action of this session can currently be reversed.'
         } No changes were recorded.`,
+      });
+    } catch (error) {
+      focusScan();
+      setNotice({
+        kind: 'err',
+        icon: '✕',
+        title: 'The reversal summary could not be loaded',
+        detail: `${errorMessage(error)} No changes were recorded.`,
       });
     } finally {
       setResolving(false);
     }
-  }, [history, writeBlocked, stationId, focusScan]);
+  }, [history, writeBlocked, walkUndoEligibility, focusScan]);
 
   /**
    * The server refused a write (nothing recorded — the flow moved, the
@@ -1533,29 +1598,34 @@ function StationView({
             </DevNotice>
             <div className="ss-lastpnlabel">Last Action</div>
             <div className="ss-lastpn">
+              {/* The block shows the server-derived Undo TARGET — the
+                  most recent eligible completed PN operation — never
+                  the raw newest session entry, which may be a command
+                  the server already judges ineligible. */}
               <div className="ss-lastpninfo">
-                <span className="p">{lastAction?.pn ?? '—'}</span>
+                <span className="p">{undoTarget?.pn ?? '—'}</span>
                 <span className="d">
-                  {lastAction?.summary ?? 'No Part Number actions yet'}
+                  {undoTarget?.summary ??
+                    (history.length > 0
+                      ? 'No reversible Part Number action'
+                      : 'No Part Number actions yet')}
                 </span>
               </div>
               {/* Undo reverses the most recent ELIGIBLE completed PN
-                  operation (§4.5): the session's commands are walked
-                  newest-first through the server's undo preview — the
-                  authority on eligibility — and the first eligible one
-                  serves the summary confirmation. With nothing to
-                  reverse, nothing currently eligible, or while writes
-                  are blocked, the action region stays present and
-                  disabled, never a hidden control. */}
+                  operation (§4.5): every click re-walks the session's
+                  commands newest-first through the server's undo
+                  preview — the authority on eligibility — and the
+                  first eligible one serves the summary confirmation.
+                  With nothing to reverse, nothing currently eligible,
+                  or while writes are blocked, the action region stays
+                  present and disabled, never a hidden control. */}
               <button
                 className="ss-undo zone-action"
-                disabled={
-                  writeBlocked || resolving || !lastAction || undoExhausted
-                }
+                disabled={writeBlocked || resolving || !undoTarget}
                 title={
-                  !lastAction
+                  history.length === 0
                     ? 'No completed Part Number action to reverse yet'
-                    : undoExhausted
+                    : !undoTarget
                       ? 'No completed action of this session can currently be reversed'
                       : 'Reverse the most recent eligible completed action'
                 }

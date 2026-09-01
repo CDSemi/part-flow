@@ -765,7 +765,18 @@ function handle(url: string, method: string, body: unknown): Response {
         409,
       );
     }
+    // The same verdict rule as the preview: the seam overrides the
+    // natural "only the newest command" judgement.
+    const verdictOverride = previewVerdicts.has(
+      request.reverses_device_event_id,
+    )
+      ? previewVerdicts.get(request.reverses_device_event_id)!
+      : undefined;
+    if (typeof verdictOverride === 'string') {
+      return json({ detail: `${verdictOverride} Nothing was reversed.` }, 409);
+    }
     if (
+      verdictOverride === undefined &&
       commandLog[commandLog.length - 1] !== request.reverses_device_event_id
     ) {
       return json(
@@ -783,7 +794,7 @@ function handle(url: string, method: string, body: unknown): Response {
       visited: f.visited && [...f.visited],
     }));
     record.reversed = true;
-    commandLog.pop();
+    commandLog.splice(commandLog.indexOf(request.reverses_device_event_id), 1);
     return commit(request.device_event_id, {
       reverses_device_event_id: request.reverses_device_event_id,
       reversed_kind: record.kind,
@@ -998,7 +1009,7 @@ test('UNDO is disabled with no completed action, opens the server preview summar
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   // The structured §4.5 summary from the server's preview.
   expect(reads(new RegExp(`/undo-preview/${doneEventId}$`))).toHaveLength(1);
@@ -1053,7 +1064,7 @@ test('after a confirmed Undo the Last Scanned PN advances to the previous comple
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   expect(summaryValue(box, 'Original action')).toBe('SCRAPPED');
   fireEvent.click(
@@ -1066,11 +1077,11 @@ test('after a confirmed Undo the Last Scanned PN advances to the previous comple
     within(gate).getByRole('button', { name: 'Yes — reverse it' }),
   );
   await notice();
-  // The previous operation (the DONE on PN-B) is the Last Scanned PN
-  // again, and Undo stays available for it.
-  expect(lastActionBlock()).toHaveTextContent('PN-B');
+  // The previous operation (the DONE on PN-B) becomes the Last Scanned
+  // PN once the server confirms it eligible, and Undo re-enables.
+  await waitFor(() => expect(lastActionBlock()).toHaveTextContent('PN-B'));
   expect(lastActionBlock()).toHaveTextContent('AREA_COMPLETED');
-  expect(undoButton()).toBeEnabled();
+  await waitFor(() => expect(undoButton()).toBeEnabled());
 });
 
 test('a newer ineligible command never blocks Undo: the walk opens the older eligible operation', async () => {
@@ -1092,7 +1103,7 @@ test('a newer ineligible command never blocks Undo: the walk opens the older eli
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   // Newest-first walk, reads only: the scrap was previewed and
   // skipped, the DONE opened — nothing was written.
@@ -1107,6 +1118,11 @@ test('a newer ineligible command never blocks Undo: the walk opens the older eli
     within(box).getByRole('button', { name: 'Confirm reversal' }),
   ).toBeInTheDocument();
   expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(0);
+  // The Last Scanned PN context follows the server-derived target —
+  // never the raw newest (ineligible) session entry.
+  expect(lastActionBlock()).toHaveTextContent('PN-B');
+  expect(lastActionBlock()).toHaveTextContent('AREA_COMPLETED');
+  expect(lastActionBlock()).not.toHaveTextContent('SCRAPPED');
 });
 
 test('with every session command ineligible there is no actionable Undo: no dialog, nothing written, the action disables', async () => {
@@ -1128,12 +1144,20 @@ test('with every session command ineligible there is no actionable Undo: no dial
   expect(toast).toHaveTextContent('Nothing can be reversed');
   expect(toast).toHaveTextContent('already been reversed');
   expect(toast).toHaveTextContent('No changes were recorded');
-  // Both commands were previewed (reads only), no dialog opened,
-  // nothing was written, and the action region disables in place.
-  expect(reads(/\/undo-preview\//)).toHaveLength(2);
+  // Both commands were previewed newest-first (reads only), no dialog
+  // opened, nothing was written, and the action region disables in
+  // place with the block showing that nothing is reversible.
+  expect(
+    reads(/\/undo-preview\//)
+      .slice(0, 2)
+      .map((r) => r.url.split('/undo-preview/')[1]),
+  ).toEqual([scrapId, doneId]);
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(0);
   await waitFor(() => expect(undoButton()).toBeDisabled());
+  expect(lastActionBlock()).toHaveTextContent(
+    'No reversible Part Number action',
+  );
   // New activity re-arms the walk: another completed command enables
   // Undo again.
   await completeScrapOnPnA(1);
@@ -1147,7 +1171,7 @@ test('a refused Undo keeps the server reason in the dialog, re-reads the Area an
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   writeFailure = {
     status: 409,
@@ -1185,7 +1209,7 @@ test('a lost Undo response freezes the intent and the retry replays the same dev
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   writeFailure = 'lost-response';
   fireEvent.click(
@@ -1231,7 +1255,7 @@ test('undoing a cross-Area transfer keeps the source Machine identity in the sum
 
   fireEvent.click(undoButton());
   const summary = await screen.findByRole('dialog', {
-    name: 'Reverse the last Part Number action?',
+    name: 'Reverse this Part Number action?',
   });
   expect(summaryValue(summary, 'Original action')).toBe(
     'AREA_COMPLETED + TRANSFERRED',
@@ -1262,6 +1286,143 @@ test('undoing a cross-Area transfer keeps the source Machine identity in the sum
     state: 'ON_MACHINE',
     machineId: 1,
   });
+});
+
+test('after undoing the older eligible command the context advances to the next eligible previous operation — never back to the newer ineligible one', async () => {
+  await renderStation('LATHE-ST-01');
+  await completeDoneOnPnB(); // cmd1 — forced eligible below
+  await completeScrapOnPnA(1); // cmd2 — the walk's target
+  await completeScrapOnPnA(2); // cmd3 — newest, forced ineligible
+  const doneId = writes().find((r) => /\/area-completions$/.test(r.url))!.body
+    .device_event_id as string;
+  const scrapIds = writes()
+    .filter((r) => /\/scraps$/.test(r.url))
+    .map((r) => r.body.device_event_id as string);
+  previewVerdicts.set(
+    scrapIds[1],
+    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.',
+  );
+  previewVerdicts.set(scrapIds[0], null);
+  previewVerdicts.set(doneId, null);
+
+  fireEvent.click(undoButton());
+  const box = await screen.findByRole('dialog', {
+    name: 'Reverse this Part Number action?',
+  });
+  // The walk skipped the newest (ineligible) scrap and opened the
+  // older eligible one.
+  expect(summaryValue(box, 'Original action')).toBe('SCRAPPED');
+  expect(summaryValue(box, 'Quantity')).toBe('1 pcs');
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm reversal' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Reverse this action?',
+  });
+  fireEvent.click(
+    within(gate).getByRole('button', { name: 'Yes — reverse it' }),
+  );
+  await notice();
+  // The context advances to the NEXT eligible previous operation (the
+  // DONE) — it never snaps back to the newer ineligible scrap.
+  await waitFor(() => expect(lastActionBlock()).toHaveTextContent('PN-B'));
+  expect(lastActionBlock()).toHaveTextContent('AREA_COMPLETED');
+  expect(lastActionBlock()).not.toHaveTextContent('SCRAPPED');
+  await waitFor(() => expect(undoButton()).toBeEnabled());
+  // The advance itself was reads only: exactly one reversal was written.
+  expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(1);
+});
+
+test('with no eligible operation left after a confirmed Undo, the action disables at once and nothing older is claimed reversible', async () => {
+  await renderStation('LATHE-ST-01');
+  await completeDoneOnPnB(); // cmd1 — forced ineligible below
+  await completeScrapOnPnA(1); // cmd2 — newest, naturally eligible
+  const doneId = writes().find((r) => /\/area-completions$/.test(r.url))!.body
+    .device_event_id as string;
+  previewVerdicts.set(
+    doneId,
+    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.',
+  );
+
+  fireEvent.click(undoButton());
+  const box = await screen.findByRole('dialog', {
+    name: 'Reverse this Part Number action?',
+  });
+  expect(summaryValue(box, 'Original action')).toBe('SCRAPPED');
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm reversal' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Reverse this action?',
+  });
+  fireEvent.click(
+    within(gate).getByRole('button', { name: 'Yes — reverse it' }),
+  );
+  await notice();
+  // The remaining command is ineligible: no target, Undo disabled, and
+  // the block claims nothing reversible instead of the stale entry.
+  await waitFor(() =>
+    expect(lastActionBlock()).toHaveTextContent(
+      'No reversible Part Number action',
+    ),
+  );
+  expect(lastActionBlock()).not.toHaveTextContent('AREA_COMPLETED');
+  await waitFor(() => expect(undoButton()).toBeDisabled());
+  expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(1);
+});
+
+test('a "nothing reversible" verdict is never cached for good: the next server sync revalidates and re-enables Undo', async () => {
+  await renderStation('LATHE-ST-01');
+  await completeDoneOnPnB();
+  const doneId = writes().find((r) => /\/area-completions$/.test(r.url))!.body
+    .device_event_id as string;
+  previewVerdicts.set(
+    doneId,
+    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.',
+  );
+  fireEvent.click(undoButton());
+  const toast = await notice();
+  expect(toast).toHaveTextContent('Nothing can be reversed');
+  await waitFor(() => expect(undoButton()).toBeDisabled());
+  expect(lastActionBlock()).toHaveTextContent(
+    'No reversible Part Number action',
+  );
+
+  // The server's eligibility changes (e.g. the later activity was
+  // reversed elsewhere). The station notices on its next server sync:
+  // here, a refused write re-reads the Area, and the fresh read
+  // re-runs the eligibility walk — the verdict was not cached.
+  previewVerdicts.delete(doneId);
+  scan('PF:PN:PN-A');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Add more quantity/ }),
+  );
+  const box = await screen.findByRole('dialog', { name: 'Add more quantity' });
+  fireEvent.change(quantityInput(box), { target: { value: '2' } });
+  fireEvent.change(within(box).getByLabelText(/Reason/), {
+    target: { value: 'found parts' },
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  writeFailure = {
+    status: 409,
+    body: { detail: 'no active quantity in this Area. Nothing was recorded.' },
+  };
+  fireEvent.click(
+    within(box).getByRole('button', { name: 'Confirm addition' }),
+  );
+  await waitFor(() =>
+    expect(box).toHaveTextContent('no active quantity in this Area'),
+  );
+  fireEvent.click(within(box).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  await waitFor(() => expect(undoButton()).toBeEnabled());
+  expect(lastActionBlock()).toHaveTextContent('AREA_COMPLETED');
+  // Revalidation and the walk are reads only — the refused addition
+  // wrote nothing and no reversal was submitted.
+  expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(0);
 });
 
 /* ============ Repair ============ */
