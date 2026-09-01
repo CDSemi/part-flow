@@ -76,9 +76,9 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
 
 import datetime
 from collections.abc import Collection, Mapping, Sequence
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, Literal, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
@@ -220,13 +220,27 @@ def _derived_status(
 ) -> str:
     """OPEN while any current demand still has quantity left to release;
     RELEASED once every current demand line is fully released
-    (GUI_DESIGN §11.1). Derived at read time from immutable history —
-    the stored column stays OPEN, so no migration and no drift are
-    possible. A partially released line keeps the Work Order OPEN: its
-    remaining quantity is still releasable."""
+    (GUI_DESIGN §11.1); COMPLETED once every demand line is fully
+    allocated from stocked quantity (Phase 10 — `completed_at` is the
+    allocation projection). Derived at read time — the stored column
+    stays OPEN, so no migration and no drift are possible. A partially
+    released line keeps the Work Order OPEN: its remaining quantity is
+    still releasable."""
+    if work_order.completed_at is not None:
+        return WorkOrderStatus.COMPLETED
     if demands and all(released.get(demand_id, 0) >= requested for demand_id, requested in demands):
         return WorkOrderStatus.RELEASED
     return work_order.status
+
+
+def _require_active(work_order: WorkOrder, action: str) -> None:
+    """A completed Work Order is read-only history (PROJECT_PROFILE §18)."""
+    if work_order.completed_at is not None:
+        raise ConflictError(
+            f"Work Order {work_order.id} is completed: every demand line is fully"
+            f" allocated from stock, and it is read-only history. {action} Later"
+            " work is a new Work Order Demand; an allocation adjustment reopens it."
+        )
 
 
 def _build_detail(
@@ -285,9 +299,12 @@ def list_work_orders(
     )
     if number is not None:
         # Exact resolution answers "does this number already exist?" —
-        # it must see every Work Order, so it is never bounded.
+        # it must see every Work Order, completed history included, so
+        # it is never bounded and never filtered.
         query = query.where(WorkOrder.work_order_number == number)
     else:
+        # The active list: a completed Work Order left it (Phase 10).
+        query = query.where(WorkOrder.completed_at.is_(None))
         if search is not None and search.strip():
             escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             query = query.where(WorkOrder.work_order_number.ilike(f"%{escaped}%", escape="\\"))
@@ -714,10 +731,20 @@ def update_work_order(
         demands_by_id[edited_id] = locked
     released = production_release.released_quantities(session, edited_ids)
 
-    # Adding demand lines serializes on the parent Work Order row, and
-    # the authoritative PN set is re-read under that lock — never the
-    # `detail.demands` snapshot taken before any waiting. Nothing has
-    # been mutated yet, so this cannot autoflush an earlier lock.
+    # The Work Order row is locked for every save (after the demand
+    # locks — the established demand → Work Order order, the same the
+    # allocation command takes) and its completion judged on the locked
+    # RE-READ: a completed Work Order is read-only history (Phase 10),
+    # and an allocation completing it "at the same time" as this save
+    # has one serial outcome — the save sees the completion and refuses,
+    # or commits first and the allocation judges the saved quantities.
+    session.refresh(work_order, with_for_update=True)
+    _require_active(work_order, "Nothing was saved.")
+
+    # Adding demand lines re-reads the authoritative PN set under that
+    # Work Order lock — never the `detail.demands` snapshot taken before
+    # any waiting. Nothing has been mutated yet, so this cannot
+    # autoflush an earlier lock.
     taken: set[str] = (
         _lock_work_order_and_read_part_numbers(session, work_order.id) if new_lines else set()
     )
@@ -850,7 +877,14 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
         raise NotFoundError(
             f"Demand line {demand_id} does not exist on Work Order {work_order_id}."
         )
-    session.get(WorkOrder, work_order_id, with_for_update=True)
+    work_order = session.get(WorkOrder, work_order_id, with_for_update=True, populate_existing=True)
+    if work_order is None:  # pragma: no cover - the demand's FK guarantees the row
+        raise NotFoundError(f"Work Order {work_order_id} does not exist.")
+    _require_active(work_order, "Nothing was removed.")
+    if demand.allocated_quantity > 0:
+        raise ConflictError(
+            "Cannot remove: stocked quantity has already been allocated to this demand line."
+        )
     if production_release.demand_has_released_quantity(session, demand.id):
         # GUI_DESIGN §11.2 wording — the UI disables the action, the
         # backend still refuses.
@@ -871,3 +905,125 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
         )
     session.delete(demand)
     commit(session, _WORK_ORDER_CONFLICTS)
+
+
+# ---------------------------------------------------------------------------
+# Completed Work Orders history (Phase 10 — GUI_DESIGN §11.5)
+# ---------------------------------------------------------------------------
+
+#: Rows one page of the completed history returns (the page appends
+#: the next page through the keyset cursor). Bounded here, in the
+#: query, because the history is unbounded by design.
+COMPLETED_PAGE_LIMIT: Final = 50
+
+DueOutcome = Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"]
+
+
+class CompletedCursor(NamedTuple):
+    """Keyset position over ``(completed_at, id)`` descending."""
+
+    completed_at: datetime.datetime
+    work_order_id: int
+
+
+class CompletedPage(NamedTuple):
+    work_orders: list[WorkOrderSummary]
+    # Matching rows in the whole history for the same filters — the
+    # "Showing n of N" summary line.
+    total: int
+    # The cursor of the last row, when more rows may follow.
+    next_cursor: CompletedCursor | None
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def list_completed_work_orders(
+    session: Session,
+    *,
+    search: str | None = None,
+    done_from: datetime.datetime | None = None,
+    done_to: datetime.datetime | None = None,
+    due_outcome: DueOutcome = "ALL",
+    cursor: CompletedCursor | None = None,
+    limit: int = COMPLETED_PAGE_LIMIT,
+) -> CompletedPage:
+    """The completed history, newest done date first — search, filter, page server-side.
+
+    ``search`` matches the Work Order Number, any demand line's PN or
+    any Job Number (case-insensitive contains); ``done_from`` /
+    ``done_to`` bound ``completed_at`` (inclusive / exclusive); the due
+    outcome compares the done DATE with the Work Order due date. The
+    page is a keyset continuation over ``(completed_at, id)``
+    descending — never an offset over an unbounded table.
+    """
+    if limit <= 0 or limit > 200:
+        raise InvalidInputError("The page size must be between 1 and 200.")
+    filters: list[ColumnElement[bool]] = [WorkOrder.completed_at.is_not(None)]
+    if search is not None and search.strip():
+        pattern = f"%{_escape_like(search.strip())}%"
+        matching_demand = (
+            select(WorkOrderDemand.id)
+            .where(WorkOrderDemand.work_order_id == WorkOrder.id)
+            .where(
+                WorkOrderDemand.part_number.ilike(pattern, escape="\\")
+                | func.array_to_string(WorkOrderDemand.job_numbers, "\n").ilike(
+                    pattern, escape="\\"
+                )
+            )
+            .correlate(WorkOrder)
+            .exists()
+        )
+        filters.append(WorkOrder.work_order_number.ilike(pattern, escape="\\") | matching_demand)
+    if done_from is not None:
+        filters.append(WorkOrder.completed_at >= done_from)
+    if done_to is not None:
+        filters.append(WorkOrder.completed_at < done_to)
+    done_date = func.date(WorkOrder.completed_at)
+    if due_outcome == "ON_TIME":
+        filters.append(WorkOrder.due_date.is_not(None) & (done_date <= WorkOrder.due_date))
+    elif due_outcome == "LATE":
+        filters.append(WorkOrder.due_date.is_not(None) & (done_date > WorkOrder.due_date))
+    elif due_outcome == "NO_DUE_DATE":
+        filters.append(WorkOrder.due_date.is_(None))
+    elif due_outcome != "ALL":
+        raise InvalidInputError("due_outcome must be ALL, ON_TIME, LATE or NO_DUE_DATE.")
+
+    total = session.scalar(select(func.count()).select_from(WorkOrder).where(*filters)) or 0
+
+    part_numbers = func.array_agg(
+        aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
+    )
+    query = (
+        select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers)
+        .outerjoin(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
+        .where(*filters)
+        .group_by(WorkOrder.id)
+        .order_by(WorkOrder.completed_at.desc(), WorkOrder.id.desc())
+        .limit(limit)
+    )
+    if cursor is not None:
+        query = query.where(
+            (WorkOrder.completed_at < cursor.completed_at)
+            | (
+                (WorkOrder.completed_at == cursor.completed_at)
+                & (WorkOrder.id < cursor.work_order_id)
+            )
+        )
+    rows = list(session.execute(query))
+    summaries = [
+        WorkOrderSummary(
+            work_order=work_order,
+            demand_line_count=count,
+            part_numbers=[value for value in (values or []) if value is not None],
+            status=WorkOrderStatus.COMPLETED,
+        )
+        for work_order, count, values in rows
+    ]
+    next_cursor: CompletedCursor | None = None
+    if len(rows) == limit:
+        last = rows[-1][0]
+        assert last.completed_at is not None  # filtered on IS NOT NULL
+        next_cursor = CompletedCursor(last.completed_at, last.id)
+    return CompletedPage(work_orders=summaries, total=int(total), next_cursor=next_cursor)

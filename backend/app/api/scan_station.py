@@ -33,6 +33,14 @@ Surface:
 - ``GET  /areas/{area_id}/inventory`` — the ACTIVE quantity currently
   in an Area grouped per PN, the refresh source after a transfer.
 
+Phase 10 — ``POST /scan-stations/{station_id}/stockings``: the
+Stockroom arrival — the transfer's request shape (minus Repair) recorded
+as ``STOCKED`` at a station bound to a terminal Area; the flow closes as
+manufacturing-complete and the receiving allocation follows through
+``/api/allocations``. The PN resolution reports the PN's stocked and
+available stocked quantity and, at a Stockroom station, marks the
+candidates as stock sources.
+
 Phase 6 — the one-shot Machine-Area processing commands, each ONE
 QuantityFlow (whole, or since Phase 8 a part of it), 201 fresh / 200
 idempotent replay / 409 mismatched reuse, 422 for a quantity exceeding
@@ -154,6 +162,7 @@ from app.application import (
     merges,
     quantity_events,
     scan_station,
+    stockroom,
     transfers,
     undo,
 )
@@ -195,7 +204,7 @@ class WorkOrderContextResponse(BaseModel):
 ProcessingStateLiteral = Literal["QUEUED", "PROCESSING", "ON_MACHINE", "READY_TO_TRANSFER"]
 FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER", "SCRAP"]
 MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
-FlowStatusLiteral = Literal["ACTIVE", "SPLIT", "MERGED", "SCRAPPED", "REVERSED"]
+FlowStatusLiteral = Literal["ACTIVE", "SPLIT", "MERGED", "SCRAPPED", "REVERSED", "STOCKED"]
 
 
 class RecordedOperationRef(BaseModel):
@@ -405,6 +414,12 @@ class ScanResolveResponse(BaseModel):
     combine_groups: list[list[int]]
     # Phase 9: the PN's total scrapped quantity, net of reversed scraps.
     scrapped_quantity: int
+    # Phase 10: the PN's stocked quantity and its unallocated part
+    # (derived); at a Stockroom station the candidates are stock
+    # sources and `stock_available` says the STOCKED arrival applies.
+    stocked_quantity: int
+    available_stocked_quantity: int
+    stock_available: bool
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -447,6 +462,9 @@ def resolve_scan(
         requires_selection=result.requires_selection,
         combine_groups=result.combine_groups,
         scrapped_quantity=result.scrapped_quantity,
+        stocked_quantity=result.stocked_quantity,
+        available_stocked_quantity=result.available_stocked_quantity,
+        stock_available=result.stock_available,
     )
 
 
@@ -534,9 +552,12 @@ class AreaTransferRequest(BaseModel):
 
 
 class AreaTransferResponse(BaseModel):
-    """The committed transfer, read from the immutable TRANSFERRED Movement."""
+    """The committed arrival, read from the immutable TRANSFERRED (or STOCKED) Movement."""
 
     movement_id: int
+    # TRANSFERRED for a transfer; STOCKED for the Stockroom arrival
+    # (Phase 10) — the same command shape with a different meaning.
+    movement_type: str
     quantity_flow_id: int
     part_number: str
     quantity: int
@@ -587,8 +608,13 @@ def transfer_to_station_area(
         device_event_id=body.device_event_id,
     )
     response.status_code = 201 if result.created else 200
+    return _arrival_response(result)
+
+
+def _arrival_response(result: transfers.AreaTransfer) -> AreaTransferResponse:
     return AreaTransferResponse(
         movement_id=result.movement_id,
+        movement_type=result.movement_type,
         quantity_flow_id=result.quantity_flow_id,
         part_number=result.part_number,
         quantity=result.quantity,
@@ -608,6 +634,61 @@ def transfer_to_station_area(
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stockroom arrival — STOCKED (Phase 10)
+# ---------------------------------------------------------------------------
+
+
+class StockRequest(BaseModel):
+    """The confirmed Stockroom arrival (GUI_DESIGN §10): the transfer shape
+    without the Repair intent — quantity stocked at a terminal Area is
+    manufacturing-complete, never returned for repair by this command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    quantity_flow_id: int
+    source_area_id: int
+    # The terminal Area the operator confirmed at the Stockroom station
+    # — an optimistic precondition checked under the station lock.
+    target_area_id: int
+    quantity: StrictInt
+    operation_id: int | None = None
+    confirm_route_deviation: StrictBool = False
+    route_deviation_reason: str | None = None
+    device_event_id: str
+
+
+@router.post("/scan-stations/{station_id}/stockings")
+def stock_at_station_area(
+    station_id: str,
+    body: StockRequest,
+    session: SessionDep,
+    response: Response,
+) -> AreaTransferResponse:
+    """Record the `STOCKED` arrival of ONE QuantityFlow (whole, or a part of
+    it — split first) at the station's terminal Area: 201 fresh, 200 on an
+    idempotent replay, 409 on a mismatched id reuse, a non-terminal Area,
+    a stale source, or an unconfirmed route deviation; 422 for a quantity
+    exceeding the source. The flow closes as STOCKED; the allocation
+    confirmation that follows is its own command (`POST /allocations`)."""
+    result = stockroom.stock_into_station_area(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity_flow_id=body.quantity_flow_id,
+        source_area_id=body.source_area_id,
+        target_area_id=body.target_area_id,
+        quantity=body.quantity,
+        operation_id=body.operation_id,
+        confirm_route_deviation=body.confirm_route_deviation,
+        route_deviation_reason=body.route_deviation_reason,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return _arrival_response(result)
 
 
 # ---------------------------------------------------------------------------

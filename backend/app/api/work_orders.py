@@ -56,6 +56,7 @@ Deliberate surface decisions:
 """
 
 import datetime
+from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
@@ -63,6 +64,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from app.api.dependencies import SessionDep
 from app.application import work_orders
 from app.application.common import UNSET
+from app.application.errors import InvalidInputError
 from app.application.work_orders import WorkOrderDetail, WorkOrderSummary
 from app.domain.enums import RequestType
 from app.infrastructure.models import WorkOrderDemand
@@ -110,8 +112,11 @@ class WorkOrderSummaryResponse(BaseModel):
     due_date: datetime.date | None
     # Server-derived read status: OPEN while at least one current
     # demand has never released; RELEASED once every current demand
-    # line carries release evidence (GUI_DESIGN §11.1).
+    # line carries release evidence (GUI_DESIGN §11.1); COMPLETED once
+    # every line is fully allocated (Phase 10).
     status: str
+    # The done date (Phase 10): set while the Work Order is completed.
+    completed_at: datetime.datetime | None
     demand_line_count: int
     part_numbers: list[str]
 
@@ -122,6 +127,7 @@ class WorkOrderDetailResponse(BaseModel):
     received_date: datetime.date
     due_date: datetime.date | None
     status: str
+    completed_at: datetime.datetime | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     demands: list[WorkOrderDemandResponse]
@@ -204,6 +210,7 @@ def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
         received_date=work_order.received_date,
         due_date=work_order.due_date,
         status=summary.status,
+        completed_at=work_order.completed_at,
         demand_line_count=summary.demand_line_count,
         part_numbers=summary.part_numbers,
     )
@@ -239,6 +246,7 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
         received_date=work_order.received_date,
         due_date=work_order.due_date,
         status=detail.status,
+        completed_at=work_order.completed_at,
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
         demands=[
@@ -256,6 +264,52 @@ def list_work_orders(
         _summary_response(summary)
         for summary in work_orders.list_work_orders(session, search=search, number=number)
     ]
+
+
+class CompletedWorkOrdersResponse(BaseModel):
+    work_orders: list[WorkOrderSummaryResponse]
+    # Matching completed Work Orders in the whole history.
+    total: int
+    # Pass back as `cursor_completed_at` + `cursor_id` for the next page;
+    # null when no further page can exist.
+    next_cursor_completed_at: datetime.datetime | None
+    next_cursor_id: int | None
+
+
+@router.get("/work-orders/completed")
+def list_completed_work_orders(
+    session: SessionDep,
+    search: str | None = None,
+    done_from: datetime.datetime | None = None,
+    done_to: datetime.datetime | None = None,
+    due_outcome: Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"] = "ALL",
+    cursor_completed_at: datetime.datetime | None = None,
+    cursor_id: int | None = None,
+    limit: int = work_orders.COMPLETED_PAGE_LIMIT,
+) -> CompletedWorkOrdersResponse:
+    """The read-only completed history (GUI_DESIGN §11.5), newest done date first."""
+    cursor: work_orders.CompletedCursor | None = None
+    if (cursor_completed_at is None) != (cursor_id is None):
+        raise InvalidInputError("Provide both cursor_completed_at and cursor_id, or neither.")
+    if cursor_completed_at is not None and cursor_id is not None:
+        cursor = work_orders.CompletedCursor(cursor_completed_at, cursor_id)
+    page = work_orders.list_completed_work_orders(
+        session,
+        search=search,
+        done_from=done_from,
+        done_to=done_to,
+        due_outcome=due_outcome,
+        cursor=cursor,
+        limit=limit,
+    )
+    return CompletedWorkOrdersResponse(
+        work_orders=[_summary_response(summary) for summary in page.work_orders],
+        total=page.total,
+        next_cursor_completed_at=(
+            page.next_cursor.completed_at if page.next_cursor is not None else None
+        ),
+        next_cursor_id=page.next_cursor.work_order_id if page.next_cursor is not None else None,
+    )
 
 
 @router.get("/work-orders/{work_order_id}")

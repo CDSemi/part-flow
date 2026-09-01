@@ -53,6 +53,12 @@ Area summary, never a Machine card). Boundaries: no Worker barcodes, no
 Receive Quantity intake from the station (the resolution reports
 whether active demand exists so the UI can present the honest
 placeholder).
+
+Stockroom (Phase 10): at a station bound to a terminal Area the same
+resolution lists the PN's candidates as the sources the operator STOCKS
+from (`stock_available`; a transfer stays blocked there), and every
+resolution carries the PN's derived stocked and available stocked
+quantity. Stocked flows are closed and never inventory.
 """
 
 from typing import Final, Literal, NamedTuple
@@ -60,6 +66,7 @@ from typing import Final, Literal, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
+from app.application import allocations
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
     area_has_machines,
@@ -279,6 +286,16 @@ class ScanResolution(NamedTuple):
     # scraps) — displayed wherever the PN is presented operationally
     # (PROJECT_PROFILE §11 Scrap).
     scrapped_quantity: int
+    # Phase 10 (PROJECT_PROFILE §18): the PN's stocked quantity and what
+    # of it is still unallocated — both derived (`STOCKED` history minus
+    # active allocation rows). At a Stockroom station the candidates
+    # are the sources the operator stocks from; the receiving
+    # confirmation follows the `STOCKED` write as its own command.
+    stocked_quantity: int
+    available_stocked_quantity: int
+    # True at a station bound to a terminal Area: the arrival command
+    # there is the Stockroom `STOCKED`, never a transfer.
+    stock_available: bool
 
 
 def scrapped_quantity_of(session: Session, part_number: str) -> int:
@@ -447,6 +464,7 @@ def resolve_part_number_scan(
             f"Area '{area.name}' is a terminal Area. Receiving finished quantity there is"
             " the Stockroom workflow, not a transfer."
         )
+    position = allocations.stock_position_of(session, pn)
     return ScanResolution(
         part_number=pn,
         station=station,
@@ -462,6 +480,9 @@ def resolve_part_number_scan(
             session, in_area_flows, latest, direct_processing=area.id not in machine_areas
         ),
         scrapped_quantity=scrapped_quantity_of(session, pn),
+        stocked_quantity=position.stocked_quantity,
+        available_stocked_quantity=position.available_stocked_quantity,
+        stock_available=area.is_terminal and bool(candidates),
     )
 
 

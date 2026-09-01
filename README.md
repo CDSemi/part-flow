@@ -29,7 +29,14 @@ preview read model, Repair as `TRANSFERRED · movement_reason REPAIR`,
 Scrap (`SCRAPPED`) and quantity additions (`QUANTITY_ADJUSTED ·
 INCREASE`), and the real Scan Station correction workflows on that
 API (`Add more quantity`, `Return quantity for repair`, the PF:SCRAP
-counting Scrap workflow, and Undo from the Last Scanned PN block):
+counting Scrap workflow, and Undo from the Last Scanned PN block), and
+the **Phase 10 Stockroom and WorkOrderAllocation backend** — the
+`STOCKED` arrival at a terminal Area (the same command mechanism as
+the transfer, the flow closing as manufacturing-complete), the
+append-only `work_order_allocations` record with the canonical-order
+suggestion, the confirmation and the auditable reversal, and Work
+Order completion derived from allocation with the read-only completed
+history (frontend pending):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -96,7 +103,24 @@ counting Scrap workflow, and Undo from the Last Scanned PN block):
   and the command-level Undo that reverses one complete committed
   command with compensating `REVERSED` Movements, the originals
   preserved and the projection restored from the reversal-aware
-  derivation; the PN resolution
+  derivation; the Phase 10 Stockroom and allocation surface —
+  `POST /api/scan-stations/{id}/stockings` (the `STOCKED` arrival at a
+  station bound to a terminal Area: the transfer's shape minus Repair,
+  implicit `AREA_COMPLETED`, partial via the same in-command SPLIT,
+  whole-command idempotency; the flow closes as manufacturing-complete
+  and is never undoable), `GET /api/allocations/suggestion` (the
+  canonical demand ordering — Hot rank, dated earliest first, undated
+  by received date — proposing up to each line's remaining shortage
+  and never beyond the derived available stocked quantity),
+  `POST /api/allocations` (the receiving confirmation or a Management
+  allocation, both invariants judged under a per-PN lock plus the
+  demand and Work Order row locks, the operator's adjustments flagged
+  as overrides, Work Order completion derived and `completed_at`
+  projected), `POST /api/allocations/{id}/reversals` (the auditable
+  adjustment, once per allocation, reopening a completed Work Order),
+  `GET /api/allocations`, and `GET /api/work-orders/completed` (the
+  read-only history: search over WO Number / PN / Job Number, done
+  range, due outcome, keyset paging); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
@@ -105,7 +129,7 @@ counting Scrap workflow, and Undo from the Last Scanned PN block):
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
   SQLAlchemy mappings of the canonical Phase 3, Phase 3.5, Phase 4,
-  Phase 5, Phase 6, Phase 7, Phase 8 and Phase 9 schema
+  Phase 5, Phase 6, Phase 7, Phase 8, Phase 9 and Phase 10 schema
   (`app/infrastructure/models.py`)
 - PostgreSQL 16 with Alembic migrations: the canonical Phase 3 domain
   schema (Departments, Areas, Operations, the optional PartNumber
@@ -134,7 +158,11 @@ counting Scrap workflow, and Undo from the Last Scanned PN block):
   `QUANTITY_ADJUSTED` / `REVERSED` types with their shape branches,
   `movement_reason`, the mandatory `reason`, the UNIQUE
   `reverses_movement_id`, and the `SCRAPPED` / `REVERSED` flow
-  statuses)
+  statuses) and the Phase 10 Stockroom and allocation persistence (the
+  `STOCKED` type and flow closure, `work_orders.completed_at` with its
+  keyset index, and the append-only `work_order_allocations` table —
+  allocation and reversal rows, UNIQUE `reverses_allocation_id`, the
+  `device_event_id` + `command_sequence` idempotency pair)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -499,13 +527,13 @@ integration):
   for Phase 4, `0006_phase5_transfer` for Phase 5,
   `0007_phase6_machine_assignment` for Phase 6,
   `0008_phase7_direct_processing` for Phase 7,
-  `0009_phase8_split_merge` for Phase 8 — while the Phase 9
-  module carries the head-level coverage: the `SCRAPPED` /
-  `QUANTITY_ADJUSTED` / `REVERSED` types and their shape branches, the
-  movement-reason and mandatory-reason checks, the UNIQUE
-  `reverses_movement_id`, the widened flow lifecycle, the downgrade
-  that refuses to drop Phase 9 history, and models↔migration
-  parity); and the API tests exercise the endpoints
+  `0009_phase8_split_merge` for Phase 8,
+  `0010_phase9_undo_corrections` for Phase 9 — while the Phase 10
+  module carries the head-level coverage: the `STOCKED` type and its
+  shape branch, the widened flow lifecycle, `work_orders.completed_at`
+  and its index, the allocation table's constraints and append-only
+  trigger, the downgrade that refuses to drop Phase 10 history, and
+  models↔migration parity); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save
@@ -561,7 +589,21 @@ integration):
   deviation interplay, Scrap full/partial/ON_MACHINE with refusals,
   additions with the Area-mode arrival state, the witness-locked
   in-Area precondition and the station-lock re-check, and the
-  `introduced = active + scrapped` reconciliation)
+  `introduced = active + scrapped` reconciliation) and the Phase 10
+  Stockroom and allocation (the `STOCKED` arrival from direct
+  processing and from a Machine, partial stocking through SPLIT, a
+  Planned Route ending at the Stockroom, every refusal with zero
+  writes, replay / mismatch / cross-kind reuse, the one-winner race,
+  the not-undoable stocked command, the `introduced = active + stocked
+  + scrapped` reconciliation, the canonical suggestion ordering and
+  tie-breaker, the confirmation with overrides and both invariants, the
+  paused two-station race stopped by the per-PN lock, the allocation
+  versus in-flight stocking interleaving, the reversal reopening a
+  completed Work Order and the threaded double-reversal race, the
+  read-only completed history with its edit / removal / release
+  refusals and the allocated-quantity floor, the history endpoint's
+  search, due outcome and keyset paging, and the projection replays of
+  `allocated_quantity` and `completed_at`)
   — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
@@ -664,7 +706,7 @@ backend/
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage + Phase 9 corrections widening)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage + Phase 9 corrections widening + Phase 10 Stockroom and allocation)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

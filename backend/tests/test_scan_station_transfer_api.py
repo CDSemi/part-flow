@@ -1404,9 +1404,9 @@ def test_terminal_flag_set_between_station_read_and_area_lock_is_seen_under_the_
     real = transfers._require_confirmed_station
 
     def flip_after_station_read(
-        session: Session, station_id: str, target_area_id: int
+        session: Session, station_id: str, target_area_id: int, nothing: str
     ) -> tuple[models.ScanStation, models.Area]:
-        result = real(session, station_id, target_area_id)
+        result = real(session, station_id, target_area_id, nothing)
         with db_engine.begin() as connection:
             connection.execute(
                 sa.update(models.Area)

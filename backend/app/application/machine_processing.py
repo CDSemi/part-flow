@@ -122,7 +122,9 @@ from app.infrastructure.models import (
 FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
 
-CommandKind = Literal["ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE", "SCRAP", "ADD", "UNDO"]
+CommandKind = Literal[
+    "ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE", "SCRAP", "ADD", "UNDO", "STOCK"
+]
 
 _MOVEMENT_TYPE_BY_KIND: Final[dict[CommandKind, MovementType]] = {
     "ASSIGN": MovementType.ASSIGNED_TO_MACHINE,
@@ -407,6 +409,12 @@ def no_longer_active(flow: QuantityFlow) -> str:
         return (
             f"Quantity Flow {flow.id} no longer exists: the action that created it"
             " was reversed. Reload the station and scan again. Nothing was recorded."
+        )
+    if flow.status == QuantityFlowStatus.STOCKED:
+        return (
+            f"Quantity Flow {flow.id} was stocked at the Stockroom and is"
+            " manufacturing-complete — it is no longer in active production."
+            " Reload the station and scan again. Nothing was recorded."
         )
     return f"Quantity Flow {flow.id} is no longer active. Nothing was recorded."
 

@@ -71,6 +71,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application import allocations
 from app.application.common import flush, required_flag
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -417,6 +418,19 @@ def release_to_production(
     # requested quantity.
     already_released = demand_released_quantity(session, demand.id)
     remaining = demand.requested_quantity - already_released
+    # Phase 10 (PROJECT_PROFILE §18): demand already satisfied from
+    # stocked quantity needs no production. Judged under the same
+    # demand row lock the allocation command takes, so an allocation
+    # and a release of one demand have one serial outcome; a completed
+    # Work Order (every line fully allocated) is read-only history.
+    allocated = allocations.active_allocations_by_demand(session, [demand.id]).get(demand.id, 0)
+    if allocated >= demand.requested_quantity:
+        raise ConflictError(
+            f"Demand line {demand.id} is fully allocated from stock"
+            f" ({allocated} of {demand.requested_quantity} pcs). No production"
+            " release is needed — later work is a new Work Order Demand."
+            " Nothing was released."
+        )
     if remaining <= 0:
         raise ConflictError(
             f"Demand line {demand.id} is fully released"

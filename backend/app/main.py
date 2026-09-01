@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.allocations import router as allocations_router
 from app.api.environment import router as environment_router
 from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(production_release_router)
     app.include_router(route_templates_router)
     app.include_router(scan_station_router)
+    app.include_router(allocations_router)
     register_exception_handlers(app)
     return app
 

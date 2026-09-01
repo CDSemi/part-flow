@@ -36,6 +36,14 @@ edges no longer count, `consumed_flow_ids`). A `SCRAPPED` closes its
 flow, so it never bears an active position either. Nothing here reads
 state off a `REVERSED` row beyond its `to_area_id`, which by
 construction of the compensating motion is the restored Area.
+
+Stockroom (Phase 10, PROJECT_PROFILE §18): a `STOCKED` Movement ends
+the flow's active life — the quantity is manufacturing-complete in the
+terminal Area and never active inventory again — so a flow whose
+newest effective Movement is its `STOCKED` is absent from the replay
+exactly like a scrapped one; the stocked total of a PN
+(`stocked_quantity_of`) is the `stocked` term of the §11
+reconciliation and the quantity Work Order Allocation draws from.
 """
 
 from collections.abc import Iterable
@@ -53,15 +61,21 @@ from app.infrastructure.models import PartMovement, QuantityFlowLineage
 LINEAGE_MOVEMENT_TYPES: Final = (MovementType.SPLIT, MovementType.MERGED)
 
 # Movement types that never bear an active position: descent (Phase 8),
-# the removal from active production, and the compensating reversal
-# (Phase 9) — a flow whose newest effective Movement is one of these is
-# closed, or derives its position from an earlier Movement.
+# the removal from active production, the compensating reversal
+# (Phase 9) and the Stockroom completion (Phase 10) — a flow whose
+# newest effective Movement is one of these is closed, or derives its
+# position from an earlier Movement.
 NON_POSITION_BEARING_TYPES: Final = (
     MovementType.SPLIT,
     MovementType.MERGED,
     MovementType.SCRAPPED,
     MovementType.REVERSED,
+    MovementType.STOCKED,
 )
+
+# The two closures that end a flow's active life for good: its newest
+# effective Movement being one of these makes it inactive inventory.
+CLOSING_MOVEMENT_TYPES: Final = (MovementType.SCRAPPED, MovementType.STOCKED)
 
 
 def reversed_movement_ids(flow_id: int) -> Select[tuple[int | None]]:
@@ -357,8 +371,9 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
     are: a flow consumed by an effective SPLIT or MERGED (a parent in
     the effective lineage graph, `consumed_flow_ids`), a flow whose
     newest effective Movement is its ``SCRAPPED`` (Phase 9 — its
-    quantity left active production), and a flow with no effective
-    Movement at all (the command that created it was undone). Every
+    quantity left active production) or its ``STOCKED`` (Phase 10 —
+    manufacturing-complete in the terminal Area), and a flow with no
+    effective Movement at all (the command that created it was undone). Every
     other flow appears: a QuantityFlow's first Movement is always its
     ``RECEIVED``, a ``QUANTITY_ADJUSTED`` addition, or the lineage
     event that created it — and an undone Scrap or consumption leaves
@@ -369,7 +384,7 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
     active_ids = [
         flow_id
         for flow_id, movement in latest.items()
-        if flow_id not in consumed and movement.movement_type != MovementType.SCRAPPED
+        if flow_id not in consumed and movement.movement_type not in CLOSING_MOVEMENT_TYPES
     ]
     effective = effective_latest_movements(session, active_ids)
     # The Area mode is part of the derivation (§12): the same arrival
@@ -389,6 +404,27 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
         )
         for flow_id in active_ids
     }
+
+
+def stocked_quantity_of(session: Session, part_number: str) -> int:
+    """The PN's total stocked quantity (Phase 10, PROJECT_PROFILE §18).
+
+    The sum of every effective ``STOCKED`` Movement of the PN — the
+    `stocked` term of the §11 reconciliation `introduced = active +
+    stocked + scrapped` and the gross quantity Work Order Allocation
+    draws from. Reversed history is excluded for uniformity with every
+    other derivation, although a ``STOCKED`` command is never undone
+    (PROJECT_PROFILE §32 open decision 1).
+    """
+    reversal = aliased(PartMovement)
+    total = session.scalar(
+        select(func.coalesce(func.sum(PartMovement.quantity), 0)).where(
+            PartMovement.part_number == part_number,
+            PartMovement.movement_type == MovementType.STOCKED,
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+    )
+    return int(total or 0)
 
 
 def rebuild_current_area_ids(session: Session) -> dict[int, int]:

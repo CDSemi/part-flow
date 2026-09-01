@@ -63,8 +63,15 @@ class MovementType(StrEnum):
     referencing it through ``reverses_movement_id``; the original is
     preserved and the derived state is restored by EXCLUDING the
     reversed pair from every derivation, never by re-stating state on
-    the REVERSED row). Later phases widen this additively (STOCKED,
-    ...); none of those values exist yet.
+    the REVERSED row). Phase 10 adds STOCKED (PROJECT_PROFILE §18): the
+    scan of quantity into the terminal Stockroom Area — recorded like a
+    TRANSFERRED (source Area → terminal Area at a Station, preceded by
+    the implicit AREA_COMPLETED of actively processing quantity) — the
+    quantity is manufacturing-complete, leaves active production (the
+    flow closes as STOCKED) and becomes available for Work Order
+    Allocation, which is recorded separately from Movement. Later
+    phases widen this additively (ROUTE_ADJUSTED, ...); none of those
+    values exist yet.
     """
 
     RECEIVED = "RECEIVED"
@@ -77,6 +84,7 @@ class MovementType(StrEnum):
     SCRAPPED = "SCRAPPED"
     QUANTITY_ADJUSTED = "QUANTITY_ADJUSTED"
     REVERSED = "REVERSED"
+    STOCKED = "STOCKED"
 
 
 class MovementReason(StrEnum):
@@ -170,8 +178,10 @@ class QuantityFlowStatus(StrEnum):
     as quantity again; a flow closed by a command that is later undone
     reopens as ACTIVE instead). A closed flow keeps its history and its
     last position but is never active inventory again; `closed_at` is
-    set exactly for a non-ACTIVE status (CHECK). Later closures
-    (STOCKED, ...) arrive with their phases.
+    set exactly for a non-ACTIVE status (CHECK). Phase 10 adds STOCKED
+    (the flow's whole quantity was scanned into the terminal Stockroom
+    Area: manufacturing-complete, never active inventory again, and the
+    quantity that Work Order Allocation draws from).
     """
 
     ACTIVE = "ACTIVE"
@@ -179,6 +189,7 @@ class QuantityFlowStatus(StrEnum):
     MERGED = "MERGED"
     SCRAPPED = "SCRAPPED"
     REVERSED = "REVERSED"
+    STOCKED = "STOCKED"
 
 
 class WorkOrderStatus(StrEnum):
@@ -190,14 +201,32 @@ class WorkOrderStatus(StrEnum):
     Order whose every current demand line has committed release
     evidence reads as RELEASED; the stored column stays OPEN, because
     the derivation from immutable ``RECEIVED`` Movement context can
-    never drift while a stored copy could. Completion stays derived
-    from allocation records (`completed_at`, Phase 10) and is never a
-    stored status value either.
+    never drift while a stored copy could. COMPLETED (Phase 10) is
+    likewise a DERIVED read value: a Work Order whose every demand line
+    is fully allocated from stocked quantity reads as COMPLETED — the
+    allocation records stay the source of truth, ``completed_at`` is
+    the persisted done-date projection they set and clear (PROJECT_PROFILE
+    §8.2), and the stored status column stays OPEN.
     """
 
     OPEN = "OPEN"
-    # Derived read status only — never written to work_orders.status.
+    # Derived read statuses only — never written to work_orders.status.
     RELEASED = "RELEASED"
+    COMPLETED = "COMPLETED"
+
+
+class AllocationSource(StrEnum):
+    """Where a WorkOrderAllocation row was recorded (PROJECT_PROFILE §18).
+
+    STOCKROOM: the receiving confirmation at a Stockroom Scan Station
+    (the routine Operator workflow, no Manager approval). MANAGEMENT: an
+    allocation or adjustment made from Management (Admin/Manager may
+    adjust allocation at any time; authorization itself arrives with
+    Phase 14 — nothing is simulated before).
+    """
+
+    STOCKROOM = "STOCKROOM"
+    MANAGEMENT = "MANAGEMENT"
 
 
 class AuditEventType(StrEnum):

@@ -17,7 +17,10 @@ types); plus the Phase 7 direct-processing widening (an `AREA_COMPLETED`
 without a Machine for an Area without Machines); plus the Phase 8
 quantity lineage (the `SPLIT` / `MERGED` types, the QuantityFlow
 lifecycle closure, and the append-only `quantity_flow_lineage` edge
-table). Business rules stay in the
+table); plus the Phase 10 Stockroom and allocation persistence (the
+`STOCKED` type, the `STOCKED` flow closure, `work_orders.completed_at`
+and the append-only `work_order_allocations` table). Business rules
+stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -69,6 +72,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql.elements import conv
 
 from app.domain.enums import (
+    AllocationSource,
     AuditEntityType,
     AuditEventType,
     LineageRelation,
@@ -152,7 +156,12 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 # from/to pair may cross Areas (reversing a TRANSFERRED) or stay in one
 # (reversing an in-Area event), and it never re-states a Machine: the
 # restored state is derived by EXCLUDING the reversed pair from the
-# derivations, so re-stating it here could only drift.
+# derivations, so re-stating it here could only drift. Phase 10:
+# STOCKED records the scan of quantity into the terminal Stockroom
+# Area exactly like a TRANSFERRED — two DIFFERENT Areas at a Station,
+# no Machine (actively processing quantity is preceded by its own
+# AREA_COMPLETED); the terminal flag of the destination is an Area
+# configuration rule the Application layer judges under the Area lock.
 MOVEMENT_SHAPE_SQL = (
     "(movement_type = 'RECEIVED' AND from_area_id IS NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
@@ -183,6 +192,9 @@ MOVEMENT_SHAPE_SQL = (
     " OR (movement_type = 'REVERSED' AND from_area_id IS NOT NULL"
     " AND station_id IS NOT NULL"
     " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
+    " OR (movement_type = 'STOCKED' AND from_area_id IS NOT NULL"
+    " AND from_area_id <> to_area_id AND station_id IS NOT NULL"
+    " AND source_machine_id IS NULL AND destination_machine_id IS NULL)"
 )
 
 # Typed movement intent (PROJECT_PROFILE §8.11, §14): the only Phase 9
@@ -206,11 +218,18 @@ MOVEMENT_REASON_REQUIRED_SQL = (
 # (PROJECT_PROFILE §16); no other type references one.
 MOVEMENT_REVERSES_SQL = "(movement_type = 'REVERSED') = (reverses_movement_id IS NOT NULL)"
 
+# A reversal takes an allocation back and always says why (PROJECT_PROFILE
+# §8.12 "every adjustment must be auditable"); an allocation row may
+# carry an optional reason.
+ALLOCATION_REVERSAL_REASON_SQL = "reverses_allocation_id IS NULL OR allocation_reason IS NOT NULL"
+
 # Row-level idempotency guarantee of the application-command model
 # (Phase 6): one `device_event_id` identifies one command, which may
 # append several Movements numbered by `command_sequence`. Referenced
 # by the commands that translate a race lost at COMMIT into a replay.
 DEVICE_EVENT_ID_CONSTRAINT = "uq_part_movements_device_event_id_command_sequence"
+# The same guarantee for the allocation command (Phase 10).
+ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT = "uq_work_order_allocations_device_event_id_command_sequence"
 
 # Fallback naming convention for anything created without an explicit
 # name. All constraints below are still named explicitly.
@@ -614,6 +633,14 @@ class WorkOrder(Base):
     # Value vocabulary belongs to the Phase 4 intake workflow; 'OPEN' is
     # the established initial state of an accepting Work Order.
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'OPEN'"))
+    # The done date (Phase 10, PROJECT_PROFILE §8.2): the timestamp of
+    # the allocation event that fully allocated the last open demand
+    # line — a maintained projection of the allocation records, set and
+    # cleared inside the allocation transaction, never entered by hand,
+    # and rebuildable from `work_order_allocations` alone. NULL while
+    # the Work Order is active. Indexed for the keyset-paged completed
+    # history ordered by (completed_at, id).
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -627,6 +654,12 @@ class WorkOrder(Base):
             "work_order_number",
             unique=True,
             postgresql_where=text("work_order_number IS NOT NULL"),
+        ),
+        Index(
+            "ix_work_orders_completed_at_id",
+            "completed_at",
+            "id",
+            postgresql_where=text("completed_at IS NOT NULL"),
         ),
     )
 
@@ -647,6 +680,12 @@ class WorkOrderDemand(Base):
     part_number: Mapped[str] = mapped_column(Text, nullable=False)
     request_type: Mapped[str] = mapped_column(Text, nullable=False)
     requested_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Maintained projection of the demand's ACTIVE allocation (Phase 10):
+    # the sum of its effective `work_order_allocations` rows, updated
+    # inside the allocation transaction under the demand row lock and
+    # rebuildable from those rows alone — the rows stay the source of
+    # truth (PROJECT_PROFILE §8.2 "the allocation records remain the
+    # source of truth").
     allocated_quantity: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
@@ -1080,6 +1119,107 @@ class QuantityFlowLineage(Base):
         ),
         Index("ix_quantity_flow_lineage_parent_flow_id", "parent_flow_id"),
         Index("ix_quantity_flow_lineage_child_flow_id", "child_flow_id"),
+    )
+
+
+class WorkOrderAllocation(Base):
+    """One append-only allocation event of stocked PN quantity to a demand
+    (Phase 10; PROJECT_PROFILE §8.12, §18).
+
+    Allocation is independent from PartMovement by design: a row never
+    references a Movement or a QuantityFlow, only the canonical PN
+    (kept by value, like every production record) and the demand it
+    serves. Rows are immutable (raise-on-write trigger owned by
+    migration 0011) and come in two kinds: an ALLOCATION row adds
+    `quantity` to the demand's active allocation; a REVERSAL row
+    (`reverses_allocation_id` set — FK, UNIQUE: at most one reversal
+    per allocation, so a correction can never be applied twice, even
+    by a race) takes exactly the referenced allocation's quantity back
+    out, with a mandatory reason (CHECK). The ACTIVE allocation of a
+    demand — and of a PN — is therefore the sum of its allocation rows
+    that no reversal references, derived, never a stored counter that
+    could drift (`work_order_demands.allocated_quantity` is a
+    maintained projection of exactly that sum). Available stocked
+    quantity is `effective STOCKED quantity − active allocation`, both
+    derived from history.
+
+    `device_event_id` + `command_sequence` identify the application
+    command that recorded the rows — the same idempotency model as
+    `part_movements` (SLICE1 §14): one confirmation writes several
+    rows under one id, replayed as a whole on a transport retry.
+    `station_id` names the Stockroom Scan Station of a receiving
+    confirmation (NULL for a Management allocation or adjustment);
+    `actor_reference` stays a nullable, reference-free value until
+    authentication exists (Phase 14); Workers (`allocated_by_worker_id`)
+    arrive with Worker sessions (Phase 13).
+    """
+
+    __tablename__ = "work_order_allocations"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    part_number: Mapped[str] = mapped_column(Text, nullable=False)
+    work_order_demand_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "work_order_demands.id",
+            name="fk_work_order_allocations_demand_id_work_order_demands",
+        ),
+        nullable=False,
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    # True when the confirmed quantity differs from the canonical
+    # suggestion the server computed at confirmation time (an Operator
+    # adjustment, PROJECT_PROFILE §18) — audit context only.
+    is_manual_override: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    allocation_reason: Mapped[str | None] = mapped_column(Text)
+    reverses_allocation_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "work_order_allocations.id",
+            name="fk_work_order_allocations_reverses_allocation_id",
+        ),
+    )
+    station_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey(
+            "scan_stations.station_id", name="fk_work_order_allocations_station_id_scan_stations"
+        ),
+    )
+    actor_reference: Mapped[str | None] = mapped_column(Text)
+    allocated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    command_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+
+    __table_args__ = (
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL,
+            name=conv("ck_work_order_allocations_part_number_canonical"),
+        ),
+        CheckConstraint("quantity > 0", name=conv("ck_work_order_allocations_quantity_positive")),
+        CheckConstraint(
+            "source IN (" + ", ".join(f"'{source}'" for source in AllocationSource) + ")",
+            name=conv("ck_work_order_allocations_source"),
+        ),
+        CheckConstraint(
+            ALLOCATION_REVERSAL_REASON_SQL,
+            name=conv("ck_work_order_allocations_reversal_reason_required"),
+        ),
+        CheckConstraint(
+            "command_sequence >= 1",
+            name=conv("ck_work_order_allocations_command_sequence_positive"),
+        ),
+        UniqueConstraint(
+            "reverses_allocation_id", name="uq_work_order_allocations_reverses_allocation_id"
+        ),
+        UniqueConstraint(
+            "device_event_id",
+            "command_sequence",
+            name=ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT,
+        ),
+        Index("ix_work_order_allocations_work_order_demand_id", "work_order_demand_id"),
+        Index("ix_work_order_allocations_part_number", "part_number"),
     )
 
 

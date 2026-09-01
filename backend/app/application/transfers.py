@@ -110,11 +110,22 @@ Rules owned here:
   history); partial Repair rides on the same SPLIT machinery; a route
   deviation of a PLANNED flow is confirmed separately, exactly like a
   normal transfer's.
+- Stockroom (Phase 10, PROJECT_PROFILE §18): the scan of quantity into
+  the terminal Stockroom Area is the SAME arrival command recorded as
+  `STOCKED` instead of `TRANSFERRED` (`record_arrival`, reached through
+  `app.application.stockroom`): source selection, the flow/station/
+  Area/Operation locks, the route assessment, partial quantity via
+  SPLIT, the implicit `AREA_COMPLETED`, idempotency and zero-write
+  refusals are one mechanism — the differences are the destination
+  (a terminal Area only, versus never a terminal Area for a transfer),
+  the Movement type, and the projection outcome: a stocked flow closes
+  (`status = STOCKED`, manufacturing-complete, never active inventory
+  again) instead of moving on. Repair never stocks. Work Order
+  Allocation is a separate record (`app.application.allocations`).
 - Explicitly NOT here (their own modules / later phases): the explicit
   merge (`app.application.merges`), Scrap and quantity additions
   (`app.application.quantity_events`), Undo (`app.application.undo`),
-  Worker sessions (Phase 13), Stockroom `STOCKED` (Phase 10) — a
-  transfer into a terminal Area is therefore refused.
+  Worker sessions (Phase 13).
 """
 
 import datetime
@@ -184,6 +195,12 @@ _DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
 
 RouteStatus = Literal["FLOATING", "ON_ROUTE", "DEVIATION"]
 DeviationKind = Literal["AREA", "OPERATION"]
+# The two arrival intents one command mechanism records (Phase 10).
+ArrivalKind = Literal["TRANSFER", "STOCK"]
+_MOVEMENT_TYPE_BY_ARRIVAL: Final[dict[ArrivalKind, MovementType]] = {
+    "TRANSFER": MovementType.TRANSFERRED,
+    "STOCK": MovementType.STOCKED,
+}
 
 
 class RouteAssessment(NamedTuple):
@@ -212,6 +229,8 @@ class AreaTransfer(NamedTuple):
     """
 
     movement_id: int
+    # TRANSFERRED, or STOCKED for the Stockroom arrival (Phase 10).
+    movement_type: str
     quantity_flow_id: int
     part_number: str
     quantity: int
@@ -282,6 +301,15 @@ def require_transfer_target(area: Area) -> None:
         raise ConflictError(
             f"Area '{area.name}' is a terminal Area. Receiving finished quantity there"
             " is the Stockroom workflow, not a transfer."
+        )
+
+
+def require_stock_target(area: Area) -> None:
+    """Stocking records manufacturing completion — only at a terminal Area (§18)."""
+    if not area.is_terminal:
+        raise ConflictError(
+            f"Area '{area.name}' is not a terminal Area. Quantity is stocked only at the"
+            " Stockroom — move it there with a transfer instead. Nothing was stocked."
         )
 
 
@@ -505,6 +533,7 @@ def _request_fingerprint(
     route_deviation_reason: str | None,
     movement_reason: str | None,
     reason: str | None,
+    kind: ArrivalKind = "TRANSFER",
 ) -> str:
     """Deterministic canonical hash of the normalized request (SLICE1 §14).
 
@@ -514,9 +543,12 @@ def _request_fingerprint(
     reason — a Repair and a normal transfer are different intents under
     one ``device_event_id``. The explicit confirmation flag itself is
     intent-to-proceed, not request content (like the release's
-    active-quantity confirmation), and is excluded.
+    active-quantity confirmation), and is excluded. A Stockroom arrival
+    (Phase 10) adds its command kind, so a stock and a transfer are
+    different intents under one id while every committed transfer
+    fingerprint stays byte-identical to what Phases 5–9 recorded.
     """
-    normalized = {
+    normalized: dict[str, Any] = {
         "station_id": station_id,
         "quantity_flow_id": quantity_flow_id,
         "part_number": part_number,
@@ -528,6 +560,8 @@ def _request_fingerprint(
         "movement_reason": movement_reason,
         "reason": reason,
     }
+    if kind != "TRANSFER":
+        normalized["command"] = kind
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -568,10 +602,15 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
     split, action = split_prefix(command)
     movement = action[-1]
     completed = action[0] if len(action) == 2 else None
-    if movement.from_area_id is None or movement.station_id is None:
+    if (
+        movement.from_area_id is None
+        or movement.station_id is None
+        or movement.movement_type not in _MOVEMENT_TYPE_BY_ARRIVAL.values()
+    ):
         # The database shape CHECK makes this unreachable for a
-        # TRANSFERRED command; another kind of row reusing the id is a
-        # client defect caught by the fingerprint check before this point.
+        # TRANSFERRED / STOCKED command; another kind of row reusing the
+        # id is a client defect caught by the fingerprint check before
+        # this point.
         raise IdempotencyConflictError(
             "This device_event_id belongs to a different kind of production"
             " event. Nothing was recorded — a new intent needs a new"
@@ -579,6 +618,7 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
         )
     return AreaTransfer(
         movement_id=movement.id,
+        movement_type=movement.movement_type,
         quantity_flow_id=movement.quantity_flow_id,
         part_number=movement.part_number,
         quantity=movement.quantity,
@@ -601,19 +641,22 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
     )
 
 
-def _replay_or_conflict(command: list[PartMovement], fingerprint: str) -> AreaTransfer:
-    """A committed command replays only as the SAME transfer intent.
+def _replay_or_conflict(
+    command: list[PartMovement], fingerprint: str, kind: ArrivalKind = "TRANSFER"
+) -> AreaTransfer:
+    """A committed command replays only as the SAME arrival intent.
 
-    The command is a transfer when — after its optional SPLIT prefix
-    (Phase 8) — its last Movement is the TRANSFERRED row and, when two
-    action rows exist, the first is its implicit AREA_COMPLETED; every
-    row of the command carries the same fingerprint.
+    The command is a transfer (a stocking) when — after its optional
+    SPLIT prefix (Phase 8) — its last Movement is the TRANSFERRED
+    (STOCKED) row and, when two action rows exist, the first is its
+    implicit AREA_COMPLETED; every row of the command carries the same
+    fingerprint.
     """
     _, action = split_prefix(command)
     movement = action[-1]
     stored = (movement.metadata_ or {}).get(_FINGERPRINT_KEY)
     well_formed = (
-        movement.movement_type == MovementType.TRANSFERRED
+        movement.movement_type == _MOVEMENT_TYPE_BY_ARRIVAL[kind]
         and (
             len(action) == 1
             or (len(action) == 2 and action[0].movement_type == MovementType.AREA_COMPLETED)
@@ -635,7 +678,7 @@ def _replay_or_conflict(command: list[PartMovement], fingerprint: str) -> AreaTr
 
 
 def _require_confirmed_station(
-    session: Session, station_id: str, target_area_id: int
+    session: Session, station_id: str, target_area_id: int, nothing: str
 ) -> tuple[ScanStation, Area]:
     """The station locked until COMMIT, still bound to the confirmed Area.
 
@@ -649,14 +692,13 @@ def _require_confirmed_station(
         raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
     if not station.is_active:
         raise ConflictError(
-            f"Scan Station '{station_id}' is inactive and accepts no production use."
-            " Nothing was transferred."
+            f"Scan Station '{station_id}' is inactive and accepts no production use. {nothing}"
         )
     if station.area_id != target_area_id:
         raise ConflictError(
             f"Scan Station '{station_id}' is no longer bound to the confirmed destination"
-            " Area — its configuration changed since the transfer was prepared. Reload"
-            " the station and confirm the transfer again. Nothing was transferred."
+            " Area — its configuration changed since the action was prepared. Reload"
+            f" the station and confirm again. {nothing}"
         )
     area = session.get(Area, station.area_id)
     if area is None:  # pragma: no cover - FK guarantees the row
@@ -745,6 +787,54 @@ def transfer_to_station_area(
     deviation is confirmed separately exactly as for a normal transfer
     (§17 — the Repair reason never doubles as the deviation reason).
     """
+    return record_arrival(
+        session,
+        kind="TRANSFER",
+        station_id=station_id,
+        part_number=part_number,
+        quantity_flow_id=quantity_flow_id,
+        source_area_id=source_area_id,
+        target_area_id=target_area_id,
+        quantity=quantity,
+        operation_id=operation_id,
+        confirm_route_deviation=confirm_route_deviation,
+        route_deviation_reason=route_deviation_reason,
+        repair=repair,
+        repair_reason=repair_reason,
+        device_event_id=device_event_id,
+    )
+
+
+def record_arrival(
+    session: Session,
+    *,
+    kind: ArrivalKind,
+    station_id: str,
+    part_number: object,
+    quantity_flow_id: int,
+    source_area_id: int,
+    target_area_id: int,
+    quantity: object,
+    operation_id: int | None,
+    confirm_route_deviation: object,
+    route_deviation_reason: str | None,
+    repair: object = False,
+    repair_reason: str | None = None,
+    device_event_id: object,
+) -> AreaTransfer:
+    """The one arrival command: a TRANSFER into an Area, or a STOCK into the Stockroom.
+
+    Both kinds share every rule of this module verbatim — explicit
+    source and confirmed destination, the lock order flow → station →
+    source Machine → target Area → Operation, the route assessment and
+    deviation confirmation, partial quantity through the in-command
+    SPLIT, the implicit AREA_COMPLETED of actively processing quantity,
+    whole-command idempotency with fingerprint conflicts, and zero
+    writes on every refusal. They differ only in what the destination
+    must be (a terminal Area for STOCK, never one for TRANSFER), the
+    Movement type recorded (STOCKED / TRANSFERRED), and the projection
+    outcome: a stocked flow closes as manufacturing-complete.
+    """
     # -- Pure input shape (no database) -------------------------------
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity)
@@ -752,6 +842,13 @@ def transfer_to_station_area(
     reason = optional_text(route_deviation_reason)
     repair_intent = required_flag(repair, "repair")
     repair_text = optional_text(repair_reason)
+    stocking = kind == "STOCK"
+    nothing = "Nothing was stocked." if stocking else "Nothing was transferred."
+    if stocking and (repair_intent or repair_text is not None):
+        raise InvalidInputError(
+            "A Repair returns quantity to production; it never stocks it. Record the"
+            f" Stockroom arrival without the Repair intent. {nothing}"
+        )
     if repair_intent and repair_text is None:
         raise InvalidInputError(
             "A Repair needs a reason. Enter why the quantity returns for repair —"
@@ -776,6 +873,7 @@ def transfer_to_station_area(
         route_deviation_reason=reason,
         movement_reason=movement_reason,
         reason=repair_text,
+        kind=kind,
     )
 
     # -- Idempotency fast path (SLICE1 §14) ------------------------------
@@ -783,7 +881,7 @@ def transfer_to_station_area(
     # transfer replays whatever the configuration looks like now.
     committed = _committed_transfer(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, fingerprint)
+        return _replay_or_conflict(committed, fingerprint, kind)
 
     # -- Source flow under row lock ------------------------------------
     # Serializes concurrent transfers of the same flow: the loser
@@ -796,14 +894,14 @@ def transfer_to_station_area(
     # -- Idempotency RE-CHECK after the blocking lock --------------------
     committed = _committed_transfer(session, event_id)
     if committed:
-        return _replay_or_conflict(committed, fingerprint)
+        return _replay_or_conflict(committed, fingerprint, kind)
 
     # -- Station context under the station row lock ---------------------
     # The confirmed destination is an optimistic precondition: the
     # station must still be active and still bound to exactly the Area
     # the operator confirmed, checked on the locked row so a concurrent
     # deactivation or rebind and this transfer have one serial outcome.
-    station, target = _require_confirmed_station(session, station_id, target_area_id)
+    station, target = _require_confirmed_station(session, station_id, target_area_id, nothing)
 
     # -- Validation before write ---------------------------------------
     if flow.part_number != pn:
@@ -815,7 +913,8 @@ def transfer_to_station_area(
         raise ConflictError(no_longer_active(flow))
     if flow.current_area_id == target.id:
         raise ConflictError(
-            f"Quantity Flow {flow.id} is already in Area '{target.name}'. Nothing to transfer."
+            f"Quantity Flow {flow.id} is already in Area '{target.name}'. Nothing to"
+            f" {'stock' if stocking else 'transfer'}."
         )
     if flow.current_area_id != source_area_id:
         raise ConflictError(
@@ -825,8 +924,8 @@ def transfer_to_station_area(
         )
     if confirmed_quantity > flow.quantity:
         raise InvalidInputError(
-            f"Transfer quantity {confirmed_quantity} exceeds the {flow.quantity} pcs"
-            f" available in the source. Nothing was transferred."
+            f"{'Stock' if stocking else 'Transfer'} quantity {confirmed_quantity} exceeds"
+            f" the {flow.quantity} pcs available in the source. {nothing}"
         )
     partial = confirmed_quantity < flow.quantity
     source = session.get(Area, source_area_id)
@@ -852,7 +951,7 @@ def transfer_to_station_area(
         if flow.current_machine_id is None:  # pragma: no cover - projection invariant
             raise ConflictError(
                 f"Quantity Flow {flow.id} is on a Machine according to its history but"
-                " its projection carries none. Nothing was transferred."
+                f" its projection carries none. {nothing}"
             )
         source_machine = lock_machine(session, flow.current_machine_id)
         if source_machine is None:  # pragma: no cover - FK guarantees the row
@@ -867,9 +966,13 @@ def transfer_to_station_area(
     session.refresh(target, with_for_update=True)
     if not target.is_active:
         raise ConflictError(
-            f"Area '{target.name}' is inactive and cannot accept transferred quantity."
+            f"Area '{target.name}' is inactive and cannot accept"
+            f" {'stocked' if stocking else 'transferred'} quantity."
         )
-    require_transfer_target(target)
+    if stocking:
+        require_stock_target(target)
+    else:
+        require_transfer_target(target)
 
     # -- Repair destination (Phase 9, PROJECT_PROFILE §14) ---------------
     # Repair returns quantity to a previously visited Area to correct
@@ -924,7 +1027,7 @@ def transfer_to_station_area(
     size = (3 if partial else 0) + action_rows
     # Read before any Movement is staged (no autoflush surprises).
     assigned_before = assigned_quantity(session, source_machine.id) if source_machine else 0
-    metadata = command_metadata("TRANSFER", fingerprint, size=size)
+    metadata = command_metadata(kind, fingerprint, size=size)
     sequence = 1
     if partial:
         # The source closes; the SELECTED child (its own snapshot copy
@@ -989,7 +1092,7 @@ def transfer_to_station_area(
         PartMovement(
             quantity_flow_id=flow.id,
             part_number=pn,
-            movement_type=MovementType.TRANSFERRED,
+            movement_type=_MOVEMENT_TYPE_BY_ARRIVAL[kind],
             quantity=flow.quantity,
             from_area_id=source.id,
             to_area_id=target.id,
@@ -1021,6 +1124,13 @@ def transfer_to_station_area(
     flow.current_area_id = target.id
     flow.current_machine_id = None
     flow.updated_at = func.now()
+    if stocking:
+        # Manufacturing-complete (PROJECT_PROFILE §18): the flow leaves
+        # active production for good — its last position is the
+        # Stockroom, its history complete, and its quantity is what
+        # Work Order Allocation draws from (a separate record).
+        flow.status = QuantityFlowStatus.STOCKED
+        flow.closed_at = func.now()
 
     try:
         session.commit()
@@ -1032,6 +1142,6 @@ def transfer_to_station_area(
             # the race at COMMIT: nothing of this attempt persisted.
             winner = _committed_transfer(session, event_id)
             if winner:
-                return _replay_or_conflict(winner, fingerprint)
+                return _replay_or_conflict(winner, fingerprint, kind)
         raise
     return _result_from_command(command, created=True)

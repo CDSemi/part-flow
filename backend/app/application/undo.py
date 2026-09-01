@@ -230,6 +230,21 @@ def _ineligibility(session: Session, station: ScanStation, rows: list[PartMoveme
             "This action is itself a reversal. A reversal is permanent — record the"
             " intended action again instead of reversing the reversal."
         )
+    if _command_kind(rows) == "STOCK" or any(
+        row.movement_type == MovementType.STOCKED for row in rows
+    ):
+        # PROJECT_PROFILE §32 open decision 1: whether stocked quantity
+        # may return to active production through a controlled reversal
+        # is undecided — and Work Order Allocation may already depend on
+        # the stocked quantity (Phase 10). Until decided, a STOCKED
+        # command is permanent; corrections go through allocation
+        # adjustments, never through the Movement history.
+        return (
+            "This action stocked the quantity at the Stockroom: it is"
+            " manufacturing-complete and may already be allocated to Work Order"
+            " Demand. Returning stocked quantity to production is not supported;"
+            " adjust the allocation instead."
+        )
     if any(row.station_id is None for row in rows):
         return (
             "This event was recorded by Management, not at a Scan Station."

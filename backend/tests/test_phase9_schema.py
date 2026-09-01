@@ -20,16 +20,14 @@ SLICE1_DATA_MODEL §18):
   reversal of one Movement;
 - the QuantityFlow lifecycle: `status` widened with SCRAPPED /
   REVERSED, `closed_at` agreement unchanged;
-- models↔migration metadata parity at head (moved here from the
-  Phase 8 schema test, which is now pinned to 0009);
 - append-only enforcement covers the new Movement types unchanged;
 - clean downgrade back to the Phase 8 boundary with a successful
   re-upgrade, and the downgrade refusing to drop Phase 9 history.
 
-Phase 9 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to
-`0010_phase9_undo_corrections` and move the head-level coverage into
-that phase's schema test.
+This module is PINNED to `0010_phase9_undo_corrections` (Phase 10
+added migration 0011): every assertion documents the Phase 9 boundary
+as it shipped, and the head-level coverage (models↔schema parity, the
+current shape CHECK) lives in `test_phase10_schema.py`.
 """
 
 import datetime
@@ -105,14 +103,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated 0010 → base → 0010 through real Alembic runs."""
     name = "partflow_test_phase9_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE9_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE9_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -228,7 +226,7 @@ def _constraint(connection: Connection, name: str) -> str:
 
 
 class TestMigrationSchema:
-    def test_head_keeps_exactly_the_phase8_tables(self, migrated_engine: Engine) -> None:
+    def test_phase9_keeps_exactly_the_phase8_tables(self, migrated_engine: Engine) -> None:
         tables = set(inspect(migrated_engine).get_table_names())
         assert tables == _EXPECTED_TABLES | {"alembic_version"}
 
@@ -241,6 +239,9 @@ class TestMigrationSchema:
         assert movement_columns.isdisjoint({"worker_id", "scan_session_id"})
         flow_columns = {column["name"] for column in inspector.get_columns("quantity_flows")}
         assert flow_columns.isdisjoint({"parent_flow_id", "processing_state", "stocked_at"})
+        # The Phase 10 done date does not exist at this boundary.
+        work_order_columns = {column["name"] for column in inspector.get_columns("work_orders")}
+        assert "completed_at" not in work_order_columns
 
     def test_movement_type_check_admits_exactly_the_phase9_types(
         self, connection: Connection
@@ -267,7 +268,11 @@ class TestMigrationSchema:
     ) -> None:
         phase9 = _load_migration("20260831_0010_phase9_undo_corrections.py", "phase9_migration")
         phase8 = _load_migration("20260828_0009_phase8_split_merge.py", "phase8_migration")
-        assert phase9._PHASE9_SHAPE == models.MOVEMENT_SHAPE_SQL
+        phase10 = _load_migration("20260901_0011_phase10_stock_allocation.py", "phase10_migration")
+        # The Phase 9 expression is what the Phase 10 migration restores
+        # on downgrade; the model now carries the Phase 10 shape.
+        assert phase9._PHASE9_SHAPE == phase10._PHASE9_SHAPE
+        assert phase9._PHASE9_SHAPE != models.MOVEMENT_SHAPE_SQL
         assert phase9._PHASE8_SHAPE == phase8._PHASE8_SHAPE
         assert phase9._PHASE9_SHAPE != phase9._PHASE8_SHAPE
         assert phase9._MOVEMENT_REASON_SQL == models.MOVEMENT_REASON_SQL
@@ -285,22 +290,13 @@ class TestMigrationSchema:
             assert value in status
         assert "STOCKED" not in status
 
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
-
     def test_downgrade_restores_the_phase8_boundary(self, admin_engine: Engine) -> None:
         name = "partflow_test_phase9_downgrade"
         _create_temp_database(admin_engine, name)
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE9_REVISION)
             command.downgrade(config, _PHASE8_REVISION)
             engine = create_engine(url)
             try:
@@ -320,7 +316,7 @@ class TestMigrationSchema:
                     connection.rollback()
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE9_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 
@@ -333,7 +329,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE9_REVISION)
             engine = create_engine(url)
             try:
                 with engine.connect() as connection:
