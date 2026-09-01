@@ -597,10 +597,13 @@ export function ScrapDialog({
 /* Undo — the structured reversal summary and final warning question   */
 /* ------------------------------------------------------------------ */
 
-/** Operator wording for a restored holding state. */
+/** Operator wording for a restored holding state. `machineLabel` is
+ * the resolved Machine identity — never lost: a Machine outside the
+ * station's Area (a cross-Area reversal) falls back to its explicit
+ * `Machine #<id>` label instead of a vague placeholder. */
 function restoredStateText(
   state: FlowInArea['processingState'] | null,
-  machine: MachineRef | null,
+  machineLabel: string | null,
 ): string {
   switch (state) {
     case 'QUEUED':
@@ -608,7 +611,7 @@ function restoredStateText(
     case 'PROCESSING':
       return 'in processing';
     case 'ON_MACHINE':
-      return machine ? `on ${machine.name}` : 'on its Machine';
+      return machineLabel ? `on ${machineLabel}` : 'on its Machine';
     case 'READY_TO_TRANSFER':
       return 'finished — ready to move';
     default:
@@ -671,8 +674,14 @@ export function UndoDialog({
   }
 
   const cancel = write.outcomeUnknown ? onAbandonUnknown : onCancel;
-  const machineOf = (id: number | null) =>
-    id === null ? null : (machines.find((item) => item.id === id) ?? null);
+  // Machine identity is never dropped: a Machine of the station's Area
+  // resolves to its name; one of another Area (a cross-Area command —
+  // e.g. the source Machine of an implicit-completion transfer) keeps
+  // an explicit `Machine #<id>` fallback.
+  const machineLabelOf = (id: number | null) =>
+    id === null
+      ? null
+      : (machines.find((item) => item.id === id)?.name ?? `Machine #${id}`);
   // The original action as recorded, in command order — audit data.
   const repair = preview.movements.some(
     (item) => item.movementReason === 'REPAIR',
@@ -686,7 +695,7 @@ export function UndoDialog({
     firstMovement !== undefined &&
     firstMovement.fromArea !== null &&
     firstMovement.fromArea.id !== lastMovement.toArea.id;
-  const actionMachine = machineOf(
+  const actionMachineLabel = machineLabelOf(
     preview.movements.find((item) => item.machineId !== null)?.machineId ??
       null,
   );
@@ -698,7 +707,7 @@ export function UndoDialog({
     const where = item.area ? item.area.name : 'its previous Area';
     const state = restoredStateText(
       item.processingState,
-      machineOf(item.machineId),
+      machineLabelOf(item.machineId),
     );
     return `${item.quantity} pcs return to ${where}${state ? ` — ${state}` : ''}.`;
   });
@@ -759,8 +768,8 @@ export function UndoDialog({
                 ],
             [
               'Machine',
-              actionMachine ? (
-                <EntityChip>{actionMachine.name}</EntityChip>
+              actionMachineLabel ? (
+                <EntityChip>{actionMachineLabel}</EntityChip>
               ) : null,
               'primary',
             ],

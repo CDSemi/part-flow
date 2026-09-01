@@ -101,8 +101,10 @@ let writeFailure:
 // newest is Undo-eligible (the backend's "most recent operation" rule).
 let commandLog: string[];
 let records: Map<string, CommandRecord>;
-// Test seam: force the preview verdict regardless of the log.
-let forceIneligibleReason: string | null;
+// Test seam: per-command preview verdicts (null = force eligible,
+// string = force that ineligible reason); ids not in the map follow
+// the natural "only the newest command is eligible" rule.
+let previewVerdicts: Map<string, string | null>;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -492,6 +494,13 @@ function handle(url: string, method: string, body: unknown): Response {
     const snapshot = snapshotFlows();
     const pre = { ...source };
     const { acted, split } = splitIfPartial(source, request.quantity);
+    // Actively processing quantity is completed implicitly by the
+    // transfer: AREA_COMPLETED (with the source Machine when
+    // ON_MACHINE) then TRANSFERRED, one command.
+    const implicit = pre.state === 'ON_MACHINE' || pre.state === 'PROCESSING';
+    const completedMachineId =
+      pre.state === 'ON_MACHINE' ? pre.machineId : null;
+    const completedMovementId = implicit ? nextMovementId++ : null;
     acted.areaId = station.area_id;
     acted.state = hasMachines(station.area_id) ? 'QUEUED' : 'PROCESSING';
     acted.machineId = null;
@@ -501,6 +510,20 @@ function handle(url: string, method: string, body: unknown): Response {
       pn: acted.pn,
       qty: acted.qty,
       movements: [
+        ...(implicit
+          ? [
+              {
+                movement_id: completedMovementId!,
+                movement_type: 'AREA_COMPLETED',
+                movement_reason: null,
+                quantity: acted.qty,
+                from_area: areaRef(pre.areaId),
+                to_area: areaRef(pre.areaId),
+                machine_id: completedMachineId,
+                operation_id: operationsOf(pre.areaId)[0].id,
+              },
+            ]
+          : []),
         {
           movement_id: movementId,
           movement_type: 'TRANSFERRED',
@@ -536,8 +559,8 @@ function handle(url: string, method: string, body: unknown): Response {
       station_id: station.station_id,
       assigned_route_step_id: null,
       route_deviation: null,
-      completed_movement_id: null,
-      completed_machine_id: null,
+      completed_movement_id: completedMovementId,
+      completed_machine_id: completedMachineId,
       ...split,
       movement_reason: request.repair ? 'REPAIR' : null,
       reason: request.repair ? request.repair_reason : null,
@@ -697,13 +720,13 @@ function handle(url: string, method: string, body: unknown): Response {
     if (!record) {
       return json({ detail: `No production event under '${eventId}'.` }, 404);
     }
-    const reason =
-      forceIneligibleReason ??
-      (record.reversed
+    const reason = previewVerdicts.has(eventId)
+      ? previewVerdicts.get(eventId)!
+      : record.reversed
         ? 'This action has already been reversed.'
         : commandLog[commandLog.length - 1] !== eventId
           ? 'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.'
-          : null);
+          : null;
     return json({
       reverses_device_event_id: eventId,
       station_id: station.station_id,
@@ -834,7 +857,7 @@ beforeEach(() => {
   writeFailure = null;
   commandLog = [];
   records = new Map();
-  forceIneligibleReason = null;
+  previewVerdicts = new Map();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1050,22 +1073,71 @@ test('after a confirmed Undo the Last Scanned PN advances to the previous comple
   expect(undoButton()).toBeEnabled();
 });
 
-test('an ineligible command shows the server reason with no way to confirm', async () => {
+test('a newer ineligible command never blocks Undo: the walk opens the older eligible operation', async () => {
   await renderStation('LATHE-ST-01');
   await completeDoneOnPnB();
-  forceIneligibleReason =
-    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.';
+  await completeScrapOnPnA(1);
+  const doneId = writes().find((r) => /\/area-completions$/.test(r.url))!.body
+    .device_event_id as string;
+  const scrapId = writes().find((r) => /\/scraps$/.test(r.url))!.body
+    .device_event_id as string;
+  // The server judges the newest command ineligible and the older DONE
+  // eligible again (e.g. the scrap was reversed elsewhere meanwhile):
+  // the preview is the authority, never the raw session stack.
+  previewVerdicts.set(
+    scrapId,
+    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.',
+  );
+  previewVerdicts.set(doneId, null);
 
   fireEvent.click(undoButton());
   const box = await screen.findByRole('dialog', {
     name: 'Reverse the last Part Number action?',
   });
-  expect(box).toHaveTextContent('Later activity exists for this quantity');
+  // Newest-first walk, reads only: the scrap was previewed and
+  // skipped, the DONE opened — nothing was written.
+  const previews = reads(/\/undo-preview\//);
+  expect(previews.map((r) => r.url.split('/undo-preview/')[1])).toEqual([
+    scrapId,
+    doneId,
+  ]);
+  expect(summaryValue(box, 'Original action')).toBe('AREA_COMPLETED');
+  expect(box).toHaveTextContent('PN-B');
   expect(
-    within(box).queryByRole('button', { name: 'Confirm reversal' }),
-  ).toBeNull();
-  fireEvent.click(within(box).getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(writes()).toHaveLength(1); // the DONE only — nothing reversed
+    within(box).getByRole('button', { name: 'Confirm reversal' }),
+  ).toBeInTheDocument();
+  expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(0);
+});
+
+test('with every session command ineligible there is no actionable Undo: no dialog, nothing written, the action disables', async () => {
+  await renderStation('LATHE-ST-01');
+  await completeDoneOnPnB();
+  await completeScrapOnPnA(1);
+  const doneId = writes().find((r) => /\/area-completions$/.test(r.url))!.body
+    .device_event_id as string;
+  const scrapId = writes().find((r) => /\/scraps$/.test(r.url))!.body
+    .device_event_id as string;
+  previewVerdicts.set(scrapId, 'This action has already been reversed.');
+  previewVerdicts.set(
+    doneId,
+    'Later activity exists for this quantity: the action is no longer the most recent recorded operation and cannot be undone.',
+  );
+
+  fireEvent.click(undoButton());
+  const toast = await notice();
+  expect(toast).toHaveTextContent('Nothing can be reversed');
+  expect(toast).toHaveTextContent('already been reversed');
+  expect(toast).toHaveTextContent('No changes were recorded');
+  // Both commands were previewed (reads only), no dialog opened,
+  // nothing was written, and the action region disables in place.
+  expect(reads(/\/undo-preview\//)).toHaveLength(2);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes().filter((r) => /\/undos$/.test(r.url))).toHaveLength(0);
+  await waitFor(() => expect(undoButton()).toBeDisabled());
+  // New activity re-arms the walk: another completed command enables
+  // Undo again.
+  await completeScrapOnPnA(1);
+  expect(undoButton()).toBeEnabled();
 });
 
 test('a refused Undo keeps the server reason in the dialog, re-reads the Area and pops nothing', async () => {
@@ -1140,6 +1212,56 @@ test('a lost Undo response freezes the intent and the retry replays the same dev
   expect(undos).toHaveLength(2);
   expect(undos[1].body.device_event_id).toBe(undos[0].body.device_event_id);
   expect(lastActionBlock()).toHaveTextContent('No Part Number actions yet');
+});
+
+test('undoing a cross-Area transfer keeps the source Machine identity in the summary and the restored effect', async () => {
+  // PN-B: only the ON_MACHINE quantity at Lathe remains — scanned at
+  // Plating it is one transfer candidate with an implicit completion.
+  flows = flows.filter((f) => f.id !== 351);
+  await renderStation('PLATING-ST-01');
+  scan('PF:PN:PN-B');
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await notice();
+
+  fireEvent.click(undoButton());
+  const summary = await screen.findByRole('dialog', {
+    name: 'Reverse the last Part Number action?',
+  });
+  expect(summaryValue(summary, 'Original action')).toBe(
+    'AREA_COMPLETED + TRANSFERRED',
+  );
+  // The source Machine belongs to ANOTHER Area (no Machine cards at
+  // this station): its identity is never dropped — the explicit
+  // fallback names it.
+  expect(summaryValue(summary, 'Machine')).toBe('Machine #1');
+  expect(summaryValue(summary, 'Source → destination')).toContain('Lathe');
+  expect(summaryValue(summary, 'Result after reversal')).toBe(
+    '10 pcs return to Lathe — on Machine #1.',
+  );
+  fireEvent.click(
+    within(summary).getByRole('button', { name: 'Confirm reversal' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Reverse this action?',
+  });
+  expect(gate).toHaveTextContent('on Machine #1');
+  fireEvent.click(
+    within(gate).getByRole('button', { name: 'Yes — reverse it' }),
+  );
+  const toast = await notice();
+  expect(toast).toHaveTextContent('PN-B — action reversed');
+  // The fake restored the pre-command state: back ON its Machine at Lathe.
+  expect(flows.find((f) => f.id === 301)).toMatchObject({
+    areaId: 2,
+    state: 'ON_MACHINE',
+    machineId: 1,
+  });
 });
 
 /* ============ Repair ============ */
@@ -1250,6 +1372,158 @@ test('Repair is not offered when no source is repair-eligible', async () => {
     name: 'Select an action',
   });
   expect(actions).not.toHaveTextContent('Return quantity for repair');
+});
+
+test('a PN with no in-Area quantity and a repair-eligible source offers the explicit Transfer-or-Repair choice; Repair records the intent', async () => {
+  flows.push({
+    id: 360,
+    pn: 'PN-R',
+    qty: 8,
+    areaId: 6,
+    state: 'READY_TO_TRANSFER',
+    machineId: null,
+    visited: [2, 6],
+  });
+  await renderStation('LATHE-ST-01');
+  scan('PF:PN:PN-R');
+  const choice = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  expect(choice).toHaveTextContent('has no quantity in Lathe yet');
+  expect(
+    within(choice).getByRole('button', { name: /Receive from another Area/ }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(choice).getByRole('button', { name: /Return quantity for repair/ }),
+  );
+  const box = await screen.findByRole('dialog', {
+    name: 'Return quantity for repair',
+  });
+  // Back returns to the explicit intent choice with nothing recorded.
+  fireEvent.click(within(box).getByRole('button', { name: '‹ Back' }));
+  const again = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(again).getByRole('button', { name: /Return quantity for repair/ }),
+  );
+  const repair = await screen.findByRole('dialog', {
+    name: 'Return quantity for repair',
+  });
+  fireEvent.change(within(repair).getByLabelText(/Reason/), {
+    target: { value: 'Thread depth out of spec' },
+  });
+  fireEvent.click(within(repair).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm repair' }),
+  );
+  await notice();
+  expect(writes()).toHaveLength(1);
+  expect(writes()[0].body).toMatchObject({
+    quantity_flow_id: 360,
+    quantity: 8,
+    repair: true,
+    repair_reason: 'Thread depth out of spec',
+  });
+});
+
+test('the same Transfer-or-Repair choice keeps the normal transfer path — nothing infers a Repair', async () => {
+  flows.push({
+    id: 360,
+    pn: 'PN-R',
+    qty: 8,
+    areaId: 6,
+    state: 'READY_TO_TRANSFER',
+    machineId: null,
+    visited: [2, 6],
+  });
+  await renderStation('LATHE-ST-01');
+  scan('PF:PN:PN-R');
+  const choice = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(choice).getByRole('button', { name: /Receive from another Area/ }),
+  );
+  const box = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm transfer' }),
+  );
+  await notice();
+  expect(writes()).toHaveLength(1);
+  expect(writes()[0].body).toMatchObject({
+    quantity_flow_id: 360,
+    repair: false,
+    repair_reason: null,
+  });
+});
+
+test('with several external sources the Repair selection lists only the repair-eligible ones; the normal transfer keeps every source', async () => {
+  flows.push(
+    {
+      id: 361,
+      pn: 'PN-S',
+      qty: 8,
+      areaId: 6,
+      state: 'READY_TO_TRANSFER',
+      machineId: null,
+      visited: [2, 6],
+    },
+    {
+      id: 362,
+      pn: 'PN-S',
+      qty: 5,
+      areaId: 6,
+      state: 'READY_TO_TRANSFER',
+      machineId: null,
+      visited: [2, 6],
+    },
+    {
+      id: 363,
+      pn: 'PN-S',
+      qty: 4,
+      areaId: 6,
+      state: 'READY_TO_TRANSFER',
+      machineId: null,
+    },
+  );
+  await renderStation('LATHE-ST-01');
+  scan('PF:PN:PN-S');
+  const choice = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(choice).getByRole('button', { name: /Return quantity for repair/ }),
+  );
+  const repairSelect = await screen.findByRole('dialog', {
+    name: 'Select the repair source',
+  });
+  // Exactly the server-marked repair-eligible sources — never the rest.
+  expect(
+    within(repairSelect).getAllByRole('button', { name: /pcs available/ }),
+  ).toHaveLength(2);
+  expect(repairSelect).toHaveTextContent('8 pcs available');
+  expect(repairSelect).toHaveTextContent('5 pcs available');
+  expect(repairSelect).not.toHaveTextContent('4 pcs available');
+  // Back to the intent choice; the normal transfer keeps every source.
+  fireEvent.click(within(repairSelect).getByRole('button', { name: '‹ Back' }));
+  const again = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(again).getByRole('button', { name: /Receive from another Area/ }),
+  );
+  const sourceSelect = await screen.findByRole('dialog', {
+    name: 'Select the source',
+  });
+  expect(
+    within(sourceSelect).getAllByRole('button', { name: /pcs available/ }),
+  ).toHaveLength(3);
+  expect(sourceSelect).toHaveTextContent('4 pcs available');
+  expect(writes()).toHaveLength(0);
 });
 
 /* ============ Scrap ============ */

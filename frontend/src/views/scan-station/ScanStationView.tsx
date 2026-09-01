@@ -15,7 +15,7 @@ import type { ReactNode } from 'react';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { isMockPreviewRequested } from '../../app/view-state';
-import { errorMessage } from '../../api/client';
+import { ApiError, errorMessage } from '../../api/client';
 import {
   listAreas,
   listDepartments,
@@ -518,6 +518,15 @@ type Flow =
       parent?: Flow;
     }
   | {
+      // Transfer or Repair (Phase 9): the PN has no quantity in the
+      // Area but at least one source is repair-eligible — the operator
+      // chooses the intent explicitly first. Repair is never inferred
+      // from the history alone.
+      kind: 'transfer-or-repair';
+      resolution: ScanResolution;
+      parent?: Flow;
+    }
+  | {
       // Return quantity for repair (Phase 9): several repair-eligible
       // sources take an explicit selection first — never auto-picked.
       kind: 'repair-select';
@@ -582,12 +591,20 @@ function StationView({
   const [flow, setFlow] = useState<Flow | null>(null);
   const [resolving, setResolving] = useState(false);
   // The session's completed commands, oldest first (§4.5): the top is
-  // the Last Scanned PN, and Undo targets exactly it. A confirmed Undo
-  // pops it, so the block advances to the previous operation.
+  // the Last Scanned PN. Undo targets the most recent ELIGIBLE
+  // completed PN operation — the server's undo preview is the
+  // authority, and `openUndo` walks this stack newest-first (reads
+  // only) until the server reports one eligible. A confirmed Undo
+  // removes the reversed entry, so the block advances to the previous
+  // operation and the next Undo walks the preview again.
   const [history, setHistory] = useState<LastAction[]>([]);
   const lastAction = history.length > 0 ? history[history.length - 1] : null;
+  // Set when a full preview walk found NOTHING eligible: Undo disables
+  // until new activity changes what the walk could find.
+  const [undoExhausted, setUndoExhausted] = useState(false);
   const recordAction = useCallback((entry: LastAction) => {
     setHistory((stack) => [...stack, entry]);
+    setUndoExhausted(false);
   }, []);
 
   useEffect(() => {
@@ -719,10 +736,11 @@ function StationView({
   /**
    * Route a server resolution to the applicable one-shot dialog
    * (GUI_DESIGN §4.7): quantity already in the Area → the action
-   * dialog (Phase 5: receive more from another Area only); exactly one
-   * valid source → the transfer's quantity/review flow; several → the
-   * explicit source selection — never an automatic pick; nothing
-   * transferable → the honest placeholder.
+   * dialog; no in-Area quantity with a repair-eligible source → the
+   * explicit Transfer-or-Repair choice; exactly one valid source → the
+   * transfer's quantity/review flow; several → the explicit source
+   * selection — never an automatic pick; nothing transferable → the
+   * honest placeholder.
    */
   const openResolution = useCallback(
     (resolution: ScanResolution, parent?: Flow) => {
@@ -736,6 +754,17 @@ function StationView({
       }
       if (resolution.resolution === 'ALREADY_IN_AREA') {
         setFlow({ kind: 'in-area', resolution, parent });
+        return;
+      }
+      if (
+        resolution.candidates.some((candidate) => candidate.repairAvailable)
+      ) {
+        // No quantity in the Area, but the SERVER marked at least one
+        // source repair-eligible: the operator chooses the intent
+        // explicitly — a normal transfer or `Return quantity for
+        // repair`. A previously visited destination alone never turns
+        // a transfer into a Repair.
+        setFlow({ kind: 'transfer-or-repair', resolution, parent });
         return;
       }
       if (resolution.candidates.length === 1) {
@@ -1149,13 +1178,15 @@ function StationView({
 
   /** An Undo the SERVER confirmed (Phase 9, §4.5): the undone entry
    * leaves the session stack — the Last Scanned PN advances to the
-   * previous completed operation — and the Area is re-read. The
-   * original history stays; the reversal is its own recorded event. */
+   * next eligible previous operation (the next Undo walks the preview
+   * newest-first again) — and the Area is re-read. The original
+   * history stays; the reversal is its own recorded event. */
   const completeUndo = useCallback(
     (result: UndoResult, entry: LastAction) => {
       setHistory((stack) =>
         stack.filter((item) => item.deviceEventId !== entry.deviceEventId),
       );
+      setUndoExhausted(false);
       setNotice({
         kind: 'ok',
         icon: '✓',
@@ -1173,26 +1204,64 @@ function StationView({
   );
 
   /**
-   * Open the Undo of the most recent completed command (§4.5): the
-   * server's undo preview serves the structured summary — original
+   * Open the Undo of the most recent ELIGIBLE completed PN operation
+   * (§4.5): the session's completed commands are walked newest-first
+   * through the server's undo preview — the authority on eligibility —
+   * until one is reported eligible; a newer command the server judges
+   * ineligible is skipped, never blocking an older eligible one. The
+   * walk is reads only: nothing is locked and nothing is written. The
+   * first eligible preview serves the structured summary — original
    * action, quantity, source/destination, Machine, timestamp, and the
-   * effect of the reversal — before anything can be submitted. A
-   * preview that cannot be loaded changes nothing.
+   * effect of the reversal — before anything can be submitted. With
+   * nothing eligible, Undo disables until new activity changes what
+   * the walk could find. A preview that cannot be loaded changes
+   * nothing.
    */
   const openUndo = useCallback(async () => {
-    const entry = history.length > 0 ? history[history.length - 1] : null;
-    if (!entry || writeBlocked) return;
+    if (history.length === 0 || writeBlocked) return;
     setResolving(true);
     try {
-      const preview = await getUndoPreview(stationId, entry.deviceEventId);
-      setFlow({ kind: 'undo', entry, preview });
-    } catch (error) {
+      let newestReason: string | null = null;
+      for (let index = history.length - 1; index >= 0; index -= 1) {
+        const entry = history[index];
+        let preview: UndoPreview;
+        try {
+          preview = await getUndoPreview(stationId, entry.deviceEventId);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            // No command is recorded under this id (never previewable
+            // here): keep walking to the older operations.
+            continue;
+          }
+          // The preview could not be loaded (network, server error):
+          // the walk stops and nothing changes.
+          focusScan();
+          setNotice({
+            kind: 'err',
+            icon: '✕',
+            title: 'The reversal summary could not be loaded',
+            detail: `${errorMessage(error)} No changes were recorded.`,
+          });
+          return;
+        }
+        if (preview.eligible) {
+          setFlow({ kind: 'undo', entry, preview });
+          return;
+        }
+        newestReason ??= preview.ineligibleReason;
+      }
+      // The walk exhausted the session's commands with nothing
+      // eligible — no reversal can be offered right now.
+      setUndoExhausted(true);
       focusScan();
       setNotice({
-        kind: 'err',
-        icon: '✕',
-        title: 'The reversal summary could not be loaded',
-        detail: `${errorMessage(error)} No changes were recorded.`,
+        kind: 'warn',
+        icon: '⚠',
+        title: 'Nothing can be reversed',
+        detail: `${
+          newestReason ??
+          'No completed action of this session can currently be reversed.'
+        } No changes were recorded.`,
       });
     } finally {
       setResolving(false);
@@ -1470,19 +1539,25 @@ function StationView({
                   {lastAction?.summary ?? 'No Part Number actions yet'}
                 </span>
               </div>
-              {/* Undo reverses the complete most recent command of this
-                  session (§4.5): the server's preview serves the
-                  summary confirmation first, and eligibility is the
-                  server's judgement. With nothing to reverse — or while
-                  writes are blocked — the action region stays present
-                  and disabled, never a hidden control. */}
+              {/* Undo reverses the most recent ELIGIBLE completed PN
+                  operation (§4.5): the session's commands are walked
+                  newest-first through the server's undo preview — the
+                  authority on eligibility — and the first eligible one
+                  serves the summary confirmation. With nothing to
+                  reverse, nothing currently eligible, or while writes
+                  are blocked, the action region stays present and
+                  disabled, never a hidden control. */}
               <button
                 className="ss-undo zone-action"
-                disabled={writeBlocked || resolving || !lastAction}
+                disabled={
+                  writeBlocked || resolving || !lastAction || undoExhausted
+                }
                 title={
-                  lastAction
-                    ? 'Reverse the complete last action'
-                    : 'No completed Part Number action to reverse yet'
+                  !lastAction
+                    ? 'No completed Part Number action to reverse yet'
+                    : undoExhausted
+                      ? 'No completed action of this session can currently be reversed'
+                      : 'Reverse the most recent eligible completed action'
                 }
                 onClick={() => void openUndo()}
               >
@@ -1566,6 +1641,46 @@ function StationView({
           onCancel={cancelFlow}
           onRejected={refreshAfterRejection}
           onAbandonUnknown={() => abandonUnknown('Transfer')}
+        />
+      )}
+      {flow?.kind === 'transfer-or-repair' && (
+        <TransferOrRepairDialog
+          resolution={flow.resolution}
+          onTransfer={() =>
+            flow.resolution.candidates.length === 1
+              ? setFlow({
+                  kind: 'transfer',
+                  resolution: flow.resolution,
+                  candidate: flow.resolution.candidates[0],
+                  parent: flow,
+                })
+              : setFlow({
+                  kind: 'source-select',
+                  resolution: flow.resolution,
+                  parent: flow,
+                })
+          }
+          onRepair={() => {
+            const repairable = flow.resolution.candidates.filter(
+              (candidate) => candidate.repairAvailable,
+            );
+            if (repairable.length === 1) {
+              setFlow({
+                kind: 'repair',
+                resolution: flow.resolution,
+                candidate: repairable[0],
+                parent: flow,
+              });
+            } else {
+              setFlow({
+                kind: 'repair-select',
+                resolution: flow.resolution,
+                parent: flow,
+              });
+            }
+          }}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
         />
       )}
       {flow?.kind === 'repair-select' && (
@@ -1867,6 +1982,98 @@ function routeDetail(candidate: TransferCandidate): string {
 
 function candidateLabel(candidate: TransferCandidate): string {
   return `${candidate.currentArea.name} — ${candidate.quantity} pcs available`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Transfer or Repair — the explicit intent choice (Phase 9)           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The PN has no quantity in the station's Area, but the SERVER marked
+ * at least one transfer source repair-eligible (this Area previously
+ * visited): the operator chooses the intent explicitly — the normal
+ * transfer keeps EVERY valid source, `Return quantity for repair`
+ * narrows to the repair-eligible ones. A selection view — nothing is
+ * recorded here, and Repair is never inferred from the history alone.
+ */
+function TransferOrRepairDialog({
+  resolution,
+  onTransfer,
+  onRepair,
+  onBack,
+  onCancel,
+}: {
+  resolution: ScanResolution;
+  onTransfer: () => void;
+  onRepair: () => void;
+  onBack?: () => void;
+  onCancel: () => void;
+}) {
+  const elsewhere = resolution.candidates.reduce(
+    (sum, candidate) => sum + candidate.quantity,
+    0,
+  );
+  const repairable = resolution.candidates.filter(
+    (candidate) => candidate.repairAvailable,
+  );
+  return (
+    <ModalDialog label="Select an action" onClose={onCancel}>
+      <h3>Select an action</h3>
+      <div className="big mono">{resolution.partNumber}</div>
+      <div className="sub">
+        This Part Number has no quantity in {resolution.area.name} yet.
+        {resolution.scrappedQuantity > 0
+          ? ` ${resolution.scrappedQuantity} pcs scrapped.`
+          : ''}
+      </div>
+      <button className="choice" onClick={onTransfer}>
+        <span className="cic run" aria-hidden="true">
+          RCV
+        </span>
+        <span>
+          <span className="ct1">Receive from another Area</span>
+          <br />
+          <span className="ct2">
+            {elsewhere} pcs available in{' '}
+            {resolution.candidates.length === 1
+              ? resolution.candidates[0].currentArea.name
+              : `${resolution.candidates.length} places`}
+            .
+          </span>
+        </span>
+      </button>
+      <button className="choice" onClick={onRepair}>
+        <span className="cic rep" aria-hidden="true">
+          REP
+        </span>
+        <span>
+          <span className="ct1">Return quantity for repair</span>
+          <br />
+          <span className="ct2">
+            Return quantity to {resolution.area.name} so earlier work can be
+            corrected.{' '}
+            {repairable
+              .map(
+                (candidate) =>
+                  `${candidate.quantity} pcs at ${candidate.currentArea.name}`,
+              )
+              .join(' · ')}
+            .
+          </span>
+        </span>
+      </button>
+      <div className="row">
+        {onBack ? (
+          <button className="bigbtn ghost ss-back" onClick={onBack}>
+            ‹ Back
+          </button>
+        ) : null}
+        <button className="bigbtn ghost" onClick={onCancel}>
+          Cancel (Esc)
+        </button>
+      </div>
+    </ModalDialog>
+  );
 }
 
 /* ------------------------------------------------------------------ */
