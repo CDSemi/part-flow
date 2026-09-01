@@ -21,10 +21,23 @@ Rules owned here:
   (lowest `priority_rank` = highest priority; unranked last), then
   dated demand earliest due date first with undated demand after all
   dated demand ordered by the parent Work Order's `received_date`
-  (oldest first), then the stable deterministic tie-breaker (demand id
-  ascending — an implementation detail, not a business rule) — and
-  proposes for each demand the smaller of its remaining shortage and
-  what is still unallocated of the quantity being allocated.
+  (oldest first) — the received date orders UNDATED demand only —,
+  then the stable deterministic tie-breaker (demand id ascending — an
+  implementation detail, not a business rule; it also resolves dated
+  demand sharing one due date) — and proposes for each demand the
+  smaller of its remaining shortage and what is still unallocated of
+  the quantity being allocated.
+- **The confirmed allocation quantity is explicit** (§18 Receiving
+  Confirmation: "the total active allocation must equal the portion
+  of stocked quantity being allocated"): the command names the
+  quantity being allocated — at the Stockroom the just-stocked
+  quantity the operator confirmed — and the lines must sum to exactly
+  it (refused otherwise, nothing written); the quantity is part of the
+  idempotency fingerprint, so a replay with another quantity is a
+  conflict; and it is an optimistic precondition against the stock —
+  a quantity the PN's available stocked quantity no longer covers
+  (someone allocated meanwhile) is refused with nothing written, so a
+  dialog opened on a stale figure can never allocate it.
 - **Two invariants, enforced under locks** (§8.12): the total active
   allocation of a PN never exceeds its available stocked quantity, and
   a demand's allocation never exceeds its requested quantity — an
@@ -75,7 +88,7 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -187,14 +200,20 @@ def canonical_demand_order(query: Select[Any]) -> Select[Any]:
     """Apply the canonical demand ordering (PROJECT_PROFILE §18) to a demand query.
 
     The query must join `WorkOrder`. Hot rank first (lowest rank number
-    = highest priority, unranked last), dated demand earliest first,
-    undated demand after all dated demand by the parent Work Order's
-    received date (oldest first), then the stable tie-breaker.
+    = highest priority, unranked last); within one priority, dated
+    demand earliest due date first, undated demand after all dated
+    demand ordered by the parent Work Order's received date (oldest
+    first); equal values — dated demand sharing a due date, undated
+    demand sharing a received date — resolved by the stable
+    deterministic tie-breaker (demand id ascending, an implementation
+    detail). The received date is a criterion for UNDATED demand only:
+    two dated lines with the same due date order by the tie-breaker,
+    never by which Work Order arrived first.
     """
     return query.order_by(
         WorkOrderDemand.priority_rank.asc().nulls_last(),
         WorkOrderDemand.due_date.asc().nulls_last(),
-        WorkOrder.received_date.asc(),
+        case((WorkOrderDemand.due_date.is_(None), WorkOrder.received_date), else_=None).asc(),
         WorkOrderDemand.id.asc(),
     )
 
@@ -350,6 +369,9 @@ class AllocationResult(NamedTuple):
 
     kind: str
     part_number: str
+    # The quantity the command allocated (the confirmed allocation
+    # quantity) or took back (a reversal) — the sum of its rows.
+    allocation_quantity: int
     rows: list[AllocationRow]
     # Work Orders this command completed / reopened — recorded in the
     # row metadata at command time, replayed verbatim.
@@ -402,6 +424,9 @@ def _result_from_rows(
     return AllocationResult(
         kind=str(block["kind"]),
         part_number=rows[0].part_number,
+        allocation_quantity=int(
+            block.get("allocation_quantity", sum(row.quantity for row in rows))
+        ),
         rows=[
             AllocationRow(
                 allocation_id=row.id,
@@ -603,6 +628,7 @@ def confirm_allocation(
     session: Session,
     *,
     part_number: object,
+    allocation_quantity: object,
     lines: Sequence[Mapping[str, Any]],
     station_id: str | None = None,
     actor: str | None = None,
@@ -613,16 +639,34 @@ def confirm_allocation(
 
     The Stockroom receiving confirmation (``station_id`` set — the
     routine Operator workflow, PROJECT_PROFILE §18) and a Management
-    allocation (``station_id`` None) are the same command. Order:
-    input shape → fingerprint → idempotency fast path → the per-PN
-    advisory lock → the demand row locks (ascending) → the Work Order
-    row locks (ascending) → idempotency re-check → validation under
-    the locks (PN agreement, shortage per line, available stocked
-    quantity for the total) → the rows, the projection and the
-    completion → COMMIT (or replay of a race winner).
+    allocation (``station_id`` None) are the same command.
+    ``allocation_quantity`` is the explicit quantity being allocated:
+    the lines must sum to exactly it, and the PN's available stocked
+    quantity must still cover it when the command is judged under the
+    locks. Order: input shape → fingerprint → idempotency fast path →
+    the per-PN advisory lock → the demand row locks (ascending) → the
+    Work Order row locks (ascending) → idempotency re-check →
+    validation under the locks (PN agreement, shortage per line,
+    available stocked quantity for the allocation quantity) → the
+    rows, the projection and the completion → COMMIT (or replay of a
+    race winner).
     """
     pn = canonical_part_number(part_number)
     confirmed = _normalized_lines(lines)
+    if (
+        not isinstance(allocation_quantity, int)
+        or isinstance(allocation_quantity, bool)
+        or allocation_quantity <= 0
+    ):
+        raise InvalidInputError("The allocation quantity must be a positive whole number.")
+    total = sum(line.quantity for line in confirmed)
+    if total != allocation_quantity:
+        raise InvalidInputError(
+            f"The allocated lines sum to {total} pcs but the allocation quantity is"
+            f" {allocation_quantity} pcs. The total active allocation must equal the"
+            " quantity being allocated — adjust the lines until they add up."
+            " Nothing was allocated."
+        )
     reason_text = optional_text(reason)
     event_id = device_event_id_text(device_event_id)
     source = AllocationSource.STOCKROOM if station_id is not None else AllocationSource.MANAGEMENT
@@ -630,6 +674,7 @@ def confirm_allocation(
         {
             "command": "ALLOCATE",
             "part_number": pn,
+            "allocation_quantity": allocation_quantity,
             "lines": [list(line) for line in sorted(confirmed)],
             "station_id": station_id,
             "actor": actor,
@@ -675,14 +720,18 @@ def confirm_allocation(
                 f" {line.quantity}. Allocation never exceeds the requested quantity."
                 " Nothing was allocated."
             )
-    total = sum(line.quantity for line in confirmed)
+    # The confirmed allocation quantity is an optimistic precondition
+    # against the stock: judged here, under the per-PN lock, on the
+    # derived figure — never on the figure the dialog was opened with.
     position = stock_position_of(session, pn)
-    if total > position.available_stocked_quantity:
+    if allocation_quantity > position.available_stocked_quantity:
         raise ConflictError(
             f"Only {max(position.available_stocked_quantity, 0)} pcs of Part Number '{pn}'"
             f" are available in stock ({position.stocked_quantity} stocked,"
-            f" {position.active_allocated_quantity} already allocated); {total} pcs"
-            " cannot be allocated. Nothing was allocated."
+            f" {position.active_allocated_quantity} already allocated);"
+            f" {allocation_quantity} pcs cannot be allocated — the available quantity"
+            " changed since the allocation was prepared. Reload the suggestion and"
+            " confirm again. Nothing was allocated."
         )
 
     # -- The canonical suggestion for the confirmed total (audit) --------
@@ -704,6 +753,7 @@ def confirm_allocation(
         COMMAND_KEY: {
             "kind": "ALLOCATE",
             "size": len(confirmed),
+            "allocation_quantity": allocation_quantity,
             "completed_work_order_ids": completed,
             "reopened_work_order_ids": reopened,
         },
@@ -816,6 +866,7 @@ def reverse_allocation(
         COMMAND_KEY: {
             "kind": "REVERSE_ALLOCATION",
             "size": 1,
+            "allocation_quantity": original.quantity,
             "completed_work_order_ids": completed,
             "reopened_work_order_ids": reopened,
         },

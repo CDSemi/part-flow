@@ -19,9 +19,11 @@ Surface:
   quantity to demand lines (the receiving confirmation with
   ``station_id`` set — a Stockroom station; a Management allocation
   without it). 201 fresh, 200 on an idempotent replay of the same
-  ``device_event_id`` + same lines, 409 on a mismatched reuse, on a
-  line beyond its remaining shortage, or on a total beyond the
-  available stocked quantity — every refusal writes nothing.
+  ``device_event_id`` + same intent, 422 when the lines do not sum to
+  the explicit ``allocation_quantity`` (or when it is missing), 409 on
+  a mismatched reuse, on a line beyond its remaining shortage, or on an
+  allocation quantity the available stocked quantity no longer covers
+  (a stale figure) — every refusal writes nothing.
 - ``POST /allocations/{allocation_id}/reversals`` — the auditable
   adjustment: takes one allocation back with a mandatory reason (a
   smaller allocation is a reversal plus a new confirmation). 201 /
@@ -115,6 +117,11 @@ class AllocationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     part_number: str
+    # The explicit quantity being allocated — at the Stockroom the
+    # just-stocked quantity the operator confirmed. The lines must sum
+    # to exactly it; the available stocked quantity must still cover
+    # it when the command is judged (a stale figure is refused).
+    allocation_quantity: StrictInt
     lines: list[AllocationLineRequest]
     # The Stockroom station confirming the receiving allocation; omitted
     # for a Management allocation.
@@ -143,6 +150,8 @@ class AllocationRowResponse(BaseModel):
 class AllocationResponse(BaseModel):
     kind: Literal["ALLOCATE", "REVERSE_ALLOCATION"]
     part_number: str
+    # The quantity allocated (or, on a reversal, taken back).
+    allocation_quantity: int
     rows: list[AllocationRowResponse]
     # Work Orders this command completed (every line fully allocated)
     # or reopened (a reversal) — the derived completion effect.
@@ -173,6 +182,7 @@ def _response(result: allocations.AllocationResult) -> AllocationResponse:
     return AllocationResponse(
         kind="ALLOCATE" if result.kind == "ALLOCATE" else "REVERSE_ALLOCATION",
         part_number=result.part_number,
+        allocation_quantity=result.allocation_quantity,
         rows=[_row(row) for row in result.rows],
         completed_work_order_ids=result.completed_work_order_ids,
         reopened_work_order_ids=result.reopened_work_order_ids,
@@ -187,6 +197,7 @@ def confirm_allocation(
     result = allocations.confirm_allocation(
         session,
         part_number=body.part_number,
+        allocation_quantity=body.allocation_quantity,
         lines=[line.model_dump() for line in body.lines],
         station_id=body.station_id,
         reason=body.reason,

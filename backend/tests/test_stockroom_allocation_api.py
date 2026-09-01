@@ -400,15 +400,23 @@ def _allocate(
     station_id: str | None = None,
     **kw: Any,
 ) -> Any:
+    """POST an allocation; the explicit allocation quantity defaults to
+    the sum of the lines (override or remove it through ``kw``)."""
     payload: dict[str, Any] = {
         "part_number": pn,
+        "allocation_quantity": sum(qty for _, qty in lines),
         "lines": [{"work_order_demand_id": demand_id, "quantity": qty} for demand_id, qty in lines],
         "device_event_id": str(uuid.uuid4()),
     }
     if station_id is not None:
         payload["station_id"] = station_id
     payload.update(kw)
+    payload = {key: value for key, value in payload.items() if value is not _OMIT}
     return client.post("/api/allocations", json=payload)
+
+
+#: Sentinel: drop this key from a request payload.
+_OMIT = object()
 
 
 def _reverse(client: TestClient, allocation_id: int, **kw: Any) -> Any:
@@ -883,6 +891,51 @@ def test_suggestion_tie_breaker_is_deterministic(client: TestClient, db_engine: 
         assert [line["proposed_quantity"] for line in suggestion["lines"]] == [4, 2, 0]
 
 
+def test_received_date_orders_undated_demand_only(client: TestClient, db_engine: Engine) -> None:
+    """PROJECT_PROFILE §18: the parent Work Order's received date orders
+    UNDATED demand. Two dated lines of one priority sharing a due date
+    resolve by the deterministic tie-breaker (creation order), never by
+    which Work Order was received first — here the later-created line
+    belongs to the EARLIER-received Work Order and still sorts second."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    dated_late_receipt = _create_work_order(
+        client,
+        [{"part_number": pn, "requested_quantity": 3, "due_date": "2026-10-01"}],
+        received_date="2026-05-01",
+    )
+    dated_early_receipt = _create_work_order(
+        client,
+        [{"part_number": pn, "requested_quantity": 3, "due_date": "2026-10-01"}],
+        received_date="2026-01-01",
+    )
+    # Undated lines DO order by received date, oldest first — created in
+    # the opposite order to prove the date decides, not the id.
+    undated_new = _create_work_order(
+        client, [{"part_number": pn, "requested_quantity": 3}], received_date="2026-03-01"
+    )
+    undated_old = _create_work_order(
+        client, [{"part_number": pn, "requested_quantity": 3}], received_date="2026-02-01"
+    )
+    supply = _supply(client, material, stockroom, pn, 4)
+    suggestion = _suggest(client, pn)
+    assert [line["work_order_demand_id"] for line in suggestion["lines"]] == [
+        dated_late_receipt.demand_id,  # same due date: tie-breaker, not received date
+        dated_early_receipt.demand_id,
+        undated_old.demand_id,  # undated: received date, oldest first
+        undated_new.demand_id,
+        supply.demand_id,
+    ]
+    assert [line["proposed_quantity"] for line in suggestion["lines"]] == [3, 1, 0, 0, 0]
+    # A Hot rank on the later-created dated line still wins outright.
+    _set_priority(db_engine, dated_early_receipt.demand_id, 1)
+    assert [line["work_order_demand_id"] for line in _suggest(client, pn)["lines"]][:2] == [
+        dated_early_receipt.demand_id,
+        dated_late_receipt.demand_id,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The confirmation
 # ---------------------------------------------------------------------------
@@ -1027,6 +1080,67 @@ def test_confirmation_refusals_write_nothing(
     _assert_projections_match_replay(db_engine)
 
 
+@pytest.mark.parametrize("case", ["missing", "too_high", "too_low", "zero", "negative", "bool"])
+def test_confirmation_requires_the_explicit_allocation_quantity(
+    client: TestClient, db_engine: Engine, case: str
+) -> None:
+    """§18: the total active allocation must equal the quantity being
+    allocated — the command names it explicitly and the lines must add
+    up to exactly it; a missing or disagreeing quantity is refused with
+    nothing written."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 8}])
+    _supply(client, material, stockroom, pn, 8)
+    before = _counts(db_engine)
+    quantity: Any = {
+        "missing": _OMIT,
+        "too_high": 6,
+        "too_low": 4,
+        "zero": 0,
+        "negative": -5,
+        "bool": True,
+    }[case]
+    response = _allocate(client, pn, [(work_order.demand_id, 5)], allocation_quantity=quantity)
+    assert response.status_code == 422, response.text
+    if case in ("too_high", "too_low"):
+        assert "must equal the quantity being allocated" in response.json()["detail"]
+    assert _counts(db_engine) == before
+    assert _demand_row(db_engine, work_order.demand_id).allocated_quantity == 0
+    # The same lines with the agreeing quantity are accepted.
+    assert _allocate(client, pn, [(work_order.demand_id, 5)]).status_code == 201
+
+
+def test_stale_available_stock_is_refused_at_confirmation(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The dialog was opened on 10 pcs available; another confirmation
+    took 4 meanwhile. Confirming the stale 10 — even with lines that add
+    up to it — is refused with nothing written; the current figure
+    (6) confirms."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    first = _create_work_order(client, [{"part_number": pn, "requested_quantity": 10}])
+    second = _create_work_order(client, [{"part_number": pn, "requested_quantity": 10}])
+    _supply(client, material, stockroom, pn, 10)
+    stale = _suggest(client, pn, 10)
+    assert stale["available_stocked_quantity"] == 10
+    assert _allocate(client, pn, [(second.demand_id, 4)]).status_code == 201
+    before = _counts(db_engine)
+    response = _allocate(client, pn, [(first.demand_id, 10)], station_id=stockroom.station_id)
+    assert response.status_code == 409, response.text
+    assert "changed since the allocation was prepared" in response.json()["detail"]
+    assert _counts(db_engine) == before
+    assert _demand_row(db_engine, first.demand_id).allocated_quantity == 0
+    fresh = _suggest(client, pn)
+    assert fresh["available_stocked_quantity"] == 6 and fresh["quantity"] == 6
+    accepted = _allocate(client, pn, [(first.demand_id, 6)], station_id=stockroom.station_id)
+    assert accepted.status_code == 201 and accepted.json()["allocation_quantity"] == 6
+    _assert_projections_match_replay(db_engine)
+
+
 def test_confirmation_is_idempotent_per_command(client: TestClient, db_engine: Engine) -> None:
     material = _Cell(client, machine_count=1)
     stockroom = _Cell(client, is_terminal=True)
@@ -1043,6 +1157,7 @@ def test_confirmation_is_idempotent_per_command(client: TestClient, db_engine: E
     assert replay.json()["completed_work_order_ids"] == [work_order.id]
     mismatch = _allocate(client, pn, [(work_order.demand_id, 4)], device_event_id=event_id)
     assert mismatch.status_code == 409 and "different allocation" in mismatch.json()["detail"]
+    assert replay.json()["allocation_quantity"] == 5
     # The reversal command never replays under an allocation's id.
     assert (
         _reverse(

@@ -113,7 +113,9 @@ history (frontend pending):
   by received date — proposing up to each line's remaining shortage
   and never beyond the derived available stocked quantity),
   `POST /api/allocations` (the receiving confirmation or a Management
-  allocation, both invariants judged under a per-PN lock plus the
+  allocation naming the explicit allocation quantity the lines must
+  sum to — refused when stale against the derived available stock —,
+  both invariants judged under a per-PN lock plus the
   demand and Work Order row locks, the operator's adjustments flagged
   as overrides, Work Order completion derived and `completed_at`
   projected), `POST /api/allocations/{id}/reversals` (the auditable
@@ -596,7 +598,9 @@ integration):
   writes, replay / mismatch / cross-kind reuse, the one-winner race,
   the not-undoable stocked command, the `introduced = active + stocked
   + scrapped` reconciliation, the canonical suggestion ordering and
-  tie-breaker, the confirmation with overrides and both invariants, the
+  tie-breaker with the received date ordering undated demand only,
+  the confirmation with the explicit allocation quantity, the stale
+  available-stock refusal, overrides and both invariants, the
   paused two-station race stopped by the per-PN lock, the allocation
   versus in-flight stocking interleaving, the reversal reopening a
   completed Work Order and the threaded double-reversal race, the
