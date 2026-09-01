@@ -327,6 +327,15 @@ export interface ScanResolution {
   combineGroups: number[][];
   /** Phase 9: the PN's total scrapped quantity, net of reversed scraps. */
   scrappedQuantity: number;
+  /** Phase 10: the PN's stocked quantity and the part of it no
+   * allocation has taken yet — both derived by the server from the
+   * STOCKED history and the allocation records. */
+  stockedQuantity: number;
+  availableStockedQuantity: number;
+  /** Phase 10: the station is bound to a terminal (Stockroom) Area and
+   * the candidates are the sources the operator STOCKS from — the
+   * arrival there is the `STOCKED` command, never a transfer. */
+  stockAvailable: boolean;
 }
 
 interface TransferCandidateWire {
@@ -357,6 +366,9 @@ interface ScanResolutionWire {
   requires_selection: boolean;
   combine_groups: number[][];
   scrapped_quantity: number;
+  stocked_quantity: number;
+  available_stocked_quantity: number;
+  stock_available: boolean;
 }
 
 /**
@@ -405,6 +417,9 @@ export async function resolveScan(
     requiresSelection: wire.requires_selection,
     combineGroups: wire.combine_groups,
     scrappedQuantity: wire.scrapped_quantity,
+    stockedQuantity: wire.stocked_quantity,
+    availableStockedQuantity: wire.available_stocked_quantity,
+    stockAvailable: wire.stock_available,
   };
 }
 
@@ -504,6 +519,9 @@ export interface RouteDeviation {
 
 export interface TransferResult {
   movementId: number;
+  /** `TRANSFERRED`, or `STOCKED` for the Stockroom arrival (Phase 10)
+   * — the same command shape recorded with a different meaning. */
+  movementType: 'TRANSFERRED' | 'STOCKED';
   quantityFlowId: number;
   partNumber: string;
   quantity: number;
@@ -549,6 +567,7 @@ interface RouteDeviationWire {
 
 interface TransferResultWire {
   movement_id: number;
+  movement_type: 'TRANSFERRED' | 'STOCKED';
   quantity_flow_id: number;
   part_number: string;
   quantity: number;
@@ -611,8 +630,55 @@ export async function transferToStationArea(
       },
     },
   );
+  return toTransferResult(data, status);
+}
+
+/** The Stockroom arrival (Phase 10): the transfer's shape without the
+ * Repair intent — quantity stocked at a terminal Area is
+ * manufacturing-complete and never returned for repair by this command. */
+export type StockInput = Omit<TransferInput, 'repair' | 'repairReason'>;
+
+/**
+ * Record the confirmed `STOCKED` arrival of ONE Quantity Flow — whole,
+ * or a part of it (the server splits first) — at the station's terminal
+ * Area (PROJECT_PROFILE §18). Resolves ONLY when the server confirmed
+ * the write: 201 fresh, 200 on an idempotent replay of the same
+ * `deviceEventId` + same intent. Every rejection — a non-terminal Area,
+ * a stale source, an exceeding quantity, an unconfirmed route deviation
+ * — is an `ApiError` and nothing was recorded. The flow closes as
+ * stocked; the receiving allocation that follows is its own command
+ * (`src/api/allocations.ts`).
+ */
+export async function stockAtStationArea(
+  input: StockInput,
+): Promise<TransferResult> {
+  const { status, data } = await apiRequestWithStatus<TransferResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/stockings`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        quantity_flow_id: input.quantityFlowId,
+        source_area_id: input.sourceAreaId,
+        target_area_id: input.targetAreaId,
+        quantity: input.quantity,
+        operation_id: input.operationId,
+        confirm_route_deviation: input.confirmRouteDeviation,
+        route_deviation_reason: input.routeDeviationReason,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return toTransferResult(data, status);
+}
+
+function toTransferResult(
+  data: TransferResultWire,
+  status: number,
+): TransferResult {
   return {
     movementId: data.movement_id,
+    movementType: data.movement_type,
     quantityFlowId: data.quantity_flow_id,
     partNumber: data.part_number,
     quantity: data.quantity,

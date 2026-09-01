@@ -1,7 +1,6 @@
 import './work-orders.css';
 
-import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import type { ComponentType, LazyExoticComponent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { WORK_ORDER_LIST_LIMIT, listWorkOrders } from '../../api/work-orders';
 import type { WorkOrderSummary } from '../../api/work-orders';
@@ -20,7 +19,7 @@ import {
 } from '../../components/view-states';
 import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
 import { partNumbersPreview, workOrderStatusLabel } from './demand-lines';
-import { CompletedWorkOrdersUnavailable } from './CompletedWorkOrdersUnavailable';
+import { CompletedWorkOrdersView } from './CompletedWorkOrdersView';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -45,6 +44,7 @@ const LONG_PREVIEW_WORK_ORDERS: WorkOrderSummary[] = import.meta.env.DEV
           // Every fifth long-preview Work Order has no due date (valid).
           dueDate: n % 5 === 0 ? null : '2026-09-30',
           status: 'OPEN',
+          completedAt: null,
           demandLineCount: 0,
           partNumbers: [`0114-60-${String(100 + n).padStart(4, '0')}-00`],
         };
@@ -55,26 +55,12 @@ const LONG_PREVIEW_WORK_ORDERS: WorkOrderSummary[] = import.meta.env.DEV
         receivedDate: '2026-07-20',
         dueDate: '2026-10-15',
         status: 'OPEN',
+        completedAt: null,
         demandLineCount: 0,
         partNumbers: ['0118-40-0022-07-0455-88-REV-C'],
       },
     ]
   : [];
-
-// The §11.5 Completed Work Orders page has no backend yet (completion
-// = full allocation, Phase 10): the real route states that honestly.
-// The development-only visual preview of the approved page design is
-// reachable ONLY through this `import.meta.env.DEV`-guarded lazy
-// import, so production builds drop it — and its mock history — from
-// the module graph entirely.
-const CompletedWorkOrdersPreview: LazyExoticComponent<ComponentType> | null =
-  import.meta.env.DEV
-    ? lazy(() =>
-        import('./CompletedWorkOrdersView').then((m) => ({
-          default: m.CompletedWorkOrdersView,
-        })),
-      )
-    : null;
 
 // Management sub view for manual Work Order entry and explicit
 // production release, wired to the real /api/work-orders surface
@@ -83,25 +69,14 @@ const CompletedWorkOrdersPreview: LazyExoticComponent<ComponentType> | null =
 //
 // Two routes belong to this sub view (GUI_DESIGN §11): the active WO
 // list on `/management/work-orders` and the read-only Completed Work
-// Orders history page on `/management/work-orders/completed`. The
-// Management sub-view bar keeps Work Orders active on both.
+// Orders history page on `/management/work-orders/completed` — a REAL
+// view on `/api/work-orders/completed` since Phase 10 (completion is
+// derived by the server from allocation). The Management sub-view bar
+// keeps Work Orders active on both.
 export function WorkOrdersView() {
   const { route } = useRouter();
   if (route.view === 'management' && route.page === 'completed') {
-    if (CompletedWorkOrdersPreview) {
-      return (
-        <Suspense
-          fallback={
-            <section className="wo-view" aria-label="Completed Work Orders">
-              <LoadingState label="Loading Completed Work Orders" />
-            </section>
-          }
-        >
-          <CompletedWorkOrdersPreview />
-        </Suspense>
-      );
-    }
-    return <CompletedWorkOrdersUnavailable />;
+    return <CompletedWorkOrdersView />;
   }
   return <ActiveWorkOrdersView />;
 }
@@ -121,9 +96,9 @@ function ActiveWorkOrdersView() {
 
   // Search runs on the SERVER (GUI_DESIGN §11.1 — a contains-match over
   // the Work Order Number), so the typing burst is waited out instead
-  // of one request per keystroke. Nothing leaves the active list before
-  // allocation-derived completion (Phase 10), so the list only grows:
-  // it is never downloaded whole to be filtered in the browser.
+  // of one request per keystroke. Only allocation-derived completion
+  // (Phase 10) takes a Work Order off the active list, so it stays
+  // large: it is never downloaded whole to be filtered in the browser.
   const [settledSearch, setSettledSearch] = useState(search);
   useEffect(() => {
     const timer = setTimeout(
@@ -297,10 +272,13 @@ function ActiveWorkOrdersView() {
           onOpenExisting={(existing) => {
             // A WO Number is never duplicated (uniqueness spans the
             // whole history, PROJECT_PROFILE §8.2) — the existing Work
-            // Order opens instead.
+            // Order opens instead: a completed one opens read-only
+            // from the permanent history.
             closeNewWorkOrder();
             showNotice(
-              `⚠ WO Number ${existing.workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
+              existing.status === 'COMPLETED'
+                ? `⚠ WO Number ${existing.workOrderNumber} already exists and is completed — opening its read-only details from the completed history instead of duplicating it.`
+                : `⚠ WO Number ${existing.workOrderNumber} already exists — opening the existing Work Order instead of duplicating it.`,
             );
             openWorkOrder(existing.id);
           }}

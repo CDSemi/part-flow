@@ -337,6 +337,9 @@ function handle(url: string, method: string, body: unknown): Response {
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
       combine_groups: combineGroupsOverride ?? combineGroups(inArea),
       scrapped_quantity: 0,
+      stocked_quantity: 0,
+      available_stocked_quantity: 0,
+      stock_available: false,
     });
   }
 

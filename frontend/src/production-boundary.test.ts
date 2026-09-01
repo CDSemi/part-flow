@@ -260,8 +260,13 @@ test('no production module reaches src/mocks/', () => {
   expect(graph).not.toContain(
     join('views', 'production-board', 'ProductionBoardView.tsx'),
   );
-  expect(graph).not.toContain(
+  // The Completed Work Orders page is a REAL view since Phase 10: it
+  // ships in every build and imports nothing from src/mocks/.
+  expect(graph).toContain(
     join('views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
+  );
+  expect(graph).toContain(
+    join('views', 'scan-station', 'scan-station-allocation-dialog.tsx'),
   );
 
   expect(mockOffenders(graph)).toEqual([]);
@@ -434,19 +439,23 @@ test('the dev-only Worker sessions preview stays behind the DEV boundary', () =>
   expect(adminView).toContain("import('./WorkerSessionsPreview')");
 });
 
-test('the dev-only Completed Work Orders preview stays behind the DEV boundary', () => {
-  // §11.5 has no backend yet (completion = full allocation, Phase 10):
-  // production builds render the honest unavailable page, and the mock
-  // visual preview is reachable only through the guarded lazy import —
-  // never through a static import that would pull the mock completed
-  // history into the production module graph.
+test('the Completed Work Orders page is a real view with no mock history', () => {
+  // §11.5 has its backend since Phase 10 (completion = full
+  // allocation): the real page reads `/api/work-orders/completed` and
+  // is imported statically — never a DEV-gated preview over mock data,
+  // and never anything from src/mocks/.
   const workOrdersView = readFileSync(
     join(srcDir, 'views', 'work-orders', 'WorkOrdersView.tsx'),
     'utf8',
   );
-  expect(workOrdersView).not.toMatch(/^import .*CompletedWorkOrdersView'/m);
-  expect(workOrdersView).toContain('import.meta.env.DEV');
-  expect(workOrdersView).toContain("import('./CompletedWorkOrdersView')");
+  expect(workOrdersView).toMatch(/^import .*CompletedWorkOrdersView'/m);
+  expect(workOrdersView).not.toContain("import('./CompletedWorkOrdersView')");
+  const completedView = readFileSync(
+    join(srcDir, 'views', 'work-orders', 'CompletedWorkOrdersView.tsx'),
+    'utf8',
+  );
+  expect(completedView).not.toMatch(/from '\.\.\/\.\.\/mocks\//);
+  expect(completedView).toContain('listCompletedWorkOrders');
 });
 
 test('the dev-only mock Scan Station preview stays behind the DEV boundary', () => {

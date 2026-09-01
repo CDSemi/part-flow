@@ -388,6 +388,11 @@ function handle(url: string, method: string, body: unknown): Response {
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
       combine_groups: [],
       scrapped_quantity: 0,
+      stocked_quantity: 0,
+      available_stocked_quantity: 0,
+      // Phase 10: at a terminal-Area station the candidates are the
+      // sources the operator stocks from.
+      stock_available: terminal === true && candidates.length > 0,
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);
@@ -1281,14 +1286,17 @@ test('a PN with nothing to receive shows the honest placeholder — no intake at
   expect(transferRequests()).toHaveLength(0);
 });
 
-test('a terminal-Area station explains why it never receives a transfer', async () => {
+test('a terminal-Area station with nothing to stock explains it — never a transfer', async () => {
   await renderStation('STOCK-ST-01');
 
-  scan('PF:PN:2027-60-8114-00');
+  // No active quantity of this PN anywhere: nothing to stock, and a
+  // terminal Area never receives a transfer.
+  scan('PF:PN:NOTHING-1');
   const box = await screen.findByRole('dialog', {
     name: 'No quantity to receive',
   });
   expect(box).toHaveTextContent('terminal Area');
+  expect(box).toHaveTextContent('Nothing to stock');
 });
 
 test('Area, scrap and unknown barcodes are rejected without a server call', async () => {
@@ -1474,25 +1482,23 @@ test('a whole scan delivered to a focused button — terminating Enter included 
   );
 });
 
-test('a terminal-Area station refuses every Receive action even with quantity here and elsewhere', async () => {
-  flows.push({
-    id: 107,
-    pn: '2027-60-8114-00',
-    qty: 20,
-    areaId: 4, // already in the Stockroom
-    routeMode: 'FLOATING',
-    wo: { id: 1, number: '007003', demandId: 11, type: 'NEW' },
-  });
+test('a terminal-Area station opens the Stockroom receiving workflow — never the ordinary transfer', async () => {
   await renderStation('STOCK-ST-01');
 
-  scan('PF:PN:2027-60-8114-00'); // also 12 pcs in Material
+  scan('PF:PN:2027-60-8114-00'); // 12 pcs in Material
+  // The Stockroom arrival, not "Receive from another Area": the
+  // quantity is stocked as manufacturing-complete (Phase 10).
   const box = await screen.findByRole('dialog', {
-    name: 'No quantity to receive',
+    name: 'Receive into Stockroom',
   });
-  expect(box).toHaveTextContent('terminal Area');
+  expect(box).toHaveTextContent('Material');
+  expect(box).toHaveTextContent('manufacturing-complete');
+  expect(
+    screen.queryByRole('dialog', { name: 'Receive from another Area' }),
+  ).toBeNull();
   expect(screen.queryByRole('dialog', { name: 'Select an action' })).toBeNull();
-  expect(screen.queryByRole('button', { name: /Receive more/ })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Next' })).toBeNull();
+  // Cancel writes nothing — no transfer request was ever sent.
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
   expect(transferRequests()).toHaveLength(0);
 });
 

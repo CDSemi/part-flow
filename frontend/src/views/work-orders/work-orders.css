@@ -180,7 +180,8 @@
   color: var(--ok-t);
 }
 
-.wostat.complete {
+.wostat.complete,
+.wostat.completed {
   background: var(--chip);
   color: var(--muted);
 }

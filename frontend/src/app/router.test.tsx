@@ -96,6 +96,14 @@ beforeEach(() => {
       if (/\/api\/departments$/.test(url)) {
         return json([{ id: 1, name: 'Machining', is_active: true }]);
       }
+      if (/\/api\/work-orders\/completed\?/.test(url)) {
+        return json({
+          work_orders: [],
+          total: 0,
+          next_cursor_completed_at: null,
+          next_cursor_id: null,
+        });
+      }
       if (
         /\/api\/(machines|operations|work-orders|part-numbers|route-templates)/.test(
           url,

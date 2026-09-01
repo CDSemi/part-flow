@@ -24,6 +24,7 @@ import {
 } from '../../api/environment';
 import type { Area, Department, Operation } from '../../api/environment';
 import { listMachines } from '../../api/machines';
+import type { AllocationResult } from '../../api/allocations';
 import { newDeviceEventId } from '../../api/production-release';
 import {
   areaRefColor,
@@ -33,6 +34,7 @@ import {
   resolveMachineScan,
   resolveScan,
   routeDeviationConfirmation,
+  stockAtStationArea,
   transferOutcomeUnknown,
   transferToStationArea,
 } from '../../api/scan-station';
@@ -72,6 +74,7 @@ import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { normalizeScanInput, parseScan } from './barcode';
+import { AllocationDialog } from './scan-station-allocation-dialog';
 import { CombineQuantitiesDialog } from './scan-station-combine-dialog';
 import {
   AddQuantityDialog,
@@ -471,6 +474,8 @@ type Flow =
   | {
       kind: 'source-select';
       resolution: ScanResolution;
+      /** Phase 10: the selection leads to the Stockroom arrival. */
+      stock?: boolean;
       parent?: Flow;
     }
   | {
@@ -478,6 +483,22 @@ type Flow =
       resolution: ScanResolution;
       candidate: TransferCandidate;
       parent?: Flow;
+    }
+  | {
+      // The Stockroom arrival (Phase 10): the SAME transfer wizard
+      // recorded through the STOCKED command at a terminal Area.
+      kind: 'stock';
+      resolution: ScanResolution;
+      candidate: TransferCandidate;
+      parent?: Flow;
+    }
+  | {
+      // The receiving allocation (Phase 10, GUI_DESIGN §10): opened
+      // ONLY after the server confirmed the STOCKED write — no parent,
+      // no Back; the stocked quantity is the allocation quantity.
+      kind: 'allocate';
+      stocked: TransferResult;
+      candidate: TransferCandidate;
     }
   | { kind: 'in-area'; resolution: ScanResolution; parent?: Flow }
   | { kind: 'no-quantity'; resolution: ScanResolution; parent?: Flow }
@@ -759,6 +780,23 @@ function StationView({
    */
   const openResolution = useCallback(
     (resolution: ScanResolution, parent?: Flow) => {
+      if (resolution.stockAvailable) {
+        // A station bound to a terminal Area (the Stockroom): the
+        // candidates are the sources the operator STOCKS from — the
+        // same explicit source selection, then the Stockroom arrival
+        // (GUI_DESIGN §10). Nothing is ever picked automatically.
+        if (resolution.candidates.length === 1) {
+          setFlow({
+            kind: 'stock',
+            resolution,
+            candidate: resolution.candidates[0],
+            parent,
+          });
+        } else {
+          setFlow({ kind: 'source-select', resolution, stock: true, parent });
+        }
+        return;
+      }
       if (resolution.transferBlockedReason !== null) {
         // The station's Area never receives a transfer (a terminal
         // Area — the Stockroom workflow, a later release): no Receive
@@ -1054,6 +1092,85 @@ function StationView({
       focusScan();
     },
     [context, inventory, focusScan, recordAction],
+  );
+
+  /** A Stockroom arrival the SERVER confirmed (Phase 10): refresh the
+   * Area, note it, then open the receiving allocation for exactly the
+   * stocked quantity. The STOCKED command is not reversible from the
+   * station (PROJECT_PROFILE §32 open decision 1), so it joins the raw
+   * session log without becoming the Undo target. */
+  const completeStock = useCallback(
+    (result: TransferResult, candidate: TransferCandidate) => {
+      const completed = result.completedMovementId !== null;
+      const events = completed
+        ? `AREA_COMPLETED #${result.completedMovementId} + STOCKED #${result.movementId}`
+        : `STOCKED #${result.movementId}`;
+      const split =
+        result.remainderQuantity !== null
+          ? ` SPLIT · ${result.remainderQuantity} pcs remain at ${candidate.currentArea.name}.`
+          : '';
+      setHistory((stack) => [
+        ...stack,
+        {
+          pn: result.partNumber,
+          summary: `${result.remainderQuantity !== null ? 'SPLIT + ' : ''}${completed ? 'AREA_COMPLETED + STOCKED' : 'STOCKED'} · ${candidate.currentArea.name} → ${ready?.area.name ?? 'Stockroom'} · qty ${result.quantity}${result.remainderQuantity !== null ? ` of ${result.quantity + result.remainderQuantity}` : ''}`,
+          deviceEventId: result.deviceEventId,
+        },
+      ]);
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.quantity} stocked`,
+        detail: result.created
+          ? `${completed ? `Processing at ${candidate.currentArea.name} was completed and the` : 'The'} quantity is manufacturing-complete at ${ready?.area.name ?? 'the Stockroom'}.${split} Recorded by the server (${events}). Allocate it to Work Order Demand next.`
+          : `This stocking was already recorded by the server (${events}) — nothing was recorded twice.${split}`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow({ kind: 'allocate', stocked: result, candidate });
+    },
+    [context, inventory, ready],
+  );
+
+  /** A receiving allocation the SERVER confirmed: note it, refresh, refocus. */
+  const completeAllocation = useCallback(
+    (result: AllocationResult) => {
+      const lines = result.rows.length;
+      const completedNote =
+        result.completedWorkOrderIds.length > 0
+          ? ` Work Order${result.completedWorkOrderIds.length > 1 ? 's' : ''} ${result.completedWorkOrderIds
+              .map((id) => `#${id}`)
+              .join(', ')} completed — every demand line is fully allocated.`
+          : '';
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.allocationQuantity} allocated`,
+        detail: result.created
+          ? `${result.allocationQuantity} pcs allocated to ${lines} demand line${lines === 1 ? '' : 's'}. Recorded by the server.${completedNote}`
+          : `This allocation was already recorded by the server — nothing was recorded twice.${completedNote}`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan],
+  );
+
+  /** The operator leaves the stocked quantity unallocated for now. */
+  const leaveInStock = useCallback(
+    (stocked: TransferResult) => {
+      setFlow(null);
+      setNotice({
+        kind: 'info',
+        title: `${stocked.partNumber} × ${stocked.quantity} left in stock — not allocated`,
+        detail:
+          'The stocked quantity stays available for allocation from Management. Nothing else was recorded.',
+      });
+      focusScan();
+    },
+    [focusScan],
   );
 
   /** An in-Area action the SERVER confirmed: refresh, note, refocus.
@@ -1696,9 +1813,15 @@ function StationView({
       {flow?.kind === 'source-select' && (
         <SourceSelectDialog
           resolution={flow.resolution}
+          title={flow.stock ? 'Select the source to stock' : undefined}
+          sub={
+            flow.stock
+              ? 'This Part Number is available in more than one place. Select exactly one source to stock at the Stockroom — quantities are never combined.'
+              : undefined
+          }
           onPick={(candidate) =>
             setFlow({
-              kind: 'transfer',
+              kind: flow.stock ? 'stock' : 'transfer',
               resolution: flow.resolution,
               candidate,
               parent: flow,
@@ -1706,6 +1829,32 @@ function StationView({
           }
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
+        />
+      )}
+      {flow?.kind === 'stock' && (
+        <TransferDialog
+          stock
+          station={station}
+          resolution={flow.resolution}
+          candidate={flow.candidate}
+          destinationNote={`${station.area.name} — stocked (manufacturing-complete)`}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onDone={(result) => completeStock(result, flow.candidate)}
+          onCancel={cancelFlow}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Stocking')}
+        />
+      )}
+      {flow?.kind === 'allocate' && (
+        <AllocationDialog
+          station={station}
+          stocked={flow.stocked}
+          sourceArea={flow.candidate.currentArea}
+          writeBlocked={writeBlocked}
+          onDone={completeAllocation}
+          onLeave={() => leaveInStock(flow.stocked)}
+          onAbandonUnknown={() => abandonUnknown('Allocation')}
         />
       )}
       {flow?.kind === 'transfer' && (
@@ -2232,6 +2381,7 @@ function TransferDialog({
   destinationNote,
   writeBlocked,
   repair = false,
+  stock = false,
   onBack,
   onDone,
   onCancel,
@@ -2248,6 +2398,13 @@ function TransferDialog({
    * its mandatory reason. Only the operator's explicit choice sets it;
    * a previously visited destination alone never does. */
   repair?: boolean;
+  /** Phase 10: the Stockroom arrival — the SAME wizard (explicit
+   * source, confirmed quantity 1..MAX with the server's split, the
+   * implicit completion, the route assessment) recorded through the
+   * `STOCKED` command at a station bound to a terminal Area: the
+   * quantity is manufacturing-complete and the receiving allocation
+   * follows as its own step. Never combined with Repair. */
+  stock?: boolean;
   onBack?: () => void;
   /** Called ONLY with a server-confirmed result. */
   onDone: (result: TransferResult) => void;
@@ -2367,7 +2524,7 @@ function TransferDialog({
     // completion handler failed afterwards.
     let result: TransferResult;
     try {
-      result = await transferToStationArea({
+      const intent = {
         stationId: station.stationId,
         partNumber: pn,
         quantityFlowId: candidate.quantityFlowId,
@@ -2377,10 +2534,15 @@ function TransferDialog({
         operationId: operation!.id,
         confirmRouteDeviation: deviation !== null,
         routeDeviationReason: deviation !== null ? reason.trim() : null,
-        repair,
-        repairReason: repair ? repairReason.trim() : null,
         deviceEventId: deviceEventId.current,
-      });
+      };
+      result = stock
+        ? await stockAtStationArea(intent)
+        : await transferToStationArea({
+            ...intent,
+            repair,
+            repairReason: repair ? repairReason.trim() : null,
+          });
     } catch (error) {
       if (transferOutcomeUnknown(error)) {
         // Transport failure, timeout or 5xx: the request may or may
@@ -2411,10 +2573,14 @@ function TransferDialog({
   }
 
   const cancel = outcomeUnknown ? onAbandonUnknown : onCancel;
-  const what = repair ? 'repair' : 'transfer';
+  const what = repair ? 'repair' : stock ? 'stocking' : 'transfer';
   const title = repair
     ? 'Return quantity for repair'
-    : 'Receive from another Area';
+    : stock
+      ? 'Receive into Stockroom'
+      : 'Receive from another Area';
+  // The event the server records for the arrival itself.
+  const arrivalEvent = stock ? 'STOCKED' : 'TRANSFERRED';
 
   const quantityGuidance =
     parsedQty > candidate.quantity ? (
@@ -2452,10 +2618,18 @@ function TransferDialog({
               additional quantity. A reason is required.
             </div>
           ) : null}
+          {stock ? (
+            <div className="sub">
+              Enter or confirm the completed quantity received at{' '}
+              {destination.name}. Stocked quantity is manufacturing-complete and
+              becomes available for Work Order allocation — the allocation
+              follows right after the server confirms.
+            </div>
+          ) : null}
           <StepRecap
             lines={[
               <>
-                {repair ? 'Repair return' : 'Transfer'}{' '}
+                {repair ? 'Repair return' : stock ? 'Stock' : 'Transfer'}{' '}
                 <AreaChip area={candidate.currentArea}>
                   {candidate.currentArea.name}
                 </AreaChip>{' '}
@@ -2480,7 +2654,8 @@ function TransferDialog({
             <>
               <Guidance tone="action">
                 {destination.name} supports several Operations. Select the
-                Operation this quantity is transferred for.
+                Operation this quantity is {stock ? 'stocked' : 'transferred'}{' '}
+                for.
                 {candidate.expectedOperationId !== null
                   ? ' The Planned Route expects the one marked planned; another choice is a route deviation.'
                   : ''}
@@ -2527,8 +2702,8 @@ function TransferDialog({
           <Guidance tone="info">
             Available at {candidate.currentArea.name}:{' '}
             <b>{candidate.quantity} pcs</b> (MAX). A smaller quantity{' '}
-            {repair ? 'returns' : 'moves'} only that part — the rest stays at{' '}
-            {candidate.currentArea.name}
+            {repair ? 'returns' : stock ? 'stocks' : 'moves'} only that part —
+            the rest stays at {candidate.currentArea.name}
             {implicitCompletion
               ? candidate.processingState === 'ON_MACHINE'
                 ? ' on its Machine'
@@ -2616,8 +2791,10 @@ function TransferDialog({
               [
                 'Source processing',
                 implicitCompletion
-                  ? `Completed at ${candidate.currentArea.name} by this transfer${
-                      partial ? ' — the transferred part only' : ''
+                  ? `Completed at ${candidate.currentArea.name} by this ${what}${
+                      partial
+                        ? ` — the ${stock ? 'stocked' : 'transferred'} part only`
+                        : ''
                     }`
                   : null,
                 'primary',
@@ -2639,18 +2816,25 @@ function TransferDialog({
                 </span>,
                 partial ? 'primary' : undefined,
               ],
+              [
+                'After stocking',
+                stock
+                  ? 'Manufacturing-complete — the quantity is allocated to Work Order Demand next'
+                  : null,
+                'primary',
+              ],
               ['Scan Station', station.stationId, 'secondary'],
               implicitCompletion
                 ? [
                     'Recorded events',
                     repair
                       ? 'AREA_COMPLETED, then TRANSFERRED · REPAIR intent (one command)'
-                      : 'AREA_COMPLETED, then TRANSFERRED (one command)',
+                      : `AREA_COMPLETED, then ${arrivalEvent} (one command)`,
                     'secondary',
                   ]
                 : [
                     'Recorded event',
-                    repair ? 'TRANSFERRED · REPAIR intent' : 'TRANSFERRED',
+                    repair ? 'TRANSFERRED · REPAIR intent' : arrivalEvent,
                     'secondary',
                   ],
             ]}
@@ -2658,7 +2842,7 @@ function TransferDialog({
           {deviation !== null ? (
             <>
               <Guidance tone="warn">
-                Confirming records the actual transfer as a route deviation. A
+                Confirming records the actual {what} as a route deviation. A
                 reason is required.
               </Guidance>
               <input
@@ -2712,7 +2896,9 @@ function TransferDialog({
                     ? 'Recording…'
                     : repair
                       ? 'Confirm repair'
-                      : 'Confirm transfer',
+                      : stock
+                        ? 'Confirm stocking'
+                        : 'Confirm transfer',
               onClick: () => void confirm(),
               disabled: !valid || busy || reasonMissing || writeBlocked,
               autoFocus: true,
@@ -3027,11 +3213,13 @@ function NoQuantityDialog({
       <h3>No quantity to receive</h3>
       <div className="big mono">{resolution.partNumber}</div>
       <div className="sub">
-        {resolution.transferBlockedReason
-          ? resolution.transferBlockedReason
-          : resolution.hasActiveDemand
-            ? 'This Part Number has no active production quantity in another Area. Release quantity from its Work Order in Management → Work Orders first.'
-            : 'This Part Number has no active Work Order Demand and no production quantity. Receiving new quantity at the station arrives with a later release — create the demand in Management → Work Orders.'}
+        {resolution.area.isTerminal
+          ? `Nothing to stock at ${resolution.area.name} (a terminal Area): this Part Number has no active production quantity in another Area to receive.${resolution.stockedQuantity > 0 ? ` ${resolution.stockedQuantity} pcs are already stocked (${resolution.availableStockedQuantity} pcs not yet allocated).` : ''}`
+          : resolution.transferBlockedReason
+            ? resolution.transferBlockedReason
+            : resolution.hasActiveDemand
+              ? 'This Part Number has no active production quantity in another Area. Release quantity from its Work Order in Management → Work Orders first.'
+              : 'This Part Number has no active Work Order Demand and no production quantity. Receiving new quantity at the station arrives with a later release — create the demand in Management → Work Orders.'}
       </div>
       {resolution.scrappedQuantity > 0 ? (
         <Guidance tone="info">

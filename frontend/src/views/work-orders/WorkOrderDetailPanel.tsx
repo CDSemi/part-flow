@@ -20,7 +20,7 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { formatIsoDate } from '../dates';
+import { formatIsoDate, todayIso } from '../dates';
 import { normalizePartNumber } from '../scan-station/barcode';
 import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
@@ -262,11 +262,16 @@ export function WorkOrderDetailPanel({
 
   // OPEN scope: adding lines, the WO due date, removal and release.
   const editable = detail.status === 'OPEN';
+  // Completed (Phase 10): every demand line fully allocated — the
+  // server derived it and refuses every edit, removal and release; the
+  // dialog is read-only history (GUI_DESIGN §11.5).
+  const completed = detail.status === 'COMPLETED';
   // A released line keeps its RESTRICTED edit (Qty, due date, Job
   // Numbers) whatever the Work Order's derived status — a Released
   // Work Order is exactly the case where every line is released, so
   // its lines stay editable that far and `Save demand` stays offered.
-  const linesRestricted = lines.some((line) => line.released);
+  // A completed Work Order is the exception: nothing is editable.
+  const linesRestricted = !completed && lines.some((line) => line.released);
   const woDisplay = detail.workOrderNumber ?? '—';
   const internal = detail.workOrderNumber === null;
 
@@ -557,6 +562,19 @@ export function WorkOrderDetailPanel({
           >
             {workOrderStatusLabel(detail.status)}
           </span>
+          {detail.completedAt ? (
+            // The done date (`completed_at`, GUI_DESIGN §11.5) — present
+            // exactly on a completed Work Order.
+            <>
+              {' '}
+              · Done{' '}
+              <b className="mono">
+                {formatIsoDate(
+                  todayIso(new Date(detail.completedAt).getTime()),
+                )}
+              </b>
+            </>
+          ) : null}
           {internal
             ? ' · internal Work Order — no external number yet (displays —)'
             : ''}
@@ -609,7 +627,8 @@ export function WorkOrderDetailPanel({
                   // The restricted edit of a released line: Qty, due
                   // date and Job Numbers stay editable (§11.2), on an
                   // Open and on a Released Work Order alike.
-                  const valueEditable = rowEditable || line.released;
+                  const valueEditable =
+                    rowEditable || (line.released && !completed);
                   const removeRule = lineRemoveRule(line);
                   return (
                     <tr key={line.id}>
@@ -842,6 +861,14 @@ export function WorkOrderDetailPanel({
                         >
                           {line.statusLabel}
                         </span>
+                        {line.allocatedQuantity > 0 ? (
+                          // Allocation from stocked quantity (Phase 10):
+                          // server-owned, shown as it is.
+                          <div className="sub mono-sm">
+                            Allocated {line.allocatedQuantity}/
+                            {parseInt(line.qty || '0', 10) || 0}
+                          </div>
+                        ) : null}
                       </td>
                       {editable ? (
                         <td data-label="" className="wo-cell-actions">
@@ -996,6 +1023,13 @@ export function WorkOrderDetailPanel({
                   be saved and are never dropped silently.
                 </>
               )
+            ) : completed ? (
+              <>
+                This Work Order is <b>Completed</b> — every demand line is fully
+                allocated from stocked quantity. It is read-only history: no
+                edit, removal or release. Later work is a new Work Order Demand;
+                an audited allocation adjustment reopens it.
+              </>
             ) : (
               <>
                 This Work Order is <b>{workOrderStatusLabel(detail.status)}</b>{' '}

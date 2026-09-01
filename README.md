@@ -36,14 +36,18 @@ the transfer, the flow closing as manufacturing-complete), the
 append-only `work_order_allocations` record with the canonical-order
 suggestion, the confirmation and the auditable reversal, and Work
 Order completion derived from allocation with the read-only completed
-history (frontend pending):
+history — and the **Phase 10 frontend**: the Stockroom station's
+`Receive into Stockroom` workflow with the receiving allocation dialog
+on the Scan Station shell, and the real Completed Work Orders page on
+the server-side history:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
   real `/api/health` connectivity integration, and the ten approved GUI
   views — the real views (Administration's minimum-environment
   sections and Management → Machines from Phase 3.5, Management →
-  Work Orders from Phase 4, and the Scan Station from Phases 5–8) read and
+  Work Orders from Phase 4 with the Completed Work Orders page from
+  Phase 10, and the Scan Station from Phases 5–10) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -223,17 +227,32 @@ the final warning question); Worker identity, badge gates and Area
 barcodes stay honest placeholders, and the approved presentation of
 the remaining workflows survives as a development-only mock preview
 (`?preview=mock` on a Scan Station route) that never enters a
-production build. The Phase 3.5
+production build. Phase 10 adds the Stockroom: at a station bound
+to a terminal Area a PN scan opens `Receive into Stockroom` instead of
+the transfer (the server marks the stockable sources, the partial
+quantity is split by the server inside the same `STOCKED` command,
+`Confirm stocking` is the only write point), and after the server
+confirmed the write the allocation dialog shows the server's
+suggestion for exactly the stocked quantity in the canonical demand
+order — adjustable per line, `Confirm allocation` enabled only when
+the allocated total equals the stocked quantity, the confirmation
+carrying that quantity as `allocation_quantity`, a refusal keeping
+the dialog open with a refreshed suggestion, a lost response retried
+under the same `device_event_id`, success only after the server —
+while the Completed Work Orders page is the real read-only history
+(server-side search, Done range and due-outcome filters, keyset
+`Show more` paging, the read-only details with the done date and the
+allocated quantities, and no duplicate of a completed number from the
+New Work Order lookup). The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
 master data end to end. Every other view renders development-only mock
-data; the Stockroom and
-allocation-derived completion (Phase 10), and the remaining tracking
+data; the monitoring read models (Phase 11) and the remaining tracking
 behavior arrive next — the movement-type check admits the
-Phase 3–9 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
+Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
-`SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`).
+`SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`, `STOCKED`).
 See `docs/IMPLEMENTATION_ROADMAP.md` for phase boundaries,
 `docs/PROJECT_PROFILE.md` for the authoritative project specification,
 and `docs/GUI_DESIGN.md` (with `docs/mockups/partflow-gui-mockup-v18.html`)
@@ -296,8 +315,9 @@ Frontend structure:
   through the dev-only registry `src/app/dev-views.ts`
   (`import.meta.env.DEV`), so a production build excludes them
   entirely: the real views (`src/app/real-views.ts` — Administration
-  and Machines from Phase 3.5, Work Orders from Phase 4, the Scan
-  Station from Phase 5) ship in every
+  and Machines from Phase 3.5, Work Orders with the Completed Work
+  Orders page from Phases 4 and 10, the Scan Station from Phase 5)
+  ship in every
   build against the live `/api` surface, and every other route renders
   an explicit "not connected to a production data source yet" state. `npm run build`
   verifies the boundary by scanning the generated assets for known
@@ -305,8 +325,8 @@ Frontend structure:
   `src/production-boundary.test.ts` additionally verifies at the
   source level that no production module imports from `src/mocks/`
   by walking the production module graph transitively from
-  `src/main.tsx` (the development-only Worker sessions preview, the
-  Completed Work Orders visual preview and the mock Scan Station
+  `src/main.tsx` (the development-only Worker sessions preview and
+  the mock Scan Station
   preview of the Phase 6+ workflows — `ScanStationMockView.tsx`,
   `?preview=mock` — stay behind `import.meta.env.DEV`-guarded lazy
   imports, which the walk cuts — an ordinary production dynamic import
