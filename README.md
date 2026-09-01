@@ -550,7 +550,18 @@ integration):
   recorded step or deviation, the explicit merge with every
   incompatibility refused, whole-command replay and conflicting reuse,
   concurrent and stale commands, and the projection replay across a
-  lineage tree)
+  lineage tree) and the Phase 9 corrections and Undo (every command
+  kind reversed as a whole — including the implicit-completion
+  transfer, SPLIT-prefixed partials, merges, Scrap and additions —
+  with conservation, Machine totals and route-position restoration,
+  consecutive undos walking back, every eligibility refusal with zero
+  writes, the preview verdicts, whole-command replay versus mismatched
+  reuse, the threaded double-undo race stopped by the database UNIQUE
+  backstop, Repair full/partial/unvisited/reason rules and the
+  deviation interplay, Scrap full/partial/ON_MACHINE with refusals,
+  additions with the Area-mode arrival state, the witness-locked
+  in-Area precondition and the station-lock re-check, and the
+  `introduced = active + scrapped` reconciliation)
   — all
   against dedicated temporary
   databases (`partflow_test_*`), so the configured database role must
@@ -653,7 +664,7 @@ backend/
   app/domain/      framework-independent domain vocabulary (PN normalization, enums)
   app/infrastructure/  database engine, connectivity check, and canonical schema mappings
   tests/           pytest suite
-  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage)
+  alembic/         migration environment and revisions (baseline + Phase 3 domain schema + Phase 3.5 environment setup + Phase 4 audit table and release-context index + Phase 5 Movement widening + Phase 6 Machine assignment widening + Phase 7 direct-processing completion widening + Phase 8 quantity lineage + Phase 9 corrections widening)
 compose.yaml       development stack (db, backend, frontend)
 docs/              canonical project documentation
 ```

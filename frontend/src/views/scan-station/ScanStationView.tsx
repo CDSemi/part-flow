@@ -622,15 +622,26 @@ function StationView({
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  // The pending delayed-refocus timer, cleared on unmount so it never
+  // fires against a view (or test environment) that no longer exists.
+  const focusTimer = useRef<number | null>(null);
   const focusScan = useCallback(() => {
     // §3.1 focus discipline: the barcode input regains focus after every
     // completed operation and dialog close — never pulling focus out of
     // a dialog that opened in the meantime.
-    setTimeout(() => {
+    if (focusTimer.current !== null) window.clearTimeout(focusTimer.current);
+    focusTimer.current = window.setTimeout(() => {
+      focusTimer.current = null;
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       inputRef.current?.focus();
     }, 30);
   }, []);
+  useEffect(
+    () => () => {
+      if (focusTimer.current !== null) window.clearTimeout(focusTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!writeBlocked && ready) focusScan();
