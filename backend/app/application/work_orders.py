@@ -1,11 +1,15 @@
-"""Work Order intake services (Phase 4 — Work Orders view, demand save).
+"""Work Order services: intake and edit (Phase 4), completion read side (Phase 10).
 
 Application-layer operations behind the Work Orders management view
-(GUI_DESIGN §11.1–§11.3): listing/searching the WO list, loading Work
-Order Details with its demand lines, creating a Work Order with its
-demand draft, and saving edits. Business demand only — no production
-release, no QuantityFlow, no PartMovement, and no projection change
-ever originates here (PROJECT_PROFILE §13; SLICE1_DATA_MODEL §7).
+(GUI_DESIGN §11.1–§11.3): listing/searching the active WO list, loading
+Work Order Details with its demand lines, creating a Work Order with
+its demand draft, and saving edits — plus the READ side of completion
+(Phase 10): the derived ``COMPLETED`` status, the read-only guard on a
+completed Work Order, and the Completed Work Orders history read model
+of GUI_DESIGN §11.5 (site-calendar done date, Done range, server-side
+sort, keyset paging). Business demand only — no production release, no
+allocation write, no QuantityFlow, no PartMovement, and no projection
+change ever originates here (PROJECT_PROFILE §13; SLICE1_DATA_MODEL §7).
 
 Rules owned here (PROJECT_PROFILE §7 Work Order, §8.2, §8.3, §13;
 SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
@@ -270,14 +274,13 @@ def _build_detail(
     )
 
 
-#: Most Work Orders one active-list read returns. Nothing leaves the
-#: active list before allocation-derived completion (Phase 10), so the
-#: list only grows: it is bounded HERE, in the query, never by slicing
-#: an already-transferred list in the browser. This is a result bound,
-#: not a pagination contract — the client narrows with ``search``, and
-#: the Completed Work Orders history (GUI_DESIGN §11.5) brings its own
-#: server-side paging when it becomes real. ``number`` is unaffected:
-#: an exact resolution must reach every Work Order, bound or not.
+#: Most Work Orders one active-list read returns. The active list is
+#: bounded HERE, in the query, never by slicing an already-transferred
+#: list in the browser. This is a result bound, not a pagination
+#: contract — the client narrows with ``search``; the Completed Work
+#: Orders history (GUI_DESIGN §11.5) has its own server-side keyset
+#: paging (``list_completed_work_orders``). ``number`` is unaffected: an
+#: exact resolution must reach every Work Order, bound or not.
 LIST_RESULT_LIMIT: Final = 100
 
 

@@ -1,6 +1,6 @@
 # PartFlow trên shared hosting
 
-> **Bản gốc chuẩn:** [`docs/deployment/SHARED_HOSTING.md`](../../deployment/SHARED_HOSTING.md),
+> **Bản gốc chuẩn:** [`SHARED_HOSTING.md`](SHARED_HOSTING.md),
 > được tạo trong gói tài liệu này trên baseline upstream
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >

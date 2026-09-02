@@ -1,11 +1,11 @@
 # Hồ sơ dự án PartFlow v21
 
-> **Bản gốc chuẩn:** [`docs/PROJECT_PROFILE.md`](../PROJECT_PROFILE.md).
+> **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
 > Baseline upstream: commit `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
 >
-> **Trạng thái:** Living Document  
+> **Trạng thái:** Living Document
 > **Thẩm quyền:** Đặc tả chuẩn về domain behavior và product direction của PartFlow.
 
 ---

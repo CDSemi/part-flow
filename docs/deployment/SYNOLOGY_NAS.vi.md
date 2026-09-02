@@ -1,6 +1,6 @@
 # Triển khai PartFlow trên Synology NAS
 
-> **Bản gốc chuẩn:** [`docs/deployment/SYNOLOGY_NAS.md`](../../deployment/SYNOLOGY_NAS.md),
+> **Bản gốc chuẩn:** [`SYNOLOGY_NAS.md`](SYNOLOGY_NAS.md),
 > được tạo trong gói tài liệu này trên baseline upstream
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >
@@ -59,7 +59,7 @@ Permission:
 - chỉ deployment administrator và account Container Manager dùng cần quyền
   write;
 - DSM user thông thường không cần quyền vào filesystem;
-- `.env`, database dump và manifest không được đặt trong shared folder phục vụ
+- `../../.env`, database dump và manifest không được đặt trong shared folder phục vụ
   web;
 - không cấp read/write rộng cho `Everyone`.
 
@@ -84,7 +84,7 @@ cậy, verify rồi extract vào `repo/`.
 
 ### 4.2 Cấu hình staging secret
 
-Copy `.env.example` thành `.env` và thay mọi credential. `.env` thật không được
+Copy `../../.env.example` thành `../../.env` và thay mọi credential. `../../.env` thật không được
 commit.
 
 ```bash
@@ -99,7 +99,7 @@ Yêu cầu:
 - không dùng lại password DSM, GitHub, production hoặc password cá nhân;
 - giữ recovery copy được bảo vệ trong secret manager/password vault của hãng.
 
-`compose.yaml` hiện tại tạo `DATABASE_URL` của backend container từ
+`../../compose.yaml` hiện tại tạo `DATABASE_URL` của backend container từ
 `POSTGRES_USER`, `POSTGRES_PASSWORD` và `POSTGRES_DB`, đồng thời truyền
 `SITE_TIMEZONE` vào backend (mặc định `UTC`). Đặt `SITE_TIMEZONE` theo múi giờ
 IANA của nhà máy (ví dụ `America/Los_Angeles`) trước lần khởi động đầu tiên:
@@ -238,7 +238,7 @@ khi tin rằng backup dùng được.
 2. Ghi Git commit và Alembic revision hiện tại.
 3. Tạo và verify database dump mới.
 4. Fetch và checkout approved target commit.
-5. Review diff của `.env`, Compose, Dockerfile, dependency lock và migration.
+5. Review diff của `../../.env`, Compose, Dockerfile, dependency lock và migration.
 6. Build target image.
 7. Chạy `alembic upgrade head` đúng một lần.
 8. Recreate/start service.

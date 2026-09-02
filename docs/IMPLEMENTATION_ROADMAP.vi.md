@@ -1,12 +1,12 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc chuẩn:** [`docs/IMPLEMENTATION_ROADMAP.md`](../IMPLEMENTATION_ROADMAP.md).
+> **Bản gốc chuẩn:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md).
 > Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
 >
 > **Quyền chuẩn:** File tiếng Anh là canonical source cho thứ tự triển khai,
 > ranh giới phase, dependency và các giới hạn tạm thời. Hành vi domain và phạm
-> vi sản phẩm do [`PROJECT_PROFILE.md`](../PROJECT_PROFILE.md) định nghĩa; UI
-> đích đã duyệt do [`GUI_DESIGN.md`](../GUI_DESIGN.md) định nghĩa.
+> vi sản phẩm do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa; UI
+> đích đã duyệt do [`GUI_DESIGN.md`](GUI_DESIGN.md) định nghĩa.
 
 ## Trạng thái hiện tại
 
@@ -59,7 +59,7 @@
   Station route theo station; due date nullable; demand ordering chuẩn; chỉ báo
   scan thành công sau server confirmation; đổi Hot order phải xác nhận.
 - UI đích là `GUI_DESIGN.md`; visual reference mới nhất là
-  `docs/mockups/partflow-gui-mockup-v18.html`.
+  `mockups/partflow-gui-mockup-v18.html`.
 - **Phase 1** đã có: React + TypeScript frontend, FastAPI backend, PostgreSQL,
   Alembic baseline, Docker Compose, `/api/health`, formatter/linter/typecheck/
   test và CI.
@@ -610,7 +610,7 @@ Server-side role authorization theo PROJECT_PROFILE §19.
 ## Phase 16 — Deployment, Production Hardening, and Admin Maintenance
 
 Yêu cầu vận hành và hướng theo nền tảng nằm trong
-[`DEPLOYMENT.md`](../DEPLOYMENT.md). Hướng chạy repo hiện tại như staging nội bộ
+[`DEPLOYMENT.md`](DEPLOYMENT.md). Hướng chạy repo hiện tại như staging nội bộ
 có giới hạn không làm phase này trở thành complete.
 
 - backup;

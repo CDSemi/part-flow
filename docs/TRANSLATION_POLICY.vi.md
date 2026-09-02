@@ -1,6 +1,6 @@
 # Chính sách dịch tài liệu
 
-> **Bản gốc chuẩn:** [`docs/TRANSLATION_POLICY.md`](../TRANSLATION_POLICY.md).
+> **Bản gốc chuẩn:** [`TRANSLATION_POLICY.md`](TRANSLATION_POLICY.md).
 > Baseline upstream của gói tài liệu:
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >
@@ -18,7 +18,7 @@ hành.
 
 ## 2. Cấu trúc và cách đặt tên
 
-- `README.md` ở root tương ứng với `README.vi.md`.
+- `../README.md` ở root tương ứng với `../README.vi.md`.
 - `docs/<path>/<NAME>.md` tương ứng với `docs/vi/<path>/<NAME>.md`.
 - Tên file, số mục, code, identifier, API path, database object, command,
   environment variable, barcode format, enum value và UI copy nguyên văn vẫn
@@ -82,9 +82,9 @@ migration, backup, restore hoặc rollback vẫn phải được review về ng�
 Tài liệu project đang active và tài liệu vận hành mới đều có mirror tiếng Việt.
 Các mục sau được chủ động loại trừ:
 
-- `docs/archive/`, vì chứa bản lịch sử và prompt cũ đã bị thay thế;
-- `docs/mockups/`, vì HTML ở đó là tham chiếu trực quan có thể chạy và UI text
+- `archive`, vì chứa bản lịch sử và prompt cũ đã bị thay thế;
+- `mockups`, vì HTML ở đó là tham chiếu trực quan có thể chạy và UI text
   của chúng được quản lý bởi `GUI_DESIGN.md`;
-- `AGENTS.md` và `CLAUDE.md`, vì đây là instruction vận hành AI chứ không phải
+- `../AGENTS.md` và `../CLAUDE.md`, vì đây là instruction vận hành AI chứ không phải
   tài liệu project cho người đọc. Nhân đôi chúng bằng ngôn ngữ khác sẽ tạo ra
   các instruction entry point cạnh tranh nhau.

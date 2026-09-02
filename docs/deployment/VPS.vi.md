@@ -1,6 +1,6 @@
 # Triển khai PartFlow trên Linux VPS
 
-> **Bản gốc chuẩn:** [`docs/deployment/VPS.md`](../../deployment/VPS.md), được tạo
+> **Bản gốc chuẩn:** [`VPS.md`](VPS.md), được tạo
 > trong gói tài liệu này trên baseline upstream
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >
@@ -18,7 +18,7 @@ React/FastAPI/PostgreSQL hiện có.
 
 ## 2. Artifact Phase 16 bắt buộc
 
-Không triển khai production từ `compose.yaml`. Release phải cung cấp:
+Không triển khai production từ `../../compose.yaml`. Release phải cung cấp:
 
 - Dockerfile/image frontend và backend production;
 - production Compose configuration;

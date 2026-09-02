@@ -1,13 +1,13 @@
 # Thiết kế GUI PartFlow v18
 
-> **Bản gốc chuẩn:** [`docs/GUI_DESIGN.md`](../GUI_DESIGN.md).
+> **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
 > Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
-> do [`PROJECT_PROFILE.md`](../PROJECT_PROFILE.md) định nghĩa.
+> do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
 >
 > **Trạng thái:** Hiện hành, companion của Project Profile v21. Interactive visual
-> reference: `docs/mockups/partflow-gui-mockup-v18.html`; version cũ nằm trong
-> `docs/archive/`. Mockup là reference, không thay contract bằng văn bản.
+> reference: `mockups/partflow-gui-mockup-v18.html`; version cũ nằm trong
+> `archive`. Mockup là reference, không thay contract bằng văn bản.
 
 ---
 

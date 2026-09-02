@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc chuẩn:** [`docs/deployment/OPERATIONS_RUNBOOK.md`](../../deployment/OPERATIONS_RUNBOOK.md),
+> **Bản gốc chuẩn:** [`OPERATIONS_RUNBOOK.md`](OPERATIONS_RUNBOOK.md),
 > được tạo trong gói tài liệu này trên baseline upstream
 > `194ffc2e5e8e22c389abecd0830292a6707955d9`.
 >
