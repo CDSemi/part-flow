@@ -1044,20 +1044,46 @@ class CompletedCursor(NamedTuple):
     """The keyset position: the sort value of the last row (None when
     that value is NULL — an internal number, no due date) and its id.
     Only meaningful for the sort it was issued for: the token carries
-    the sort and direction, and a mismatch is refused."""
+    the sort and direction, and a mismatch is refused.
+
+    When the page was asked for a Done range PRESET, the token also
+    carries the preset and the inclusive done DATES it resolved to on
+    the site calendar at the first page, so every continuation of that
+    query keeps the same effective range — the site's midnight (or New
+    Year) passing between two pages never re-anchors the window
+    mid-walk. Explicit dates (the Custom range) travel with the
+    request and need no binding."""
 
     sort: CompletedSort
     direction: SortDirection
     value: str | None
     work_order_id: int
+    done_range: DoneRangePreset | None = None
+    done_from: datetime.date | None = None
+    done_to: datetime.date | None = None
 
 
 def encode_completed_cursor(cursor: CompletedCursor) -> str:
-    raw = json.dumps(
-        {"s": cursor.sort, "d": cursor.direction, "v": cursor.value, "i": cursor.work_order_id},
-        separators=(",", ":"),
-    )
+    fields: dict[str, Any] = {
+        "s": cursor.sort,
+        "d": cursor.direction,
+        "v": cursor.value,
+        "i": cursor.work_order_id,
+    }
+    if cursor.done_range is not None:
+        fields["r"] = cursor.done_range
+        fields["f"] = cursor.done_from.isoformat() if cursor.done_from is not None else None
+        fields["t"] = cursor.done_to.isoformat() if cursor.done_to is not None else None
+    raw = json.dumps(fields, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _optional_iso_date(value: Any) -> datetime.date | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("cursor date")
+    return datetime.date.fromisoformat(value)
 
 
 def decode_completed_cursor(token: str) -> CompletedCursor:
@@ -1073,9 +1099,16 @@ def decode_completed_cursor(token: str) -> CompletedCursor:
             or isinstance(work_order_id, bool)
         ):
             raise ValueError("cursor fields")
+        done_range = data.get("r")
+        done_from = done_to = None
+        if done_range is not None:
+            if done_range not in ("LAST_30_DAYS", "LAST_90_DAYS", "THIS_YEAR", "LAST_YEAR"):
+                raise ValueError("cursor preset")
+            done_from = _optional_iso_date(data["f"])
+            done_to = _optional_iso_date(data["t"])
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise InvalidInputError("The paging cursor is not valid. Reload the history.") from exc
-    return CompletedCursor(sort, direction, value, work_order_id)
+    return CompletedCursor(sort, direction, value, work_order_id, done_range, done_from, done_to)
 
 
 class CompletedPage(NamedTuple):
@@ -1177,7 +1210,9 @@ def list_completed_work_orders(
     in either direction) — Done descending by default — and the page
     is a keyset continuation over exactly that order, never an offset
     over an unbounded table; the cursor is bound to the sort it was
-    issued for and exists only while a further row does.
+    issued for, carries the done dates a preset resolved to at the first
+    page so the whole walk keeps one effective range, and exists only
+    while a further row does.
     """
     if limit <= 0 or limit > 200:
         raise InvalidInputError("The page size must be between 1 and 200.")
@@ -1185,12 +1220,26 @@ def list_completed_work_orders(
         raise InvalidInputError("sort must be DONE, RECEIVED, DUE or NUMBER.")
     if direction not in ("ASC", "DESC"):
         raise InvalidInputError("direction must be ASC or DESC.")
+    position = decode_completed_cursor(cursor) if cursor is not None else None
+    if position is not None and (position.sort != sort or position.direction != direction):
+        raise InvalidInputError(
+            "The paging cursor belongs to another sort order. Reload the history."
+        )
+    if position is not None and position.done_range != done_range:
+        raise InvalidInputError(
+            "The paging cursor belongs to another Done range. Reload the history."
+        )
     if done_range is not None:
         if done_from is not None or done_to is not None:
             raise InvalidInputError(
                 "Use either a done_range preset or explicit done_from / done_to dates."
             )
-        done_from, done_to = done_range_bounds(done_range)
+        if position is not None:
+            # A continuation keeps the range its first page resolved —
+            # the site's date may have moved on since, the query has not.
+            done_from, done_to = position.done_from, position.done_to
+        else:
+            done_from, done_to = done_range_bounds(done_range)
     filters: list[ColumnElement[bool]] = [WorkOrder.completed_at.is_not(None)]
     if search is not None and search.strip():
         pattern = f"%{_escape_like(search.strip())}%"
@@ -1253,12 +1302,7 @@ def list_completed_work_orders(
         .order_by(*ordering)
         .limit(limit + 1)
     )
-    if cursor is not None:
-        position = decode_completed_cursor(cursor)
-        if position.sort != sort or position.direction != direction:
-            raise InvalidInputError(
-                "The paging cursor belongs to another sort order. Reload the history."
-            )
+    if position is not None:
         query = query.where(_keyset_after(column, direction, position))
     fetched = list(session.execute(query))
     has_more = len(fetched) > limit
@@ -1276,7 +1320,15 @@ def list_completed_work_orders(
     if has_more:
         last = rows[-1][0]
         next_cursor = encode_completed_cursor(
-            CompletedCursor(sort, direction, _cursor_value(sort, last), last.id)
+            CompletedCursor(
+                sort,
+                direction,
+                _cursor_value(sort, last),
+                last.id,
+                done_range,
+                done_from if done_range is not None else None,
+                done_to if done_range is not None else None,
+            )
         )
     return CompletedPage(
         work_orders=summaries,

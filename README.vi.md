@@ -2,9 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md).
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
-> upstream commit `d2f68dee0d4ed363111c8a6b602ae3a58ab63e8d` cộng các sửa đổi
-> Phase 10 audit (Done range preset resolve trên server, cursor chỉ khi còn row)
-> đã được phản ánh.
+> upstream commit `6fdf20e` (Phase 10 audit r3).
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/vi/README.md) và
 > [hướng dẫn triển khai](./docs/vi/DEPLOYMENT.md).

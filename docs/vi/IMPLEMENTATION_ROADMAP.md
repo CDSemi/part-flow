@@ -1,7 +1,8 @@
 # Roadmap triển khai PartFlow
 
 > **Bản gốc chuẩn:** [`docs/IMPLEMENTATION_ROADMAP.md`](../IMPLEMENTATION_ROADMAP.md).
-> Baseline upstream: commit `194ffc2e5e8e22c389abecd0830292a6707955d9`.
+> Baseline upstream: commit `6fdf20e` (Phase 10 audit r3) cộng sửa đổi Phase 10
+> chưa commit (keyset continuation giữ effective Done range) đã được phản ánh.
 >
 > **Quyền chuẩn:** File tiếng Anh là canonical source cho thứ tự triển khai,
 > ranh giới phase, dependency và các giới hạn tạm thời. Hành vi domain và phạm
@@ -166,9 +167,13 @@
   completion derive khi mọi demand fully allocated; reversal có reason, chỉ một
   lần và reopen Work Order. Confirmation mang `allocation_quantity` tường minh
   mà các line phải cộng đúng bằng, từ chối khi stale so với available stock.
-  Completed history read-only có search, Done range và due outcome xét trên
-  lịch nhà máy (`SITE_TIMEZONE`, một rule server-side cho cả filter lẫn ngày
-  hiển thị), sort server-side và keyset paging. Đã audit trước khi đóng.
+  Completed history read-only có search, Done range (preset đặt tên
+  `LAST_30_DAYS` / `LAST_90_DAYS` / `THIS_YEAR` / `LAST_YEAR` resolve server-side
+  theo ngày hiện tại của site, hoặc Custom với `done_from` / `done_to` tường
+  minh) và due outcome xét trên lịch nhà máy (`SITE_TIMEZONE`, một rule
+  server-side cho cả filter lẫn ngày hiển thị), sort server-side và keyset
+  paging giữ nguyên effective Done range đã resolve ở page đầu, cursor chỉ tồn
+  tại khi còn row tiếp theo. Đã audit trước khi đóng.
   Authorization adjustment chờ Phase 14, Worker chờ Phase 13, read model
   monitoring chờ Phase 11.
 
@@ -539,10 +544,18 @@ khác suggestion được ghi override. Fully allocated mọi line đặt `compl
 đưa Work Order khỏi active list vào read-only history; exact number lookup vẫn
 tìm thấy để không duplicate. Patch/remove/release completed Work Order bị từ
 chối. Allocation reversal append row có mandatory reason, chỉ một lần, hoàn
-stock và reopen Work Order. Completed history search WO/PN/Job Number, filter
-done range/due outcome xét trên lịch nhà máy `SITE_TIMEZONE`, sort server-side
-và keyset page theo cursor gắn với sort đã phát hành. Không command allocation
-nào sửa Movement history. Authorization chờ Phase 14; Worker chờ Phase 13; return
+stock và reopen Work Order. Completed history search WO/PN/Job Number; Done
+range là preset đặt tên `done_range` (`LAST_30_DAYS`, `LAST_90_DAYS`,
+`THIS_YEAR`, `LAST_YEAR` — server resolve theo ngày hiện tại của site trong
+`SITE_TIMEZONE`, không bao giờ theo clock browser) hoặc Custom với
+`done_from` / `done_to` inclusive tường minh, không bao giờ cả hai; filter due
+outcome xét trên cùng lịch nhà máy; sort server-side; keyset page theo opaque
+cursor gắn với sort đã phát hành và mang luôn các ngày mà preset đã resolve ở
+page đầu — mọi continuation của một query đã load giữ cùng effective range dù
+site midnight hay New Year đi qua giữa hai page, còn first page mới resolve
+preset theo ngày site mới — và cursor chỉ được phát khi thực sự còn row tiếp
+theo (history kết thúc đúng ranh giới trang không có `Show more` thừa). Không
+command allocation nào sửa Movement history. Authorization chờ Phase 14; Worker chờ Phase 13; return
 stock to production vẫn là open decision.
 
 ## Phase 11 — Read Models and Monitoring Views

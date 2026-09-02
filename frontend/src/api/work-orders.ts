@@ -310,8 +310,10 @@ export interface CompletedWorkOrdersPage {
    * filters — tells "none ever" from "none in this range". */
   historyTotal: number;
   /** The server's opaque keyset cursor, bound to the sort it was issued
-   * for: continue with it for the next page. Present exactly when a
-   * further row exists; null = this was the last page. */
+   * for and carrying the Done range a preset resolved to at the first
+   * page (a continuation never re-anchors to a new site date): continue
+   * with it for the next page. Present exactly when a further row
+   * exists; null = this was the last page. */
   nextCursor: string | null;
 }
 

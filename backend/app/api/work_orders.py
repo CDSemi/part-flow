@@ -323,7 +323,9 @@ def list_completed_work_orders(
     outcome and every row's `done_date` use, so a browser in another
     time zone never shifts the window. Sorted server-side by `sort` /
     `direction` (Done descending by default, NULLs last, id as the
-    tie-breaker) with keyset paging bound to that order.
+    tie-breaker) with keyset paging bound to that order; a continuation
+    of a preset query keeps the range its first page resolved, so the
+    site's midnight passing between two pages never changes the walk.
     """
     page = work_orders.list_completed_work_orders(
         session,

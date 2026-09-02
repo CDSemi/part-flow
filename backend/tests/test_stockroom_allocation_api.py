@@ -1882,6 +1882,162 @@ def test_completed_history_presets_select_rows_on_the_site_calendar(
         assert refused.status_code == 422, params
 
 
+def _completed_at_instants(
+    client: TestClient,
+    db_engine: Engine,
+    material: _Cell,
+    stockroom: _Cell,
+    marker: str,
+    instants: dict[str, datetime.datetime],
+) -> dict[str, int]:
+    """One completed Work Order per instant (its `completed_at` pinned)."""
+    ids: dict[str, int] = {}
+    for key, completed_at in instants.items():
+        work_order = _create_work_order(
+            client,
+            [{"part_number": _unique(f"PN{marker}"), "requested_quantity": 1}],
+            number=f"WO-{marker}-{key}",
+        )
+        _complete(client, material, stockroom, work_order)
+        with db_engine.begin() as connection:
+            connection.execute(
+                sa.update(models.WorkOrder)
+                .where(models.WorkOrder.id == work_order.id)
+                .values(completed_at=completed_at)
+            )
+        ids[key] = work_order.id
+    return ids
+
+
+def test_preset_continuation_keeps_the_range_its_first_page_resolved_across_new_year(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`THIS_YEAR` paged across the site's New Year: page 1 is served on
+    December 31 (the window is 2026), the site clock moves to January 1
+    before `Show more` — the continuation still belongs to page 1's
+    query (2026 rows, page 1's total, no row twice or missing, loaded
+    never above matching), while a NEW first page after midnight
+    resolves the preset on the new site date."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    ids = _completed_at_instants(
+        client,
+        db_engine,
+        material,
+        stockroom,
+        marker,
+        {
+            "a_2026": datetime.datetime(2026, 3, 1, 12, 0, tzinfo=datetime.UTC),
+            "b_2026": datetime.datetime(2026, 8, 1, 12, 0, tzinfo=datetime.UTC),
+            "c_2026": datetime.datetime(2026, 12, 31, 20, 0, tzinfo=datetime.UTC),  # Dec 31 LA
+            "d_2027": datetime.datetime(2027, 1, 1, 12, 0, tzinfo=datetime.UTC),
+        },
+    )
+    search = f"PN{marker}"
+    # Page 1 at 23:30 on December 31 in Los Angeles (07:30 UTC Jan 1).
+    _pin_site_clock(
+        monkeypatch,
+        "America/Los_Angeles",
+        datetime.datetime(2027, 1, 1, 7, 30, tzinfo=datetime.UTC),
+    )
+    first = _completed(client, search=search, done_range="THIS_YEAR", limit=2)
+    # Done descending: the (future-dated) 2027 row and the newest 2026 one.
+    assert [int(r["id"]) for r in first["work_orders"]] == [ids["d_2027"], ids["c_2026"]]
+    assert first["total"] == 4 and isinstance(first["next_cursor"], str)
+    # The site's midnight passes before `Show more`: now January 1.
+    _pin_site_clock(
+        monkeypatch,
+        "America/Los_Angeles",
+        datetime.datetime(2027, 1, 1, 8, 30, tzinfo=datetime.UTC),
+    )
+    second = _completed(
+        client, search=search, done_range="THIS_YEAR", limit=2, cursor=first["next_cursor"]
+    )
+    # The continuation is page 2 of the SAME query: the remaining 2026
+    # rows, the same total, nothing repeated, nothing skipped, and the
+    # walk ends.
+    assert [int(r["id"]) for r in second["work_orders"]] == [ids["b_2026"], ids["a_2026"]]
+    assert second["total"] == first["total"] == 4
+    loaded = [int(r["id"]) for r in first["work_orders"] + second["work_orders"]]
+    assert len(loaded) == len(set(loaded)) == first["total"]
+    assert second["next_cursor"] is None
+    # A NEW first page after midnight is the new site year: only 2027.
+    fresh = _completed(client, search=search, done_range="THIS_YEAR", limit=2)
+    assert [int(r["id"]) for r in fresh["work_orders"]] == [ids["d_2027"]]
+    assert fresh["total"] == 1 and fresh["next_cursor"] is None
+    # A cursor of a preset query cannot continue another Done range.
+    for params in (
+        {"done_range": "LAST_YEAR"},
+        {},
+        {"done_from": "2026-01-01"},
+    ):
+        refused = client.get(
+            "/api/work-orders/completed",
+            params={"search": search, "limit": 2, "cursor": first["next_cursor"], **params},
+        )
+        assert refused.status_code == 422, params
+        assert "Done range" in refused.json()["detail"] or "preset" in refused.json()["detail"]
+
+
+def test_preset_continuation_keeps_the_range_across_the_site_midnight(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LAST_90_DAYS` across the site's midnight: a completion on the
+    window's oldest day stays in the continuation of a page served
+    before midnight, and drops out of a NEW first page after it. An
+    explicit Custom range behaves the same before and after."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    ids = _completed_at_instants(
+        client,
+        db_engine,
+        material,
+        stockroom,
+        marker,
+        {
+            # Noon LA on December 9 2025 — the oldest day of a 90-day
+            # window anchored on LA March 9 2026 (from Dec 9), outside
+            # one anchored on LA March 10 (from Dec 10).
+            "edge": datetime.datetime(2025, 12, 9, 20, 0, tzinfo=datetime.UTC),
+            "jan": datetime.datetime(2026, 1, 15, 12, 0, tzinfo=datetime.UTC),
+            "feb": datetime.datetime(2026, 2, 15, 12, 0, tzinfo=datetime.UTC),
+        },
+    )
+    search = f"PN{marker}"
+    # Los Angeles is on daylight time in March (UTC-7).
+    before_midnight = datetime.datetime(2026, 3, 10, 6, 30, tzinfo=datetime.UTC)  # 23:30 LA Mar 9
+    after_midnight = datetime.datetime(2026, 3, 10, 7, 30, tzinfo=datetime.UTC)  # 00:30 LA Mar 10
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", before_midnight)
+    first = _completed(client, search=search, done_range="LAST_90_DAYS", limit=2)
+    assert [int(r["id"]) for r in first["work_orders"]] == [ids["feb"], ids["jan"]]
+    assert first["total"] == 3 and first["next_cursor"] is not None
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", after_midnight)
+    second = _completed(
+        client, search=search, done_range="LAST_90_DAYS", limit=2, cursor=first["next_cursor"]
+    )
+    assert [int(r["id"]) for r in second["work_orders"]] == [ids["edge"]]
+    assert second["total"] == 3 and second["next_cursor"] is None
+    fresh = _completed(client, search=search, done_range="LAST_90_DAYS", limit=2)
+    assert [int(r["id"]) for r in fresh["work_orders"]] == [ids["feb"], ids["jan"]]
+    assert fresh["total"] == 2 and fresh["next_cursor"] is None
+    # Custom explicit dates: the same request before and after midnight,
+    # the same pages — nothing to re-anchor.
+    custom = {"done_from": "2025-12-09", "done_to": "2026-02-15"}
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", before_midnight)
+    custom_first = _completed(client, search=search, limit=2, **custom)
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", after_midnight)
+    custom_second = _completed(
+        client, search=search, limit=2, cursor=custom_first["next_cursor"], **custom
+    )
+    assert [int(r["id"]) for r in custom_first["work_orders"]] == [ids["feb"], ids["jan"]]
+    assert [int(r["id"]) for r in custom_second["work_orders"]] == [ids["edge"]]
+    assert custom_first["total"] == custom_second["total"] == 3
+    assert custom_second["next_cursor"] is None
+    assert _completed(client, search=search, limit=2, **custom)["total"] == 3
+
+
 def _pages(client: TestClient, **params: Any) -> list[list[int]]:
     """The keyset pages of the history for ``params``, as served."""
     pages: list[list[int]] = []

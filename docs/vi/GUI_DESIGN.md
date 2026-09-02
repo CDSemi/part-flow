@@ -1,9 +1,8 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`docs/GUI_DESIGN.md`](../GUI_DESIGN.md).
-> Baseline upstream: commit `d2f68dee0d4ed363111c8a6b602ae3a58ab63e8d` cộng các
-> sửa đổi §11.5 của vòng audit Phase 10 (Done range preset resolve trên server,
-> chu kỳ sort cột Done, cursor chỉ khi còn row) đã được phản ánh.
+> Baseline upstream: commit `6fdf20e` (Phase 10 audit r3) cộng sửa đổi §11.5
+> chưa commit (keyset continuation giữ effective Done range) đã được phản ánh.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](../PROJECT_PROFILE.md) định nghĩa.
 >
@@ -625,7 +624,9 @@ default) chu kỳ là ascending ↔ descending — mọi click đều đổi ord
 của mọi cột đều chọn được. Paging: 50 row đầu theo order hiện tại, `Show more`
 nối 50 tiếp qua opaque cursor của server gắn với sort đã phát hành; server chỉ
 phát cursor khi thực sự còn row tiếp theo (history kết thúc đúng ranh giới trang
-không hiện `Show more` thừa); đổi search/filter/sort reset paging. Row opens read-only
+không hiện `Show more` thừa), và continuation của một preset Done range giữ
+nguyên range đã resolve ở page đầu — site midnight đi qua giữa hai page không
+neo lại query đã load; đổi search/filter/sort reset paging. Row opens read-only
 details với done date và allocated quantity. No New/edit/release; independent
 toolbar. Active search/New exact number check can route here.
 
