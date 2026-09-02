@@ -2503,6 +2503,9 @@ function TransferDialog({
     candidate.processingState === 'ON_MACHINE' ||
     candidate.processingState === 'PROCESSING';
 
+  // The intent this dialog carries — named in every message and label.
+  const what = repair ? 'repair' : stock ? 'stocking' : 'transfer';
+
   function goConfirm() {
     if (!valid) return;
     setConfirmed(parsedQty);
@@ -2513,7 +2516,7 @@ function TransferDialog({
     if (!valid || busy || reasonMissing) return;
     if (writeBlocked) {
       setServerError(
-        `Connection lost — the ${repair ? 'repair' : 'transfer'} was not sent. Reconnect and confirm again; nothing was recorded.`,
+        `Connection lost — the ${what} was not sent. Reconnect and confirm again; nothing was recorded.`,
       );
       return;
     }
@@ -2573,7 +2576,6 @@ function TransferDialog({
   }
 
   const cancel = outcomeUnknown ? onAbandonUnknown : onCancel;
-  const what = repair ? 'repair' : stock ? 'stocking' : 'transfer';
   const title = repair
     ? 'Return quantity for repair'
     : stock

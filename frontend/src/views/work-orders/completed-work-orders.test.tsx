@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -42,6 +43,11 @@ interface FakeWorkOrder {
 
 let workOrders: FakeWorkOrder[];
 let requests: string[];
+/** When set, keyset continuations (requests carrying a cursor) are
+ * answered only when released — the response is computed at request
+ * time, so it still describes the filters it was asked for. */
+let holdContinuations: boolean;
+let heldContinuations: (() => void)[];
 
 function summaryWire(w: FakeWorkOrder) {
   return {
@@ -267,11 +273,19 @@ beforeEach(() => {
       lines: [line(1000 + i, `GEN-${i}`, 1, 1, 1)],
     })),
   ];
+  holdContinuations = false;
+  heldContinuations = [];
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
-      Promise.resolve(handle(String(input), init?.method ?? 'GET')),
-    ),
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const response = handle(String(input), init?.method ?? 'GET');
+      if (holdContinuations && String(input).includes('cursor_id=')) {
+        return new Promise<Response>((resolve) => {
+          heldContinuations.push(() => resolve(response));
+        });
+      }
+      return Promise.resolve(response);
+    }),
   );
 });
 
@@ -452,6 +466,65 @@ test('Show more continues the server keyset page — never an offset', async () 
   );
   // The oldest completion arrives last, and nothing more can be paged.
   expect(visibleRows().at(-1)).toHaveTextContent('006721');
+  expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+});
+
+test('a continuation still pending when the filters change is ignored — never appended to the new page', async () => {
+  await renderCompleted();
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'all' },
+  });
+  await waitFor(() =>
+    expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+      'Showing 50 of 59 completed Work Orders · all time',
+    ),
+  );
+
+  // Page 2 of the all-time query is requested but the answer is slow…
+  holdContinuations = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+  await waitFor(() => expect(heldContinuations).toHaveLength(1));
+  expect(completedRequests().at(-1)).toContain('cursor_id=');
+
+  // …and meanwhile the operator narrows the Done range: page 1 of the
+  // 90-day query replaces the list.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: '90d' },
+  });
+  await waitFor(() =>
+    expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+      'Showing 50 of 58 completed Work Orders · last 90 days',
+    ),
+  );
+  expect(visibleRows()).toHaveLength(50);
+  const firstPageRequests = completedRequests().length;
+
+  // The stale all-time page 2 arrives now: rows, total and cursor are
+  // dropped — the 90-day page is untouched (006721 completed 400 days
+  // ago and belongs only to the all-time query).
+  await act(async () => {
+    heldContinuations.forEach((release) => release());
+    await Promise.resolve();
+  });
+  expect(visibleRows()).toHaveLength(50);
+  expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+    'Showing 50 of 58 completed Work Orders · last 90 days',
+  );
+  expect(screen.queryByText('006721')).toBeNull();
+  expect(completedRequests()).toHaveLength(firstPageRequests);
+
+  // `Show more` is available again for the CURRENT query and continues
+  // from its own cursor within the 90-day range.
+  holdContinuations = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+  await waitFor(() => expect(visibleRows()).toHaveLength(58));
+  const continuation = completedRequests().at(-1)!;
+  expect(continuation).toContain('cursor_id=');
+  expect(continuation).toContain('done_from=');
+  expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+    'Showing 58 of 58 completed Work Orders · last 90 days',
+  );
+  expect(screen.queryByText('006721')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
 });
 

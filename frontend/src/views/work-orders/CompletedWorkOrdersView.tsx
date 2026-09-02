@@ -1,6 +1,6 @@
 import './work-orders.css';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { listCompletedWorkOrders } from '../../api/work-orders';
 import type {
@@ -137,6 +137,11 @@ interface LoadedPage {
   rows: WorkOrderSummary[];
   total: number;
   nextCursor: CompletedCursor | null;
+  /** The query (filters + reload generation) these rows belong to — a
+   * keyset continuation is applied only while it is still the loaded
+   * one, so a page requested for earlier filters never lands in the
+   * page of the current ones. */
+  query: number;
 }
 
 export function CompletedWorkOrdersView() {
@@ -172,6 +177,9 @@ export function CompletedWorkOrdersView() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [generation, setGeneration] = useState(0);
+  // Increments on every first-page load — the identity of the query
+  // whose page is on screen.
+  const queryRef = useRef(0);
   const reload = useCallback(() => {
     setLoadError(null);
     setGeneration((value) => value + 1);
@@ -180,8 +188,11 @@ export function CompletedWorkOrdersView() {
   useEffect(() => {
     if (preview !== null) return;
     let cancelled = false;
+    queryRef.current += 1;
+    const query = queryRef.current;
     setPage(null);
     setLoadError(null);
+    setLoadingMore(false);
     listCompletedWorkOrders({
       search: settledSearch,
       doneFrom,
@@ -194,6 +205,7 @@ export function CompletedWorkOrdersView() {
           rows: fresh.workOrders,
           total: fresh.total,
           nextCursor: fresh.nextCursor,
+          query,
         });
       },
       (error: unknown) => {
@@ -207,6 +219,7 @@ export function CompletedWorkOrdersView() {
 
   const showMore = async () => {
     if (page === null || page.nextCursor === null || loadingMore) return;
+    const { query } = page;
     setLoadingMore(true);
     try {
       const next = await listCompletedWorkOrders({
@@ -216,21 +229,26 @@ export function CompletedWorkOrdersView() {
         dueOutcome: DUE_OUTCOME[outcome],
         cursor: page.nextCursor,
       });
+      // Stale continuation (the filters changed meanwhile): ignored — the
+      // rows, total and cursor belong to a query no longer on screen.
       setPage((current) =>
-        current === null
+        current === null || current.query !== query
           ? current
           : {
               rows: [...current.rows, ...next.workOrders],
               total: next.total,
               nextCursor: next.nextCursor,
+              query,
             },
       );
     } catch (error) {
-      showNotice(
-        `⚠ More completed Work Orders could not be loaded: ${errorMessage(error)}`,
-      );
+      if (queryRef.current === query) {
+        showNotice(
+          `⚠ More completed Work Orders could not be loaded: ${errorMessage(error)}`,
+        );
+      }
     } finally {
-      setLoadingMore(false);
+      if (queryRef.current === query) setLoadingMore(false);
     }
   };
 

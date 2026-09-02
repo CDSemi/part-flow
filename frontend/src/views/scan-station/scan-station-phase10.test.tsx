@@ -1120,18 +1120,24 @@ test('going offline disables the stocking and the allocation confirmations in pl
   expect(box).toHaveTextContent(
     'Disconnected — the stocking cannot be recorded',
   );
+  // Enter reaches the confirmation while blocked: the refusal names the
+  // stocking — never a "transfer" — and nothing is sent.
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(box).toHaveTextContent(
+    'Connection lost — the stocking was not sent. Reconnect and confirm again; nothing was recorded.',
+  );
+  expect(box).not.toHaveTextContent('the transfer was not sent');
   expect(stockingRequests()).toHaveLength(0);
   act(() => {
     window.dispatchEvent(new Event('online'));
   });
+  // Back online the same dialog offers the retry of the stocking.
   await waitFor(() =>
     expect(
-      within(box).getByRole('button', { name: 'Confirm stocking' }),
+      within(box).getByRole('button', { name: 'Retry stocking' }),
     ).toBeEnabled(),
   );
-  fireEvent.click(
-    within(box).getByRole('button', { name: 'Confirm stocking' }),
-  );
+  fireEvent.click(within(box).getByRole('button', { name: 'Retry stocking' }));
   const allocation = await screen.findByRole('dialog', {
     name: 'Allocate stocked quantity',
   });
