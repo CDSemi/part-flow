@@ -43,13 +43,47 @@ interface FakeWorkOrder {
 
 let workOrders: FakeWorkOrder[];
 let requests: string[];
+/** Server-side calendar verdicts forced per Work Order id — proves the
+ * page renders the SERVER's judgement, never its own. */
+let outcomeOverrides: Map<
+  number,
+  { done: string; outcome: 'ON_TIME' | 'LATE'; daysLate: number | null }
+>;
 /** When set, keyset continuations (requests carrying a cursor) are
  * answered only when released — the response is computed at request
  * time, so it still describes the filters it was asked for. */
 let holdContinuations: boolean;
 let heldContinuations: (() => void)[];
 
+/** The fake server's site calendar — this device's local date stands
+ * in for the site time zone the real backend applies. */
+function doneDateOf(w: FakeWorkOrder): string | null {
+  return w.completedAt ? localDate(w.completedAt) : null;
+}
+
+/** The server-derived due outcome on the site calendar. */
+function dueOutcomeOf(w: FakeWorkOrder): {
+  outcome: 'ON_TIME' | 'LATE' | 'NO_DUE_DATE' | null;
+  daysLate: number | null;
+} {
+  const done = doneDateOf(w);
+  if (done === null) return { outcome: null, daysLate: null };
+  if (w.due === null) return { outcome: 'NO_DUE_DATE', daysLate: null };
+  if (done > w.due) {
+    const days = Math.round(
+      (Date.parse(`${done}T00:00:00Z`) - Date.parse(`${w.due}T00:00:00Z`)) /
+        86_400_000,
+    );
+    return { outcome: 'LATE', daysLate: days };
+  }
+  return { outcome: 'ON_TIME', daysLate: null };
+}
+
 function summaryWire(w: FakeWorkOrder) {
+  const forced = outcomeOverrides.get(w.id);
+  const { outcome, daysLate } = forced
+    ? { outcome: forced.outcome, daysLate: forced.daysLate }
+    : dueOutcomeOf(w);
   return {
     id: w.id,
     work_order_number: w.number,
@@ -57,6 +91,9 @@ function summaryWire(w: FakeWorkOrder) {
     due_date: w.due,
     status: w.completedAt ? 'COMPLETED' : 'OPEN',
     completed_at: w.completedAt,
+    done_date: forced ? forced.done : doneDateOf(w),
+    due_outcome: outcome,
+    days_late: daysLate,
     demand_line_count: w.lines.length,
     part_numbers: w.lines.map((line) => line.pn),
   };
@@ -98,16 +135,19 @@ function localDate(iso: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** The server's completed history: filtered, ordered newest first,
- * keyset-paged over (completed_at, id) — never offset paging. */
+/** The server's completed history: filtered, sorted (NULLs last in
+ * either direction, id as the tie-breaker following the direction),
+ * keyset-paged on an opaque cursor bound to the sort — never offset
+ * paging. The Done range is inclusive done DATES on the site calendar. */
 function completedPage(url: URL) {
   const search = (url.searchParams.get('search') ?? '').toLowerCase();
   const doneFrom = url.searchParams.get('done_from');
   const doneTo = url.searchParams.get('done_to');
   const dueOutcome = url.searchParams.get('due_outcome') ?? 'ALL';
+  const sort = url.searchParams.get('sort') ?? 'DONE';
+  const direction = url.searchParams.get('direction') ?? 'DESC';
   const limit = Number(url.searchParams.get('limit') ?? '50');
-  const cursorAt = url.searchParams.get('cursor_completed_at');
-  const cursorId = url.searchParams.get('cursor_id');
+  const cursor = url.searchParams.get('cursor');
   let rows = workOrders.filter((w) => w.completedAt !== null);
   const historyTotal = rows.length;
   if (search) {
@@ -121,43 +161,55 @@ function completedPage(url: URL) {
         ),
     );
   }
-  if (doneFrom) rows = rows.filter((w) => w.completedAt! >= doneFrom);
-  if (doneTo) rows = rows.filter((w) => w.completedAt! < doneTo);
-  if (dueOutcome === 'ON_TIME') {
-    rows = rows.filter(
-      (w) => w.due !== null && localDate(w.completedAt!) <= w.due,
-    );
-  } else if (dueOutcome === 'LATE') {
-    rows = rows.filter(
-      (w) => w.due !== null && localDate(w.completedAt!) > w.due,
-    );
-  } else if (dueOutcome === 'NO_DUE_DATE') {
-    rows = rows.filter((w) => w.due === null);
+  if (doneFrom) rows = rows.filter((w) => doneDateOf(w)! >= doneFrom);
+  if (doneTo) rows = rows.filter((w) => doneDateOf(w)! <= doneTo);
+  if (dueOutcome !== 'ALL') {
+    rows = rows.filter((w) => dueOutcomeOf(w).outcome === dueOutcome);
   }
-  rows.sort((a, b) =>
-    a.completedAt! < b.completedAt!
-      ? 1
-      : a.completedAt! > b.completedAt!
-        ? -1
-        : b.id - a.id,
-  );
+  const value = (w: FakeWorkOrder): string | null =>
+    sort === 'DONE'
+      ? w.completedAt
+      : sort === 'RECEIVED'
+        ? w.received
+        : sort === 'DUE'
+          ? w.due
+          : w.number;
+  const sign = direction === 'ASC' ? 1 : -1;
+  rows.sort((a, b) => {
+    const va = value(a);
+    const vb = value(b);
+    if (va === null && vb !== null) return 1;
+    if (va !== null && vb === null) return -1;
+    if (va !== null && vb !== null && va !== vb) return va < vb ? -sign : sign;
+    return (a.id - b.id) * sign;
+  });
   const total = rows.length;
-  if (cursorAt && cursorId) {
-    rows = rows.filter(
-      (w) =>
-        w.completedAt! < cursorAt ||
-        (w.completedAt === cursorAt && w.id < Number(cursorId)),
-    );
+  if (cursor) {
+    const position = JSON.parse(cursor) as {
+      sort: string;
+      direction: string;
+      value: string | null;
+      id: number;
+    };
+    if (position.sort !== sort || position.direction !== direction) {
+      return json(
+        { detail: 'The paging cursor belongs to another sort order.' },
+        422,
+      );
+    }
+    const index = rows.findIndex((w) => w.id === position.id);
+    rows = rows.slice(index + 1);
   }
   const page = rows.slice(0, limit);
   const last = page.length === limit ? page[page.length - 1] : null;
-  return {
+  return json({
     work_orders: page.map(summaryWire),
     total,
     history_total: historyTotal,
-    next_cursor_completed_at: last ? last.completedAt : null,
-    next_cursor_id: last ? last.id : null,
-  };
+    next_cursor: last
+      ? JSON.stringify({ sort, direction, value: value(last), id: last.id })
+      : null,
+  });
 }
 
 function handle(rawUrl: string, method: string): Response {
@@ -165,7 +217,7 @@ function handle(rawUrl: string, method: string): Response {
   requests.push(`${method} ${url.pathname}${url.search}`);
   if (url.pathname === '/api/health') return json({ status: 'ok' });
   if (url.pathname === '/api/work-orders/completed') {
-    return json(completedPage(url));
+    return completedPage(url);
   }
   if (url.pathname === '/api/work-orders') {
     const number = url.searchParams.get('number');
@@ -277,11 +329,12 @@ beforeEach(() => {
   ];
   holdContinuations = false;
   heldContinuations = [];
+  outcomeOverrides = new Map();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const response = handle(String(input), init?.method ?? 'GET');
-      if (holdContinuations && String(input).includes('cursor_id=')) {
+      if (holdContinuations && String(input).includes('cursor=')) {
         return new Promise<Response>((resolve) => {
           heldContinuations.push(() => resolve(response));
         });
@@ -455,8 +508,8 @@ test('the Due outcome filter and a custom Done range travel to the server', asyn
   await waitFor(() => expect(visibleRows()).toHaveLength(1));
   expect(visibleRows()[0]).toHaveTextContent('internal Work Order');
 
-  // A custom range: both bounds travel as timestamps; the lower bound
-  // is inclusive, the upper exclusive (the next midnight).
+  // A custom range: both bounds travel as inclusive done DATES the
+  // server judges on the site calendar — never local instants.
   fireEvent.change(screen.getByLabelText('Due outcome'), {
     target: { value: 'all' },
   });
@@ -471,8 +524,8 @@ test('the Due outcome filter and a custom Done range travel to the server', asyn
   });
   await waitFor(() => {
     const last = completedRequests().at(-1)!;
-    expect(last).toContain('done_from=');
-    expect(last).toContain('done_to=');
+    expect(last).toContain(`done_from=${localDate(daysAgoIso(6))}`);
+    expect(last).toContain(`done_to=${localDate(daysAgoIso(1))}`);
     expect(last).not.toContain('due_outcome=');
   });
   await waitFor(() => expect(visibleRows()).toHaveLength(2));
@@ -496,8 +549,7 @@ test('Show more continues the server keyset page — never an offset', async () 
   fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
   await waitFor(() => expect(visibleRows()).toHaveLength(59));
   const continuation = completedRequests().at(-1)!;
-  expect(continuation).toContain('cursor_completed_at=');
-  expect(continuation).toContain('cursor_id=');
+  expect(continuation).toContain('cursor=');
   expect(document.querySelector('.cwo-summary')).toHaveTextContent(
     'Showing 59 of 59 completed Work Orders · all time',
   );
@@ -521,7 +573,7 @@ test('a continuation still pending when the filters change is ignored — never 
   holdContinuations = true;
   fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
   await waitFor(() => expect(heldContinuations).toHaveLength(1));
-  expect(completedRequests().at(-1)).toContain('cursor_id=');
+  expect(completedRequests().at(-1)).toContain('cursor=');
 
   // …and meanwhile the operator narrows the Done range: page 1 of the
   // 90-day query replaces the list.
@@ -556,13 +608,111 @@ test('a continuation still pending when the filters change is ignored — never 
   fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
   await waitFor(() => expect(visibleRows()).toHaveLength(58));
   const continuation = completedRequests().at(-1)!;
-  expect(continuation).toContain('cursor_id=');
+  expect(continuation).toContain('cursor=');
   expect(continuation).toContain('done_from=');
   expect(document.querySelector('.cwo-summary')).toHaveTextContent(
     'Showing 58 of 58 completed Work Orders · last 90 days',
   );
   expect(screen.queryByText('006721')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+});
+
+test('the date and identity columns sort on the server — Done descending by default, the cycle returning to it, paging reset per sort', async () => {
+  await renderCompleted();
+  // The table re-mounts around every server load: query the header
+  // afresh each time.
+  const doneHeader = () =>
+    screen.getByRole('button', { name: 'Sort by Done' }).closest('th');
+  expect(doneHeader()).toHaveAttribute('aria-sort', 'descending');
+  expect(completedRequests()[0]).toContain('sort=DONE');
+  expect(completedRequests()[0]).toContain('direction=DESC');
+
+  // Sort by Due: ascending first — a fresh first page for that order
+  // (no cursor), rendered in the SERVER's order: dated first (earliest
+  // due, then by id), undated last.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'all' },
+  });
+  await screen.findByText(/all time/);
+  const before = completedRequests().length;
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Due' }));
+  await waitFor(() =>
+    expect(completedRequests().length).toBeGreaterThan(before),
+  );
+  const ascending = completedRequests().at(-1)!;
+  expect(ascending).toContain('sort=DUE');
+  expect(ascending).toContain('direction=ASC');
+  expect(ascending).not.toContain('cursor=');
+  await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006721'));
+  expect(visibleRows()[1]).toHaveTextContent('006990');
+  // Equal due dates (2099-01-01) follow the id tie-breaker: id 2 first.
+  expect(visibleRows()[2]).toHaveTextContent('006996');
+  expect(
+    screen.getByRole('button', { name: 'Sort by Due' }).closest('th'),
+  ).toHaveAttribute('aria-sort', 'ascending');
+  expect(doneHeader()?.getAttribute('aria-sort')).toBeNull();
+
+  // Show more continues the SAME order from the server's cursor.
+  fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+  await waitFor(() => expect(visibleRows()).toHaveLength(59));
+  const continuation = completedRequests().at(-1)!;
+  expect(continuation).toContain('sort=DUE');
+  expect(continuation).toContain('cursor=');
+  // The undated rows close the ascending order (NULLs last).
+  expect(visibleRows().at(-1)).toHaveTextContent('internal Work Order');
+  expect(visibleRows().at(-2)).toHaveTextContent('006954');
+
+  // Descending: the undated rows stay last; the loaded pages reset.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Due' }));
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('direction=DESC'),
+  );
+  await waitFor(() => expect(visibleRows()).toHaveLength(50));
+  // Descending id tie-breaker among the equal due dates: id 154 first.
+  expect(visibleRows()[0]).toHaveTextContent('006954');
+  expect(
+    screen.getByRole('button', { name: 'Sort by Due' }).closest('th'),
+  ).toHaveAttribute('aria-sort', 'descending');
+
+  // The third click returns to the default order — Done descending.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Due' }));
+  await waitFor(() => {
+    const last = completedRequests().at(-1)!;
+    expect(last).toContain('sort=DONE');
+    expect(last).toContain('direction=DESC');
+  });
+  await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006996'));
+  expect(doneHeader()).toHaveAttribute('aria-sort', 'descending');
+
+  // WO Number sorts on the server too; the page never re-sorts rows.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by WO Number' }));
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('sort=NUMBER'),
+  );
+  await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006721'));
+  expect(visibleRows()[1]).toHaveTextContent('006900');
+});
+
+test("the Done date and the due outcome are the server's verdict on the site calendar — never recomputed from the browser clock", async () => {
+  // The server judged this completion on ITS calendar: a local date
+  // would say "on time" (due 2099), the site said late by 3 days.
+  outcomeOverrides.set(2, {
+    done: '2099-01-04',
+    outcome: 'LATE',
+    daysLate: 3,
+  });
+  await renderCompleted();
+  const row = visibleRows()[0];
+  expect(row).toHaveTextContent('006996');
+  expect(row).toHaveTextContent('Jan 04, 2099');
+  expect(row).toHaveTextContent('✕ 3 days late');
+
+  // The read-only details carry the same server date.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open Work Order 006996' }),
+  );
+  const dialog = await screen.findByRole('dialog');
+  expect(dialog).toHaveTextContent('Done Jan 04, 2099');
 });
 
 test('a row opens the read-only Work Order Details with the Done date and the allocation', async () => {

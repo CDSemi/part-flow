@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { listCompletedWorkOrders } from '../../api/work-orders';
 import type {
-  CompletedCursor,
+  CompletedSort,
   DueOutcome,
+  SortDirection,
   WorkOrderSummary,
 } from '../../api/work-orders';
 import { errorMessage } from '../../api/client';
@@ -20,7 +21,7 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { daysBetweenIso, formatIsoDate, todayIso } from '../dates';
+import { formatIsoDate, todayIso } from '../dates';
 import { partNumbersPreview } from './demand-lines';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -31,8 +32,10 @@ import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 // allocated from stocked quantity; it then leaves the active list and
 // appears here permanently. The history is unbounded by design, so the
 // search (WO Number, PN, Job Number), the Done-date range, the due
-// outcome filter, the newest-first order and the keyset paging all run
-// on the server — the page never downloads the history to filter it.
+// outcome filter, the column sort (Done descending by default) and the
+// keyset paging all run on the server — the page never downloads the
+// history to filter or sort it, and every date judgement (the done
+// date, on time / late) is the SERVER's, on the site calendar.
 
 const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
 
@@ -108,36 +111,58 @@ function rangeSummary(
   }
 }
 
-/** Local midnight of an ISO date as the server's timestamp bound. */
-function startOfLocalDay(isoDate: string): string {
-  return new Date(`${isoDate}T00:00:00`).toISOString();
+/** The one server-side sort of the page (GUI_DESIGN §11.5): the column
+ * and its direction. `Done` descending is the default — and what the
+ * unsorted state of every header cycle returns to. */
+interface SortState {
+  key: CompletedSort;
+  dir: SortDirection;
+}
+const DEFAULT_SORT: SortState = { key: 'DONE', dir: 'DESC' };
+
+/**
+ * One sortable column header (the shared §12.1 idiom): ascending →
+ * descending → the default order. The arrow names the direction; the
+ * active sort renders emphasized. `aria-sort` lives on the owning th.
+ */
+function SortHeader({
+  label,
+  active,
+  dir,
+  onToggle,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDirection;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`wo-sortbtn${active ? ' on' : ''}`}
+      aria-label={`Sort by ${label}`}
+      onClick={onToggle}
+    >
+      {label}
+      <span className="arrow" aria-hidden="true">
+        {active ? (dir === 'ASC' ? '↑' : '↓') : '↕'}
+      </span>
+    </button>
+  );
 }
 
-/** The exclusive upper bound of an inclusive ISO date: the next midnight. */
-function endOfLocalDay(isoDate: string): string {
-  const date = new Date(`${isoDate}T00:00:00`);
-  date.setDate(date.getDate() + 1);
-  return date.toISOString();
-}
-
-/** The done DATE (local) of a completed Work Order. */
-function doneDate(w: WorkOrderSummary): string | null {
-  return w.completedAt ? todayIso(new Date(w.completedAt).getTime()) : null;
-}
-
-/** Derived due outcome of a completed Work Order — done vs due. */
-function dueOutcome(w: WorkOrderSummary): OutcomeKey {
-  if (!w.dueDate) return 'nodue';
-  const done = doneDate(w);
-  if (done && done > w.dueDate) return 'late';
-  return 'ontime';
-}
+const SORT_COLUMNS: readonly { key: CompletedSort; label: string }[] = [
+  { key: 'NUMBER', label: 'WO Number' },
+  { key: 'DONE', label: 'Done' },
+  { key: 'RECEIVED', label: 'Received' },
+  { key: 'DUE', label: 'Due' },
+];
 
 interface LoadedPage {
   rows: WorkOrderSummary[];
   total: number;
   historyTotal: number;
-  nextCursor: CompletedCursor | null;
+  nextCursor: string | null;
   /** The query (filters + reload generation) these rows belong to — a
    * keyset continuation is applied only while it is still the loaded
    * one, so a page requested for earlier filters never lands in the
@@ -165,11 +190,24 @@ export function CompletedWorkOrdersView() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [outcome, setOutcome] = useState<OutcomeKey>('all');
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
+  const toggleSort = (key: CompletedSort) =>
+    setSort((current) =>
+      current.key !== key
+        ? { key, dir: 'ASC' }
+        : current.dir === 'ASC'
+          ? { key, dir: 'DESC' }
+          : // The unsorted state of the cycle is the default order — an
+            // unbounded history has no meaningful "registry order".
+            DEFAULT_SORT,
+    );
   const [detailId, setDetailId] = useState<number | null>(null);
 
+  // Inclusive done DATES in the site calendar — the server turns them
+  // into instants; the presets are computed on this device's calendar.
   const bounds = rangeBounds(range, now, customFrom, customTo);
-  const doneFrom = bounds.from ? startOfLocalDay(bounds.from) : null;
-  const doneTo = bounds.to ? endOfLocalDay(bounds.to) : null;
+  const doneFrom = bounds.from;
+  const doneTo = bounds.to;
 
   // The loaded page(s) for the CURRENT filters: the first page replaces,
   // `Show more` appends the next keyset page. A filter change starts
@@ -199,6 +237,8 @@ export function CompletedWorkOrdersView() {
       doneFrom,
       doneTo,
       dueOutcome: DUE_OUTCOME[outcome],
+      sort: sort.key,
+      direction: sort.dir,
     }).then(
       (fresh) => {
         if (cancelled) return;
@@ -217,7 +257,16 @@ export function CompletedWorkOrdersView() {
     return () => {
       cancelled = true;
     };
-  }, [preview, settledSearch, doneFrom, doneTo, outcome, generation]);
+  }, [
+    preview,
+    settledSearch,
+    doneFrom,
+    doneTo,
+    outcome,
+    sort.key,
+    sort.dir,
+    generation,
+  ]);
 
   const showMore = async () => {
     if (page === null || page.nextCursor === null || loadingMore) return;
@@ -229,9 +278,12 @@ export function CompletedWorkOrdersView() {
         doneFrom,
         doneTo,
         dueOutcome: DUE_OUTCOME[outcome],
+        sort: sort.key,
+        direction: sort.dir,
         cursor: page.nextCursor,
       });
-      // Stale continuation (the filters changed meanwhile): ignored — the
+      // Stale continuation (the filters or the sort changed meanwhile):
+      // ignored — the
       // rows, total and cursor belong to a query no longer on screen.
       setPage((current) =>
         current === null || current.query !== query
@@ -371,10 +423,25 @@ export function CompletedWorkOrdersView() {
           <table className="wolist cwo-list">
             <thead>
               <tr>
-                <th>WO Number</th>
-                <th>Done ↓</th>
-                <th>Received</th>
-                <th>Due</th>
+                {SORT_COLUMNS.map((column) => (
+                  <th
+                    key={column.key}
+                    aria-sort={
+                      sort.key === column.key
+                        ? sort.dir === 'ASC'
+                          ? 'ascending'
+                          : 'descending'
+                        : undefined
+                    }
+                  >
+                    <SortHeader
+                      label={column.label}
+                      active={sort.key === column.key}
+                      dir={sort.key === column.key ? sort.dir : 'ASC'}
+                      onToggle={() => toggleSort(column.key)}
+                    />
+                  </th>
+                ))}
                 <th>Demand lines</th>
               </tr>
             </thead>
@@ -398,12 +465,15 @@ export function CompletedWorkOrdersView() {
                 </tr>
               ) : (
                 rows.map((w) => {
-                  const outcomeKey = dueOutcome(w);
-                  const done = doneDate(w);
-                  const daysLate =
-                    outcomeKey === 'late' && w.dueDate && done
-                      ? daysBetweenIso(w.dueDate, done)
-                      : null;
+                  // The server's judgement on the site calendar — the
+                  // same rule the due-outcome filter applied.
+                  const outcomeKey: OutcomeKey =
+                    w.dueOutcome === 'LATE'
+                      ? 'late'
+                      : w.dueOutcome === 'ON_TIME'
+                        ? 'ontime'
+                        : 'nodue';
+                  const daysLate = w.daysLate;
                   return (
                     <tr
                       key={w.id}
@@ -429,7 +499,7 @@ export function CompletedWorkOrdersView() {
                         </button>
                       </td>
                       <td className="mono-sm cwo-done" data-label="Done">
-                        {formatIsoDate(done)}
+                        {formatIsoDate(w.doneDate)}
                       </td>
                       <td className="mono-sm" data-label="Received">
                         {formatIsoDate(w.receivedDate)}

@@ -25,6 +25,7 @@ services:
         build: ./backend
         environment:
             DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-partflow_user}:${POSTGRES_PASSWORD:-partflow_dev_password}@db:5432/${POSTGRES_DB:-partflow}
+            SITE_TIMEZONE: ${SITE_TIMEZONE:-UTC}
         ports:
             - "8000:8000"
         volumes:

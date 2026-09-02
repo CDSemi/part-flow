@@ -21,6 +21,10 @@ import { apiRequest } from './client';
 // Types
 // ---------------------------------------------------------------------------
 
+/** A completed Work Order's due outcome, judged by the server on the
+ * site calendar (GUI_DESIGN §11.5). */
+export type CompletionOutcome = 'ON_TIME' | 'LATE' | 'NO_DUE_DATE';
+
 export interface WorkOrderSummary {
   id: number;
   /** Verbatim external number, or null on an internal Work Order —
@@ -37,6 +41,15 @@ export interface WorkOrderSummary {
    * the Work Order is completed; a later allocation reversal clears it
    * and returns the Work Order to the active list. */
   completedAt: string | null;
+  /** The completion calendar (Phase 10, GUI_DESIGN §11.5) — the done
+   * DATE of `completedAt` in the SITE time zone and the due outcome
+   * judged on it, derived by the server: the one rule the history's
+   * filter and every displayed row share (never the browser's local
+   * date). All null while the Work Order is active. */
+  doneDate: string | null;
+  dueOutcome: CompletionOutcome | null;
+  /** Calendar days late (LATE only). */
+  daysLate: number | null;
   demandLineCount: number;
   /** Canonical PNs of the demand lines, in demand order. */
   partNumbers: string[];
@@ -87,6 +100,10 @@ export interface WorkOrderDetail {
   status: string;
   /** The done date — see `WorkOrderSummary.completedAt`. */
   completedAt: string | null;
+  /** The server-derived completion calendar — see `WorkOrderSummary`. */
+  doneDate: string | null;
+  dueOutcome: CompletionOutcome | null;
+  daysLate: number | null;
   demands: WorkOrderDemand[];
 }
 
@@ -126,6 +143,9 @@ interface WorkOrderSummaryWire {
   due_date: string | null;
   status: string;
   completed_at: string | null;
+  done_date: string | null;
+  due_outcome: CompletionOutcome | null;
+  days_late: number | null;
   demand_line_count: number;
   part_numbers: string[];
 }
@@ -155,6 +175,9 @@ interface WorkOrderDetailWire {
   due_date: string | null;
   status: string;
   completed_at: string | null;
+  done_date: string | null;
+  due_outcome: CompletionOutcome | null;
+  days_late: number | null;
   demands: WorkOrderDemandWire[];
 }
 
@@ -166,6 +189,9 @@ function toSummary(wire: WorkOrderSummaryWire): WorkOrderSummary {
     dueDate: wire.due_date,
     status: wire.status,
     completedAt: wire.completed_at,
+    doneDate: wire.done_date,
+    dueOutcome: wire.due_outcome,
+    daysLate: wire.days_late,
     demandLineCount: wire.demand_line_count,
     partNumbers: wire.part_numbers,
   };
@@ -199,6 +225,9 @@ function toDetail(wire: WorkOrderDetailWire): WorkOrderDetail {
     dueDate: wire.due_date,
     status: wire.status,
     completedAt: wire.completed_at,
+    doneDate: wire.done_date,
+    dueOutcome: wire.due_outcome,
+    daysLate: wire.days_late,
     demands: wire.demands.map(toDemand),
   };
 }
@@ -263,11 +292,9 @@ export async function listWorkOrders(
 /** The due outcome filter of the completed history (GUI_DESIGN §11.5). */
 export type DueOutcome = 'ALL' | 'ON_TIME' | 'LATE' | 'NO_DUE_DATE';
 
-/** Keyset position over `(completed_at, id)` — the server's cursor. */
-export interface CompletedCursor {
-  completedAt: string;
-  id: number;
-}
+/** The server-side sort of the completed history (GUI_DESIGN §11.5). */
+export type CompletedSort = 'DONE' | 'RECEIVED' | 'DUE' | 'NUMBER';
+export type SortDirection = 'ASC' | 'DESC';
 
 export interface CompletedWorkOrdersPage {
   workOrders: WorkOrderSummary[];
@@ -276,8 +303,9 @@ export interface CompletedWorkOrdersPage {
   /** Completed Work Orders in the whole history regardless of the
    * filters — tells "none ever" from "none in this range". */
   historyTotal: number;
-  /** Continue with this cursor for the next page; null = no more. */
-  nextCursor: CompletedCursor | null;
+  /** The server's opaque keyset cursor, bound to the sort it was issued
+   * for: continue with it for the next page; null = no more. */
+  nextCursor: string | null;
 }
 
 /** Rows one page of the completed history returns (the server's page
@@ -288,23 +316,26 @@ interface CompletedWorkOrdersPageWire {
   work_orders: WorkOrderSummaryWire[];
   total: number;
   history_total: number;
-  next_cursor_completed_at: string | null;
-  next_cursor_id: number | null;
+  next_cursor: string | null;
 }
 
 /**
- * The read-only completed history (GUI_DESIGN §11.5), newest done date
- * first. Search (WO Number, PN, Job Number), the done-date range, the
- * due outcome and the keyset paging all run on the SERVER — the history
- * is unbounded by design and never downloaded whole.
+ * The read-only completed history (GUI_DESIGN §11.5). Search (WO
+ * Number, PN, Job Number), the Done range (inclusive done DATES in the
+ * site calendar), the due outcome, the sort (Done descending by
+ * default) and the keyset paging all run on the SERVER — the history
+ * is unbounded by design and never downloaded whole, and the rows are
+ * never re-sorted here.
  */
 export async function listCompletedWorkOrders(input: {
   search?: string;
-  /** ISO timestamps: inclusive lower / exclusive upper `completed_at`. */
+  /** Inclusive done dates, ISO `YYYY-MM-DD`, in the site calendar. */
   doneFrom?: string | null;
   doneTo?: string | null;
   dueOutcome?: DueOutcome;
-  cursor?: CompletedCursor | null;
+  sort?: CompletedSort;
+  direction?: SortDirection;
+  cursor?: string | null;
 }): Promise<CompletedWorkOrdersPage> {
   const params = new URLSearchParams();
   const term = input.search?.trim() ?? '';
@@ -314,10 +345,9 @@ export async function listCompletedWorkOrders(input: {
   if (input.dueOutcome && input.dueOutcome !== 'ALL') {
     params.set('due_outcome', input.dueOutcome);
   }
-  if (input.cursor) {
-    params.set('cursor_completed_at', input.cursor.completedAt);
-    params.set('cursor_id', String(input.cursor.id));
-  }
+  if (input.sort) params.set('sort', input.sort);
+  if (input.direction) params.set('direction', input.direction);
+  if (input.cursor) params.set('cursor', input.cursor);
   params.set('limit', String(COMPLETED_PAGE_LIMIT));
   const wire = await apiRequest<CompletedWorkOrdersPageWire>(
     `/api/work-orders/completed?${params.toString()}`,
@@ -326,13 +356,7 @@ export async function listCompletedWorkOrders(input: {
     workOrders: wire.work_orders.map(toSummary),
     total: wire.total,
     historyTotal: wire.history_total,
-    nextCursor:
-      wire.next_cursor_completed_at !== null && wire.next_cursor_id !== null
-        ? {
-            completedAt: wire.next_cursor_completed_at,
-            id: wire.next_cursor_id,
-          }
-        : null,
+    nextCursor: wire.next_cursor,
   };
 }
 

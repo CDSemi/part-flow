@@ -44,6 +44,7 @@ The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
 """
 
+import datetime
 import os
 import threading
 import uuid
@@ -55,13 +56,14 @@ import pytest
 import sqlalchemy as sa
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
 from app.application import allocations, projections, work_orders
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.infrastructure import models
 from app.main import create_app
 
@@ -1558,35 +1560,207 @@ def test_completed_history_search_filters_and_pages(client: TestClient, db_engin
     assert [
         r["id"] for r in _completed(client, search=marker, due_outcome="NO_DUE_DATE")["work_orders"]
     ] == [completed[2].id]
-    # Keyset paging, one row per page, newest done date first.
+    # Keyset paging, one row per page, newest done date first — the
+    # cursor is opaque and issued by the server.
     first = _completed(client, search=marker, limit=1)
     assert [r["id"] for r in first["work_orders"]] == [completed[2].id]
-    assert first["next_cursor_id"] == completed[2].id
-    second = _completed(
-        client,
-        search=marker,
-        limit=1,
-        cursor_completed_at=first["next_cursor_completed_at"],
-        cursor_id=first["next_cursor_id"],
-    )
+    assert isinstance(first["next_cursor"], str)
+    second = _completed(client, search=marker, limit=1, cursor=first["next_cursor"])
     assert [r["id"] for r in second["work_orders"]] == [completed[1].id]
-    third = _completed(
-        client,
-        search=marker,
-        limit=2,
-        cursor_completed_at=second["next_cursor_completed_at"],
-        cursor_id=second["next_cursor_id"],
-    )
+    third = _completed(client, search=marker, limit=2, cursor=second["next_cursor"])
     assert [r["id"] for r in third["work_orders"]] == [completed[0].id]
-    assert third["next_cursor_id"] is None
-    # A done-date range that excludes everything, and half a cursor.
+    assert third["next_cursor"] is None
+    # A done-date range that excludes everything, and a broken cursor.
     # `history_total` ignores the filters: "none in this range" is not
     # "none ever" (GUI_DESIGN §11.5).
-    empty_range = _completed(client, search=marker, done_to="2000-01-01T00:00:00Z")
+    empty_range = _completed(client, search=marker, done_to="2000-01-01")
     assert empty_range["total"] == 0 and empty_range["history_total"] >= 3
     assert page["history_total"] >= page["total"]
-    assert client.get("/api/work-orders/completed", params={"cursor_id": 1}).status_code == 422
+    assert (
+        client.get("/api/work-orders/completed", params={"cursor": "nonsense"}).status_code == 422
+    )
     assert client.get("/api/work-orders/completed", params={"limit": 0}).status_code == 422
+    assert client.get("/api/work-orders/completed", params={"sort": "PN"}).status_code == 422
+
+
+def _complete(
+    client: TestClient, material: _Cell, stockroom: _Cell, work_order: _WorkOrder
+) -> None:
+    """Stock and allocate every line of ``work_order`` (all lines 1 pc)."""
+    detail = _work_order(client, work_order.id)
+    for line in detail["demands"]:
+        pn = str(line["part_number"])
+        flow_id = _release(client, material, work_order, pn, demand_id=int(line["id"]), quantity=1)
+        assert _stock(client, material, stockroom, flow_id, pn, 1).status_code == 201
+        assert _allocate(client, pn, [(int(line["id"]), 1)]).status_code == 201
+
+
+def _walk(client: TestClient, **params: Any) -> list[int]:
+    """Every id of the history for ``params``, one keyset page at a time."""
+    ids: list[int] = []
+    cursor: str | None = None
+    for _ in range(50):
+        page = _completed(client, **params, **({"cursor": cursor} if cursor else {}))
+        ids.extend(int(r["id"]) for r in page["work_orders"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return ids
+    raise AssertionError("the keyset walk never ended")
+
+
+def test_completed_history_sorts_on_the_server_with_keyset_paging_per_sort(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """GUI_DESIGN §11.5: the date and identity columns sort on the SERVER
+    — Done descending by default, NULL values (an internal number, no
+    due date) last in either direction, the id as the stable
+    tie-breaker — and a page continues exactly that order: walking one
+    row at a time yields the same sequence as one page, with no row
+    twice or missing, also across the trailing NULL block; a cursor of
+    another sort is refused."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    spec: list[tuple[str | None, str, str | None]] = [
+        # (number, received, due)
+        (f"WO-{marker}-B", "2026-02-01", "2026-06-01"),
+        (None, "2026-01-01", None),
+        (f"WO-{marker}-A", "2026-03-01", None),
+        (None, "2026-02-01", "2026-05-01"),
+        (f"WO-{marker}-C", "2026-01-01", "2026-06-01"),
+    ]
+    orders: list[_WorkOrder] = []
+    for number, received, due in spec:
+        work_order = _create_work_order(
+            client,
+            [{"part_number": _unique(f"PN{marker}"), "requested_quantity": 1}],
+            number=number,
+            received_date=received,
+            due_date=due,
+        )
+        _complete(client, material, stockroom, work_order)
+        orders.append(work_order)
+    ids = [w.id for w in orders]
+    search = f"PN{marker}"
+
+    def order(sort: str, direction: str) -> list[int]:
+        page = _completed(client, search=search, sort=sort, direction=direction)
+        assert page["total"] == 5
+        return [int(r["id"]) for r in page["work_orders"]]
+
+    # Default: Done descending = completion order reversed (ids as the
+    # tie-breaker share the direction).
+    assert order("DONE", "DESC") == list(reversed(ids))
+    assert [int(r["id"]) for r in _completed(client, search=search)["work_orders"]] == list(
+        reversed(ids)
+    )
+    assert order("DONE", "ASC") == ids
+    # Identity: A < B < C, internal (NULL) numbers last both ways, by id.
+    assert order("NUMBER", "ASC") == [ids[2], ids[0], ids[4], ids[1], ids[3]]
+    assert order("NUMBER", "DESC") == [ids[4], ids[0], ids[2], ids[3], ids[1]]
+    # Due date: equal dates by id in the direction, undated last both ways.
+    assert order("DUE", "ASC") == [ids[3], ids[0], ids[4], ids[1], ids[2]]
+    assert order("DUE", "DESC") == [ids[4], ids[0], ids[3], ids[2], ids[1]]
+    assert order("RECEIVED", "ASC") == [ids[1], ids[4], ids[0], ids[3], ids[2]]
+    assert order("RECEIVED", "DESC") == [ids[2], ids[3], ids[0], ids[4], ids[1]]
+    # Keyset continuation reproduces every order one row at a time.
+    for sort in ("DONE", "NUMBER", "DUE", "RECEIVED"):
+        for direction in ("ASC", "DESC"):
+            assert _walk(client, search=search, sort=sort, direction=direction, limit=1) == order(
+                sort, direction
+            ), (sort, direction)
+            assert _walk(client, search=search, sort=sort, direction=direction, limit=2) == order(
+                sort, direction
+            ), (sort, direction)
+    # A cursor is bound to the sort it was issued for.
+    issued = _completed(client, search=search, sort="DUE", direction="ASC", limit=1)
+    mismatch = client.get(
+        "/api/work-orders/completed",
+        params={
+            "search": search,
+            "sort": "NUMBER",
+            "direction": "ASC",
+            "cursor": issued["next_cursor"],
+        },
+    )
+    assert mismatch.status_code == 422 and "another sort" in mismatch.json()["detail"]
+
+
+def test_site_timezone_must_be_a_known_zone() -> None:
+    """`SITE_TIMEZONE` is validated at startup: a typo can never silently
+    shift every done date."""
+    assert Settings(database_url="postgresql+psycopg://x", site_timezone="UTC").site_timezone
+    assert (
+        Settings(
+            database_url="postgresql+psycopg://x", site_timezone="America/Los_Angeles"
+        ).site_timezone
+        == "America/Los_Angeles"
+    )
+    with pytest.raises(ValidationError, match="not a known IANA time zone"):
+        Settings(database_url="postgresql+psycopg://x", site_timezone="Mars/Olympus_Mons")
+
+
+def test_done_date_and_due_outcome_follow_the_site_calendar(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE calendar rule (`SITE_TIMEZONE`) turns the completion instant
+    into the done date — for the due-outcome FILTER, the Done range and
+    the row's displayed `done_date` / `due_outcome` alike — so a Work
+    Order completed at 06:30 UTC on the day after its due date is LATE
+    in a UTC site and ON_TIME in a Los Angeles site (22:30 the day
+    before), and the filter never contradicts the row it returns."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    work_order = _create_work_order(
+        client,
+        [{"part_number": _unique(f"PN{marker}"), "requested_quantity": 1}],
+        number=f"WO-{marker}",
+        due_date="2026-03-09",
+    )
+    _complete(client, material, stockroom, work_order)
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.update(models.WorkOrder)
+            .where(models.WorkOrder.id == work_order.id)
+            .values(completed_at=datetime.datetime(2026, 3, 10, 6, 30, tzinfo=datetime.UTC))
+        )
+    search = f"PN{marker}"
+
+    def rows(**params: Any) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]], _completed(client, search=search, **params)["work_orders"]
+        )
+
+    for zone, done, outcome, days_late in (
+        ("UTC", "2026-03-10", "LATE", 1),
+        ("America/Los_Angeles", "2026-03-09", "ON_TIME", None),
+    ):
+        monkeypatch.setattr(work_orders, "site_timezone", lambda zone=zone: zone)
+        row = rows()[0]
+        assert (row["done_date"], row["due_outcome"], row["days_late"]) == (
+            done,
+            outcome,
+            days_late,
+        )
+        # The filter judges the same date: exactly the matching outcome
+        # returns the row, and the row it returns says the same.
+        matching = rows(due_outcome=outcome)
+        assert [r["id"] for r in matching] == [work_order.id]
+        assert matching[0]["due_outcome"] == outcome
+        other = "ON_TIME" if outcome == "LATE" else "LATE"
+        assert rows(due_outcome=other) == []
+        # The Done range is judged on the same calendar date.
+        assert [r["id"] for r in rows(done_from=done, done_to=done)] == [work_order.id]
+        before = (datetime.date.fromisoformat(done) - datetime.timedelta(days=1)).isoformat()
+        assert rows(done_from=before, done_to=before) == []
+        # Work Order Details carry the same derived calendar.
+        detail = _work_order(client, work_order.id)
+        assert (detail["done_date"], detail["due_outcome"]) == (done, outcome)
+    # An active Work Order has no done date and no outcome.
+    active = _create_work_order(client, [{"part_number": _unique("PN"), "requested_quantity": 1}])
+    detail = _work_order(client, active.id)
+    assert (detail["done_date"], detail["due_outcome"], detail["days_late"]) == (None, None, None)
 
 
 def test_allocation_rows_are_immutable_and_never_reference_movement(

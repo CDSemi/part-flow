@@ -45,8 +45,13 @@ Deliberate surface decisions:
   quantity has ever been released for it, and the last demand line
   of a Work Order is never removable (a Work Order contains one or
   more demand records; nothing auto-deletes the Work Order) — either
-  violation is a 409 that removes nothing. There is still no
-  Completed Work Orders surface (Phase 10+).
+  violation is a 409 that removes nothing; so is removing a line that
+  stocked quantity has ever been allocated to (Phase 10).
+- ``GET /work-orders/completed`` is the read-only completed history
+  (Phase 10, GUI_DESIGN §11.5): server-side search, the Done range and
+  the due outcome in the site calendar (``SITE_TIMEZONE`` — the one
+  rule behind every row's ``done_date`` / ``due_outcome`` too), the
+  chosen sort and keyset paging bound to it.
 - ``priority_rank`` and ``allocated_quantity`` appear only in
   responses: Hot ranking (Phase 12) and allocation (Phase 10) own
   those values.
@@ -64,7 +69,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from app.api.dependencies import SessionDep
 from app.application import work_orders
 from app.application.common import UNSET
-from app.application.errors import InvalidInputError
 from app.application.work_orders import WorkOrderDetail, WorkOrderSummary
 from app.domain.enums import RequestType
 from app.infrastructure.models import WorkOrderDemand
@@ -117,6 +121,13 @@ class WorkOrderSummaryResponse(BaseModel):
     status: str
     # The done date (Phase 10): set while the Work Order is completed.
     completed_at: datetime.datetime | None
+    # The completion calendar (Phase 10, GUI_DESIGN §11.5): the done
+    # DATE of `completed_at` in the site time zone, and the due outcome
+    # judged on it — derived by the server, the one rule the history's
+    # filter and every displayed row share. All null while active.
+    done_date: datetime.date | None
+    due_outcome: Literal["ON_TIME", "LATE", "NO_DUE_DATE"] | None
+    days_late: int | None
     demand_line_count: int
     part_numbers: list[str]
 
@@ -128,6 +139,9 @@ class WorkOrderDetailResponse(BaseModel):
     due_date: datetime.date | None
     status: str
     completed_at: datetime.datetime | None
+    done_date: datetime.date | None
+    due_outcome: Literal["ON_TIME", "LATE", "NO_DUE_DATE"] | None
+    days_late: int | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     demands: list[WorkOrderDemandResponse]
@@ -204,6 +218,7 @@ class WorkOrderUpdateRequest(BaseModel):
 
 def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
     work_order = summary.work_order
+    outcome = work_orders.due_outcome_of(work_order)
     return WorkOrderSummaryResponse(
         id=work_order.id,
         work_order_number=work_order.work_order_number,
@@ -211,6 +226,9 @@ def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
         due_date=work_order.due_date,
         status=summary.status,
         completed_at=work_order.completed_at,
+        done_date=work_orders.done_date_of(work_order.completed_at),
+        due_outcome=outcome.outcome if outcome is not None else None,
+        days_late=outcome.days_late if outcome is not None else None,
         demand_line_count=summary.demand_line_count,
         part_numbers=summary.part_numbers,
     )
@@ -240,6 +258,7 @@ def _demand_response(demand: WorkOrderDemand, released: int) -> WorkOrderDemandR
 
 def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
     work_order = detail.work_order
+    outcome = work_orders.due_outcome_of(work_order)
     return WorkOrderDetailResponse(
         id=work_order.id,
         work_order_number=work_order.work_order_number,
@@ -247,6 +266,9 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
         due_date=work_order.due_date,
         status=detail.status,
         completed_at=work_order.completed_at,
+        done_date=work_orders.done_date_of(work_order.completed_at),
+        due_outcome=outcome.outcome if outcome is not None else None,
+        days_late=outcome.days_late if outcome is not None else None,
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
         demands=[
@@ -273,35 +295,40 @@ class CompletedWorkOrdersResponse(BaseModel):
     # Completed Work Orders in the whole history regardless of the
     # filters — "none ever" versus "none in this range".
     history_total: int
-    # Pass back as `cursor_completed_at` + `cursor_id` for the next page;
-    # null when no further page can exist.
-    next_cursor_completed_at: datetime.datetime | None
-    next_cursor_id: int | None
+    # Opaque keyset cursor of the last row — pass back as `cursor` for
+    # the next page of the SAME sort; null when no further page can
+    # exist.
+    next_cursor: str | None
 
 
 @router.get("/work-orders/completed")
 def list_completed_work_orders(
     session: SessionDep,
     search: str | None = None,
-    done_from: datetime.datetime | None = None,
-    done_to: datetime.datetime | None = None,
+    done_from: datetime.date | None = None,
+    done_to: datetime.date | None = None,
     due_outcome: Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"] = "ALL",
-    cursor_completed_at: datetime.datetime | None = None,
-    cursor_id: int | None = None,
+    sort: Literal["DONE", "RECEIVED", "DUE", "NUMBER"] = "DONE",
+    direction: Literal["ASC", "DESC"] = "DESC",
+    cursor: str | None = None,
     limit: int = work_orders.COMPLETED_PAGE_LIMIT,
 ) -> CompletedWorkOrdersResponse:
-    """The read-only completed history (GUI_DESIGN §11.5), newest done date first."""
-    cursor: work_orders.CompletedCursor | None = None
-    if (cursor_completed_at is None) != (cursor_id is None):
-        raise InvalidInputError("Provide both cursor_completed_at and cursor_id, or neither.")
-    if cursor_completed_at is not None and cursor_id is not None:
-        cursor = work_orders.CompletedCursor(cursor_completed_at, cursor_id)
+    """The read-only completed history (GUI_DESIGN §11.5).
+
+    `done_from` / `done_to` are inclusive done DATES in the site
+    calendar (`SITE_TIMEZONE`), the same calendar the due outcome and
+    every row's `done_date` use. Sorted server-side by `sort` /
+    `direction` (Done descending by default, NULLs last, id as the
+    tie-breaker) with keyset paging bound to that order.
+    """
     page = work_orders.list_completed_work_orders(
         session,
         search=search,
         done_from=done_from,
         done_to=done_to,
         due_outcome=due_outcome,
+        sort=sort,
+        direction=direction,
         cursor=cursor,
         limit=limit,
     )
@@ -309,10 +336,7 @@ def list_completed_work_orders(
         work_orders=[_summary_response(summary) for summary in page.work_orders],
         total=page.total,
         history_total=page.history_total,
-        next_cursor_completed_at=(
-            page.next_cursor.completed_at if page.next_cursor is not None else None
-        ),
-        next_cursor_id=page.next_cursor.work_order_id if page.next_cursor is not None else None,
+        next_cursor=page.next_cursor,
     )
 
 

@@ -126,8 +126,9 @@ the server-side history:
   adjustment, once per allocation, reopening a completed Work Order),
   `GET /api/allocations`, and `GET /api/work-orders/completed` (the
   read-only history: search over WO Number / PN / Job Number, done
-  range, due outcome, keyset paging, the matching and the
-  whole-history totals); the PN resolution
+  range, due outcome and done date on the site calendar
+  (`SITE_TIMEZONE`), server-side sort, keyset paging, the matching and
+  the whole-history totals); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
@@ -375,7 +376,7 @@ banner with a Retry action while production-write mock controls disable.
    cp .env.example .env
    ```
 
-2. Adjust values in `.env` if needed. These are development-only credentials; the real `.env` is git-ignored and must never contain shared or production secrets.
+2. Adjust values in `.env` if needed. These are development-only credentials; the real `.env` is git-ignored and must never contain shared or production secrets. `SITE_TIMEZONE` (an IANA zone name, `UTC` by default) is the factory's calendar: the backend turns a completion timestamp into its done date in this zone for the completed history's Done range, due outcome and displayed date alike — set it to the site's zone (e.g. `America/Los_Angeles`) so "on time" and "late" follow the factory's day, never a browser's.
 
 Dependency lockfiles (`backend/uv.lock`, `frontend/package-lock.json`)
 are committed; the Docker builds install strictly from them

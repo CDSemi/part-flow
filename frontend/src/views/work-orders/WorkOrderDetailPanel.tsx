@@ -20,7 +20,7 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { formatIsoDate, todayIso } from '../dates';
+import { formatIsoDate } from '../dates';
 import { normalizePartNumber } from '../scan-station/barcode';
 import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
@@ -562,17 +562,13 @@ export function WorkOrderDetailPanel({
           >
             {workOrderStatusLabel(detail.status)}
           </span>
-          {detail.completedAt ? (
-            // The done date (`completed_at`, GUI_DESIGN §11.5) — present
-            // exactly on a completed Work Order.
+          {detail.doneDate ? (
+            // The done date (GUI_DESIGN §11.5) — present exactly on a
+            // completed Work Order, judged by the SERVER on the site
+            // calendar (never the browser's local date).
             <>
               {' '}
-              · Done{' '}
-              <b className="mono">
-                {formatIsoDate(
-                  todayIso(new Date(detail.completedAt).getTime()),
-                )}
-              </b>
+              · Done <b className="mono">{formatIsoDate(detail.doneDate)}</b>
             </>
           ) : null}
           {internal

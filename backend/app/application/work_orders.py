@@ -74,18 +74,22 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   and Completed Work Orders stay outside this module.
 """
 
+import base64
 import datetime
+import json
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final, Literal, NamedTuple
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.application import audit, production_release
 from app.application.common import UNSET, UnsetType, commit, flush, optional_text
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.part_numbers import PART_NUMBER_CONFLICTS, ensure_part_number
+from app.core.config import get_settings
 from app.domain.enums import AuditEntityType, AuditEventType, RequestType, WorkOrderStatus
 from app.infrastructure.models import WorkOrder, WorkOrderAllocation, WorkOrderDemand
 
@@ -945,14 +949,98 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
 #: query, because the history is unbounded by design.
 COMPLETED_PAGE_LIMIT: Final = 50
 
-DueOutcome = Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"]
+DueOutcomeFilter = Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"]
+DueOutcome = Literal["ON_TIME", "LATE", "NO_DUE_DATE"]
+CompletedSort = Literal["DONE", "RECEIVED", "DUE", "NUMBER"]
+SortDirection = Literal["ASC", "DESC"]
+
+
+# -- The site calendar: ONE rule for every date-versus-timestamp judgement --
+
+
+def site_timezone() -> str:
+    """The factory's IANA time zone (``SITE_TIMEZONE``) — the calendar in
+    which a completion timestamp becomes a done DATE."""
+    return get_settings().site_timezone
+
+
+def done_date_of(completed_at: datetime.datetime | None) -> datetime.date | None:
+    """The done date of a completed Work Order: ``completed_at`` in the
+    site calendar. The Python twin of ``_done_date_sql`` — the two must
+    agree, which the history test asserts around a day boundary."""
+    if completed_at is None:
+        return None
+    return completed_at.astimezone(ZoneInfo(site_timezone())).date()
+
+
+def _done_date_sql() -> ColumnElement[datetime.date]:
+    """``date(completed_at AT TIME ZONE site)`` — the same rule in SQL, so
+    the due-outcome FILTER judges exactly what the row DISPLAYS."""
+    return func.date(func.timezone(site_timezone(), WorkOrder.completed_at))
+
+
+class DueOutcomeOf(NamedTuple):
+    outcome: DueOutcome
+    # Calendar days between the due date and the done date (LATE only).
+    days_late: int | None
+
+
+def due_outcome_of(work_order: WorkOrder) -> DueOutcomeOf | None:
+    """Done date versus due date of a COMPLETED Work Order (None while active)."""
+    done = done_date_of(work_order.completed_at)
+    if done is None:
+        return None
+    if work_order.due_date is None:
+        return DueOutcomeOf("NO_DUE_DATE", None)
+    if done > work_order.due_date:
+        return DueOutcomeOf("LATE", (done - work_order.due_date).days)
+    return DueOutcomeOf("ON_TIME", None)
+
+
+def _site_day_start(day: datetime.date) -> datetime.datetime:
+    """Midnight of a site-calendar date as the instant the index compares."""
+    return datetime.datetime.combine(day, datetime.time.min, tzinfo=ZoneInfo(site_timezone()))
+
+
+# -- Keyset paging over the chosen sort ---------------------------------------
 
 
 class CompletedCursor(NamedTuple):
-    """Keyset position over ``(completed_at, id)`` descending."""
+    """The keyset position: the sort value of the last row (None when
+    that value is NULL — an internal number, no due date) and its id.
+    Only meaningful for the sort it was issued for: the token carries
+    the sort and direction, and a mismatch is refused."""
 
-    completed_at: datetime.datetime
+    sort: CompletedSort
+    direction: SortDirection
+    value: str | None
     work_order_id: int
+
+
+def encode_completed_cursor(cursor: CompletedCursor) -> str:
+    raw = json.dumps(
+        {"s": cursor.sort, "d": cursor.direction, "v": cursor.value, "i": cursor.work_order_id},
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_completed_cursor(token: str) -> CompletedCursor:
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        sort, direction, value, work_order_id = data["s"], data["d"], data["v"], data["i"]
+        if (
+            sort not in ("DONE", "RECEIVED", "DUE", "NUMBER")
+            or direction not in ("ASC", "DESC")
+            or (value is not None and not isinstance(value, str))
+            or not isinstance(work_order_id, int)
+            or isinstance(work_order_id, bool)
+        ):
+            raise ValueError("cursor fields")
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise InvalidInputError("The paging cursor is not valid. Reload the history.") from exc
+    return CompletedCursor(sort, direction, value, work_order_id)
 
 
 class CompletedPage(NamedTuple):
@@ -964,35 +1052,100 @@ class CompletedPage(NamedTuple):
     # filters: lets the page tell "none ever" from "none in this range"
     # (GUI_DESIGN §11.5) without a second request.
     history_total: int
-    # The cursor of the last row, when more rows may follow.
-    next_cursor: CompletedCursor | None
+    # The opaque cursor of the last row, when more rows may follow.
+    next_cursor: str | None
 
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _sort_column(sort: CompletedSort) -> InstrumentedAttribute[Any]:
+    if sort == "DONE":
+        return WorkOrder.completed_at
+    if sort == "RECEIVED":
+        return WorkOrder.received_date
+    if sort == "DUE":
+        return WorkOrder.due_date
+    return WorkOrder.work_order_number
+
+
+def _cursor_value(sort: CompletedSort, work_order: WorkOrder) -> str | None:
+    if sort == "DONE":
+        assert work_order.completed_at is not None  # filtered on IS NOT NULL
+        return work_order.completed_at.isoformat()
+    if sort == "RECEIVED":
+        return work_order.received_date.isoformat()
+    if sort == "DUE":
+        return work_order.due_date.isoformat() if work_order.due_date is not None else None
+    return work_order.work_order_number
+
+
+def _typed_cursor_value(sort: CompletedSort, value: str) -> Any:
+    try:
+        if sort == "DONE":
+            return datetime.datetime.fromisoformat(value)
+        if sort in ("RECEIVED", "DUE"):
+            return datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise InvalidInputError("The paging cursor is not valid. Reload the history.") from exc
+    return value
+
+
+def _keyset_after(
+    column: InstrumentedAttribute[Any], direction: SortDirection, cursor: CompletedCursor
+) -> ColumnElement[bool]:
+    """Rows strictly after the cursor in the order ``(column, id)`` with
+    NULL values of the column LAST in either direction (``—`` rows sit
+    at the end whichever way the column is sorted) and the id
+    tie-breaker following the direction."""
+    later_id = (
+        WorkOrder.id > cursor.work_order_id
+        if direction == "ASC"
+        else WorkOrder.id < cursor.work_order_id
+    )
+    if cursor.value is None:
+        # Inside the trailing NULL block: only the id decides.
+        return and_(column.is_(None), later_id)
+    value = _typed_cursor_value(cursor.sort, cursor.value)
+    strictly_after = column > value if direction == "ASC" else column < value
+    return or_(
+        and_(column.is_not(None), strictly_after),
+        and_(column == value, later_id),
+        column.is_(None),
+    )
+
+
 def list_completed_work_orders(
     session: Session,
     *,
     search: str | None = None,
-    done_from: datetime.datetime | None = None,
-    done_to: datetime.datetime | None = None,
-    due_outcome: DueOutcome = "ALL",
-    cursor: CompletedCursor | None = None,
+    done_from: datetime.date | None = None,
+    done_to: datetime.date | None = None,
+    due_outcome: DueOutcomeFilter = "ALL",
+    sort: CompletedSort = "DONE",
+    direction: SortDirection = "DESC",
+    cursor: str | None = None,
     limit: int = COMPLETED_PAGE_LIMIT,
 ) -> CompletedPage:
-    """The completed history, newest done date first — search, filter, page server-side.
+    """The completed history — search, filter, sort and page server-side.
 
     ``search`` matches the Work Order Number, any demand line's PN or
     any Job Number (case-insensitive contains); ``done_from`` /
-    ``done_to`` bound ``completed_at`` (inclusive / exclusive); the due
-    outcome compares the done DATE with the Work Order due date. The
-    page is a keyset continuation over ``(completed_at, id)``
-    descending — never an offset over an unbounded table.
+    ``done_to`` are inclusive done DATES in the site calendar; the due
+    outcome compares the done date (same calendar) with the Work Order
+    due date. The order is the chosen column then the id (NULLs last
+    in either direction) — Done descending by default — and the page
+    is a keyset continuation over exactly that order, never an offset
+    over an unbounded table; the cursor is bound to the sort it was
+    issued for.
     """
     if limit <= 0 or limit > 200:
         raise InvalidInputError("The page size must be between 1 and 200.")
+    if sort not in ("DONE", "RECEIVED", "DUE", "NUMBER"):
+        raise InvalidInputError("sort must be DONE, RECEIVED, DUE or NUMBER.")
+    if direction not in ("ASC", "DESC"):
+        raise InvalidInputError("direction must be ASC or DESC.")
     filters: list[ColumnElement[bool]] = [WorkOrder.completed_at.is_not(None)]
     if search is not None and search.strip():
         pattern = f"%{_escape_like(search.strip())}%"
@@ -1009,11 +1162,15 @@ def list_completed_work_orders(
             .exists()
         )
         filters.append(WorkOrder.work_order_number.ilike(pattern, escape="\\") | matching_demand)
+    # The date bounds become instants (site midnight) so the
+    # `(completed_at, id)` index still serves the range.
     if done_from is not None:
-        filters.append(WorkOrder.completed_at >= done_from)
+        filters.append(WorkOrder.completed_at >= _site_day_start(done_from))
     if done_to is not None:
-        filters.append(WorkOrder.completed_at < done_to)
-    done_date = func.date(WorkOrder.completed_at)
+        filters.append(
+            WorkOrder.completed_at < _site_day_start(done_to + datetime.timedelta(days=1))
+        )
+    done_date = _done_date_sql()
     if due_outcome == "ON_TIME":
         filters.append(WorkOrder.due_date.is_not(None) & (done_date <= WorkOrder.due_date))
     elif due_outcome == "LATE":
@@ -1031,6 +1188,12 @@ def list_completed_work_orders(
         or 0
     )
 
+    column = _sort_column(sort)
+    ordering = (
+        [column.asc().nulls_last(), WorkOrder.id.asc()]
+        if direction == "ASC"
+        else [column.desc().nulls_last(), WorkOrder.id.desc()]
+    )
     part_numbers = func.array_agg(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
     )
@@ -1039,17 +1202,16 @@ def list_completed_work_orders(
         .outerjoin(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
         .where(*filters)
         .group_by(WorkOrder.id)
-        .order_by(WorkOrder.completed_at.desc(), WorkOrder.id.desc())
+        .order_by(*ordering)
         .limit(limit)
     )
     if cursor is not None:
-        query = query.where(
-            (WorkOrder.completed_at < cursor.completed_at)
-            | (
-                (WorkOrder.completed_at == cursor.completed_at)
-                & (WorkOrder.id < cursor.work_order_id)
+        position = decode_completed_cursor(cursor)
+        if position.sort != sort or position.direction != direction:
+            raise InvalidInputError(
+                "The paging cursor belongs to another sort order. Reload the history."
             )
-        )
+        query = query.where(_keyset_after(column, direction, position))
     rows = list(session.execute(query))
     summaries = [
         WorkOrderSummary(
@@ -1060,11 +1222,12 @@ def list_completed_work_orders(
         )
         for work_order, count, values in rows
     ]
-    next_cursor: CompletedCursor | None = None
+    next_cursor: str | None = None
     if len(rows) == limit:
         last = rows[-1][0]
-        assert last.completed_at is not None  # filtered on IS NOT NULL
-        next_cursor = CompletedCursor(last.completed_at, last.id)
+        next_cursor = encode_completed_cursor(
+            CompletedCursor(sort, direction, _cursor_value(sort, last), last.id)
+        )
     return CompletedPage(
         work_orders=summaries,
         total=int(total),
