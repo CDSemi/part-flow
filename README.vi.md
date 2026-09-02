@@ -4,8 +4,8 @@
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
 > upstream commit `6fdf20e` (Phase 10 audit r3).
 >
-> Xem [mục lục tài liệu tiếng Việt](./docs/vi/README.md) và
-> [hướng dẫn triển khai](./docs/vi/DEPLOYMENT.md).
+> Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
+> [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
 
 PartFlow là hệ thống nội bộ theo dõi quá trình sản xuất, dùng barcode để ghi
 nhận việc di chuyển số lượng chi tiết qua nhà máy.
@@ -49,7 +49,7 @@ Repository hiện có nền tảng từ Phase 1 đến Phase 10, triển khai en
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
-[`docs/vi/DEPLOYMENT.md`](./docs/vi/DEPLOYMENT.md) trước khi đưa dữ liệu thật vào.
+[`docs/DEPLOYMENT.vi.md`](./docs/DEPLOYMENT.vi.md) trước khi đưa dữ liệu thật vào.
 
 ## Thành phần chính
 

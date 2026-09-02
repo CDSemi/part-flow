@@ -3,7 +3,7 @@
 > **Status:** Target production path for Phase 16. The current development
 > Compose stack is not a production package.
 >
-> **Language:** English is the source of truth. [Tiếng Việt](../vi/deployment/VPS.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./VPS.vi.md).
 
 ## 1. When to choose a VPS
 

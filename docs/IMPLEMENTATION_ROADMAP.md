@@ -2,7 +2,7 @@
 
 > **Authority:** Canonical for implementation order, phase boundaries, dependencies, and temporary limitations.
 > Domain behavior and product scope are defined by [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md); the approved target UI by [`GUI_DESIGN.md`](./GUI_DESIGN.md).
-> **Language:** English is the source of truth. [Tiếng Việt](./vi/IMPLEMENTATION_ROADMAP.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./IMPLEMENTATION_ROADMAP.vi.md).
 
 ## Current State
 

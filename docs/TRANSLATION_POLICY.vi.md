@@ -19,7 +19,13 @@ hành.
 ## 2. Cấu trúc và cách đặt tên
 
 - `../README.md` ở root tương ứng với `../README.vi.md`.
-- `docs/<path>/<NAME>.md` tương ứng với `docs/vi/<path>/<NAME>.md`.
+- `docs/<path>/<NAME>.md` tương ứng với `docs/<path>/<NAME>.vi.md` — bản dịch
+  tiếng Việt nằm cùng thư mục với bản gốc tiếng Anh, chỉ khác hậu tố `.vi.md`
+  (ví dụ `docs/GUI_DESIGN.md` ↔ `docs/GUI_DESIGN.vi.md`,
+  `docs/deployment/VPS.md` ↔ `docs/deployment/VPS.vi.md`). Không có thư mục
+  con riêng cho tiếng Việt.
+- Mỗi tài liệu tiếng Anh link tới bản dịch của nó từ header ngôn ngữ, và mỗi
+  bản dịch link ngược về file `.md` chuẩn; mục lục tài liệu liệt kê cả hai cột.
 - Tên file, số mục, code, identifier, API path, database object, command,
   environment variable, barcode format, enum value và UI copy nguyên văn vẫn
   giữ tiếng Anh, trừ khi tài liệu gốc định nghĩa rõ một giá trị đã localized.
@@ -66,8 +72,8 @@ Với từng bản mirror:
 - code fence cân bằng; mọi normative command/data example giữ nguyên kỹ thuật;
   example không normative và lặp lại có thể được gộp;
 - các local Markdown link phải resolve được;
-- identifier và command example giữ nguyên, trừ path cần điều chỉnh do thư mục
-  `vi/`;
+- identifier và command example giữ nguyên — bản dịch nằm cạnh bản gốc nên
+  relative path không cần điều chỉnh;
 - các từ mang tính bắt buộc như **must**, **never**, **required**, **refused** và
   **no write** phải giữ nguyên mức độ mạnh;
 - table mapping/decision mang tính normative giữ đủ mọi hàng và cột của nguồn;

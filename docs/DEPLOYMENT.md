@@ -4,7 +4,7 @@
 > what is deployable now, what Phase 16 must add, and the portable operating
 > contract for Synology NAS, VPS, and conditional shared hosting.
 >
-> **Language:** English is the source of truth. [Tiếng Việt](./vi/DEPLOYMENT.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./DEPLOYMENT.vi.md).
 
 ## 1. Roadmap status
 

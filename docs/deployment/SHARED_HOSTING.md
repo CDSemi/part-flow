@@ -4,7 +4,7 @@
 > drop-in replacement for the Docker deployment. Use only after the provider
 > confirms every compatibility requirement in writing for the exact plan.
 >
-> **Language:** English is the source of truth. [Tiếng Việt](../vi/deployment/SHARED_HOSTING.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./SHARED_HOSTING.vi.md).
 
 ## 1. Why compatibility is conditional
 

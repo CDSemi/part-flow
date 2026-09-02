@@ -1,6 +1,6 @@
 # PartFlow GUI Design v18
 
-> **Language:** English is the source of truth. [Tiếng Việt](./vi/GUI_DESIGN.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./GUI_DESIGN.vi.md).
 
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v21).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.

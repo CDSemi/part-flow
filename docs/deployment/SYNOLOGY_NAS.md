@@ -5,7 +5,7 @@
 > the Phase 14 and Phase 16 gates in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) are
 > complete.
 >
-> **Language:** English is the source of truth. [Tiếng Việt](../vi/deployment/SYNOLOGY_NAS.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./SYNOLOGY_NAS.vi.md).
 
 ## 1. Intended use
 

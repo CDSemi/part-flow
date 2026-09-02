@@ -4,7 +4,7 @@
 > that depend on future production Compose artifacts must be replaced by their
 > final repository-provided names before production use.
 >
-> **Language:** English is the source of truth. [Tiếng Việt](../vi/deployment/OPERATIONS_RUNBOOK.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
 ## 1. Required deployment record
 

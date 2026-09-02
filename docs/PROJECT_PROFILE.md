@@ -1,6 +1,6 @@
 # PartFlow Project Profile v21
 
-> **Language:** English is the source of truth. [Tiếng Việt](./vi/PROJECT_PROFILE.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./PROJECT_PROFILE.vi.md).
 
 > **Status:** Living Document
 > **Authority:** Canonical project profile for PartFlow domain behavior and product direction

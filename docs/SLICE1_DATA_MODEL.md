@@ -1,6 +1,6 @@
 # Slice 1 — Manual Work Order Intake and Production Release Data Model
 
-> **Language:** English is the source of truth. [Tiếng Việt](./vi/SLICE1_DATA_MODEL.md).
+> **Language:** English is the source of truth. [Tiếng Việt](./SLICE1_DATA_MODEL.vi.md).
 
 > **Status:** Implemented. This document is the canonical design and contract of the Phase 4 slice, not a proposal: the schema it specifies is migrated (`0004_phase4_audit`, `0005_phase4_release_index`), the commands it specifies are implemented in the backend Application layer, and its Acceptance Criteria (§19) are covered by tests. It stays subordinate to `PROJECT_PROFILE.md` and `GUI_DESIGN.md`; where implementation and this document disagree, the disagreement is a defect in one of them, never a licence to invent behavior.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.

@@ -1,7 +1,7 @@
 # Documentation Translation Policy
 
 > **Language:** English is the source of truth. [Read this policy in
-> Vietnamese](./vi/TRANSLATION_POLICY.md).
+> Vietnamese](./TRANSLATION_POLICY.vi.md).
 
 ## 1. Authority
 
@@ -16,7 +16,14 @@ operational procedure.
 ## 2. Layout and naming
 
 - Root `README.md` maps to `README.vi.md`.
-- `docs/<path>/<NAME>.md` maps to `docs/vi/<path>/<NAME>.md`.
+- `docs/<path>/<NAME>.md` maps to `docs/<path>/<NAME>.vi.md` — the Vietnamese
+  mirror sits in the same folder as its English source, distinguished only by
+  the `.vi.md` suffix (for example `docs/GUI_DESIGN.md` ↔ `docs/GUI_DESIGN.vi.md`,
+  `docs/deployment/VPS.md` ↔ `docs/deployment/VPS.vi.md`). There is no separate
+  Vietnamese subfolder.
+- Every English document links to its mirror from its language header, and
+  every mirror links back to its canonical `.md` source; a documentation index
+  lists both columns.
 - File names, section numbers, code, identifiers, API paths, database objects,
   commands, environment variables, barcode formats, enum values, and literal UI
   copy remain in English unless the English source explicitly defines a
@@ -65,8 +72,8 @@ For each mirror:
   remains technically unchanged; non-normative repeated examples may be
   consolidated;
 - local Markdown links resolve;
-- identifiers and command examples remain unchanged unless a path must be
-  adjusted for the `vi/` directory;
+- identifiers and command examples remain unchanged — a mirror sits beside its
+  source, so relative paths need no adjustment;
 - normative words such as **must**, **never**, **required**, **refused**, and
   **no write** keep the same strength;
 - normative mapping and decision tables keep every source row and column;
