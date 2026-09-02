@@ -59,7 +59,7 @@
   Station route theo station; due date nullable; demand ordering chuẩn; chỉ báo
   scan thành công sau server confirmation; đổi Hot order phải xác nhận.
 - UI đích là `GUI_DESIGN.md`; visual reference mới nhất là
-  `mockups/partflow-gui-mockup-v18.html`.
+  `docs/mockups/partflow-gui-mockup-v18.html`.
 - **Phase 1** đã có: React + TypeScript frontend, FastAPI backend, PostgreSQL,
   Alembic baseline, Docker Compose, `/api/health`, formatter/linter/typecheck/
   test và CI.
