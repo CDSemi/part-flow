@@ -292,6 +292,12 @@ export async function listWorkOrders(
 /** The due outcome filter of the completed history (GUI_DESIGN §11.5). */
 export type DueOutcome = 'ALL' | 'ON_TIME' | 'LATE' | 'NO_DUE_DATE';
 
+/** The Done range presets of the completed history (GUI_DESIGN §11.5),
+ * resolved by the SERVER on the site's current date (`SITE_TIMEZONE`)
+ * — this device's clock and time zone never define the window. */
+export type DoneRangePreset =
+  'LAST_30_DAYS' | 'LAST_90_DAYS' | 'THIS_YEAR' | 'LAST_YEAR';
+
 /** The server-side sort of the completed history (GUI_DESIGN §11.5). */
 export type CompletedSort = 'DONE' | 'RECEIVED' | 'DUE' | 'NUMBER';
 export type SortDirection = 'ASC' | 'DESC';
@@ -304,7 +310,8 @@ export interface CompletedWorkOrdersPage {
    * filters — tells "none ever" from "none in this range". */
   historyTotal: number;
   /** The server's opaque keyset cursor, bound to the sort it was issued
-   * for: continue with it for the next page; null = no more. */
+   * for: continue with it for the next page. Present exactly when a
+   * further row exists; null = this was the last page. */
   nextCursor: string | null;
 }
 
@@ -321,15 +328,19 @@ interface CompletedWorkOrdersPageWire {
 
 /**
  * The read-only completed history (GUI_DESIGN §11.5). Search (WO
- * Number, PN, Job Number), the Done range (inclusive done DATES in the
- * site calendar), the due outcome, the sort (Done descending by
- * default) and the keyset paging all run on the SERVER — the history
- * is unbounded by design and never downloaded whole, and the rows are
- * never re-sorted here.
+ * Number, PN, Job Number), the Done range (a preset the server resolves
+ * on the site's current date, or explicit inclusive done DATES in the
+ * site calendar — never both), the due outcome, the sort (Done
+ * descending by default) and the keyset paging all run on the SERVER —
+ * the history is unbounded by design and never downloaded whole, and
+ * the rows are never re-sorted here.
  */
 export async function listCompletedWorkOrders(input: {
   search?: string;
-  /** Inclusive done dates, ISO `YYYY-MM-DD`, in the site calendar. */
+  /** A Done range preset — the server anchors it to the site's today. */
+  doneRange?: DoneRangePreset | null;
+  /** Inclusive done dates, ISO `YYYY-MM-DD`, in the site calendar (the
+   * Custom range). */
   doneFrom?: string | null;
   doneTo?: string | null;
   dueOutcome?: DueOutcome;
@@ -340,6 +351,7 @@ export async function listCompletedWorkOrders(input: {
   const params = new URLSearchParams();
   const term = input.search?.trim() ?? '';
   if (term) params.set('search', term);
+  if (input.doneRange) params.set('done_range', input.doneRange);
   if (input.doneFrom) params.set('done_from', input.doneFrom);
   if (input.doneTo) params.set('done_to', input.doneTo);
   if (input.dueOutcome && input.dueOutcome !== 'ALL') {

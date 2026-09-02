@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listCompletedWorkOrders } from '../../api/work-orders';
 import type {
   CompletedSort,
+  DoneRangePreset,
   DueOutcome,
   SortDirection,
   WorkOrderSummary,
@@ -15,13 +16,12 @@ import { Link } from '../../app/link';
 import { getViewStatePreview } from '../../app/view-state';
 import { PageNote } from '../../components/PageNote';
 import { useToastNotice } from '../../components/toast-notice';
-import { useUiClock } from '../../components/ui-clock';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { formatIsoDate, todayIso } from '../dates';
+import { formatIsoDate } from '../dates';
 import { partNumbersPreview } from './demand-lines';
 import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 
@@ -35,7 +35,8 @@ import { WorkOrderDetailPanel } from './WorkOrderDetailPanel';
 // outcome filter, the column sort (Done descending by default) and the
 // keyset paging all run on the server — the page never downloads the
 // history to filter or sort it, and every date judgement (the done
-// date, on time / late) is the SERVER's, on the site calendar.
+// date, on time / late, the window a Done range preset stands for) is
+// the SERVER's, on the site calendar — never this device's clock.
 
 const woDisplay = (workOrderNumber: string | null) => workOrderNumber ?? '—';
 
@@ -52,37 +53,32 @@ const DUE_OUTCOME: Record<OutcomeKey, DueOutcome> = {
   nodue: 'NO_DUE_DATE',
 };
 
-/** ISO `YYYY-MM-DD` local date `days` before now. Calendar-day
- * arithmetic (not ms) so a DST boundary never shifts the date. */
-function isoDaysAgo(nowMs: number, days: number): string {
-  const date = new Date(nowMs);
-  date.setDate(date.getDate() - days);
-  return todayIso(date.getTime());
-}
-
-/** Inclusive done-DATE bounds of the selected range (null = open). */
-function rangeBounds(
+/** The Done range as the server takes it: a preset it anchors to the
+ * site's current date (`SITE_TIMEZONE` is the server's — this device
+ * holds no second calendar that could drift from it), or the explicit
+ * inclusive done DATES of the Custom range; `all` sends no bound. */
+function rangeQuery(
   range: RangeKey,
-  nowMs: number,
   customFrom: string,
   customTo: string,
-): { from: string | null; to: string | null } {
-  const year = todayIso(nowMs).slice(0, 4);
+): {
+  preset: DoneRangePreset | null;
+  from: string | null;
+  to: string | null;
+} {
   switch (range) {
     case '30d':
-      return { from: isoDaysAgo(nowMs, 30), to: null };
+      return { preset: 'LAST_30_DAYS', from: null, to: null };
     case '90d':
-      return { from: isoDaysAgo(nowMs, 90), to: null };
+      return { preset: 'LAST_90_DAYS', from: null, to: null };
     case 'year':
-      return { from: `${year}-01-01`, to: null };
-    case 'lastyear': {
-      const last = String(Number(year) - 1);
-      return { from: `${last}-01-01`, to: `${last}-12-31` };
-    }
+      return { preset: 'THIS_YEAR', from: null, to: null };
+    case 'lastyear':
+      return { preset: 'LAST_YEAR', from: null, to: null };
     case 'all':
-      return { from: null, to: null };
+      return { preset: null, from: null, to: null };
     case 'custom':
-      return { from: customFrom || null, to: customTo || null };
+      return { preset: null, from: customFrom || null, to: customTo || null };
   }
 }
 
@@ -121,9 +117,23 @@ interface SortState {
 const DEFAULT_SORT: SortState = { key: 'DONE', dir: 'DESC' };
 
 /**
+ * The next sort after activating `key` (the shared §12.1 cycle):
+ * ascending → descending → the default order. The default column's
+ * descending order IS the default, so on that header the cycle is
+ * ascending ↔ descending — a click always changes the order, and both
+ * directions of every column stay reachable.
+ */
+function nextSort(current: SortState, key: CompletedSort): SortState {
+  if (current.key !== key) return { key, dir: 'ASC' };
+  if (current.dir === 'ASC') return { key, dir: 'DESC' };
+  return key === DEFAULT_SORT.key ? { key, dir: 'ASC' } : DEFAULT_SORT;
+}
+
+/**
  * One sortable column header (the shared §12.1 idiom): ascending →
- * descending → the default order. The arrow names the direction; the
- * active sort renders emphasized. `aria-sort` lives on the owning th.
+ * descending → the default order (`nextSort`). The arrow names the
+ * direction; the active sort renders emphasized. `aria-sort` lives on
+ * the owning th.
  */
 function SortHeader({
   label,
@@ -172,7 +182,6 @@ interface LoadedPage {
 
 export function CompletedWorkOrdersView() {
   const preview = getViewStatePreview();
-  const now = useUiClock('minute');
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
   const { showNotice, noticeElement } = useToastNotice();
@@ -192,20 +201,13 @@ export function CompletedWorkOrdersView() {
   const [outcome, setOutcome] = useState<OutcomeKey>('all');
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const toggleSort = (key: CompletedSort) =>
-    setSort((current) =>
-      current.key !== key
-        ? { key, dir: 'ASC' }
-        : current.dir === 'ASC'
-          ? { key, dir: 'DESC' }
-          : // The unsorted state of the cycle is the default order — an
-            // unbounded history has no meaningful "registry order".
-            DEFAULT_SORT,
-    );
+    setSort((current) => nextSort(current, key));
   const [detailId, setDetailId] = useState<number | null>(null);
 
-  // Inclusive done DATES in the site calendar — the server turns them
-  // into instants; the presets are computed on this device's calendar.
-  const bounds = rangeBounds(range, now, customFrom, customTo);
+  // The Done range travels as the server takes it: a preset it resolves
+  // on the site's calendar, or the Custom range's explicit done DATES.
+  const bounds = rangeQuery(range, customFrom, customTo);
+  const doneRange = bounds.preset;
   const doneFrom = bounds.from;
   const doneTo = bounds.to;
 
@@ -234,6 +236,7 @@ export function CompletedWorkOrdersView() {
     setLoadingMore(false);
     listCompletedWorkOrders({
       search: settledSearch,
+      doneRange,
       doneFrom,
       doneTo,
       dueOutcome: DUE_OUTCOME[outcome],
@@ -260,6 +263,7 @@ export function CompletedWorkOrdersView() {
   }, [
     preview,
     settledSearch,
+    doneRange,
     doneFrom,
     doneTo,
     outcome,
@@ -275,6 +279,7 @@ export function CompletedWorkOrdersView() {
     try {
       const next = await listCompletedWorkOrders({
         search: settledSearch,
+        doneRange,
         doneFrom,
         doneTo,
         dueOutcome: DUE_OUTCOME[outcome],

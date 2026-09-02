@@ -16,9 +16,11 @@ import { App } from '../../App';
 // is derived by the SERVER (every demand line fully allocated), a
 // completed Work Order leaves the active list and appears in the
 // permanent read-only history, and the search (WO Number, PN, Job
-// Number), the Done range, the due outcome and the keyset paging are
-// server-side — this fake implements that contract over an in-memory
-// history and records every request so the parameters can be asserted.
+// Number), the Done range (presets resolved on the SERVER's site
+// calendar, explicit dates for Custom), the due outcome and the keyset
+// paging are server-side — this fake implements that contract over an
+// in-memory history and records every request so the parameters can be
+// asserted.
 // Also covered: the read-only details with the Done date and the
 // allocation figures, the active list excluding completed Work Orders,
 // and the New Work Order lookup of a completed number opening its
@@ -54,11 +56,43 @@ let outcomeOverrides: Map<
  * time, so it still describes the filters it was asked for. */
 let holdContinuations: boolean;
 let heldContinuations: (() => void)[];
+/** The fake server's TODAY on the site calendar — the anchor of every
+ * Done range preset. Defaults to this device's date; a test sets it to
+ * another day to prove the page never anchors a preset itself. */
+let siteToday: string;
 
 /** The fake server's site calendar — this device's local date stands
  * in for the site time zone the real backend applies. */
 function doneDateOf(w: FakeWorkOrder): string | null {
   return w.completedAt ? localDate(w.completedAt) : null;
+}
+
+/** ISO date `days` before an ISO date (UTC noon arithmetic — DST-proof). */
+function isoDaysBefore(iso: string, days: number): string {
+  const date = new Date(`${iso}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** The server's resolution of a Done range preset on ITS calendar
+ * (`work_orders.done_range_bounds`): inclusive done-date bounds. */
+function presetBounds(preset: string): {
+  from: string | null;
+  to: string | null;
+} {
+  const year = Number(siteToday.slice(0, 4));
+  switch (preset) {
+    case 'LAST_30_DAYS':
+      return { from: isoDaysBefore(siteToday, 30), to: null };
+    case 'LAST_90_DAYS':
+      return { from: isoDaysBefore(siteToday, 90), to: null };
+    case 'THIS_YEAR':
+      return { from: `${year}-01-01`, to: null };
+    case 'LAST_YEAR':
+      return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
+    default:
+      throw new Error(`unknown preset ${preset}`);
+  }
 }
 
 /** The server-derived due outcome on the site calendar. */
@@ -138,11 +172,19 @@ function localDate(iso: string): string {
 /** The server's completed history: filtered, sorted (NULLs last in
  * either direction, id as the tie-breaker following the direction),
  * keyset-paged on an opaque cursor bound to the sort — never offset
- * paging. The Done range is inclusive done DATES on the site calendar. */
+ * paging. The Done range is a preset the server anchors to ITS today
+ * or explicit inclusive done DATES on the site calendar, never both. */
 function completedPage(url: URL) {
   const search = (url.searchParams.get('search') ?? '').toLowerCase();
-  const doneFrom = url.searchParams.get('done_from');
-  const doneTo = url.searchParams.get('done_to');
+  const doneRange = url.searchParams.get('done_range');
+  let doneFrom = url.searchParams.get('done_from');
+  let doneTo = url.searchParams.get('done_to');
+  if (doneRange !== null) {
+    if (doneFrom !== null || doneTo !== null) {
+      return json({ detail: 'Use either a done_range preset or dates.' }, 422);
+    }
+    ({ from: doneFrom, to: doneTo } = presetBounds(doneRange));
+  }
   const dueOutcome = url.searchParams.get('due_outcome') ?? 'ALL';
   const sort = url.searchParams.get('sort') ?? 'DONE';
   const direction = url.searchParams.get('direction') ?? 'DESC';
@@ -200,8 +242,9 @@ function completedPage(url: URL) {
     const index = rows.findIndex((w) => w.id === position.id);
     rows = rows.slice(index + 1);
   }
+  // One row past the page decides whether a cursor exists at all.
   const page = rows.slice(0, limit);
-  const last = page.length === limit ? page[page.length - 1] : null;
+  const last = rows.length > limit ? page[page.length - 1] : null;
   return json({
     work_orders: page.map(summaryWire),
     total,
@@ -330,6 +373,7 @@ beforeEach(() => {
   holdContinuations = false;
   heldContinuations = [];
   outcomeOverrides = new Map();
+  siteToday = localDate(new Date().toISOString());
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -348,6 +392,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 async function renderCompleted() {
@@ -376,10 +421,13 @@ function completedRequests() {
 test('the completed page loads the server history newest first within the last 90 days', async () => {
   await renderCompleted();
 
-  // The server received the default range and no search; the page
-  // restates the effective range — never mistaken for everything.
+  // The server received the default range as ITS preset (anchored to
+  // the site's date on the server, never computed here) and no search;
+  // the page restates the effective range — never mistaken for
+  // everything.
   const first = completedRequests()[0];
-  expect(first).toContain('done_from=');
+  expect(first).toContain('done_range=LAST_90_DAYS');
+  expect(first).not.toContain('done_from=');
   expect(first).not.toContain('search=');
   expect(first).toContain('limit=50');
   expect(document.querySelector('.cwo-summary')).toHaveTextContent(
@@ -481,6 +529,7 @@ test('a search miss inside a bounded range offers one-click Search all history',
   expect(
     await screen.findByRole('button', { name: 'Open Work Order 006721' }),
   ).toBeInTheDocument();
+  expect(completedRequests().at(-1)).not.toContain('done_range=');
   expect(completedRequests().at(-1)).not.toContain('done_from=');
   expect(completedRequests().at(-1)).toContain('search=006721');
   expect(screen.getByText(/all time/)).toBeInTheDocument();
@@ -526,6 +575,7 @@ test('the Due outcome filter and a custom Done range travel to the server', asyn
     const last = completedRequests().at(-1)!;
     expect(last).toContain(`done_from=${localDate(daysAgoIso(6))}`);
     expect(last).toContain(`done_to=${localDate(daysAgoIso(1))}`);
+    expect(last).not.toContain('done_range=');
     expect(last).not.toContain('due_outcome=');
   });
   await waitFor(() => expect(visibleRows()).toHaveLength(2));
@@ -609,7 +659,7 @@ test('a continuation still pending when the filters change is ignored — never 
   await waitFor(() => expect(visibleRows()).toHaveLength(58));
   const continuation = completedRequests().at(-1)!;
   expect(continuation).toContain('cursor=');
-  expect(continuation).toContain('done_from=');
+  expect(continuation).toContain('done_range=LAST_90_DAYS');
   expect(document.querySelector('.cwo-summary')).toHaveTextContent(
     'Showing 58 of 58 completed Work Orders · last 90 days',
   );
@@ -691,6 +741,167 @@ test('the date and identity columns sort on the server — Done descending by de
   );
   await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006721'));
   expect(visibleRows()[1]).toHaveTextContent('006900');
+});
+
+test("the Done range presets are anchored by the server on the site calendar — never by this browser's date", async () => {
+  // The browser sits at 23:30 on December 31 (its local calendar); the
+  // site is already in the new year. A page anchoring the presets on
+  // its own clock would ask for 2026-01-01 as "this year".
+  vi.setSystemTime(new Date(2026, 11, 31, 23, 30));
+  siteToday = '2027-01-01';
+  workOrders = [
+    {
+      id: 61,
+      number: '007301',
+      received: '2026-12-01',
+      due: null,
+      completedAt: '2027-01-01T12:00:00Z',
+      lines: [line(611, 'NY-100', 1, 1, 1)],
+    },
+    {
+      id: 62,
+      number: '007300',
+      received: '2026-12-01',
+      due: null,
+      completedAt: '2026-12-31T12:00:00Z',
+      lines: [line(621, 'NY-200', 1, 1, 1)],
+    },
+    {
+      id: 63,
+      number: '007299',
+      received: '2026-06-01',
+      due: null,
+      completedAt: '2026-06-15T12:00:00Z',
+      lines: [line(631, 'NY-300', 1, 1, 1)],
+    },
+    {
+      id: 64,
+      number: '007100',
+      received: '2025-06-01',
+      due: null,
+      completedAt: '2025-06-15T12:00:00Z',
+      lines: [line(641, 'NY-400', 1, 1, 1)],
+    },
+  ];
+  await renderCompleted();
+
+  // The default window is the server's: the last 90 site-calendar days
+  // before ITS January 1 hold the two recent completions.
+  await waitFor(() => expect(visibleRows()).toHaveLength(2));
+  expect(visibleRows()[0]).toHaveTextContent('007301');
+  expect(visibleRows()[1]).toHaveTextContent('007300');
+
+  // "This year" is the SITE's 2027 — the request carries the preset
+  // and no date this device computed.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'year' },
+  });
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('done_range=THIS_YEAR'),
+  );
+  expect(completedRequests().at(-1)).not.toContain('done_from=');
+  expect(completedRequests().at(-1)).not.toContain('done_to=');
+  await waitFor(() => expect(visibleRows()).toHaveLength(1));
+  expect(visibleRows()[0]).toHaveTextContent('007301');
+  expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+    'Showing 1 of 1 completed Work Order · this year',
+  );
+
+  // "Last year" is the site's 2026 — both 2026 completions, not the
+  // 2025 one, not the New Year one.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'lastyear' },
+  });
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('done_range=LAST_YEAR'),
+  );
+  expect(completedRequests().at(-1)).not.toContain('done_from=');
+  expect(completedRequests().at(-1)).not.toContain('done_to=');
+  await waitFor(() => expect(visibleRows()).toHaveLength(2));
+  expect(visibleRows()[0]).toHaveTextContent('007300');
+  expect(visibleRows()[1]).toHaveTextContent('007299');
+
+  // "Last 30 days" likewise travels as the preset alone.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: '30d' },
+  });
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('done_range=LAST_30_DAYS'),
+  );
+  expect(completedRequests().at(-1)).not.toContain('done_from=');
+  await waitFor(() => expect(visibleRows()).toHaveLength(2));
+
+  // Custom stays explicit: the operator's dates travel as typed, as
+  // site-calendar dates, with no preset beside them.
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'custom' },
+  });
+  fireEvent.change(screen.getByLabelText('Done from'), {
+    target: { value: '2026-12-31' },
+  });
+  fireEvent.change(screen.getByLabelText('Done to'), {
+    target: { value: '2026-12-31' },
+  });
+  await waitFor(() => {
+    const last = completedRequests().at(-1)!;
+    expect(last).toContain('done_from=2026-12-31');
+    expect(last).toContain('done_to=2026-12-31');
+    expect(last).not.toContain('done_range=');
+  });
+  await waitFor(() => expect(visibleRows()).toHaveLength(1));
+  expect(visibleRows()[0]).toHaveTextContent('007300');
+});
+
+test('the Done header reaches ascending on its first click from the initial state and returns to descending', async () => {
+  await renderCompleted();
+  fireEvent.change(screen.getByLabelText('Done date range'), {
+    target: { value: 'all' },
+  });
+  await screen.findByText(/all time/);
+  // Two pages are loaded, so the reset on the sort change is visible.
+  fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+  await waitFor(() => expect(visibleRows()).toHaveLength(59));
+  const before = completedRequests().length;
+
+  // The initial state IS Done descending — the first click must not
+  // re-request the same order but ask for Done ASCENDING, as a fresh
+  // first page (no cursor), and the loaded pages reset to one.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Done' }));
+  await waitFor(() =>
+    expect(completedRequests().length).toBeGreaterThan(before),
+  );
+  const ascending = completedRequests().at(-1)!;
+  expect(ascending).toContain('sort=DONE');
+  expect(ascending).toContain('direction=ASC');
+  expect(ascending).not.toContain('cursor=');
+  await waitFor(() => expect(visibleRows()).toHaveLength(50));
+  // Oldest completion first — the server's order rendered as is.
+  expect(visibleRows()[0]).toHaveTextContent('006721');
+  expect(
+    screen.getByRole('button', { name: 'Sort by Done' }).closest('th'),
+  ).toHaveAttribute('aria-sort', 'ascending');
+  expect(screen.getByRole('button', { name: 'Show more' })).toBeEnabled();
+
+  // The second click is descending — which is the default order, so
+  // the cycle is closed without a dead click.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Done' }));
+  await waitFor(() => {
+    const last = completedRequests().at(-1)!;
+    expect(last).toContain('sort=DONE');
+    expect(last).toContain('direction=DESC');
+    expect(last).not.toContain('cursor=');
+  });
+  await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006996'));
+  expect(
+    screen.getByRole('button', { name: 'Sort by Done' }).closest('th'),
+  ).toHaveAttribute('aria-sort', 'descending');
+
+  // And ascending is reachable again from there.
+  fireEvent.click(screen.getByRole('button', { name: 'Sort by Done' }));
+  await waitFor(() =>
+    expect(completedRequests().at(-1)).toContain('direction=ASC'),
+  );
+  await waitFor(() => expect(visibleRows()[0]).toHaveTextContent('006721'));
 });
 
 test("the Done date and the due outcome are the server's verdict on the site calendar — never recomputed from the browser clock", async () => {

@@ -296,8 +296,8 @@ class CompletedWorkOrdersResponse(BaseModel):
     # filters — "none ever" versus "none in this range".
     history_total: int
     # Opaque keyset cursor of the last row — pass back as `cursor` for
-    # the next page of the SAME sort; null when no further page can
-    # exist.
+    # the next page of the SAME sort; present exactly when a further
+    # row exists, null on the last page.
     next_cursor: str | None
 
 
@@ -305,6 +305,7 @@ class CompletedWorkOrdersResponse(BaseModel):
 def list_completed_work_orders(
     session: SessionDep,
     search: str | None = None,
+    done_range: Literal["LAST_30_DAYS", "LAST_90_DAYS", "THIS_YEAR", "LAST_YEAR"] | None = None,
     done_from: datetime.date | None = None,
     done_to: datetime.date | None = None,
     due_outcome: Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"] = "ALL",
@@ -315,15 +316,19 @@ def list_completed_work_orders(
 ) -> CompletedWorkOrdersResponse:
     """The read-only completed history (GUI_DESIGN §11.5).
 
-    `done_from` / `done_to` are inclusive done DATES in the site
-    calendar (`SITE_TIMEZONE`), the same calendar the due outcome and
-    every row's `done_date` use. Sorted server-side by `sort` /
+    The Done range is either a `done_range` preset, resolved on the
+    server against the site's current date, or explicit `done_from` /
+    `done_to` inclusive done DATES in the site calendar
+    (`SITE_TIMEZONE`) — never both. That is the same calendar the due
+    outcome and every row's `done_date` use, so a browser in another
+    time zone never shifts the window. Sorted server-side by `sort` /
     `direction` (Done descending by default, NULLs last, id as the
     tie-breaker) with keyset paging bound to that order.
     """
     page = work_orders.list_completed_work_orders(
         session,
         search=search,
+        done_range=done_range,
         done_from=done_from,
         done_to=done_to,
         due_outcome=due_outcome,

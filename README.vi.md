@@ -2,8 +2,9 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md).
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
-> upstream commit `194ffc2e5e8e22c389abecd0830292a6707955d9` và phản ánh các bổ
-> sung tài liệu triển khai có trong gói này.
+> upstream commit `d2f68dee0d4ed363111c8a6b602ae3a58ab63e8d` cộng các sửa đổi
+> Phase 10 audit (Done range preset resolve trên server, cursor chỉ khi còn row)
+> đã được phản ánh.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/vi/README.md) và
 > [hướng dẫn triển khai](./docs/vi/DEPLOYMENT.md).
@@ -41,9 +42,11 @@ Repository hiện có nền tảng từ Phase 1 đến Phase 10, triển khai en
 - **Phase 10:** Stockroom/Allocation end to end: backend có `STOCKED`, gợi ý
   allocation theo thứ tự chuẩn, xác nhận allocation với `allocation_quantity`
   tường minh (từ chối khi stale so với available stock), reversal, completion
-  Work Order được derive và lịch sử completed chỉ đọc (search, Done range, due
+  Work Order được derive và lịch sử completed chỉ đọc (search, Done range —
+  preset theo tên neo vào ngày hiện tại của site hoặc ngày tường minh — due
   outcome và done date theo lịch nhà máy `SITE_TIMEZONE`, sort server-side,
-  keyset paging); frontend có workflow `Receive into Stockroom` cùng allocation
+  keyset paging chỉ phát cursor khi còn row tiếp); frontend có workflow
+  `Receive into Stockroom` cùng allocation
   dialog trên Scan Station shell và trang Completed Work Orders thật.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,

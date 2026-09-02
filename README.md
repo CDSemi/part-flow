@@ -130,9 +130,11 @@ the server-side history:
   adjustment, once per allocation, reopening a completed Work Order),
   `GET /api/allocations`, and `GET /api/work-orders/completed` (the
   read-only history: search over WO Number / PN / Job Number, done
-  range, due outcome and done date on the site calendar
-  (`SITE_TIMEZONE`), server-side sort, keyset paging, the matching and
-  the whole-history totals); the PN resolution
+  range (named presets anchored to the site's current date, or explicit
+  dates), due outcome and done date on the site calendar
+  (`SITE_TIMEZONE`), server-side sort, keyset paging with a cursor only
+  while a further row exists, the matching and the whole-history
+  totals); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses

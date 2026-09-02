@@ -953,6 +953,10 @@ DueOutcomeFilter = Literal["ALL", "ON_TIME", "LATE", "NO_DUE_DATE"]
 DueOutcome = Literal["ON_TIME", "LATE", "NO_DUE_DATE"]
 CompletedSort = Literal["DONE", "RECEIVED", "DUE", "NUMBER"]
 SortDirection = Literal["ASC", "DESC"]
+#: The Done range presets of the history page (GUI_DESIGN §11.5), resolved
+#: HERE on the site's current date — the browser's clock and time zone
+#: never define the window.
+DoneRangePreset = Literal["LAST_30_DAYS", "LAST_90_DAYS", "THIS_YEAR", "LAST_YEAR"]
 
 
 # -- The site calendar: ONE rule for every date-versus-timestamp judgement --
@@ -962,6 +966,37 @@ def site_timezone() -> str:
     """The factory's IANA time zone (``SITE_TIMEZONE``) — the calendar in
     which a completion timestamp becomes a done DATE."""
     return get_settings().site_timezone
+
+
+def _now() -> datetime.datetime:
+    """The current instant (a seam the history tests pin)."""
+    return datetime.datetime.now(datetime.UTC)
+
+
+def site_today() -> datetime.date:
+    """Today on the site calendar — the anchor of every Done range preset."""
+    return _now().astimezone(ZoneInfo(site_timezone())).date()
+
+
+def done_range_bounds(
+    preset: DoneRangePreset,
+) -> tuple[datetime.date | None, datetime.date | None]:
+    """The inclusive done-DATE bounds (``None`` = open) a preset stands for
+    on the site calendar today: the "last N days" presets reach back N
+    calendar days with no upper bound, the year presets are calendar
+    years of the site's current date."""
+    today = site_today()
+    if preset == "LAST_30_DAYS":
+        return today - datetime.timedelta(days=30), None
+    if preset == "LAST_90_DAYS":
+        return today - datetime.timedelta(days=90), None
+    if preset == "THIS_YEAR":
+        return datetime.date(today.year, 1, 1), None
+    if preset == "LAST_YEAR":
+        return datetime.date(today.year - 1, 1, 1), datetime.date(today.year - 1, 12, 31)
+    raise InvalidInputError(
+        "done_range must be LAST_30_DAYS, LAST_90_DAYS, THIS_YEAR or LAST_YEAR."
+    )
 
 
 def done_date_of(completed_at: datetime.datetime | None) -> datetime.date | None:
@@ -1052,7 +1087,8 @@ class CompletedPage(NamedTuple):
     # filters: lets the page tell "none ever" from "none in this range"
     # (GUI_DESIGN §11.5) without a second request.
     history_total: int
-    # The opaque cursor of the last row, when more rows may follow.
+    # The opaque cursor of the last row — present exactly when a further
+    # row exists (the query looks one row past the page).
     next_cursor: str | None
 
 
@@ -1120,6 +1156,7 @@ def list_completed_work_orders(
     session: Session,
     *,
     search: str | None = None,
+    done_range: DoneRangePreset | None = None,
     done_from: datetime.date | None = None,
     done_to: datetime.date | None = None,
     due_outcome: DueOutcomeFilter = "ALL",
@@ -1131,14 +1168,16 @@ def list_completed_work_orders(
     """The completed history — search, filter, sort and page server-side.
 
     ``search`` matches the Work Order Number, any demand line's PN or
-    any Job Number (case-insensitive contains); ``done_from`` /
-    ``done_to`` are inclusive done DATES in the site calendar; the due
+    any Job Number (case-insensitive contains); the Done range is either
+    a ``done_range`` preset — resolved here on the site's current date
+    (``done_range_bounds``) — or explicit ``done_from`` / ``done_to``
+    inclusive done DATES in the site calendar, never both; the due
     outcome compares the done date (same calendar) with the Work Order
     due date. The order is the chosen column then the id (NULLs last
     in either direction) — Done descending by default — and the page
     is a keyset continuation over exactly that order, never an offset
     over an unbounded table; the cursor is bound to the sort it was
-    issued for.
+    issued for and exists only while a further row does.
     """
     if limit <= 0 or limit > 200:
         raise InvalidInputError("The page size must be between 1 and 200.")
@@ -1146,6 +1185,12 @@ def list_completed_work_orders(
         raise InvalidInputError("sort must be DONE, RECEIVED, DUE or NUMBER.")
     if direction not in ("ASC", "DESC"):
         raise InvalidInputError("direction must be ASC or DESC.")
+    if done_range is not None:
+        if done_from is not None or done_to is not None:
+            raise InvalidInputError(
+                "Use either a done_range preset or explicit done_from / done_to dates."
+            )
+        done_from, done_to = done_range_bounds(done_range)
     filters: list[ColumnElement[bool]] = [WorkOrder.completed_at.is_not(None)]
     if search is not None and search.strip():
         pattern = f"%{_escape_like(search.strip())}%"
@@ -1197,13 +1242,16 @@ def list_completed_work_orders(
     part_numbers = func.array_agg(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
     )
+    # One row beyond the page is fetched only to learn whether a further
+    # page exists: a cursor is issued exactly when it does, so a history
+    # that ends on the page boundary never offers an empty `Show more`.
     query = (
         select(WorkOrder, func.count(WorkOrderDemand.id), part_numbers)
         .outerjoin(WorkOrderDemand, WorkOrderDemand.work_order_id == WorkOrder.id)
         .where(*filters)
         .group_by(WorkOrder.id)
         .order_by(*ordering)
-        .limit(limit)
+        .limit(limit + 1)
     )
     if cursor is not None:
         position = decode_completed_cursor(cursor)
@@ -1212,7 +1260,9 @@ def list_completed_work_orders(
                 "The paging cursor belongs to another sort order. Reload the history."
             )
         query = query.where(_keyset_after(column, direction, position))
-    rows = list(session.execute(query))
+    fetched = list(session.execute(query))
+    has_more = len(fetched) > limit
+    rows = fetched[:limit]
     summaries = [
         WorkOrderSummary(
             work_order=work_order,
@@ -1223,7 +1273,7 @@ def list_completed_work_orders(
         for work_order, count, values in rows
     ]
     next_cursor: str | None = None
-    if len(rows) == limit:
+    if has_more:
         last = rows[-1][0]
         next_cursor = encode_completed_cursor(
             CompletedCursor(sort, direction, _cursor_value(sort, last), last.id)

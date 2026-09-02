@@ -1765,6 +1765,177 @@ def test_done_date_and_due_outcome_follow_the_site_calendar(
     assert (detail["done_date"], detail["due_outcome"], detail["days_late"]) == (None, None, None)
 
 
+def _pin_site_clock(monkeypatch: pytest.MonkeyPatch, zone: str, now: datetime.datetime) -> None:
+    """Pin the site calendar the presets are resolved on: the zone and
+    the current instant (what a browser's clock says is irrelevant)."""
+    monkeypatch.setattr(work_orders, "site_timezone", lambda: zone)
+    monkeypatch.setattr(work_orders, "_now", lambda: now)
+
+
+def test_done_range_presets_are_anchored_to_the_site_calendar_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The presets resolve on the SERVER from the site's current date —
+    the one calendar rule (`SITE_TIMEZONE`) — so near midnight, and at
+    the turn of the year, a site west or east of UTC gets its own
+    window, whatever the requesting browser's date is."""
+    # 06:30 UTC on March 10: still March 9 in Los Angeles.
+    near_midnight = datetime.datetime(2026, 3, 10, 6, 30, tzinfo=datetime.UTC)
+    _pin_site_clock(monkeypatch, "UTC", near_midnight)
+    assert work_orders.site_today() == datetime.date(2026, 3, 10)
+    assert work_orders.done_range_bounds("LAST_30_DAYS") == (datetime.date(2026, 2, 8), None)
+    assert work_orders.done_range_bounds("LAST_90_DAYS") == (datetime.date(2025, 12, 10), None)
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", near_midnight)
+    assert work_orders.site_today() == datetime.date(2026, 3, 9)
+    assert work_orders.done_range_bounds("LAST_30_DAYS") == (datetime.date(2026, 2, 7), None)
+    assert work_orders.done_range_bounds("LAST_90_DAYS") == (datetime.date(2025, 12, 9), None)
+    # 18:30 UTC on December 31: already January 1 in Ho Chi Minh City,
+    # still December 31 in Los Angeles — "this year" and "last year"
+    # are the site's years.
+    new_year = datetime.datetime(2026, 12, 31, 18, 30, tzinfo=datetime.UTC)
+    _pin_site_clock(monkeypatch, "Asia/Ho_Chi_Minh", new_year)
+    assert work_orders.site_today() == datetime.date(2027, 1, 1)
+    assert work_orders.done_range_bounds("THIS_YEAR") == (datetime.date(2027, 1, 1), None)
+    assert work_orders.done_range_bounds("LAST_YEAR") == (
+        datetime.date(2026, 1, 1),
+        datetime.date(2026, 12, 31),
+    )
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", new_year)
+    assert work_orders.site_today() == datetime.date(2026, 12, 31)
+    assert work_orders.done_range_bounds("THIS_YEAR") == (datetime.date(2026, 1, 1), None)
+    assert work_orders.done_range_bounds("LAST_YEAR") == (
+        datetime.date(2025, 1, 1),
+        datetime.date(2025, 12, 31),
+    )
+
+
+def test_completed_history_presets_select_rows_on_the_site_calendar(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`done_range` on the endpoint: the window's edge is the site's
+    midnight N calendar days before the site's TODAY, and the year
+    presets follow the site's year — a completion that is inside the
+    window for one site is outside it for another, and a preset never
+    combines with explicit dates."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    instants = {
+        # 01:00 Feb 7 in Los Angeles (09:00 UTC) — inside a 30-day window
+        # anchored on LA March 9 (from Feb 7), outside one anchored on
+        # UTC March 10 (from Feb 8).
+        "inside_la": datetime.datetime(2026, 2, 7, 9, 0, tzinfo=datetime.UTC),
+        # 23:00 Feb 6 in Los Angeles (07:00 UTC Feb 7) — outside both.
+        "outside": datetime.datetime(2026, 2, 7, 7, 0, tzinfo=datetime.UTC),
+        # 01:00 Jan 1 2027 in Ho Chi Minh City (18:00 UTC Dec 31 2026).
+        "new_year_hcm": datetime.datetime(2026, 12, 31, 18, 0, tzinfo=datetime.UTC),
+        # Mid 2026 anywhere.
+        "mid_2026": datetime.datetime(2026, 6, 15, 12, 0, tzinfo=datetime.UTC),
+    }
+    ids: dict[str, int] = {}
+    for key, completed_at in instants.items():
+        work_order = _create_work_order(
+            client,
+            [{"part_number": _unique(f"PN{marker}"), "requested_quantity": 1}],
+            number=f"WO-{marker}-{key}",
+        )
+        _complete(client, material, stockroom, work_order)
+        with db_engine.begin() as connection:
+            connection.execute(
+                sa.update(models.WorkOrder)
+                .where(models.WorkOrder.id == work_order.id)
+                .values(completed_at=completed_at)
+            )
+        ids[key] = work_order.id
+    search = f"PN{marker}"
+
+    def rows(**params: Any) -> set[int]:
+        return {int(r["id"]) for r in _completed(client, search=search, **params)["work_orders"]}
+
+    near_midnight = datetime.datetime(2026, 3, 10, 6, 30, tzinfo=datetime.UTC)
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", near_midnight)
+    assert rows(done_range="LAST_30_DAYS") == {
+        ids["inside_la"],
+        ids["new_year_hcm"],
+        ids["mid_2026"],
+    }
+    _pin_site_clock(monkeypatch, "UTC", near_midnight)
+    assert rows(done_range="LAST_30_DAYS") == {ids["new_year_hcm"], ids["mid_2026"]}
+    # The turn of the year: Ho Chi Minh City is in 2027 already, so
+    # "this year" holds only the New Year completion and "last year"
+    # the 2026 ones; Los Angeles is still in 2026.
+    new_year = datetime.datetime(2026, 12, 31, 18, 30, tzinfo=datetime.UTC)
+    _pin_site_clock(monkeypatch, "Asia/Ho_Chi_Minh", new_year)
+    assert rows(done_range="THIS_YEAR") == {ids["new_year_hcm"]}
+    assert rows(done_range="LAST_YEAR") == {ids["inside_la"], ids["outside"], ids["mid_2026"]}
+    _pin_site_clock(monkeypatch, "America/Los_Angeles", new_year)
+    assert rows(done_range="THIS_YEAR") == set(ids.values())
+    assert rows(done_range="LAST_YEAR") == set()
+    # Explicit dates are the Custom range and stay explicit: a preset
+    # never combines with them, and an unknown preset is refused.
+    for params in (
+        {"done_range": "LAST_30_DAYS", "done_from": "2026-01-01"},
+        {"done_range": "THIS_YEAR", "done_to": "2026-12-31"},
+        {"done_range": "YESTERDAY"},
+    ):
+        refused = client.get("/api/work-orders/completed", params={"search": search, **params})
+        assert refused.status_code == 422, params
+
+
+def _pages(client: TestClient, **params: Any) -> list[list[int]]:
+    """The keyset pages of the history for ``params``, as served."""
+    pages: list[list[int]] = []
+    cursor: str | None = None
+    for _ in range(50):
+        page = _completed(client, **params, **({"cursor": cursor} if cursor else {}))
+        pages.append([int(r["id"]) for r in page["work_orders"]])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return pages
+    raise AssertionError("the keyset walk never ended")
+
+
+def test_completed_history_issues_a_cursor_only_while_a_further_row_exists(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A history whose matching rows end exactly on a page boundary —
+    one page of one row, one full page, two full pages — gets no
+    cursor on its last page: `Show more` is offered only when a
+    further row really exists, and a walk fetches exactly the pages
+    the rows fill."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    marker = uuid.uuid4().hex[:8].upper()
+    orders: list[_WorkOrder] = []
+    for index in range(4):
+        work_order = _create_work_order(
+            client,
+            [{"part_number": _unique(f"PN{marker}"), "requested_quantity": 1}],
+            number=f"WO-{marker}-{index}",
+        )
+        _complete(client, material, stockroom, work_order)
+        orders.append(work_order)
+    newest_first = [w.id for w in reversed(orders)]
+    search = f"PN{marker}"
+
+    # Exactly one matching row on a one-row page.
+    single = _completed(client, search=f"WO-{marker}-2", limit=1)
+    assert [int(r["id"]) for r in single["work_orders"]] == [orders[2].id]
+    assert single["total"] == 1 and single["next_cursor"] is None
+    # Exactly one full page.
+    assert _pages(client, search=search, limit=4) == [newest_first]
+    assert _completed(client, search=search, limit=4)["next_cursor"] is None
+    # Exactly two full pages: the second is the last and says so.
+    assert _pages(client, search=search, limit=2) == [newest_first[:2], newest_first[2:]]
+    # A partial last page still ends the walk.
+    assert _pages(client, search=search, limit=3) == [newest_first[:3], newest_first[3:]]
+    # One row per page: four pages, never a fifth empty one.
+    assert _pages(client, search=search, limit=1) == [[i] for i in newest_first]
+    # More rows than the page holds: the cursor is issued.
+    first = _completed(client, search=search, limit=3)
+    assert len(first["work_orders"]) == 3 and isinstance(first["next_cursor"], str)
+
+
 def test_allocation_rows_are_immutable_and_never_reference_movement(
     client: TestClient, db_engine: Engine
 ) -> None:

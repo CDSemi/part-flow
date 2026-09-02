@@ -1,7 +1,9 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`docs/GUI_DESIGN.md`](../GUI_DESIGN.md).
-> Baseline upstream: commit `194ffc2e5e8e22c389abecd0830292a6707955d9`.
+> Baseline upstream: commit `d2f68dee0d4ed363111c8a6b602ae3a58ab63e8d` cộng các
+> sửa đổi §11.5 của vòng audit Phase 10 (Done range preset resolve trên server,
+> chu kỳ sort cột Done, cursor chỉ khi còn row) đã được phản ánh.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](../PROJECT_PROFILE.md) định nghĩa.
 >
@@ -607,21 +609,30 @@ fully released disables action; WO Released only all lines exhausted.
 Real deep-link read-only page. Giá trị trung tâm là `completed_at` hiển thị thành
 **done date** theo múi giờ của site (một rule server-side `SITE_TIMEZONE` cho ngày
 hiển thị, Done range và due outcome; không bao giờ theo ngày local của browser).
-Bounded default date range, server search WO/PN/Job, done range (inclusive done
-date), due outcome. Bảng WO Number | Done | Received | Due | Demand lines, không
+Bounded default date range, server search WO/PN/Job, done range, due outcome.
+Done range preset (`Last 30 days` / `Last 90 days` mặc định / `This year` /
+`Last year`) gửi lên server theo tên và được server neo vào ngày hiện tại của
+site trên lịch `SITE_TIMEZONE` — browser gần nửa đêm hoặc qua ranh giới năm ở
+múi giờ khác không làm lệch cửa sổ; `Custom…` gửi hai ngày site-calendar tường
+minh (inclusive done date). Bảng WO Number | Done | Received | Due | Demand lines, không
 Status column, không urgency ramp; Due cell có `✓ On time` / `✕ N ngày late` (done
 date vs due date, verdict của server trên lịch site) / `—` khi không có due date.
 Sort: WO Number/Done/Received/Due là server contract (column + direction đi cùng
 query; row thiếu giá trị xếp cuối ở cả hai chiều, Work Order id là tie-breaker;
-trang không tự sort lại row đã load), mặc định Done descending. Paging: 50 row
-đầu theo order hiện tại, `Show more` nối 50 tiếp qua opaque cursor của server gắn
-với sort đã phát hành; đổi search/filter/sort reset paging. Row opens read-only
+trang không tự sort lại row đã load), mặc định Done descending; unsorted state
+của chu kỳ header quay về default đó, nên riêng header Done (descending chính là
+default) chu kỳ là ascending ↔ descending — mọi click đều đổi order, cả hai chiều
+của mọi cột đều chọn được. Paging: 50 row đầu theo order hiện tại, `Show more`
+nối 50 tiếp qua opaque cursor của server gắn với sort đã phát hành; server chỉ
+phát cursor khi thực sự còn row tiếp theo (history kết thúc đúng ranh giới trang
+không hiện `Show more` thừa); đổi search/filter/sort reset paging. Row opens read-only
 details với done date và allocated quantity. No New/edit/release; independent
 toolbar. Active search/New exact number check can route here.
 
 **Implementation boundary (Phase 10):** production UI thật trên
-`GET /api/work-orders/completed` — search (debounced), Done range, due-outcome
-filter và sort column/direction là query parameter server-side; done date và due
+`GET /api/work-orders/completed` — search (debounced), Done range (preset theo
+tên do server neo vào ngày hiện tại của site, hoặc inclusive done date của Custom),
+due-outcome filter và sort column/direction là query parameter server-side; done date và due
 outcome của mọi row là verdict của server; summary giữ loaded/matching count;
 row mở read-only Work Order Details với `Done <date>` ở meta line và allocated
 quantity từng demand line. Work Order chỉ complete khi server derive (mọi demand
