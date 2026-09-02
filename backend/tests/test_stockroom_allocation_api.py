@@ -1290,6 +1290,8 @@ def test_reversal_reopens_the_work_order_and_returns_the_quantity_to_stock(
     material = _Cell(client, machine_count=1)
     stockroom = _Cell(client, is_terminal=True)
     pn = _unique("PN")
+    # Searched by its own PN below: a bare id as the search text could
+    # match the digits inside another completed Work Order's number.
     work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 5}])
     flow_id = _release(client, material, work_order, pn, quantity=5)
     assert _stock(client, material, stockroom, flow_id, pn, 5).status_code == 201
@@ -1310,7 +1312,7 @@ def test_reversal_reopens_the_work_order_and_returns_the_quantity_to_stock(
     assert detail["status"] == "RELEASED" and detail["completed_at"] is None
     assert detail["demands"][0]["allocated_quantity"] == 0
     assert work_order.id in _active_ids(client)
-    assert _completed(client, search=str(work_order.id))["total"] == 0
+    assert _completed(client, search=pn)["total"] == 0
     assert _suggest(client, pn)["available_stocked_quantity"] == 5
     # The original row is untouched; both rows are listed for audit.
     listed = client.get("/api/allocations", params={"part_number": pn}).json()
