@@ -87,7 +87,7 @@ from app.application.common import UNSET, UnsetType, commit, flush, optional_tex
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.part_numbers import PART_NUMBER_CONFLICTS, ensure_part_number
 from app.domain.enums import AuditEntityType, AuditEventType, RequestType, WorkOrderStatus
-from app.infrastructure.models import WorkOrder, WorkOrderDemand
+from app.infrastructure.models import WorkOrder, WorkOrderAllocation, WorkOrderDemand
 
 _WORK_ORDER_CONFLICTS: Final = {
     "uq_work_orders_work_order_number": (
@@ -542,11 +542,10 @@ def _guard_released_line_edit(
       remainder again — and lowering it to exactly the committed
       quantity is valid, leaving nothing left to release. This part is
       tied to COMMITTED QUANTITY, not to release alone, so it also
-      binds a line that only carries allocated quantity. Allocation
-      arrives with Phase 10 and nothing in Phase 4 writes
-      ``allocated_quantity``, so today the branch is provably inert —
-      it is written this way so the canonical floor cannot silently
-      lose half its meaning when allocation starts writing.
+      binds a line that only carries allocated quantity (Phase 10 —
+      ``allocated_quantity`` is the projection the allocation command
+      maintains under this same demand row lock, and the caller
+      re-reads the row under the lock before judging it).
 
     Qty, due date and Job Numbers are otherwise the normal audited
     edit; nothing here touches QuantityFlows, PartMovements, or release
@@ -721,9 +720,18 @@ def update_work_order(
     # `delete_work_order_demand` already takes. A header-only save locks
     # nothing: the audited Work Order Number edit stays available after
     # a release (PROJECT_PROFILE §7).
+    #
+    # `populate_existing` makes the lock a RE-READ: `get_work_order`
+    # above already loaded these rows into the identity map, and a lock
+    # alone would keep their pre-lock attributes — `allocated_quantity`
+    # (Phase 10) is read from the row itself, so a partial allocation
+    # committed while this save waited would otherwise be judged on the
+    # stale figure and a lowered Qty could leave allocated > requested.
     edited_ids = sorted(edit_id for edit_id in seen_edit_ids if isinstance(edit_id, int))
     for edited_id in edited_ids:
-        locked = session.get(WorkOrderDemand, edited_id, with_for_update=True)
+        locked = session.get(
+            WorkOrderDemand, edited_id, with_for_update=True, populate_existing=True
+        )
         if locked is None or locked.work_order_id != work_order.id:
             raise NotFoundError(
                 f"Demand line {edited_id} does not exist on Work Order {work_order.id}."
@@ -780,7 +788,7 @@ def update_work_order(
             # from here — production corrections stay in the correction
             # and production workflows (PROJECT_PROFILE §16). A line
             # carrying only allocated quantity reaches the same guard
-            # for its quantity floor alone (Phase 10; inert today).
+            # for its quantity floor alone (Phase 10).
             _guard_released_line_edit(demand, edit, released_quantity)
         before = _demand_snapshot(demand)
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):
@@ -841,6 +849,18 @@ def update_work_order(
 # ---------------------------------------------------------------------------
 
 
+def _demand_has_allocation_history(session: Session, demand_id: int) -> bool:
+    """Any allocation row — active or reversed — referencing the demand line."""
+    return (
+        session.scalar(
+            select(WorkOrderAllocation.id)
+            .where(WorkOrderAllocation.work_order_demand_id == demand_id)
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def delete_work_order_demand(session: Session, work_order_id: int, demand_id: int) -> None:
     """Delete one saved demand line, blocked once quantity has released.
 
@@ -884,6 +904,15 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     if demand.allocated_quantity > 0:
         raise ConflictError(
             "Cannot remove: stocked quantity has already been allocated to this demand line."
+        )
+    if _demand_has_allocation_history(session, demand.id):
+        # Phase 10: a reversed allocation leaves no active allocation,
+        # but its append-only rows still reference the line — that
+        # audit history never disappears (the FK would refuse anyway;
+        # this names the reason instead of failing at COMMIT).
+        raise ConflictError(
+            "Cannot remove: stocked quantity has been allocated to this demand line before"
+            " and the allocation history stays with it."
         )
     if production_release.demand_has_released_quantity(session, demand.id):
         # GUI_DESIGN §11.2 wording — the UI disables the action, the
@@ -931,6 +960,10 @@ class CompletedPage(NamedTuple):
     # Matching rows in the whole history for the same filters — the
     # "Showing n of N" summary line.
     total: int
+    # Completed Work Orders in the whole history regardless of the
+    # filters: lets the page tell "none ever" from "none in this range"
+    # (GUI_DESIGN §11.5) without a second request.
+    history_total: int
     # The cursor of the last row, when more rows may follow.
     next_cursor: CompletedCursor | None
 
@@ -991,6 +1024,12 @@ def list_completed_work_orders(
         raise InvalidInputError("due_outcome must be ALL, ON_TIME, LATE or NO_DUE_DATE.")
 
     total = session.scalar(select(func.count()).select_from(WorkOrder).where(*filters)) or 0
+    history_total = (
+        session.scalar(
+            select(func.count()).select_from(WorkOrder).where(WorkOrder.completed_at.is_not(None))
+        )
+        or 0
+    )
 
     part_numbers = func.array_agg(
         aggregate_order_by(WorkOrderDemand.part_number, WorkOrderDemand.id)
@@ -1026,4 +1065,9 @@ def list_completed_work_orders(
         last = rows[-1][0]
         assert last.completed_at is not None  # filtered on IS NOT NULL
         next_cursor = CompletedCursor(last.completed_at, last.id)
-    return CompletedPage(work_orders=summaries, total=int(total), next_cursor=next_cursor)
+    return CompletedPage(
+        work_orders=summaries,
+        total=int(total),
+        history_total=int(history_total),
+        next_cursor=next_cursor,
+    )

@@ -100,6 +100,7 @@ beforeEach(() => {
         return json({
           work_orders: [],
           total: 0,
+          history_total: 0,
           next_cursor_completed_at: null,
           next_cursor_id: null,
         });

@@ -136,6 +136,7 @@ function dueOutcome(w: WorkOrderSummary): OutcomeKey {
 interface LoadedPage {
   rows: WorkOrderSummary[];
   total: number;
+  historyTotal: number;
   nextCursor: CompletedCursor | null;
   /** The query (filters + reload generation) these rows belong to — a
    * keyset continuation is applied only while it is still the loaded
@@ -204,6 +205,7 @@ export function CompletedWorkOrdersView() {
         setPage({
           rows: fresh.workOrders,
           total: fresh.total,
+          historyTotal: fresh.historyTotal,
           nextCursor: fresh.nextCursor,
           query,
         });
@@ -237,6 +239,7 @@ export function CompletedWorkOrdersView() {
           : {
               rows: [...current.rows, ...next.workOrders],
               total: next.total,
+              historyTotal: next.historyTotal,
               nextCursor: next.nextCursor,
               query,
             },
@@ -272,14 +275,16 @@ export function CompletedWorkOrdersView() {
   }
 
   const query = search.trim();
-  const hasFilters = query !== '' || range !== 'all' || outcome !== 'all';
   // The page for exactly the filters on screen: null while the debounce
   // or the request is still pending for them.
   const current = search === settledSearch ? page : null;
   const rows = preview === 'empty' ? [] : (current?.rows ?? null);
   const total = preview === 'empty' ? 0 : (current?.total ?? 0);
+  // "None ever" is the SERVER's whole-history count, not the absence of
+  // filters: the default 90-day window is always a filter (GUI_DESIGN
+  // §11.5 — a plain empty state only when nothing ever completed).
   const noneEver =
-    rows !== null && rows.length === 0 && !hasFilters && total === 0;
+    rows !== null && rows.length === 0 && (current?.historyTotal ?? 0) === 0;
 
   return (
     <section className="wo-view" aria-label="Completed Work Orders">
@@ -358,7 +363,8 @@ export function CompletedWorkOrdersView() {
       ) : (
         <>
           <p className="cwo-summary">
-            Showing <b>{rows.length}</b> of <b>{total}</b> completed Work Order
+            Showing <b>{rows.length.toLocaleString()}</b> of{' '}
+            <b>{total.toLocaleString()}</b> completed Work Order
             {total === 1 ? '' : 's'} ·{' '}
             {rangeSummary(range, bounds.from, bounds.to)}
           </p>
@@ -366,7 +372,7 @@ export function CompletedWorkOrdersView() {
             <thead>
               <tr>
                 <th>WO Number</th>
-                <th aria-sort="descending">Done ↓</th>
+                <th>Done ↓</th>
                 <th>Received</th>
                 <th>Due</th>
                 <th>Demand lines</th>

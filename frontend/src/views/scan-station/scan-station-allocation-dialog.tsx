@@ -22,6 +22,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { formatIsoDate } from '../dates';
 import { EntityChip, Guidance, StepButtons } from './scan-station-presentation';
+import { enterKeyHandler } from './scan-station-wizard';
 import { WriteGuidance } from './scan-station-machine-dialogs';
 
 /**
@@ -61,8 +62,13 @@ export function AllocationDialog({
   stocked: TransferResult;
   sourceArea: AreaRef;
   writeBlocked: boolean;
-  /** Called ONLY with a server-confirmed allocation. */
-  onDone: (result: AllocationResult) => void;
+  /** Called ONLY with a server-confirmed allocation, with the Work Order
+   * Numbers the suggestion showed (by Work Order id) so the completed
+   * Work Orders can be NAMED, not only numbered by id. */
+  onDone: (
+    result: AllocationResult,
+    workOrderNumbers: ReadonlyMap<number, string | null>,
+  ) => void;
   /** Leave the quantity in stock, unallocated (nothing recorded). */
   onLeave: () => void;
   /** The operator abandons an allocation whose outcome is UNKNOWN. */
@@ -193,7 +199,10 @@ export function AllocationDialog({
       return;
     }
     setBusy(false);
-    onDone(result);
+    onDone(
+      result,
+      new Map(lines.map((line) => [line.workOrderId, line.workOrderNumber])),
+    );
   }
 
   const cancel = outcomeUnknown ? onAbandonUnknown : onLeave;
@@ -204,6 +213,7 @@ export function AllocationDialog({
       label="Allocate stocked quantity"
       onClose={busy ? () => undefined : cancel}
       size="wide"
+      onKeyDown={enterKeyHandler(() => void confirm())}
     >
       <h3>Allocate stocked quantity</h3>
       <div className="big mono" title={pn}>

@@ -273,6 +273,9 @@ export interface CompletedWorkOrdersPage {
   workOrders: WorkOrderSummary[];
   /** Matching completed Work Orders in the WHOLE history. */
   total: number;
+  /** Completed Work Orders in the whole history regardless of the
+   * filters — tells "none ever" from "none in this range". */
+  historyTotal: number;
   /** Continue with this cursor for the next page; null = no more. */
   nextCursor: CompletedCursor | null;
 }
@@ -284,6 +287,7 @@ export const COMPLETED_PAGE_LIMIT = 50;
 interface CompletedWorkOrdersPageWire {
   work_orders: WorkOrderSummaryWire[];
   total: number;
+  history_total: number;
   next_cursor_completed_at: string | null;
   next_cursor_id: number | null;
 }
@@ -321,6 +325,7 @@ export async function listCompletedWorkOrders(input: {
   return {
     workOrders: wire.work_orders.map(toSummary),
     total: wire.total,
+    historyTotal: wire.history_total,
     nextCursor:
       wire.next_cursor_completed_at !== null && wire.next_cursor_id !== null
         ? {

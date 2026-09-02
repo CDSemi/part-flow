@@ -60,7 +60,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import allocations, projections
+from app.application import allocations, projections, work_orders
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -1457,6 +1457,70 @@ def test_completed_work_order_is_read_only_history(client: TestClient, db_engine
     _assert_projections_match_replay(db_engine)
 
 
+def test_demand_save_judges_the_allocation_floor_on_the_locked_re_read(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Save that read the demand BEFORE a concurrent allocation committed
+    must judge the committed-quantity floor on the row RE-READ under its
+    lock — never on the stale identity-map copy — so a lowered Qty can
+    never leave ``allocated_quantity > requested_quantity``."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 10}])
+    _supply(client, material, stockroom, pn, 10)
+
+    real_get = work_orders.get_work_order
+    allocated_meanwhile: list[Any] = []
+
+    def get_then_allocate(session: Session, work_order_id: int) -> Any:
+        detail = real_get(session, work_order_id)
+        if work_order_id == work_order.id and not allocated_meanwhile:
+            # The allocation commits (its own request, its own session)
+            # after this save loaded the demand and before it locks it.
+            allocated_meanwhile.append(_allocate(client, pn, [(work_order.demand_id, 6)]))
+        return detail
+
+    monkeypatch.setattr(work_orders, "get_work_order", get_then_allocate)
+    lowered = client.patch(
+        f"/api/work-orders/{work_order.id}",
+        json={"line_edits": [{"id": work_order.demand_id, "requested_quantity": 4}]},
+    )
+    assert allocated_meanwhile and allocated_meanwhile[0].status_code == 201
+    assert lowered.status_code == 409 and "6 pcs are already allocated" in lowered.json()["detail"]
+    demand = _demand_row(db_engine, work_order.demand_id)
+    assert (demand.requested_quantity, demand.allocated_quantity) == (10, 6)
+
+
+def test_demand_line_with_allocation_history_is_not_removable(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A reversed allocation leaves the line's active allocation at 0, but
+    its append-only allocation rows still reference the line: removal is
+    refused with a clear reason — never a database error."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    work_order = _create_work_order(
+        client,
+        [
+            {"part_number": pn, "requested_quantity": 4},
+            {"part_number": _unique("PN"), "requested_quantity": 1},
+        ],
+    )
+    _supply(client, material, stockroom, pn, 4)
+    allocated = _allocate(client, pn, [(work_order.demand_id, 4)])
+    assert allocated.status_code == 201
+    assert _reverse(client, allocated.json()["rows"][0]["allocation_id"]).status_code == 201
+    assert _demand_row(db_engine, work_order.demand_id).allocated_quantity == 0
+
+    before = _counts(db_engine)
+    removed = client.delete(f"/api/work-orders/{work_order.id}/demands/{work_order.demand_id}")
+    assert removed.status_code == 409 and "allocat" in removed.json()["detail"]
+    assert _counts(db_engine) == before
+    assert len(_allocation_rows(db_engine, pn)) == 2
+
+
 def test_completed_history_search_filters_and_pages(client: TestClient, db_engine: Engine) -> None:
     material = _Cell(client, machine_count=1)
     stockroom = _Cell(client, is_terminal=True)
@@ -1516,7 +1580,11 @@ def test_completed_history_search_filters_and_pages(client: TestClient, db_engin
     assert [r["id"] for r in third["work_orders"]] == [completed[0].id]
     assert third["next_cursor_id"] is None
     # A done-date range that excludes everything, and half a cursor.
-    assert _completed(client, search=marker, done_to="2000-01-01T00:00:00Z")["total"] == 0
+    # `history_total` ignores the filters: "none in this range" is not
+    # "none ever" (GUI_DESIGN §11.5).
+    empty_range = _completed(client, search=marker, done_to="2000-01-01T00:00:00Z")
+    assert empty_range["total"] == 0 and empty_range["history_total"] >= 3
+    assert page["history_total"] >= page["total"]
     assert client.get("/api/work-orders/completed", params={"cursor_id": 1}).status_code == 422
     assert client.get("/api/work-orders/completed", params={"limit": 0}).status_code == 422
 

@@ -126,7 +126,8 @@ the server-side history:
   adjustment, once per allocation, reopening a completed Work Order),
   `GET /api/allocations`, and `GET /api/work-orders/completed` (the
   read-only history: search over WO Number / PN / Job Number, done
-  range, due outcome, keyset paging); the PN resolution
+  range, due outcome, keyset paging, the matching and the
+  whole-history totals); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses

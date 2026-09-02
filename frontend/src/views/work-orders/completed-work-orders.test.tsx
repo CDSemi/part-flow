@@ -109,6 +109,7 @@ function completedPage(url: URL) {
   const cursorAt = url.searchParams.get('cursor_completed_at');
   const cursorId = url.searchParams.get('cursor_id');
   let rows = workOrders.filter((w) => w.completedAt !== null);
+  const historyTotal = rows.length;
   if (search) {
     rows = rows.filter(
       (w) =>
@@ -153,6 +154,7 @@ function completedPage(url: URL) {
   return {
     work_orders: page.map(summaryWire),
     total,
+    history_total: historyTotal,
     next_cursor_completed_at: last ? last.completedAt : null,
     next_cursor_id: last ? last.id : null,
   };
@@ -349,6 +351,41 @@ test('the completed page loads the server history newest first within the last 9
   expect(
     screen.queryByRole('button', { name: '＋ New Work Order' }),
   ).not.toBeInTheDocument();
+});
+
+test('"none ever" is the server\'s whole-history count — the default window alone never hides it', async () => {
+  // Nothing ever completed: the plain empty state, although the default
+  // 90-day range is in force.
+  workOrders = workOrders.filter((w) => w.completedAt === null);
+  window.history.replaceState({}, '', '/management/work-orders/completed');
+  render(<App />);
+  expect(
+    await screen.findByText(/No completed Work Orders yet/),
+  ).toBeInTheDocument();
+  expect(document.querySelector('.cwo-summary')).toBeNull();
+  cleanup();
+
+  // History exists but none of it inside the range: "none in this
+  // range" with the widening hint — never the "none ever" state.
+  workOrders = [
+    ...workOrders,
+    {
+      id: 5,
+      number: '006721',
+      received: '2025-01-05',
+      due: '2025-02-01',
+      completedAt: daysAgoIso(400),
+      lines: [line(51, 'E-500', 3, 3, 3)],
+    },
+  ];
+  await renderCompleted();
+  expect(
+    screen.getByText(/No completed Work Orders match in this range/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/No completed Work Orders yet/)).toBeNull();
+  expect(document.querySelector('.cwo-summary')).toHaveTextContent(
+    'Showing 0 of 0 completed Work Orders · last 90 days',
+  );
 });
 
 test('search runs on the server over WO Number, PN and Job Number', async () => {

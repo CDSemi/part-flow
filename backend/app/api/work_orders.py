@@ -270,6 +270,9 @@ class CompletedWorkOrdersResponse(BaseModel):
     work_orders: list[WorkOrderSummaryResponse]
     # Matching completed Work Orders in the whole history.
     total: int
+    # Completed Work Orders in the whole history regardless of the
+    # filters — "none ever" versus "none in this range".
+    history_total: int
     # Pass back as `cursor_completed_at` + `cursor_id` for the next page;
     # null when no further page can exist.
     next_cursor_completed_at: datetime.datetime | None
@@ -305,6 +308,7 @@ def list_completed_work_orders(
     return CompletedWorkOrdersResponse(
         work_orders=[_summary_response(summary) for summary in page.work_orders],
         total=page.total,
+        history_total=page.history_total,
         next_cursor_completed_at=(
             page.next_cursor.completed_at if page.next_cursor is not None else None
         ),

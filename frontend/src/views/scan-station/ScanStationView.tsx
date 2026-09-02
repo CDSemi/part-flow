@@ -1134,12 +1134,15 @@ function StationView({
 
   /** A receiving allocation the SERVER confirmed: note it, refresh, refocus. */
   const completeAllocation = useCallback(
-    (result: AllocationResult) => {
+    (
+      result: AllocationResult,
+      workOrderNumbers: ReadonlyMap<number, string | null>,
+    ) => {
       const lines = result.rows.length;
       const completedNote =
         result.completedWorkOrderIds.length > 0
           ? ` Work Order${result.completedWorkOrderIds.length > 1 ? 's' : ''} ${result.completedWorkOrderIds
-              .map((id) => `#${id}`)
+              .map((id) => workOrderNumbers.get(id) ?? `#${id} (internal)`)
               .join(', ')} completed — every demand line is fully allocated.`
           : '';
       setNotice({

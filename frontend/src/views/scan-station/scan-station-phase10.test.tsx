@@ -396,6 +396,31 @@ function handle(url: string, method: string, body: unknown): Response {
     }
     return json(result, 201);
   }
+  const preview = /\/undo-preview\/([^/]+)$/.exec(url);
+  if (preview && method === 'GET') {
+    // The server's verdict on a stocked command: never undoable
+    // (PROJECT_PROFILE §32 open decision 1).
+    const eventId = decodeURIComponent(preview[1]);
+    const record = committed.get(eventId) as
+      | { part_number: string; quantity: number; occurred_at: string }
+      | undefined;
+    if (!record) {
+      return json({ detail: `No production event under '${eventId}'.` }, 404);
+    }
+    return json({
+      reverses_device_event_id: eventId,
+      station_id: 'STOCK-ST-01',
+      kind: 'STOCK',
+      part_number: record.part_number,
+      quantity: record.quantity,
+      occurred_at: record.occurred_at,
+      eligible: false,
+      ineligible_reason:
+        'This action stocked the quantity at the Stockroom: it is manufacturing-complete and may already be allocated to Work Order Demand. Returning stocked quantity to production is not supported; adjust the allocation instead.',
+      movements: [],
+      restored: [],
+    });
+  }
   const suggest = /^\/api\/allocations\/suggestion\?(.*)$/.exec(url);
   if (suggest) {
     const params = new URLSearchParams(suggest[1]);
@@ -800,8 +825,9 @@ test('the confirmation sends the stocked quantity as allocation_quantity with th
   );
   const toast = await notice();
   expect(toast).toHaveTextContent('PN-A × 12 allocated');
-  // 007020 (4/4) and 007003 (5/5) completed; 007010 (5/10) did not.
-  expect(toast).toHaveTextContent('Work Orders #3, #1 completed');
+  // 007020 (4/4) and 007003 (5/5) completed; 007010 (5/10) did not —
+  // NAMED by Work Order Number, never only by id.
+  expect(toast).toHaveTextContent('Work Orders 007020, 007003 completed');
   // The Area is re-read from the server and the barcode input refocused.
   await waitFor(() =>
     expect(
@@ -1075,6 +1101,48 @@ test('leaving the quantity in stock records no allocation', async () => {
   expect(none).toHaveTextContent(
     '14 pcs are already stocked (12 pcs not yet allocated)',
   );
+});
+
+test('a stocked command is never an Undo target — the Last Scanned PN block offers nothing reversible', async () => {
+  await renderStation();
+  const allocation = await stockPnA(12);
+  fireEvent.click(
+    within(allocation).getByRole('button', {
+      name: 'Leave in stock — allocate later',
+    }),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // The stocking is in the session history, but the server (the
+  // authority on eligibility) judges it ineligible — UNDO stays
+  // disabled and the block names no reversible action.
+  const undo = document.querySelector('button.ss-undo') as HTMLButtonElement;
+  await waitFor(() => expect(undo).toBeDisabled());
+  expect(document.querySelector('.ss-lastpninfo .d')?.textContent).toContain(
+    'No reversible Part Number action',
+  );
+  expect(undo.title).toBe(
+    'No completed action of this session can currently be reversed',
+  );
+  // Nothing was posted to any undo endpoint.
+  expect(
+    requests.filter((r) => r.method === 'POST' && /\/undos$/.test(r.url)),
+  ).toHaveLength(0);
+});
+
+test('Enter confirms the allocation once the total matches — keyboard-first, like every other write dialog', async () => {
+  await renderStation();
+  const allocation = await stockPnA(12);
+  // Enter on the dialog itself (focus is not inside a field): the
+  // one write, exactly as the Confirm button would send it.
+  fireEvent.keyDown(allocation, { key: 'Enter' });
+  await waitFor(() => expect(allocationRequests()).toHaveLength(1));
+  expect(allocationRequests()[0].body).toMatchObject({
+    part_number: 'PN-A',
+    allocation_quantity: 12,
+  });
+  const toast = await notice();
+  expect(toast).toHaveTextContent('PN-A × 12 allocated');
 });
 
 test('with no outstanding demand the stocked quantity simply stays in stock', async () => {
