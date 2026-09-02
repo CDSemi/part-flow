@@ -18,7 +18,7 @@ React/FastAPI/PostgreSQL hiện có.
 
 ## 2. Artifact Phase 16 bắt buộc
 
-Không triển khai production từ `../../compose.yaml`. Release phải cung cấp:
+Không triển khai production từ `compose.yaml`. Release phải cung cấp:
 
 - Dockerfile/image frontend và backend production;
 - production Compose configuration;

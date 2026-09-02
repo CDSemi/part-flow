@@ -7,7 +7,7 @@
 >
 > **Trạng thái:** Hiện hành, companion của Project Profile v21. Interactive visual
 > reference: `mockups/partflow-gui-mockup-v18.html`; version cũ nằm trong
-> `archive`. Mockup là reference, không thay contract bằng văn bản.
+> `docs/archive/`. Mockup là reference, không thay contract bằng văn bản.
 
 ---
 

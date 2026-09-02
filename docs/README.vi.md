@@ -27,7 +27,7 @@
 
 ## Chính sách bản dịch
 
-[`TRANSLATION_POLICY.md`](./TRANSLATION_POLICY.md) quy định cách tạo, kiểm tra,
-đánh dấu và cập nhật bản dịch tiếng Việt. `archive` không được dịch vì
+[`TRANSLATION_POLICY.vi.md`](./TRANSLATION_POLICY.vi.md) quy định cách tạo, kiểm tra,
+đánh dấu và cập nhật bản dịch tiếng Việt. `docs/archive/` không được dịch vì
 chứa các bản lịch sử đã bị thay thế. Các HTML mockup là tham chiếu trực quan có
 thể chạy, không phải tài liệu mirror, nên cũng không nằm trong phạm vi dịch.

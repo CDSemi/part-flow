@@ -27,7 +27,7 @@ Vì vậy:
 
 | Mục đích | Repo hiện tại | Quyết định |
 | --- | --- | --- |
-| Máy developer | Được hỗ trợ | Dùng `../compose.yaml` theo root README. |
+| Máy developer | Được hỗ trợ | Dùng `compose.yaml` theo root README. |
 | Synology staging/test nội bộ | Được hỗ trợ có giới hạn | Chỉ trong LAN, dùng dữ liệu giả/không phải production, người dùng được kiểm soát và backup rõ ràng. Xem [`deployment/SYNOLOGY_NAS.md`](./deployment/SYNOLOGY_NAS.md). |
 | Pilot hoặc production | Chưa sẵn sàng | Chờ authorization Phase 14 cùng artifact và gate Phase 16 ở §5. |
 | Mở ra Internet | Hiện tại bị cấm | Ứng dụng chưa có ranh giới authentication production và Compose hiện tại đang expose các service development. |
@@ -36,7 +36,7 @@ Triển khai staging nội bộ không có nghĩa Phase 16 đã hoàn thành.
 
 ## 2. Vì sao Compose hiện tại chỉ dành cho development
 
-Repo tự ghi rõ `../compose.yaml` và hai Dockerfile là artifact development. Các
+Repo tự ghi rõ `compose.yaml` và hai Dockerfile là artifact development. Các
 giới hạn đã quan sát được gồm:
 
 - backend chạy Uvicorn với `--reload`;

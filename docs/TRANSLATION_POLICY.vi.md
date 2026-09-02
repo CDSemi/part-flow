@@ -18,7 +18,7 @@ hành.
 
 ## 2. Cấu trúc và cách đặt tên
 
-- `../README.md` ở root tương ứng với `../README.vi.md`.
+- `README.md` ở root tương ứng với `README.vi.md`.
 - `docs/<path>/<NAME>.md` tương ứng với `docs/<path>/<NAME>.vi.md` — bản dịch
   tiếng Việt nằm cùng thư mục với bản gốc tiếng Anh, chỉ khác hậu tố `.vi.md`
   (ví dụ `docs/GUI_DESIGN.md` ↔ `docs/GUI_DESIGN.vi.md`,
@@ -88,9 +88,9 @@ migration, backup, restore hoặc rollback vẫn phải được review về ng�
 Tài liệu project đang active và tài liệu vận hành mới đều có mirror tiếng Việt.
 Các mục sau được chủ động loại trừ:
 
-- `archive`, vì chứa bản lịch sử và prompt cũ đã bị thay thế;
-- `mockups`, vì HTML ở đó là tham chiếu trực quan có thể chạy và UI text
+- `docs/archive/`, vì chứa bản lịch sử và prompt cũ đã bị thay thế;
+- `docs/mockups/`, vì HTML ở đó là tham chiếu trực quan có thể chạy và UI text
   của chúng được quản lý bởi `GUI_DESIGN.md`;
-- `../AGENTS.md` và `../CLAUDE.md`, vì đây là instruction vận hành AI chứ không phải
+- `AGENTS.md` và `CLAUDE.md`, vì đây là instruction vận hành AI chứ không phải
   tài liệu project cho người đọc. Nhân đôi chúng bằng ngôn ngữ khác sẽ tạo ra
   các instruction entry point cạnh tranh nhau.
