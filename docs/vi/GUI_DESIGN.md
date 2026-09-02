@@ -1,8 +1,7 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`docs/GUI_DESIGN.md`](../GUI_DESIGN.md).
-> Baseline upstream: commit `6fdf20e` (Phase 10 audit r3) cộng sửa đổi §11.5
-> chưa commit (keyset continuation giữ effective Done range) đã được phản ánh.
+> Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](../PROJECT_PROFILE.md) định nghĩa.
 >

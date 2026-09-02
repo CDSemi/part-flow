@@ -1,8 +1,7 @@
 # Roadmap triển khai PartFlow
 
 > **Bản gốc chuẩn:** [`docs/IMPLEMENTATION_ROADMAP.md`](../IMPLEMENTATION_ROADMAP.md).
-> Baseline upstream: commit `6fdf20e` (Phase 10 audit r3) cộng sửa đổi Phase 10
-> chưa commit (keyset continuation giữ effective Done range) đã được phản ánh.
+> Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
 >
 > **Quyền chuẩn:** File tiếng Anh là canonical source cho thứ tự triển khai,
 > ranh giới phase, dependency và các giới hạn tạm thời. Hành vi domain và phạm

@@ -70,8 +70,14 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   (``production_release.demand_has_released_quantity``). Removal never
   touches the PartNumber master, QuantityFlows, PartMovements, release
   history, or other demand lines; an unsaved draft is a frontend
-  concern and never reaches this layer. Release itself, allocation,
-  and Completed Work Orders stay outside this module.
+  concern and never reaches this layer. Release itself and every
+  allocation write stay outside this module
+  (``production_release``, ``allocations``); what lives here besides
+  the intake is the READ side of completion — the derived
+  ``COMPLETED`` status, the read-only guard on a completed Work Order,
+  and the Completed Work Orders history read model (GUI_DESIGN §11.5:
+  the site-calendar done date, the Done range, the server-side sort and
+  the keyset paging).
 """
 
 import base64
