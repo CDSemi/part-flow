@@ -1,5 +1,7 @@
 # PartFlow GUI Design v18
 
+> **Language:** English is the source of truth. [Tiếng Việt](./vi/GUI_DESIGN.md).
+
 > **Status:** Current — companion to [PROJECT_PROFILE.md](./PROJECT_PROFILE.md) (v21).
 > This document specifies the user interface only. Business rules, terminology and workflows are defined in PROJECT_PROFILE and are not redefined here.
 > An interactive mockup accompanies this document: `mockups/partflow-gui-mockup-v18.html` (previous versions are archived under `docs/archive/`). The v18 mockup is aligned with the PROJECT_PROFILE v16 PN-identity model (canonical uppercase PN — trimmed, no internal whitespace; PN master as optional, hard-deletable metadata).

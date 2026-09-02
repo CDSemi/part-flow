@@ -1,5 +1,9 @@
 # PartFlow
 
+> **Language:** English is the source of truth. [Tiếng Việt](./README.vi.md).
+> See the [documentation index](./docs/README.md) and
+> [deployment guide](./docs/DEPLOYMENT.md).
+
 Internal manufacturing tracking system for barcode-driven movement of
 production quantities through the factory.
 
