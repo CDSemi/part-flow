@@ -17,15 +17,17 @@ chain. Covered per IMPLEMENTATION_ROADMAP Phase 11, PROJECT_PROFILE
   restores the earlier one), the completing Machine as DONE context;
 - the stocked and scrapped quantities derived from history (net of
   reversed scraps), the row totals and the footer totals reconciling;
-- the demand context (Work Order Number, Job Numbers, requested /
+- the OPEN demand context (Work Order Number, Job Numbers, requested /
   allocated quantity, request type) in the canonical order, the first
   demand defining the row's Hot rank, due and received dates, a
-  completed Work Order still named while its quantity is in
-  production, and a quantity without any demand context;
+  completed Work Order never supplying metadata even while its
+  quantity is still in production, and a quantity without any demand
+  context keeping its row with the no-demand fallback;
 - the row selection: stocked-only rows stay only while an open demand
   exists, and leave once the Work Order completes;
-- the canonical board order: active rows first, Hot rank, dated
-  earliest first, undated by received date, stocked-only rows last.
+- the canonical board order and nothing else: Hot rank, dated
+  earliest first, undated by received date, the deterministic
+  tie-breaker — stocked quantity is not a sorting tier.
 
 The API commits real transactions, so tests isolate through fresh
 Departments, PNs and Work Orders; the module database is dropped
@@ -555,7 +557,6 @@ def test_the_distribution_reports_every_state_with_its_machine_and_activity(
             "job_numbers": ["18112", "18113"],
             "due_date": None,
             "priority_rank": None,
-            "completed": False,
         }
     ]
     assert row["hot_rank"] is None
@@ -658,7 +659,6 @@ def test_stocked_and_scrapped_quantities_derive_from_history(
     # Leaving the stocked quantity unallocated keeps the row: the demand
     # is still open (allocated 0 of 20).
     assert row["demands"][0]["allocated_quantity"] == 0
-    assert row["demands"][0]["completed"] is False
 
 
 def test_the_footer_totals_reconcile_with_the_rows(client: TestClient) -> None:
@@ -677,7 +677,9 @@ def test_the_footer_totals_reconcile_with_the_rows(client: TestClient) -> None:
     _stock(client, shop.material, shop.stockroom, flow_c, pn_c, 5)
 
     board = _board(client, shop.department_id)
-    assert [row["part_number"] for row in board["rows"]][-1] == pn_c
+    # Three undated demands received today: the demand id breaks the tie
+    # — the entirely stocked PN is no sorting tier of its own.
+    assert [row["part_number"] for row in board["rows"]] == [pn_a, pn_b, pn_c]
     assert board["active_part_numbers"] == 2
     assert board["active_quantity"] == 7 + 9
     assert board["stocked_quantity"] == 3 + 5
@@ -708,26 +710,26 @@ def test_a_stocked_only_row_stays_while_demand_is_open_and_leaves_on_completion(
     _allocate(client, pn, [(work_order.demand_id, 4)])
     row = _row(_board(client, shop.department_id), pn)
     assert row["demands"][0]["allocated_quantity"] == 4
-    assert row["demands"][0]["completed"] is False
 
     # Full allocation completes the Work Order: the finished PN leaves.
     _allocate(client, pn, [(work_order.demand_id, 2)])
     assert _row_or_none(_board(client, shop.department_id), pn) is None
 
 
-def test_a_completed_work_order_stays_named_while_its_quantity_is_in_production(
+def test_a_completed_work_order_never_supplies_the_rows_context(
     client: TestClient, shop: _Shop
 ) -> None:
     pn = _unique("PN")
     work_order = _create_work_order(
-        client, [{"part_number": pn, "requested_quantity": 5}], number="007009"
+        client,
+        [{"part_number": pn, "requested_quantity": 5, "job_numbers": ["18900"]}],
+        number="007009",
     )
     flow_id = _release(client, shop.material, work_order, pn, quantity=5)
-    # 4 pcs stocked and allocated complete the Work Order; 1 pc is
-    # still in Material.
+    # 4 pcs stocked and allocated; the fifth piece comes from a supply
+    # Work Order of its own (an allocation never exceeds the available
+    # stock), completing 007009 while 1 pc of it is still in Material.
     _stock(client, shop.material, shop.stockroom, flow_id, pn, 4)
-    # The allocation never exceeds the available stock, so the fifth
-    # piece comes from a supply Work Order of its own.
     _allocate(client, pn, [(work_order.demand_id, 4)])
     supply = _create_work_order(
         client, [{"part_number": pn, "requested_quantity": 1}], received_date="2099-12-31"
@@ -738,15 +740,14 @@ def test_a_completed_work_order_stays_named_while_its_quantity_is_in_production(
     _stock(client, shop.material, shop.stockroom, supply_flow, pn, 1)
     _allocate(client, pn, [(work_order.demand_id, 1)])
 
+    # The completed 007009 is history: only the open supply demand is
+    # the row's context, and it defines the row's dates.
     row = _row(_board(client, shop.department_id), pn)
     assert row["active_quantity"] == 1
-    named = {demand["work_order_number"]: demand for demand in row["demands"]}
-    assert named["007009"]["completed"] is True
-    assert named["007009"]["allocated_quantity"] == 5
-    # Both demands are undated: the completed 007009 (received today,
-    # named through its released quantity) precedes the open supply
-    # demand received far in the future.
-    assert [demand["work_order_number"] for demand in row["demands"]] == ["007009", None]
+    assert [demand["work_order_id"] for demand in row["demands"]] == [supply.id]
+    assert all(demand["work_order_number"] != "007009" for demand in row["demands"])
+    assert row["due_date"] is None
+    assert row["received_date"] == "2099-12-31"
 
 
 def _orphan_quantity(client: TestClient, shop: _Shop, pn: str, quantity: int) -> None:
@@ -810,14 +811,14 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
 
     undated_old = seed(due=None, received="2026-01-05")
     dated_late = seed(due="2026-12-01", received="2026-01-01")
-    stocked_hot = seed(due="2026-01-01", received="2026-01-01", rank=1, stocked=True)
+    stocked_hot = seed(due="2026-01-02", received="2026-01-01", rank=1, stocked=True)
     hot_2 = seed(due="2026-12-31", received="2026-01-01", rank=2)
     dated_early = seed(due="2026-06-01", received="2026-03-01")
     undated_new = seed(due=None, received="2026-02-01")
     hot_1 = seed(due=None, received="2026-01-01", rank=1)
     dated_first = seed(due="2026-01-01", received="2026-01-01")
-    # A row without any demand context: its Work Order completed, only
-    # found quantity remains active.
+    # A row without any demand context: its Work Order completed (no
+    # longer context), only found quantity remains active.
     orphan = _unique("PN")
     orphan_wo = _create_work_order(client, [{"part_number": orphan, "requested_quantity": 1}])
     orphan_flow = _release(client, shop.material, orphan_wo, orphan, quantity=1)
@@ -825,8 +826,13 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
     _stock(client, shop.material, shop.stockroom, orphan_flow, orphan, 1)
     _allocate(client, orphan, [(orphan_wo.demand_id, 1)])
 
+    # Exactly the canonical demand ordering: within rank 1 the dated
+    # demand precedes the undated one — the entirely stocked PN is no
+    # tier of its own — and the row without demand context is an
+    # unranked, undated row on its fallback received date (today).
     board = _board(client, shop.department_id)
     assert [row["part_number"] for row in board["rows"]] == [
+        stocked_hot,
         hot_1,
         hot_2,
         dated_first,
@@ -835,7 +841,6 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
         undated_old,
         undated_new,
         orphan,
-        stocked_hot,
     ]
     assert _row(board, hot_1)["hot_rank"] == 1
     assert _row(board, stocked_hot)["hot_rank"] == 1

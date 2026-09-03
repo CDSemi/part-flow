@@ -185,8 +185,9 @@
   của effective position-bearing Movement, lấy cũ nhất trong nhóm), stocked và
   scrapped từ effective `STOCKED` / `SCRAPPED`, demand context theo canonical
   demand ordering (PROJECT_PROFILE §18 — demand đầu tiên quyết định Hot rank, due
-  date và received date của row), tổng Department, theo canonical board order
-  (row active theo demand order, row stocked hoàn toàn xếp cuối). Frontend thật
+  date và received date của row; Work Order đã complete không bao giờ cấp
+  metadata cho row), tổng Department, theo đúng canonical demand ordering đó
+  (stocked không phải một tầng sắp xếp riêng). Frontend thật
   (`src/api/production-board.ts`, `views/production-board/ProductionBoardView.tsx`,
   `board-feed.ts`): Department do server resolve (một Department active duy nhất,
   hoặc `?department=<id>` trên URL của màn hình), auto-refresh định kỳ với một
@@ -607,19 +608,22 @@ External activity) lấy thời điểm CŨ NHẤT của nhóm; Operation extern
 (`Operation.is_external`) đặt tên activity. Stocked = Σ effective `STOCKED` vào
 terminal Area của Department (theo Area, không có thời gian vào); scrapped = Σ
 effective `SCRAPPED` trong Area của Department (trừ scrap đã reverse). Demand
-context = demand còn mở của PN (Work Order chưa complete) cộng demand đã release
-các active flow (Work Order đã complete mà quantity còn trong sản xuất vẫn được
-nêu tên, `completed: true`), theo `allocations.canonical_demand_order`; demand
-đầu tiên quyết định Hot rank, due date, received date của row — row không có
-demand context nào (quantity addition Phase 9, merge giữa các demand) giữ due
-date null và lấy received date từ ngày tạo active flow cũ nhất theo lịch site
+context = CHỈ demand còn mở của PN (Work Order chưa complete), theo
+`allocations.canonical_demand_order`; demand đầu tiên quyết định Hot rank, due
+date, received date của row. Work Order đã complete là lịch sử, không bao giờ
+cấp Hot rank, ngày hay metadata Work Order / Job Number cho row kể cả khi
+quantity nó release còn trong sản xuất: row như vậy — cũng như quantity addition
+Phase 9 hay merge giữa các demand — không có demand context, giữ due date null
+và lấy received date từ ngày tạo active flow cũ nhất theo lịch site
 (`SITE_TIMEZONE`). Chọn row: PN có active quantity luôn là row; PN không có
 active quantity chỉ là row khi có stocked quantity trong Department VÀ demand
 còn mở, rời board khi mọi Work Order của nó complete. Board order
-(`board_row_sort_key`): row có active quantity trước row stocked hoàn toàn
-(lựa chọn presentation, không phải business rule), mỗi nhóm theo canonical
-demand order của demand quyết định, row không có demand context sau mọi row có
-context. Department: `department_id` tường minh phải tồn tại (404); bỏ trống thì
+(`board_row_sort_key`): đúng canonical demand ordering của demand quyết định và
+không gì khác — Hot rank trước, dated theo due date sớm nhất, undated sau mọi
+dated theo received date của Work Order, demand id là tie-breaker; stocked không
+phải một tầng sắp xếp (row stocked hoàn toàn sắp theo open demand của nó như
+mọi row khác), row không có demand context là row không rank, không due date,
+sắp theo received date fallback. Department: `department_id` tường minh phải tồn tại (404); bỏ trống thì
 resolve Department active duy nhất (không có → 404, nhiều → 409 nêu tên — màn
 hình không bao giờ bị trỏ nhầm Department âm thầm). Response chỉ mang timestamp
 và ngày nguồn cố định — dwell, countdown và `Total Days` derive lúc render từ UI
@@ -628,9 +632,9 @@ duration của Route Step. Test: `tests/test_production_board_api.py` (phạm vi
 resolve Department, mọi state kèm Machine và External activity, gộp lấy thời
 điểm cũ nhất, timestamp kế thừa qua lineage và khôi phục qua Undo, stocked /
 scrapped từ history, tổng footer khớp rows, row stocked-only còn khi demand mở
-và rời khi complete, Work Order complete vẫn được nêu tên, quantity không có
-demand context, canonical board order, demand đầu tiên quyết định ngày của
-row). **Frontend** (`src/api/production-board.ts`,
+và rời khi complete, Work Order complete không bao giờ cấp context cho row,
+quantity không có demand context vẫn giữ row với ngày fallback, canonical board
+order không có tầng stocked, demand đầu tiên quyết định ngày của row). **Frontend** (`src/api/production-board.ts`,
 `views/production-board/ProductionBoardView.tsx`, `board-feed.ts`,
 `board-logic.ts`; view thật trong `src/app/real-views.ts` có trong mọi build,
 mock dataset cũ đã xoá): board đọc `GET /api/production-board` —

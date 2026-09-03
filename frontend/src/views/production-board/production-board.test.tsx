@@ -92,7 +92,6 @@ function demand(
     requestType?: string;
     dueDate?: string | null;
     priorityRank?: number | null;
-    completed?: boolean;
   } = {},
 ) {
   return {
@@ -105,13 +104,13 @@ function demand(
     job_numbers: jobNumbers,
     due_date: extra.dueDate ?? null,
     priority_rank: extra.priorityRank ?? null,
-    completed: extra.completed ?? false,
   };
 }
 
-// Rows in the SERVER's canonical order (Hot rank → earliest due date →
-// undated by received date → stocked-only rows last), the same order
-// the view keeps.
+// Rows in the SERVER's canonical order — exactly the canonical demand
+// ordering of each row's defining OPEN demand (Hot rank → earliest due
+// date → undated by received date → demand id), stocked quantity being
+// no sorting tier — the same order the view keeps.
 const BOARD_ROWS = [
   {
     part_number: '2027-60-8114-00',
@@ -162,18 +161,23 @@ const BOARD_ROWS = [
     ],
   },
   {
-    part_number: '0123-40-0007-22',
+    part_number: '309-127',
     hot_rank: null,
-    due_date: isoDateIn(9),
-    received_date: isoDateIn(-3),
-    locations: [
-      location(AREA.external, 'PROCESSING', 12, 1800, { activity: 'vendor' }),
-    ],
-    active_quantity: 12,
-    stocked_quantity: 0,
+    due_date: isoDateIn(-12),
+    received_date: isoDateIn(-34),
+    locations: [location(AREA.stockroom, 'STOCKED', 50, null)],
+    active_quantity: 0,
+    stocked_quantity: 50,
     scrapped_quantity: 0,
-    total_quantity: 12,
-    demands: [demand(7007, '007007', ['18377'], 12, { dueDate: isoDateIn(9) })],
+    total_quantity: 50,
+    demands: [
+      // Entirely stocked, partially allocated: the demand is still
+      // open, so the row stays — and sorts by its (overdue) due date.
+      demand(6996, '006996', ['17740'], 50, {
+        allocated: 30,
+        dueDate: isoDateIn(-12),
+      }),
+    ],
   },
   {
     part_number: '0455-20-0118-03',
@@ -191,6 +195,20 @@ const BOARD_ROWS = [
     scrapped_quantity: 0,
     total_quantity: 12,
     demands: [demand(7003, '007003', ['18190'], 12, { dueDate: isoDateIn(9) })],
+  },
+  {
+    part_number: '0123-40-0007-22',
+    hot_rank: null,
+    due_date: isoDateIn(9),
+    received_date: isoDateIn(-3),
+    locations: [
+      location(AREA.external, 'PROCESSING', 12, 1800, { activity: 'vendor' }),
+    ],
+    active_quantity: 12,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 12,
+    demands: [demand(7007, '007007', ['18377'], 12, { dueDate: isoDateIn(9) })],
   },
   {
     part_number: '78-04-0031',
@@ -226,23 +244,6 @@ const BOARD_ROWS = [
     scrapped_quantity: 0,
     total_quantity: 4,
     demands: [demand(7011, '007011', ['18520'], 4)],
-  },
-  {
-    part_number: '309-127',
-    hot_rank: null,
-    due_date: isoDateIn(-12),
-    received_date: isoDateIn(-34),
-    locations: [location(AREA.stockroom, 'STOCKED', 50, null)],
-    active_quantity: 0,
-    stocked_quantity: 50,
-    scrapped_quantity: 0,
-    total_quantity: 50,
-    demands: [
-      demand(6996, '006996', ['17740'], 50, {
-        allocated: 50,
-        dueDate: isoDateIn(-12),
-      }),
-    ],
   },
 ];
 
@@ -602,24 +603,25 @@ test('the clock reads time-first with the date as its secondary line', async () 
   ]);
 });
 
-test('rows follow canonical order: Hot → dated → undated → stocked', async () => {
+test('rows keep the server order: Hot → dated (stocked rows included) → undated', async () => {
   await renderBoard();
 
   const parts = Array.from(
     visibleTable().querySelectorAll('tbody .part'),
     (el) => el.textContent,
   );
-  // 0123-40-0007-22 and 0455-20-0118-03 share the SAME due date in the
-  // v16 mocks — equal dated demands keep the stable creation order
-  // (demand-order rule 4), so 0123 (earlier in the mock array) leads.
+  // The entirely stocked 309-127 sits among the dated rows by its due
+  // date — stocked quantity is no sorting tier; 0455-20-0118-03 and
+  // 0123-40-0007-22 share the same due date and keep the server's
+  // tie-break (the demand id). The view never re-sorts.
   expect(parts).toEqual([
     '2027-60-8114-00',
     '142-260',
-    '0123-40-0007-22',
+    '309-127',
     '0455-20-0118-03',
+    '0123-40-0007-22',
     '78-04-0031',
     '118-052',
-    '309-127',
   ]);
   // Row numbering stays continuous in display order.
   const numbers = Array.from(
@@ -1760,7 +1762,7 @@ test('the Job Numbers column names every demand with its WO context', async () =
     rowByPn('309-127')?.querySelectorAll('.jobs .j') ?? [],
     (el) => el.textContent,
   );
-  expect(stockedJobs).toEqual(['17740 · WO 006996 · allocated 50/50']);
+  expect(stockedJobs).toEqual(['17740 · WO 006996 · allocated 30/50']);
 });
 
 test('the first load shows the loading state under the board header', async () => {

@@ -57,7 +57,7 @@ export interface BoardLocation {
   since: string | null;
 }
 
-/** One Work Order Demand named on a board row (Job Numbers column). */
+/** One OPEN Work Order Demand named on a board row (Job Numbers column). */
 export interface BoardDemand {
   workOrderId: number;
   /** Verbatim external number, or null on an internal Work Order —
@@ -71,9 +71,6 @@ export interface BoardDemand {
   /** ISO `YYYY-MM-DD`, or null. */
   dueDate: string | null;
   priorityRank: number | null;
-  /** A completed Work Order stays named while its quantity is still
-   * in production. */
-  completed: boolean;
 }
 
 export interface BoardRow {
@@ -97,8 +94,10 @@ export interface BoardRow {
   /** Cumulative SCRAPPED quantity for the PN in the Department (0 =
    * none). */
   scrapped: number;
-  /** The demand context in canonical order; the first entry defines
-   * the row's Hot rank, due and received dates. */
+  /** The OPEN demand context in canonical order; the first entry
+   * defines the row's Hot rank, due and received dates. Empty when only
+   * history (a completed Work Order, found quantity) explains the
+   * quantity — the row then carries the server's fallback dates. */
   demands: BoardDemand[];
   /**
    * ISO `YYYY-MM-DD` due date of the row's defining WO Demand, or null
@@ -153,7 +152,6 @@ interface BoardDemandWire {
   job_numbers: string[];
   due_date: string | null;
   priority_rank: number | null;
-  completed: boolean;
 }
 
 interface BoardRowWire {
@@ -210,7 +208,6 @@ function toDemand(wire: BoardDemandWire): BoardDemand {
     jobNumbers: wire.job_numbers,
     dueDate: wire.due_date,
     priorityRank: wire.priority_rank,
-    completed: wire.completed,
   };
 }
 

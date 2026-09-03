@@ -4,7 +4,7 @@
 (`app.application.production_board`): the rows in the canonical board
 order with their distributed quantity per Area / Machine / External
 activity, the fixed entry timestamps the display derives dwell times
-from, the stocked and scrapped quantities, the demand context (Work
+from, the stocked and scrapped quantities, the OPEN demand context (Work
 Order Number, Job Numbers, requested / allocated quantity) and the
 Hot rank, plus the Department totals of the footer. ``department_id``
 selects the Department; omitted, the single active Department is
@@ -64,9 +64,6 @@ class BoardDemandResponse(BaseModel):
     job_numbers: list[str]
     due_date: datetime.date | None
     priority_rank: int | None
-    # Completed Work Orders stay named while their quantity is still in
-    # production.
-    completed: bool
 
 
 class BoardRowResponse(BaseModel):
@@ -129,7 +126,6 @@ def _demand(entry: production_board.BoardDemand) -> BoardDemandResponse:
         job_numbers=list(entry.demand.job_numbers),
         due_date=entry.demand.due_date,
         priority_rank=entry.demand.priority_rank,
-        completed=entry.work_order.completed_at is not None,
     )
 
 

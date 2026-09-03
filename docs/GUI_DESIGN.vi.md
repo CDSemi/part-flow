@@ -392,7 +392,7 @@ Read-only full-screen Department-wide display, không per-Area filter.
 `GET /api/production-board` (IMPLEMENTATION_ROADMAP Phase 11): rows đến theo
 canonical board order từ read model của **server** — phân bổ theo Area / Machine /
 External activity với state derive, timestamp vào vị trí cố định, stocked và
-scrapped, Work Order / Job Number context và Hot rank đều derive server-side từ
+scrapped, Work Order / Job Number context còn mở và Hot rank đều derive server-side (Work Order đã complete không cấp context cho row; rows theo đúng canonical demand ordering — stocked không phải tầng sắp xếp) từ
 projection vị trí hiện tại và Movement history — còn mọi giá trị thời gian hiển
 thị (dwell theo vị trí và cờ `long`, due countdown, `Total Days`, đồng hồ) vẫn
 derive lúc render từ UI clock chung (§3.12). Dòng Department nêu Department server

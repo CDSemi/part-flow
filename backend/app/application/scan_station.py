@@ -326,7 +326,7 @@ def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> d
     return {operation.id: operation for operation in rows}
 
 
-def work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
+def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkOrderContext]:
     """The initiating Work Order Demand of each flow, from its RECEIVED context.
 
     A flow created by a SPLIT or a MERGED (Phase 8) has no RECEIVED of
@@ -388,7 +388,7 @@ def resolve_part_number_scan(
             .order_by(QuantityFlow.id)
         )
     )
-    contexts = work_order_contexts(session, [flow.id for flow in flows])
+    contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
     # Every flow's state depends on the mode of the Area it is in.
@@ -585,7 +585,7 @@ def resolve_machine_scan(
     )
     latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
-    contexts = work_order_contexts(session, [flow.id for flow in flows])
+    contexts = _work_order_contexts(session, [flow.id for flow in flows])
     queued = [
         FlowInArea(
             flow.part_number,
@@ -700,7 +700,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
             .order_by(QuantityFlow.part_number, QuantityFlow.id)
         )
     )
-    contexts = work_order_contexts(session, [flow.id for flow in flows])
+    contexts = _work_order_contexts(session, [flow.id for flow in flows])
     latest = effective_latest_movements(session, [flow.id for flow in flows])
     recorded = _recorded_operations(session, latest)
     active_machines = list(

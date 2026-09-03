@@ -39,29 +39,34 @@ stored counter:
 - **Scrapped quantity** is the sum of the effective `SCRAPPED`
   Movements recorded in the Department's Areas (net of reversed
   scraps), per PN.
-- **Demand context**: the PN's OPEN Work Order Demands (the Work Order
-  not completed, PROJECT_PROFILE §18) plus the demands that released
-  the active flows (from the `RECEIVED` context — a finished Work Order
-  whose quantity is still in production stays named), in the canonical
+- **Demand context**: the PN's OPEN Work Order Demands only — the
+  Work Order not completed (PROJECT_PROFILE §18) — in the canonical
   demand order (`allocations.canonical_demand_order`: Hot rank, dated
   earliest first, undated by the Work Order's received date, the
   demand id as the deterministic tie-breaker). The FIRST demand of a
   row defines its Hot rank, due date and received date — the values
   the board sorts by and derives `N days left` / `Total Days` from. A
-  row whose quantity has no demand context at all (a Phase 9 quantity
-  addition, a merge across demands) keeps a null due date and takes
-  its received date from the day its oldest active flow was created
-  on the site calendar, so `Total Days` still has a meaning.
+  completed Work Order is history and never supplies a row's Hot rank,
+  dates or Work Order / Job Number metadata, even while quantity it
+  released is still in production: such a row — like a Phase 9
+  quantity addition or a merge across demands — has no demand context,
+  keeps a null due date, and takes its received date from the day its
+  oldest active flow was created on the site calendar, so `Total
+  Days` still has a meaning.
 - **Row selection**: a PN with active quantity in the Department is
-  always a row. A PN with NO active quantity is a row only while it has
-  stocked quantity in the Department AND an open demand — stocked
-  quantity waiting for (or partially) allocated to open work; once its
-  every Work Order is complete, the PN leaves the board.
-- **Board order** (`board_row_sort_key`): rows with active quantity
-  first, rows that are entirely stocked last (completed demand, a
-  presentation choice — not a business rule), each group in the
-  canonical demand order of its defining demand; a row without demand
-  context sorts after every row with one, by PN.
+  always a row (with or without demand context). A PN with NO active
+  quantity is a row only while it has stocked quantity in the
+  Department AND an open demand — stocked quantity waiting for (or
+  partially allocated to) open work; once its every Work Order is
+  complete, the PN leaves the board.
+- **Board order** (`board_row_sort_key`): the canonical demand
+  ordering of the row's defining demand, and nothing else — Hot rank
+  first, dated rows earliest due date first, undated rows after all
+  dated rows by the Work Order's received date, the demand id as the
+  deterministic tie-breaker. Stocked quantity is not a sorting tier: a
+  row whose quantity is entirely stocked sorts by its open demand like
+  any other row. A row without demand context is an unranked, undated
+  row ordered by its fallback received date (its PN the tie-breaker).
 
 Time in location versus the expected duration of the active Route
 Step (PROJECT_PROFILE §21 "may be highlighted") is not judged here —
@@ -80,7 +85,6 @@ from app.application.allocations import canonical_demand_order
 from app.application.errors import ConflictError, NotFoundError
 from app.application.machines import areas_with_machines
 from app.application.projections import effective_latest_movements, processing_state_of
-from app.application.scan_station import work_order_contexts
 from app.application.work_orders import site_timezone
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
 from app.infrastructure.models import (
@@ -144,8 +148,9 @@ class BoardRow(NamedTuple):
     active_quantity: int
     stocked_quantity: int
     scrapped_quantity: int
-    # The demand context in canonical order; the first entry defines
-    # the row's Hot rank, due date and received date.
+    # The OPEN demand context in canonical order; the first entry
+    # defines the row's Hot rank, due date and received date. Empty
+    # when only history explains the quantity.
     demands: list[BoardDemand]
 
     @property
@@ -232,22 +237,21 @@ def _effective_totals_by_area(
     return {(str(pn), int(area_id)): int(total) for pn, area_id, total in rows}
 
 
-def _demand_context(
-    session: Session, part_numbers: set[str], flow_ids: list[int]
-) -> dict[str, list[BoardDemand]]:
-    """The demands per PN in canonical order: open demand plus the
-    demands that released the active flows."""
+def _demand_context(session: Session, part_numbers: set[str]) -> dict[str, list[BoardDemand]]:
+    """The OPEN demands per PN in canonical order.
+
+    A completed Work Order is history: it never supplies a row's Hot
+    rank, dates or Work Order / Job Number metadata, even while
+    quantity it released is still in production.
+    """
     if not part_numbers:
         return {}
-    released_demand_ids = {
-        context.work_order_demand_id for context in work_order_contexts(session, flow_ids).values()
-    }
     query = (
         select(WorkOrderDemand, WorkOrder)
         .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
         .where(
             WorkOrderDemand.part_number.in_(part_numbers),
-            (WorkOrder.completed_at.is_(None)) | (WorkOrderDemand.id.in_(released_demand_ids)),
+            WorkOrder.completed_at.is_(None),
         )
     )
     contexts: dict[str, list[BoardDemand]] = {}
@@ -264,10 +268,6 @@ def _location_sort_key(location: BoardLocation) -> tuple[str, int, int, str, int
         location.machine.name if location.machine is not None else "",
         location.machine.id if location.machine is not None else 0,
     )
-
-
-def _has_open_demand(demands: list[BoardDemand]) -> bool:
-    return any(entry.work_order.completed_at is None for entry in demands)
 
 
 # ---------------------------------------------------------------------------
@@ -376,14 +376,14 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
         scrapped_by_pn[pn] = scrapped_by_pn.get(pn, 0) + quantity
 
     part_numbers = set(groups) | set(stocked_by_pn)
-    demands = _demand_context(session, part_numbers, flow_ids)
+    demands = _demand_context(session, part_numbers)
     zone = ZoneInfo(site_timezone())
 
     rows: list[BoardRow] = []
     for pn in sorted(part_numbers):
         active_locations = list(groups.get(pn, {}).values())
         context = demands.get(pn, [])
-        if not active_locations and not _has_open_demand(context):
+        if not active_locations and not context:
             # Stocked quantity of finished work: no longer the
             # Department's business on the board.
             continue
@@ -432,24 +432,24 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
 
 def board_row_sort_key(
     row: BoardRow,
-) -> tuple[int, int, int, datetime.date, int, datetime.date, int, str]:
+) -> tuple[int, datetime.date, int, datetime.date, int, str]:
     """The canonical board order, expressed as a sort key.
 
-    Active rows before entirely stocked rows; then the canonical demand
-    order of the row's defining demand — Hot rank (unranked last),
-    dated earliest first, undated after all dated by the Work Order's
-    received date, the demand id as the tie-breaker — with a row
-    without demand context after every row that has one, by PN.
+    Exactly the canonical demand ordering (PROJECT_PROFILE §18) of the
+    row's defining demand — Hot rank (unranked last), dated earliest
+    first, undated after all dated by the Work Order's received date,
+    the demand id as the deterministic tie-breaker. Stocked quantity is
+    no tier of its own. A row without demand context is an unranked,
+    undated row ordered by its fallback received date, then its PN.
     """
     first = row.demands[0] if row.demands else None
+    unranked = 1_000_000_000
     far = datetime.date.max
     if first is None:
-        return (int(row.is_stocked_only), 1, 0, far, 1, far, 0, row.part_number)
+        return (unranked, far, 1, row.received_date, unranked, row.part_number)
     demand = first.demand
     return (
-        int(row.is_stocked_only),
-        0,
-        demand.priority_rank if demand.priority_rank is not None else 1_000_000_000,
+        demand.priority_rank if demand.priority_rank is not None else unranked,
         demand.due_date if demand.due_date is not None else far,
         1 if demand.due_date is None else 0,
         first.work_order.received_date if demand.due_date is None else far,

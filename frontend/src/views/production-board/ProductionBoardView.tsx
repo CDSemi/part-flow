@@ -471,7 +471,6 @@ const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
         jobNumbers,
         dueDate,
         priorityRank: null,
-        completed: false,
       });
       const rows: BoardRow[] = [
         {

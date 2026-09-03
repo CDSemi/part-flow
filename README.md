@@ -144,9 +144,9 @@ mode):
   Department's Areas — or stocked quantity with an open demand — with
   its distribution per Area / Machine / External activity, the derived
   state and the fixed entry timestamp of each position, the stocked and
-  scrapped quantities, the demand context with Work Order Number, Job
-  Numbers and allocated quantity, the Hot rank, in the canonical board
-  order; `department_id` selects the Department, omitted only for a
+  scrapped quantities, the open demand context with Work Order Number,
+  Job Numbers and allocated quantity, the Hot rank, in the canonical
+  demand ordering; `department_id` selects the Department, omitted only for a
   single active Department); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
