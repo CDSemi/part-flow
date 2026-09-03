@@ -175,6 +175,27 @@
   tại khi còn row tiếp theo. Đã audit trước khi đóng.
   Authorization adjustment chờ Phase 14, Worker chờ Phase 13, read model
   monitoring chờ Phase 11.
+- **Phase 11**: đã triển khai **Production Board** (Area Board và Tracking là
+  phần còn mở của phase). Backend `app/application/production_board.py` trên
+  `GET /api/production-board` derive board toàn Department từ projection vị trí
+  hiện tại và Movement history: mọi PN có active quantity trong Area của
+  Department (hoặc stocked quantity kèm demand còn mở), phân bổ theo Area /
+  Machine / External activity với holding state derive (`MACHINE` / `QUEUE` /
+  `PROCESSING` / `DONE` / `STOCKED`), timestamp vào vị trí cố định (`occurred_at`
+  của effective position-bearing Movement, lấy cũ nhất trong nhóm), stocked và
+  scrapped từ effective `STOCKED` / `SCRAPPED`, demand context theo canonical
+  demand ordering (PROJECT_PROFILE §18 — demand đầu tiên quyết định Hot rank, due
+  date và received date của row), tổng Department, theo canonical board order
+  (row active theo demand order, row stocked hoàn toàn xếp cuối). Frontend thật
+  (`src/api/production-board.ts`, `views/production-board/ProductionBoardView.tsx`,
+  `board-feed.ts`): Department do server resolve (một Department active duy nhất,
+  hoặc `?department=<id>` trên URL của màn hình), auto-refresh định kỳ với một
+  request in flight, giữ rows hoàn chỉnh cuối cùng kèm trạng thái `Feed stale —
+  reconnecting` khi refresh hoặc kết nối lỗi, refresh ngay khi kết nối trở lại,
+  các state loading / error có Retry / empty dưới header luôn hiển thị, và giữ
+  nguyên presentation GUI_DESIGN §5 (kiosk, pagination + rotation, auto scale,
+  điều hướng tay, dwell / countdown / Total Days derive từ UI clock chung). Mục
+  Phase 11 bên dưới ghi chi tiết trạng thái và ranh giới.
 
 ## Nguyên tắc triển khai
 
@@ -565,6 +586,94 @@ stock to production vẫn là open decision.
 - Tracking;
 - projection derive từ Movement;
 - stale-feed và long-data state.
+
+Trạng thái triển khai (một phần — Production Board hoàn tất end to end; read
+model và view thật của Area Board và Tracking là phần còn mở): **Backend**
+(`app/application/production_board.py`, `app/api/production_board.py` —
+`GET /api/production-board?department_id=`): read model read-only toàn Department,
+không có per-Area mode (PROJECT_PROFILE §21, GUI_DESIGN §5), derive hoàn toàn từ
+projection vị trí hiện tại và Movement history bất biến, không bao giờ từ counter
+lưu sẵn. Active quantity là mọi QuantityFlow ACTIVE có current Area thuộc
+Department; holding state theo effective latest position-bearing Movement và mode
+của Area (`projections.processing_state_of` — cùng một derivation với mọi read
+model Scan Station; `projections.effective_latest_movements` nay giải quyết
+trường hợp thường bằng một query gộp, chỉ walk lineage cho flow sinh từ lineage
+event mà chưa di chuyển), Machine là destination Machine của Movement đó với
+`ON_MACHINE` và Machine hoàn thành (source) chỉ là context phụ cho quantity đã
+DONE, timestamp vào vị trí (`since`) là `occurred_at` của Movement đó — split
+child kế thừa thời điểm vào của parent qua lineage, command bị Undo khôi phục
+thời điểm của state được khôi phục. Quantity gộp theo (Area, state, Machine,
+External activity) lấy thời điểm CŨ NHẤT của nhóm; Operation external
+(`Operation.is_external`) đặt tên activity. Stocked = Σ effective `STOCKED` vào
+terminal Area của Department (theo Area, không có thời gian vào); scrapped = Σ
+effective `SCRAPPED` trong Area của Department (trừ scrap đã reverse). Demand
+context = demand còn mở của PN (Work Order chưa complete) cộng demand đã release
+các active flow (Work Order đã complete mà quantity còn trong sản xuất vẫn được
+nêu tên, `completed: true`), theo `allocations.canonical_demand_order`; demand
+đầu tiên quyết định Hot rank, due date, received date của row — row không có
+demand context nào (quantity addition Phase 9, merge giữa các demand) giữ due
+date null và lấy received date từ ngày tạo active flow cũ nhất theo lịch site
+(`SITE_TIMEZONE`). Chọn row: PN có active quantity luôn là row; PN không có
+active quantity chỉ là row khi có stocked quantity trong Department VÀ demand
+còn mở, rời board khi mọi Work Order của nó complete. Board order
+(`board_row_sort_key`): row có active quantity trước row stocked hoàn toàn
+(lựa chọn presentation, không phải business rule), mỗi nhóm theo canonical
+demand order của demand quyết định, row không có demand context sau mọi row có
+context. Department: `department_id` tường minh phải tồn tại (404); bỏ trống thì
+resolve Department active duy nhất (không có → 404, nhiều → 409 nêu tên — màn
+hình không bao giờ bị trỏ nhầm Department âm thầm). Response chỉ mang timestamp
+và ngày nguồn cố định — dwell, countdown và `Total Days` derive lúc render từ UI
+clock chung (GUI_DESIGN §3.12); không so thời gian tại vị trí với expected
+duration của Route Step. Test: `tests/test_production_board_api.py` (phạm vi và
+resolve Department, mọi state kèm Machine và External activity, gộp lấy thời
+điểm cũ nhất, timestamp kế thừa qua lineage và khôi phục qua Undo, stocked /
+scrapped từ history, tổng footer khớp rows, row stocked-only còn khi demand mở
+và rời khi complete, Work Order complete vẫn được nêu tên, quantity không có
+demand context, canonical board order, demand đầu tiên quyết định ngày của
+row). **Frontend** (`src/api/production-board.ts`,
+`views/production-board/ProductionBoardView.tsx`, `board-feed.ts`,
+`board-logic.ts`; view thật trong `src/app/real-views.ts` có trong mọi build,
+mock dataset cũ đã xoá): board đọc `GET /api/production-board` —
+`?department=<id>` trên URL board (địa chỉ cấu hình của màn hình treo tường,
+địa chỉ presentation chứ không phải route) thành `department_id`, nếu không
+server resolve Department active duy nhất và từ chối tường minh được hiển thị —
+tự refresh mỗi `BOARD_REFRESH_MS` (15 s, `board-logic`) với một request in
+flight (request kế tiếp chỉ arm sau khi có trả lời); refresh lỗi giữ board hoàn
+chỉnh cuối và đánh dấu feed stale — trạng thái `● Live` chuyển tone warning kèm
+ghi chú `Feed stale — reconnecting`, giống hệt khi connectivity chung không
+khỏe — polling tiếp tục để board tự hồi phục, kết nối trở lại sau khi mất thì
+refresh ngay, còn lần load ĐẦU lỗi là error state có Retry; header board (dòng
+Department từ trả lời server, tiêu đề với live status, đồng hồ) render ở mọi
+state trong khi vùng bảng hiển thị loading, error, `No active production in this
+Department.` hoặc rows, và footer (chỉ số trang, rotation, điều hướng, tổng của
+server — active PNs, pcs in production, pcs stocked, pcs scrapped —, công tắc
+Kiosk và Auto scale, legend sắp xếp) render khi đã có board hoàn chỉnh.
+Presentation duyệt ở Phase 2 giữ nguyên: location rows (chấm Area màu từ
+server, chip Machine với `on machine`, `queue`, `processing`, chip External
+activity, `done` với Machine hoàn thành trong tooltip, `stocked`), dòng total
+với `n scrapped`, cột Job Numbers nêu mọi demand (`<job numbers> · WO <number
+hoặc —> [· MODIFY] · <n> pcs` hoặc `· allocated a/n`), dwell derive theo vị trí
+(`long` khi ≥ 3 ngày), countdown và `Total Days` từ UI clock chung, ngọn lửa Hot
+và tint row, kiosk, pagination theo chiều cao với rotation tỉ lệ, auto scale và
+mọi điều hướng tay; rows render đúng thứ tự server trả — `sortBoardRows` phía
+client đã bỏ, một quy tắc sắp xếp duy nhất thuộc read model (fixture long-data
+development sắp bằng `compareDemandOrder` chung một lần lúc load). Chỉ development: `?state=loading|empty|error|long` render state xác định
+mà không request (fixture long-data inline sau ranh giới DEV — không import
+`src/mocks/`; mock dataset Phase 2 `src/mocks/production-board.ts` đã bỏ). Test
+frontend: suite Production Board hiện có chạy trên trả lời giả của
+`GET /api/production-board` (đúng wire shape backend) cộng hành vi feed (request
+có và không `department_id`, cột Job Numbers, loading dưới header, load đầu lỗi
+có Retry, refresh định kỳ, feed stale khi refresh lỗi vẫn giữ rows và hồi phục
+ở trả lời tốt kế tiếp, mất kết nối hiện feed stale và refresh ngay khi trở lại,
+Department trống, state preview không request) và `production-boundary.test.ts`
+(board trong registry view thật, có trong production module graph, không
+import `src/mocks/`). Cố ý chưa có: read model và view Area Board, Tracking
+(phần còn lại của phase — vẫn là mock view chỉ development), dòng tên / revision
+PN master (Part Numbers management, Phase 13 — dòng phụ chỉ render khi có tên),
+thời gian rotation theo Department và Due Soon policy từ Administration (Phase
+13 — dùng default đặt tên trong `board-logic` và `views/dates`), quản lý Hot rank
+(Phase 12 — board chỉ đọc `priority_rank`), và highlight thời gian tại vị trí
+theo expected duration (PROJECT_PROFILE §17 — cờ `long` ≥ 3 ngày thay thế).
 
 ## Phase 12 — Priority Management
 

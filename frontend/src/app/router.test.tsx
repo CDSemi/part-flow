@@ -96,6 +96,16 @@ beforeEach(() => {
       if (/\/api\/departments$/.test(url)) {
         return json([{ id: 1, name: 'Machining', is_active: true }]);
       }
+      if (/\/api\/production-board/.test(url)) {
+        return json({
+          department: { id: 1, name: 'Machining' },
+          rows: [],
+          active_part_numbers: 0,
+          active_quantity: 0,
+          stocked_quantity: 0,
+          scrapped_quantity: 0,
+        });
+      }
       if (/\/api\/work-orders\/completed\?/.test(url)) {
         return json({
           work_orders: [],

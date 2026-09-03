@@ -43,7 +43,11 @@ Order completion derived from allocation with the read-only completed
 history — and the **Phase 10 frontend**: the Stockroom station's
 `Receive into Stockroom` workflow with the receiving allocation dialog
 on the Scan Station shell, and the real Completed Work Orders page on
-the server-side history:
+the server-side history — and the **Phase 11 Production Board**: the
+Department-wide board read model derived from the current-position
+projection and the Movement history (`GET /api/production-board`) and
+the real large-display board on it (auto-refresh, stale feed, kiosk
+mode):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -51,7 +55,8 @@ the server-side history:
   views — the real views (Administration's minimum-environment
   sections and Management → Machines from Phase 3.5, Management →
   Work Orders from Phase 4 with the Completed Work Orders page from
-  Phase 10, and the Scan Station from Phases 5–10) read and
+  Phase 10, the Scan Station from Phases 5–10, and the Production
+  Board from Phase 11) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -134,7 +139,15 @@ the server-side history:
   dates), due outcome and done date on the site calendar
   (`SITE_TIMEZONE`), server-side sort, keyset paging with a cursor only
   while a further row exists, the matching and the whole-history
-  totals); the PN resolution
+  totals); the Phase 11 monitoring surface — `GET /api/production-board`
+  (the Department-wide board: every PN with active quantity in the
+  Department's Areas — or stocked quantity with an open demand — with
+  its distribution per Area / Machine / External activity, the derived
+  state and the fixed entry timestamp of each position, the stocked and
+  scrapped quantities, the demand context with Work Order Number, Job
+  Numbers and allocated quantity, the Hot rank, in the canonical board
+  order; `department_id` selects the Department, omitted only for a
+  single active Department); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
@@ -255,9 +268,19 @@ New Work Order lookup). The Phase 3.5
 configuration surfaces (Administration →
 Departments/Areas/Operations/Scan Stations/Barcode configuration and
 Management → Machines) read and write real configuration and Machine
-master data end to end. Every other view renders development-only mock
-data; the monitoring read models (Phase 11) and the remaining tracking
-behavior arrive next — the movement-type check admits the
+master data end to end. Phase 11 makes the Production Board real: the
+Department-wide board reads `GET /api/production-board` (the
+distribution per Area / Machine / External activity with the entry
+timestamps the dwell times derive from, stocked and scrapped
+quantities, the Work Order and Job Number context, the Hot rank, in
+the canonical board order), refreshes itself periodically, keeps the
+last complete rows with the explicit `Feed stale — reconnecting`
+status when a refresh or the connection fails, and keeps the approved
+presentation — kiosk mode, pagination and rotation, automatic display
+scaling, the manual navigation. Every other view (Area Board,
+Tracking, Priority, Planned Routes, Part Numbers) renders
+development-only mock data; the remaining Phase 11 monitoring read
+models (Area Board, Tracking) arrive next — the movement-type check admits the
 Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
 `SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`, `STOCKED`).
@@ -310,9 +333,10 @@ Frontend structure:
   typed fetch core translating the backend's `{"detail": …}` errors
   into user-facing messages, the environment configuration and
   Machines endpoints (Phase 3.5), the Work Orders, Part Numbers,
-  route-template and production-release endpoints (Phase 4) and the
+  route-template and production-release endpoints (Phase 4), the
   Scan Station context / scan resolution / transfer / Area inventory
-  endpoints (Phase 5, `scan-station.ts`) with snake_case ↔ camelCase
+  endpoints (Phase 5, `scan-station.ts`) and the Production Board
+  read (Phase 11, `production-board.ts`) with snake_case ↔ camelCase
   mapping, the ISO 8601 duration helpers, and
   the `useApiData` loading/error/reload hook. Production-safe — never
   imports from `src/mocks/`.
@@ -324,7 +348,8 @@ Frontend structure:
   (`import.meta.env.DEV`), so a production build excludes them
   entirely: the real views (`src/app/real-views.ts` — Administration
   and Machines from Phase 3.5, Work Orders with the Completed Work
-  Orders page from Phases 4 and 10, the Scan Station from Phase 5)
+  Orders page from Phases 4 and 10, the Scan Station from Phase 5,
+  the Production Board from Phase 11)
   ship in every
   build against the live `/api` surface, and every other route renders
   an explicit "not connected to a production data source yet" state. `npm run build`

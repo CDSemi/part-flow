@@ -10,6 +10,12 @@ import {
   useState,
 } from 'react';
 
+import type {
+  BoardDemand,
+  BoardLocation,
+  BoardRow,
+  ProductionBoard,
+} from '../../api/production-board';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
@@ -20,12 +26,9 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { areaByKey } from '../../mocks/areas';
-import {
-  MOCK_BOARD_ROWS,
-  MOCK_BOARD_ROWS_LONG,
-} from '../../mocks/production-board';
 import { useUiClock } from '../../components/ui-clock';
+import { useBoardFeed } from './board-feed';
+import { compareDemandOrder } from '../demand-order';
 import {
   DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
@@ -35,7 +38,6 @@ import {
   formatElapsedSince,
   formatIsoDateShort,
 } from '../dates';
-import type { MockBoardRow, MockLocationRow } from '../view-models';
 import {
   autoFitScale,
   FALLBACK_PAGE_SIZE,
@@ -43,7 +45,6 @@ import {
   LONG_DWELL_MINUTES,
   pageBreaksByHeight,
   rotationDurationMs,
-  sortBoardRows,
 } from './board-logic';
 
 /**
@@ -102,9 +103,7 @@ function RotationProgress({
  * is never color-only. One status per header — never a second
  * `ONLINE` chip.
  */
-function BoardTitle() {
-  const { status } = useConnectivity();
-  const stale = status !== 'connected';
+function BoardTitle({ stale }: { stale: boolean }) {
   return (
     <h1 className={`live${stale ? ' stale' : ''}`}>
       Production
@@ -161,7 +160,7 @@ function LiveClock({ control }: { control?: ReactNode }) {
  * read as quiet secondary text. Color is never the only distinction —
  * the written state text remains beside every toned quantity.
  */
-function locationStateLabel(state: MockLocationRow['state']): string {
+function locationStateLabel(state: BoardLocation['state']): string {
   switch (state) {
     case 'machine':
       return 'on machine';
@@ -176,7 +175,7 @@ function locationStateLabel(state: MockLocationRow['state']): string {
   }
 }
 
-function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
+function BoardLocationRow({ loc }: { loc: BoardLocation }) {
   // Derived per-location dwell time: fixed entry timestamp + shared
   // minute clock; `long` flags an unusually long dwell (≥ 3 days).
   const now = useUiClock('minute');
@@ -204,10 +203,7 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
     // row's quantity by state (v18).
     <div className={`locrow st-${loc.state}`}>
       <span className="lname">
-        <AreaDot
-          colorVar={areaByKey(loc.area)?.colorVar ?? 'var(--faint)'}
-          size={11}
-        />
+        <AreaDot colorVar={loc.areaColor ?? 'var(--faint)'} size={11} />
         {onMachine ? (
           <span className="mchip" title={loc.machine}>
             {loc.machine}
@@ -236,7 +232,7 @@ function BoardLocationRow({ loc }: { loc: MockLocationRow }) {
   );
 }
 
-function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
+function BoardRowCells({ row, no }: { row: BoardRow; no: number }) {
   // Countdown, urgency and Total Days are DERIVED from the fixed due /
   // received dates and the shared minute clock — never stored.
   const now = useUiClock('minute');
@@ -271,14 +267,14 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
         <div className="part" title={row.pn}>
           {row.pn}
         </div>
-        <div className="pname">{row.name}</div>
+        {row.name ? <div className="pname">{row.name}</div> : null}
       </td>
       <td className="areas">
         <div className="loc">
           {row.locations.map((loc) => (
             <BoardLocationRow
               loc={loc}
-              key={`${loc.area}-${loc.machine ?? ''}-${loc.state}`}
+              key={`${loc.areaId}-${loc.machine ?? ''}-${loc.state}-${loc.activity ?? ''}`}
             />
           ))}
           {/* One continuous dashed separator spanning the complete
@@ -314,9 +310,10 @@ function BoardRowCells({ row, no }: { row: MockBoardRow; no: number }) {
         <div className="dtotal">{daysInProductionNote(row.received, now)}</div>
       </td>
       <td className="jobs">
-        {row.jobs.map((job) => (
-          <div className="j" key={job.job + job.meta}>
-            {job.job} <span className="jm">{job.meta}</span>
+        {row.demands.map((demand) => (
+          <div className="j" key={demand.workOrderDemandId}>
+            {jobNumbersText(demand)}{' '}
+            <span className="jm">{demandMeta(demand)}</span>
           </div>
         ))}
       </td>
@@ -401,7 +398,196 @@ function BoardHeadRow() {
   );
 }
 
-// Read-only large-display view: mock rows, no interactive elements.
+/**
+ * Presentation strings of the Job Numbers column: the Job Numbers of a
+ * demand (`—` when it has none) and its quiet meta text — the Work
+ * Order Number (`—` for an internal Work Order, GUI_DESIGN §3.7), the
+ * MODIFY request type where it applies, the requested quantity, and
+ * the allocated share once allocation started.
+ */
+function jobNumbersText(demand: BoardDemand): string {
+  return demand.jobNumbers.length > 0 ? demand.jobNumbers.join(', ') : '—';
+}
+
+function demandMeta(demand: BoardDemand): string {
+  const parts = [`· WO ${demand.workOrderNumber ?? '—'}`];
+  if (demand.requestType !== 'NEW') parts.push(`· ${demand.requestType}`);
+  if (demand.allocatedQuantity > 0) {
+    parts.push(
+      `· allocated ${demand.allocatedQuantity}/${demand.requestedQuantity}`,
+    );
+  } else {
+    parts.push(
+      `· ${demand.requestedQuantity} ${demand.requestedQuantity === 1 ? 'pc' : 'pcs'}`,
+    );
+  }
+  return parts.join(' ');
+}
+
+/**
+ * The Department the display shows: `?department=<id>` on the board
+ * URL (a wall display's configured address) — otherwise the server
+ * resolves the single active Department and refuses an ambiguous
+ * configuration with an explicit message. A presentation address, not
+ * a route: the router model keeps the two board routes only.
+ */
+function departmentIdFromLocation(): number | null {
+  const value = new URLSearchParams(window.location.search).get('department');
+  if (value === null || !/^\d+$/.test(value)) return null;
+  return Number(value);
+}
+
+// Long-data preview rows (?state=long, development builds only): an
+// over-long identifier plus many rows so the board's single-line PN
+// rule, the shared location tracks and the height-aware pagination
+// can be verified without a busy Department. Authored as relative
+// offsets resolved once at module load and ordered by the canonical
+// demand rule the server applies to real rows; compiled out of
+// production builds.
+const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
+  ? (() => {
+      const minutesAgoIso = (minutes: number) =>
+        new Date(Date.now() - minutes * 60_000).toISOString();
+      const isoDateIn = (days: number) => {
+        const date = new Date();
+        date.setDate(date.getDate() + days);
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${date.getFullYear()}-${month}-${day}`;
+      };
+      const demand = (
+        id: number,
+        workOrderNumber: string,
+        jobNumbers: string[],
+        requestedQuantity: number,
+        dueDate: string | null,
+      ): BoardDemand => ({
+        workOrderId: id,
+        workOrderNumber,
+        workOrderDemandId: id,
+        requestType: 'NEW',
+        requestedQuantity,
+        allocatedQuantity: 0,
+        jobNumbers,
+        dueDate,
+        priorityRank: null,
+        completed: false,
+      });
+      const rows: BoardRow[] = [
+        {
+          pn: '0118-40-0022-07-0455-88-REV-C',
+          name: 'MANIFOLD ASSY, 6-PORT ANODIZED, W/ FITTINGS 1/4 NPT, VENDOR SUB-ASSY — long identifier sample',
+          hotRank: 1,
+          locations: [
+            {
+              areaId: -1,
+              label: 'Mill',
+              areaColor: 'var(--a-mill)',
+              machine: 'Mill 3 — Horizontal Boring',
+              qty: 2,
+              state: 'machine',
+              since: minutesAgoIso(80),
+            },
+            {
+              areaId: -2,
+              label: 'Deburr',
+              areaColor: 'var(--a-deburr)',
+              qty: 6,
+              state: 'processing',
+              since: minutesAgoIso(7860),
+            },
+          ],
+          activeQuantity: 8,
+          stockedQuantity: 0,
+          total: 8,
+          totalStocked: false,
+          scrapped: 0,
+          demands: [
+            demand(
+              -1,
+              '007008-SUPPLEMENTAL-B',
+              ['18455-CUSTOMER-REF-2026-000147'],
+              8,
+              isoDateIn(1),
+            ),
+          ],
+          due: isoDateIn(1),
+          received: isoDateIn(-21),
+        },
+        ...Array.from({ length: 24 }, (_, i): BoardRow => {
+          const n = i + 1;
+          const due = n % 4 === 0 ? null : isoDateIn((n % 20) + 4);
+          return {
+            pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
+            name: `Spacer, sample lot ${n}, ALUM 6061-T6`,
+            locations: [
+              {
+                areaId: n % 2 === 0 ? -3 : -1,
+                label: n % 2 === 0 ? 'Lathe' : 'Mill',
+                areaColor: n % 2 === 0 ? 'var(--a-lathe)' : 'var(--a-mill)',
+                qty: (n % 7) + 1,
+                state: 'queue',
+                since: minutesAgoIso(((n % 9) + 1) * 60 + (n % 6)),
+              },
+            ],
+            activeQuantity: (n % 7) + 1,
+            stockedQuantity: 0,
+            total: (n % 7) + 1,
+            totalStocked: false,
+            scrapped: 0,
+            demands: [
+              demand(
+                -100 - n,
+                String(7200 + n).padStart(6, '0'),
+                [String(19000 + n)],
+                (n % 7) + 1,
+                due,
+              ),
+            ],
+            // Every fourth generated demand has no due date so the long
+            // list also exercises the dated-first / undated-by-received
+            // ordering.
+            due,
+            received: isoDateIn(-((n % 12) + 1 + (n % 20))),
+          };
+        }),
+      ];
+      return rows
+        .map((row, seq) => ({ row, seq }))
+        .sort((a, b) =>
+          compareDemandOrder(
+            {
+              hotRank: a.row.hotRank,
+              due: a.row.due,
+              received: a.row.received,
+              seq: a.seq,
+            },
+            {
+              hotRank: b.row.hotRank,
+              due: b.row.due,
+              received: b.row.received,
+              seq: b.seq,
+            },
+          ),
+        )
+        .map((entry) => entry.row);
+    })()
+  : [];
+
+/** A deterministic board around preview rows (development only). */
+function previewBoard(rows: BoardRow[]): ProductionBoard {
+  return {
+    department: { id: 0, name: 'Machine Shop' },
+    rows,
+    activePartNumbers: rows.filter((row) => !row.totalStocked).length,
+    activeQuantity: rows.reduce((sum, row) => sum + row.activeQuantity, 0),
+    stockedQuantity: rows.reduce((sum, row) => sum + row.stockedQuantity, 0),
+    scrappedQuantity: rows.reduce((sum, row) => sum + row.scrapped, 0),
+  };
+}
+
+// Read-only large-display view on the real board feed (Phase 11):
+// no interactive elements beyond the footer's presentation controls.
 // Pagination is calculated from the actual available board height and
 // the actual rendered row heights (a hidden measurement table renders
 // every row); it recalculates on viewport/container resize, data
@@ -409,21 +595,31 @@ function BoardHeadRow() {
 export function ProductionBoardView() {
   const preview = getViewStatePreview();
   const { route, navigate } = useRouter();
+  const { status: connectivity } = useConnectivity();
   // Kiosk mode is an addressable route (`/production-board/kiosk`),
   // explicit in the router model — the top application navigation is
   // hidden by the App shell and the board renders its own coherent
   // kiosk header. Presentation only, never an authorization boundary.
   const kiosk = route.view === 'production-board' && route.mode === 'kiosk';
 
-  const allRows: MockBoardRow[] = useMemo(() => {
-    const raw =
-      preview === 'empty' || preview === 'loading' || preview === 'error'
-        ? []
-        : preview === 'long'
-          ? MOCK_BOARD_ROWS_LONG
-          : MOCK_BOARD_ROWS;
-    return sortBoardRows(raw);
-  }, [preview]);
+  // The feed: polled from the server while the board is displayed; a
+  // development state preview replaces it with a deterministic board
+  // and performs no request.
+  const [departmentId] = useState(departmentIdFromLocation);
+  const feed = useBoardFeed(departmentId, connectivity, preview === null);
+  const board: ProductionBoard | null = useMemo(() => {
+    if (preview === 'long') return previewBoard(LONG_PREVIEW_ROWS);
+    if (preview === 'empty') return previewBoard([]);
+    if (preview !== null) return null;
+    return feed.state.status === 'ready' ? feed.state.board : null;
+  }, [preview, feed.state]);
+  const feedStale =
+    connectivity !== 'connected' ||
+    (feed.state.status === 'ready' && feed.state.stale);
+
+  // Rows render in the server's canonical board order — never
+  // re-sorted here (one ordering rule, owned by the read model).
+  const allRows: BoardRow[] = useMemo(() => board?.rows ?? [], [board]);
 
   const sectionRef = useRef<HTMLElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
@@ -719,23 +915,22 @@ export function ProductionBoardView() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [kiosk, navigate]);
 
-  if (preview === 'loading') {
-    return (
-      <section className="pb" aria-label="Production Board">
-        <LoadingState label="Loading Production Board" />
-      </section>
-    );
-  }
-  if (preview === 'error') {
-    return (
-      <section className="pb" aria-label="Production Board">
-        <ErrorState
-          message="The production feed could not be loaded."
-          detail="The board retries automatically; data shown after recovery is complete and consistent."
-        />
-      </section>
-    );
-  }
+  // Body content by feed state (GUI_DESIGN §5): the header with the
+  // Department, the `● Live` status and the clock renders in EVERY
+  // state — a wall display always says whose board it is and whether
+  // its feed is alive — while the table area shows the loading state
+  // (first load only), the error state with Retry (a first load that
+  // failed — a failed REFRESH keeps the last complete data and marks
+  // the feed stale instead), the empty state, or the rows.
+  const loading =
+    preview === 'loading' ||
+    (preview === null && feed.state.status === 'loading');
+  const loadError =
+    preview === 'error'
+      ? 'The board retries automatically; data shown after recovery is complete and consistent.'
+      : preview === null && feed.state.status === 'error'
+        ? feed.state.message
+        : null;
 
   const start = breaks[safePage] ?? 0;
   const end = breaks[safePage + 1] ?? allRows.length;
@@ -757,14 +952,13 @@ export function ProductionBoardView() {
         : ' pb-pageback';
     prevPageRef.current = safePage;
   }
-  const activePns = allRows.filter((r) => !r.totalStocked).length;
-  const inProduction = allRows
-    .filter((r) => !r.totalStocked)
-    .reduce((s, r) => s + r.total, 0);
-  const stocked = allRows
-    .filter((r) => r.totalStocked)
-    .reduce((s, r) => s + r.total, 0);
-  const scrappedTotal = allRows.reduce((s, r) => s + (r.scrapped ?? 0), 0);
+  // The footer totals are the server's (the same derivation as the
+  // rows, so they always reconcile); nothing to total before the
+  // first complete answer.
+  const activePns = board?.activePartNumbers ?? 0;
+  const inProduction = board?.activeQuantity ?? 0;
+  const stocked = board?.stockedQuantity ?? 0;
+  const scrappedTotal = board?.scrappedQuantity ?? 0;
 
   return (
     <section
@@ -790,13 +984,21 @@ export function ProductionBoardView() {
           board, not two boards. */}
       <div className={`pb-head${kiosk ? ' pbk-head' : ''}`} ref={headRef}>
         <div className="pb-headid">
-          <div className="dept">Machine Shop</div>
-          <BoardTitle />
+          <div className="dept">{board?.department.name ?? '\u00a0'}</div>
+          <BoardTitle stale={feedStale} />
         </div>
         <span className="spacer" />
         <LiveClock control={kiosk ? <ThemeToggle compact /> : undefined} />
       </div>
-      {rows.length === 0 ? (
+      {loading ? (
+        <LoadingState label="Loading Production Board" />
+      ) : loadError !== null ? (
+        <ErrorState
+          message="The production feed could not be loaded."
+          detail={loadError}
+          onRetry={preview === null ? feed.reload : undefined}
+        />
+      ) : rows.length === 0 ? (
         <EmptyState message="No active production in this Department." />
       ) : (
         <table key={safePage} className={`pb-table${pageDirRef.current}`}>
@@ -848,69 +1050,75 @@ export function ProductionBoardView() {
           height stays inside the pagination measurement. Two readable
           rows: pagination controls + aggregate totals, then the legend
           row carrying the user-facing sorting rule (v18 — the other
-          conventions live in the column-header tooltips). */}
-      <div className="pb-foot" ref={footRef}>
-        <div className="pb-footrow">
-          <span>
-            {pageCount > 1
-              ? `Page ${safePage + 1} / ${pageCount}`
-              : 'Page 1 / 1'}
-          </span>
-          {/* Rotation countdown: same deadline as the actual page
+          conventions live in the column-header tooltips). Rendered
+          once a complete board exists — no page count and no totals
+          are claimed before the first answer. */}
+      {board === null ? null : (
+        <div className="pb-foot" ref={footRef}>
+          <div className="pb-footrow">
+            <span>
+              {pageCount > 1
+                ? `Page ${safePage + 1} / ${pageCount}`
+                : 'Page 1 / 1'}
+            </span>
+            {/* Rotation countdown: same deadline as the actual page
               rotation, hidden when only one page exists. */}
-          {pageCount > 1 && rotateDeadline !== null ? (
-            <RotationProgress deadline={rotateDeadline} durationMs={rotateMs} />
-          ) : null}
-          {/* Manual page navigation: Previous/Next never wrap (automatic
+            {pageCount > 1 && rotateDeadline !== null ? (
+              <RotationProgress
+                deadline={rotateDeadline}
+                durationMs={rotateMs}
+              />
+            ) : null}
+            {/* Manual page navigation: Previous/Next never wrap (automatic
               rotation still does) and every manual change restarts the
               rotation timer. ArrowLeft/ArrowRight mirror the buttons. */}
-          <span className="pgnav">
-            <button
-              className="pgbtn"
-              aria-label="Previous page"
-              disabled={safePage === 0}
-              onClick={() => goToPage(safePage - 1, pageCount)}
-            >
-              ‹
-            </button>
-            {Array.from({ length: pageCount }, (_, i) => (
+            <span className="pgnav">
               <button
-                key={i}
-                className={`pgdot ${i === safePage ? 'on' : ''}`}
-                aria-label={`Go to page ${i + 1}`}
-                aria-current={i === safePage ? 'page' : undefined}
-                onClick={() => goToPage(i, pageCount)}
-              />
-            ))}
-            <button
-              className="pgbtn"
-              aria-label="Next page"
-              disabled={safePage === pageCount - 1}
-              onClick={() => goToPage(safePage + 1, pageCount)}
-            >
-              ›
-            </button>
-          </span>
-          <span className="spacer" />
-          {/* Restrained inline aggregate summary: numeric values carry
+                className="pgbtn"
+                aria-label="Previous page"
+                disabled={safePage === 0}
+                onClick={() => goToPage(safePage - 1, pageCount)}
+              >
+                ‹
+              </button>
+              {Array.from({ length: pageCount }, (_, i) => (
+                <button
+                  key={i}
+                  className={`pgdot ${i === safePage ? 'on' : ''}`}
+                  aria-label={`Go to page ${i + 1}`}
+                  aria-current={i === safePage ? 'page' : undefined}
+                  onClick={() => goToPage(i, pageCount)}
+                />
+              ))}
+              <button
+                className="pgbtn"
+                aria-label="Next page"
+                disabled={safePage === pageCount - 1}
+                onClick={() => goToPage(safePage + 1, pageCount)}
+              >
+                ›
+              </button>
+            </span>
+            <span className="spacer" />
+            {/* Restrained inline aggregate summary: numeric values carry
               the weight (monospace, subtle semantic tones), the labels
               stay quiet, separators come from CSS — no pills, clearly
               subordinate to the production table. */}
-          <span className="pb-agg">
-            <span className="aggitem">
-              <b className="aggnum">{activePns}</b> active PNs
+            <span className="pb-agg">
+              <span className="aggitem">
+                <b className="aggnum">{activePns}</b> active PNs
+              </span>
+              <span className="aggitem">
+                <b className="aggnum m">{inProduction}</b> pcs in production
+              </span>
+              <span className="aggitem">
+                <b className="aggnum d">{stocked}</b> pcs stocked
+              </span>
+              <span className="aggitem">
+                <b className="aggnum e">{scrappedTotal}</b> pcs scrapped
+              </span>
             </span>
-            <span className="aggitem">
-              <b className="aggnum m">{inProduction}</b> pcs in production
-            </span>
-            <span className="aggitem">
-              <b className="aggnum d">{stocked}</b> pcs stocked
-            </span>
-            <span className="aggitem">
-              <b className="aggnum e">{scrappedTotal}</b> pcs scrapped
-            </span>
-          </span>
-          {/* The kiosk mode toggle lives in the footer controls row —
+            {/* The kiosk mode toggle lives in the footer controls row —
               a normal layout child, so the footer height stays inside
               the pagination measurement; the shortcut lives in the
               tooltip instead of a legend line. An On/Off slide switch
@@ -918,59 +1126,62 @@ export function ProductionBoardView() {
               mirrors the active route, switching navigates between
               the standard and kiosk routes (v17) — the same position
               and presentation in both modes. */}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={kiosk}
-            aria-label="Kiosk mode"
-            title={
-              kiosk
-                ? 'Exit kiosk mode (Ctrl+Shift+K)'
-                : 'Enter kiosk mode (Ctrl+Shift+K)'
-            }
-            className={`pb-switch pb-kioskswitch${kiosk ? ' on' : ''}`}
-            onClick={() =>
-              navigate(kiosk ? '/production-board' : '/production-board/kiosk')
-            }
-          >
-            <span className="swlbl">Kiosk</span>
-            <span className="track" aria-hidden="true">
-              <span className="knob" />
-            </span>
-            <span className="swstate">{kiosk ? 'On' : 'Off'}</span>
-          </button>
-          {/* Automatic display scaling switch (v18): the same On/Off
+            <button
+              type="button"
+              role="switch"
+              aria-checked={kiosk}
+              aria-label="Kiosk mode"
+              title={
+                kiosk
+                  ? 'Exit kiosk mode (Ctrl+Shift+K)'
+                  : 'Enter kiosk mode (Ctrl+Shift+K)'
+              }
+              className={`pb-switch pb-kioskswitch${kiosk ? ' on' : ''}`}
+              onClick={() =>
+                navigate(
+                  kiosk ? '/production-board' : '/production-board/kiosk',
+                )
+              }
+            >
+              <span className="swlbl">Kiosk</span>
+              <span className="track" aria-hidden="true">
+                <span className="knob" />
+              </span>
+              <span className="swstate">{kiosk ? 'On' : 'Off'}</span>
+            </button>
+            {/* Automatic display scaling switch (v18): the same On/Off
               slide-control language as the Machines Maintenance switch
               (role="switch", track + knob + written state). ON scales
               the whole board (header, table, footer) uniformly until
               the table content fills the display width; OFF returns to
               the baseline sizes. Presentation only. */}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={autoScale}
-            aria-label="Automatic display scaling"
-            title="Scale the board to fill the display width"
-            className={`pb-switch pb-scaleswitch${autoScale ? ' on' : ''}`}
-            onClick={() => setAutoScale((current) => !current)}
-          >
-            <span className="swlbl">Auto scale</span>
-            <span className="track" aria-hidden="true">
-              <span className="knob" />
-            </span>
-            <span className="swstate">{autoScale ? 'On' : 'Off'}</span>
-          </button>
-        </div>
-        {/* Legend row (v18): only the user-facing sorting rule remains
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoScale}
+              aria-label="Automatic display scaling"
+              title="Scale the board to fill the display width"
+              className={`pb-switch pb-scaleswitch${autoScale ? ' on' : ''}`}
+              onClick={() => setAutoScale((current) => !current)}
+            >
+              <span className="swlbl">Auto scale</span>
+              <span className="track" aria-hidden="true">
+                <span className="knob" />
+              </span>
+              <span className="swstate">{autoScale ? 'On' : 'Off'}</span>
+            </button>
+          </div>
+          {/* Legend row (v18): only the user-facing sorting rule remains
             — the flame / blink / dash conventions moved into the
             column-header tooltips of the columns they describe. */}
-        <div className="pb-footrow legend">
-          <span className="leg sort">
-            Sorted: Hot rank first → earliest due date → no due date by oldest
-            received date.
-          </span>
+          <div className="pb-footrow legend">
+            <span className="leg sort">
+              Sorted: Hot rank first → earliest due date → no due date by oldest
+              received date.
+            </span>
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }

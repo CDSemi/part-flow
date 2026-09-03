@@ -7,9 +7,12 @@ import {
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
+import { ConnectivityContext } from '../../app/connectivity-context';
 import { ConnectivityProvider } from '../../app/connectivity-provider';
 import { RouterProvider } from '../../app/router-provider';
 import { ThemeProvider } from '../../app/theme-provider';
+import { isoDateIn, minutesAgoIso } from '../../mocks/mock-time';
+import { BOARD_REFRESH_MS } from './board-logic';
 import { ProductionBoardView } from './ProductionBoardView';
 
 // Production Board regressions: column order and content-driven sizing
@@ -17,20 +20,269 @@ import { ProductionBoardView } from './ProductionBoardView';
 // Areas & Quantities markup with the explicit location-state model
 // (machine chip / queue / processing / done / stocked), scrap on its
 // own line, canonical row ordering with nullable due dates, the live
-// clock, and height-aware pagination + rotation. jsdom has no layout,
-// so sizing rules are asserted through classes/attributes/structure —
-// never computed pixel widths.
+// clock, height-aware pagination + rotation, and the real feed
+// (loading / error / stale / refresh). jsdom has no layout, so sizing
+// rules are asserted through classes/attributes/structure — never
+// computed pixel widths.
+
+// ---------------------------------------------------------------------------
+// A fake `GET /api/production-board` answer (the backend wire shape)
+// ---------------------------------------------------------------------------
+
+const AREA = {
+  cut: { id: 1, name: 'Cut', color: 'var(--a-cut)', is_terminal: false },
+  lathe: { id: 2, name: 'Lathe', color: 'var(--a-lathe)', is_terminal: false },
+  mill: { id: 3, name: 'Mill', color: 'var(--a-mill)', is_terminal: false },
+  manual: {
+    id: 4,
+    name: 'Manual',
+    color: 'var(--a-manual)',
+    is_terminal: false,
+  },
+  deburr: {
+    id: 5,
+    name: 'Deburr',
+    color: 'var(--a-deburr)',
+    is_terminal: false,
+  },
+  material: {
+    id: 6,
+    name: 'Material',
+    color: 'var(--a-material)',
+    is_terminal: false,
+  },
+  external: {
+    id: 7,
+    name: 'External',
+    color: 'var(--a-external)',
+    is_terminal: false,
+  },
+  stockroom: {
+    id: 8,
+    name: 'Stockroom',
+    color: 'var(--a-stockroom)',
+    is_terminal: true,
+  },
+};
+
+function location(
+  area: (typeof AREA)[keyof typeof AREA],
+  state: 'MACHINE' | 'QUEUE' | 'PROCESSING' | 'DONE' | 'STOCKED',
+  quantity: number,
+  minutesAgo: number | null,
+  extra: { machine?: { id: number; name: string }; activity?: string } = {},
+) {
+  return {
+    area,
+    machine: extra.machine ?? null,
+    activity: extra.activity ?? null,
+    quantity,
+    state,
+    since: minutesAgo === null ? null : minutesAgoIso(minutesAgo),
+  };
+}
+
+function demand(
+  id: number,
+  workOrderNumber: string | null,
+  jobNumbers: string[],
+  requestedQuantity: number,
+  extra: {
+    allocated?: number;
+    requestType?: string;
+    dueDate?: string | null;
+    priorityRank?: number | null;
+    completed?: boolean;
+  } = {},
+) {
+  return {
+    work_order_id: id,
+    work_order_number: workOrderNumber,
+    work_order_demand_id: id,
+    request_type: extra.requestType ?? 'NEW',
+    requested_quantity: requestedQuantity,
+    allocated_quantity: extra.allocated ?? 0,
+    job_numbers: jobNumbers,
+    due_date: extra.dueDate ?? null,
+    priority_rank: extra.priorityRank ?? null,
+    completed: extra.completed ?? false,
+  };
+}
+
+// Rows in the SERVER's canonical order (Hot rank → earliest due date →
+// undated by received date → stocked-only rows last), the same order
+// the view keeps.
+const BOARD_ROWS = [
+  {
+    part_number: '2027-60-8114-00',
+    hot_rank: 1,
+    due_date: isoDateIn(2),
+    received_date: isoDateIn(-10),
+    locations: [
+      location(AREA.cut, 'MACHINE', 4, 220, {
+        machine: { id: 11, name: 'Saw 1' },
+      }),
+      location(AREA.lathe, 'MACHINE', 3, 125, {
+        machine: { id: 23, name: 'Lathe 3' },
+      }),
+      location(AREA.lathe, 'QUEUE', 2, 70),
+      location(AREA.lathe, 'DONE', 1, 25, {
+        machine: { id: 23, name: 'Lathe 3' },
+      }),
+    ],
+    active_quantity: 10,
+    stocked_quantity: 0,
+    scrapped_quantity: 1,
+    total_quantity: 10,
+    demands: [
+      demand(7001, '007001', ['18112'], 10, {
+        dueDate: isoDateIn(2),
+        priorityRank: 1,
+      }),
+      demand(7008, '007008', ['18240'], 5, { dueDate: isoDateIn(2) }),
+    ],
+  },
+  {
+    part_number: '142-260',
+    hot_rank: 2,
+    due_date: isoDateIn(-6),
+    received_date: isoDateIn(-18),
+    locations: [
+      location(AREA.external, 'PROCESSING', 20, 5880, { activity: 'plating' }),
+    ],
+    active_quantity: 20,
+    stocked_quantity: 0,
+    scrapped_quantity: 2,
+    total_quantity: 20,
+    demands: [
+      demand(7005, '007005', ['18031'], 20, {
+        dueDate: isoDateIn(-6),
+        priorityRank: 2,
+      }),
+    ],
+  },
+  {
+    part_number: '0123-40-0007-22',
+    hot_rank: null,
+    due_date: isoDateIn(9),
+    received_date: isoDateIn(-3),
+    locations: [
+      location(AREA.external, 'PROCESSING', 12, 1800, { activity: 'vendor' }),
+    ],
+    active_quantity: 12,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 12,
+    demands: [demand(7007, '007007', ['18377'], 12, { dueDate: isoDateIn(9) })],
+  },
+  {
+    part_number: '0455-20-0118-03',
+    hot_rank: null,
+    due_date: isoDateIn(9),
+    received_date: isoDateIn(-6),
+    locations: [
+      location(AREA.lathe, 'MACHINE', 4, 65, {
+        machine: { id: 22, name: 'Lathe 2' },
+      }),
+      location(AREA.material, 'PROCESSING', 8, 2941),
+    ],
+    active_quantity: 12,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 12,
+    demands: [demand(7003, '007003', ['18190'], 12, { dueDate: isoDateIn(9) })],
+  },
+  {
+    part_number: '78-04-0031',
+    hot_rank: null,
+    due_date: isoDateIn(16),
+    received_date: isoDateIn(-4),
+    locations: [
+      location(AREA.deburr, 'DONE', 3, 30),
+      location(AREA.mill, 'MACHINE', 3, 45, {
+        machine: { id: 31, name: 'Mill 1' },
+      }),
+    ],
+    active_quantity: 6,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 6,
+    demands: [
+      demand(7002, '007002', ['18102'], 6, { dueDate: isoDateIn(16) }),
+      // Internal MODIFY demand without an external WO Number → `—`.
+      demand(7012, null, [], 1, { requestType: 'MODIFY' }),
+    ],
+  },
+  {
+    // WO Demand without a due date: valid data — sorts after all dated
+    // demands, ordered by the parent Work Order received date.
+    part_number: '118-052',
+    hot_rank: null,
+    due_date: null,
+    received_date: isoDateIn(-2),
+    locations: [location(AREA.manual, 'PROCESSING', 4, 320)],
+    active_quantity: 4,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 4,
+    demands: [demand(7011, '007011', ['18520'], 4)],
+  },
+  {
+    part_number: '309-127',
+    hot_rank: null,
+    due_date: isoDateIn(-12),
+    received_date: isoDateIn(-34),
+    locations: [location(AREA.stockroom, 'STOCKED', 50, null)],
+    active_quantity: 0,
+    stocked_quantity: 50,
+    scrapped_quantity: 0,
+    total_quantity: 50,
+    demands: [
+      demand(6996, '006996', ['17740'], 50, {
+        allocated: 50,
+        dueDate: isoDateIn(-12),
+      }),
+    ],
+  },
+];
+
+function boardPayload(rows = BOARD_ROWS) {
+  return {
+    department: { id: 1, name: 'Machine Shop' },
+    rows,
+    active_part_numbers: rows.filter((row) => row.active_quantity > 0).length,
+    active_quantity: rows.reduce((sum, row) => sum + row.active_quantity, 0),
+    stocked_quantity: rows.reduce((sum, row) => sum + row.stocked_quantity, 0),
+    scrapped_quantity: rows.reduce(
+      (sum, row) => sum + row.scrapped_quantity,
+      0,
+    ),
+  };
+}
+
+type FetchImpl = (input: RequestInfo | URL) => Promise<Response>;
+
+/** Health ok + the board answered from `boardResponse` (overridable). */
+function stubFetch(
+  boardResponse: () => Promise<Response> = () =>
+    Promise.resolve(
+      new Response(JSON.stringify(boardPayload()), { status: 200 }),
+    ),
+) {
+  const impl = vi.fn<FetchImpl>((input) => {
+    const url = String(input);
+    if (url.startsWith('/api/production-board')) return boardResponse();
+    return Promise.resolve(
+      new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
+    );
+  });
+  vi.stubGlobal('fetch', impl);
+  return impl;
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() =>
-      Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      ),
-    ),
-  );
+  stubFetch();
 });
 
 afterEach(() => {
@@ -1443,4 +1695,237 @@ test('scaling is one uniform zoom — the stylesheet keeps fixed baseline sizes'
   expect(ruleBlock(css, '.pb-foot .pb-switch.on .knob')).toContain(
     'transform: translateX(',
   );
+});
+
+/* ============ The real feed (Phase 11) ============ */
+
+function connectivityTree(status: 'connected' | 'unavailable' | 'connecting') {
+  return (
+    <ThemeProvider>
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <RouterProvider>
+          <ProductionBoardView />
+        </RouterProvider>
+      </ConnectivityContext.Provider>
+    </ThemeProvider>
+  );
+}
+
+test('the board loads its rows from GET /api/production-board and passes ?department through', async () => {
+  const fetchImpl = stubFetch();
+  await renderBoard('/production-board?department=7');
+
+  const boardCalls = fetchImpl.mock.calls.filter(([input]) =>
+    String(input).startsWith('/api/production-board'),
+  );
+  expect(boardCalls).toHaveLength(1);
+  expect(String(boardCalls[0][0])).toBe(
+    '/api/production-board?department_id=7',
+  );
+  // Rows, the Department line and the footer totals come from the answer.
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+  expect(document.querySelector('.pb-headid .dept')?.textContent).toBe(
+    'Machine Shop',
+  );
+  const agg = document.querySelector('.pb-agg')?.textContent ?? '';
+  expect(agg).toContain('6 active PNs');
+  expect(agg).toContain('64 pcs in production');
+  expect(agg).toContain('50 pcs stocked');
+  expect(agg).toContain('3 pcs scrapped');
+});
+
+test('without ?department the server resolves the Department (no department_id sent)', async () => {
+  const fetchImpl = stubFetch();
+  await renderBoard('/production-board');
+
+  const boardCalls = fetchImpl.mock.calls.filter(([input]) =>
+    String(input).startsWith('/api/production-board'),
+  );
+  expect(String(boardCalls[0][0])).toBe('/api/production-board');
+});
+
+test('the Job Numbers column names every demand with its WO context', async () => {
+  await renderBoard();
+
+  const jobs = Array.from(
+    rowByPn('78-04-0031')?.querySelectorAll('.jobs .j') ?? [],
+    (el) => el.textContent,
+  );
+  expect(jobs).toEqual([
+    '18102 · WO 007002 · 6 pcs',
+    // Internal MODIFY demand: no Job Number and no external WO Number.
+    '— · WO — · MODIFY · 1 pc',
+  ]);
+  const stockedJobs = Array.from(
+    rowByPn('309-127')?.querySelectorAll('.jobs .j') ?? [],
+    (el) => el.textContent,
+  );
+  expect(stockedJobs).toEqual(['17740 · WO 006996 · allocated 50/50']);
+});
+
+test('the first load shows the loading state under the board header', async () => {
+  let resolveBoard: (response: Response) => void = () => {};
+  stubFetch(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveBoard = resolve;
+      }),
+  );
+  await renderBoard();
+
+  // The header (title + clock) is present while the table area loads.
+  expect(
+    screen.getByRole('status', { name: 'Loading Production Board' }),
+  ).toBeInTheDocument();
+  expect(document.querySelector('.pb-head h1.live')).not.toBeNull();
+  expect(document.querySelector('table.pb-table')).toBeNull();
+
+  await act(async () => {
+    resolveBoard(new Response(JSON.stringify(boardPayload()), { status: 200 }));
+  });
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+  expect(
+    screen.queryByRole('status', { name: 'Loading Production Board' }),
+  ).toBeNull();
+});
+
+test('a failed first load is the error state with Retry; Retry reloads', async () => {
+  let fail = true;
+  stubFetch(() =>
+    Promise.resolve(
+      fail
+        ? new Response(
+            JSON.stringify({ detail: 'Department 7 does not exist.' }),
+            {
+              status: 404,
+            },
+          )
+        : new Response(JSON.stringify(boardPayload()), { status: 200 }),
+    ),
+  );
+  await renderBoard('/production-board?department=7');
+
+  const alert = screen.getByRole('alert');
+  expect(alert.textContent).toContain(
+    'The production feed could not be loaded.',
+  );
+  expect(alert.textContent).toContain('Department 7 does not exist.');
+  expect(document.querySelector('table.pb-table')).toBeNull();
+  // The footer totals are not claimed before a first complete answer.
+  expect(document.querySelector('.pb-agg')).toBeNull();
+
+  fail = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await act(async () => {});
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+});
+
+test('the board refreshes itself periodically and a failed refresh marks the feed stale without dropping the rows', async () => {
+  let answer: 'ok' | 'fail' = 'ok';
+  const fetchImpl = stubFetch(() =>
+    Promise.resolve(
+      answer === 'ok'
+        ? new Response(JSON.stringify(boardPayload()), { status: 200 })
+        : new Response(JSON.stringify({ detail: 'boom' }), { status: 500 }),
+    ),
+  );
+  await renderBoard();
+  const boardCalls = () =>
+    fetchImpl.mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/production-board'),
+    ).length;
+  expect(boardCalls()).toBe(1);
+
+  // One request per refresh period, armed after the previous answer.
+  await act(async () => {
+    vi.advanceTimersByTime(BOARD_REFRESH_MS);
+  });
+  expect(boardCalls()).toBe(2);
+  const live = () => document.querySelector('.pb-head h1.live');
+  expect(live()?.className).not.toContain('stale');
+
+  // The next refresh fails: the rows stay, the title turns stale with
+  // the explicit note — never an empty board, never an error page.
+  answer = 'fail';
+  await act(async () => {
+    vi.advanceTimersByTime(BOARD_REFRESH_MS);
+  });
+  expect(boardCalls()).toBe(3);
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+  expect(live()?.className).toContain('stale');
+  expect(live()?.querySelector('.stalenote')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
+  expect(screen.queryByRole('alert')).toBeNull();
+
+  // Polling continues; the next good answer clears the stale flag.
+  answer = 'ok';
+  await act(async () => {
+    vi.advanceTimersByTime(BOARD_REFRESH_MS);
+  });
+  expect(boardCalls()).toBe(4);
+  expect(live()?.className).not.toContain('stale');
+  expect(live()?.querySelector('.stalenote')).toBeNull();
+});
+
+test('lost connectivity shows the stale feed on the loaded rows, and its return refreshes at once', async () => {
+  const fetchImpl = stubFetch();
+  window.history.replaceState({}, '', '/production-board');
+  const view = render(connectivityTree('connected'));
+  await act(async () => {});
+  const boardCalls = () =>
+    fetchImpl.mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/production-board'),
+    ).length;
+  expect(boardCalls()).toBe(1);
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+
+  view.rerender(connectivityTree('unavailable'));
+  const live = document.querySelector('.pb-head h1.live');
+  expect(live?.className).toContain('stale');
+  expect(live?.querySelector('.stalenote')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
+  // The loaded rows stay on screen.
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+
+  // Connectivity back: an immediate refresh, not a wait for the period.
+  view.rerender(connectivityTree('connected'));
+  await act(async () => {});
+  expect(boardCalls()).toBe(2);
+  expect(document.querySelector('.pb-head h1.live')?.className).not.toContain(
+    'stale',
+  );
+});
+
+test('a Department with nothing in production renders the empty state with the header and footer', async () => {
+  stubFetch(() =>
+    Promise.resolve(
+      new Response(JSON.stringify(boardPayload([])), { status: 200 }),
+    ),
+  );
+  await renderBoard();
+
+  expect(
+    screen.getByText('No active production in this Department.'),
+  ).toBeInTheDocument();
+  expect(document.querySelector('.pb-headid .dept')?.textContent).toBe(
+    'Machine Shop',
+  );
+  expect(document.querySelector('.pb-agg')?.textContent).toContain(
+    '0 active PNs',
+  );
+  expect(screen.getByText('Page 1 / 1')).toBeInTheDocument();
+});
+
+test('the development state previews perform no board request', async () => {
+  const fetchImpl = stubFetch();
+  await renderBoard('/production-board?state=long');
+  expect(
+    fetchImpl.mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/production-board'),
+    ),
+  ).toHaveLength(0);
+  expect(rowByPn('0118-40-0022-07-0455-88-REV-C')).toBeDefined();
 });

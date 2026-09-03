@@ -1,9 +1,8 @@
-// Framework-independent Production Board presentation logic: row
-// ordering and viewport-aware pagination. Kept outside the component so
+// Framework-independent Production Board presentation logic: rotation
+// and refresh timing, display scaling and viewport-aware pagination.
+// Row ORDER is the server's: the board renders its rows exactly in the
+// canonical board order the read model delivers (GUI_DESIGN §5). Kept outside the component so
 // it is directly testable.
-
-import { compareDemandOrder } from '../demand-order';
-import type { MockBoardRow } from '../view-models';
 
 /**
  * Rows/page used when real measurements are unavailable (first paint
@@ -31,6 +30,16 @@ export const LONG_DWELL_MINUTES = 3 * 24 * 60;
 
 export const ROTATE_MS_PER_ROW = 3_000;
 export const ROTATE_MS_MIN = 6_000;
+
+/**
+ * Auto-refresh period of the board feed (GUI_DESIGN §5): the read
+ * model is re-read from the server this often while the board is
+ * displayed — one request at a time, the next armed only after the
+ * previous answer — and immediately again when connectivity returns.
+ * A refresh that fails keeps the last complete data on screen and
+ * marks the feed stale; nothing partial is ever shown.
+ */
+export const BOARD_REFRESH_MS = 15_000;
 
 /** Rotation dwell time for a page showing `rowCount` rows. */
 export function rotationDurationMs(rowCount: number): number {
@@ -74,38 +83,6 @@ export function autoFitScale(
     FIT_SCALE_MIN,
     (boardWidth - FIT_WIDTH_ALLOWANCE_PX) / intrinsicTableWidth,
   );
-}
-
-/**
- * Board row order: canonical demand order (Hot rank → earliest due date
- * → undated by WO received date → stable creation order). Stocked rows
- * are completed demand and stay after every active row regardless of
- * their historical due date — a board presentation choice, not a
- * business rule.
- */
-export function sortBoardRows(rows: readonly MockBoardRow[]): MockBoardRow[] {
-  return rows
-    .map((row, seq) => ({ row, seq }))
-    .sort((a, b) => {
-      if (!!a.row.totalStocked !== !!b.row.totalStocked) {
-        return a.row.totalStocked ? 1 : -1;
-      }
-      return compareDemandOrder(
-        {
-          hotRank: a.row.hotRank,
-          due: a.row.due,
-          received: a.row.received,
-          seq: a.seq,
-        },
-        {
-          hotRank: b.row.hotRank,
-          due: b.row.due,
-          received: b.row.received,
-          seq: b.seq,
-        },
-      );
-    })
-    .map((entry) => entry.row);
 }
 
 /**

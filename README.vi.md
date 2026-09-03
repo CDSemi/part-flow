@@ -12,7 +12,8 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 
 ## Trạng thái hiện tại
 
-Repository hiện có nền tảng từ Phase 1 đến Phase 10, triển khai end to end:
+Repository hiện có nền tảng từ Phase 1 đến Phase 10 triển khai end to end, và
+Production Board của Phase 11:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -46,6 +47,16 @@ Repository hiện có nền tảng từ Phase 1 đến Phase 10, triển khai en
   keyset paging chỉ phát cursor khi còn row tiếp); frontend có workflow
   `Receive into Stockroom` cùng allocation
   dialog trên Scan Station shell và trang Completed Work Orders thật.
+- **Phase 11 (Production Board):** read model board toàn Department derive từ
+  projection vị trí hiện tại và Movement history (`GET /api/production-board`:
+  phân bổ theo Area / Machine / External activity kèm timestamp vào vị trí,
+  stocked và scrapped, Work Order / Job Number context, Hot rank, theo canonical
+  board order; `department_id` chọn Department, bỏ trống chỉ khi có một
+  Department active) và view board thật trên đó: tự refresh định kỳ, giữ rows
+  hoàn chỉnh cuối cùng kèm `Feed stale — reconnecting` khi refresh hoặc kết nối
+  lỗi, giữ nguyên presentation đã duyệt (kiosk, pagination + rotation, auto
+  scale, điều hướng tay). Area Board và Tracking (phần còn lại của Phase 11)
+  vẫn là mock view chỉ development.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
@@ -54,8 +65,8 @@ chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát tri�
 ## Thành phần chính
 
 - `frontend/` — Vite + React + TypeScript. Các view có backend (Administration
-  Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station) đã
-  kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
+  Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station,
+  Production Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
   khỏi production bundle.
 - `backend/` — FastAPI. Application service sở hữu business rule và transaction;
   domain vocabulary độc lập framework; SQLAlchemy mapping khớp schema chuẩn.

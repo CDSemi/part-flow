@@ -12,6 +12,7 @@ from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
 from app.api.machines import router as machines_router
 from app.api.part_numbers import router as part_numbers_router
+from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
 from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(route_templates_router)
     app.include_router(scan_station_router)
     app.include_router(allocations_router)
+    app.include_router(production_board_router)
     register_exception_handlers(app)
     return app
 

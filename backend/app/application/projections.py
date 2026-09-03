@@ -251,8 +251,36 @@ def effective_latest_movement(
 def effective_latest_movements(
     session: Session, flow_ids: Iterable[int]
 ) -> dict[int, PartMovement]:
-    """`effective_latest_movement` for several flows (read models, unlocked)."""
-    return {flow_id: effective_latest_movement(session, flow_id) for flow_id in set(flow_ids)}
+    """`effective_latest_movement` for several flows (read models, unlocked).
+
+    The same derivation, in one grouped query for every flow whose OWN
+    history holds a position-bearing, non-reversed Movement (the
+    common case); only a flow that has none — created by a lineage
+    event and never moved since — takes the per-flow lineage walk.
+    """
+    wanted = set(flow_ids)
+    if not wanted:
+        return {}
+    reversal = aliased(PartMovement)
+    newest = (
+        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
+        .where(
+            PartMovement.quantity_flow_id.in_(wanted),
+            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.quantity_flow_id)
+        .subquery()
+    )
+    found = {
+        movement.quantity_flow_id: movement
+        for movement in session.scalars(
+            select(PartMovement).join(newest, newest.c.movement_id == PartMovement.id)
+        )
+    }
+    for flow_id in wanted - found.keys():
+        found[flow_id] = effective_latest_movement(session, flow_id)
+    return found
 
 
 # ---------------------------------------------------------------------------

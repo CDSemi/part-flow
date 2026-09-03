@@ -388,6 +388,30 @@ Read-only full-screen Department-wide display, không per-Area filter.
   Header identity: Department trên, `Production` + connection-toned `● Live`; healthy
   dot dùng shared heartbeat; stale có `Feed stale — reconnecting`.
 
+**Implementation boundary (Phase 11):** production UI thật trên
+`GET /api/production-board` (IMPLEMENTATION_ROADMAP Phase 11): rows đến theo
+canonical board order từ read model của **server** — phân bổ theo Area / Machine /
+External activity với state derive, timestamp vào vị trí cố định, stocked và
+scrapped, Work Order / Job Number context và Hot rank đều derive server-side từ
+projection vị trí hiện tại và Movement history — còn mọi giá trị thời gian hiển
+thị (dwell theo vị trí và cờ `long`, due countdown, `Total Days`, đồng hồ) vẫn
+derive lúc render từ UI clock chung (§3.12). Dòng Department nêu Department server
+resolve (Department active duy nhất, hoặc Department chỉ định bằng
+`?department=<id>` trên URL màn hình — địa chỉ presentation cho màn hình treo
+tường, không phải route); cấu hình mơ hồ bị từ chối tường minh. Auto-refresh poll
+feed định kỳ (một request in flight, refresh ngay khi kết nối trở lại sau khi
+mất): refresh lỗi giữ rows hoàn chỉnh cuối cùng và `● Live` chuyển tone warning
+kèm `Feed stale — reconnecting` giống hệt khi connectivity chung không khỏe; load
+đầu lỗi là error state có Retry, cả hai render dưới header board luôn hiển thị
+(Department, tiêu đề với status, đồng hồ), footer hiện khi đã có board hoàn
+chỉnh. Cột Job Numbers nêu mọi demand của row (`<job numbers> · WO <number hoặc —>
+[· MODIFY] · <n> pcs`, hoặc `· allocated a/n` khi đã allocate), dòng tên /
+revision PN chỉ render khi Part Numbers management (Phase 13) cung cấp. Mọi thứ
+khác ở trên — kiosk, pagination và rotation, auto scale, điều hướng tay, location
+grid, tooltip, legend — giữ nguyên; mock dataset Phase 2 của board đã bỏ, các
+preview `?state=` chỉ development (loading / empty / error / long) render state
+xác định mà không request.
+
 ## 5.1 Kiosk mode
 
 - `/production-board` standard; `/production-board/kiosk` kiosk. Route explicit,

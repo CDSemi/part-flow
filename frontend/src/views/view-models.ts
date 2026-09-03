@@ -232,65 +232,6 @@ export interface MockRouteTemplate {
 }
 
 /**
- * One distributed quantity position on the Production Board. The Area,
- * Machine and External activity are explicit presentation data — never
- * one combined display string that would have to be parsed back apart:
- * - `state: 'machine'` — actively assigned; `machine` is the executor.
- * - `state: 'done'` — finished at the Area (`READY_TO_TRANSFER`);
- *   `machine` is optional completion context only, never the executor.
- * - `state: 'queue' | 'processing' | 'stocked'` — no Machine involved.
- */
-export interface MockLocationRow {
-  area: AreaKey;
-  /**
-   * Area display label — only the Area name (`External`, never a
-   * composite such as `External — Plating`).
-   */
-  label: string;
-  /** Machine name — executor for `machine`, context for `done`. */
-  machine?: string;
-  /**
-   * External processing activity (`plating`, `vendor`, `painting`, …).
-   * Rendered as a light informational chip in the state position,
-   * replacing the generic `processing` label; for a DONE row it stays
-   * secondary context only.
-   */
-  activity?: string;
-  qty: number;
-  state: 'machine' | 'queue' | 'processing' | 'done' | 'stocked';
-  /**
-   * ISO timestamp when this quantity portion entered its current
-   * position, or null when elapsed time does not apply (Stockroom).
-   * The board derives the displayed duration at render from this fixed
-   * timestamp plus the shared UI clock — a formatted duration is never
-   * stored, so no two views can disagree.
-   */
-  since: string | null;
-}
-
-export interface MockBoardRow {
-  pn: string;
-  name: string;
-  hotRank?: number;
-  locations: MockLocationRow[];
-  total: number;
-  totalStocked?: boolean;
-  /** Cumulative SCRAPPED quantity for the PN (0/absent = none). */
-  scrapped?: number;
-  jobs: { job: string; meta: string }[];
-  /**
-   * ISO `YYYY-MM-DD` due date of the WO Demand, or null when the demand
-   * has no due date — a missing due date is valid data, not an error.
-   * The countdown text and urgency class are DERIVED at render
-   * (views/dates `dueCountdown` + the shared UI clock), never stored.
-   */
-  due: string | null;
-  /** Parent Work Order received date (ISO) — orders undated demands and
-   * backs the derived `Total Days` column. */
-  received: string;
-}
-
-/**
  * One PN presence in one Area — the shared row model for the Area/
  * Machine monitoring surfaces (Area Board detail and Scan Station).
  */

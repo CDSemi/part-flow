@@ -1,6 +1,5 @@
 import { expect, test } from 'vitest';
 
-import type { MockBoardRow } from '../view-models';
 import {
   FIT_SCALE_MIN,
   ROTATE_MS_MIN,
@@ -9,7 +8,6 @@ import {
   fallbackPageBreaks,
   pageBreaksByHeight,
   rotationDurationMs,
-  sortBoardRows,
 } from './board-logic';
 
 /* ============ Height-aware page calculation ============ */
@@ -93,37 +91,4 @@ test('a near-empty page never flashes past — the 6 s floor applies', () => {
   // proportional duration takes over.
   expect(rotationDurationMs(2)).toBe(6_000);
   expect(rotationDurationMs(3)).toBeGreaterThan(ROTATE_MS_MIN);
-});
-
-/* ============ Board row ordering ============ */
-
-const row = (
-  partial: Partial<MockBoardRow> & { pn: string },
-): MockBoardRow => ({
-  name: '',
-  locations: [],
-  total: 1,
-  jobs: [],
-  due: null,
-  received: '2026-07-01',
-  ...partial,
-});
-
-test('board rows: Hot first, then dated, then undated, stocked last', () => {
-  const rows = [
-    row({ pn: 'UNDATED', due: null, received: '2026-07-10' }),
-    row({ pn: 'STOCKED', due: '2026-07-01', totalStocked: true }),
-    row({ pn: 'DATED-LATE', due: '2026-09-01' }),
-    row({ pn: 'HOT', hotRank: 1, due: null }),
-    row({ pn: 'DATED-EARLY', due: '2026-08-01' }),
-    row({ pn: 'UNDATED-OLDER', due: null, received: '2026-07-02' }),
-  ];
-  expect(sortBoardRows(rows).map((r) => r.pn)).toEqual([
-    'HOT',
-    'DATED-EARLY',
-    'DATED-LATE',
-    'UNDATED-OLDER',
-    'UNDATED',
-    'STOCKED',
-  ]);
 });
