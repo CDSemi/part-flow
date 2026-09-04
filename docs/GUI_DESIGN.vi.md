@@ -1,11 +1,11 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
-> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
+> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
 >
-> **Trạng thái:** Hiện hành, companion của Project Profile v21. Interactive visual
+> **Trạng thái:** Hiện hành, companion của Project Profile v22. Interactive visual
 > reference: `mockups/partflow-gui-mockup-v18.html`; version cũ nằm trong
 > `docs/archive/`. Mockup là reference, không thay contract bằng văn bản.
 
@@ -267,7 +267,10 @@ component nhưng không action.
 
 ## 4.7 Resolve PN scan
 
-1. **Không active Demand:** mở ba-step `Receive Quantity`. Default editable MODIFY
+1. **Không active Demand:** ba-step `Receive Quantity` áp dụng — mở thẳng khi scan
+   nếu PN không có active quantity ở đâu cả, và là explicit choice trong dialog
+   của mục 2 và 3 khi PN đã có (post-v18; wizard khi đó lấy separate-quantity
+   confirmation ở step 3). Default editable MODIFY
    + FLOATING; settings gồm optional due, starting Area/Operation, reason/notes và
    blank WO reuse; quantity step không default; confirmation `Confirm receipt` là
    write point. `received_date` mặc định là scan timestamp — instant do scan
@@ -278,14 +281,37 @@ component nhưng không action.
    explicit selection **ngay trong settings view** — một step view trong cùng
    modal, không bao giờ nested dialog (§4.6) — và `Next` bị chặn tới khi
    operator chọn; không bao giờ đoán. TypeChip và RouteModeChip dùng chung mọi
-   view.
-2. **PN không ở station Area:** resolve source explicit. Một source → quantity MAX →
+   view. **Separate-quantity confirmation (post-v18; PROJECT_PROFILE §14):** khi
+   PN **đã có active quantity**, confirmation view nêu tên distribution đó
+   (`<Area> × <n> pcs`, nối bằng `·` — internal flow id không bao giờ hiển thị),
+   nói bằng warning-toned guidance rằng receipt **không join** quantity đó và
+   `Combine quantities` mới là nơi gom chúng lại sau này, và có MỘT explicit
+   acknowledgement checkbox. `Confirm receipt` **disabled** tới khi checkbox được
+   tick, và Enter ở confirmation view không ghi gì khi chưa tick: quyết định không
+   bao giờ là một phím. Distribution đến từ scan resolution, và server xét đúng
+   rule đó lúc write — quantity chỉ xuất hiện sau khi wizard mở sẽ quay lại thành
+   explicit refusal không ghi gì, hiển thị distribution của chính server ở đây,
+   xoá acknowledgement, và được trả lời bằng cùng retry dưới cùng
+   `device_event_id`.
+2. **PN không ở station Area:** resolve source explicit. Khi có nhiều hơn một
+   intent áp dụng ở đây — receive transfer, Repair return của Phase 9, và
+   (post-v18) `Receive new quantity` khi **server** báo entry condition của
+   `Receive Quantity` — dialog `Select an action` hỏi intent TRƯỚC và không suy
+   ra gì: quantity đang chờ ở Area khác không bao giờ khiến transfer thành intent
+   duy nhất. Còn lại: một source → quantity MAX →
    confirmation transfer; nhiều source → selection trước, không combine. Planned
    deviation cần reason/confirm. Active processing source ghi atomic completion +
    transfer; ready/queued chỉ transfer. Destination no-Machine ghi direct processing.
 3. **PN đã ở Area:** action dialog chỉ valid choices: assign queued, complete từng
    active Machine hoặc direct processing, receive/add, combine, Repair, Scrap,
-   transfer khi applicable. Không expose invalid action.
+   transfer khi applicable. Không expose invalid action. **`Receive new quantity`**
+   (post-v18, Phase 10.5; chỉ khi **server** báo entry condition của
+   `Receive Quantity`) đứng ngay sau `Add more quantity` và mở wizard của mục 1:
+   subtitle nói rằng quantity đến kèm Work Order riêng và được ghi **riêng** với
+   số pcs đang có ở đây — không merge gì cả. Nó không bao giờ thay cho
+   `Add more quantity` và ngược lại: correction ghi quantity tìm thấy bên cạnh
+   production quantity đang có, receipt đưa vào quantity kèm business demand
+   riêng của nó.
 
 Partial action 1..MAX là production behavior từ Phase 8; server split trong command,
 client không tự split. `Combine quantities` chỉ cho server-provided compatible
@@ -310,6 +336,21 @@ quantity 1..MAX (server split trong cùng command), route-deviation confirmation
 one-shot write model (retry cùng `device_event_id`); `Confirm stocking` là write
 point duy nhất, `STOCKED` ghi ở `Recorded event(s)`. Stocked quantity không Undo
 (§4.5 skip).
+
+Phase 10.5 `Receive Quantity` UI thật (§4.7 mục 1): server quyết định nơi workflow
+áp dụng (`intake_available`: PN không còn active Work Order Demand và Area của
+station bắt đầu được production), station không bao giờ tự đoán. PN không có
+active quantity ở đâu cả mở wizard thẳng từ scan; PN đã có active quantity vào
+wizard qua explicit choice `Receive new quantity` của mục 3 hoặc của intent dialog
+mục 2, và confirmation view khi đó chặn `Confirm receipt` sau explicit
+acknowledgement. Receipt tạo Quantity Flow RIÊNG và không đổi gì ở quantity đang
+có. `received_date` theo SCAN; `Confirm receipt` là write point duy nhất, theo
+đúng rejection / unknown-outcome model của Phase 6 (refusal `selection_required`
+quay lại settings view dưới `device_event_id` MỚI, lost response đóng băng intent
+dưới CÙNG `device_event_id` và receipt đã commit thì replay). Sau khi server
+confirm: reload context/inventory, refocus barcode input, và receipt vào session
+log NHƯNG không thành Undo target. Chưa có ở đây: Worker identity và badge gate
+(Phase 13), authorization (Phase 14).
 
 ## 4.8 Nhập quantity
 

@@ -141,17 +141,24 @@ Order Demand remains: the PartNumber master on first use, the internal
 blank-number Work Order created or reused, the WorkOrderDemand, the
 QuantityFlow, an AssignedRoute snapshot for ``PLANNED`` only, and the
 immutable ``RECEIVED`` Movement carrying the station and the resolved
-Operation. 201 fresh / 200 idempotent replay / 409 mismatched reuse;
-409 with nothing recorded for a stale station, Area or Operation
-context, a terminal Area, active quantity or active demand that
-appeared meanwhile, and 409 with ``selection_required`` listing the
-candidates when several internal blank-number MODIFY Work Orders are
-plausible — a first match is never guessed. The receipt carries the
-``scanned_at`` of the resolution that opened it, so ``received_date``
-follows the SCAN and not the confirmation (§14); a naive, future or
-too-old scan timestamp is a 422 with nothing recorded. The PN
+Operation. A receipt NEVER joins existing quantity: beside active
+quantity of the PN it creates a SEPARATE flow, and only after the
+explicit ``confirm_active_quantity`` the wizard sets once it showed
+the distribution. 201 fresh / 200 idempotent replay / 409 mismatched
+reuse; 409 with nothing recorded for a stale station, Area or
+Operation context, a terminal Area and active demand that appeared
+meanwhile, 409 with ``confirmation_required`` and the existing active
+distribution while that confirmation is missing, and 409 with
+``selection_required`` listing the candidates when several internal
+blank-number MODIFY Work Orders are plausible — a first match is never
+guessed. The receipt carries the ``scanned_at`` of the resolution that
+opened it, so ``received_date`` follows the SCAN and not the
+confirmation (§14); a naive or future scan timestamp is a 422 with
+nothing recorded, and so is one older than the intake scan window
+UNLESS the receipt is already committed — then it replays. The PN
 resolution reports ``scanned_at``, ``intake_available``,
-``part_number_known`` and those ``internal_work_orders``.
+``part_number_known``, those ``internal_work_orders`` and the PN's
+``active_quantity`` distribution.
 
 - ``POST /scan-stations/{station_id}/undos`` — reverse the COMPLETE
   command recorded under ``reverses_device_event_id`` as one: a
@@ -444,6 +451,21 @@ def _internal_work_order(
     )
 
 
+class ActiveQuantityResponse(BaseModel):
+    """One existing ACTIVE quantity of the PN, as the confirmation shows it.
+
+    The same shape the confirmation-required 409 carries, so the
+    wizard renders one distribution whether it came with the
+    resolution or with the server's refusal.
+    """
+
+    quantity_flow_id: int
+    quantity: int
+    route_mode: str
+    current_area_id: int
+    current_area_name: str
+
+
 class ScanResolveResponse(BaseModel):
     part_number: str
     station_id: str
@@ -465,6 +487,11 @@ class ScanResolveResponse(BaseModel):
     intake_available: bool
     part_number_known: bool
     internal_work_orders: list[InternalWorkOrderResponse]
+    # Phase 10.5 (PROJECT_PROFILE §14): the PN's existing ACTIVE
+    # distribution. A receipt never joins it, so while this is
+    # non-empty the wizard shows it and takes the operator's explicit
+    # confirmation that the receipt creates a SEPARATE quantity.
+    active_quantity: list[ActiveQuantityResponse]
     transfer_blocked_reason: str | None
     # Several flows match: the operator must select exactly one.
     requires_selection: bool
@@ -525,6 +552,16 @@ def resolve_scan(
         part_number_known=result.part_number_known,
         internal_work_orders=[
             _internal_work_order(candidate) for candidate in result.internal_work_orders
+        ],
+        active_quantity=[
+            ActiveQuantityResponse(
+                quantity_flow_id=entry.quantity_flow_id,
+                quantity=entry.quantity,
+                route_mode=entry.route_mode,
+                current_area_id=entry.current_area_id,
+                current_area_name=entry.current_area_name,
+            )
+            for entry in result.active_quantity
         ],
         transfer_blocked_reason=result.transfer_blocked_reason,
         requires_selection=result.requires_selection,
@@ -1145,6 +1182,14 @@ class ReceiptRequest(BaseModel):
     # records the day it was scanned. Required — the server never falls
     # back to its own clock.
     scanned_at: datetime.datetime
+    # PROJECT_PROFILE §14: a receipt NEVER joins existing quantity.
+    # Set only after the wizard showed the PN's existing active
+    # distribution and the operator confirmed that this receipt
+    # creates a SEPARATE quantity; the server refuses an unconfirmed
+    # receipt beside active quantity with nothing recorded. It is not
+    # part of the request fingerprint — confirming continues the same
+    # submission under the same `device_event_id`.
+    confirm_active_quantity: bool = False
     device_event_id: str
 
 
@@ -1177,13 +1222,16 @@ def receive_quantity(
     station_id: str, body: ReceiptRequest, session: SessionDep, response: Response
 ) -> ReceiptResponse:
     """Record one confirmed `Receive Quantity` as ONE transaction: 201 fresh,
-    200 on an idempotent replay, 409 on a mismatched id reuse, on a stale
-    station / Area / Operation context, on a terminal Area, on active
-    quantity or active demand that appeared meanwhile, and 409 with
-    ``selection_required`` when several internal blank-number MODIFY Work
-    Orders are plausible; 422 for an invalid PN, quantity, Request Type,
-    Route Mode, Planned Route or scan timestamp (naive, in the future, or
-    older than the intake scan window)."""
+    200 on an idempotent replay (whatever the scan window says by then),
+    409 on a mismatched id reuse, on a stale station / Area / Operation
+    context, on a terminal Area and on active demand that appeared
+    meanwhile, 409 with ``confirmation_required`` and the existing active
+    distribution while the separate-quantity confirmation of
+    PROJECT_PROFILE §14 is missing, and 409 with ``selection_required``
+    when several internal blank-number MODIFY Work Orders are plausible;
+    422 for an invalid PN, quantity, Request Type, Route Mode, Planned
+    Route or scan timestamp (naive, in the future, or — for a receipt not
+    yet recorded — older than the intake scan window)."""
     result = intake.receive_quantity(
         session,
         station_id=station_id,
@@ -1197,6 +1245,7 @@ def receive_quantity(
         reason=body.reason,
         work_order_id=body.work_order_id,
         scanned_at=body.scanned_at,
+        confirm_active_quantity=body.confirm_active_quantity,
         device_event_id=body.device_event_id,
     )
     response.status_code = 201 if result.created else 200

@@ -6,13 +6,15 @@ while every response body stays in the standard FastAPI
 ``{"detail": ...}`` shape with the safe, user-facing message only.
 
 The deliberate exceptions are the confirmation-required outcomes: the
-release active-quantity confirmation (SLICE1_DATA_MODEL §8.2) carries
-the existing active distribution, the Phase 5 route-deviation
+active-quantity confirmation carries the PN's existing active
+distribution — raised by the release (SLICE1_DATA_MODEL §8.2) and by
+the Phase 10.5 Scan Station receipt, which never joins existing
+quantity either (PROJECT_PROFILE §14) —, the Phase 5 route-deviation
 confirmation (PROJECT_PROFILE §17) carries the deviation itself, and
-the Phase 10.5 receipt carries the internal blank-number MODIFY Work
-Orders it refuses to choose between (PROJECT_PROFILE §14), because the
-UI must show them before the user can confirm the intent — still no
-internal detail, only the data the confirmation dialog presents.
+the receipt also carries the internal blank-number MODIFY Work Orders
+it refuses to choose between (§14), because the UI must show them
+before the user can confirm the intent — still no internal detail,
+only the data the confirmation dialog presents.
 """
 
 from typing import cast

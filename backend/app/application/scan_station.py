@@ -54,12 +54,15 @@ Area summary, never a Machine card). Boundaries: no Worker barcodes.
 Receive Quantity (Phase 10.5, PROJECT_PROFILE §14): the resolution
 also reports whether the station may INTRODUCE this PN here — no
 active Work Order Demand (a demand line with a remaining business
-shortage), no active quantity anywhere, and an Area that can start
-production — together with the internal blank-number MODIFY Work
-Orders a MODIFY receipt may reuse and whether the PartNumber master
-already exists. The read model judges the entry condition; the command
-(`app.application.intake`) re-judges it authoritatively when it
-writes.
+shortage) and an Area that can start production — together with the
+internal blank-number MODIFY Work Orders a MODIFY receipt may reuse,
+whether the PartNumber master already exists, and the PN's existing
+ACTIVE distribution. Active quantity does not withhold the workflow: a
+receipt never joins it, so beside it the wizard takes the operator's
+explicit separate-quantity confirmation and this is the distribution
+that confirmation is made against. The read model judges the entry
+condition; the command (`app.application.intake`) re-judges it — and
+the confirmation — authoritatively when it writes.
 
 Stockroom (Phase 10): at a station bound to a terminal Area the same
 resolution lists the PN's candidates as the sources the operator STOCKS
@@ -83,7 +86,11 @@ from app.application.machines import (
     operational_state,
 )
 from app.application.merges import combinable_groups
-from app.application.part_numbers import canonical_part_number
+from app.application.part_numbers import (
+    ActiveQuantityEntry,
+    active_quantity_distribution,
+    canonical_part_number,
+)
 from app.application.projections import (
     effective_latest_movements,
     origin_flow_ids,
@@ -283,14 +290,21 @@ class ScanResolution(NamedTuple):
     # station never receives it (PROJECT_PROFILE §14, GUI_DESIGN §4.7).
     has_active_demand: bool
     # Phase 10.5 `Receive Quantity`: the station may introduce this PN
-    # here — no active demand, no active quantity anywhere, and an
-    # Area that can start production. With the candidates a MODIFY
-    # receipt may reuse (§14 — several REQUIRE an explicit selection)
-    # and whether the PartNumber master already exists (the Step 1
-    # copy tells a known PN from a new one).
+    # here — no active demand and an Area that can start production.
+    # With the candidates a MODIFY receipt may reuse (§14 — several
+    # REQUIRE an explicit selection) and whether the PartNumber master
+    # already exists (the Step 1 copy tells a known PN from a new one).
     intake_available: bool
     part_number_known: bool
     internal_work_orders: list[intake.InternalWorkOrderCandidate]
+    # Phase 10.5 (PROJECT_PROFILE §14): the PN's existing ACTIVE
+    # distribution — the whole of it, wherever it is, not only what
+    # this Area holds. A receipt never joins existing quantity, so
+    # while this is non-empty the wizard must show it and take the
+    # operator's explicit confirmation that the receipt creates a
+    # SEPARATE quantity; the command re-judges the same distribution
+    # authoritatively under the PN lock.
+    active_quantity: list[ActiveQuantityEntry]
     # Set when the station's Area can never receive a transfer
     # (terminal Area): candidates are still listed for information.
     transfer_blocked_reason: str | None
@@ -475,7 +489,8 @@ def resolve_part_number_scan(
             )
         )
 
-    receive = intake.intake_context(session, pn, area, has_active_quantity=bool(flows))
+    active_quantity = active_quantity_distribution(session, pn)
+    receive = intake.intake_context(session, pn, area, active_quantity=active_quantity)
     resolution: Resolution
     if in_area:
         resolution = "ALREADY_IN_AREA"
@@ -502,6 +517,7 @@ def resolve_part_number_scan(
         intake_available=receive.available,
         part_number_known=receive.part_number_known,
         internal_work_orders=receive.work_orders,
+        active_quantity=receive.active_quantity,
         transfer_blocked_reason=blocked,
         requires_selection=len(in_area) > 1 or (not in_area and len(candidates) > 1),
         combine_groups=combinable_groups(

@@ -81,7 +81,12 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
-from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
+from app.application.part_numbers import (
+    acquire_part_number_lock,
+    active_quantity_distribution,
+    active_quantity_payload,
+    canonical_part_number,
+)
 from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -264,34 +269,6 @@ def _replay_or_conflict(
             " new device_event_id."
         )
     return _result_from_movement(session, movement, created=False)
-
-
-# ---------------------------------------------------------------------------
-# Active-quantity distribution (SLICE1 §8.2)
-# ---------------------------------------------------------------------------
-
-
-def _existing_active_distribution(session: Session, part_number: str) -> list[dict[str, Any]]:
-    """The PN's current ACTIVE distribution, as shown for confirmation."""
-    active_rows = session.execute(
-        select(QuantityFlow, Area.name)
-        .join(Area, Area.id == QuantityFlow.current_area_id)
-        .where(
-            QuantityFlow.part_number == part_number,
-            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-        )
-        .order_by(QuantityFlow.id)
-    ).all()
-    return [
-        {
-            "quantity_flow_id": flow.id,
-            "quantity": flow.quantity,
-            "route_mode": flow.route_mode,
-            "current_area_id": flow.current_area_id,
-            "current_area_name": area_name,
-        }
-        for flow, area_name in active_rows
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -489,14 +466,14 @@ def release_to_production(
     # -- Active-quantity safety (SLICE1 §8.2) ---------------------------
     # Serialized by the PN advisory lock above: no concurrent release
     # of this PN can commit between this check and our own COMMIT.
-    distribution = _existing_active_distribution(session, pn)
+    distribution = active_quantity_distribution(session, pn)
     if distribution and not confirmed:
         raise ActiveQuantityConfirmationRequiredError(
             f"Part Number '{pn}' already has active production quantity."
             " Review the existing distribution and confirm the intent to"
             " release a separate Quantity Flow — existing quantity is never"
             " merged.",
-            existing_active_quantity=distribution,
+            existing_active_quantity=active_quantity_payload(distribution),
         )
 
     # -- Writes (SLICE1 §13) — all inside the one open transaction ------

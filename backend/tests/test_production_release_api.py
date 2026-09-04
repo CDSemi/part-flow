@@ -50,7 +50,13 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import environment, production_release, projections, work_orders
+from app.application import (
+    environment,
+    part_numbers,
+    production_release,
+    projections,
+    work_orders,
+)
 from app.application.common import flush as translated_flush
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -1652,13 +1658,15 @@ class _PauseFirstActiveCheck:
     blocking, then released deterministically."""
 
     def __init__(self) -> None:
-        self.real = production_release._existing_active_distribution
+        self.real = part_numbers.active_quantity_distribution
         self.first_inside = threading.Event()
         self.let_first_finish = threading.Event()
         self._pause_taken = threading.Lock()
         self._paused_once = False
 
-    def __call__(self, session: Session, part_number: str) -> list[dict[str, Any]]:
+    def __call__(
+        self, session: Session, part_number: str
+    ) -> list[part_numbers.ActiveQuantityEntry]:
         result = self.real(session, part_number)
         with self._pause_taken:
             should_pause = not self._paused_once
@@ -1682,7 +1690,7 @@ def test_concurrent_same_pn_releases_cannot_both_pass_active_check(
     wo_2, demand_2, _ = _create_demand(client, part_number=pn)
 
     pause = _PauseFirstActiveCheck()
-    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+    monkeypatch.setattr(production_release, "active_quantity_distribution", pause)
 
     results: dict[str, Any] = {}
 
@@ -1749,7 +1757,7 @@ def test_concurrent_identical_retries_one_creates_one_replays(
     event_id = str(uuid.uuid4())
 
     pause = _PauseFirstActiveCheck()
-    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+    monkeypatch.setattr(production_release, "active_quantity_distribution", pause)
 
     results: dict[str, Any] = {}
 
@@ -1818,7 +1826,7 @@ def test_concurrent_release_vs_area_deactivation_single_serial_outcome(
     work_order_id, demand_id, pn = _create_demand(client)
 
     pause = _PauseFirstActiveCheck()
-    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+    monkeypatch.setattr(production_release, "active_quantity_distribution", pause)
 
     results: dict[str, Any] = {}
 
@@ -2120,13 +2128,15 @@ class _PauseFirstReleaseAfterDemandLock:
     competing demand edit can be started and observed blocking."""
 
     def __init__(self) -> None:
-        self.real = production_release._existing_active_distribution
+        self.real = part_numbers.active_quantity_distribution
         self.inside = threading.Event()
         self.let_finish = threading.Event()
         self._guard = threading.Lock()
         self._paused_once = False
 
-    def __call__(self, session: Session, part_number: str) -> list[dict[str, Any]]:
+    def __call__(
+        self, session: Session, part_number: str
+    ) -> list[part_numbers.ActiveQuantityEntry]:
         result = self.real(session, part_number)
         with self._guard:
             should_pause = not self._paused_once
@@ -2182,7 +2192,7 @@ def test_release_winning_the_demand_lock_makes_the_concurrent_edit_conflict(
     work_order_id, demand_id, pn = _create_demand(client)  # requested 50
 
     pause = _PauseFirstReleaseAfterDemandLock()
-    monkeypatch.setattr(production_release, "_existing_active_distribution", pause)
+    monkeypatch.setattr(production_release, "active_quantity_distribution", pause)
     results: dict[str, Any] = {}
 
     def run_release() -> None:

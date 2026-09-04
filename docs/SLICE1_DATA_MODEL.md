@@ -4,7 +4,7 @@
 
 > **Status:** Implemented. This document is the canonical design and contract of the Phase 4 slice, not a proposal: the schema it specifies is migrated (`0004_phase4_audit`, `0005_phase4_release_index`), the commands it specifies are implemented in the backend Application layer, and its Acceptance Criteria (§19) are covered by tests. It stays subordinate to `PROJECT_PROFILE.md` and `GUI_DESIGN.md`; where implementation and this document disagree, the disagreement is a defect in one of them, never a licence to invent behavior.
 > **Scope:** Roadmap Phase 4 vertical slice — *manually enter a Work Order and its Work Order Demand, then explicitly release production quantity into the configured starting Area*.
-> **Basis:** `docs/PROJECT_PROFILE.md` (v21, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3, 3.5, 4), `docs/GUI_DESIGN.md` §11 Work Orders, `CLAUDE.md`.
+> **Basis:** `docs/PROJECT_PROFILE.md` (v22, canonical — §7, §8, §13, §17, §18, §21 Work Orders, §24–§25, §28), `docs/IMPLEMENTATION_ROADMAP.md` (Phases 3, 3.5, 4), `docs/GUI_DESIGN.md` §11 Work Orders, `CLAUDE.md`.
 
 ---
 

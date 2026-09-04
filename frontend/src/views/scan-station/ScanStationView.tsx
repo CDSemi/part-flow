@@ -138,9 +138,12 @@ import type { Notice } from './scan-station-presentation';
  * class or a local guess. Every command is recorded by the server
  * before anything reads as success, with no Machine or PN context
  * surviving a dialog. Phase 10.5 added `Receive Quantity` (§4.7 item
- * 1): a PN the server resolves with no active Work Order Demand and
- * no active quantity is INTRODUCED here through the three-view wizard
- * of `scan-station-intake-dialog`. Worker sessions and their badge
+ * 1): a PN the server resolves with no active Work Order Demand is
+ * INTRODUCED here through the three-view wizard of
+ * `scan-station-intake-dialog` — straight from the scan when the PN
+ * has no active quantity anywhere, and through the explicit `Receive
+ * new quantity` choice of the PN action and intent dialogs when it
+ * has, because a receipt never joins existing quantity. Worker sessions and their badge
  * gates (Phase 13) remain the one approved workflow NOT implemented
  * here — it stays an honest placeholder, and the mock preview of it
  * survives only behind the development-only boundary below
@@ -508,9 +511,10 @@ type Flow =
   | { kind: 'in-area'; resolution: ScanResolution; parent?: Flow }
   | {
       // Receive Quantity (Phase 10.5, GUI_DESIGN §4.7 item 1): the PN
-      // has no active Work Order Demand and no active quantity, so the
-      // station INTRODUCES it here — including a PN seen for the first
-      // time.
+      // has no active Work Order Demand, so the station INTRODUCES it
+      // here — including a PN seen for the first time. Existing active
+      // quantity of the PN is never joined: the wizard then takes the
+      // explicit separate-quantity confirmation.
       kind: 'intake';
       resolution: ScanResolution;
       parent?: Flow;
@@ -553,11 +557,14 @@ type Flow =
       parent?: Flow;
     }
   | {
-      // Transfer or Repair (Phase 9): the PN has no quantity in the
-      // Area but at least one source is repair-eligible — the operator
-      // chooses the intent explicitly first. Repair is never inferred
-      // from the history alone.
-      kind: 'transfer-or-repair';
+      // Explicit intent choice for a PN with NO quantity in the Area
+      // but more than one applicable intent: receiving a transfer, the
+      // Phase 9 Repair return when the server marked a source
+      // repair-eligible, and the Phase 10.5 `Receive Quantity` when
+      // the server reports its entry condition. Neither Repair nor a
+      // receipt is ever inferred — quantity elsewhere never makes a
+      // transfer the only possible intent.
+      kind: 'pn-intent';
       resolution: ScanResolution;
       parent?: Flow;
     }
@@ -824,14 +831,17 @@ function StationView({
         return;
       }
       if (
-        resolution.candidates.some((candidate) => candidate.repairAvailable)
+        resolution.candidates.length > 0 &&
+        (resolution.candidates.some((candidate) => candidate.repairAvailable) ||
+          resolution.intakeAvailable)
       ) {
-        // No quantity in the Area, but the SERVER marked at least one
-        // source repair-eligible: the operator chooses the intent
-        // explicitly — a normal transfer or `Return quantity for
-        // repair`. A previously visited destination alone never turns
-        // a transfer into a Repair.
-        setFlow({ kind: 'transfer-or-repair', resolution, parent });
+        // No quantity in the Area, but more than one intent applies:
+        // the SERVER marked a source repair-eligible, or it reports
+        // the `Receive Quantity` entry condition. The operator chooses
+        // explicitly — a previously visited destination alone never
+        // turns a transfer into a Repair, and quantity waiting
+        // elsewhere never makes the transfer the only possible intent.
+        setFlow({ kind: 'pn-intent', resolution, parent });
         return;
       }
       if (resolution.candidates.length === 1) {
@@ -1930,9 +1940,16 @@ function StationView({
           onAbandonUnknown={() => abandonUnknown('Transfer')}
         />
       )}
-      {flow?.kind === 'transfer-or-repair' && (
-        <TransferOrRepairDialog
+      {flow?.kind === 'pn-intent' && (
+        <PnIntentDialog
           resolution={flow.resolution}
+          onReceiveNew={() =>
+            setFlow({
+              kind: 'intake',
+              resolution: flow.resolution,
+              parent: flow,
+            })
+          }
           onTransfer={() =>
             flow.resolution.candidates.length === 1
               ? setFlow({
@@ -2140,6 +2157,13 @@ function StationView({
               parent: flow,
             })
           }
+          onReceiveNew={() =>
+            setFlow({
+              kind: 'intake',
+              resolution: flow.resolution,
+              parent: flow,
+            })
+          }
           onRepair={() => {
             const repairable = flow.resolution.candidates.filter(
               (candidate) => candidate.repairAvailable,
@@ -2296,16 +2320,28 @@ function candidateLabel(candidate: TransferCandidate): string {
  * narrows to the repair-eligible ones. A selection view — nothing is
  * recorded here, and Repair is never inferred from the history alone.
  */
-function TransferOrRepairDialog({
+/**
+ * The explicit intent choice for a PN with NO quantity in the station's
+ * Area (GUI_DESIGN §4.7 item 2): receive a transfer from where the
+ * quantity actually is, return quantity for repair (Phase 9 — only for
+ * the sources the SERVER marked repair-eligible), or receive NEW
+ * quantity (Phase 10.5 — only where the SERVER reports the
+ * `Receive Quantity` entry condition). It opens whenever more than one
+ * of them applies: no intent is ever inferred from the PN's history or
+ * from quantity waiting elsewhere.
+ */
+function PnIntentDialog({
   resolution,
   onTransfer,
   onRepair,
+  onReceiveNew,
   onBack,
   onCancel,
 }: {
   resolution: ScanResolution;
   onTransfer: () => void;
   onRepair: () => void;
+  onReceiveNew: () => void;
   onBack?: () => void;
   onCancel: () => void;
 }) {
@@ -2342,26 +2378,44 @@ function TransferOrRepairDialog({
           </span>
         </span>
       </button>
-      <button className="choice" onClick={onRepair}>
-        <span className="cic rep" aria-hidden="true">
-          REP
-        </span>
-        <span>
-          <span className="ct1">Return quantity for repair</span>
-          <br />
-          <span className="ct2">
-            Return quantity to {resolution.area.name} so earlier work can be
-            corrected.{' '}
-            {repairable
-              .map(
-                (candidate) =>
-                  `${candidate.quantity} pcs at ${candidate.currentArea.name}`,
-              )
-              .join(' · ')}
-            .
+      {repairable.length > 0 ? (
+        <button className="choice" onClick={onRepair}>
+          <span className="cic rep" aria-hidden="true">
+            REP
           </span>
-        </span>
-      </button>
+          <span>
+            <span className="ct1">Return quantity for repair</span>
+            <br />
+            <span className="ct2">
+              Return quantity to {resolution.area.name} so earlier work can be
+              corrected.{' '}
+              {repairable
+                .map(
+                  (candidate) =>
+                    `${candidate.quantity} pcs at ${candidate.currentArea.name}`,
+                )
+                .join(' · ')}
+              .
+            </span>
+          </span>
+        </button>
+      ) : null}
+      {resolution.intakeAvailable ? (
+        <button className="choice" onClick={onReceiveNew}>
+          <span className="cic run" aria-hidden="true">
+            NEW
+          </span>
+          <span>
+            <span className="ct1">Receive new quantity</span>
+            <br />
+            <span className="ct2">
+              Receive quantity that arrives with its own Work Order. It is
+              recorded separately from the {elsewhere} pcs elsewhere — nothing
+              is merged, and you confirm that explicitly.
+            </span>
+          </span>
+        </button>
+      ) : null}
       <div className="row">
         {onBack ? (
           <button className="bigbtn ghost ss-back" onClick={onBack}>
@@ -2993,6 +3047,7 @@ function InAreaDialog({
   onComplete,
   onCombine,
   onAdd,
+  onReceiveNew,
   onRepair,
   onScrap,
   onReceiveMore,
@@ -3014,6 +3069,13 @@ function InAreaDialog({
   /** `Add more quantity` (Phase 9): found physical quantity beside the
    * existing in-Area quantity, with a mandatory reason. */
   onAdd: () => void;
+  /** `Receive Quantity` (Phase 10.5, PROJECT_PROFILE §14): NEW quantity
+   * introduced with its own business demand, offered only where the
+   * SERVER reports the entry condition (`intakeAvailable`). It never
+   * joins the quantity already here — the wizard takes an explicit
+   * separate-quantity confirmation — and never replaces the `Add more
+   * quantity` correction. */
+  onReceiveNew: () => void;
   /** `Return quantity for repair` (Phase 9): offered only when the
    * server marked at least one candidate repair-eligible. */
   onRepair: () => void;
@@ -3215,6 +3277,22 @@ function InAreaDialog({
           </span>
         </span>
       </button>
+      {resolution.intakeAvailable ? (
+        <button className="choice" onClick={onReceiveNew}>
+          <span className="cic run" aria-hidden="true">
+            NEW
+          </span>
+          <span>
+            <span className="ct1">Receive new quantity</span>
+            <br />
+            <span className="ct2">
+              Receive quantity that arrives with its own Work Order. It is
+              recorded separately from the {inAreaQty} pcs already here —
+              nothing is merged, and you confirm that explicitly.
+            </span>
+          </span>
+        </button>
+      ) : null}
       {repairable.length > 0 ? (
         <button className="choice" onClick={onRepair}>
           <span className="cic rep" aria-hidden="true">

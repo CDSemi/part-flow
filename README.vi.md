@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md).
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
-> upstream commit `40fbcb5` (Phase 10.5 Receive Quantity).
+> upstream commit `4fd635f` (Phase 10.5 Receive Quantity).
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -12,9 +12,8 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 
 ## Trạng thái hiện tại
 
-Repository hiện có nền tảng từ Phase 1 đến Phase 10 triển khai end to end,
-`Receive Quantity` của Phase 10.5 (đã triển khai, phase còn mở vì một canonical
-decision) và Production Board của Phase 11:
+Repository hiện có nền tảng từ Phase 1 đến Phase 10.5 triển khai end to end và
+Production Board của Phase 11:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -56,9 +55,10 @@ decision) và Production Board của Phase 11:
   Operation đã resolve (`POST /api/scan-stations/{id}/receipts`). `received_date`
   lấy từ chính lần scan mà resolution đóng dấu, không phải lúc confirm, và toàn
   bộ entry condition được serialize bằng lock cấp Part Number dùng chung cho mọi
-  command có thể tạo demand hoặc quantity. Phase **chưa đóng**: PROJECT_PROFILE
-  §32 quyết định 3 — “join an existing Quantity Flow” nghĩa là gì — còn mở, nên
-  Part Number đã có active quantity vẫn bị từ chối thay vì suy đoán.
+  command có thể tạo demand hoặc quantity. Receipt bên cạnh active quantity của
+  Part Number tạo Quantity Flow RIÊNG và chỉ sau explicit confirmation của
+  operator — không bao giờ merge gì, và `Combine quantities` vẫn là merge duy
+  nhất (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32).
 - **Phase 11 (Production Board):** read model board toàn Department derive từ
   projection vị trí hiện tại và Movement history (`GET /api/production-board`:
   phân bổ theo Area / Machine / External activity kèm timestamp vào vị trí,

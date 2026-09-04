@@ -1070,6 +1070,30 @@
   font-weight: 650;
 }
 
+/* The explicit separate-quantity confirmation of `Receive Quantity`
+   (PROJECT_PROFILE §14): a receipt never joins existing quantity, so
+   `Confirm receipt` stays blocked until this is checked. Same shape as
+   the Work Orders release confirmation — a checkbox beside the warning
+   guidance, never a styled button. */
+.ss-confirmsep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding-left: 12px;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ss-confirmsep input {
+  accent-color: var(--info);
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
 /* Required action: what must be entered before Next enables. */
 .ss-guide.action {
   color: var(--text);

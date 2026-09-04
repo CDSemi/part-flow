@@ -25,13 +25,16 @@ SLICE1_DATA_MODEL §6, §16):
   atomically; the standalone create endpoint commits its own.
 - The canonical PN string is also the key of the ONE PN-level
   serialization lock every command shares
-  (:func:`acquire_part_number_lock`). It lives here because the
-  canonical PN — not the optional, hard-deletable master row — is what
-  the lock is keyed on.
+  (:func:`acquire_part_number_lock`), and the subject of the PN-level
+  state that lock protects — :func:`active_quantity_distribution`, the
+  one reading of "what active quantity this PN already has" that the
+  release, the Scan Station receipt and the scan resolution all share.
+  Both live here because the canonical PN — not the optional,
+  hard-deletable master row — is what they are keyed on.
 """
 
 from collections.abc import Iterable
-from typing import Final, NamedTuple
+from typing import Any, Final, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -39,9 +42,9 @@ from sqlalchemy.orm import Session
 from app.application import audit
 from app.application.common import commit, flush
 from app.application.errors import InvalidInputError
-from app.domain.enums import AuditEntityType, AuditEventType
+from app.domain.enums import AuditEntityType, AuditEventType, QuantityFlowStatus
 from app.domain.part_number import InvalidPartNumberError, normalize_part_number
-from app.infrastructure.models import PartNumber
+from app.infrastructure.models import Area, PartNumber, QuantityFlow
 
 PART_NUMBER_CONFLICTS: Final = {
     "pk_part_numbers": (
@@ -132,6 +135,62 @@ def acquire_part_number_locks(session: Session, part_numbers: Iterable[str]) -> 
     """
     for part_number in sorted(set(part_numbers)):
         acquire_part_number_lock(session, part_number)
+
+
+# ---------------------------------------------------------------------------
+# PN-level active quantity — the state the lock protects
+# ---------------------------------------------------------------------------
+
+
+class ActiveQuantityEntry(NamedTuple):
+    """One ACTIVE QuantityFlow of a PN, as a confirmation presents it.
+
+    Business facts only: the quantity, where it currently is and how
+    it is routed. The Area name travels with the id so a station or a
+    dialog can name the location without a second lookup.
+    """
+
+    quantity_flow_id: int
+    quantity: int
+    route_mode: str
+    current_area_id: int
+    current_area_name: str
+
+
+def active_quantity_distribution(session: Session, part_number: str) -> list[ActiveQuantityEntry]:
+    """The PN's current ACTIVE distribution, oldest flow first.
+
+    ONE reading of the PN-level state :func:`acquire_part_number_lock`
+    protects, shared by every consumer: the production release and the
+    Scan Station receipt judge their explicit-confirmation rule on it
+    under the lock, and the scan resolution shows exactly the same
+    distribution to the operator BEFORE the confirmation. A separate
+    reading per consumer could show one thing and judge another.
+    """
+    rows = session.execute(
+        select(QuantityFlow, Area.name)
+        .join(Area, Area.id == QuantityFlow.current_area_id)
+        .where(
+            QuantityFlow.part_number == part_number,
+            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+        )
+        .order_by(QuantityFlow.id)
+    ).all()
+    return [
+        ActiveQuantityEntry(
+            quantity_flow_id=flow.id,
+            quantity=flow.quantity,
+            route_mode=flow.route_mode,
+            current_area_id=flow.current_area_id,
+            current_area_name=area_name,
+        )
+        for flow, area_name in rows
+    ]
+
+
+def active_quantity_payload(entries: Iterable[ActiveQuantityEntry]) -> list[dict[str, Any]]:
+    """The distribution as the confirmation-required response body carries it."""
+    return [dict(entry._asdict()) for entry in entries]
 
 
 class EnsuredPartNumber(NamedTuple):

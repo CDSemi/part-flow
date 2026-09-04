@@ -25,7 +25,12 @@ import { App } from '../../App';
 // receipt` as the only write point, the post-write refresh and focus
 // restoration, the receipt NOT becoming the Undo target, the server
 // refusal with nothing recorded, the lost response retried under the
-// SAME device_event_id, and the offline write block.
+// SAME device_event_id, and the offline write block. Also: a receipt
+// beside ACTIVE quantity of the PN — reachable from the PN action
+// dialog and the intent choice, blocked until the operator explicitly
+// confirms a SEPARATE quantity, never merging anything, and answering
+// the server's own confirmation-required refusal under the SAME
+// device_event_id.
 
 interface Flow {
   id: number;
@@ -110,6 +115,12 @@ let areaHasMachines: boolean;
 // The station's Area configures a second Operation: the receipt then
 // takes an explicit Operation choice (one resolves itself).
 let secondOperation: boolean;
+// The PN's business demand is settled (released, stocked and fully
+// allocated): its ACTIVE quantity remains while no active Work Order
+// Demand does. That is the state PROJECT_PROFILE §14 governs — the
+// workflow still applies and the receipt becomes an explicitly
+// confirmed SEPARATE quantity.
+let demandSettled: boolean;
 let healthDown: boolean;
 // What the SERVER stamps on the resolution: the received date follows
 // this instant, never the moment the operator confirms.
@@ -146,6 +157,16 @@ function flowWire(flow: Flow) {
     machine_id: null,
     available_actions: ['TRANSFER', 'SCRAP'],
     work_order: null,
+  };
+}
+
+function activeQuantityWire(flow: Flow) {
+  return {
+    quantity_flow_id: flow.id,
+    quantity: flow.qty,
+    route_mode: 'FLOATING',
+    current_area_id: flow.areaId,
+    current_area_name: AREAS.find((item) => item.id === flow.areaId)!.name,
   };
 }
 
@@ -269,11 +290,20 @@ function handle(url: string, method: string, body: unknown): Response {
         repair_available: false,
       })),
       operations: operationsOf(station.area_id),
-      has_active_demand: false,
-      // The SERVER judges the entry condition of `Receive Quantity`.
-      intake_available: mine.length === 0,
+      // A receipt creates the demand for what it received, so quantity
+      // introduced here keeps the PN's demand active until it is
+      // settled — exactly what withholds a further receipt.
+      has_active_demand: mine.length > 0 && !demandSettled,
+      // The SERVER judges the entry condition of `Receive Quantity`:
+      // no ACTIVE demand and an Area that can start production.
+      // Active quantity does not withhold it (§14).
+      intake_available: !(mine.length > 0 && !demandSettled),
       part_number_known: knownPartNumbers.has(pn),
-      internal_work_orders: mine.length === 0 ? internalWorkOrders : [],
+      internal_work_orders:
+        mine.length > 0 && !demandSettled ? [] : internalWorkOrders,
+      // Phase 10.5: the PN's existing ACTIVE distribution — a receipt
+      // never joins it (PROJECT_PROFILE §14).
+      active_quantity: mine.map(activeQuantityWire),
       transfer_blocked_reason: null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),
@@ -299,6 +329,7 @@ function handle(url: string, method: string, body: unknown): Response {
       reason: string | null;
       work_order_id: number | null;
       scanned_at: string;
+      confirm_active_quantity: boolean;
       device_event_id: string;
     };
     const replay = committed.get(request.device_event_id);
@@ -332,6 +363,26 @@ function handle(url: string, method: string, body: unknown): Response {
           409,
         );
       }
+    }
+    // PROJECT_PROFILE §14: a receipt never joins existing quantity —
+    // beside active quantity it commits only with the explicit
+    // separate-quantity confirmation, judged by the SERVER.
+    const active = flows.filter((flow) => flow.pn === request.part_number);
+    if (active.length > 0 && request.confirm_active_quantity !== true) {
+      return json(
+        {
+          detail:
+            "Part Number '" +
+            request.part_number +
+            "' already has active production quantity. Review the existing" +
+            ' distribution and confirm that this receipt creates a SEPARATE' +
+            ' quantity — existing quantity is never merged, and nothing was' +
+            ' recorded.',
+          confirmation_required: true,
+          existing_active_quantity: active.map(activeQuantityWire),
+        },
+        409,
+      );
     }
     const result = record(station, request);
     committed.set(request.device_event_id, result);
@@ -412,6 +463,7 @@ beforeEach(() => {
   writeFailure = null;
   areaHasMachines = true;
   secondOperation = false;
+  demandSettled = false;
   healthDown = false;
   scannedAt = new Date().toISOString();
   vi.stubGlobal(
@@ -915,4 +967,144 @@ test('a retry of the same receipt repeats the original scan timestamp', async ()
   expect(sent).toHaveLength(2);
   expect(sent[1].body.device_event_id).toBe(sent[0].body.device_event_id);
   expect(sent[1].body.scanned_at).toBe(scannedAt);
+});
+
+/* ====== Active quantity — the explicit separate-quantity confirmation
+   (PROJECT_PROFILE §14) ====== */
+
+test('quantity elsewhere offers `Receive new quantity` as an explicit intent', async () => {
+  // The PN's demand is settled but 4 pcs are still active in Deburr:
+  // the station never assumes the operator means the transfer.
+  flows = [{ id: 301, pn: '118-052', qty: 4, areaId: 6, state: 'QUEUED' }];
+  demandSettled = true;
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const choices = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+
+  expect(
+    within(choices).getByRole('button', {
+      name: /Receive from another Area/,
+    }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(choices).getByRole('button', { name: /Receive new quantity/ }),
+  );
+
+  await screen.findByRole('dialog', { name: 'Receive Quantity' });
+  expect(receiptRequests()).toHaveLength(0);
+});
+
+test('quantity in this Area offers `Receive new quantity` beside `Add more quantity`', async () => {
+  flows = [{ id: 301, pn: '118-052', qty: 4, areaId: 2, state: 'QUEUED' }];
+  demandSettled = true;
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+
+  // Two DIFFERENT workflows, both offered, neither substituting for
+  // the other (IMPLEMENTATION_ROADMAP Phase 10.5).
+  expect(
+    within(actions).getByRole('button', { name: /Add more quantity/ }),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Receive new quantity/ }),
+  );
+
+  await screen.findByRole('dialog', { name: 'Receive Quantity' });
+});
+
+test('a receipt beside active quantity is blocked until the operator confirms a separate quantity', async () => {
+  flows = [{ id: 301, pn: '118-052', qty: 4, areaId: 2, state: 'QUEUED' }];
+  demandSettled = true;
+  await renderStation();
+
+  scan('PF:PN:118-052');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Receive new quantity/ }),
+  );
+  const box = await screen.findByRole('dialog', { name: 'Receive Quantity' });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  fireEvent.change(quantityInput(box), { target: { value: '6' } });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+
+  const confirm = await within(box).findByRole('button', {
+    name: 'Confirm receipt',
+  });
+  // The existing quantity is named, and nothing can be recorded yet.
+  expect(box).toHaveTextContent('Milling × 4 pcs');
+  expect(box).toHaveTextContent('does not join it');
+  expect(confirm).toBeDisabled();
+
+  const acknowledge = within(box).getByRole('checkbox');
+  fireEvent.click(acknowledge);
+  expect(confirm).toBeEnabled();
+  fireEvent.click(confirm);
+
+  await notice();
+  const sent = receiptRequests();
+  expect(sent).toHaveLength(1);
+  expect(sent[0].body.confirm_active_quantity).toBe(true);
+  // A SEPARATE quantity: the existing flow is untouched.
+  expect(flows).toHaveLength(2);
+  expect(flows[0]).toMatchObject({ id: 301, qty: 4 });
+  expect(flows[1]).toMatchObject({ pn: '118-052', qty: 6 });
+});
+
+test('active quantity that appeared after the wizard opened refuses the receipt until it is confirmed', async () => {
+  // The wizard opened with nothing active; the server refuses the
+  // unconfirmed receipt with the distribution and records nothing.
+  writeFailure = {
+    status: 409,
+    body: {
+      detail:
+        "Part Number 'NEW-PN-1' already has active production quantity." +
+        ' Review the existing distribution and confirm that this receipt' +
+        ' creates a SEPARATE quantity — existing quantity is never merged,' +
+        ' and nothing was recorded.',
+      confirmation_required: true,
+      existing_active_quantity: [
+        {
+          quantity_flow_id: 340,
+          quantity: 7,
+          route_mode: 'FLOATING',
+          current_area_id: 6,
+          current_area_name: 'Deburr',
+        },
+      ],
+    },
+  };
+  await renderStation();
+
+  const box = await toConfirmation('5');
+  expect(within(box).queryByRole('checkbox')).toBeNull();
+  fireEvent.click(within(box).getByRole('button', { name: 'Confirm receipt' }));
+
+  const retry = await within(box).findByRole('button', {
+    name: 'Retry receipt',
+  });
+  expect(box).toHaveTextContent('Deburr × 7 pcs');
+  expect(retry).toBeDisabled();
+  expect(flows).toHaveLength(0);
+
+  fireEvent.click(within(box).getByRole('checkbox'));
+  expect(retry).toBeEnabled();
+  fireEvent.click(retry);
+
+  await notice();
+  const sent = receiptRequests();
+  expect(sent).toHaveLength(2);
+  // The confirmation continues the SAME submission: same intent, same
+  // idempotency key — it is not part of the request fingerprint.
+  expect(sent[1].body.device_event_id).toBe(sent[0].body.device_event_id);
+  expect(sent[0].body.confirm_active_quantity).toBe(false);
+  expect(sent[1].body.confirm_active_quantity).toBe(true);
 });

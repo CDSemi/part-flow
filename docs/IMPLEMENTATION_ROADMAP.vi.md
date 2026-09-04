@@ -1,7 +1,7 @@
 # Roadmap triển khai PartFlow
 
 > **Bản gốc chuẩn:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md).
-> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
+> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
 >
 > **Quyền chuẩn:** File tiếng Anh là canonical source cho thứ tự triển khai,
 > ranh giới phase, dependency và các giới hạn tạm thời. Hành vi domain và phạm
@@ -19,7 +19,10 @@
 > lại phải được gán cho đúng một owner phase, hoặc nằm ở `Deferred` / một
 > canonical open decision.
 
-- Đặc tả project chuẩn là `PROJECT_PROFILE.md` v21. V21 cho phép sửa có giới hạn
+- Đặc tả project chuẩn là `PROJECT_PROFILE.md` v22. V22 chốt: receipt của Scan
+  Station không bao giờ join quantity đang có — nó tạo Quantity Flow riêng sau
+  một explicit confirmation, và `Combine quantities` vẫn là merge duy nhất (§14,
+  giải quyết open decision 3 cũ của §32). V21 cho phép sửa có giới hạn
   WorkOrderDemand đã release: `requested_quantity` không thấp hơn quantity đã
   release hoặc allocate; `due_date` và Job Numbers vẫn sửa được; Part Number,
   Request Type, requester, reason, notes cố định và vẫn không được xóa line.
@@ -184,18 +187,18 @@
   tại khi còn row tiếp theo. Đã audit trước khi đóng.
   Authorization adjustment chờ Phase 14, Worker chờ Phase 13, read model
   monitoring chờ Phase 11.
-- **Phase 10.5**: đã triển khai nhưng **chưa đóng** — Application command
+- **Phase 10.5**: đã triển khai end to end — Application command
   `app/application/intake.py` kèm read model, `POST /api/scan-stations/{id}/receipts`
   và PN resolution mở rộng, cùng wizard `Receive Quantity` ba view thật trong Scan
-  Station: một canonical PN không còn active Work Order Demand và không có active
-  quantity nay được RECEIVED tại production station — kể cả PN gặp lần đầu — với
-  internal Work Order blank-number được tạo hoặc reuse, WorkOrderDemand,
-  QuantityFlow, AssignedRoute snapshot cho `PLANNED` và immutable Movement
-  `RECEIVED` commit trong một transaction. Không cần migration: shape check của
-  `RECEIVED` đã cho phép Scan Station identity và reason. Phase vẫn mở vì
-  PROJECT_PROFILE §32 quyết định 3 — “join an existing Quantity Flow” nghĩa là gì
-  — chưa chốt, trong khi §14 yêu cầu điều đó trước khi receive một PN đã có active
-  quantity.
+  Station: một canonical PN không còn active Work Order Demand nay được RECEIVED
+  tại production station — kể cả PN gặp lần đầu — với internal Work Order
+  blank-number được tạo hoặc reuse, WorkOrderDemand, QuantityFlow, AssignedRoute
+  snapshot cho `PLANNED` và immutable Movement `RECEIVED` commit trong một
+  transaction. Receipt KHÔNG BAO GIỜ join quantity đang có: bên cạnh active
+  quantity của PN nó tạo Quantity Flow RIÊNG, và chỉ sau explicit confirmation
+  của operator (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32). Không
+  cần migration: shape check của `RECEIVED` đã cho phép Scan Station identity và
+  reason.
 - **Phase 11**: đã triển khai **Production Board** (Area Board và Tracking là
   phần còn mở của phase). Backend `app/application/production_board.py` trên
   `GET /api/production-board` derive board toàn Department từ projection vị trí
@@ -654,11 +657,13 @@ Scope:
   theo lịch site;
 - serialize entry condition với mọi command có thể làm PN có active demand hoặc
   active quantity, để receipt không bao giờ commit bên cạnh một trong số đó;
-- chỉ receive một PN ĐÃ có active quantity sau explicit join-or-separate
-  confirmation mà PROJECT_PROFILE §14 yêu cầu. **Bullet này đang bị chặn**:
-  không canonical document nào định nghĩa ngữ nghĩa của việc join
-  (PROJECT_PROFILE §32 quyết định 3), nên workflow từ chối trường hợp đó và
-  phase vẫn mở tới khi quyết định được chốt.
+- chỉ receive một PN ĐÃ có active quantity sau explicit confirmation mà
+  PROJECT_PROFILE §14 yêu cầu, và ghi nó thành QuantityFlow RIÊNG: receipt không
+  bao giờ join, merge, mutate hay ghi đè quantity đang có, resolution mang theo
+  existing distribution để operator confirm dựa trên đó, backend xét lại state đó
+  authoritative lúc write (receipt mà PN có active quantity xuất hiện sau khi mở
+  wizard bị từ chối, zero write, tới khi được confirm), và các quantity về sau
+  thuộc về nhau được gom lại bằng workflow `Combine quantities` đã có.
 
 Không thuộc phase corrective này:
 
@@ -667,15 +672,14 @@ Không thuộc phase corrective này:
 - quản lý Planned Route template hay PartNumber metadata — Phase 13;
 - allocation behavior của Stockroom — đã thuộc Phase 10.
 
-Trạng thái triển khai (**một phần — phase CHƯA đóng**: mọi scope bullet ở trên đã
-triển khai, nhưng canonical decision mà bullet cuối phụ thuộc vẫn mở, nên
-`Receive Quantity` chỉ phủ trường hợp PN không có active quantity — xem *Bị chặn
-bởi canonical decision* bên dưới. Backend: command `Receive Quantity` kèm read
-model và API; frontend: wizard ba view của GUI_DESIGN §4.7 mục 1 trong Scan
-Station thật; đã validate bằng full backend gate — `ruff format --check`,
-`ruff check`, `mypy app tests`, 658 test —, `alembic upgrade head` +
-`alembic check` không drift, và full frontend gate `npm run check` — format,
-lint, typecheck, 719 test, build, production-boundary sentinel): **không
+Trạng thái triển khai (**hoàn tất**: mọi scope bullet ở trên đã triển khai và đã
+validate. Backend: command `Receive Quantity` kèm read model và API; frontend:
+wizard ba view của GUI_DESIGN §4.7 mục 1 trong Scan Station thật, vào được từ
+scan và từ explicit choice `Receive new quantity` của §4.7 mục 2 và 3; đã validate
+bằng full backend gate — `ruff format --check`, `ruff check`, `mypy app tests`,
+661 test —, `alembic upgrade head` + `alembic check` không drift, và full frontend
+gate `npm run check` — format, lint, typecheck, 723 test, build,
+production-boundary sentinel): **không
 migration** — shape check theo type của Movement đã cho phép `RECEIVED` mang
 `station_id` và `reason`, nên receipt do scan không cần đổi schema và Alembic
 head vẫn là `0011_phase10_stock_allocation`. **Entry condition**
@@ -685,17 +689,19 @@ Work Order Demand là ACTIVE khi còn business shortage —
 trong phase này: released quantity không quyết định, và `WorkOrder.completed_at`
 là trạng thái tổng của cả Work Order chứ không phải của một line). Resolution
 báo `has_active_demand` theo rule đó cùng `intake_available` (không active
-demand, không ACTIVE QuantityFlow nào của PN ở bất kỳ đâu, và Area của station
-có thể bắt đầu production — terminal Area thì không bao giờ), `part_number_known`
-(copy Step 1 phân biệt PN đã biết với PN mới), `internal_work_orders` và
-`scanned_at`; read model xét entry condition còn command xét lại một cách
-authoritative lúc ghi. **Command** (`intake.receive_quantity`,
+demand và Area của station có thể bắt đầu production — terminal Area thì không
+bao giờ), `part_number_known` (copy Step 1 phân biệt PN đã biết với PN mới),
+`internal_work_orders`, `active_quantity` (existing ACTIVE distribution của PN,
+ở bất kỳ đâu) và `scanned_at`; read model xét entry condition còn command xét lại
+một cách authoritative lúc ghi. Active quantity KHÔNG giữ workflow lại — receipt
+tạo flow riêng bên cạnh nó, xem *Không bao giờ join* bên dưới. **Command** (`intake.receive_quantity`,
 `POST /api/scan-stations/{station_id}/receipts`) là MỘT transaction theo thứ tự
 đã thiết lập — input shape → deterministic fingerprint → idempotency fast path →
 station context → MỘT advisory lock cấp PN dùng chung
 (`part_numbers.acquire_part_number_lock`) → idempotency re-check → row lock Scan
-Station kèm re-check active/binding authoritative → precondition no-active-quantity
-và no-active-demand → resolve internal Work Order dưới lock demand → WorkOrder →
+Station kèm re-check active/binding authoritative → separate-quantity confirmation
+xét trên distribution re-read dưới lock và precondition no-active-demand →
+resolve internal Work Order dưới lock demand → WorkOrder →
 re-read Area đã lock (active, non-terminal) → lock Operation
 (`transfers.resolve_arrival_operation` — một Operation active tự resolve, nhiều
 thì phải chọn tường minh) → các write → COMMIT (hoặc replay của bên thắng race).
@@ -719,9 +725,10 @@ edit thường, kèm audit row `UPDATED` (SLICE1_DATA_MODEL §5 — một canoni
 ghi lại). Mọi từ chối đều không ghi gì: PN, quantity, Request Type, Route Mode
 hay Planned Route invalid, Route không bắt đầu ở đây, station đã deactivate hoặc
 rebind, Area đã deactivate hoặc terminal, Operation lạ hoặc ambiguous, active
-demand / active quantity xuất hiện từ lúc mở wizard, selection Work Order cũ,
-scan timestamp naive / ở tương lai / quá cũ so với intake scan window, và reuse
-`device_event_id` sai fingerprint hoặc khác command.
+demand xuất hiện từ lúc mở wizard, active quantity mà thiếu explicit
+separate-quantity confirmation, selection Work Order cũ, scan timestamp naive /
+ở tương lai / — với receipt chưa được ghi — quá cũ so với intake scan window, và
+reuse `device_event_id` sai fingerprint hoặc khác command.
 
 **Undo boundary:** receipt cố ý KHÔNG reversible từ station
 (`undo._ineligibility` từ chối command `INTAKE` tường minh, như Phase 10 đã làm
@@ -751,25 +758,41 @@ theo `SITE_TIMEZONE` qua đúng một helper lịch site dùng chung
 (`work_orders.site_date_of`), nên receipt chuẩn bị lúc 23:50 và confirm lúc 00:10
 vẫn thuộc ngày đã scan. Instant này nằm trong idempotency fingerprint: retry cùng
 intent replay receipt gốc, còn một lần scan mới là intent khác và cần
-`device_event_id` riêng.
+`device_event_id` riêng. **Normalization tách khỏi freshness**
+(`_normalized_scanned_at` so với `_validate_scan_freshness`): shape check chạy
+trước fingerprint vì instant là một phần của nó, còn đồng hồ chỉ xét command CHƯA
+được commit. Scan window chi phối việc NHẬN quantity mới, không bao giờ chi phối
+việc BÁO LẠI quantity đã nhận, nên một lost response retry sau mười hai giờ vẫn
+replay receipt đã commit thay vì bị từ chối là quá cũ — và receipt chưa được ghi
+thì vẫn bị từ chối đúng theo window đó.
 
-Test: `tests/test_intake_api.py` (entry condition với active demand, active
-quantity và terminal Area giữ workflow lại; các record của receipt, arrival
+Test: `tests/test_intake_api.py` (entry condition với active demand và terminal
+Area giữ workflow lại, còn active quantity một mình thì workflow vẫn mở; các
+record của receipt, arrival
 queued so với direct processing, due date, snapshot `PLANNED` và các từ chối của
 nó; reuse bằng cách nâng line kèm audit row, từ chối khi nhiều ứng viên kèm danh
 sách và selection tường minh sau đó, selection cũ, `NEW` không bao giờ reuse,
 Work Order completed không bao giờ là ứng viên; revalidation lúc ghi và ma trận
 input invalid, mỗi trường hợp zero write; replay, reuse sai và reuse khác
-command; từ chối Undo; projection replay; received date qua site midnight cùng
-validation và intent của scan timestamp; và bộ concurrency — hai receipt đồng
-thời của một PN, và receipt chạy đua với từng writer có thể trao cho PN active
-demand hoặc active quantity).
+command; từ chối Undo; projection replay; separate-quantity confirmation — bị từ
+chối khi chưa confirm kèm distribution và zero write, confirm rồi thì tạo flow
+thứ hai bên cạnh flow đầu còn nguyên vẹn, quantity chỉ xuất hiện sau resolution
+bị từ chối lúc write rồi được confirm dưới CÙNG `device_event_id`; received date
+qua site midnight cùng validation và intent của scan timestamp, và receipt đã
+commit replay được sau khi scan window hết hạn; và bộ concurrency — hai receipt
+đồng thời của một PN, và receipt chạy đua với từng writer có thể trao cho PN
+active demand hoặc active quantity).
 
 **Frontend** (`src/api/scan-station.ts` — `receiveQuantity`,
-`workOrderSelectionRequired`, resolution mở rộng kèm `scannedAt` —,
+`workOrderSelectionRequired`, `receiptConfirmationRequired`, resolution mở rộng
+kèm `scannedAt` và `activeQuantity` —,
 `src/views/scan-station/scan-station-intake-dialog.tsx`, nối trong
 `ScanStationView.tsx`): PN resolve với `intake_available` mở `Receive Quantity`
-thay cho placeholder trung thực trước đây — ba view đã duyệt trong MỘT dialog
+thay cho placeholder trung thực trước đây — mở thẳng từ scan khi PN không có
+active quantity ở đâu cả, và qua explicit choice `Receive new quantity` của PN
+action dialog (bên cạnh `Add more quantity`) hoặc của intent dialog cho PN có
+quantity ở nơi khác (`PnIntentDialog`, mở rộng từ choice transfer-or-repair cũ:
+không suy ra intent nào khi có nhiều intent áp dụng) — ba view đã duyệt trong MỘT dialog
 lifecycle (settings → quantity → confirmation), default editable
 `Request Type = MODIFY` và `Route Mode = FLOATING`, field Planned Route chỉ cho
 `PLANNED` và chỉ liệt kê Route bắt đầu tại Area này, due date optional với label
@@ -784,33 +807,51 @@ mở kèm lý do của server và không ghi gì, từ chối `selection_require
 settings view với ứng viên của server dưới `device_event_id` MỚI (request bị từ
 chối không ghi gì, nên intent đã sửa là intent khác — `useOneShotWrite` có thêm
 `resetIntent` đúng cho việc này), và mất response thì freeze intent sau CÙNG
-`device_event_id` với `Retry the same receipt`. Sau khi server xác nhận, station
-context và Area inventory load lại từ server, barcode input lấy lại focus, và
-receipt vào session log NHƯNG không trở thành Undo target. Test frontend:
+`device_event_id` với `Retry the same receipt`. Khi PN đã có active quantity,
+confirmation view nêu tên distribution đó (`<Area> × <n> pcs`), nói rằng receipt
+không join nó, và chặn `Confirm receipt` — cùng phím Enter — sau MỘT explicit
+acknowledgement; refusal `confirmation_required` của server (quantity chỉ xuất
+hiện sau khi wizard mở, không ghi gì) hiển thị distribution của chính server ở đó
+và được trả lời dưới CÙNG `device_event_id`, vì flag cố ý không nằm trong request
+fingerprint. Sau khi server xác nhận, station context và Area inventory load lại
+từ server, barcode input lấy lại focus, và receipt vào session log NHƯNG không
+trở thành Undo target. Test frontend:
 `scan-station-intake.test.tsx` (default settings và cả hai copy PN, Planned Route
 lọc theo Area, write point kèm reload và refocus, due date / reason / Operation,
 request `PLANNED`, arrival direct-processing, reuse và selection tường minh,
 `NEW` không reuse, từ chối, từ chối selection-required với id mới, retry khi mất
 response dùng cùng id và cùng scan timestamp, scan timestamp đi nguyên vẹn tới
 write point, block offline, Cancel không ghi gì, và receipt không được đề nghị
-làm Undo target), cùng suite transfer Phase 5 đã cập nhật, nơi placeholder “no
-intake at the station” cũ nay là wizard.
+làm Undo target; và các case active-quantity — choice `Receive new quantity` xuất
+hiện bên cạnh transfer intent và bên cạnh `Add more quantity`, `Confirm receipt`
+bị chặn tới khi có explicit acknowledgement với quantity đang có được nêu tên,
+receipt đã confirm gửi flag và giữ nguyên flow cũ, và refusal
+confirmation-required của server được trả lời dưới cùng `device_event_id`), cùng
+suite transfer Phase 5 đã cập nhật, nơi placeholder “no intake at the station” cũ
+nay là wizard.
 
 Cố ý chưa có: Worker identity, Worker Sessions và badge gate (Phase 13),
 authorization (Phase 14), quản lý Planned Route và PartNumber master (Phase 13).
 
-**Bị chặn bởi canonical decision — vì sao phase chưa đóng.** PROJECT_PROFILE §14
-yêu cầu một PN đã có active quantity chỉ được receive sau explicit confirmation
-rằng quantity mới **join existing Quantity Flow hay tạo Flow riêng**. GUI_DESIGN
-§4.7 không đặc tả bước đó trong wizard `Receive Quantity` (mục 1 chỉ mở cho PN
-không có active demand, và ba view của nó không thu thập lựa chọn join-or-separate
-nào), và không tài liệu nào định nghĩa join nghĩa là gì — được join active flow
-nào, quantity được join thừa hưởng gì (route mode, Assigned Route, current
-position, processing state), Movement nào ghi lại. Khoảng trống đó nay được ghi
-thành PROJECT_PROFILE §32 quyết định 3. Trước khi chốt, implementation từ chối
-receipt mà PN có active quantity thay vì tự bịa ngữ nghĩa, và phase này vẫn
-**chưa hoàn tất**: đóng nó sẽ đánh dấu một canonical requirement chưa triển khai
-là xong. Mọi phần còn lại trong scope đã triển khai và đã validate.
+**Không bao giờ join — explicit separate-quantity confirmation.** Canonical
+decision từng chặn phase này đã được chốt (PROJECT_PROFILE v22 §14, giải quyết
+open decision 3 cũ của §32) và cố ý là phương án đơn giản nhất giữ được quantity
+integrity: receipt **không bao giờ join** một Quantity Flow đang tồn tại. Nó luôn
+tạo flow riêng, và khi PN đã có active quantity thì operator confirm điều đó
+tường minh trước khi bất cứ gì được ghi. Quantity đang có không bao giờ bị merge
+vào, mutate, thừa hưởng hay ghi đè — không Movement nào được ghi lên nó, và
+quantity, route mode, Assigned Route, vị trí cùng processing state của nó giữ
+nguyên — còn các Quantity Flow về sau hoá ra thuộc về nhau thì được gom lại bằng
+workflow `Combine quantities` đã có (Phase 8, `MERGED`), vốn đã sở hữu
+compatibility và lineage. Không có ngữ nghĩa mới nào được bịa ra cho trường hợp
+join, nên không có semantics mới, không migration và không có merge path thứ hai.
+Rule được enforce ở MỘT chỗ lúc write: `intake.receive_quantity` re-read
+distribution dưới advisory lock cấp PN dùng chung và raise CHÍNH
+`ActiveQuantityConfirmationRequiredError` mà production release raise (409,
+`confirmation_required` kèm existing distribution, zero write), nên quantity xuất
+hiện giữa scan và confirmation không bao giờ được receive một cách âm thầm. Flag
+confirmation cố ý nằm ngoài request fingerprint: confirm là tiếp tục cùng một
+submission dưới cùng `device_event_id`, nên nó replay chứ không ghi hai lần.
 
 ## Phase 11 — Read Models and Monitoring Views
 

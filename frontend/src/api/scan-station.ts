@@ -343,6 +343,38 @@ function toInternalWorkOrder(wire: InternalWorkOrderWire): InternalWorkOrder {
   };
 }
 
+/**
+ * One existing ACTIVE quantity of the PN, as the `Receive Quantity`
+ * confirmation shows it (PROJECT_PROFILE §14). The same shape arrives
+ * with the resolution and with the server's confirmation-required
+ * refusal, so one renderer serves both.
+ */
+export interface ActiveQuantityEntry {
+  quantityFlowId: number;
+  quantity: number;
+  routeMode: 'FLOATING' | 'PLANNED';
+  currentAreaId: number;
+  currentAreaName: string;
+}
+
+interface ActiveQuantityWire {
+  quantity_flow_id: number;
+  quantity: number;
+  route_mode: 'FLOATING' | 'PLANNED';
+  current_area_id: number;
+  current_area_name: string;
+}
+
+function toActiveQuantity(wire: ActiveQuantityWire): ActiveQuantityEntry {
+  return {
+    quantityFlowId: wire.quantity_flow_id,
+    quantity: wire.quantity,
+    routeMode: wire.route_mode,
+    currentAreaId: wire.current_area_id,
+    currentAreaName: wire.current_area_name,
+  };
+}
+
 export interface ScanResolution {
   partNumber: string;
   stationId: string;
@@ -356,8 +388,9 @@ export interface ScanResolution {
    * belongs to a production release, not to a station receipt. */
   hasActiveDemand: boolean;
   /** Phase 10.5: the station may INTRODUCE this PN here — no active
-   * demand, no active quantity anywhere, and an Area that can start
-   * production (GUI_DESIGN §4.7 item 1). */
+   * demand and an Area that can start production (GUI_DESIGN §4.7
+   * item 1). Existing active quantity does NOT withhold it: it makes
+   * the receipt an explicitly confirmed separate quantity. */
   intakeAvailable: boolean;
   /** The PartNumber master already exists (the Step 1 copy tells a
    * known PN from a new one). */
@@ -366,6 +399,13 @@ export interface ScanResolution {
    * reuse; more than one REQUIRES an explicit selection and the client
    * never picks one (PROJECT_PROFILE §14). */
   internalWorkOrders: InternalWorkOrder[];
+  /** Phase 10.5 (PROJECT_PROFILE §14): the PN's existing ACTIVE
+   * distribution, wherever it is. A receipt never joins it, so while
+   * this is non-empty `Receive Quantity` shows it and requires the
+   * operator's explicit confirmation that the receipt creates a
+   * SEPARATE quantity; the server judges the same rule at write
+   * time. `Combine quantities` stays the only way to merge. */
+  activeQuantity: ActiveQuantityEntry[];
   /** Set when the station's Area can never receive a transfer. */
   transferBlockedReason: string | null;
   /** Several flows match: the operator selects exactly one. */
@@ -422,6 +462,7 @@ interface ScanResolutionWire {
   intake_available: boolean;
   part_number_known: boolean;
   internal_work_orders: InternalWorkOrderWire[];
+  active_quantity: ActiveQuantityWire[];
   transfer_blocked_reason: string | null;
   requires_selection: boolean;
   combine_groups: number[][];
@@ -477,6 +518,7 @@ export async function resolveScan(
     intakeAvailable: wire.intake_available,
     partNumberKnown: wire.part_number_known,
     internalWorkOrders: wire.internal_work_orders.map(toInternalWorkOrder),
+    activeQuantity: wire.active_quantity.map(toActiveQuantity),
     transferBlockedReason: wire.transfer_blocked_reason,
     requiresSelection: wire.requires_selection,
     combineGroups: wire.combine_groups,
@@ -1051,6 +1093,13 @@ export interface ReceiptInput {
    * It is part of the receipt's intent, so a retry of the SAME intent
    * replays instead of receiving under a later date. */
   scannedAt: string;
+  /** PROJECT_PROFILE §14: a receipt NEVER joins existing quantity. Set
+   * only after the wizard showed the PN's existing active
+   * distribution and the operator confirmed that this receipt creates
+   * a SEPARATE quantity. It is NOT part of the request fingerprint, so
+   * confirming continues the same submission under the same
+   * `deviceEventId`. */
+  confirmActiveQuantity: boolean;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
@@ -1104,11 +1153,13 @@ interface ReceiptResultWire {
  * Record the confirmed `Receive Quantity` (GUI_DESIGN §4.7,
  * PROJECT_PROFILE §14). Resolves ONLY when the server confirmed the
  * write: 201 for a fresh receipt, 200 for an idempotent replay of the
- * same `deviceEventId` + same intent. Every rejection — active demand
- * or active quantity that appeared meanwhile, a stale station / Area /
+ * same `deviceEventId` + same intent (a replay is never refused for
+ * age — the scan window governs new quantity only). Every rejection —
+ * active demand that appeared meanwhile, active quantity without the
+ * explicit separate-quantity confirmation, a stale station / Area /
  * Operation context, a terminal Area, several plausible internal Work
- * Orders, a scan timestamp the server no longer accepts — is an
- * `ApiError` and nothing was recorded.
+ * Orders, a scan timestamp the server no longer accepts for a fresh
+ * receipt — is an `ApiError` and nothing was recorded.
  */
 export async function receiveQuantity(
   input: ReceiptInput,
@@ -1128,6 +1179,7 @@ export async function receiveQuantity(
         reason: input.reason,
         work_order_id: input.workOrderId,
         scanned_at: input.scannedAt,
+        confirm_active_quantity: input.confirmActiveQuantity,
         device_event_id: input.deviceEventId,
       },
     },
@@ -1152,6 +1204,31 @@ export async function receiveQuantity(
     occurredAt: data.occurred_at,
     created: status === 201,
   };
+}
+
+/**
+ * The PN's existing ACTIVE distribution a refused receipt asks the
+ * operator to confirm against (the backend's 409 with
+ * `confirmation_required`), or null for any other failure. It arrives
+ * when quantity appeared after the resolution opened the wizard;
+ * nothing was recorded, and the SAME `deviceEventId` continues the
+ * submission once the operator confirmed.
+ */
+export function receiptConfirmationRequired(
+  error: unknown,
+): ActiveQuantityEntry[] | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const body = error.body;
+  if (!body || typeof body !== 'object') return null;
+  const record = body as {
+    confirmation_required?: unknown;
+    existing_active_quantity?: unknown;
+  };
+  if (record.confirmation_required !== true) return null;
+  if (!Array.isArray(record.existing_active_quantity)) return null;
+  return (record.existing_active_quantity as ActiveQuantityWire[]).map(
+    toActiveQuantity,
+  );
 }
 
 /**

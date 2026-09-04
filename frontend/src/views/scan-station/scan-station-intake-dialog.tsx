@@ -4,10 +4,12 @@ import type { ReactNode } from 'react';
 import { errorMessage } from '../../api/client';
 import {
   areaRefColor,
+  receiptConfirmationRequired,
   receiveQuantity,
   workOrderSelectionRequired,
 } from '../../api/scan-station';
 import type {
+  ActiveQuantityEntry,
   InternalWorkOrder,
   OperationRef,
   ReceiptResult,
@@ -52,6 +54,19 @@ import {
  * take the receipt, the settings view REQUIRES an explicit choice
  * between them — the station never guesses a first match, and the
  * server refuses the same way if a further one appeared meanwhile.
+ *
+ * A receipt NEVER joins existing quantity (PROJECT_PROFILE §14). Where
+ * the PN already has active quantity, the confirmation view shows that
+ * distribution and `Confirm receipt` stays blocked until the operator
+ * explicitly confirms that this receipt creates a SEPARATE quantity —
+ * existing quantity is never merged, mutated or rewritten, and
+ * quantities that belong together are combined afterwards by the
+ * separate `Combine quantities` workflow. Quantity found beside
+ * quantity already in this Area stays the separate `Add more
+ * quantity` correction. Quantity that appeared only AFTER this wizard
+ * opened arrives as the server's confirmation-required refusal (which
+ * recorded nothing): the distribution is shown and the SAME
+ * `device_event_id` continues the submission once confirmed.
  *
  * The write follows the shared one-shot protocol: nothing is recorded
  * before the final confirmation, success reads only after the server
@@ -146,6 +161,15 @@ export function IntakeDialog({
     resolution.internalWorkOrders,
   );
   const [workOrderId, setWorkOrderId] = useState<number | null>(null);
+  // The PN's existing ACTIVE quantity: from the resolution that opened
+  // the wizard, replaced by the server's own list when a refusal
+  // reports quantity that appeared since. Non-empty REQUIRES the
+  // explicit separate-quantity confirmation below (§14).
+  const [activeQuantity, setActiveQuantity] = useState<ActiveQuantityEntry[]>(
+    resolution.activeQuantity,
+  );
+  const [separateConfirmed, setSeparateConfirmed] = useState(false);
+  const separateRequired = activeQuantity.length > 0;
 
   // Planned Routes are loaded only when the operator actually chooses
   // PLANNED — a FLOATING receipt needs no route at all.
@@ -209,6 +233,15 @@ export function IntakeDialog({
   const destination = hasMachines
     ? `${areaName} queue (awaiting Machine)`
     : `${areaName} — direct processing`;
+  // How the existing quantity reads to an operator: where it is and
+  // how much — the internal flow id is never the operator's handle.
+  const existingTotal = activeQuantity.reduce(
+    (sum, entry) => sum + entry.quantity,
+    0,
+  );
+  const existingQuantityLabel = activeQuantity
+    .map((entry) => `${entry.currentAreaName} × ${entry.quantity} pcs`)
+    .join(' · ');
 
   function goQty() {
     if (!settingsValid) return;
@@ -250,6 +283,9 @@ export function IntakeDialog({
           // from, carried through every step: the received date
           // follows the scan, never this confirmation (§14).
           scannedAt: resolution.scannedAt,
+          // Only ever true after the operator confirmed against the
+          // distribution shown here (§14) — never inferred.
+          confirmActiveQuantity: separateRequired && separateConfirmed,
           deviceEventId,
         });
       } catch (error) {
@@ -259,6 +295,15 @@ export function IntakeDialog({
           setWorkOrderId(null);
           setStep('settings');
           setSelectionNotice(errorMessage(error));
+          throw error;
+        }
+        const existing = receiptConfirmationRequired(error);
+        if (existing !== null) {
+          // Quantity appeared after this wizard opened: nothing was
+          // recorded, and the SAME intent continues once the operator
+          // confirms against the server's distribution.
+          setActiveQuantity(existing);
+          setSeparateConfirmed(false);
         }
         throw error;
       }
@@ -286,7 +331,12 @@ export function IntakeDialog({
         step === 'qty'
           ? quantityKeyHandler(qty, setQty, goConfirm)
           : step === 'confirm'
-            ? enterKeyHandler(() => void write.submit())
+            ? enterKeyHandler(() => {
+                // The explicit §14 confirmation is a decision, never a
+                // keystroke: Enter records nothing until it is given.
+                if (separateRequired && !separateConfirmed) return;
+                void write.submit();
+              })
             : enterKeyHandler(goQty)
       }
     >
@@ -546,10 +596,37 @@ export function IntakeDialog({
                 'primary',
               ],
               ['Reason / notes', notes.trim() || null],
+              [
+                'Existing quantity',
+                separateRequired ? (
+                  <span className="mono">{existingQuantityLabel}</span>
+                ) : null,
+              ],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'RECEIVED', 'secondary'],
             ]}
           />
+          {separateRequired ? (
+            <>
+              <Guidance tone="warn">
+                This Part Number already has {existingTotal} pcs in production (
+                {existingQuantityLabel}). This receipt does not join it — it
+                records a separate quantity. Nothing existing is changed. Use
+                Combine quantities later if they turn out to belong together.
+              </Guidance>
+              <label className="ss-confirmsep">
+                <input
+                  type="checkbox"
+                  checked={separateConfirmed}
+                  onChange={(event) =>
+                    setSeparateConfirmed(event.target.checked)
+                  }
+                />{' '}
+                Record this as a separate quantity — I reviewed the quantity
+                already in production.
+              </label>
+            </>
+          ) : null}
           <WriteGuidance
             outcomeUnknown={write.outcomeUnknown}
             serverError={write.serverError}
@@ -578,7 +655,10 @@ export function IntakeDialog({
                     ? 'Recording…'
                     : 'Confirm receipt',
               onClick: () => void write.submit(),
-              disabled: write.busy || writeBlocked,
+              disabled:
+                write.busy ||
+                writeBlocked ||
+                (separateRequired && !separateConfirmed),
               autoFocus: true,
             }}
           />

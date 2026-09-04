@@ -335,6 +335,9 @@ function handle(url: string, method: string, body: unknown): Response {
       intake_available: false,
       part_number_known: true,
       internal_work_orders: [],
+      // Phase 10.5: the PN's existing ACTIVE distribution — a receipt
+      // never joins it (PROJECT_PROFILE §14).
+      active_quantity: [],
       transfer_blocked_reason: null,
       requires_selection:
         inArea.length > 1 || (inArea.length === 0 && candidates.length > 1),

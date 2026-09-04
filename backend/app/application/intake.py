@@ -61,13 +61,21 @@ terminal Area is where finished quantity ends, never where production
 enters) and an inactive or foreign Operation are each refused with
 zero writes.
 
-**No silent join of existing quantity**: the workflow exists only
-where the PN has NO active quantity at all. If active quantity of the
-PN appeared between the resolution and the confirmation, the receipt
-is refused — PROJECT_PROFILE §14 requires an explicit confirmation of
-whether new quantity joins an existing Quantity Flow or creates a
-separate one, and this wizard collects no such confirmation. Nothing
-is inferred from PN identity alone.
+**Received quantity is never joined to existing quantity**
+(PROJECT_PROFILE §14): a receipt always creates its OWN
+`QuantityFlow`. Where the PN already has active quantity, the receipt
+requires the operator's explicit confirmation that this is what
+happens — the existing quantity is not merged, mutated, inherited from
+or rewritten in any way, and nothing is ever inferred from PN identity
+alone. The confirmation is judged on the distribution re-read UNDER
+the PN lock, so quantity that appeared between the resolution and the
+confirmation refuses an unconfirmed receipt with zero writes
+(`ActiveQuantityConfirmationRequiredError`, the same
+confirmation-required protocol the production release uses). The flag
+is deliberately NOT part of the fingerprint: confirming continues the
+SAME submission under the same `device_event_id`. Flows that later
+turn out to belong together are combined by the explicit `Combine
+quantities` workflow (`app.application.merges`), never by a receipt.
 
 **`Add more quantity` stays separate**: found physical quantity beside
 quantity already active in the station's Area is the Phase 9
@@ -84,20 +92,27 @@ records the day it was scanned. The server validates the instant
 :data:`MAX_SCAN_AGE`) and derives the calendar date from it in
 `SITE_TIMEZONE` — the one site-calendar rule of Phase 10 — and the
 instant is part of the idempotency fingerprint, so a retry of the same
-intent replays instead of silently receiving under a new date.
+intent replays instead of silently receiving under a new date. The
+freshness of the instant is validated only for a command that is not
+already committed: normalization and the fingerprint come first, so a
+receipt that COMMITTED always replays under its own
+`device_event_id` — a retry that arrives after
+:data:`MAX_SCAN_AGE` reports the original receipt instead of failing
+on a window that belongs to accepting new quantity, not to reporting
+quantity already accepted.
 
 Serialization: a receipt takes the ONE shared PN-level lock
 (`part_numbers.acquire_part_number_lock`) that every other command
 able to give a PN active quantity or active demand takes as well — the
 production release, a Work Order save that adds or raises a demand
 line, an allocation reversal, and an Undo that reopens a flow its
-command had closed. The no-active-quantity and no-active-demand
-preconditions are therefore judged on state no concurrent transaction
-can still change before this one commits. Lock order is PN advisory →
-Scan Station → demand → WorkOrder → Area → Operation — the advisory
-lock always first, then the established row order of the release
-(demand → Area → Operation) and the demand save (demand → WorkOrder),
-with no cycle.
+command had closed. The no-active-demand precondition and the
+separate-quantity confirmation are therefore judged on state no
+concurrent transaction can still change before this one commits. Lock
+order is PN advisory → Scan Station → demand → WorkOrder → Area →
+Operation — the advisory lock always first, then the established row
+order of the release (demand → Area → Operation) and the demand save
+(demand → WorkOrder), with no cycle.
 
 Deliberately absent: Worker identity and the badge gates (Phase 13),
 authorization (Phase 14), and Undo of a receipt — a receipt also
@@ -117,8 +132,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.application import audit, work_orders
-from app.application.common import device_event_id_text, flush, optional_text
+from app.application.common import device_event_id_text, flush, optional_text, required_flag
 from app.application.errors import (
+    ActiveQuantityConfirmationRequiredError,
     ConflictError,
     IdempotencyConflictError,
     InvalidInputError,
@@ -131,7 +147,10 @@ from app.application.machine_processing import (
 )
 from app.application.machines import area_has_machines
 from app.application.part_numbers import (
+    ActiveQuantityEntry,
     acquire_part_number_lock,
+    active_quantity_distribution,
+    active_quantity_payload,
     canonical_part_number,
     ensure_part_number,
 )
@@ -275,9 +294,15 @@ class IntakeContext(NamedTuple):
 
     #: The PN still has a business shortage on some demand line.
     has_active_demand: bool
-    #: The workflow applies here: the PN has no active demand and no
-    #: active quantity, and the station's Area can start production.
+    #: The workflow applies here: the PN has no active demand and the
+    #: station's Area can start production. Active quantity does NOT
+    #: withhold it — it makes the receipt an explicitly confirmed
+    #: separate `QuantityFlow` (§14), never a silent join.
     available: bool
+    #: The PN's existing ACTIVE distribution. Non-empty means the
+    #: receipt REQUIRES the explicit separate-quantity confirmation,
+    #: and this is exactly what the operator confirms against.
+    active_quantity: list[ActiveQuantityEntry]
     #: The PartNumber master already exists (the Step 1 copy of
     #: GUI_DESIGN §4.7 tells a known PN from a new one).
     part_number_known: bool
@@ -286,14 +311,28 @@ class IntakeContext(NamedTuple):
 
 
 def intake_context(
-    session: Session, part_number: str, area: Area, *, has_active_quantity: bool
+    session: Session,
+    part_number: str,
+    area: Area,
+    *,
+    active_quantity: list[ActiveQuantityEntry],
 ) -> IntakeContext:
-    """Judge the `Receive Quantity` entry condition for one resolved scan."""
+    """Judge the `Receive Quantity` entry condition for one resolved scan.
+
+    The entry condition is business demand and the Area, not quantity:
+    while any demand line of the PN still has a shortage its quantity
+    belongs to a production release, and a terminal Area never starts
+    production. Existing active quantity is reported, not a refusal —
+    the receipt creates a separate flow beside it once the operator
+    confirms that explicitly (§14), and the command re-judges the same
+    distribution authoritatively under the PN lock.
+    """
     active_demand = has_active_demand(session, part_number)
-    available = not has_active_quantity and not area.is_terminal and not active_demand
+    available = not area.is_terminal and not active_demand
     return IntakeContext(
         has_active_demand=active_demand,
         available=available,
+        active_quantity=active_quantity,
         part_number_known=session.get(PartNumber, part_number) is not None,
         work_orders=internal_modify_work_orders(session, part_number) if available else [],
     )
@@ -340,30 +379,49 @@ def _validated_due_date(value: object) -> datetime.date | None:
     return value
 
 
-def _validated_scanned_at(value: object) -> datetime.datetime:
+def _normalized_scanned_at(value: object) -> datetime.datetime:
     """The instant the PN scan opened this `Receive Quantity` (§14).
 
     Server-issued by the scan resolution and carried unchanged through
     the wizard, so the received date follows the SCAN and not the
-    moment the operator finished confirming. Validated as an actual
-    instant — time-zone aware, never in the future, never older than
-    :data:`MAX_SCAN_AGE` — because the value travels through the
-    client: a naive, future or stale timestamp is refused with zero
-    writes instead of backdating business demand.
+    moment the operator finished confirming. This is SHAPE only — an
+    actual time-zone aware instant, because the value travels through
+    the client and a naive timestamp has no defined site date. It is
+    deliberately separate from :func:`_validate_scan_freshness`: the
+    normalized instant is part of the fingerprint, so it must be known
+    before the committed command is looked up, while the clock may
+    only judge a command that is not committed yet.
     """
     if not isinstance(value, datetime.datetime) or value.tzinfo is None:
         raise InvalidInputError(
             "The scan timestamp must be a date and time with a time zone offset."
         )
+    return value
+
+
+def _validate_scan_freshness(instant: datetime.datetime) -> None:
+    """Judge a FRESH receipt's scan instant against the clock (§14).
+
+    A receipt dates business demand from its scan, so an unbounded
+    past would let a stale or fabricated context backdate it: a
+    receipt that has not been recorded yet is accepted only while its
+    scan is not in the future and no older than :data:`MAX_SCAN_AGE`,
+    and is otherwise refused with zero writes.
+
+    Only the FRESH command is judged. An already committed receipt is
+    replayed by its `device_event_id` before this runs: the window
+    governs accepting new quantity, never reporting quantity that was
+    already accepted, so a retry of a committed receipt keeps
+    returning the original result however long it takes to arrive.
+    """
     now = work_orders.now()
-    if value > now:
+    if instant > now:
         raise InvalidInputError("The scan timestamp is in the future.")
-    if now - value > MAX_SCAN_AGE:
+    if now - instant > MAX_SCAN_AGE:
         raise InvalidInputError(
             "This Receive Quantity was prepared too long ago to record the"
             " quantity under its scan date. Scan the Part Number again."
         )
-    return value
 
 
 def _fingerprint(
@@ -641,19 +699,23 @@ def receive_quantity(
     reason: object = None,
     work_order_id: int | None = None,
     scanned_at: object,
+    confirm_active_quantity: object = False,
     device_event_id: object,
 ) -> IntakeReceipt:
     """Record one confirmed `Receive Quantity` as ONE transaction.
 
-    Order: input shape → fingerprint → idempotency fast path → station
-    context → the ONE shared PN-level advisory lock → idempotency
-    re-check → the STATION row lock with its
-    authoritative active/binding re-check → the no-active-quantity and
-    no-active-demand preconditions → the internal Work Order resolution
-    under the demand → WorkOrder locks → the locked Area re-read
-    (active, non-terminal) → the Operation lock → the writes → COMMIT
-    (or the replay of a race winner). Any failure before COMMIT leaves
-    zero writes.
+    Order: input SHAPE (normalization only) → fingerprint →
+    idempotency fast path (a committed receipt replays here, whatever
+    the clock says since) → the scan-freshness judgement of a FRESH
+    command → station context → the ONE shared PN-level advisory lock
+    → idempotency re-check → the STATION row lock with its
+    authoritative active/binding re-check → the separate-quantity
+    confirmation judged on the distribution re-read under the lock and
+    the no-active-demand precondition → the internal Work Order
+    resolution under the demand → WorkOrder locks → the locked Area
+    re-read (active, non-terminal) → the Operation lock → the writes →
+    COMMIT (or the replay of a race winner). Any failure before COMMIT
+    leaves zero writes.
     """
     pn = canonical_part_number(part_number)
     received_quantity = _validated_quantity(quantity)
@@ -671,11 +733,15 @@ def receive_quantity(
     receipt_reason = optional_text(reason if isinstance(reason, str) or reason is None else None)
     if reason is not None and not isinstance(reason, str):
         raise InvalidInputError("The reason must be text.")
-    scan_instant = _validated_scanned_at(scanned_at)
-    # §14: the received date defaults to the SCAN — read on the site
-    # calendar, the one SITE_TIMEZONE rule, so a wizard that crosses
-    # midnight still records the day the PN was scanned.
-    received_on = work_orders.site_date_of(scan_instant)
+    # Shape only — the clock judges a FRESH command below, AFTER the
+    # idempotency fast path, so a committed receipt always replays.
+    scan_instant = _normalized_scanned_at(scanned_at)
+    # The explicit separate-quantity confirmation of §14. Deliberately
+    # outside the fingerprint: confirming continues the SAME
+    # submission under its own `device_event_id` (the release
+    # precedent), so the confirmed retry replays rather than recording
+    # a second receipt.
+    confirmed_separate = required_flag(confirm_active_quantity, "confirm_active_quantity")
     event_id = device_event_id_text(device_event_id)
     fingerprint = _fingerprint(
         station_id=station_id,
@@ -694,6 +760,14 @@ def receive_quantity(
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
+
+    # Only now — the receipt is not recorded yet, so its scan instant
+    # has to be one this station may still receive under (§14).
+    _validate_scan_freshness(scan_instant)
+    # §14: the received date defaults to the SCAN — read on the site
+    # calendar, the one SITE_TIMEZONE rule, so a wizard that crosses
+    # midnight still records the day the PN was scanned.
+    received_on = work_orders.site_date_of(scan_instant)
 
     station, area = require_production_station(session, station_id)
 
@@ -727,23 +801,20 @@ def receive_quantity(
             " station and confirm the receipt again. Nothing was recorded."
         )
 
-    # PROJECT_PROFILE §14: quantity that would join existing active
-    # quantity needs an explicit join-or-separate confirmation this
-    # workflow does not collect — it exists only where the PN has none.
-    active_flow = session.scalar(
-        select(QuantityFlow.id)
-        .where(
-            QuantityFlow.part_number == pn,
-            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-        )
-        .limit(1)
-    )
-    if active_flow is not None:
-        raise ConflictError(
+    # PROJECT_PROFILE §14: a receipt never joins existing quantity, so
+    # quantity beside active quantity needs the operator's explicit
+    # confirmation that a SEPARATE Quantity Flow is what happens. The
+    # distribution is re-read under the PN lock, so quantity that
+    # appeared since the resolution refuses an unconfirmed receipt
+    # with zero writes instead of being received unnoticed.
+    distribution = active_quantity_distribution(session, pn)
+    if distribution and not confirmed_separate:
+        raise ActiveQuantityConfirmationRequiredError(
             f"Part Number '{pn}' already has active production quantity."
-            " Receiving new quantity beside it needs an explicit decision about"
-            " the existing quantity — scan the Part Number again. Nothing was"
-            " recorded."
+            " Review the existing distribution and confirm that this receipt"
+            " creates a SEPARATE quantity — existing quantity is never merged,"
+            " and nothing was recorded.",
+            existing_active_quantity=active_quantity_payload(distribution),
         )
     if has_active_demand(session, pn):
         raise ConflictError(

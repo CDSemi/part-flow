@@ -7,10 +7,16 @@ IMPLEMENTATION_ROADMAP Phase 10.5, PROJECT_PROFILE §14 and GUI_DESIGN
 §4.7:
 
 - the entry condition: a PN with no ACTIVE Work Order Demand (a demand
-  line with `requested_quantity > allocated_quantity`) and no active
-  quantity at a production Area opens the workflow — a PN seen for the
-  first time included; active demand, active quantity and a terminal
-  Area each withhold it, in the read model AND in the command;
+  line with `requested_quantity > allocated_quantity`) at a production
+  Area opens the workflow — a PN seen for the first time included;
+  active demand and a terminal Area each withhold it, in the read
+  model AND in the command;
+- a receipt NEVER joins existing quantity (PROJECT_PROFILE §14): where
+  the PN already has active quantity the workflow stays available, the
+  resolution carries that distribution, and the receipt commits only
+  with the operator's explicit separate-quantity confirmation — judged
+  authoritatively at write time, so quantity that appeared after the
+  resolution refuses an unconfirmed receipt with zero writes;
 - the confirmed receipt as ONE transaction: the PartNumber master on
   first valid use, the internal blank-number Work Order, the
   WorkOrderDemand, the QuantityFlow, the immutable `RECEIVED` Movement
@@ -35,6 +41,7 @@ The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
 """
 
+import contextlib
 import datetime
 import os
 import threading
@@ -224,6 +231,21 @@ def _receive(client: TestClient, cell: _Cell, pn: str, quantity: Any, **kw: Any)
     )
 
 
+@contextlib.contextmanager
+def _pinned_clock(instant: datetime.datetime) -> Iterator[None]:
+    """Run the block with the server clock pinned to ``instant``.
+
+    ``work_orders.now`` is the one clock seam the receipt reads — the
+    scan-freshness judgement and the site calendar both go through it.
+    """
+    real = work_orders.now
+    work_orders.now = lambda: instant
+    try:
+        yield
+    finally:
+        work_orders.now = real
+
+
 def _work_order(client: TestClient, work_order_id: int) -> dict[str, Any]:
     response = client.get(f"/api/work-orders/{work_order_id}")
     assert response.status_code == 200, response.text
@@ -341,6 +363,76 @@ def _internal_modify_candidate(
     )
     assert allocated.status_code == 201, allocated.text
     return work_order_id, demand_id
+
+
+def _active_quantity_beside_a_settled_demand(
+    client: TestClient, production: _Cell, stockroom: _Cell, pn: str
+) -> tuple[int, int]:
+    """A PN with ACTIVE quantity and NO active Work Order Demand.
+
+    Built through the real workflows: the only demand line is
+    released, stocked and fully allocated (no business shortage left),
+    while a second quantity found at the Area — the Phase 9 addition,
+    its own flow — stays active. This is the state PROJECT_PROFILE §14
+    governs: `Receive Quantity` still applies, and the new quantity
+    becomes a SEPARATE flow only after an explicit confirmation.
+    Returns the surviving flow's id and its quantity.
+    """
+    created = client.post(
+        "/api/work-orders",
+        json={"lines": [{"part_number": pn, "requested_quantity": 4, "request_type": "MODIFY"}]},
+    )
+    assert created.status_code == 201, created.text
+    work_order_id = int(created.json()["id"])
+    demand_id = int(created.json()["demands"][0]["id"])
+    released = client.post(
+        f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
+        json={
+            "part_number": pn,
+            "quantity": 4,
+            "route_mode": "FLOATING",
+            "starting_area_id": production.area_id,
+            "operation_id": production.operation_id,
+            "confirm_active_quantity": False,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert released.status_code == 201, released.text
+    released_flow = int(released.json()["quantity_flow_id"])
+    added = client.post(
+        f"/api/scan-stations/{production.station_id}/quantity-additions",
+        json={
+            "part_number": pn,
+            "quantity": 3,
+            "reason": "Found at the Area",
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert added.status_code == 201, added.text
+    stocked = client.post(
+        f"/api/scan-stations/{stockroom.station_id}/stockings",
+        json={
+            "part_number": pn,
+            "quantity_flow_id": released_flow,
+            "source_area_id": production.area_id,
+            "target_area_id": stockroom.area_id,
+            "quantity": 4,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert stocked.status_code == 201, stocked.text
+    allocated = client.post(
+        "/api/allocations",
+        json={
+            "part_number": pn,
+            "allocation_quantity": 4,
+            "lines": [{"work_order_demand_id": demand_id, "quantity": 4}],
+            "station_id": stockroom.station_id,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert allocated.status_code == 201, allocated.text
+    return int(added.json()["quantity_flow_id"]), 3
 
 
 def _scrapped_beside_a_settled_demand(
@@ -469,18 +561,48 @@ def test_terminal_area_never_opens_receive_quantity(client: TestClient) -> None:
     assert resolution["intake_available"] is False
 
 
-def test_active_quantity_withholds_receive_quantity(client: TestClient, db_engine: Engine) -> None:
+def test_a_receipt_leaves_active_demand_that_withholds_the_next_receipt(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A receipt creates business demand for exactly what it received,
+    and that demand is ACTIVE until it is allocated — so the workflow
+    that exists where no active demand remains withholds itself."""
     cell = _Cell(client)
     pn = _unique("PN")
     assert _receive(client, cell, pn, 6).status_code == 201
 
     resolution = _resolve(client, cell, pn)
 
-    # The PN now has quantity in the Area: the applicable workflows are
-    # the in-Area actions (`Add more quantity` among them), not a
-    # second receipt.
     assert resolution["resolution"] == "ALREADY_IN_AREA"
+    assert resolution["has_active_demand"] is True
     assert resolution["intake_available"] is False
+
+
+def test_active_quantity_alone_keeps_receive_quantity_available(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """PROJECT_PROFILE §14: active quantity does not withhold the
+    workflow — it makes the receipt an explicitly confirmed SEPARATE
+    quantity. The resolution carries the existing distribution the
+    operator confirms against."""
+    production = _Cell(client)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    flow_id, quantity = _active_quantity_beside_a_settled_demand(client, production, stockroom, pn)
+
+    resolution = _resolve(client, production, pn)
+
+    assert resolution["has_active_demand"] is False
+    assert resolution["intake_available"] is True
+    assert resolution["active_quantity"] == [
+        {
+            "quantity_flow_id": flow_id,
+            "quantity": quantity,
+            "route_mode": "FLOATING",
+            "current_area_id": production.area_id,
+            "current_area_name": production.area["name"],
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -900,19 +1022,82 @@ def test_receipt_refuses_active_demand_that_appeared_meanwhile(
     assert _counts(db_engine, pn) == before
 
 
-def test_receipt_refuses_active_quantity_that_appeared_meanwhile(
+def test_a_receipt_beside_active_quantity_needs_the_separate_quantity_confirmation(
     client: TestClient, db_engine: Engine
 ) -> None:
-    cell = _Cell(client)
+    """PROJECT_PROFILE §14: an unconfirmed receipt beside active
+    quantity is refused with the existing distribution and zero
+    writes; the confirmed one creates a SEPARATE flow and leaves the
+    existing quantity exactly as it was — nothing merged, mutated,
+    inherited or rewritten."""
+    production = _Cell(client)
+    stockroom = _Cell(client, is_terminal=True)
     pn = _unique("PN")
+    existing_flow, existing_quantity = _active_quantity_beside_a_settled_demand(
+        client, production, stockroom, pn
+    )
+    before = _counts(db_engine, pn)
     payload = _receipt_payload(pn, 4)
-    assert _receive(client, cell, pn, 2).status_code == 201
+
+    refused = client.post(f"/api/scan-stations/{production.station_id}/receipts", json=payload)
+
+    assert refused.status_code == 409, refused.text
+    body = refused.json()
+    assert body["confirmation_required"] is True
+    assert [entry["quantity_flow_id"] for entry in body["existing_active_quantity"]] == [
+        existing_flow
+    ]
+    assert _counts(db_engine, pn) == before
+
+    confirmed = client.post(
+        f"/api/scan-stations/{production.station_id}/receipts",
+        json={**payload, "confirm_active_quantity": True},
+    )
+
+    assert confirmed.status_code == 201, confirmed.text
+    assert int(confirmed.json()["quantity_flow_id"]) != existing_flow
+    with Session(db_engine) as session:
+        untouched = session.get(models.QuantityFlow, existing_flow)
+        assert untouched is not None
+        assert untouched.quantity == existing_quantity
+        assert untouched.current_area_id == production.area_id
+        assert untouched.status == "ACTIVE"
+    assert _counts(db_engine, pn)["flows"] == before["flows"] + 1
+
+
+def test_active_quantity_appearing_after_the_resolution_refuses_the_receipt(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The confirmation is judged at WRITE time, not at resolution
+    time: a wizard opened with no active quantity is refused with zero
+    writes when quantity appeared meanwhile, and the operator's
+    confirmation continues the SAME submission — the flag is not part
+    of the request fingerprint."""
+    production = _Cell(client)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    opened = _resolve(client, production, pn)
+    assert opened["intake_available"] is True
+    assert opened["active_quantity"] == []
+    payload = _receipt_payload(pn, 4, scanned_at=opened["scanned_at"])
+    existing_flow, _ = _active_quantity_beside_a_settled_demand(client, production, stockroom, pn)
     before = _counts(db_engine, pn)
 
-    response = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+    refused = client.post(f"/api/scan-stations/{production.station_id}/receipts", json=payload)
 
-    assert response.status_code == 409, response.text
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["confirmation_required"] is True
     assert _counts(db_engine, pn) == before
+
+    # The SAME device_event_id: confirming is the same submission
+    # continued, so it commits instead of conflicting.
+    confirmed = client.post(
+        f"/api/scan-stations/{production.station_id}/receipts",
+        json={**payload, "confirm_active_quantity": True},
+    )
+    assert confirmed.status_code == 201, confirmed.text
+    assert confirmed.json()["device_event_id"] == payload["device_event_id"]
+    assert int(confirmed.json()["quantity_flow_id"]) != existing_flow
 
 
 @pytest.mark.parametrize(
@@ -1067,7 +1252,8 @@ def test_two_concurrent_receipts_of_one_part_number_have_one_serial_outcome(
 
     Two receipts of the same PN, each its own confirmed intent, can
     never both introduce quantity: the second waits for the first and
-    then sees the active quantity its own precondition forbids.
+    then sees the active Work Order Demand the first created, which
+    its own entry condition forbids.
     """
     cell = _Cell(client)
     pn = _unique("PN")
@@ -1132,6 +1318,47 @@ def test_received_date_is_the_scan_day_even_when_the_confirmation_crosses_midnig
     # The server derives the date itself; the confirmation instant is
     # only the clock the validation compares against.
     assert work_orders.site_today() == datetime.date(2026, 3, 10)
+
+
+def test_a_committed_receipt_replays_after_its_scan_window_expired(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The scan window governs ACCEPTING new quantity, never REPORTING
+    quantity already accepted: a retry of a committed receipt replays
+    under its own `device_event_id` however long it took to arrive, and
+    records no second Movement, flow or demand.
+
+    Without the split between normalizing the scan instant and judging
+    its freshness, a lost response retried after `MAX_SCAN_AGE` would
+    be refused as stale — telling the station nothing was recorded
+    while a receipt is committed."""
+    cell = _Cell(client)
+    pn = _unique("PN")
+    payload = _receipt_payload(pn, 5)
+    first = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+    assert first.status_code == 201, first.text
+    after = _counts(db_engine, pn)
+
+    # The station retries the SAME confirmed intent long after the
+    # window a fresh receipt would be accepted in.
+    scanned_at = datetime.datetime.fromisoformat(payload["scanned_at"])
+    much_later = scanned_at + intake.MAX_SCAN_AGE + datetime.timedelta(hours=3)
+    with _pinned_clock(much_later):
+        replay = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["movement_id"] == first.json()["movement_id"]
+    assert replay.json()["quantity_flow_id"] == first.json()["quantity_flow_id"]
+    assert replay.json()["work_order_demand_id"] == first.json()["work_order_demand_id"]
+    assert _counts(db_engine, pn) == after
+
+    # A FRESH receipt of the same stale scan stays refused: the split
+    # relaxes nothing for quantity that is not recorded yet.
+    fresh = _receipt_payload(pn, 5, scanned_at=payload["scanned_at"])
+    with _pinned_clock(much_later):
+        refused = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=fresh)
+    assert refused.status_code == 422, refused.text
+    assert _counts(db_engine, pn) == after
 
 
 def test_a_receipt_refuses_an_unusable_scan_timestamp(

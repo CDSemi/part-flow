@@ -1,7 +1,7 @@
-# Hồ sơ dự án PartFlow v21
+# Hồ sơ dự án PartFlow v22
 
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
-> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
+> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
 >
@@ -757,6 +757,10 @@ receive nó.
    định ngày của receipt, không phải confirmation — receipt chuẩn bị trước nửa
    đêm và confirm sau nửa đêm vẫn thuộc ngày đã scan — và scan instant là một
    phần của confirmed intent nên retry ghi đúng ngày đó.
+6. Khi PN đã có active quantity, explicit confirm rằng quantity nhận được được
+   ghi thành một Quantity Flow **riêng** (xem bên dưới). Confirmation được đưa
+   ra dựa trên existing active distribution của PN, và không có nó thì không
+   ghi gì cả.
 
 Transaction create/reuse PartNumber, applicable blank MODIFY Work Order, Demand,
 Flow, initial Movement/current position; quantity vào queue hoặc direct processing.
@@ -781,17 +785,27 @@ production state và không bao giờ ghi lại business demand mà receipt đã
 nâng, nên receipt sai được sửa qua production correction workflow chứ không bị
 đảo một nửa.
 
-Nếu PN đã có active quantity, hệ thống phải explicit confirm quantity mới join
-existing Quantity Flow hay tạo Flow riêng; không bao giờ suy ra từ PN identity.
+**Quantity nhận được không bao giờ được join vào quantity đang có (v22 — đã
+chốt; giải quyết open decision 3 cũ của §32):** một receipt luôn tạo QuantityFlow
+RIÊNG của nó. Nếu PN đã có active quantity, operator phải **explicit confirm**
+rằng quantity vừa nhận được ghi thành một Quantity Flow **riêng**; hệ thống
+không bao giờ suy ra intent từ PN identity, và không ghi gì trước confirmation
+đó. Quantity đang có không bao giờ bị receipt merge vào, mutate, thừa hưởng hay
+ghi đè: quantity, route mode, Assigned Route, current position và processing
+state của nó giữ nguyên, và không Movement nào được ghi lên nó. Confirmation
+được đưa ra dựa trên existing active distribution của PN — quantity đang ở đâu
+và bao nhiêu — và rule được xét lại authoritative tại write time, nên receipt mà
+PN có active quantity xuất hiện giữa scan và confirmation bị từ chối, không ghi
+gì, cho tới khi operator confirm dựa trên distribution hiện tại. Đây đúng là
+explicit confirmation mà production release §13 vẫn dùng, vốn cũng luôn tạo flow
+riêng và không bao giờ merge.
 
-“Join existing Quantity Flow” *nghĩa là gì* với một receipt là **quyết định còn
-mở** (§32 quyết định 3) và cố ý không định nghĩa ở đây: được join Flow nào khi
-có nhiều active flow, route mode / Assigned Route / vị trí của chúng ra sao, và
-Movement nào ghi lại việc join. Trước khi chốt, không workflow nào được đoán:
-`Receive Quantity` của Scan Station chỉ tồn tại khi PN KHÔNG có active quantity,
-và receipt mà PN có active quantity xuất hiện giữa scan và confirmation bị từ
-chối, không ghi gì. Quantity tìm thấy bên cạnh quantity đang active trong Area
-vẫn là correction `QUANTITY_ADJUSTED · INCREASE` của §11, và nó không join gì cả.
+Các Quantity Flow về sau hoá ra thuộc về nhau được gom lại bằng workflow
+**Combine quantities** đã có (`MERGED`, §11; GUI_DESIGN §4.7) — nơi duy nhất
+quantity từng được merge, và chỉ cho các portion có production context giống hệt
+nhau. Receipt không bao giờ là nơi đó. Quantity tìm thấy bên cạnh quantity đang
+active trong Area vẫn là correction `QUANTITY_ADJUSTED · INCREASE` của §11, và
+nó không join gì cả.
 
 ## Repair
 
@@ -1292,15 +1306,13 @@ có explicit project decision.
 
 1. Stocked quantity có được quay lại active production qua controlled reversal?
 2. Offline scan synchronization có được thêm ở release sau?
-3. Lựa chọn explicit “join an existing Quantity Flow” của một `MODIFY` intake
-   (§14) làm gì: được join active flow nào của PN khi có nhiều flow, quantity
-   được join thừa hưởng gì (route mode, Assigned Route, current position,
-   processing state), và Movement nào ghi lại việc join. Trước khi chốt, việc
-   receive quantity cho PN đã có active quantity bị từ chối, không bao giờ suy ra.
 
 Scrap đã chốt là first-class Movement; không Machine session; Worker expiration đã
-chốt là configurable sliding inactivity timeout. Implementation không được đưa giả
-định làm hai open decision khó thay đổi.
+chốt là configurable sliding inactivity timeout. Câu hỏi “join an existing Quantity
+Flow” của `MODIFY` intake đã chốt ở v22: receipt không bao giờ join quantity đang
+có — nó tạo Quantity Flow riêng sau một explicit confirmation, và `Combine
+quantities` vẫn là merge duy nhất (§14). Implementation không được đưa giả định
+làm hai open decision còn lại khó thay đổi.
 
 ---
 

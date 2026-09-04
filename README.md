@@ -44,8 +44,7 @@ history — and the **Phase 10 frontend**: the Stockroom station's
 `Receive into Stockroom` workflow with the receiving allocation dialog
 on the Scan Station shell, and the real Completed Work Orders page on
 the server-side history — the **Phase 10.5 Scan
-Station Receive Quantity Gap Closure** (implemented, phase still open
-on one canonical decision) — the three-view `Receive
+Station Receive Quantity Gap Closure** — the three-view `Receive
 Quantity` wizard that INTRODUCES a canonical Part Number with no
 active Work Order Demand (a Part Number seen for the first time
 included) as one transaction: the internal Work Order without an
@@ -152,8 +151,8 @@ mode):
   totals); the Phase 10.5 receipt —
   `POST /api/scan-stations/{id}/receipts` (`Receive Quantity`: one
   transaction introducing a canonical PN with no active Work Order
-  Demand — no demand line with a remaining business shortage — and no
-  active quantity at a non-terminal Area, creating the PartNumber
+  Demand — no demand line with a remaining business shortage — at a
+  non-terminal Area, creating the PartNumber
   master on first use, the internal Work Order without an external
   number or reusing the single applicable one by raising its existing
   demand line, the WorkOrderDemand, the QuantityFlow, an AssignedRoute
@@ -162,10 +161,13 @@ mode):
   internal Work Orders are refused with the candidates for an explicit
   selection, every stale context writes nothing, and the receipt is
   never undoable because it also created the demand behind the
-  quantity; `received_date` comes from the scan the resolution
-  stamped, not from the confirmation, and the whole entry condition is
-  serialized by the shared per-Part-Number lock every command that can
-  create demand or quantity takes); the Phase 11 monitoring surface — `GET /api/production-board`
+  quantity; a receipt beside ACTIVE quantity of the PN creates a
+  SEPARATE Quantity Flow and only after the operator's explicit
+  confirmation — nothing is ever merged, and `Combine quantities`
+  stays the one merge; `received_date` comes from the scan the
+  resolution stamped, not from the confirmation, and the whole entry
+  condition is serialized by the shared per-Part-Number lock every
+  command that can create demand or quantity takes); the Phase 11 monitoring surface — `GET /api/production-board`
   (the Department-wide board: every PN with active quantity in the
   Department's Areas — or stocked quantity with an open demand — with
   its distribution per Area / Machine / External activity, the derived
