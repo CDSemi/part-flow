@@ -111,6 +111,9 @@ let areaHasMachines: boolean;
 // takes an explicit Operation choice (one resolves itself).
 let secondOperation: boolean;
 let healthDown: boolean;
+// What the SERVER stamps on the resolution: the received date follows
+// this instant, never the moment the operator confirms.
+let scannedAt: string;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((item) => item.id === areaId)!;
@@ -279,6 +282,7 @@ function handle(url: string, method: string, body: unknown): Response {
       stocked_quantity: 0,
       available_stocked_quantity: 0,
       stock_available: false,
+      scanned_at: scannedAt,
     });
   }
 
@@ -294,6 +298,7 @@ function handle(url: string, method: string, body: unknown): Response {
       due_date: string | null;
       reason: string | null;
       work_order_id: number | null;
+      scanned_at: string;
       device_event_id: string;
     };
     const replay = committed.get(request.device_event_id);
@@ -408,6 +413,7 @@ beforeEach(() => {
   areaHasMachines = true;
   secondOperation = false;
   healthDown = false;
+  scannedAt = new Date().toISOString();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -872,4 +878,41 @@ test('the received quantity appears in the Area after the server confirmed', asy
   });
   expect(flows).toHaveLength(1);
   expect(flows[0]).toMatchObject({ pn: 'NEW-PN-1', qty: 9, state: 'QUEUED' });
+});
+
+test('the receipt carries the scan timestamp, not the confirmation time', async () => {
+  // The PN resolved at 23:50; the operator confirms afterwards. The
+  // received date follows the SCAN (PROJECT_PROFILE §14), so the
+  // station sends the resolution's instant back verbatim and never
+  // reads its own clock at the write point.
+  scannedAt = '2026-03-09T23:50:00.000-08:00';
+  await renderStation();
+
+  const box = await toConfirmation('5');
+  fireEvent.click(within(box).getByRole('button', { name: 'Confirm receipt' }));
+
+  await notice();
+  expect(receiptRequests()[0].body.scanned_at).toBe(scannedAt);
+});
+
+test('a retry of the same receipt repeats the original scan timestamp', async () => {
+  // A lost response is retried under the SAME device_event_id AND the
+  // same scan instant: the frozen intent is what replays, so the
+  // received date can never move to the retry's day.
+  scannedAt = '2026-03-09T23:50:00.000-08:00';
+  writeFailure = 'lost-response';
+  await renderStation();
+
+  const box = await toConfirmation('5');
+  fireEvent.click(within(box).getByRole('button', { name: 'Confirm receipt' }));
+  const retry = await within(box).findByRole('button', {
+    name: 'Retry the same receipt',
+  });
+  fireEvent.click(retry);
+
+  await notice();
+  const sent = receiptRequests();
+  expect(sent).toHaveLength(2);
+  expect(sent[1].body.device_event_id).toBe(sent[0].body.device_event_id);
+  expect(sent[1].body.scanned_at).toBe(scannedAt);
 });

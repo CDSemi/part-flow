@@ -23,11 +23,17 @@ SLICE1_DATA_MODEL §6, §16):
   only — the caller owns the transaction — so the Work Order save that
   first uses a PN commits the master, the demand, and every audit row
   atomically; the standalone create endpoint commits its own.
+- The canonical PN string is also the key of the ONE PN-level
+  serialization lock every command shares
+  (:func:`acquire_part_number_lock`). It lives here because the
+  canonical PN — not the optional, hard-deletable master row — is what
+  the lock is keyed on.
 """
 
+from collections.abc import Iterable
 from typing import Final, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.application import audit
@@ -58,6 +64,74 @@ def canonical_part_number(value: object) -> str:
         return normalize_part_number(value)
     except InvalidPartNumberError as exc:
         raise InvalidInputError(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# PN-level serialization — ONE lock for every PN-level invariant
+# ---------------------------------------------------------------------------
+
+#: Namespace hashed together with the canonical PN into the advisory
+#: lock key. ONE namespace on purpose: the PN-level preconditions of
+#: the different commands are not independent invariants that each
+#: deserve their own lock, they are statements about the SAME PN-level
+#: state — whether the PN currently has active production quantity,
+#: whether it currently has active business demand, and how much of its
+#: stocked quantity is still unallocated. Separate namespaces would let
+#: two commands each hold "their" lock and both change the state the
+#: other just judged.
+_PART_NUMBER_LOCK_NAMESPACE: Final = "partflow:part-number:"
+
+
+def acquire_part_number_lock(session: Session, part_number: str) -> None:
+    """Serialize this transaction against every other write of one PN.
+
+    ``pg_advisory_xact_lock`` blocks until the concurrent holder's
+    transaction commits or rolls back and releases automatically with
+    this one — no new table, and no dependency on the optional
+    PartNumber master (the key is derived from the canonical PN string
+    itself). A hash collision between two different PNs merely
+    serializes them too — harmless.
+
+    Every command that can move a PN across one of the PN-level
+    thresholds takes this lock, and takes it BEFORE any row lock:
+
+    - *no active quantity → active quantity*: the production release,
+      the Scan Station receipt, and an Undo that reopens a flow its
+      command had closed;
+    - *no active demand → active demand*: a Work Order save that adds
+      or raises a demand line, an allocation reversal (which returns a
+      business shortage to a line), and the Scan Station receipt;
+    - *available stocked quantity*: allocation confirmation and
+      reversal.
+
+    Commands that can only move a PN the permissive way — a demand-line
+    removal, an allocation confirmation's effect on demand, closing a
+    flow — need no lock: they can never make a precondition that was
+    judged under the lock become true again.
+
+    After the lock is granted, the state it protects must be RE-READ
+    from the database: a snapshot taken while waiting is not authority.
+    """
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"{_PART_NUMBER_LOCK_NAMESPACE}{part_number}", 0)
+            )
+        )
+    )
+
+
+def acquire_part_number_locks(session: Session, part_numbers: Iterable[str]) -> None:
+    """Lock several canonical PNs in ONE deterministic order.
+
+    Ascending canonical-PN order, so two transactions that need an
+    overlapping set queue behind each other instead of deadlocking. A
+    command that needs a single PN takes one lock and never waits on a
+    second while holding the first, so the whole advisory-lock graph
+    stays acyclic.
+    """
+    for part_number in sorted(set(part_numbers)):
+        acquire_part_number_lock(session, part_number)
 
 
 class EnsuredPartNumber(NamedTuple):

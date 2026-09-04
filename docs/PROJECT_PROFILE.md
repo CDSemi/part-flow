@@ -1346,7 +1346,7 @@ When a scan opens the intake flow (PN has no active Work Order Demand):
 2. Confirm or change the Request Type — `MODIFY` is the **default, not a forced value**.
 3. Confirm or change the Route Mode — `FLOATING` is the **default, not a forced value**; a Planned Route is selected only when `PLANNED` is chosen.
 4. Confirm quantity, optional due date (owned by the WorkOrderDemand — the PN never owns a due date), and reason/notes where applicable.
-5. Confirm the starting/current Area and, when needed, the Operation. `received_date` defaults to the scan timestamp.
+5. Confirm the starting/current Area and, when needed, the Operation. `received_date` defaults to the scan timestamp: the instant the PN scan opened the workflow, carried unchanged through every step of the wizard and read as a calendar date on the site's own calendar (`SITE_TIMEZONE`, §8.2). It is the SCAN that dates the receipt, never the confirmation — a receipt prepared before midnight and confirmed after it still belongs to the day it was scanned — and the scan instant is part of the confirmed intent, so a retry records the same date.
 
 On confirmation, the transaction creates or reuses the PartNumber, creates or reuses an applicable internal blank-number MODIFY Work Order, creates the WorkOrderDemand and QuantityFlow, records the initial Movement, establishes the current position, and places quantity in the Area queue (Area with Machines) or directly into Area processing (Area without Machines).
 
@@ -1357,6 +1357,8 @@ Reuse keeps the one-canonical-PN-per-Work-Order rule intact: the reused Work Ord
 A confirmed receipt is not undone at the Scan Station: the reversal of §16 restores production state and never rewrites the business demand a receipt created or raised, so a mistaken receipt is corrected through the production correction workflows rather than half-reversed.
 
 If the PN already has active quantity, the system must explicitly confirm whether the new quantity joins an existing Quantity Flow or creates a separate one. The system must never infer this from PN identity alone.
+
+What "joins an existing Quantity Flow" *means* for a receipt is a **remaining open decision** (§32 decision 3) and is deliberately not defined here: which of several active flows may be joined, what happens to their route mode, Assigned Route and position, and which Movement records the join. Until it is decided, no workflow may guess one: the Scan Station `Receive Quantity` of this section exists only where the PN has NO active quantity, and a receipt whose PN gained active quantity between the scan and the confirmation is refused with nothing recorded rather than resolved by inference. Quantity found beside quantity already active in the Area stays the `QUANTITY_ADJUSTED · INCREASE` correction of §11, which joins nothing.
 
 ## Repair
 
@@ -2334,6 +2336,7 @@ Only the following unresolved decisions remain:
 
 1. Whether stocked quantity may be returned to active production through a controlled reversal.
 2. Whether offline scan synchronization will be included in a later release.
+3. What a `MODIFY` intake's explicit "join an existing Quantity Flow" choice does (§14): which active flow of the PN may be joined when several exist, what the joined quantity inherits (route mode, Assigned Route, current position, processing state), and which Movement records the join. Until this is decided, receiving quantity for a PN that already has active quantity is refused, never inferred.
 
 (The former scrap question is resolved: `SCRAPPED` is a first-class Movement type, §8.11/§11. Machine sessions no longer exist, so no expiration rule applies to them. The former Worker-session expiration question is resolved in v18: scanned Worker Sessions expire through a configurable sliding inactivity timeout — Administration default with per-Area overrides, §19.)
 

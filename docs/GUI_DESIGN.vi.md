@@ -1,7 +1,7 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
-> Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
+> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
 >
@@ -270,8 +270,15 @@ component nhưng không action.
 1. **Không active Demand:** mở ba-step `Receive Quantity`. Default editable MODIFY
    + FLOATING; settings gồm optional due, starting Area/Operation, reason/notes và
    blank WO reuse; quantity step không default; confirmation `Confirm receipt` là
-   write point. New PN copy yêu cầu verify; nhiều blank MODIFY WO phải explicit
-   selection. TypeChip và RouteModeChip dùng chung mọi view.
+   write point. `received_date` mặc định là scan timestamp — instant do scan
+   resolution phát ra lúc mở wizard, giữ nguyên qua mọi bước và gửi kèm
+   confirmation, nên receipt confirm sau nửa đêm vẫn ghi đúng ngày đã scan
+   (station không đọc đồng hồ của chính nó ở write point; server derive date
+   theo lịch site). New PN copy yêu cầu verify; nhiều blank MODIFY WO phải
+   explicit selection **ngay trong settings view** — một step view trong cùng
+   modal, không bao giờ nested dialog (§4.6) — và `Next` bị chặn tới khi
+   operator chọn; không bao giờ đoán. TypeChip và RouteModeChip dùng chung mọi
+   view.
 2. **PN không ở station Area:** resolve source explicit. Một source → quantity MAX →
    confirmation transfer; nhiều source → selection trước, không combine. Planned
    deviation cần reason/confirm. Active processing source ghi atomic completion +

@@ -398,6 +398,7 @@ function handle(url: string, method: string, body: unknown): Response {
       // Phase 10: at a terminal-Area station the candidates are the
       // sources the operator stocks from.
       stock_available: terminal === true && candidates.length > 0,
+      scanned_at: new Date().toISOString(),
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);

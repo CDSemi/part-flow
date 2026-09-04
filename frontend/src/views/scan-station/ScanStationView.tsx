@@ -137,11 +137,14 @@ import type { Notice } from './scan-station-presentation';
  * from the server's read models — never from an Area name, a CSS
  * class or a local guess. Every command is recorded by the server
  * before anything reads as success, with no Machine or PN context
- * surviving a dialog. The remaining approved workflows (Worker
- * sessions and their badge gates, Receive Quantity from the station)
- * are NOT implemented here: they stay honest placeholders, and the
- * mock preview of them survives only behind the development-only
- * boundary below (`?preview=mock`).
+ * surviving a dialog. Phase 10.5 added `Receive Quantity` (§4.7 item
+ * 1): a PN the server resolves with no active Work Order Demand and
+ * no active quantity is INTRODUCED here through the three-view wizard
+ * of `scan-station-intake-dialog`. Worker sessions and their badge
+ * gates (Phase 13) remain the one approved workflow NOT implemented
+ * here — it stays an honest placeholder, and the mock preview of it
+ * survives only behind the development-only boundary below
+ * (`?preview=mock`).
  */
 
 // Development-only preview of the mock Scan Station (Phase 6+

@@ -1,7 +1,7 @@
 # Hồ sơ dự án PartFlow v21
 
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
-> Baseline upstream: commit `194ffc2e5e8e22c389abecd0830292a6707955d9`.
+> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
 >
@@ -738,17 +738,60 @@ blank-number internal WorkOrder, một Demand, Flow và immutable Movement. UI g
 workflow là **Receive Quantity**, final action **Confirm receipt**; từ “intake”
 chỉ dùng nội bộ.
 
+Ở đây một Work Order Demand là **active** theo business shortage còn lại:
+`requested_quantity > allocated_quantity`. Released quantity không quyết định
+điều đó — line release hết nhưng chưa allocate vẫn là active demand — và
+`completed_at` là trạng thái tổng của cả Work Order (§8.2), không bao giờ là
+trạng thái của một line: line đã allocate hết là inactive kể cả khi Work Order
+còn open vì các line khác. Khi PN còn active demand, quantity của nó thuộc về
+explicit production release từ Management (§13) và Scan Station không bao giờ
+receive nó.
+
 1. Scan/enter PN.
 2. Confirm/change Request Type; `MODIFY` là default, không forced.
 3. Confirm/change Route Mode; `FLOATING` default.
 4. Confirm quantity, optional due date, reason/notes.
-5. Confirm Area/Operation; received date mặc định scan timestamp.
+5. Confirm Area/Operation; `received_date` mặc định là scan timestamp: chính
+   instant lúc scan PN mở workflow, giữ nguyên qua mọi bước của wizard và đọc
+   thành calendar date theo lịch của site (`SITE_TIMEZONE`, §8.2). SCAN quyết
+   định ngày của receipt, không phải confirmation — receipt chuẩn bị trước nửa
+   đêm và confirm sau nửa đêm vẫn thuộc ngày đã scan — và scan instant là một
+   phần của confirmed intent nên retry ghi đúng ngày đó.
 
 Transaction create/reuse PartNumber, applicable blank MODIFY Work Order, Demand,
 Flow, initial Movement/current position; quantity vào queue hoặc direct processing.
-Reuse Work Order không được đoán: một clearly applicable record thì reuse, nhiều
-record phải chọn. Nếu PN đã active, hỏi join Flow hay create separate; không suy
-ra từ PN.
+
+Reuse Work Order không được đoán: cùng PN có đúng một blank-number MODIFY Work
+Order clearly applicable — không external number, chưa completed, và đã có sẵn
+`MODIFY` demand line cho PN đó — thì reuse; nhiều record plausible thì bắt buộc
+explicit selection, không bao giờ lấy first match.
+
+Reuse giữ nguyên rule một canonical PN tối đa một line trên một Work Order:
+line sẵn có của PN được **nâng** thêm received quantity — restricted edit của
+§13, trong đó nâng requested quantity của line đã release luôn hợp lệ — thay vì
+Work Order có thêm line thứ hai cho cùng PN, và receipt release đúng phần tăng
+đó. Chỉ sửa những gì restricted edit cho phép: requested quantity và, khi
+operator nhập, due date. Request Type, requester, reason và notes của line có
+sẵn không bao giờ bị station receipt ghi đè — reason của receipt đi theo
+immutable Movement của nó. Receipt `NEW` không bao giờ reuse (reuse chỉ định
+nghĩa cho blank-number MODIFY Work Order) và luôn tạo internal Work Order riêng.
+
+Receipt đã confirm không được undo tại Scan Station: reversal của §16 khôi phục
+production state và không bao giờ ghi lại business demand mà receipt đã tạo hoặc
+nâng, nên receipt sai được sửa qua production correction workflow chứ không bị
+đảo một nửa.
+
+Nếu PN đã có active quantity, hệ thống phải explicit confirm quantity mới join
+existing Quantity Flow hay tạo Flow riêng; không bao giờ suy ra từ PN identity.
+
+“Join existing Quantity Flow” *nghĩa là gì* với một receipt là **quyết định còn
+mở** (§32 quyết định 3) và cố ý không định nghĩa ở đây: được join Flow nào khi
+có nhiều active flow, route mode / Assigned Route / vị trí của chúng ra sao, và
+Movement nào ghi lại việc join. Trước khi chốt, không workflow nào được đoán:
+`Receive Quantity` của Scan Station chỉ tồn tại khi PN KHÔNG có active quantity,
+và receipt mà PN có active quantity xuất hiện giữa scan và confirmation bị từ
+chối, không ghi gì. Quantity tìm thấy bên cạnh quantity đang active trong Area
+vẫn là correction `QUANTITY_ADJUSTED · INCREASE` của §11, và nó không join gì cả.
 
 ## Repair
 
@@ -1249,6 +1292,11 @@ có explicit project decision.
 
 1. Stocked quantity có được quay lại active production qua controlled reversal?
 2. Offline scan synchronization có được thêm ở release sau?
+3. Lựa chọn explicit “join an existing Quantity Flow” của một `MODIFY` intake
+   (§14) làm gì: được join active flow nào của PN khi có nhiều flow, quantity
+   được join thừa hưởng gì (route mode, Assigned Route, current position,
+   processing state), và Movement nào ghi lại việc join. Trước khi chốt, việc
+   receive quantity cho PN đã có active quantity bị từ chối, không bao giờ suy ra.
 
 Scrap đã chốt là first-class Movement; không Machine session; Worker expiration đã
 chốt là configurable sliding inactivity timeout. Implementation không được đưa giả

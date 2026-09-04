@@ -43,10 +43,13 @@ Rules owned here:
   a demand's allocation never exceeds its requested quantity — an
   allocation beyond the remaining shortage is refused (no "explicitly
   authorized correction" exists before Phase 14 authorization, so none
-  is simulated). Both are judged inside ONE transaction under a
-  per-PN advisory lock (serializing every allocation and reversal of
-  one PN, so two concurrent confirmations can never jointly exceed the
-  available quantity) plus `FOR UPDATE` on every affected demand row
+  is simulated). Both are judged inside ONE transaction under the ONE
+  shared PN-level advisory lock (serializing every allocation and
+  reversal of one PN, so two concurrent confirmations can never jointly
+  exceed the available quantity — and serializing a reversal, which
+  returns a business shortage to its demand line, against the Scan
+  Station receipt that judges the PN's active demand) plus
+  `FOR UPDATE` on every affected demand row
   (serializing against the demand edit's committed-quantity floor and
   against a release) and on every affected Work Order row (the
   completion projection).
@@ -99,7 +102,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
-from app.application.part_numbers import canonical_part_number
+from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import stocked_quantity_of
 from app.domain.enums import AllocationSource
 from app.infrastructure.models import (
@@ -118,9 +121,6 @@ from app.infrastructure.models import (
 FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
 
-# Namespace of the per-PN advisory lock: distinct from the release's
-# namespace, so allocation serialization never collides with it.
-_ALLOCATION_LOCK_NAMESPACE: Final = "partflow:allocation:part-number:"
 _REVERSES_UNIQUE_CONSTRAINT: Final = "uq_work_order_allocations_reverses_allocation_id"
 
 
@@ -469,21 +469,23 @@ def _replay_or_conflict(
 
 
 def _acquire_part_number_allocation_lock(session: Session, part_number: str) -> None:
-    """Serialize every allocation and reversal of one PN for this transaction.
+    """Take the ONE shared PN-level lock for an allocation write.
 
     Available stocked quantity is a PN-level figure: two confirmations
     of the same PN judged against the same snapshot could jointly
     exceed it, so they queue here. Stocking only ever ADDS availability
     (a `STOCKED` command is never undone), so the stocked side needs
     no lock — a reading under this lock is at worst conservative.
+
+    A REVERSAL additionally returns a business shortage to its demand
+    line — the PN regains active Work Order Demand — which is the same
+    PN-level threshold a Scan Station receipt judges its entry
+    condition on, so the lock is the shared one
+    (`part_numbers.acquire_part_number_lock`) rather than a namespace
+    of its own: a separate namespace would let a reversal and a receipt
+    each hold "their" lock and invalidate the other's precondition.
     """
-    session.execute(
-        select(
-            func.pg_advisory_xact_lock(
-                func.hashtextextended(f"{_ALLOCATION_LOCK_NAMESPACE}{part_number}", 0)
-            )
-        )
-    )
+    acquire_part_number_lock(session, part_number)
 
 
 def _lock_demands(session: Session, demand_ids: Collection[int]) -> dict[int, WorkOrderDemand]:

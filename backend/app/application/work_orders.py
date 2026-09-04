@@ -98,7 +98,12 @@ from sqlalchemy.orm import InstrumentedAttribute, Session
 from app.application import audit, production_release
 from app.application.common import UNSET, UnsetType, commit, flush, optional_text
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.application.part_numbers import PART_NUMBER_CONFLICTS, ensure_part_number
+from app.application.part_numbers import (
+    PART_NUMBER_CONFLICTS,
+    acquire_part_number_locks,
+    canonical_part_number,
+    ensure_part_number,
+)
 from app.core.config import get_settings
 from app.domain.enums import AuditEntityType, AuditEventType, RequestType, WorkOrderStatus
 from app.infrastructure.models import WorkOrder, WorkOrderAllocation, WorkOrderDemand
@@ -607,6 +612,13 @@ def create_work_order(
     projection change. The header, every demand line, any first-use PN
     masters, and all audit rows (`CREATED` for the Work Order, each
     line, and each new PN) commit together or not at all.
+
+    Every new line gives its canonical PN ACTIVE Work Order Demand
+    (`requested_quantity > allocated_quantity`), which is the entry
+    condition a Scan Station `Receive Quantity` judges. The save
+    therefore takes the shared PN-level lock of every PN it introduces
+    BEFORE any row lock or write, so a receipt of one of those PNs
+    either sees this demand or waits for it — never commits beside it.
     """
     number = _normalized_work_order_number(work_order_number)
     if number is not None:
@@ -615,6 +627,9 @@ def create_work_order(
         # PROJECT_PROFILE §8.2: a Work Order contains one or more
         # Work Order Demand records.
         raise InvalidInputError("A Work Order needs at least one demand line.")
+    acquire_part_number_locks(
+        session, (canonical_part_number(draft.get("part_number")) for draft in lines)
+    )
 
     work_order = WorkOrder(
         work_order_number=number,
@@ -690,6 +705,15 @@ def update_work_order(
     one of them can create the line
     (``_lock_work_order_and_read_part_numbers``). Lock order stays
     demand (ascending id) → Work Order.
+
+    Before any of those row locks the save takes the shared PN-level
+    lock of every canonical PN it touches, ascending
+    (``acquire_part_number_locks``). Adding a line and raising a fully
+    allocated line both give the PN ACTIVE Work Order Demand again —
+    the entry condition a Scan Station `Receive Quantity` judges — so
+    the two commands must serialize on the PN, not merely on the rows
+    of one Work Order. Advisory locks always precede row locks, and
+    ascending PN order keeps two overlapping saves from deadlocking.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -710,6 +734,19 @@ def update_work_order(
                 " Combine the changes into one entry per demand line."
             )
         seen_edit_ids.add(edit_id)
+
+    # The shared PN-level locks FIRST, ascending, before any row lock.
+    # The PN of a saved demand line is never editable, so the PNs read
+    # from the pre-lock detail are exactly the PNs this save can affect:
+    # the new lines' own canonical PNs and the PNs of the lines it
+    # edits.
+    acquire_part_number_locks(
+        session,
+        [
+            *(canonical_part_number(draft.get("part_number")) for draft in new_lines),
+            *(demand.part_number for demand in detail.demands if demand.id in seen_edit_ids),
+        ],
+    )
 
     # Lock every edited saved demand line BEFORE deciding what may be
     # edited on it, then recompute its released quantity under that lock.
@@ -977,14 +1014,24 @@ def site_timezone() -> str:
     return get_settings().site_timezone
 
 
-def _now() -> datetime.datetime:
-    """The current instant (a seam the history tests pin)."""
+def now() -> datetime.datetime:
+    """The current instant (the one seam the calendar tests pin)."""
     return datetime.datetime.now(datetime.UTC)
+
+
+def site_date_of(moment: datetime.datetime) -> datetime.date:
+    """The site calendar DATE of an instant — the one SITE_TIMEZONE rule.
+
+    Every date derived from a timestamp goes through here: the done
+    date of a completed Work Order, and the received date a Scan
+    Station receipt takes from its scan (PROJECT_PROFILE §14).
+    """
+    return moment.astimezone(ZoneInfo(site_timezone())).date()
 
 
 def site_today() -> datetime.date:
     """Today on the site calendar — the anchor of every Done range preset."""
-    return _now().astimezone(ZoneInfo(site_timezone())).date()
+    return site_date_of(now())
 
 
 def done_range_bounds(
@@ -1014,7 +1061,7 @@ def done_date_of(completed_at: datetime.datetime | None) -> datetime.date | None
     agree, which the history test asserts around a day boundary."""
     if completed_at is None:
         return None
-    return completed_at.astimezone(ZoneInfo(site_timezone())).date()
+    return site_date_of(completed_at)
 
 
 def _done_date_sql() -> ColumnElement[datetime.date]:

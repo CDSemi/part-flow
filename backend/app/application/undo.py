@@ -48,6 +48,16 @@ flow's quantity — it only moves flows between open and closed.
   transfer destination, so Area deactivation and an Undo have one
   serial outcome).
 
+**Serialization.** Reopening a flow the undone command had closed can
+give a PN ACTIVE quantity again — the threshold a Scan Station
+`Receive Quantity` judges its entry condition on — so the command
+takes the ONE shared PN-level lock
+(`part_numbers.acquire_part_number_lock`) BEFORE any row lock, exactly
+like the production release, the receipt, a Work Order save that adds
+or raises demand, and an allocation reversal. It is a single advisory
+lock taken first, so it adds no cycle to the flow → station → Machine
+→ Area order below.
+
 **Confirmation and audit.** The read model (`undo_preview`) serves the
 mandatory summary confirmation — original action, quantity, source and
 destination, Machine, timestamp, and the exact effect of the reversal
@@ -96,7 +106,7 @@ from app.application.machines import (
     lock_machine,
     note_assignment_change,
 )
-from app.application.part_numbers import canonical_part_number
+from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import effective_latest_movement, processing_state_of
 from app.application.transfers import require_production_station
 from app.domain.enums import MovementType, ProcessingState, QuantityFlowStatus
@@ -583,6 +593,14 @@ def undo_command(
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
+
+    # -- Serialize per canonical PN, before any row lock -----------------
+    # A reversal can reopen a flow this command had closed, which gives
+    # the PN active quantity again. The shared PN-level lock makes that
+    # transition serialize against every command that judges the PN's
+    # active quantity or active demand — the Scan Station receipt above
+    # all.
+    acquire_part_number_lock(session, pn)
 
     # -- The command to reverse (immutable rows, no lock needed) ---------
     rows = committed_command(session, reverses_id)

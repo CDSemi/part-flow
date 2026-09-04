@@ -74,11 +74,28 @@ quantity already active in the station's Area is the Phase 9
 `QUANTITY_ADJUSTED · INCREASE` correction (`app.application
 .quantity_events`), never this command.
 
-Serialization: receipts and production releases of one canonical PN
-share the SAME per-PN advisory lock, so the no-active-quantity and
-no-active-demand preconditions cannot both pass for two concurrent
-intents. Lock order is PN advisory → Scan Station → demand →
-WorkOrder → Area → Operation — the established order of the release
+**`received_date` is the SCAN, not the confirmation** (§14: "the
+received date defaults to the scan timestamp"). The PN resolution that
+opens the wizard issues `scanned_at`; the station carries that one
+instant through every step and sends it back with the confirmed
+receipt, so a scan before midnight confirmed after midnight still
+records the day it was scanned. The server validates the instant
+(time-zone aware, never in the future, never older than
+:data:`MAX_SCAN_AGE`) and derives the calendar date from it in
+`SITE_TIMEZONE` — the one site-calendar rule of Phase 10 — and the
+instant is part of the idempotency fingerprint, so a retry of the same
+intent replays instead of silently receiving under a new date.
+
+Serialization: a receipt takes the ONE shared PN-level lock
+(`part_numbers.acquire_part_number_lock`) that every other command
+able to give a PN active quantity or active demand takes as well — the
+production release, a Work Order save that adds or raises a demand
+line, an allocation reversal, and an Undo that reopens a flow its
+command had closed. The no-active-quantity and no-active-demand
+preconditions are therefore judged on state no concurrent transaction
+can still change before this one commits. Lock order is PN advisory →
+Scan Station → demand → WorkOrder → Area → Operation — the advisory
+lock always first, then the established row order of the release
 (demand → Area → Operation) and the demand save (demand → WorkOrder),
 with no cycle.
 
@@ -113,12 +130,12 @@ from app.application.machine_processing import (
     committed_command,
 )
 from app.application.machines import area_has_machines
-from app.application.part_numbers import canonical_part_number, ensure_part_number
-from app.application.production_release import (
-    CONTEXT_KEY,
-    DEMAND_ID_KEY,
-    acquire_part_number_release_lock,
+from app.application.part_numbers import (
+    acquire_part_number_lock,
+    canonical_part_number,
+    ensure_part_number,
 )
+from app.application.production_release import CONTEXT_KEY, DEMAND_ID_KEY
 from app.application.projections import processing_state_of
 from app.application.transfers import require_production_station, resolve_arrival_operation
 from app.domain.enums import (
@@ -151,6 +168,15 @@ from app.infrastructure.models import (
 INTAKE_KEY: Final = "intake"
 
 _COMMAND_KIND: Final = "INTAKE"
+
+#: How long a resolved scan may stay open before its `Receive Quantity`
+#: must be prepared again. The received date of a receipt is the DATE
+#: of its scan, and the instant comes back from the station, so an
+#: unbounded past would let a stale or fabricated context backdate
+#: business demand. Twelve hours is wider than any single station
+#: interaction — one shift — and still bounds the damage to the current
+#: or the previous site day.
+MAX_SCAN_AGE: Final = datetime.timedelta(hours=12)
 
 
 class WorkOrderSelectionRequiredError(ConflictError):
@@ -314,6 +340,32 @@ def _validated_due_date(value: object) -> datetime.date | None:
     return value
 
 
+def _validated_scanned_at(value: object) -> datetime.datetime:
+    """The instant the PN scan opened this `Receive Quantity` (§14).
+
+    Server-issued by the scan resolution and carried unchanged through
+    the wizard, so the received date follows the SCAN and not the
+    moment the operator finished confirming. Validated as an actual
+    instant — time-zone aware, never in the future, never older than
+    :data:`MAX_SCAN_AGE` — because the value travels through the
+    client: a naive, future or stale timestamp is refused with zero
+    writes instead of backdating business demand.
+    """
+    if not isinstance(value, datetime.datetime) or value.tzinfo is None:
+        raise InvalidInputError(
+            "The scan timestamp must be a date and time with a time zone offset."
+        )
+    now = work_orders.now()
+    if value > now:
+        raise InvalidInputError("The scan timestamp is in the future.")
+    if now - value > MAX_SCAN_AGE:
+        raise InvalidInputError(
+            "This Receive Quantity was prepared too long ago to record the"
+            " quantity under its scan date. Scan the Part Number again."
+        )
+    return value
+
+
 def _fingerprint(
     *,
     station_id: str,
@@ -326,14 +378,19 @@ def _fingerprint(
     due_date: datetime.date | None,
     reason: str | None,
     work_order_id: int | None,
+    scanned_at: datetime.datetime,
 ) -> str:
     """Deterministic canonical hash of the confirmed receipt intent.
 
     Covers the whole intent exactly as the station confirmed it — the
     explicitly selected internal Work Order included, and `None` when
     the operator confirmed without a selection because the server
-    resolved it unambiguously. A retry of a lost response therefore
-    replays; any other intent under the same id is a conflict.
+    resolved it unambiguously. The scan instant is part of it because
+    it DECIDES the received date: a retry of the lost response carries
+    the same instant and replays, while a fresh scan of the same PN and
+    quantity is a different intent that needs its own
+    `device_event_id`. The instant is normalized to UTC first, so an
+    equal moment expressed in another offset hashes the same.
     """
     normalized = {
         "command": _COMMAND_KIND,
@@ -347,6 +404,7 @@ def _fingerprint(
         "due_date": due_date.isoformat() if due_date is not None else None,
         "reason": reason,
         "work_order_id": work_order_id,
+        "scanned_at": scanned_at.astimezone(datetime.UTC).isoformat(),
     }
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -582,13 +640,14 @@ def receive_quantity(
     due_date: object = None,
     reason: object = None,
     work_order_id: int | None = None,
+    scanned_at: object,
     device_event_id: object,
 ) -> IntakeReceipt:
     """Record one confirmed `Receive Quantity` as ONE transaction.
 
     Order: input shape → fingerprint → idempotency fast path → station
-    context → the per-PN advisory lock (shared with production release)
-    → idempotency re-check → the STATION row lock with its
+    context → the ONE shared PN-level advisory lock → idempotency
+    re-check → the STATION row lock with its
     authoritative active/binding re-check → the no-active-quantity and
     no-active-demand preconditions → the internal Work Order resolution
     under the demand → WorkOrder locks → the locked Area re-read
@@ -612,6 +671,11 @@ def receive_quantity(
     receipt_reason = optional_text(reason if isinstance(reason, str) or reason is None else None)
     if reason is not None and not isinstance(reason, str):
         raise InvalidInputError("The reason must be text.")
+    scan_instant = _validated_scanned_at(scanned_at)
+    # §14: the received date defaults to the SCAN — read on the site
+    # calendar, the one SITE_TIMEZONE rule, so a wizard that crosses
+    # midnight still records the day the PN was scanned.
+    received_on = work_orders.site_date_of(scan_instant)
     event_id = device_event_id_text(device_event_id)
     fingerprint = _fingerprint(
         station_id=station_id,
@@ -624,6 +688,7 @@ def receive_quantity(
         due_date=demand_due_date,
         reason=receipt_reason,
         work_order_id=work_order_id,
+        scanned_at=scan_instant,
     )
 
     committed = committed_command(session, event_id)
@@ -632,10 +697,10 @@ def receive_quantity(
 
     station, area = require_production_station(session, station_id)
 
-    # Receipts and production releases of one canonical PN share this
-    # lock, so no two intents can both pass the no-active-quantity and
-    # no-active-demand preconditions below.
-    acquire_part_number_release_lock(session, pn)
+    # The ONE shared PN-level lock: every command that can give this PN
+    # active quantity or active demand takes it too, so nothing can
+    # make the preconditions below false between judging and COMMIT.
+    acquire_part_number_lock(session, pn)
     committed = committed_command(session, event_id)
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
@@ -757,6 +822,11 @@ def receive_quantity(
         demand.requested_quantity += received_quantity
         if demand_due_date is not None:
             demand.due_date = demand_due_date
+        # A receipt that raises a line is an edit of that line: it
+        # stamps `updated_at` exactly as the Work Order save does, so
+        # the line's last-changed time never lies about a station
+        # having raised it.
+        demand.updated_at = func.now()
         flush(session, {})
         audit.append_audit_event(
             session,
@@ -770,8 +840,8 @@ def receive_quantity(
         work_order = WorkOrder(
             work_order_number=None,
             # §14: the received date defaults to the scan — the site's
-            # calendar day (the one SITE_TIMEZONE rule, Phase 10).
-            received_date=work_orders.site_today(),
+            # calendar day OF THE SCAN, never of the confirmation.
+            received_date=received_on,
             due_date=None,
             status=WorkOrderStatus.OPEN,
         )

@@ -1,7 +1,7 @@
 # Roadmap triển khai PartFlow
 
 > **Bản gốc chuẩn:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md).
-> Baseline upstream: commit `fcc433767c348f474af748aeda646a03641f4e3a`.
+> Baseline upstream: commit `40fbcb591c3ca1b5952d240e3bcf50ac918e7286`.
 >
 > **Quyền chuẩn:** File tiếng Anh là canonical source cho thứ tự triển khai,
 > ranh giới phase, dependency và các giới hạn tạm thời. Hành vi domain và phạm
@@ -9,6 +9,15 @@
 > đích đã duyệt do [`GUI_DESIGN.md`](GUI_DESIGN.md) định nghĩa.
 
 ## Trạng thái hiện tại
+
+> **Coverage audit (2026-09-03):** đối chiếu `PROJECT_PROFILE.md`, `GUI_DESIGN.md`,
+> roadmap này và code production thật đã phát hiện một production workflow bị
+> defer mà không phase sau nào sở hữu (`Receive Quantity` ở Scan Station), cùng
+> các bàn giao chưa trọn ở monitoring, Worker sessions, authorized corrections và
+> Administration policy settings. Phase 10.5 được chèn vào như một corrective
+> prerequisite có tên, không đánh số lại các phase sau. Mọi target behavior còn
+> lại phải được gán cho đúng một owner phase, hoặc nằm ở `Deferred` / một
+> canonical open decision.
 
 - Đặc tả project chuẩn là `PROJECT_PROFILE.md` v21. V21 cho phép sửa có giới hạn
   WorkOrderDemand đã release: `requested_quantity` không thấp hơn quantity đã
@@ -175,6 +184,18 @@
   tại khi còn row tiếp theo. Đã audit trước khi đóng.
   Authorization adjustment chờ Phase 14, Worker chờ Phase 13, read model
   monitoring chờ Phase 11.
+- **Phase 10.5**: đã triển khai nhưng **chưa đóng** — Application command
+  `app/application/intake.py` kèm read model, `POST /api/scan-stations/{id}/receipts`
+  và PN resolution mở rộng, cùng wizard `Receive Quantity` ba view thật trong Scan
+  Station: một canonical PN không còn active Work Order Demand và không có active
+  quantity nay được RECEIVED tại production station — kể cả PN gặp lần đầu — với
+  internal Work Order blank-number được tạo hoặc reuse, WorkOrderDemand,
+  QuantityFlow, AssignedRoute snapshot cho `PLANNED` và immutable Movement
+  `RECEIVED` commit trong một transaction. Không cần migration: shape check của
+  `RECEIVED` đã cho phép Scan Station identity và reason. Phase vẫn mở vì
+  PROJECT_PROFILE §32 quyết định 3 — “join an existing Quantity Flow” nghĩa là gì
+  — chưa chốt, trong khi §14 yêu cầu điều đó trước khi receive một PN đã có active
+  quantity.
 - **Phase 11**: đã triển khai **Production Board** (Area Board và Tracking là
   phần còn mở của phase). Backend `app/application/production_board.py` trên
   `GET /api/production-board` derive board toàn Department từ projection vị trí
@@ -210,6 +231,14 @@
   bị từ chối và zero write.
 - Block production write khi disconnected; offline sync bị defer và chưa duyệt.
 - Không triển khai ERP integration trong MVP.
+- Mọi behavior được mô tả là `deliberately absent`, `temporary`, `placeholder`,
+  `later` hoặc bị defer cách khác phải nêu đúng một phase sau sở hữu nó, hoặc
+  được liệt kê tường minh ở `Deferred` / một canonical open decision. Một phase
+  không bao giờ được đóng khi còn target behavior vô chủ.
+- Trước khi đóng bất kỳ phase nào, đối chiếu `PROJECT_PROFILE.md` +
+  `GUI_DESIGN.md` + code production hiện tại với roadmap này. Chỉ đóng phase khi
+  mọi target behavior trong scope đã triển khai và mọi phần cố ý bỏ qua đều có
+  owner sau tường minh.
 
 ## Phase 1 — Repository Foundation
 
@@ -579,6 +608,210 @@ theo (history kết thúc đúng ranh giới trang không có `Show more` thừa
 command allocation nào sửa Movement history. Authorization chờ Phase 14; Worker chờ Phase 13; return
 stock to production vẫn là open decision.
 
+## Phase 10.5 — Scan Station Receive Quantity Gap Closure (corrective prerequisite có tên — không đánh số lại phase sau)
+
+Phase corrective này đóng một workflow gap phát hiện sau Phase 10: Phase 5 cố ý
+defer `Receive Quantity` ở Scan Station và Phase 9 vẫn phân biệt nó với `Add more
+quantity`, nhưng không phase sau nào sở hữu phần triển khai. Phải hoàn tất trước
+khi phần Phase 11 còn lại được coi là xong và trước khi Phase 12 bắt đầu.
+
+Scope:
+
+- triển khai workflow **`Receive Quantity`** thật của GUI_DESIGN §4.7 /
+  PROJECT_PROFILE §14 khi một canonical PN không có active Work Order Demand, kể
+  cả PN gặp lần đầu;
+- manual entry và scan `PF:PN:<part-number>` resolve theo cùng canonical PN rule:
+  trim whitespace bao ngoài, từ chối whitespace bên trong, uppercase, tạo
+  PartNumber master khi dùng hợp lệ lần đầu;
+- giữ workflow ba bước: settings → quantity → confirmation, default editable
+  `Request Type = MODIFY` và `Route Mode = FLOATING`, optional due date, chọn
+  Planned Route chỉ khi `PLANNED`, context Area/Operation của station,
+  reason/notes và canonical Work Order behavior; `Confirm receipt` là write point
+  duy nhất;
+- create/reuse internal WorkOrder / WorkOrderDemand đúng như PROJECT_PROFILE §14
+  định nghĩa. Nhiều blank-number MODIFY Work Order plausible thì bắt buộc explicit
+  selection — không bao giờ đoán first match;
+- receipt đã confirm tạo production quantity transactional: business-demand
+  records, QuantityFlow, AssignedRoute snapshot độc lập chỉ cho `PLANNED`,
+  immutable Movement `RECEIVED` và current-position projection commit trọn vẹn
+  hoặc không gì cả;
+- `RECEIVED` do scan ghi Scan Station identity và Operation đã resolve. Station
+  phải còn active và còn bound vào Area active, non-terminal đã confirm lúc
+  command commit; context station / Area / Operation cũ bị từ chối, zero write;
+- dùng command/idempotency model sẵn có: một `device_event_id` cho một intent đã
+  freeze, deterministic fingerprint, replay cùng intent, reuse xung đột bị từ
+  chối, retry khi mất response dùng cùng id, success chỉ hiện sau khi server xác
+  nhận;
+- refresh station context/inventory và trả focus scan sau success; input invalid,
+  ambiguous, cancelled, offline, stale hay bị từ chối đều zero write;
+- giữ **`Add more quantity`** tách biệt: nó vẫn là correction
+  `QUANTITY_ADJUSTED · INCREASE` của Phase 9 bên cạnh quantity đã active trong
+  Area của station, không bao giờ thay cho `Receive Quantity` ban đầu;
+- giữ production build boundary: workflow thật dùng server state, không import
+  hay phụ thuộc mock Scan Station chỉ có trong development;
+- ghi `received_date` từ SCAN, không phải từ confirmation (PROJECT_PROFILE §14):
+  resolution phát ra instant, wizard mang nó đi, server validate và derive date
+  theo lịch site;
+- serialize entry condition với mọi command có thể làm PN có active demand hoặc
+  active quantity, để receipt không bao giờ commit bên cạnh một trong số đó;
+- chỉ receive một PN ĐÃ có active quantity sau explicit join-or-separate
+  confirmation mà PROJECT_PROFILE §14 yêu cầu. **Bullet này đang bị chặn**:
+  không canonical document nào định nghĩa ngữ nghĩa của việc join
+  (PROJECT_PROFILE §32 quyết định 3), nên workflow từ chối trường hợp đó và
+  phase vẫn mở tới khi quyết định được chốt.
+
+Không thuộc phase corrective này:
+
+- Worker identity / Worker Sessions / badge-confirmation gate — Phase 13;
+- authentication / role enforcement — Phase 14;
+- quản lý Planned Route template hay PartNumber metadata — Phase 13;
+- allocation behavior của Stockroom — đã thuộc Phase 10.
+
+Trạng thái triển khai (**một phần — phase CHƯA đóng**: mọi scope bullet ở trên đã
+triển khai, nhưng canonical decision mà bullet cuối phụ thuộc vẫn mở, nên
+`Receive Quantity` chỉ phủ trường hợp PN không có active quantity — xem *Bị chặn
+bởi canonical decision* bên dưới. Backend: command `Receive Quantity` kèm read
+model và API; frontend: wizard ba view của GUI_DESIGN §4.7 mục 1 trong Scan
+Station thật; đã validate bằng full backend gate — `ruff format --check`,
+`ruff check`, `mypy app tests`, 658 test —, `alembic upgrade head` +
+`alembic check` không drift, và full frontend gate `npm run check` — format,
+lint, typecheck, 719 test, build, production-boundary sentinel): **không
+migration** — shape check theo type của Movement đã cho phép `RECEIVED` mang
+`station_id` và `reason`, nên receipt do scan không cần đổi schema và Alembic
+head vẫn là `0011_phase10_stock_allocation`. **Entry condition**
+(`app/application/intake.py`, expose qua `app/application/scan_station.py`): một
+Work Order Demand là ACTIVE khi còn business shortage —
+`requested_quantity > allocated_quantity` (PROJECT_PROFILE §14, đã làm rõ ở đó
+trong phase này: released quantity không quyết định, và `WorkOrder.completed_at`
+là trạng thái tổng của cả Work Order chứ không phải của một line). Resolution
+báo `has_active_demand` theo rule đó cùng `intake_available` (không active
+demand, không ACTIVE QuantityFlow nào của PN ở bất kỳ đâu, và Area của station
+có thể bắt đầu production — terminal Area thì không bao giờ), `part_number_known`
+(copy Step 1 phân biệt PN đã biết với PN mới), `internal_work_orders` và
+`scanned_at`; read model xét entry condition còn command xét lại một cách
+authoritative lúc ghi. **Command** (`intake.receive_quantity`,
+`POST /api/scan-stations/{station_id}/receipts`) là MỘT transaction theo thứ tự
+đã thiết lập — input shape → deterministic fingerprint → idempotency fast path →
+station context → MỘT advisory lock cấp PN dùng chung
+(`part_numbers.acquire_part_number_lock`) → idempotency re-check → row lock Scan
+Station kèm re-check active/binding authoritative → precondition no-active-quantity
+và no-active-demand → resolve internal Work Order dưới lock demand → WorkOrder →
+re-read Area đã lock (active, non-terminal) → lock Operation
+(`transfers.resolve_arrival_operation` — một Operation active tự resolve, nhiều
+thì phải chọn tường minh) → các write → COMMIT (hoặc replay của bên thắng race).
+Nó tạo PartNumber master khi dùng hợp lệ lần đầu, internal `WorkOrder`
+(`work_order_number = NULL`, `received_date` là ngày trên lịch site **của lần
+scan**), `WorkOrderDemand` (due date optional và reason của operator trên line
+mới), `AssignedRoute` snapshot độc lập chỉ cho `PLANNED` — step đầu phải bắt đầu
+ở Area của station —, `QuantityFlow` với `current_area_id` do chính INSERT đặt,
+và Movement `RECEIVED` mang Scan Station identity, Operation đã resolve, reason
+của receipt và cùng `context.work_order_demand_id` bất biến mà mọi release ghi,
+nên released quantity của demand và mọi read model vẫn derive từ một nguồn.
+**Reuse internal Work Order** (PROJECT_PROFILE §14 “không bao giờ đoán”): ứng
+viên là Work Order không có external number, chưa completed và đã có `MODIFY`
+demand line cho cùng PN; đúng một thì reuse, nhiều thì từ chối bằng 409 mang
+`selection_required` kèm danh sách để station cho chọn tường minh, không có thì
+tạo internal Work Order mới, và receipt `NEW` không bao giờ reuse. Reuse NÂNG
+line sẵn có thêm received quantity, đóng dấu `updated_at` đúng như một Work Order
+edit thường, kèm audit row `UPDATED` (SLICE1_DATA_MODEL §5 — một canonical PN tối
+đa một lần trên một Work Order — vẫn nguyên; restricted edit của PROJECT_PROFILE
+§13 cho phép nâng line đã release và sửa due date, không gì khác của line cũ bị
+ghi lại). Mọi từ chối đều không ghi gì: PN, quantity, Request Type, Route Mode
+hay Planned Route invalid, Route không bắt đầu ở đây, station đã deactivate hoặc
+rebind, Area đã deactivate hoặc terminal, Operation lạ hoặc ambiguous, active
+demand / active quantity xuất hiện từ lúc mở wizard, selection Work Order cũ,
+scan timestamp naive / ở tương lai / quá cũ so với intake scan window, và reuse
+`device_event_id` sai fingerprint hoặc khác command.
+
+**Undo boundary:** receipt cố ý KHÔNG reversible từ station
+(`undo._ineligibility` từ chối command `INTAKE` tường minh, như Phase 10 đã làm
+với `STOCK`): reversal cấp Movement khôi phục production state và không bao giờ
+ghi lại business demand mà receipt đã tạo hoặc nâng, nên nửa-reversal là bất khả
+thi by construction.
+
+**Serialization cấp PN.** Entry condition của receipt là state cấp PN, nên nó
+được bảo vệ bằng MỘT lock cấp PN dùng chung cho mọi command có thể đẩy một PN
+qua các ngưỡng đó — không active quantity → có active quantity (production
+release, chính receipt, và Undo mở lại flow mà command của nó đã đóng) và không
+active demand → có active demand (Work Order save thêm hoặc nâng demand line,
+allocation reversal, và chính receipt). `part_numbers.acquire_part_number_lock`
+thay cho hai namespace release và allocation cũ, vốn chỉ bảo vệ chính command đó
+với chính nó; `acquire_part_number_locks` lấy nhiều PN theo thứ tự canonical tăng
+dần để các Work Order save chồng lấn xếp hàng thay vì deadlock. Mọi bên đều lấy
+advisory lock TRƯỚC mọi row lock và re-read state dưới lock, nên thứ tự toàn cục
+vẫn là PN advisory → row (demand tăng dần → Work Order → flow → station → Machine
+→ Area → Operation), không có chu trình. Các command chỉ đẩy PN theo chiều nới
+lỏng — xóa demand line, allocation confirmation, đóng flow — cố ý không lấy lock.
+
+**Received date.** `received_date` theo SCAN, không theo confirmation
+(PROJECT_PROFILE §14): PN resolution phát ra `scanned_at`, wizard mang nó qua mọi
+bước, và `Confirm receipt` gửi lại. Server validate (có time zone, không ở tương
+lai, không cũ hơn `intake.MAX_SCAN_AGE` — mười hai giờ) và derive calendar date
+theo `SITE_TIMEZONE` qua đúng một helper lịch site dùng chung
+(`work_orders.site_date_of`), nên receipt chuẩn bị lúc 23:50 và confirm lúc 00:10
+vẫn thuộc ngày đã scan. Instant này nằm trong idempotency fingerprint: retry cùng
+intent replay receipt gốc, còn một lần scan mới là intent khác và cần
+`device_event_id` riêng.
+
+Test: `tests/test_intake_api.py` (entry condition với active demand, active
+quantity và terminal Area giữ workflow lại; các record của receipt, arrival
+queued so với direct processing, due date, snapshot `PLANNED` và các từ chối của
+nó; reuse bằng cách nâng line kèm audit row, từ chối khi nhiều ứng viên kèm danh
+sách và selection tường minh sau đó, selection cũ, `NEW` không bao giờ reuse,
+Work Order completed không bao giờ là ứng viên; revalidation lúc ghi và ma trận
+input invalid, mỗi trường hợp zero write; replay, reuse sai và reuse khác
+command; từ chối Undo; projection replay; received date qua site midnight cùng
+validation và intent của scan timestamp; và bộ concurrency — hai receipt đồng
+thời của một PN, và receipt chạy đua với từng writer có thể trao cho PN active
+demand hoặc active quantity).
+
+**Frontend** (`src/api/scan-station.ts` — `receiveQuantity`,
+`workOrderSelectionRequired`, resolution mở rộng kèm `scannedAt` —,
+`src/views/scan-station/scan-station-intake-dialog.tsx`, nối trong
+`ScanStationView.tsx`): PN resolve với `intake_available` mở `Receive Quantity`
+thay cho placeholder trung thực trước đây — ba view đã duyệt trong MỘT dialog
+lifecycle (settings → quantity → confirmation), default editable
+`Request Type = MODIFY` và `Route Mode = FLOATING`, field Planned Route chỉ cho
+`PLANNED` và chỉ liệt kê Route bắt đầu tại Area này, due date optional với label
+`.field-optional` dùng chung, chọn Operation tường minh khi Area cấu hình nhiều,
+field reason/notes, và dòng Work Order behavior nêu cái sẽ tạo hoặc reuse với
+selection tường minh ngay trong settings view khi có nhiều ứng viên (`Next` bị
+chặn tới khi chọn). Quantity view không MAX và không default, dùng keypad và
+recap chip chung (`TypeChip · RouteModeChip · Operation`), và `Confirm receipt`
+trên summary có cấu trúc là write point duy nhất, gửi qua one-shot write model
+chung: success chỉ đọc sau câu trả lời của server, từ chối tường minh giữ wizard
+mở kèm lý do của server và không ghi gì, từ chối `selection_required` quay lại
+settings view với ứng viên của server dưới `device_event_id` MỚI (request bị từ
+chối không ghi gì, nên intent đã sửa là intent khác — `useOneShotWrite` có thêm
+`resetIntent` đúng cho việc này), và mất response thì freeze intent sau CÙNG
+`device_event_id` với `Retry the same receipt`. Sau khi server xác nhận, station
+context và Area inventory load lại từ server, barcode input lấy lại focus, và
+receipt vào session log NHƯNG không trở thành Undo target. Test frontend:
+`scan-station-intake.test.tsx` (default settings và cả hai copy PN, Planned Route
+lọc theo Area, write point kèm reload và refocus, due date / reason / Operation,
+request `PLANNED`, arrival direct-processing, reuse và selection tường minh,
+`NEW` không reuse, từ chối, từ chối selection-required với id mới, retry khi mất
+response dùng cùng id và cùng scan timestamp, scan timestamp đi nguyên vẹn tới
+write point, block offline, Cancel không ghi gì, và receipt không được đề nghị
+làm Undo target), cùng suite transfer Phase 5 đã cập nhật, nơi placeholder “no
+intake at the station” cũ nay là wizard.
+
+Cố ý chưa có: Worker identity, Worker Sessions và badge gate (Phase 13),
+authorization (Phase 14), quản lý Planned Route và PartNumber master (Phase 13).
+
+**Bị chặn bởi canonical decision — vì sao phase chưa đóng.** PROJECT_PROFILE §14
+yêu cầu một PN đã có active quantity chỉ được receive sau explicit confirmation
+rằng quantity mới **join existing Quantity Flow hay tạo Flow riêng**. GUI_DESIGN
+§4.7 không đặc tả bước đó trong wizard `Receive Quantity` (mục 1 chỉ mở cho PN
+không có active demand, và ba view của nó không thu thập lựa chọn join-or-separate
+nào), và không tài liệu nào định nghĩa join nghĩa là gì — được join active flow
+nào, quantity được join thừa hưởng gì (route mode, Assigned Route, current
+position, processing state), Movement nào ghi lại. Khoảng trống đó nay được ghi
+thành PROJECT_PROFILE §32 quyết định 3. Trước khi chốt, implementation từ chối
+receipt mà PN có active quantity thay vì tự bịa ngữ nghĩa, và phase này vẫn
+**chưa hoàn tất**: đóng nó sẽ đánh dấu một canonical requirement chưa triển khai
+là xong. Mọi phần còn lại trong scope đã triển khai và đã validate.
+
 ## Phase 11 — Read Models and Monitoring Views
 
 - Production Board;
@@ -586,10 +819,23 @@ stock to production vẫn là open decision.
   Summary riêng;
 - Tracking;
 - projection derive từ Movement;
-- stale-feed và long-data state.
+- stale-feed và long-data state;
+- breakdown quantity theo từng PN của **Assigned now** trong Management →
+  Machines, thay presentation chỉ-tổng tạm thời của Phase 6;
+- expected-duration monitoring: thay stand-in `>= 3 days` cố định của long-dwell
+  trên Production Board bằng hành vi expected-duration advisory canonical theo
+  PROJECT_PROFILE §17 / GUI_DESIGN. Trước khi triển khai, canonical docs phải
+  định nghĩa nguồn duration nào áp dụng khi vừa có duration của Assigned Route
+  step vừa có default của Operation; implementation không được bịa hay đoán quy
+  tắc ưu tiên.
 
-Trạng thái triển khai (một phần — Production Board hoàn tất end to end; read
-model và view thật của Area Board và Tracking là phần còn mở): **Backend**
+Phase 11 vẫn chỉ là read-model / monitoring. Nó không được hút vào production
+write của Scan Station, Priority write, master-data management, Worker session
+hay authentication.
+
+Trạng thái triển khai (một phần — Production Board hoàn tất end to end; phần
+Phase 11 còn mở là Area Board, Tracking, breakdown theo PN của Machines và
+expected-duration monitoring): **Backend**
 (`app/application/production_board.py`, `app/api/production_board.py` —
 `GET /api/production-board?department_id=`): read model read-only toàn Department,
 không có per-Area mode (PROJECT_PROFILE §21, GUI_DESIGN §5), derive hoàn toàn từ
@@ -689,29 +935,85 @@ theo expected duration (PROJECT_PROFILE §17 — cờ `long` ≥ 3 ngày thay th
 - apply có audit sau explicit confirmation;
 - Undo/Redo.
 
-## Phase 13 — Full Administration
+## Phase 13 — Full Administration and Production Identity Configuration
 
-Hoàn thiện Administration ngoài minimum setup Phase 3.5:
+Hoàn thiện Administration ngoài minimum setup Phase 3.5 và làm thật các surface
+master-data / configuration production còn lại.
 
 - Workers: stable id, name, employee badge barcode exact-match không
-  `PF:WORKER:`, avatar, active; tách khỏi User;
+  `PF:WORKER:`, avatar, active; Worker vẫn tách khỏi User;
+- Worker identification theo Area: lưu và quản lý các mode canonical `disabled`,
+  `fixed Worker` và `scanned Worker Session`, gồm cả fixed Worker được cấu hình;
+- tích hợp runtime của Worker Session: resolve/switch badge, session sliding
+  inactivity theo phạm vi Scan Station, modal chặn khi hết hạn, giữ nguyên draft
+  của production dialog đang mở, và chỉ refresh timeout bởi production
+  interaction hợp lệ;
+- production audit identity: thêm/dùng reference Worker/ScanSession canonical mà
+  Movement của Scan Station cần và Worker attribution mà station allocation cần;
+  record lịch sử vẫn hợp lệ với identity null và không bao giờ được backfill bằng
+  cách đoán;
 - RouteTemplate management thật trong **Management → Planned Routes**, không
   duplicate trong Administration;
 - optional PartNumber master management thật trong **Management → Part Numbers**:
-  metadata/image/hard deletion theo §28 và label. Phase 4 chỉ create/find cùng
-  minimal label. Khi Phase 13 có shared Edit Part Number dialog, demand-line PN
-  mở dialog này thay label-only dialog; glyph đổi thành pencil;
-- Users và role/authorization management, enforce ở Phase 14;
-- Worker session policy: sliding inactivity default + override per Area;
-- correction permission;
-- Department display setting cho Production Board rotation;
-- theme persistence theo User và Scan Station;
+  sửa metadata, quản lý image, toàn bộ surface barcode label, và hard deletion
+  chỉ record metadata; deletion không bao giờ cascade vào WorkOrderDemand,
+  QuantityFlow, PartMovement hay allocation;
+- khi Part Numbers management thành thật, đổi đích của PN control trên demand
+  line sang shared `Edit Part Number` dialog; barcode label vẫn mở được từ trong
+  đó và control dùng affordance edit đã duyệt;
+- Users và role/authorization management: cấu hình tạo ở đây, enforcement là
+  Phase 14;
+- Worker Session policy: một sliding inactivity timeout default cùng override
+  theo Area, cùng ba badge-confirmation option độc lập cho `DONE`, `QUEUE` và
+  `UNDO` (default ON) quyết định hình thức của final confirmation gate luôn tồn
+  tại;
+- Undo reason policy: cấu hình kích hoạt `reason when configured` của
+  PROJECT_PROFILE §16; khi bật thì backend Undo command, không chỉ UI, bắt buộc
+  reason;
+- correction permission: cấu hình ở đây, enforce ở Phase 14;
+- Department display setting cho Production Board rotation (giây trên mỗi row
+  hiển thị và thời gian dừng tối thiểu của một page);
+- Due Soon policy setting: thay default tạm ở frontend bằng policy cấu hình được
+  mà presentation urgency của due date dùng, theo GUI_DESIGN §3.12 chứ không tạo
+  model policy thứ hai;
+- theme persistence theo User và Scan Station với thứ tự User → Station → Dark
+  mặc định;
 - scan behavior, retention/archive policy setting (execute Phase 16) và general
   setting.
 
-## Phase 14 — Authentication and Role Enforcement
+Phase 13 không được để lại preview Worker-session policy chỉ-development hay
+production identity giả trong module graph production.
 
-Server-side role authorization theo PROJECT_PROFILE §19.
+## Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections
+
+- authenticate application User; badge Worker vẫn là audit identity của Scan
+  Station và không bao giờ thành login credential;
+- enforce authorization phía server trên mọi write của Management,
+  Administration, correction, allocation adjustment và master data — visibility ở
+  frontend không bao giờ là security boundary;
+- áp correction permission đã cấu hình ở Phase 13 vào Undo/correction command và
+  các production action đặc quyền khác;
+- biến khả năng **Management allocation / allocation reversal** của Phase 10
+  thành workflow Management thật có authorization: allocate stocked quantity để
+  lại cho sau, xem allocation history, và append reversal có audit kèm reason bắt
+  buộc; không bao giờ sửa/xóa allocation history;
+- triển khai đường correction allocation được cho phép tường minh theo
+  PROJECT_PROFILE §8.12 / §18 khi một correction có thể vượt giới hạn remaining
+  demand thông thường; đó là intent đặc quyền, có audit, riêng biệt, không bao
+  giờ là nới lỏng allocation Stockroom thường ngày;
+- triển khai workflow **AssignedRoute adjustment** còn thiếu cho một QuantityFlow
+  `PLANNED` đã chọn (PROJECT_PROFILE §8.10 / §17): chỉ user có quyền, reason
+  tường minh, giữ route state cũ trong audit history, chỉ flow đã chọn, không
+  đụng Route Template và immutable actual Movement history;
+- gắn identity User đã authenticate vào audit record Management/Admin và các
+  action lifecycle của Machine nơi canonical actor linkage áp dụng; Movement
+  production của Scan Station tiếp tục dùng Worker identity từ Phase 13;
+- năng lực correction rộng hơn của Manager/Admin dùng command có kiểu và có
+  audit; Phase 14 không tạo đường edit/delete chung nào cho PartMovement history.
+
+Một route deviation đã ghi trên Movement `TRANSFERRED` thật không bị nhân đôi chỉ
+để tạo thêm một deviation event. `ROUTE_ADJUSTED` audit một thay đổi AssignedRoute
+có thẩm quyền về sau; actual Movement history vẫn là nguồn chuẩn.
 
 ## Phase 15 — File-Based Work Order Import
 
@@ -733,16 +1035,19 @@ có giới hạn không làm phase này trở thành complete.
 - rollback;
 - reconciliation check;
 - pilot deployment;
-- **administrative archival/purge maintenance** theo PROJECT_PROFILE §28:
-  hard-delete PN master metadata không cascade production data; Movement
-  retention theo thời gian cấu hình trong primary DB, thực hiện select-by-cutoff
-  → lossless archive export → verify → purge đúng các row đã archive. Dùng Admin
-  maintenance path riêng có privilege; application role luôn bị revoke UPDATE/
-  DELETE trên `part_movements`. Giữ trọn chain liên quan như
-  `reverses_movement_id` và atomic-command group để không retained Movement nào
-  reference row bị purge. Có policy/size threshold/manual trigger, scope preview,
-  mandatory reason và full audit. Runtime bình thường vẫn append-only; không xây
-  full retention engine trước phase này.
+- hardening database role production, gồm cả các hạn chế UPDATE/DELETE dự kiến
+  của application role trên production/audit history append-only;
+- **administrative Movement-history archival/purge maintenance** theo
+  PROJECT_PROFILE §28: retention theo thời gian cấu hình, select-by-cutoff →
+  lossless archive export → verify → purge đúng các row đã archive và đã verify,
+  qua một maintenance path riêng có privilege. Giữ trọn chain reversal/reference
+  như `reverses_movement_id` và atomic-command group để không retained Movement
+  nào reference row bị purge. Có policy/size threshold/manual trigger, scope
+  preview, mandatory reason và full audit. Runtime bình thường vẫn append-only;
+  không xây full retention engine trước phase này.
+
+Hard deletion của PartNumber master **không** phải maintenance operation của
+Phase 16. Nó thuộc Phase 13 Management → Part Numbers và chỉ xóa metadata.
 
 ## Deferred
 

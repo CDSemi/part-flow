@@ -35,12 +35,14 @@ The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations; the module database is dropped afterwards.
 """
 
+import datetime
 import os
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
@@ -51,7 +53,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import projections
+from app.application import allocations, intake, projections, undo, work_orders
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -207,6 +209,9 @@ def _receipt_payload(pn: str, quantity: Any, **kw: Any) -> dict[str, Any]:
         "quantity": quantity,
         "request_type": "MODIFY",
         "route_mode": "FLOATING",
+        # What the PN resolution issued when the wizard opened: the
+        # received date follows this instant, never the confirmation.
+        "scanned_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "device_event_id": str(uuid.uuid4()),
     }
     payload.update(kw)
@@ -336,6 +341,88 @@ def _internal_modify_candidate(
     )
     assert allocated.status_code == 201, allocated.text
     return work_order_id, demand_id
+
+
+def _scrapped_beside_a_settled_demand(
+    client: TestClient, production: _Cell, stockroom: _Cell, pn: str
+) -> str:
+    """A PN whose only remaining history is ONE scrapped (closed) flow.
+
+    Built through the real workflows: the demand line is released,
+    stocked and fully allocated (no business shortage left), and a
+    second quantity found at the Area was scrapped — so the PN has no
+    active demand and no active quantity and `Receive Quantity` opens,
+    while undoing that Scrap would reopen the closed flow and give the
+    PN active quantity again. Returns the Scrap's ``device_event_id``.
+    """
+    created = client.post(
+        "/api/work-orders",
+        json={"lines": [{"part_number": pn, "requested_quantity": 4, "request_type": "MODIFY"}]},
+    )
+    assert created.status_code == 201, created.text
+    work_order_id = int(created.json()["id"])
+    demand_id = int(created.json()["demands"][0]["id"])
+    released = client.post(
+        f"/api/work-orders/{work_order_id}/demands/{demand_id}/release",
+        json={
+            "part_number": pn,
+            "quantity": 4,
+            "route_mode": "FLOATING",
+            "starting_area_id": production.area_id,
+            "operation_id": production.operation_id,
+            "confirm_active_quantity": False,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert released.status_code == 201, released.text
+    released_flow = int(released.json()["quantity_flow_id"])
+    # Found quantity beside it — the Phase 9 addition, its own flow.
+    added = client.post(
+        f"/api/scan-stations/{production.station_id}/quantity-additions",
+        json={
+            "part_number": pn,
+            "quantity": 3,
+            "reason": "Found at the Area",
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert added.status_code == 201, added.text
+    scrap_event = str(uuid.uuid4())
+    scrapped = client.post(
+        f"/api/scan-stations/{production.station_id}/scraps",
+        json={
+            "part_number": pn,
+            "quantity_flow_id": int(added.json()["quantity_flow_id"]),
+            "quantity": 3,
+            "reason": "Damaged",
+            "device_event_id": scrap_event,
+        },
+    )
+    assert scrapped.status_code == 201, scrapped.text
+    stocked = client.post(
+        f"/api/scan-stations/{stockroom.station_id}/stockings",
+        json={
+            "part_number": pn,
+            "quantity_flow_id": released_flow,
+            "source_area_id": production.area_id,
+            "target_area_id": stockroom.area_id,
+            "quantity": 4,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert stocked.status_code == 201, stocked.text
+    allocated = client.post(
+        "/api/allocations",
+        json={
+            "part_number": pn,
+            "allocation_quantity": 4,
+            "lines": [{"work_order_demand_id": demand_id, "quantity": 4}],
+            "station_id": stockroom.station_id,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert allocated.status_code == 201, allocated.text
+    return scrap_event
 
 
 # ---------------------------------------------------------------------------
@@ -1005,3 +1092,316 @@ def test_two_concurrent_receipts_of_one_part_number_have_one_serial_outcome(
     assert counts["movements"] == 1
     assert counts["flows"] == 1
     assert counts["demands"] == 1
+
+
+# ---------------------------------------------------------------------------
+# `received_date` follows the SCAN (PROJECT_PROFILE §14)
+# ---------------------------------------------------------------------------
+
+
+def test_the_resolution_issues_the_scan_timestamp(client: TestClient) -> None:
+    """The PN resolution carries the instant `Receive Quantity` records
+    its received date from — the station never invents one."""
+    cell = _Cell(client)
+    before = datetime.datetime.now(datetime.UTC)
+    resolution = _resolve(client, cell, _unique("PN"))
+    after = datetime.datetime.now(datetime.UTC)
+    scanned_at = datetime.datetime.fromisoformat(resolution["scanned_at"])
+    assert scanned_at.tzinfo is not None
+    assert before <= scanned_at <= after
+
+
+def test_received_date_is_the_scan_day_even_when_the_confirmation_crosses_midnight(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PN scanned at 23:50 and confirmed at 00:10 the next day is
+    received on the day it was SCANNED (§14 — `received_date` defaults
+    to the scan timestamp), read on the site calendar."""
+    cell = _Cell(client)
+    pn = _unique("PN")
+    zone = ZoneInfo("America/Los_Angeles")
+    scanned_at = datetime.datetime(2026, 3, 9, 23, 50, tzinfo=zone)
+    confirmed_at = datetime.datetime(2026, 3, 10, 0, 10, tzinfo=zone)
+    monkeypatch.setattr(work_orders, "site_timezone", lambda: "America/Los_Angeles")
+    monkeypatch.setattr(work_orders, "now", lambda: confirmed_at)
+
+    response = _receive(client, cell, pn, 3, scanned_at=scanned_at.isoformat())
+    assert response.status_code == 201, response.text
+    detail = _work_order(client, int(response.json()["work_order_id"]))
+    assert detail["received_date"] == "2026-03-09"
+    # The server derives the date itself; the confirmation instant is
+    # only the clock the validation compares against.
+    assert work_orders.site_today() == datetime.date(2026, 3, 10)
+
+
+def test_a_receipt_refuses_an_unusable_scan_timestamp(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The instant travels through the station, so the server validates
+    it: naive, in the future, or older than the intake scan window are
+    each refused with zero writes."""
+    cell = _Cell(client)
+    now = datetime.datetime.now(datetime.UTC)
+    cases = {
+        "naive": now.replace(tzinfo=None).isoformat(),
+        "future": (now + datetime.timedelta(minutes=5)).isoformat(),
+        "stale": (now - intake.MAX_SCAN_AGE - datetime.timedelta(minutes=1)).isoformat(),
+        "missing": None,
+    }
+    for label, value in cases.items():
+        pn = _unique("PN")
+        payload = _receipt_payload(pn, 4)
+        if value is None:
+            del payload["scanned_at"]
+        else:
+            payload["scanned_at"] = value
+        response = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+        assert response.status_code == 422, f"{label}: {response.text}"
+        assert _counts(db_engine, pn) == {
+            "flows": 0,
+            "movements": 0,
+            "demands": 0,
+            "masters": 0,
+            "requested": 0,
+        }
+
+
+def test_the_scan_timestamp_is_part_of_the_receipt_intent(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """The retry of a lost response replays under the SAME scan instant;
+    the same id with a different scan is a different intent and is
+    refused, so a retry can never silently move the received date."""
+    cell = _Cell(client)
+    pn = _unique("PN")
+    payload = _receipt_payload(pn, 5)
+    first = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+    assert first.status_code == 201, first.text
+
+    replay = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=payload)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["movement_id"] == first.json()["movement_id"]
+
+    moved = dict(payload)
+    moved["scanned_at"] = (
+        datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=2)
+    ).isoformat()
+    conflicting = client.post(f"/api/scan-stations/{cell.station_id}/receipts", json=moved)
+    assert conflicting.status_code == 409, conflicting.text
+    assert _counts(db_engine, pn)["movements"] == 1
+
+
+# ---------------------------------------------------------------------------
+# PN-level serialization — the shared lock, judged against real writers
+# ---------------------------------------------------------------------------
+
+
+def _pause_after_part_number_lock(
+    monkeypatch: pytest.MonkeyPatch, module: Any, attribute: str
+) -> tuple[threading.Event, threading.Event]:
+    """Hold the shared PN-level lock inside ``module.attribute``.
+
+    The seam is the shared lock helper itself: the real lock is taken,
+    then the caller's transaction stops there and keeps holding it —
+    exactly the window in which a concurrent `Receive Quantity` must
+    NOT be able to judge its preconditions.
+    """
+    real = getattr(module, attribute)
+    inside = threading.Event()
+    release = threading.Event()
+
+    def paused(*args: Any, **kwargs: Any) -> None:
+        real(*args, **kwargs)
+        if not inside.is_set():
+            inside.set()
+            assert release.wait(timeout=30), "test deadlock: never released"
+
+    monkeypatch.setattr(module, attribute, paused)
+    return inside, release
+
+
+def _receipt_blocked_by(
+    client: TestClient,
+    cell: _Cell,
+    pn: str,
+    writer: "Callable[[], Any]",
+    inside: threading.Event,
+    release: threading.Event,
+) -> tuple[Any, Any]:
+    """Run ``writer`` up to the held PN lock, prove the receipt WAITS,
+    then let both finish and return (writer result, receipt response)."""
+    outcome: dict[str, Any] = {}
+    writing = threading.Thread(target=lambda: outcome.update(writer=writer()))
+    writing.start()
+    assert inside.wait(timeout=30), "the writer never reached the PN lock"
+
+    receiving = threading.Thread(
+        target=lambda: outcome.update(receipt=_receive(client, cell, pn, 6))
+    )
+    receiving.start()
+    receiving.join(timeout=1.5)
+    # The receipt has not judged its preconditions: it is queued behind
+    # the same PN-level lock the writer holds.
+    assert receiving.is_alive(), "the receipt did not wait for the PN lock"
+
+    release.set()
+    writing.join(timeout=30)
+    receiving.join(timeout=30)
+    return outcome["writer"], outcome["receipt"]
+
+
+def test_a_receipt_cannot_commit_beside_demand_created_meanwhile(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Work Order save that gives the PN its first demand line holds
+    the shared PN lock: the receipt queues behind it and then sees the
+    active demand its own entry condition forbids — the demand is never
+    created beside a receipt that judged the PN as free."""
+    cell = _Cell(client)
+    pn = _unique("PN")
+    inside, release = _pause_after_part_number_lock(
+        monkeypatch, work_orders, "acquire_part_number_locks"
+    )
+    created, receipt = _receipt_blocked_by(
+        client,
+        cell,
+        pn,
+        lambda: client.post(
+            "/api/work-orders",
+            json={"lines": [{"part_number": pn, "requested_quantity": 7}]},
+        ),
+        inside,
+        release,
+    )
+    assert created.status_code == 201, created.text
+    assert receipt.status_code == 409, receipt.text
+    assert "active Work Order Demand" in receipt.json()["detail"]
+    counts = _counts(db_engine, pn)
+    assert counts["movements"] == 0 and counts["flows"] == 0
+    assert counts["demands"] == 1 and counts["requested"] == 7
+
+
+def test_a_receipt_cannot_commit_beside_a_demand_line_raised_meanwhile(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raising a fully allocated line returns the PN's business shortage
+    — the same threshold the receipt judges. The save holds the shared
+    PN lock, the receipt waits, and is then refused."""
+    production = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    cell = _Cell(client)
+    pn = _unique("PN")
+    work_order_id, demand_id = _internal_modify_candidate(client, production, stockroom, pn)
+    before = _counts(db_engine, pn)
+    inside, release = _pause_after_part_number_lock(
+        monkeypatch, work_orders, "acquire_part_number_locks"
+    )
+    raised, receipt = _receipt_blocked_by(
+        client,
+        cell,
+        pn,
+        lambda: client.patch(
+            f"/api/work-orders/{work_order_id}",
+            json={"line_edits": [{"id": demand_id, "requested_quantity": 9}]},
+        ),
+        inside,
+        release,
+    )
+    assert raised.status_code == 200, raised.text
+    assert receipt.status_code == 409, receipt.text
+    assert "active Work Order Demand" in receipt.json()["detail"]
+    after = _counts(db_engine, pn)
+    # The refused receipt introduced no production quantity at all.
+    assert (after["movements"], after["flows"], after["demands"]) == (
+        before["movements"],
+        before["flows"],
+        before["demands"],
+    )
+
+
+def test_a_receipt_cannot_commit_beside_an_allocation_reversed_meanwhile(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An allocation reversal gives the demand line its shortage back.
+    It holds the shared PN lock, so the receipt cannot judge the PN as
+    free while the reversal is in flight."""
+    production = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    cell = _Cell(client)
+    pn = _unique("PN")
+    _internal_modify_candidate(client, production, stockroom, pn)
+    before = _counts(db_engine, pn)
+    listed = client.get("/api/allocations", params={"part_number": pn})
+    assert listed.status_code == 200, listed.text
+    allocation_id = int(listed.json()[0]["id"])
+
+    inside, release = _pause_after_part_number_lock(
+        monkeypatch, allocations, "acquire_part_number_lock"
+    )
+    reversed_row, receipt = _receipt_blocked_by(
+        client,
+        cell,
+        pn,
+        lambda: client.post(
+            f"/api/allocations/{allocation_id}/reversals",
+            json={
+                "reason": "Wrong Work Order",
+                "station_id": stockroom.station_id,
+                "device_event_id": str(uuid.uuid4()),
+            },
+        ),
+        inside,
+        release,
+    )
+    assert reversed_row.status_code == 201, reversed_row.text
+    assert receipt.status_code == 409, receipt.text
+    assert "active Work Order Demand" in receipt.json()["detail"]
+    after = _counts(db_engine, pn)
+    # The refused receipt introduced no production quantity at all.
+    assert (after["movements"], after["flows"], after["demands"]) == (
+        before["movements"],
+        before["flows"],
+        before["demands"],
+    )
+
+
+def test_a_receipt_cannot_commit_beside_an_undo_reopening_quantity(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undoing a Scrap reopens the flow it closed — the PN has active
+    quantity again. The Undo holds the shared PN lock, the receipt
+    waits, and is then refused against the reopened quantity."""
+    production = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    cell = _Cell(client)
+    pn = _unique("PN")
+    scrapped_event = _scrapped_beside_a_settled_demand(client, production, stockroom, pn)
+
+    inside, release = _pause_after_part_number_lock(monkeypatch, undo, "acquire_part_number_lock")
+    reversal, receipt = _receipt_blocked_by(
+        client,
+        cell,
+        pn,
+        lambda: client.post(
+            f"/api/scan-stations/{production.station_id}/undos",
+            json={
+                "part_number": pn,
+                "reverses_device_event_id": scrapped_event,
+                "device_event_id": str(uuid.uuid4()),
+            },
+        ),
+        inside,
+        release,
+    )
+    assert reversal.status_code == 201, reversal.text
+    assert receipt.status_code == 409, receipt.text
+    assert "active production quantity" in receipt.json()["detail"]
+    # Only the setup's own flows exist: the refused receipt created none.
+    with Session(db_engine) as session:
+        active = session.scalars(
+            sa.select(models.QuantityFlow.quantity).where(
+                models.QuantityFlow.part_number == pn,
+                models.QuantityFlow.status == "ACTIVE",
+            )
+        ).all()
+    assert sorted(active) == [3]

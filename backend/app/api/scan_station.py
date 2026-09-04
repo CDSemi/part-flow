@@ -146,9 +146,12 @@ Operation. 201 fresh / 200 idempotent replay / 409 mismatched reuse;
 context, a terminal Area, active quantity or active demand that
 appeared meanwhile, and 409 with ``selection_required`` listing the
 candidates when several internal blank-number MODIFY Work Orders are
-plausible — a first match is never guessed. The PN resolution reports
-``intake_available``, ``part_number_known`` and those
-``internal_work_orders``.
+plausible — a first match is never guessed. The receipt carries the
+``scanned_at`` of the resolution that opened it, so ``received_date``
+follows the SCAN and not the confirmation (§14); a naive, future or
+too-old scan timestamp is a 422 with nothing recorded. The PN
+resolution reports ``scanned_at``, ``intake_available``,
+``part_number_known`` and those ``internal_work_orders``.
 
 - ``POST /scan-stations/{station_id}/undos`` — reverse the COMPLETE
   command recorded under ``reverses_device_event_id`` as one: a
@@ -476,6 +479,10 @@ class ScanResolveResponse(BaseModel):
     stocked_quantity: int
     available_stocked_quantity: int
     stock_available: bool
+    # Phase 10.5: the instant this scan resolved. `Receive Quantity`
+    # sends it back with the confirmed receipt — `received_date`
+    # defaults to the SCAN, never to the confirmation (§14).
+    scanned_at: datetime.datetime
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -526,6 +533,7 @@ def resolve_scan(
         stocked_quantity=result.stocked_quantity,
         available_stocked_quantity=result.available_stocked_quantity,
         stock_available=result.stock_available,
+        scanned_at=result.scanned_at,
     )
 
 
@@ -1131,6 +1139,12 @@ class ReceiptRequest(BaseModel):
     # The explicitly selected internal blank-number MODIFY Work Order
     # when several were plausible; omitted otherwise.
     work_order_id: int | None = None
+    # The `scanned_at` of the PN resolution that opened this wizard,
+    # carried unchanged through every step: `received_date` defaults to
+    # the SCAN (§14), so a receipt confirmed after site midnight still
+    # records the day it was scanned. Required — the server never falls
+    # back to its own clock.
+    scanned_at: datetime.datetime
     device_event_id: str
 
 
@@ -1168,7 +1182,8 @@ def receive_quantity(
     quantity or active demand that appeared meanwhile, and 409 with
     ``selection_required`` when several internal blank-number MODIFY Work
     Orders are plausible; 422 for an invalid PN, quantity, Request Type,
-    Route Mode or Planned Route."""
+    Route Mode, Planned Route or scan timestamp (naive, in the future, or
+    older than the intake scan window)."""
     result = intake.receive_quantity(
         session,
         station_id=station_id,
@@ -1181,6 +1196,7 @@ def receive_quantity(
         due_date=body.due_date,
         reason=body.reason,
         work_order_id=body.work_order_id,
+        scanned_at=body.scanned_at,
         device_event_id=body.device_event_id,
     )
     response.status_code = 201 if result.created else 200

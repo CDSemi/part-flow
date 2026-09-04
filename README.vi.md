@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md).
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
-> upstream commit `6fdf20e` (Phase 10 audit r3).
+> upstream commit `40fbcb5` (Phase 10.5 Receive Quantity).
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -12,8 +12,9 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 
 ## Trạng thái hiện tại
 
-Repository hiện có nền tảng từ Phase 1 đến Phase 10 triển khai end to end, và
-Production Board của Phase 11:
+Repository hiện có nền tảng từ Phase 1 đến Phase 10 triển khai end to end,
+`Receive Quantity` của Phase 10.5 (đã triển khai, phase còn mở vì một canonical
+decision) và Production Board của Phase 11:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -47,6 +48,17 @@ Production Board của Phase 11:
   keyset paging chỉ phát cursor khi còn row tiếp); frontend có workflow
   `Receive into Stockroom` cùng allocation
   dialog trên Scan Station shell và trang Completed Work Orders thật.
+- **Phase 10.5 (Scan Station Receive Quantity):** wizard `Receive Quantity` ba
+  view ĐƯA VÀO một canonical Part Number không còn active Work Order Demand (kể
+  cả Part Number gặp lần đầu) trong một transaction: internal Work Order không có
+  external number được tạo hoặc reuse, Work Order Demand của nó, Quantity Flow,
+  route snapshot `PLANNED` và Movement `RECEIVED` bất biến mang Scan Station và
+  Operation đã resolve (`POST /api/scan-stations/{id}/receipts`). `received_date`
+  lấy từ chính lần scan mà resolution đóng dấu, không phải lúc confirm, và toàn
+  bộ entry condition được serialize bằng lock cấp Part Number dùng chung cho mọi
+  command có thể tạo demand hoặc quantity. Phase **chưa đóng**: PROJECT_PROFILE
+  §32 quyết định 3 — “join an existing Quantity Flow” nghĩa là gì — còn mở, nên
+  Part Number đã có active quantity vẫn bị từ chối thay vì suy đoán.
 - **Phase 11 (Production Board):** read model board toàn Department derive từ
   projection vị trí hiện tại và Movement history (`GET /api/production-board`:
   phân bổ theo Area / Machine / External activity kèm timestamp vào vị trí,
@@ -65,8 +77,8 @@ chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát tri�
 ## Thành phần chính
 
 - `frontend/` — Vite + React + TypeScript. Các view có backend (Administration
-  Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station,
-  Production Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
+  Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station gồm
+  cả `Receive Quantity`, Production Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
   khỏi production bundle.
 - `backend/` — FastAPI. Application service sở hữu business rule và transaction;
   domain vocabulary độc lập framework; SQLAlchemy mapping khớp schema chuẩn.

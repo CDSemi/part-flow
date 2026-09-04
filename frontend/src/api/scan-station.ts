@@ -386,6 +386,13 @@ export interface ScanResolution {
    * the candidates are the sources the operator STOCKS from — the
    * arrival there is the `STOCKED` command, never a transfer. */
   stockAvailable: boolean;
+  /** Phase 10.5: the SERVER instant this scan resolved (ISO 8601 with
+   * offset). `Receive Quantity` carries it through every wizard step
+   * and sends it back with the confirmed receipt, because the received
+   * date follows the SCAN and not the confirmation (PROJECT_PROFILE
+   * §14) — a wizard open across midnight still records the scan day.
+   * The station never reads its own clock for it. */
+  scannedAt: string;
 }
 
 interface TransferCandidateWire {
@@ -422,6 +429,7 @@ interface ScanResolutionWire {
   stocked_quantity: number;
   available_stocked_quantity: number;
   stock_available: boolean;
+  scanned_at: string;
 }
 
 /**
@@ -476,6 +484,7 @@ export async function resolveScan(
     stockedQuantity: wire.stocked_quantity,
     availableStockedQuantity: wire.available_stocked_quantity,
     stockAvailable: wire.stock_available,
+    scannedAt: wire.scanned_at,
   };
 }
 
@@ -1037,6 +1046,11 @@ export interface ReceiptInput {
    * when several were plausible; null otherwise — the client never
    * picks one itself. */
   workOrderId: number | null;
+  /** The `scannedAt` of the resolution this wizard was opened from,
+   * unchanged: `received_date` follows the SCAN (PROJECT_PROFILE §14).
+   * It is part of the receipt's intent, so a retry of the SAME intent
+   * replays instead of receiving under a later date. */
+  scannedAt: string;
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
@@ -1093,7 +1107,8 @@ interface ReceiptResultWire {
  * same `deviceEventId` + same intent. Every rejection — active demand
  * or active quantity that appeared meanwhile, a stale station / Area /
  * Operation context, a terminal Area, several plausible internal Work
- * Orders — is an `ApiError` and nothing was recorded.
+ * Orders, a scan timestamp the server no longer accepts — is an
+ * `ApiError` and nothing was recorded.
  */
 export async function receiveQuantity(
   input: ReceiptInput,
@@ -1112,6 +1127,7 @@ export async function receiveQuantity(
         due_date: input.dueDate,
         reason: input.reason,
         work_order_id: input.workOrderId,
+        scanned_at: input.scannedAt,
         device_event_id: input.deviceEventId,
       },
     },

@@ -313,6 +313,7 @@ function handle(url: string, method: string, body: unknown): Response {
       stocked_quantity: stockedOf(pn),
       available_stocked_quantity: stockedOf(pn) - allocatedOf(pn),
       stock_available: terminal && candidates.length > 0,
+      scanned_at: new Date().toISOString(),
     });
   }
   if (/^\/api\/scan-stations\/[^/]+\/transfers$/.test(url)) {

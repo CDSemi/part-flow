@@ -68,12 +68,13 @@ resolution carries the PN's derived stocked and available stocked
 quantity. Stocked flows are closed and never inventory.
 """
 
+import datetime
 from typing import Final, Literal, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application import allocations, intake
+from app.application import allocations, intake, work_orders
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
     area_has_machines,
@@ -317,6 +318,12 @@ class ScanResolution(NamedTuple):
     # True at a station bound to a terminal Area: the arrival command
     # there is the Stockroom `STOCKED`, never a transfer.
     stock_available: bool
+    # Phase 10.5: the instant this scan resolved. `Receive Quantity`
+    # carries it through the wizard and sends it back with the
+    # confirmed receipt, because `received_date` defaults to the SCAN
+    # and not to the confirmation (PROJECT_PROFILE §14) — a wizard that
+    # crosses site midnight still records the day it was scanned.
+    scanned_at: datetime.datetime
 
 
 def scrapped_quantity_of(session: Session, part_number: str) -> int:
@@ -504,6 +511,7 @@ def resolve_part_number_scan(
         stocked_quantity=position.stocked_quantity,
         available_stocked_quantity=position.available_stocked_quantity,
         stock_available=area.is_terminal and bool(candidates),
+        scanned_at=work_orders.now(),
     )
 
 

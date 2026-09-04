@@ -44,7 +44,10 @@ import {
  * The defaults `Request Type = MODIFY` and `Route Mode = FLOATING` are
  * editable, never forced; a Planned Route is selected only for
  * `PLANNED`; the due date is optional and belongs to the Work Order
- * Demand; the received date is the scan itself (the server records it).
+ * Demand; the received date is the scan itself — the resolution's
+ * `scannedAt` travels unchanged to `Confirm receipt`, so a wizard left
+ * open across midnight still records the day the PN was scanned, and
+ * the server derives that date on the site calendar.
  * When several internal Work Orders without an external number could
  * take the receipt, the settings view REQUIRES an explicit choice
  * between them — the station never guesses a first match, and the
@@ -243,6 +246,10 @@ export function IntakeDialog({
           dueDate: dueDate || null,
           reason: notes.trim() || null,
           workOrderId: selected?.workOrderId ?? null,
+          // The SERVER instant of the scan this wizard was opened
+          // from, carried through every step: the received date
+          // follows the scan, never this confirmation (§14).
+          scannedAt: resolution.scannedAt,
           deviceEventId,
         });
       } catch (error) {

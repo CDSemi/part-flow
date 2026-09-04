@@ -1769,7 +1769,7 @@ def _pin_site_clock(monkeypatch: pytest.MonkeyPatch, zone: str, now: datetime.da
     """Pin the site calendar the presets are resolved on: the zone and
     the current instant (what a browser's clock says is irrelevant)."""
     monkeypatch.setattr(work_orders, "site_timezone", lambda: zone)
-    monkeypatch.setattr(work_orders, "_now", lambda: now)
+    monkeypatch.setattr(work_orders, "now", lambda: now)
 
 
 def test_done_range_presets_are_anchored_to_the_site_calendar_date(

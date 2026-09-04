@@ -378,6 +378,7 @@ function handle(url: string, method: string, body: unknown): Response {
       stocked_quantity: 0,
       available_stocked_quantity: 0,
       stock_available: false,
+      scanned_at: new Date().toISOString(),
     });
   }
 

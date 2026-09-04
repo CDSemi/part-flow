@@ -43,14 +43,16 @@ Order completion derived from allocation with the read-only completed
 history — and the **Phase 10 frontend**: the Stockroom station's
 `Receive into Stockroom` workflow with the receiving allocation dialog
 on the Scan Station shell, and the real Completed Work Orders page on
-the server-side history — and the completed **Phase 10.5 Scan
-Station Receive Quantity Gap Closure** — the three-view `Receive
+the server-side history — the **Phase 10.5 Scan
+Station Receive Quantity Gap Closure** (implemented, phase still open
+on one canonical decision) — the three-view `Receive
 Quantity` wizard that INTRODUCES a canonical Part Number with no
 active Work Order Demand (a Part Number seen for the first time
 included) as one transaction: the internal Work Order without an
 external number created or reused, its Work Order Demand, the Quantity
 Flow, the `PLANNED` route snapshot and the immutable `RECEIVED`
-Movement carrying the Scan Station and the resolved Operation — and
+Movement carrying the Scan Station and the resolved Operation, dated
+from the scan itself — and
 the **Phase 11 Production Board**: the
 Department-wide board read model derived from the current-position
 projection and the Movement history (`GET /api/production-board`) and
@@ -160,7 +162,10 @@ mode):
   internal Work Orders are refused with the candidates for an explicit
   selection, every stale context writes nothing, and the receipt is
   never undoable because it also created the demand behind the
-  quantity); the Phase 11 monitoring surface — `GET /api/production-board`
+  quantity; `received_date` comes from the scan the resolution
+  stamped, not from the confirmation, and the whole entry condition is
+  serialized by the shared per-Part-Number lock every command that can
+  create demand or quantity takes); the Phase 11 monitoring surface — `GET /api/production-board`
   (the Department-wide board: every PN with active quantity in the
   Department's Areas — or stocked quantity with an open demand — with
   its distribution per Area / Machine / External activity, the derived

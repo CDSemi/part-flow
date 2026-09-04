@@ -14,12 +14,13 @@ Rules owned here:
   returns the original result even if entities changed state since),
   then validation, then the active-quantity confirmation check, then
   the inserts. Any failure before COMMIT leaves zero writes.
-- Releases of one canonical PN are SERIALIZED by a transaction-scoped
-  PostgreSQL advisory lock keyed on the PN string itself: two
-  concurrent unconfirmed releases of the same PN (any demand, any
-  Work Order) can never both pass the active-quantity check. The key
-  deliberately never references the optional, hard-deletable
-  PartNumber master and needs no new table. After the blocking lock
+- Releases of one canonical PN are SERIALIZED by the ONE shared
+  PN-level advisory lock (``part_numbers.acquire_part_number_lock``):
+  two concurrent unconfirmed releases of the same PN (any demand, any
+  Work Order) can never both pass the active-quantity check, and
+  neither can a Scan Station receipt, a Work Order save that adds or
+  raises demand, an allocation reversal, or an Undo that reopens a
+  closed flow. After the blocking lock
   is acquired, the ``device_event_id`` + fingerprint check runs AGAIN:
   a concurrent identical retry that was in flight while the original
   committed replays the original result instead of tripping over the
@@ -80,7 +81,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
-from app.application.part_numbers import canonical_part_number
+from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
@@ -105,11 +106,6 @@ DEMAND_ID_KEY: Final = "work_order_demand_id"
 _ACTOR_KEY: Final = "actor"
 
 _DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
-
-# Namespace of the per-PN advisory lock key, hashed together with the
-# canonical PN so release serialization never collides with any other
-# future advisory lock use.
-_RELEASE_LOCK_NAMESPACE: Final = "partflow:production-release:part-number:"
 
 
 class ProductionRelease(NamedTuple):
@@ -197,30 +193,6 @@ def _request_fingerprint(
     }
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Per-PN serialization (transaction-scoped advisory lock)
-# ---------------------------------------------------------------------------
-
-
-def acquire_part_number_release_lock(session: Session, part_number: str) -> None:
-    """Serialize releases of one canonical PN for this transaction.
-
-    ``pg_advisory_xact_lock`` blocks until the concurrent release of
-    the same PN commits or rolls back, and releases automatically with
-    this transaction — no new table, and no dependency on the optional
-    PartNumber master (the key is derived from the PN string itself).
-    A hash collision between two different PNs merely serializes them
-    too — harmless.
-    """
-    session.execute(
-        select(
-            func.pg_advisory_xact_lock(
-                func.hashtextextended(f"{_RELEASE_LOCK_NAMESPACE}{part_number}", 0)
-            )
-        )
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +353,11 @@ def release_to_production(
         return _replay_or_conflict(session, committed, fingerprint)
 
     # -- Serialize per canonical PN --------------------------------------
-    # Blocks until any concurrent release of this PN finishes, so two
-    # unconfirmed releases can never both pass the active-quantity
-    # check below.
-    acquire_part_number_release_lock(session, pn)
+    # The ONE shared PN-level lock, taken before any row lock: it
+    # blocks until every concurrent write of this PN finishes, so two
+    # unconfirmed releases — or a release and a station receipt — can
+    # never both pass the active-quantity check below.
+    acquire_part_number_lock(session, pn)
 
     # -- Idempotency RE-CHECK after the blocking lock --------------------
     # A concurrent identical retry may have waited here while the
