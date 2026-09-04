@@ -565,6 +565,77 @@ test('only the flame pulses: subtle animation with a reduced-motion fallback', a
   expect(css).not.toMatch(/\.part \{[^}]*animation/);
 });
 
+test('every Hot rank carries a row tint — ranks 1 and 2 keep their stronger one', async () => {
+  const hot = (pn: string, rank: number | null, due: string) => ({
+    part_number: pn,
+    hot_rank: rank,
+    due_date: due,
+    received_date: isoDateIn(-5),
+    locations: [location(AREA.lathe, 'QUEUE', 2, 30)],
+    active_quantity: 2,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 2,
+    demands: [
+      demand(9000 + (rank ?? 9), '00900' + (rank ?? 9), ['19001'], 2, {
+        dueDate: due,
+        priorityRank: rank,
+      }),
+    ],
+  });
+  stubFetch(() =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify(
+          boardPayload([
+            hot('HOT-1', 1, isoDateIn(1)),
+            hot('HOT-2', 2, isoDateIn(2)),
+            hot('HOT-3', 3, isoDateIn(3)),
+            hot('HOT-9', 9, isoDateIn(4)),
+            hot('PLAIN', null, isoDateIn(5)),
+          ]),
+        ),
+        { status: 200 },
+      ),
+    ),
+  );
+  await renderBoard();
+
+  const classOf = (pn: string) => rowByPn(pn)?.className ?? '';
+  // Rank 1 and 2 keep their own stronger tint…
+  expect(classOf('HOT-1')).toBe('hotrow hotrow1');
+  expect(classOf('HOT-2')).toBe('hotrow hotrow2');
+  // …and every hotter-than-nothing rank below them keeps the base Hot
+  // tint instead of losing the treatment entirely.
+  expect(classOf('HOT-3')).toBe('hotrow');
+  expect(classOf('HOT-9')).toBe('hotrow');
+  expect(classOf('PLAIN')).toBe('');
+  // The flame stays on every Hot row's No. column, whatever the rank.
+  for (const pn of ['HOT-1', 'HOT-2', 'HOT-3', 'HOT-9']) {
+    expect(rowByPn(pn)?.querySelector('.cell-no .hotflame')).not.toBeNull();
+  }
+  expect(rowByPn('PLAIN')?.querySelector('.hotflame')).toBeNull();
+
+  // The stylesheet tints the base class and keeps the two stronger
+  // tiers redder (§5 — the tint gets redder the hotter the rank).
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), 'production-board.css'),
+    'utf8',
+  );
+  expect(css).toMatch(
+    /tr\.hotrow td \{[^}]*background: var\(--hot3-row-surface\)/,
+  );
+  expect(css).toMatch(
+    /tr\.hotrow1 td \{[^}]*background: var\(--hot1-row-surface\)/,
+  );
+  expect(css).toMatch(
+    /tr\.hotrow2 td \{[^}]*background: var\(--hot2-row-surface\)/,
+  );
+});
+
 test('location tracks share cross-row minimums in the stylesheet', async () => {
   // Cross-row alignment cannot be measured in jsdom; the CSS contract
   // is: shared measured track widths (the --loc-* custom properties
@@ -1815,12 +1886,44 @@ test('a failed first load is the error state with Retry; Retry reloads', async (
   expect(document.querySelector('table.pb-table')).toBeNull();
   // The footer totals are not claimed before a first complete answer.
   expect(document.querySelector('.pb-agg')).toBeNull();
+  // …and the board never presents itself as a live feed while the
+  // server has delivered nothing: the `● Live` status carries the
+  // warning tone with its explicit note, exactly as a failed refresh.
+  const live = () => document.querySelector('.pb-head h1.live');
+  expect(live()?.className).toContain('stale');
+  expect(live()?.querySelector('.stalenote')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
 
   fail = false;
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   await act(async () => {});
   expect(screen.queryByRole('alert')).toBeNull();
   expect(rowByPn('2027-60-8114-00')).toBeDefined();
+  // The first complete answer makes it Live.
+  expect(live()?.className).not.toContain('stale');
+  expect(live()?.querySelector('.stalenote')).toBeNull();
+});
+
+test('the feed is not Live while the first load is still running', async () => {
+  let resolveBoard: (response: Response) => void = () => {};
+  stubFetch(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveBoard = resolve;
+      }),
+  );
+  await renderBoard();
+
+  // Nothing has arrived yet — the status must not claim a live feed.
+  const live = () => document.querySelector('.pb-head h1.live');
+  expect(live()?.className).toContain('stale');
+  expect(live()?.querySelector('.stalenote')).not.toBeNull();
+
+  await act(async () => {
+    resolveBoard(new Response(JSON.stringify(boardPayload()), { status: 200 }));
+  });
+  expect(live()?.className).not.toContain('stale');
 });
 
 test('the board refreshes itself periodically and a failed refresh marks the feed stale without dropping the rows', async () => {

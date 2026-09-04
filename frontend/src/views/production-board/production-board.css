@@ -627,6 +627,18 @@
   }
 }
 
+/* Hot row tint (§5): every Hot rank is tinted, redder the hotter —
+   the three tiers of the shared Hot presentation, with every rank
+   from 3 down sharing the weakest amber so a rank-3+ row still reads
+   as Hot. */
+tr.hotrow td {
+  background: var(--hot3-row-surface);
+}
+
+tr.hotrow td:first-child {
+  border-left: 5px solid var(--warn);
+}
+
 tr.hotrow1 td {
   background: var(--hot1-row-surface);
 }

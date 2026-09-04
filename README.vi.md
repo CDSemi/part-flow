@@ -65,8 +65,9 @@ Production Board của Phase 11:
   stocked và scrapped, Work Order / Job Number context, Hot rank, theo canonical
   board order; `department_id` chọn Department, bỏ trống chỉ khi có một
   Department active) và view board thật trên đó: tự refresh định kỳ, giữ rows
-  hoàn chỉnh cuối cùng kèm `Feed stale — reconnecting` khi refresh hoặc kết nối
-  lỗi, giữ nguyên presentation đã duyệt (kiosk, pagination + rotation, auto
+  hoàn chỉnh cuối cùng kèm `Feed stale — reconnecting` mỗi khi chưa có board
+  hoàn chỉnh trên màn hình (refresh lỗi, kết nối không khỏe, load đầu đang chạy
+  hoặc đã lỗi), giữ nguyên presentation đã duyệt (kiosk, pagination + rotation, auto
   scale, điều hướng tay). Area Board và Tracking (phần còn lại của Phase 11)
   vẫn là mock view chỉ development.
 

@@ -415,7 +415,9 @@ Read-only full-screen Department-wide display, không per-Area filter.
 - Columns: No. · Part Number · Areas & Quantities · Time · Due Date · Total Days ·
   Job Numbers. Content-driven sizing; due/total headings không wrap; PN min 15ch,
   long PN expand, không truncate; description/revision line phụ.
-- Hot flame chỉ ở No. column trên Board; other views dùng `🔥#n` trước PN.
+- Hot flame chỉ ở No. column trên Board; other views dùng `🔥#n` trước PN. MỌI
+  Hot rank đều có row tint, càng hot càng đỏ theo ba tier của Hot presentation
+  chung (rank 1 đỏ, rank 2 cam, từ rank 3 trở xuống cùng amber nhạt nhất).
 - Location grid explicit fields `Location | Quantity | State/activity | Time`, track
   widths đo từ widest content across all rows/pages. Long Machine/Area không ellipsis.
 - Assigned Machine chip + `on machine`; queue/direct processing/done rõ. Quantity
@@ -440,7 +442,7 @@ Read-only full-screen Department-wide display, không per-Area filter.
 `GET /api/production-board` (IMPLEMENTATION_ROADMAP Phase 11): rows đến theo
 canonical board order từ read model của **server** — phân bổ theo Area / Machine /
 External activity với state derive, timestamp vào vị trí cố định, stocked và
-scrapped, Work Order / Job Number context còn mở và Hot rank đều derive server-side (Work Order đã complete không cấp context cho row; rows theo đúng canonical demand ordering — stocked không phải tầng sắp xếp) từ
+scrapped, Work Order / Job Number context còn mở và Hot rank đều derive server-side (Work Order đã complete không cấp context cho row; rows theo đúng canonical demand ordering — stocked không phải tầng sắp xếp; quantity đã merge đọc qua MỌI nhánh lineage nên dated theo entry cũ nhất của cả khối merge và chỉ nêu Machine hoàn thành khi các nhánh đồng nhất) từ
 projection vị trí hiện tại và Movement history — còn mọi giá trị thời gian hiển
 thị (dwell theo vị trí và cờ `long`, due countdown, `Total Days`, đồng hồ) vẫn
 derive lúc render từ UI clock chung (§3.12). Dòng Department nêu Department server
@@ -450,7 +452,10 @@ tường, không phải route); cấu hình mơ hồ bị từ chối tường m
 feed định kỳ (một request in flight, refresh ngay khi kết nối trở lại sau khi
 mất): refresh lỗi giữ rows hoàn chỉnh cuối cùng và `● Live` chuyển tone warning
 kèm `Feed stale — reconnecting` giống hệt khi connectivity chung không khỏe; load
-đầu lỗi là error state có Retry, cả hai render dưới header board luôn hiển thị
+đầu lỗi là error state có Retry. Vì `● Live` là trạng thái vận hành của chính
+board nên nó chỉ xanh khi đã có board hoàn chỉnh trên màn hình — load đầu đang
+chạy hoặc đã lỗi đều mang tone warning kèm ghi chú, không bao giờ hiện feed
+"live" trên board rỗng. Cả hai render dưới header board luôn hiển thị
 (Department, tiêu đề với status, đồng hồ), footer hiện khi đã có board hoàn
 chỉnh. Cột Job Numbers nêu mọi demand của row (`<job numbers> · WO <number hoặc —>
 [· MODIFY] · <n> pcs`, hoặc `· allocated a/n` khi đã allocate), dòng tên /

@@ -206,7 +206,9 @@
   Department (hoặc stocked quantity kèm demand còn mở), phân bổ theo Area /
   Machine / External activity với holding state derive (`MACHINE` / `QUEUE` /
   `PROCESSING` / `DONE` / `STOCKED`), timestamp vào vị trí cố định (`occurred_at`
-  của effective position-bearing Movement, lấy cũ nhất trong nhóm), stocked và
+  của effective position-bearing Movement, lấy cũ nhất trong nhóm; quantity đã
+  merge đọc qua mọi nhánh lineage nên dated theo entry cũ nhất của cả khối merge
+  và chỉ nêu Machine khi các nhánh đồng nhất), stocked và
   scrapped từ effective `STOCKED` / `SCRAPPED`, demand context theo canonical
   demand ordering (PROJECT_PROFILE §18 — demand đầu tiên quyết định Hot rank, due
   date và received date của row; Work Order đã complete không bao giờ cấp
@@ -216,7 +218,9 @@
   `board-feed.ts`): Department do server resolve (một Department active duy nhất,
   hoặc `?department=<id>` trên URL của màn hình), auto-refresh định kỳ với một
   request in flight, giữ rows hoàn chỉnh cuối cùng kèm trạng thái `Feed stale —
-  reconnecting` khi refresh hoặc kết nối lỗi, refresh ngay khi kết nối trở lại,
+  reconnecting` mỗi khi chưa có board hoàn chỉnh trên màn hình — refresh lỗi,
+  kết nối không khỏe, và cả load đầu đang chạy hoặc đã lỗi — refresh ngay khi
+  kết nối trở lại,
   các state loading / error có Retry / empty dưới header luôn hiển thị, và giữ
   nguyên presentation GUI_DESIGN §5 (kiosk, pagination + rotation, auto scale,
   điều hướng tay, dwell / countdown / Total Days derive từ UI clock chung). Mục
@@ -890,7 +894,17 @@ event mà chưa di chuyển), Machine là destination Machine của Movement đ�
 `ON_MACHINE` và Machine hoàn thành (source) chỉ là context phụ cho quantity đã
 DONE, timestamp vào vị trí (`since`) là `occurred_at` của Movement đó — split
 child kế thừa thời điểm vào của parent qua lineage, command bị Undo khôi phục
-thời điểm của state được khôi phục. Quantity gộp theo (Area, state, Machine,
+thời điểm của state được khôi phục. **Quantity đã merge đọc qua MỌI nhánh
+lineage** (`projections.effective_latest_movement_branches`, walk theo frontier
+đặt cạnh walk một-Movement): merge result chưa di chuyển kế thừa từ TẤT CẢ
+source thay vì parent id nhỏ nhất, vì hai giá trị mô tả cùng một state lại không
+tương đương giữa các source — vị trí dated theo entry CŨ NHẤT trong các nhánh
+(khối quantity đã merge chờ từ thời điểm sớm nhất), và Machine chỉ hiện khi mọi
+nhánh nêu cùng một Machine, nên quantity finished merge từ các Machine hoàn
+thành khác nhau (`merges.merge_context` so CURRENT Machine, đã bị `AREA_COMPLETED`
+xoá nên merge được phép) hiển thị không Machine thay vì gán cho một source. Bản
+thân state vẫn không mơ hồ: merge đã bắt buộc cùng Area, holding state, Machine
+và Operation. Quantity gộp theo (Area, state, Machine,
 External activity) lấy thời điểm CŨ NHẤT của nhóm; Operation external
 (`Operation.is_external`) đặt tên activity. Stocked = Σ effective `STOCKED` vào
 terminal Area của Department (theo Area, không có thời gian vào); scrapped = Σ
@@ -917,8 +931,9 @@ và ngày nguồn cố định — dwell, countdown và `Total Days` derive lúc
 clock chung (GUI_DESIGN §3.12); không so thời gian tại vị trí với expected
 duration của Route Step. Test: `tests/test_production_board_api.py` (phạm vi và
 resolve Department, mọi state kèm Machine và External activity, gộp lấy thời
-điểm cũ nhất, timestamp kế thừa qua lineage và khôi phục qua Undo, stocked /
-scrapped từ history, tổng footer khớp rows, row stocked-only còn khi demand mở
+điểm cũ nhất, timestamp kế thừa qua lineage và khôi phục qua Undo, quantity đã
+merge dated theo entry cũ nhất của các nhánh và chỉ nêu Machine hoàn thành khi
+các nhánh đồng nhất, stocked / scrapped từ history, tổng footer khớp rows, row stocked-only còn khi demand mở
 và rời khi complete, Work Order complete không bao giờ cấp context cho row,
 quantity không có demand context vẫn giữ row với ngày fallback, canonical board
 order không có tầng stocked, demand đầu tiên quyết định ngày của row). **Frontend** (`src/api/production-board.ts`,
@@ -933,7 +948,10 @@ flight (request kế tiếp chỉ arm sau khi có trả lời); refresh lỗi gi
 chỉnh cuối và đánh dấu feed stale — trạng thái `● Live` chuyển tone warning kèm
 ghi chú `Feed stale — reconnecting`, giống hệt khi connectivity chung không
 khỏe — polling tiếp tục để board tự hồi phục, kết nối trở lại sau khi mất thì
-refresh ngay, còn lần load ĐẦU lỗi là error state có Retry; header board (dòng
+refresh ngay, còn lần load ĐẦU lỗi là error state có Retry; `● Live` là trạng thái vận hành
+của CHÍNH board nên chỉ xanh khi đã có board hoàn chỉnh trên màn hình — load đầu
+đang chạy hoặc đã lỗi mang cùng tone warning và ghi chú, board không bao giờ
+được trình bày như feed live trên dữ liệu server chưa trả. Header board (dòng
 Department từ trả lời server, tiêu đề với live status, đồng hồ) render ở mọi
 state trong khi vùng bảng hiển thị loading, error, `No active production in this
 Department.` hoặc rows, và footer (chỉ số trang, rotation, điều hướng, tổng của
@@ -945,7 +963,9 @@ activity, `done` với Machine hoàn thành trong tooltip, `stocked`), dòng tot
 với `n scrapped`, cột Job Numbers nêu mọi demand (`<job numbers> · WO <number
 hoặc —> [· MODIFY] · <n> pcs` hoặc `· allocated a/n`), dwell derive theo vị trí
 (`long` khi ≥ 3 ngày), countdown và `Total Days` từ UI clock chung, ngọn lửa Hot
-và tint row, kiosk, pagination theo chiều cao với rotation tỉ lệ, auto scale và
+và row tint Hot (MỌI Hot rank đều có tint, càng hot càng đỏ theo ba tier của Hot
+presentation chung: rank 1 đỏ, rank 2 cam, từ rank 3 trở xuống dùng amber nền —
+rank thấp thì nhạt hơn chứ không mất hẳn), kiosk, pagination theo chiều cao với rotation tỉ lệ, auto scale và
 mọi điều hướng tay; rows render đúng thứ tự server trả — `sortBoardRows` phía
 client đã bỏ, một quy tắc sắp xếp duy nhất thuộc read model (fixture long-data
 development sắp bằng `compareDemandOrder` chung một lần lúc load). Chỉ development: `?state=loading|empty|error|long` render state xác định
@@ -954,8 +974,10 @@ mà không request (fixture long-data inline sau ranh giới DEV — không impo
 frontend: suite Production Board hiện có chạy trên trả lời giả của
 `GET /api/production-board` (đúng wire shape backend) cộng hành vi feed (request
 có và không `department_id`, cột Job Numbers, loading dưới header, load đầu lỗi
-có Retry, refresh định kỳ, feed stale khi refresh lỗi vẫn giữ rows và hồi phục
-ở trả lời tốt kế tiếp, mất kết nối hiện feed stale và refresh ngay khi trở lại,
+có Retry kèm status không-Live, load đầu đang chạy cũng không Live, refresh định
+kỳ, feed stale khi refresh lỗi vẫn giữ rows và hồi phục ở trả lời tốt kế tiếp,
+mất kết nối hiện feed stale và refresh ngay khi trở lại, row tint của mọi Hot
+rank với hai tier mạnh hơn được giữ,
 Department trống, state preview không request) và `production-boundary.test.ts`
 (board trong registry view thật, có trong production module graph, không
 import `src/mocks/`). Cố ý chưa có: read model và view Area Board, Tracking

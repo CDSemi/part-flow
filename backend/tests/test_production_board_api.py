@@ -14,7 +14,10 @@ chain. Covered per IMPLEMENTATION_ROADMAP Phase 11, PROJECT_PROFILE
   quantity grouped per position with the OLDEST entry timestamp, the
   entry timestamp following the effective position-bearing Movement
   (a split child inherits its parent's entry, an undone command
-  restores the earlier one), the completing Machine as DONE context;
+  restores the earlier one), the completing Machine as DONE context,
+  and merged quantity read across EVERY lineage branch — dated from
+  the oldest entry of the whole merge, its Machine shown only where
+  the branches agree;
 - the stocked and scrapped quantities derived from history (net of
   reversed scraps), the row totals and the footer totals reconciling;
 - the OPEN demand context (Work Order Number, Job Numbers, requested /
@@ -316,6 +319,19 @@ def _machine_action(
     return cast(dict[str, Any], response.json())
 
 
+def _merge(client: TestClient, cell: _Cell, pn: str, flow_ids: list[int]) -> dict[str, Any]:
+    response = client.post(
+        f"/api/scan-stations/{cell.station_id}/merges",
+        json={
+            "part_number": pn,
+            "quantity_flow_ids": flow_ids,
+            "device_event_id": str(uuid.uuid4()),
+        },
+    )
+    assert response.status_code == 201, response.text
+    return cast(dict[str, Any], response.json())
+
+
 def _scrap(client: TestClient, cell: _Cell, flow_id: int, pn: str, quantity: int) -> dict[str, Any]:
     event_id = str(uuid.uuid4())
     response = client.post(
@@ -357,6 +373,19 @@ def _allocate(client: TestClient, pn: str, lines: list[tuple[int, int]]) -> None
         },
     )
     assert response.status_code == 201, response.text
+
+
+def _newest_movement_id(engine: Engine, flow_id: int) -> int:
+    """The newest Movement of one flow — the arrival whose timestamp the
+    entry-time tests pin."""
+    with engine.connect() as connection:
+        movement_id = connection.scalar(
+            sa.select(sa.func.max(models.PartMovement.id)).where(
+                models.PartMovement.quantity_flow_id == flow_id
+            )
+        )
+    assert movement_id is not None
+    return int(movement_id)
 
 
 def _set_occurred_at(engine: Engine, movement_id: int, occurred_at: datetime.datetime) -> None:
@@ -621,6 +650,101 @@ def test_a_split_child_inherits_its_parents_entry_and_an_undo_restores_the_earli
     row = _row(_board(client, shop.department_id), pn)
     assert _locations(row) == [(shop.material.area["name"], "PROCESSING", None, 10)]
     assert datetime.datetime.fromisoformat(row["locations"][0]["since"]) == old
+
+
+def test_merged_quantity_is_dated_from_the_oldest_entry_of_every_branch(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 30}])
+    # Two portions of the PN reach the Lathe queue at different times and
+    # then merge: the merged quantity has waited in that queue since the
+    # OLDER of them — never since whichever source a lineage walk
+    # happens to reach first.
+    first = _release(client, shop.material, work_order, pn, quantity=6)
+    second = _release(
+        client, shop.material, work_order, pn, quantity=4, confirm_active_quantity=True
+    )
+    queued_first = int(
+        _transfer(client, shop.material, shop.lathe, first, pn, 6)["quantity_flow_id"]
+    )
+    queued_second = int(
+        _transfer(client, shop.material, shop.lathe, second, pn, 4)["quantity_flow_id"]
+    )
+    old = datetime.datetime(2026, 8, 3, 5, 15, tzinfo=datetime.UTC)
+    newer = datetime.datetime(2026, 8, 4, 9, 45, tzinfo=datetime.UTC)
+    _set_occurred_at(db_engine, _newest_movement_id(db_engine, queued_first), old)
+    _set_occurred_at(db_engine, _newest_movement_id(db_engine, queued_second), newer)
+    # The merge deliberately names the NEWER flow first, so a
+    # first-parent choice would date the row from it.
+    merged = _merge(client, shop.lathe, pn, [queued_second, queued_first])
+    assert int(merged["quantity"]) == 10
+
+    row = _row(_board(client, shop.department_id), pn)
+    assert _locations(row) == [(shop.lathe.area["name"], "QUEUE", None, 10)]
+    assert datetime.datetime.fromisoformat(row["locations"][0]["since"]) == old
+
+
+def test_merged_finished_quantity_names_a_machine_only_when_the_branches_agree(
+    client: TestClient, shop: _Shop
+) -> None:
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 40}])
+    lathe = shop.lathe
+    started = False
+
+    def finished_on(machine_index: int, quantity: int) -> int:
+        """`quantity` pcs of the PN finished at the Lathe on one Machine."""
+        nonlocal started
+        released = _release(
+            client,
+            shop.material,
+            work_order,
+            pn,
+            quantity=quantity,
+            confirm_active_quantity=started,
+        )
+        started = True
+        queued = int(
+            _transfer(client, shop.material, lathe, released, pn, quantity)["quantity_flow_id"]
+        )
+        assigned = _machine_action(
+            client,
+            "machine-assignments",
+            lathe,
+            queued,
+            pn,
+            quantity,
+            machine_id=lathe.machine_ids[machine_index],
+        )
+        done = _machine_action(
+            client,
+            "area-completions",
+            lathe,
+            int(assigned["quantity_flow_id"]),
+            pn,
+            quantity,
+            machine_id=lathe.machine_ids[machine_index],
+        )
+        return int(done["quantity_flow_id"])
+
+    # Finished quantity is combinable across completing Machines (the
+    # merge compares the CURRENT Machine, which the AREA_COMPLETED
+    # cleared), so the merged row must credit neither of them.
+    ambiguous = _merge(client, lathe, pn, [finished_on(0, 3), finished_on(1, 2)])
+    row = _row(_board(client, shop.department_id), pn)
+    assert _locations(row) == [(lathe.area["name"], "DONE", None, 5)]
+    assert row["locations"][0]["since"] is not None
+    assert int(ambiguous["quantity"]) == 5
+
+    # Merged quantity that WAS completed on one Machine keeps naming it,
+    # in its own location row beside the ambiguous one.
+    _merge(client, lathe, pn, [finished_on(0, 4), finished_on(0, 1)])
+    row = _row(_board(client, shop.department_id), pn)
+    assert _locations(row) == [
+        (lathe.area["name"], "DONE", None, 5),
+        (lathe.area["name"], "DONE", lathe.machine_names[0], 5),
+    ]
 
 
 # ---------------------------------------------------------------------------

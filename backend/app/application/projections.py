@@ -60,6 +60,10 @@ from app.infrastructure.models import PartMovement, QuantityFlowLineage
 # The two Movement types that record descent instead of a position.
 LINEAGE_MOVEMENT_TYPES: Final = (MovementType.SPLIT, MovementType.MERGED)
 
+# Defensive bound on the single-Movement lineage walk; real lineage
+# depth is tiny (the branch walk below is frontier-based instead).
+_MAX_LINEAGE_DEPTH: Final = 10_000
+
 # Movement types that never bear an active position: descent (Phase 8),
 # the removal from active production, the compensating reversal
 # (Phase 9) and the Stockroom completion (Phase 10) — a flow whose
@@ -236,7 +240,7 @@ def effective_latest_movement(
     """
     current = flow_id
     bound: int | None = None
-    for _ in range(10_000):  # bounded defensively; lineage depth is tiny in practice
+    for _ in range(_MAX_LINEAGE_DEPTH):
         movement = _latest_position_bearing(session, current, bound, exclude_device_event_id)
         if movement is not None:
             return movement
@@ -246,6 +250,34 @@ def effective_latest_movement(
         bound = _first_movement_id(session, current)
         current = parents[0]
     raise ConflictError(f"Quantity Flow {flow_id} has no position-bearing Movement history.")
+
+
+def _own_latest_position_bearing(session: Session, flow_ids: set[int]) -> dict[int, PartMovement]:
+    """The newest position-bearing Movement of each flow's OWN history.
+
+    One grouped query for the common case; a flow created by a lineage
+    event and not moved since is simply absent and takes the lineage
+    walk at the caller.
+    """
+    if not flow_ids:
+        return {}
+    reversal = aliased(PartMovement)
+    newest = (
+        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
+        .where(
+            PartMovement.quantity_flow_id.in_(flow_ids),
+            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.quantity_flow_id)
+        .subquery()
+    )
+    return {
+        movement.quantity_flow_id: movement
+        for movement in session.scalars(
+            select(PartMovement).join(newest, newest.c.movement_id == PartMovement.id)
+        )
+    }
 
 
 def effective_latest_movements(
@@ -261,26 +293,79 @@ def effective_latest_movements(
     wanted = set(flow_ids)
     if not wanted:
         return {}
-    reversal = aliased(PartMovement)
-    newest = (
-        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
-        .where(
-            PartMovement.quantity_flow_id.in_(wanted),
-            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
-        )
-        .group_by(PartMovement.quantity_flow_id)
-        .subquery()
-    )
-    found = {
-        movement.quantity_flow_id: movement
-        for movement in session.scalars(
-            select(PartMovement).join(newest, newest.c.movement_id == PartMovement.id)
-        )
-    }
+    found = _own_latest_position_bearing(session, wanted)
     for flow_id in wanted - found.keys():
         found[flow_id] = effective_latest_movement(session, flow_id)
     return found
+
+
+def _position_bearing_branches(session: Session, flow_id: int) -> dict[int, PartMovement]:
+    """The position-bearing Movements one flow's state descends from, by id.
+
+    The flow's own newest one when it has it; otherwise the walk
+    continues into EVERY parent — each contributed quantity to this
+    flow, so each is a branch of the same state, never one arbitrarily
+    chosen source — looking at the Movements written before the child
+    existed, exactly like the single-Movement walk above.
+    """
+    found: dict[int, PartMovement] = {}
+    frontier: list[tuple[int, int | None]] = [(flow_id, None)]
+    seen: set[tuple[int, int | None]] = set()
+    while frontier:
+        current, bound = frontier.pop()
+        if (current, bound) in seen:
+            continue
+        seen.add((current, bound))
+        movement = _latest_position_bearing(session, current, bound, None)
+        if movement is not None:
+            found[movement.id] = movement
+            continue
+        parent_bound = _first_movement_id(session, current)
+        for parent in parent_flow_ids(session, current):
+            frontier.append((parent, parent_bound))
+    return found
+
+
+def effective_latest_movement_branches(
+    session: Session, flow_ids: Iterable[int]
+) -> dict[int, list[PartMovement]]:
+    """Every position-bearing Movement a flow's state descends from — one
+    per lineage branch, oldest entry first (read models, unlocked).
+
+    `effective_latest_movement` answers with ONE Movement, taking the
+    lowest parent id where a merge result has several. The merge
+    command validated that every source held the same Area, holding
+    state, Machine and Operation (`app.application.merges`), so that
+    choice is equivalent for the STATE — but not for everything a
+    display says ABOUT that state: when the quantity entered its
+    position, and which Machine completed it (finished quantity is
+    combinable across completing Machines — `merges.merge_context`
+    compares the CURRENT Machine, which is NULL once an
+    ``AREA_COMPLETED`` cleared it). A presentation showing those values
+    must see every branch, so it can date the position from the OLDEST
+    entry of the whole merged quantity and show secondary context only
+    where the branches agree, instead of attributing all of it to one
+    arbitrary source.
+
+    A flow with its own position-bearing Movement has exactly one
+    branch, and so does a split child (one parent); only a merge result
+    that has not moved since answers with several. Branches are
+    deduplicated — a diamond lineage reaches one ancestor twice — and
+    ordered by `occurred_at`, the Movement id breaking ties.
+    """
+    wanted = set(flow_ids)
+    if not wanted:
+        return {}
+    own = _own_latest_position_bearing(session, wanted)
+    branches = {flow_id: [movement] for flow_id, movement in own.items()}
+    for flow_id in wanted - own.keys():
+        found = _position_bearing_branches(session, flow_id)
+        if not found:
+            raise ConflictError(
+                f"Quantity Flow {flow_id} has no position-bearing Movement history."
+            )
+        branches[flow_id] = sorted(found.values(), key=lambda item: (item.occurred_at, item.id))
+    return branches
 
 
 # ---------------------------------------------------------------------------

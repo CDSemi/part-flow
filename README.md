@@ -301,9 +301,11 @@ Department-wide board reads `GET /api/production-board` (the
 distribution per Area / Machine / External activity with the entry
 timestamps the dwell times derive from, stocked and scrapped
 quantities, the Work Order and Job Number context, the Hot rank, in
-the canonical board order), refreshes itself periodically, keeps the
+the canonical board order; merged quantity read across every lineage
+branch), refreshes itself periodically, keeps the
 last complete rows with the explicit `Feed stale — reconnecting`
-status when a refresh or the connection fails, and keeps the approved
+status whenever no complete board is on screen — a failed refresh, an
+unhealthy connection, a first load still running or failed — and keeps the approved
 presentation — kiosk mode, pagination and rotation, automatic display
 scaling, the manual navigation. Every other view (Area Board,
 Tracking, Priority, Planned Routes, Part Numbers) renders

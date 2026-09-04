@@ -321,6 +321,19 @@ function BoardRowCells({ row, no }: { row: BoardRow; no: number }) {
   );
 }
 
+/**
+ * Row tint of a Hot row: EVERY Hot rank carries one, and it gets
+ * redder the hotter the rank (§5). The tiers follow the shared Hot
+ * presentation of `HotPn` (`components/indicators.tsx`): rank 1 red,
+ * rank 2 orange, and every rank from 3 down the base amber tint of
+ * `hotrow` — a rank-3+ row still reads as Hot instead of losing the
+ * treatment entirely.
+ */
+function hotRowClass(hotRank: number | undefined): string | undefined {
+  if (hotRank === undefined) return undefined;
+  return hotRank <= 2 ? `hotrow hotrow${hotRank}` : 'hotrow';
+}
+
 function BoardColgroup() {
   return (
     <colgroup>
@@ -612,8 +625,15 @@ export function ProductionBoardView() {
     if (preview !== null) return null;
     return feed.state.status === 'ready' ? feed.state.board : null;
   }, [preview, feed.state]);
+  // The `● Live` status is the BOARD's operational status, so it reads
+  // healthy only while a complete board is actually on screen: the
+  // shared connectivity state unhealthy, a refresh that failed, and a
+  // first load still running or failed all render it in the warning
+  // tone with the explicit note. A board the server has never
+  // delivered is never presented as a live feed.
   const feedStale =
     connectivity !== 'connected' ||
+    board === null ||
     (feed.state.status === 'ready' && feed.state.stale);
 
   // Rows render in the server's canonical board order — never
@@ -1007,16 +1027,7 @@ export function ProductionBoardView() {
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr
-                key={row.pn}
-                className={
-                  row.hotRank === 1
-                    ? 'hotrow1'
-                    : row.hotRank === 2
-                      ? 'hotrow2'
-                      : undefined
-                }
-              >
+              <tr key={row.pn} className={hotRowClass(row.hotRank)}>
                 <BoardRowCells row={row} no={start + index + 1} />
               </tr>
             ))}

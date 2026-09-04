@@ -62,6 +62,7 @@
   --row-hover: rgba(79, 140, 255, 0.04);
   --hot1-row-surface: rgba(255, 70, 70, 0.09);
   --hot2-row-surface: rgba(255, 138, 76, 0.06);
+  --hot3-row-surface: rgba(255, 178, 36, 0.05);
   --hot1-chip-surface: rgba(255, 97, 102, 0.18);
   --hot2-chip-surface: rgba(255, 138, 76, 0.18);
   --hot3-chip-surface: rgba(255, 178, 36, 0.16);
