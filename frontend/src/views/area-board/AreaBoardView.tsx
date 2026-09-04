@@ -4,10 +4,13 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 
+import type { AreaBoardArea } from '../../api/area-board';
+import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
 import {
   AreaMachineLayout,
@@ -16,20 +19,83 @@ import {
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
 import { AreaDot } from '../../components/indicators';
-import { ErrorState, LoadingState } from '../../components/view-states';
 import {
-  MOCK_AREA_CARDS,
-  MOCK_AREA_CARDS_LONG,
-  MOCK_AREA_MACHINES,
-} from '../../mocks/area-board';
-import { MOCK_AREAS } from '../../mocks/areas';
+  EmptyState,
+  ErrorState,
+  LoadingState,
+} from '../../components/view-states';
 import { useUiClock } from '../../components/ui-clock';
+import { presentAreaInventory, presentationArea } from '../area-presentation';
 import { splitAssignments } from '../area-monitoring';
 import { elapsedMinutesSince } from '../dates';
 import { compareDemandOrder } from '../demand-order';
-import type { MockArea, MockAreaCard } from '../view-models';
+import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
+import { useAreaBoardFeed } from './area-board-feed';
+import { LONG_PREVIEW_BOARD } from './area-board-preview';
 
 type SortKey = 'due' | 'prio' | 'tia' | 'qty';
+
+/**
+ * One Area of the board in the shared presentation shapes: the Area
+ * itself, one card per quantity presence, and its Machine cards. The
+ * All Areas overview and the per-Area detail both render THIS — two
+ * presentations of one read, never two reads.
+ */
+interface AreaPresentation {
+  area: MockArea;
+  cards: MockAreaCard[];
+  machines: MockAreaMachine[];
+}
+
+/**
+ * The Department the view shows: `?department=<id>` on the URL —
+ * otherwise the server resolves the single active Department and
+ * refuses an ambiguous configuration with an explicit message. A
+ * presentation address, not a route.
+ */
+function departmentIdFromLocation(): number | null {
+  const value = new URLSearchParams(window.location.search).get('department');
+  if (value === null || !/^\d+$/.test(value)) return null;
+  return Number(value);
+}
+
+/**
+ * One Area of the server's answer as the shared components take it.
+ *
+ * Active quantity goes through the SAME mapping the Scan Station uses
+ * (`presentAreaInventory`), so neither view can describe a quantity
+ * the other one shows differently. A terminal Area holds no active
+ * quantity at all — its stocked lines (Phase 10: manufacturing-complete
+ * quantity whose flows are closed) become direct `Stocked` rows whose
+ * status text states the PN's allocation instead of a due countdown.
+ */
+function presentBoardArea(entry: AreaBoardArea): AreaPresentation {
+  const area = presentationArea(entry.inventory.area, entry.operations);
+  const { cards, machines } = presentAreaInventory(entry.inventory, {
+    scrapped: entry.scrapped,
+  });
+  const stocked = entry.stocked.map((line): MockAreaCard => {
+    const scrapped = entry.scrapped[line.partNumber];
+    return {
+      area: area.key,
+      pn: line.partNumber,
+      // Stocked quantity is manufacturing-complete and PN-level: the
+      // Quantity Flow that carried it is closed, so no Work Order
+      // context remains on it. The allocation below is what the row
+      // states instead.
+      workOrder: 'WO —',
+      job: '—',
+      qty: line.quantity,
+      machines: [],
+      due: null,
+      dueText: `allocated ${line.allocatedQuantity}/${line.quantity}`,
+      enteredAreaAt: null,
+      received: '',
+      ...(scrapped ? { scrapped } : {}),
+    };
+  });
+  return { area, cards: [...cards, ...stocked], machines };
+}
 
 function sortCards(
   cards: MockAreaCard[],
@@ -94,8 +160,15 @@ const NARROW_BOARD_MAX_WIDTH_PX = 720;
 // within the view. Narrow viewports (post-v18) hide the tab strip
 // entirely: a `Summary` toggle (default OFF) switches between the
 // swipeable per-Area detail pages and the stacked All Areas overview.
+//
+// Since Phase 11 the content is the REAL Department read
+// (`GET /api/area-board`), polled and kept fresh; search, sorting and
+// the layout choices stay presentation state of this view.
 export function AreaBoardView() {
   const preview = getViewStatePreview();
+  const { status: connectivity } = useConnectivity();
+  const [departmentId] = useState(departmentIdFromLocation);
+  const feed = useAreaBoardFeed(departmentId, connectivity, preview === null);
   const [activeTab, setActiveTab] = useState<'all' | string>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('due');
@@ -125,56 +198,96 @@ export function AreaBoardView() {
     return () => query.removeEventListener('change', apply);
   }, []);
 
-  if (preview === 'loading') {
-    return (
-      <section className="ab" aria-label="Area Board">
-        <LoadingState label="Loading Area Board" />
-      </section>
-    );
-  }
-  if (preview === 'error') {
-    return (
-      <section className="ab" aria-label="Area Board">
-        <ErrorState
-          message="Area Board data could not be loaded."
-          detail="Check the backend connection and try again."
-        />
-      </section>
-    );
-  }
+  const board = useMemo(() => {
+    if (preview === 'long') return LONG_PREVIEW_BOARD;
+    if (preview === 'empty')
+      return { department: { id: 0, name: '' }, areas: [] };
+    if (preview !== null) return null;
+    return feed.state.status === 'ready' ? feed.state.data : null;
+  }, [preview, feed.state]);
 
-  const allCards =
-    preview === 'empty'
-      ? []
-      : preview === 'long'
-        ? MOCK_AREA_CARDS_LONG
-        : MOCK_AREA_CARDS;
+  const areas = useMemo(
+    () => (board ? board.areas.map(presentBoardArea) : []),
+    [board],
+  );
+
+  // The `Live` status is the BOARD's operational status, not the raw
+  // connectivity: it reads healthy only while a complete board is on
+  // screen. A first load still running or failed, a failed refresh and
+  // an unhealthy connection all read stale with the explicit note.
+  const feedStale =
+    preview === null &&
+    (connectivity !== 'connected' ||
+      board === null ||
+      (feed.state.status === 'ready' && feed.state.stale));
+
+  const loading =
+    preview === 'loading' ||
+    (preview === null && feed.state.status === 'loading');
+  const loadError =
+    preview === 'error'
+      ? 'Check the backend connection and try again.'
+      : preview === null && feed.state.status === 'error'
+        ? feed.state.message
+        : null;
+
+  const allCards = areas.flatMap((entry) => entry.cards);
   const query = search.trim().toLowerCase();
   const visible = sortCards(
     allCards.filter((c) => matches(c, query)),
     sort,
     now,
   );
+  const cardsOf = (key: string) => visible.filter((c) => c.area === key);
 
-  const safeDetailPage = Math.min(detailPage, MOCK_AREAS.length - 1);
-  const pageArea = MOCK_AREAS[safeDetailPage];
-  const metaFor = (areaKey: string | null) =>
-    areaKey === null ? (
+  const safeDetailPage = Math.min(detailPage, Math.max(0, areas.length - 1));
+  const pageArea = areas[safeDetailPage];
+  const activeArea =
+    activeTab === 'all'
+      ? undefined
+      : areas.find((entry) => entry.area.key === activeTab);
+  const metaFor = (entry: AreaPresentation | undefined) =>
+    entry === undefined ? (
       <>
         <b>{visible.length}</b> PN ·{' '}
         <b>{visible.reduce((s, c) => s + c.qty, 0)}</b> pcs across all Areas
       </>
     ) : (
       <>
-        <b>{visible.filter((c) => c.area === areaKey).length}</b> PN ·{' '}
-        <b>
-          {visible
-            .filter((c) => c.area === areaKey)
-            .reduce((s, c) => s + c.qty, 0)}
-        </b>{' '}
-        pcs in {MOCK_AREAS.find((a) => a.key === areaKey)?.name}
+        <b>{cardsOf(entry.area.key).length}</b> PN ·{' '}
+        <b>{cardsOf(entry.area.key).reduce((s, c) => s + c.qty, 0)}</b> pcs in{' '}
+        {entry.area.name}
       </>
     );
+
+  if (loading) {
+    return (
+      <section className="ab" aria-label="Area Board">
+        <LoadingState label="Loading Area Board" />
+      </section>
+    );
+  }
+  if (loadError !== null) {
+    return (
+      <section className="ab" aria-label="Area Board">
+        <ErrorState
+          message="Area Board data could not be loaded."
+          detail={loadError}
+          onRetry={preview === null ? feed.reload : undefined}
+        />
+      </section>
+    );
+  }
+  if (areas.length === 0) {
+    return (
+      <section className="ab" aria-label="Area Board">
+        <EmptyState
+          message="No active Areas are configured in this Department."
+          hint="Add an Area in Administration to monitor production here."
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="ab" aria-label="Area Board">
@@ -189,18 +302,16 @@ export function AreaBoardView() {
           >
             All Areas <span className="cnt">{allCards.length}</span>
           </button>
-          {MOCK_AREAS.map((area) => (
+          {areas.map((entry) => (
             <button
-              key={area.key}
-              className={`ab-tab ${activeTab === area.key ? 'active' : ''}`}
-              aria-pressed={activeTab === area.key}
-              onClick={() => setActiveTab(area.key)}
+              key={entry.area.key}
+              className={`ab-tab ${activeTab === entry.area.key ? 'active' : ''}`}
+              aria-pressed={activeTab === entry.area.key}
+              onClick={() => setActiveTab(entry.area.key)}
             >
-              <AreaDot colorVar={area.colorVar} />
-              {area.name}{' '}
-              <span className="cnt">
-                {allCards.filter((c) => c.area === area.key).length}
-              </span>
+              <AreaDot colorVar={entry.area.colorVar} />
+              {entry.area.name}{' '}
+              <span className="cnt">{entry.cards.length}</span>
             </button>
           ))}
         </div>
@@ -254,18 +365,18 @@ export function AreaBoardView() {
         <span className="ab-meta">
           {narrow
             ? summary
-              ? metaFor(null)
-              : metaFor(pageArea.key)
-            : activeTab === 'all'
-              ? metaFor(null)
-              : metaFor(activeTab)}
+              ? metaFor(undefined)
+              : metaFor(pageArea)
+            : metaFor(activeArea)}
         </span>
+        <FeedStatus stale={feedStale} />
       </div>
 
       {narrow ? (
         summary ? (
           <AllAreasOverview
-            cards={visible}
+            areas={areas}
+            cardsOf={cardsOf}
             wrap
             onOpenArea={(key) => {
               // A summary card header jumps straight to that Area's
@@ -274,31 +385,47 @@ export function AreaBoardView() {
               setDetailPage(
                 Math.max(
                   0,
-                  MOCK_AREAS.findIndex((a) => a.key === key),
+                  areas.findIndex((entry) => entry.area.key === key),
                 ),
               );
             }}
           />
         ) : (
           <AreaDetailPager
-            cards={visible}
+            areas={areas}
+            cardsOf={cardsOf}
             page={safeDetailPage}
             onPageChange={setDetailPage}
           />
         )
       ) : activeTab === 'all' ? (
         <AllAreasOverview
-          cards={visible}
+          areas={areas}
+          cardsOf={cardsOf}
           wrap={wrapOverview}
           onOpenArea={(key) => setActiveTab(key)}
         />
       ) : (
         <AreaDetail
-          area={MOCK_AREAS.find((a) => a.key === activeTab)}
-          cards={visible.filter((c) => c.area === activeTab)}
+          presentation={activeArea}
+          cards={activeArea ? cardsOf(activeArea.area.key) : []}
         />
       )}
     </section>
+  );
+}
+
+/**
+ * Feed status of the board (GUI_DESIGN §6.1): the shared `Live` /
+ * `Feed stale — reconnecting` statement of a live monitoring view,
+ * never color-only — the wording changes with the tone.
+ */
+function FeedStatus({ stale }: { stale: boolean }) {
+  return (
+    <span className={`ab-feed${stale ? ' stale' : ''}`} role="status">
+      <span className="ld" aria-hidden="true" />
+      {stale ? 'Feed stale — reconnecting' : 'Live'}
+    </span>
   );
 }
 
@@ -314,16 +441,18 @@ export function AreaBoardView() {
  * buttons can never disagree; paging never wraps.
  */
 function AreaDetailPager({
-  cards,
+  areas,
+  cardsOf,
   page,
   onPageChange,
 }: {
-  cards: MockAreaCard[];
+  areas: AreaPresentation[];
+  cardsOf: (key: string) => MockAreaCard[];
   page: number;
   onPageChange: (page: number) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const pageCount = MOCK_AREAS.length;
+  const pageCount = areas.length;
 
   const scrollToPage = useCallback((target: number, smooth: boolean) => {
     const el = scrollRef.current;
@@ -379,25 +508,22 @@ function AreaDetailPager({
           targets — the stable Area identity colors (§2.2) mirror the
           page accents, so the dot row reads as a map of the pages. */}
       <div className="ms-pagedots" aria-label="Area pages">
-        {MOCK_AREAS.map((area, index) => (
+        {areas.map((entry, index) => (
           <button
-            key={area.key}
+            key={entry.area.key}
             type="button"
             className={`ms-pagedot${index === page ? ' on' : ''}`}
-            style={{ ['--acol' as string]: area.colorVar }}
-            aria-label={`Go to ${area.name}`}
+            style={{ ['--acol' as string]: entry.area.colorVar }}
+            aria-label={`Go to ${entry.area.name}`}
             aria-current={index === page ? 'true' : undefined}
             onClick={() => goTo(index)}
           />
         ))}
       </div>
       <div className="abd-scroll" ref={scrollRef} onScroll={onScroll}>
-        {MOCK_AREAS.map((area) => (
-          <div className="abd-page" key={area.key}>
-            <AreaDetail
-              area={area}
-              cards={cards.filter((c) => c.area === area.key)}
-            />
+        {areas.map((entry) => (
+          <div className="abd-page" key={entry.area.key}>
+            <AreaDetail presentation={entry} cards={cardsOf(entry.area.key)} />
           </div>
         ))}
       </div>
@@ -428,19 +554,22 @@ function AreaDetailPager({
 }
 
 function AllAreasOverview({
-  cards,
+  areas,
+  cardsOf,
   wrap,
   onOpenArea,
 }: {
-  cards: MockAreaCard[];
+  areas: AreaPresentation[];
+  cardsOf: (key: string) => MockAreaCard[];
   wrap: boolean;
   onOpenArea: (key: string) => void;
 }) {
   return (
     <div className={`ms-scroll ${wrap ? 'wrap' : ''}`}>
-      {MOCK_AREAS.map((area) => {
-        const areaCards = cards.filter((c) => c.area === area.key);
-        const hasMachines = (MOCK_AREA_MACHINES[area.key] ?? []).length > 0;
+      {areas.map((entry) => {
+        const area = entry.area;
+        const areaCards = cardsOf(area.key);
+        const hasMachines = entry.machines.length > 0;
         const total = areaCards.reduce((s, c) => s + c.qty, 0);
         // The shared grouping keeps queued / on-Machine / finished
         // portions distinguishable (finished = READY_TO_TRANSFER).
@@ -534,8 +663,11 @@ function AllAreasOverview({
             </div>
             {areaCards.length ? (
               <ul className="mc-list">
-                {areaCards.map((c) => (
-                  <AreaOverviewRow key={`${c.pn}-${c.workOrder}`} card={c} />
+                {areaCards.map((c, index) => (
+                  <AreaOverviewRow
+                    key={`${c.pn}-${c.workOrder}-${index}`}
+                    card={c}
+                  />
                 ))}
               </ul>
             ) : (
@@ -556,14 +688,14 @@ function AllAreasOverview({
  * summary card.
  */
 function AreaDetail({
-  area,
+  presentation,
   cards,
 }: {
-  area: MockArea | undefined;
+  presentation: AreaPresentation | undefined;
   cards: MockAreaCard[];
 }) {
-  if (!area) return null;
-  const machines = MOCK_AREA_MACHINES[area.key] ?? [];
+  if (!presentation) return null;
+  const { area, machines } = presentation;
   const { assigned } = splitAssignments(cards);
 
   return (

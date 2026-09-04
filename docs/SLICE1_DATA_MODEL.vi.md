@@ -1,7 +1,7 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
 > **Bản gốc chuẩn:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md).
-> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
+> Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > File EN là source of truth.
 >
 > **Trạng thái:** Đã triển khai. Đây là contract chuẩn của Phase 4, không phải

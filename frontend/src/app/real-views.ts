@@ -43,4 +43,9 @@ export const REAL_VIEWS: Partial<
       default: m.ProductionBoardView,
     })),
   ),
+  'area-board': lazy(() =>
+    import('../views/area-board/AreaBoardView').then((m) => ({
+      default: m.AreaBoardView,
+    })),
+  ),
 };

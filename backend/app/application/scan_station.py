@@ -92,7 +92,8 @@ from app.application.part_numbers import (
     canonical_part_number,
 )
 from app.application.projections import (
-    effective_latest_movements,
+    EffectivePosition,
+    effective_positions,
     origin_flow_ids,
     processing_state_of,
     visited_area_ids,
@@ -216,10 +217,25 @@ def available_actions(state: ProcessingState) -> list[FlowAction]:
 
 
 class WorkOrderContext(NamedTuple):
+    """The Work Order Demand a quantity was released for, with the
+    monitoring context every Area presentation shows beside it
+    (GUI_DESIGN §4.10 PN row): the external Job Numbers, the due date
+    the countdown derives from, the Hot rank and the Work Order's
+    received date, which orders undated demand (PROJECT_PROFILE §18).
+
+    This is the demand THIS quantity descends from — one demand, not a
+    choice among the PN's several — so it stays the flow's own
+    production context whatever else the PN is demanded for.
+    """
+
     work_order_id: int
     work_order_number: str | None
     work_order_demand_id: int
     request_type: str
+    job_numbers: list[str]
+    due_date: datetime.date | None
+    priority_rank: int | None
+    received_date: datetime.date
 
 
 class FlowInArea(NamedTuple):
@@ -240,6 +256,17 @@ class FlowInArea(NamedTuple):
     # never "queued" by itself.
     processing_state: ProcessingState
     machine_id: int | None
+    # The Machine that COMPLETED finished quantity (READY_TO_TRANSFER) —
+    # secondary context only: the quantity is no longer assigned to it
+    # and stays in the Area until transferred. None in every other
+    # state, and on merged finished quantity whose lineage branches
+    # were completed on different Machines (`effective_positions`).
+    completed_machine_id: int | None
+    # When this quantity entered its current position — the fixed
+    # timestamp every monitoring surface derives `Time in Area` from,
+    # read across every lineage branch (the OLDEST entry of merged
+    # quantity), never a stored formatted duration.
+    entered_at: datetime.datetime
     available_actions: list[FlowAction]
     work_order: WorkOrderContext | None
 
@@ -383,9 +410,16 @@ def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, Wor
     received = _received_contexts(session, sorted(set[int]().union(*origins.values())))
     contexts: dict[int, WorkOrderContext] = {}
     for flow_id, origin_ids in origins.items():
-        found = {received[origin] for origin in origin_ids if origin in received}
+        # Identity is the demand, so the origins are compared by their
+        # demand id — the context itself carries list-valued Job Numbers
+        # and is deliberately not compared as a whole.
+        found = {
+            received[origin].work_order_demand_id: received[origin]
+            for origin in origin_ids
+            if origin in received
+        }
         if len(found) == 1:
-            contexts[flow_id] = next(iter(found))
+            contexts[flow_id] = next(iter(found.values()))
     return contexts
 
 
@@ -398,8 +432,12 @@ def _received_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkO
             PartMovement.quantity_flow_id,
             WorkOrder.id,
             WorkOrder.work_order_number,
+            WorkOrder.received_date,
             WorkOrderDemand.id,
             WorkOrderDemand.request_type,
+            WorkOrderDemand.job_numbers,
+            WorkOrderDemand.due_date,
+            WorkOrderDemand.priority_rank,
         )
         .join(WorkOrderDemand, WorkOrderDemand.id == demand_id_value)
         .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
@@ -409,9 +447,60 @@ def _received_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkO
         )
     )
     return {
-        flow_id: WorkOrderContext(wo_id, wo_number, demand_id, request_type)
-        for flow_id, wo_id, wo_number, demand_id, request_type in rows
+        flow_id: WorkOrderContext(
+            work_order_id=wo_id,
+            work_order_number=wo_number,
+            work_order_demand_id=demand_id,
+            request_type=request_type,
+            job_numbers=list(job_numbers),
+            due_date=due_date,
+            priority_rank=priority_rank,
+            received_date=received_date,
+        )
+        for (
+            flow_id,
+            wo_id,
+            wo_number,
+            received_date,
+            demand_id,
+            request_type,
+            job_numbers,
+            due_date,
+            priority_rank,
+        ) in rows
     }
+
+
+def _flow_in_area(
+    flow: QuantityFlow,
+    position: EffectivePosition,
+    operation: Operation,
+    state: ProcessingState,
+    work_order: WorkOrderContext | None,
+) -> FlowInArea:
+    """One flow as the shared Area monitoring model presents it.
+
+    The ONE construction site of `FlowInArea`, so the Scan Station and
+    the Area Board can never present the same quantity differently:
+    the holding state and its valid actions, the Machine executing it,
+    the Machine that completed it (finished quantity only), the entry
+    timestamp its dwell time derives from, and its Work Order context.
+    """
+    return FlowInArea(
+        part_number=flow.part_number,
+        quantity_flow_id=flow.id,
+        quantity=flow.quantity,
+        route_mode=flow.route_mode,
+        operation=operation,
+        processing_state=state,
+        machine_id=flow.current_machine_id,
+        completed_machine_id=(
+            position.completed_machine_id if state is ProcessingState.READY_TO_TRANSFER else None
+        ),
+        entered_at=position.entered_at,
+        available_actions=available_actions(state),
+        work_order=work_order,
+    )
 
 
 def resolve_part_number_scan(
@@ -431,7 +520,8 @@ def resolve_part_number_scan(
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
-    latest = effective_latest_movements(session, [flow.id for flow in flows])
+    positions = effective_positions(session, [flow.id for flow in flows])
+    latest = {flow_id: position.movement for flow_id, position in positions.items()}
     recorded = _recorded_operations(session, latest)
     # Every flow's state depends on the mode of the Area it is in.
     machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
@@ -457,15 +547,11 @@ def resolve_part_number_scan(
         if flow.current_area_id == area.id:
             in_area_flows.append(flow)
             in_area.append(
-                FlowInArea(
-                    flow.part_number,
-                    flow.id,
-                    flow.quantity,
-                    flow.route_mode,
+                _flow_in_area(
+                    flow,
+                    positions[flow.id],
                     recorded[latest[flow.id].operation_id],
                     state,
-                    flow.current_machine_id,
-                    available_actions(state),
                     contexts.get(flow.id),
                 )
             )
@@ -628,19 +714,16 @@ def resolve_machine_scan(
             .order_by(QuantityFlow.part_number, QuantityFlow.id)
         )
     )
-    latest = effective_latest_movements(session, [flow.id for flow in flows])
+    positions = effective_positions(session, [flow.id for flow in flows])
+    latest = {flow_id: position.movement for flow_id, position in positions.items()}
     recorded = _recorded_operations(session, latest)
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
     queued = [
-        FlowInArea(
-            flow.part_number,
-            flow.id,
-            flow.quantity,
-            flow.route_mode,
+        _flow_in_area(
+            flow,
+            positions[flow.id],
             recorded[latest[flow.id].operation_id],
             ProcessingState.QUEUED,
-            None,
-            available_actions(ProcessingState.QUEUED),
             contexts.get(flow.id),
         )
         for flow in flows
@@ -746,7 +829,8 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     )
     contexts = _work_order_contexts(session, [flow.id for flow in flows])
-    latest = effective_latest_movements(session, [flow.id for flow in flows])
+    positions = effective_positions(session, [flow.id for flow in flows])
+    latest = {flow_id: position.movement for flow_id, position in positions.items()}
     recorded = _recorded_operations(session, latest)
     active_machines = list(
         session.scalars(
@@ -763,15 +847,11 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
             latest[flow.id].movement_type, direct_processing=not has_machines
         )
         items.append(
-            FlowInArea(
-                flow.part_number,
-                flow.id,
-                flow.quantity,
-                flow.route_mode,
+            _flow_in_area(
+                flow,
+                positions[flow.id],
                 recorded[latest[flow.id].operation_id],
                 state,
-                flow.current_machine_id,
-                available_actions(state),
                 contexts.get(flow.id),
             )
         )

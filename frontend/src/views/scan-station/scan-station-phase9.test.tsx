@@ -43,6 +43,10 @@ interface Flow {
   machineId: number | null;
   /** Areas this quantity previously visited (repair eligibility). */
   visited?: number[];
+  /** Phase 11 monitoring context of the shared row (optional in the
+   * fixtures: the default entry timestamp and no completing Machine). */
+  completedMachineId?: number | null;
+  enteredAt?: string;
 }
 
 interface CommandRecord {
@@ -160,12 +164,18 @@ function flowWire(flow: Flow) {
     },
     processing_state: flow.state,
     machine_id: flow.machineId,
+    completed_machine_id: flow.completedMachineId ?? null,
+    entered_at: flow.enteredAt ?? '2026-08-01T06:30:00Z',
     available_actions: actionsOf(flow.state),
     work_order: {
       work_order_id: 1,
       work_order_number: '007003',
       work_order_demand_id: 11,
       request_type: 'NEW',
+      job_numbers: ['18112'],
+      due_date: null,
+      priority_rank: null,
+      received_date: '2026-07-12',
     },
   };
 }

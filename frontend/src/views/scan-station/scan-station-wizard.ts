@@ -4,6 +4,7 @@
 // quantity-step key handling, and quantity validation. Production-safe
 // — no mock imports.
 
+import { operationLabel } from '../area-presentation';
 import type { FlowInArea, MachineRef } from '../../api/scan-station';
 import { applyQuantityKey } from '../../components/quantity-input';
 
@@ -169,10 +170,6 @@ export function portionLabel(
   )}`;
 }
 
-/** Operator-facing Operation label: the name when configured, else the code. */
-export function operationLabel(operation: {
-  code: string;
-  name: string | null;
-}): string {
-  return operation.name ?? operation.code;
-}
+// The operator-facing Operation label is shared with the Area Board
+// (views/area-presentation) so both name an Operation identically.
+export { operationLabel };

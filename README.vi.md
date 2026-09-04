@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md).
 > File tiếng Anh là nguồn chuẩn (source of truth). Bản dịch này dùng baseline
-> upstream commit `4fd635f` (Phase 10.5 Receive Quantity).
+> upstream commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -13,7 +13,7 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 ## Trạng thái hiện tại
 
 Repository hiện có nền tảng từ Phase 1 đến Phase 10.5 triển khai end to end và
-Production Board của Phase 11:
+Production Board + Area Board của Phase 11:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -59,7 +59,7 @@ Production Board của Phase 11:
   Part Number tạo Quantity Flow RIÊNG và chỉ sau explicit confirmation của
   operator — không bao giờ merge gì, và `Combine quantities` vẫn là merge duy
   nhất (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32).
-- **Phase 11 (Production Board):** read model board toàn Department derive từ
+- **Phase 11 (Production Board + Area Board):** read model board toàn Department derive từ
   projection vị trí hiện tại và Movement history (`GET /api/production-board`:
   phân bổ theo Area / Machine / External activity kèm timestamp vào vị trí,
   stocked và scrapped, Work Order / Job Number context, Hot rank, theo canonical
@@ -68,8 +68,15 @@ Production Board của Phase 11:
   hoàn chỉnh cuối cùng kèm `Feed stale — reconnecting` mỗi khi chưa có board
   hoàn chỉnh trên màn hình (refresh lỗi, kết nối không khỏe, load đầu đang chạy
   hoặc đã lỗi), giữ nguyên presentation đã duyệt (kiosk, pagination + rotation, auto
-  scale, điều hướng tay). Area Board và Tracking (phần còn lại của Phase 11)
-  vẫn là mock view chỉ development.
+  scale, điều hướng tay). **Area Board** cũng đã thật: một read của Department
+  (`GET /api/area-board`) trả về mọi Area active mang CHÍNH model monitoring Area
+  mà Scan Station đọc — nên All Areas overview và per-Area detail là hai
+  presentation của cùng một trả lời và không thể lệch khỏi station — cộng
+  Operation của Area, scrapped theo PN và stocked line kèm allocation của
+  terminal Stockroom; row nay mang due date, Job Numbers, Hot rank, thời gian
+  trong Area và Machine hoàn thành thật. Tracking, breakdown theo PN của
+  Machines và expected-duration monitoring (phần còn lại của Phase 11) vẫn là
+  phần chưa làm; Tracking vẫn là mock view chỉ development.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
@@ -79,7 +86,7 @@ chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát tri�
 
 - `frontend/` — Vite + React + TypeScript. Các view có backend (Administration
   Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station gồm
-  cả `Receive Quantity`, Production Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
+  cả `Receive Quantity`, Production Board, Area Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
   khỏi production bundle.
 - `backend/` — FastAPI. Application service sở hữu business rule và transaction;
   domain vocabulary độc lập framework; SQLAlchemy mapping khớp schema chuẩn.

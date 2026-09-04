@@ -1,7 +1,7 @@
 # Hồ sơ dự án PartFlow v22
 
 > **Bản gốc chuẩn:** [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md).
-> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
+> Baseline upstream: commit `f96bf09` (không có thay đổi domain sau `f10d8bd`).
 > File tiếng Anh là nguồn chuẩn cho hành vi domain và định hướng sản phẩm; nếu
 > hai bản khác nhau, phải sửa bản EN trước rồi đồng bộ lại bản VI.
 >

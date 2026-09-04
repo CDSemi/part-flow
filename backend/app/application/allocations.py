@@ -162,19 +162,34 @@ def active_allocations_by_demand(
     return {int(demand_id): int(total) for demand_id, total in rows}
 
 
-def active_allocated_quantity_of(session: Session, part_number: str) -> int:
-    """The PN's total ACTIVE allocation, derived from the rows."""
+def active_allocated_quantities(session: Session, part_numbers: Collection[str]) -> dict[str, int]:
+    """The ACTIVE allocation of several PNs, derived from the rows.
+
+    One grouped query for a read model that reports many PNs at once
+    (the Area Board's Stockroom column); a PN with no active allocation
+    is simply absent.
+    """
+    wanted = list(part_numbers)
+    if not wanted:
+        return {}
     reversal = aliased(WorkOrderAllocation)
-    total = session.scalar(
-        select(func.coalesce(func.sum(WorkOrderAllocation.quantity), 0)).where(
-            WorkOrderAllocation.part_number == part_number,
+    rows = session.execute(
+        select(WorkOrderAllocation.part_number, func.sum(WorkOrderAllocation.quantity))
+        .where(
+            WorkOrderAllocation.part_number.in_(wanted),
             WorkOrderAllocation.reverses_allocation_id.is_(None),
             ~select(reversal.id)
             .where(reversal.reverses_allocation_id == WorkOrderAllocation.id)
             .exists(),
         )
+        .group_by(WorkOrderAllocation.part_number)
     )
-    return int(total or 0)
+    return {str(part_number): int(total) for part_number, total in rows}
+
+
+def active_allocated_quantity_of(session: Session, part_number: str) -> int:
+    """The PN's total ACTIVE allocation, derived from the rows."""
+    return active_allocated_quantities(session, [part_number]).get(part_number, 0)
 
 
 class StockPosition(NamedTuple):

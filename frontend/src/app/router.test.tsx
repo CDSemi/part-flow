@@ -96,6 +96,35 @@ beforeEach(() => {
       if (/\/api\/departments$/.test(url)) {
         return json([{ id: 1, name: 'Machining', is_active: true }]);
       }
+      if (/\/api\/area-board/.test(url)) {
+        // The Area Board is a real view since Phase 11: one Area with
+        // no production keeps these routing tests focused on navigation.
+        return json({
+          department: { id: 1, name: 'Machining' },
+          areas: [
+            {
+              inventory: {
+                area: { ...AREAS[0], description: null, is_terminal: false },
+                has_machines: false,
+                lines: [],
+                total_part_numbers: 0,
+                total_quantity: 0,
+                queued: [],
+                queued_quantity: 0,
+                machines: [],
+                on_machine_quantity: 0,
+                processing: [],
+                processing_quantity: 0,
+                finished: [],
+                finished_quantity: 0,
+              },
+              operations: [],
+              scrapped: [],
+              stocked: [],
+            },
+          ],
+        });
+      }
       if (/\/api\/production-board/.test(url)) {
         return json({
           department: { id: 1, name: 'Machining' },

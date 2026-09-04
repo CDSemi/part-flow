@@ -101,21 +101,28 @@ export function areaStats(
   hasMachines: boolean,
 ): AreaStat[] {
   const totalQty = cards.reduce((s, c) => s + c.qty, 0);
-  const hotCount = cards.filter((c) => c.hotRank !== undefined).length;
+  // The PN counts are counts of PART NUMBERS, not of rows: one PN may
+  // hold several separate quantities in one Area (a split, a partial
+  // action, two releases), and each is its own row. Counting rows would
+  // disagree with the server's own `total_part_numbers`.
+  const pnCount = new Set(cards.map((c) => c.pn)).size;
+  const hotCount = new Set(
+    cards.filter((c) => c.hotRank !== undefined).map((c) => c.pn),
+  ).size;
   const { assigned, queued, finished } = splitAssignments(cards);
   const queuedQty = queued.reduce((s, e) => s + e.qty, 0);
   const machineQty = assigned.reduce((s, e) => s + e.qty, 0);
   const finishedQty = finished.reduce((s, e) => s + e.qty, 0);
   if (area.terminal) {
     return [
-      { value: cards.length, label: 'PNs', tone: 'pn' },
+      { value: pnCount, label: 'PNs', tone: 'pn' },
       { value: totalQty, label: 'Stocked pcs' },
       { value: hotCount || '—', label: 'Hot', tone: 'h' },
     ];
   }
   if (!hasMachines) {
     return [
-      { value: cards.length, label: 'Total PNs', tone: 'pn' },
+      { value: pnCount, label: 'Total PNs', tone: 'pn' },
       { value: totalQty, label: 'Total pcs' },
       { value: queuedQty, label: 'Processing', tone: 'm' },
       { value: finishedQty, label: 'Done', tone: 'd' },
@@ -123,7 +130,7 @@ export function areaStats(
     ];
   }
   return [
-    { value: cards.length, label: 'Total PNs', tone: 'pn' },
+    { value: pnCount, label: 'Total PNs', tone: 'pn' },
     { value: totalQty, label: 'Total pcs' },
     { value: queuedQty, label: 'Queued', tone: 'q' },
     { value: machineQty, label: 'On machines', tone: 'm' },

@@ -31,6 +31,10 @@ interface Flow {
   areaId: number;
   state: State;
   machineId: number | null;
+  /** Phase 11 monitoring context of the shared row (optional in the
+   * fixtures: the default entry timestamp and no completing Machine). */
+  completedMachineId?: number | null;
+  enteredAt?: string;
 }
 
 interface FakeMachine {
@@ -161,12 +165,18 @@ function flowWire(flow: Flow) {
     },
     processing_state: flow.state,
     machine_id: flow.machineId,
+    completed_machine_id: flow.completedMachineId ?? null,
+    entered_at: flow.enteredAt ?? '2026-08-01T06:30:00Z',
     available_actions: actionsOf(flow.state),
     work_order: {
       work_order_id: 1,
       work_order_number: '007003',
       work_order_demand_id: 11,
       request_type: 'NEW',
+      job_numbers: ['18112'],
+      due_date: null,
+      priority_rank: null,
+      received_date: '2026-07-12',
     },
   };
 }
@@ -687,12 +697,23 @@ test('the inventory separates queued, per-Machine and finished quantity', async 
   expect(
     within(summary).queryByRole('button', { name: 'Complete Area processing' }),
   ).toBeNull();
-  // Header totals reconcile from the server's states.
+  // Header totals reconcile from the server's states. `Total PNs`
+  // counts PART NUMBERS, not rows: 118-052 holds two separate queued
+  // quantities and is ONE PN, exactly as the server counts them.
   const stats = screen.getByLabelText('Area statistics');
-  expect(stats).toHaveTextContent('Queued');
-  expect(within(stats).getByText('24')).toBeInTheDocument(); // 12 + 5 + 7
-  expect(within(stats).getByText('3')).toBeInTheDocument(); // on machines
-  expect(within(stats).getByText('4')).toBeInTheDocument(); // done
+  const statValues = Object.fromEntries(
+    Array.from(stats.querySelectorAll('.stat'), (stat) => [
+      stat.querySelector('.l')?.textContent,
+      stat.querySelector('.n')?.textContent,
+    ]),
+  );
+  expect(statValues).toMatchObject({
+    'Total PNs': '4',
+    'Total pcs': '31',
+    Queued: '24', // 12 + 5 + 7
+    'On machines': '3',
+    Done: '4',
+  });
 });
 
 test('an Area without Machines shows no Machine cards, no queue and no Machine actions', async () => {

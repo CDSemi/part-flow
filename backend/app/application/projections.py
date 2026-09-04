@@ -46,6 +46,7 @@ exactly like a scrapped one; the stocked total of a PN
 reconciliation and the quantity Work Order Allocation draws from.
 """
 
+import datetime
 from collections.abc import Iterable
 from typing import Final, NamedTuple
 
@@ -366,6 +367,65 @@ def effective_latest_movement_branches(
             )
         branches[flow_id] = sorted(found.values(), key=lambda item: (item.occurred_at, item.id))
     return branches
+
+
+class EffectivePosition(NamedTuple):
+    """One flow's current position, read across EVERY lineage branch.
+
+    The monitoring answer to `effective_latest_movement_branches`: the
+    state itself is unambiguous (a merge required its sources to share
+    Area, holding state, Machine and Operation), so any branch
+    represents it — but the two values a display says ABOUT that state
+    are not equivalent across branches, so they are derived from all of
+    them at once:
+
+    - ``entered_at`` dates the position from the OLDEST branch entry:
+      merged quantity has waited since the earliest of its sources, and
+      an unusually long stay is never hidden by a newer portion;
+    - ``assigned_machine_id`` (the executor of ON_MACHINE quantity) and
+      ``completed_machine_id`` (the Machine that completed finished
+      quantity — the ``AREA_COMPLETED``'s source Machine) are reported
+      only when every branch names the same Machine. Finished quantity
+      is combinable ACROSS completing Machines (`merges.merge_context`
+      compares the CURRENT Machine, which an ``AREA_COMPLETED`` has
+      already cleared), so where the branches disagree the quantity is
+      shown with no Machine rather than crediting one source with all
+      of it.
+
+    ``movement`` is the representative branch entry — the one every
+    caller reads the Movement type, the recorded Operation and the Area
+    from.
+    """
+
+    movement: PartMovement
+    entered_at: datetime.datetime
+    assigned_machine_id: int | None
+    completed_machine_id: int | None
+
+
+def _shared_machine_id(entries: list[PartMovement], attribute: str) -> int | None:
+    """The Machine every branch names, or None where they disagree."""
+    named = {getattr(movement, attribute) for movement in entries}
+    return next(iter(named)) if len(named) == 1 else None
+
+
+def effective_positions(session: Session, flow_ids: Iterable[int]) -> dict[int, EffectivePosition]:
+    """`EffectivePosition` per flow — the shared monitoring derivation.
+
+    Every monitoring read model (the Production Board, the Area
+    inventory the Scan Station and the Area Board render) derives the
+    position, its entry time and its Machine context here, so the same
+    quantity can never be dated or attributed differently by two views.
+    """
+    return {
+        flow_id: EffectivePosition(
+            movement=entries[0],
+            entered_at=entries[0].occurred_at,
+            assigned_machine_id=_shared_machine_id(entries, "destination_machine_id"),
+            completed_machine_id=_shared_machine_id(entries, "source_machine_id"),
+        )
+        for flow_id, entries in effective_latest_movement_branches(session, flow_ids).items()
+    }
 
 
 # ---------------------------------------------------------------------------

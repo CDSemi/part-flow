@@ -155,6 +155,8 @@ function flowWire(flow: Flow) {
     },
     processing_state: flow.state,
     machine_id: null,
+    completed_machine_id: null,
+    entered_at: '2026-08-01T06:30:00Z',
     available_actions: ['TRANSFER', 'SCRAP'],
     work_order: null,
   };
@@ -368,7 +370,7 @@ function handle(url: string, method: string, body: unknown): Response {
     // beside active quantity it commits only with the explicit
     // separate-quantity confirmation, judged by the SERVER.
     const active = flows.filter((flow) => flow.pn === request.part_number);
-    if (active.length > 0 && request.confirm_active_quantity !== true) {
+    if (active.length > 0 && !request.confirm_active_quantity) {
       return json(
         {
           detail:

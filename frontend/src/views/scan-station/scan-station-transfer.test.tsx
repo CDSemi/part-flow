@@ -124,6 +124,10 @@ function workOrderWire(flow: Flow) {
         work_order_number: flow.wo.number,
         work_order_demand_id: flow.wo.demandId,
         request_type: flow.wo.type,
+        job_numbers: ['18112'],
+        due_date: null,
+        priority_rank: null,
+        received_date: '2026-07-12',
       }
     : null;
 }
@@ -153,6 +157,8 @@ function flowWire(flow: Flow) {
     },
     processing_state: state,
     machine_id: flow.machineId ?? null,
+    completed_machine_id: null,
+    entered_at: '2026-08-01T06:30:00Z',
     available_actions:
       state === 'ON_MACHINE'
         ? ['DONE', 'QUEUE', 'TRANSFER', 'SCRAP']

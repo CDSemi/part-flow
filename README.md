@@ -52,11 +52,13 @@ external number created or reused, its Work Order Demand, the Quantity
 Flow, the `PLANNED` route snapshot and the immutable `RECEIVED`
 Movement carrying the Scan Station and the resolved Operation, dated
 from the scan itself — and
-the **Phase 11 Production Board**: the
+the **Phase 11 Production Board and Area Board**: the
 Department-wide board read model derived from the current-position
 projection and the Movement history (`GET /api/production-board`) and
 the real large-display board on it (auto-refresh, stale feed, kiosk
-mode):
+mode), plus the Management Area Board on `GET /api/area-board` —
+one read of the Department carrying the SAME Area monitoring model
+the Scan Station reads:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -307,10 +309,18 @@ last complete rows with the explicit `Feed stale — reconnecting`
 status whenever no complete board is on screen — a failed refresh, an
 unhealthy connection, a first load still running or failed — and keeps the approved
 presentation — kiosk mode, pagination and rotation, automatic display
-scaling, the manual navigation. Every other view (Area Board,
-Tracking, Priority, Planned Routes, Part Numbers) renders
-development-only mock data; the remaining Phase 11 monitoring read
-models (Area Board, Tracking) arrive next — the movement-type check admits the
+scaling, the manual navigation. Phase 11 also makes the **Area Board**
+real: one read of the Department (`GET /api/area-board`) returns every
+active Area with the same Area monitoring model the Scan Station reads
+— so the All Areas overview and the per-Area detail are two
+presentations of one answer and cannot drift from the station — plus
+each Area's Operations, its scrapped quantity per PN and the terminal
+Stockroom's stocked lines with their allocation; the rows now carry
+their real due date, Job Numbers, Hot rank, time in Area and completing
+Machine. Every other view (Tracking, Priority, Planned Routes,
+Part Numbers) renders development-only mock data; the remaining
+Phase 11 monitoring read models (Tracking, the Machines per-PN
+assigned breakdown, expected-duration monitoring) arrive next — the movement-type check admits the
 Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
 `SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`, `STOCKED`).
@@ -364,9 +374,11 @@ Frontend structure:
   into user-facing messages, the environment configuration and
   Machines endpoints (Phase 3.5), the Work Orders, Part Numbers,
   route-template and production-release endpoints (Phase 4), the
-  Scan Station context / scan resolution / transfer / Area inventory
-  endpoints (Phase 5, `scan-station.ts`) and the Production Board
-  read (Phase 11, `production-board.ts`) with snake_case ↔ camelCase
+  Scan Station context / scan resolution / transfer endpoints
+  (Phase 5, `scan-station.ts`), the ONE shared Area monitoring model
+  both the Scan Station and the Area Board render
+  (`area-inventory.ts`) and the two Phase 11 monitoring reads
+  (`production-board.ts`, `area-board.ts`) with snake_case ↔ camelCase
   mapping, the ISO 8601 duration helpers, and
   the `useApiData` loading/error/reload hook. Production-safe — never
   imports from `src/mocks/`.
@@ -379,7 +391,7 @@ Frontend structure:
   entirely: the real views (`src/app/real-views.ts` — Administration
   and Machines from Phase 3.5, Work Orders with the Completed Work
   Orders page from Phases 4 and 10, the Scan Station from Phase 5,
-  the Production Board from Phase 11)
+  the Production Board and the Area Board from Phase 11)
   ship in every
   build against the live `/api` surface, and every other route renders
   an explicit "not connected to a production data source yet" state. `npm run build`

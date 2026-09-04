@@ -110,6 +110,8 @@ function flowWire(flow: Flow) {
     },
     processing_state: 'PROCESSING',
     machine_id: null,
+    completed_machine_id: null,
+    entered_at: '2026-08-01T06:30:00Z',
     available_actions: ['DONE', 'TRANSFER', 'SCRAP'],
     work_order: null,
   };

@@ -162,6 +162,48 @@
   color: var(--muted);
 }
 
+/* Feed status of the live board (§6.1): the same statement as the
+   Production Board's `● Live` — the wording changes with the tone, so
+   the status is never carried by color alone. */
+.ab-feed {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--ok-t);
+}
+
+.ab-feed .ld {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 9px var(--ok);
+  /* The shared connected heartbeat (styles/global.css) — identical to
+     the connectivity chip's ONLINE dot. */
+  animation: pf-heartbeat 2s infinite;
+}
+
+.ab-feed.stale {
+  color: var(--warn-t);
+}
+
+/* Stale / reconnecting: solid warning dot, no heartbeat. */
+.ab-feed.stale .ld {
+  background: var(--warn);
+  box-shadow: 0 0 9px var(--warn);
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ab-feed .ld {
+    animation: none;
+  }
+}
+
 /* Per-Area detail — Area summary card + one card per Machine */
 /* All Areas overview — one column per Area, horizontal scroll (§6.2) */
 .ms-scroll {

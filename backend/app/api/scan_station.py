@@ -181,6 +181,22 @@ from typing import Literal
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 
+from app.api.area_inventory import (
+    AreaInventoryResponse,
+    AreaRef,
+    FlowInAreaResponse,
+    MachineRef,
+    OperationRef,
+    ProcessingStateLiteral,
+    WorkOrderContextResponse,
+    area_inventory_response,
+    area_ref,
+    flow_response,
+    machine_ref,
+    machine_state,
+    operation_ref,
+    work_order_context,
+)
 from app.api.dependencies import SessionDep
 from app.application import (
     direct_processing,
@@ -193,159 +209,12 @@ from app.application import (
     transfers,
     undo,
 )
-from app.application.scan_station import FlowInArea, MachineInventory, WorkOrderContext
-from app.domain.enums import MachineOperationalState
-from app.infrastructure.models import Area, Machine, Operation
 
 router = APIRouter(prefix="/api")
 
-
-# ---------------------------------------------------------------------------
-# Shared response shapes
-# ---------------------------------------------------------------------------
-
-
-class AreaRef(BaseModel):
-    id: int
-    name: str
-    color: str | None
-    description: str | None
-    is_terminal: bool
-
-
-class OperationRef(BaseModel):
-    id: int
-    code: str
-    name: str | None
-    is_external: bool
-
-
-class WorkOrderContextResponse(BaseModel):
-    work_order_id: int
-    # NULL for an internal blank-number Work Order (rendered `—`).
-    work_order_number: str | None
-    work_order_demand_id: int
-    request_type: str
-
-
-ProcessingStateLiteral = Literal["QUEUED", "PROCESSING", "ON_MACHINE", "READY_TO_TRANSFER"]
-FlowActionLiteral = Literal["ASSIGN", "DONE", "QUEUE", "TRANSFER", "SCRAP"]
-MachineStateLiteral = Literal["MAINTENANCE", "RUNNING", "IDLE"]
+# The flow lifecycle an Undo result reports (Phase 9) — an endpoint
+# concept, not part of the shared Area monitoring contract.
 FlowStatusLiteral = Literal["ACTIVE", "SPLIT", "MERGED", "SCRAPPED", "REVERSED", "STOCKED"]
-
-
-class RecordedOperationRef(BaseModel):
-    """The Operation recorded on a flow's latest Movement — presented as
-    recorded, whatever its current activation (an inactive Operation is
-    still the one existing quantity is in the Area for)."""
-
-    id: int
-    code: str
-    name: str | None
-    is_external: bool
-    is_active: bool
-
-
-class FlowInAreaResponse(BaseModel):
-    part_number: str
-    quantity_flow_id: int
-    quantity: int
-    route_mode: str
-    # The Operation recorded on the flow's latest Movement — independent
-    # of the active Operations the station offers for new arrivals.
-    operation: RecordedOperationRef
-    # Derived from the flow's latest Movement and the Area's mode
-    # (PROJECT_PROFILE §12); machine_id is set exactly while ON_MACHINE.
-    processing_state: ProcessingStateLiteral
-    machine_id: int | None
-    # The actions currently valid for this flow (PN-first, §15).
-    available_actions: list[FlowActionLiteral]
-    work_order: WorkOrderContextResponse | None
-
-
-class MachineRef(BaseModel):
-    id: int
-    name: str
-    asset_tag: str
-    barcode_value: str
-    # Derived (PROJECT_PROFILE §8.6) with the moment it last changed.
-    operational_state: MachineStateLiteral
-    state_changed_at: datetime.datetime
-    maintenance_since: datetime.datetime | None
-    maintenance_note: str | None
-    maintenance_expected_return: datetime.date | None
-
-
-def _machine_state(state: MachineOperationalState) -> MachineStateLiteral:
-    if state is MachineOperationalState.MAINTENANCE:
-        return "MAINTENANCE"
-    if state is MachineOperationalState.RUNNING:
-        return "RUNNING"
-    return "IDLE"
-
-
-def _machine_ref(machine: Machine, state: MachineStateLiteral) -> MachineRef:
-    return MachineRef(
-        id=machine.id,
-        name=machine.name,
-        asset_tag=machine.asset_tag,
-        barcode_value=machine.barcode_value,
-        operational_state=state,
-        state_changed_at=machine.state_changed_at,
-        maintenance_since=machine.maintenance_since,
-        maintenance_note=machine.maintenance_note,
-        maintenance_expected_return=machine.maintenance_expected_return,
-    )
-
-
-def _area_ref(area: Area) -> AreaRef:
-    return AreaRef(
-        id=area.id,
-        name=area.name,
-        color=area.color,
-        description=area.description,
-        is_terminal=area.is_terminal,
-    )
-
-
-def _operation_ref(operation: Operation) -> OperationRef:
-    return OperationRef(
-        id=operation.id,
-        code=operation.code,
-        name=operation.name,
-        is_external=operation.is_external,
-    )
-
-
-def _work_order(context: WorkOrderContext | None) -> WorkOrderContextResponse | None:
-    if context is None:
-        return None
-    return WorkOrderContextResponse(
-        work_order_id=context.work_order_id,
-        work_order_number=context.work_order_number,
-        work_order_demand_id=context.work_order_demand_id,
-        request_type=context.request_type,
-    )
-
-
-def _flow(item: FlowInArea) -> FlowInAreaResponse:
-    return FlowInAreaResponse(
-        part_number=item.part_number,
-        quantity_flow_id=item.quantity_flow_id,
-        quantity=item.quantity,
-        route_mode=item.route_mode,
-        operation=RecordedOperationRef(
-            id=item.operation.id,
-            code=item.operation.code,
-            name=item.operation.name,
-            is_external=item.operation.is_external,
-            is_active=item.operation.is_active,
-        ),
-        processing_state=item.processing_state.value,
-        machine_id=item.machine_id,
-        available_actions=list(item.available_actions),
-        work_order=_work_order(item.work_order),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +243,8 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
     return StationContextResponse(
         station_id=context.station.station_id,
         department=DepartmentRef(id=context.department.id, name=context.department.name),
-        area=_area_ref(context.area),
-        operations=[_operation_ref(operation) for operation in context.operations],
+        area=area_ref(context.area),
+        operations=[operation_ref(operation) for operation in context.operations],
         has_machines=context.has_machines,
     )
 
@@ -438,7 +307,7 @@ class InternalWorkOrderResponse(BaseModel):
     job_numbers: list[str]
 
 
-def _internal_work_order(
+def _internalwork_order_context(
     candidate: intake.InternalWorkOrderCandidate,
 ) -> InternalWorkOrderResponse:
     return InternalWorkOrderResponse(
@@ -522,36 +391,36 @@ def resolve_scan(
     return ScanResolveResponse(
         part_number=result.part_number,
         station_id=result.station.station_id,
-        area=_area_ref(result.area),
+        area=area_ref(result.area),
         resolution=result.resolution,
-        in_area=[_flow(item) for item in result.in_area],
+        in_area=[flow_response(item) for item in result.in_area],
         candidates=[
             TransferCandidateResponse(
                 quantity_flow_id=candidate.quantity_flow_id,
                 quantity=candidate.quantity,
                 route_mode=candidate.route_mode,
-                current_area=_area_ref(candidate.current_area),
+                current_area=area_ref(candidate.current_area),
                 processing_state=candidate.processing_state.value,
                 machine_id=candidate.machine_id,
                 route_status=candidate.route_status,
                 expected_next_area=(
-                    _area_ref(candidate.expected_next_area)
+                    area_ref(candidate.expected_next_area)
                     if candidate.expected_next_area is not None
                     else None
                 ),
                 expected_operation_id=candidate.expected_operation_id,
                 suggested_operation_id=candidate.suggested_operation_id,
                 repair_available=candidate.repair_available,
-                work_order=_work_order(candidate.work_order),
+                work_order=work_order_context(candidate.work_order),
             )
             for candidate in result.candidates
         ],
-        operations=[_operation_ref(operation) for operation in result.operations],
+        operations=[operation_ref(operation) for operation in result.operations],
         has_active_demand=result.has_active_demand,
         intake_available=result.intake_available,
         part_number_known=result.part_number_known,
         internal_work_orders=[
-            _internal_work_order(candidate) for candidate in result.internal_work_orders
+            _internalwork_order_context(candidate) for candidate in result.internal_work_orders
         ],
         active_quantity=[
             ActiveQuantityResponse(
@@ -610,10 +479,10 @@ def resolve_machine_scan(
     )
     return MachineScanResolveResponse(
         station_id=result.station.station_id,
-        area=_area_ref(result.area),
-        machine=_machine_ref(result.machine, _machine_state(result.operational_state)),
+        area=area_ref(result.area),
+        machine=machine_ref(result.machine, machine_state(result.operational_state)),
         assigned_quantity=result.assigned_quantity,
-        queued=[_flow(item) for item in result.queued],
+        queued=[flow_response(item) for item in result.queued],
         requires_selection=result.requires_selection,
     )
 
@@ -1351,8 +1220,8 @@ def get_undo_preview(
                 movement_type=item.movement_type,
                 movement_reason=item.movement_reason,
                 quantity=item.quantity,
-                from_area=_area_ref(item.from_area) if item.from_area is not None else None,
-                to_area=_area_ref(item.to_area),
+                from_area=area_ref(item.from_area) if item.from_area is not None else None,
+                to_area=area_ref(item.to_area),
                 machine_id=item.machine_id,
                 operation_id=item.operation_id,
             )
@@ -1363,7 +1232,7 @@ def get_undo_preview(
                 quantity_flow_id=item.quantity_flow_id,
                 quantity=item.quantity,
                 status=item.status.value,
-                area=_area_ref(item.area) if item.area is not None else None,
+                area=area_ref(item.area) if item.area is not None else None,
                 machine_id=item.machine_id,
                 processing_state=(
                     item.processing_state.value if item.processing_state is not None else None
@@ -1451,78 +1320,6 @@ def undo_production_command(
 # ---------------------------------------------------------------------------
 
 
-class InventoryLineResponse(BaseModel):
-    part_number: str
-    total_quantity: int
-    flows: list[FlowInAreaResponse]
-
-
-class MachineInventoryResponse(BaseModel):
-    """One Machine card: ON_MACHINE quantity only (PROJECT_PROFILE §12)."""
-
-    machine: MachineRef
-    lines: list[InventoryLineResponse]
-    total_quantity: int
-
-
-class AreaInventoryResponse(BaseModel):
-    area: AreaRef
-    # The Area mode (PROJECT_PROFILE §12): true → queued / Machine cards
-    # / finished; false → directly processing / finished, with no
-    # placeholder cards and structurally zero queued/on-Machine figures.
-    has_machines: bool
-    # Every ACTIVE flow per PN whatever its state (Phase 5 shape).
-    lines: list[InventoryLineResponse]
-    total_part_numbers: int
-    total_quantity: int
-    # Phase 6: the same flows split by derived state — queued and
-    # finished are Area summary figures; on-Machine quantity sits on
-    # the Machine cards (every active Machine, with or without quantity).
-    queued: list[InventoryLineResponse]
-    queued_quantity: int
-    machines: list[MachineInventoryResponse]
-    on_machine_quantity: int
-    # Phase 7: directly processing quantity (Areas without Machines).
-    processing: list[InventoryLineResponse]
-    processing_quantity: int
-    finished: list[InventoryLineResponse]
-    finished_quantity: int
-
-
-def _lines(lines: list[scan_station.InventoryLine]) -> list[InventoryLineResponse]:
-    return [
-        InventoryLineResponse(
-            part_number=line.part_number,
-            total_quantity=line.total_quantity,
-            flows=[_flow(item) for item in line.flows],
-        )
-        for line in lines
-    ]
-
-
-def _machine_card(card: MachineInventory) -> MachineInventoryResponse:
-    return MachineInventoryResponse(
-        machine=_machine_ref(card.machine, _machine_state(card.operational_state)),
-        lines=_lines(card.lines),
-        total_quantity=card.total_quantity,
-    )
-
-
 @router.get("/areas/{area_id}/inventory")
 def get_area_inventory(area_id: int, session: SessionDep) -> AreaInventoryResponse:
-    inventory = scan_station.area_inventory(session, area_id)
-    return AreaInventoryResponse(
-        area=_area_ref(inventory.area),
-        has_machines=inventory.has_machines,
-        lines=_lines(inventory.lines),
-        total_part_numbers=inventory.total_part_numbers,
-        total_quantity=inventory.total_quantity,
-        queued=_lines(inventory.queued),
-        queued_quantity=inventory.queued_quantity,
-        machines=[_machine_card(card) for card in inventory.machines],
-        on_machine_quantity=inventory.on_machine_quantity,
-        processing=_lines(inventory.processing),
-        processing_quantity=inventory.processing_quantity,
-        finished=_lines(inventory.finished),
-        finished_quantity=inventory.finished_quantity,
-    )
+    return area_inventory_response(scan_station.area_inventory(session, area_id))

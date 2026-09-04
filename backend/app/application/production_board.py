@@ -29,7 +29,8 @@ stored counter:
   entry of a group, so an unusually long stay is never hidden by a
   newer portion.
 - **Merged quantity is read across every lineage branch**
-  (`projections.effective_latest_movement_branches`): a merge result
+  (`projections.effective_positions`, the shared monitoring
+  derivation every Area read model uses): a merge result
   that has not moved since inherits its state from all of its sources
   at once, never from one arbitrarily chosen parent. The sources
   agreed on Area, holding state, Machine and Operation — the merge
@@ -99,7 +100,8 @@ from app.application.allocations import canonical_demand_order
 from app.application.errors import ConflictError, NotFoundError
 from app.application.machines import areas_with_machines
 from app.application.projections import (
-    effective_latest_movement_branches,
+    EffectivePosition,
+    effective_positions,
     processing_state_of,
 )
 from app.application.work_orders import site_timezone
@@ -230,7 +232,7 @@ def resolve_department(session: Session, department_id: int | None) -> Departmen
 # ---------------------------------------------------------------------------
 
 
-def _effective_totals_by_area(
+def effective_totals_by_area(
     session: Session, movement_type: MovementType, area_ids: Iterable[int]
 ) -> dict[tuple[str, int], int]:
     """Σ quantity of the effective Movements of one type per (PN, Area)."""
@@ -277,24 +279,23 @@ def _demand_context(session: Session, part_numbers: set[str]) -> dict[str, list[
     return contexts
 
 
-def _shared_machine_id(entries: list[PartMovement], state: LocationState) -> int | None:
+def _machine_id_of(position: EffectivePosition, state: LocationState) -> int | None:
     """The Machine a location shows, or None where the branches disagree.
 
     ON_MACHINE quantity is executed by the assignment's destination
     Machine; finished quantity names the completing Machine (the
     ``AREA_COMPLETED``'s source Machine) as secondary context only, and
-    no other state shows a Machine at all. A merge result inherits from
-    several branches: the Machine appears only when they all name the
-    same one, so merged quantity completed on different Machines is
-    never credited to one of them.
+    no other state shows a Machine at all. Both come from the shared
+    monitoring derivation (`projections.effective_positions`), which
+    names a Machine only when every lineage branch agrees — so merged
+    quantity completed on different Machines is never credited to one
+    of them.
     """
     if state == "MACHINE":
-        named = {movement.destination_machine_id for movement in entries}
-    elif state == "DONE":
-        named = {movement.source_machine_id for movement in entries}
-    else:
-        return None
-    return next(iter(named)) if len(named) == 1 else None
+        return position.assigned_machine_id
+    if state == "DONE":
+        return position.completed_machine_id
+    return None
 
 
 def _location_sort_key(location: BoardLocation) -> tuple[str, int, int, str, int]:
@@ -332,12 +333,12 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
         else []
     )
     flow_ids = [flow.id for flow in flows]
-    # Every lineage branch of each flow's state: one Movement for
-    # ordinary and split quantity, several for a merge result that has
-    # not moved since (oldest entry first).
-    branches = effective_latest_movement_branches(session, flow_ids)
+    # The shared monitoring derivation: the representative Movement of
+    # each flow's position, the entry time of the OLDEST lineage branch
+    # and the Machines every branch agrees on.
+    positions = effective_positions(session, flow_ids)
     machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
-    operation_ids = {movement.operation_id for entries in branches.values() for movement in entries}
+    operation_ids = {position.movement.operation_id for position in positions.values()}
     operations = (
         {
             operation.id: operation
@@ -350,9 +351,8 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
     )
     machine_ids = {
         machine_id
-        for entries in branches.values()
-        for movement in entries
-        for machine_id in (movement.destination_machine_id, movement.source_machine_id)
+        for position in positions.values()
+        for machine_id in (position.assigned_machine_id, position.completed_machine_id)
         if machine_id is not None
     }
     machines = (
@@ -368,19 +368,19 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
     groups: dict[str, dict[tuple[int, str, int | None, str | None], BoardLocation]] = {}
     oldest_flow: dict[str, datetime.datetime] = {}
     for flow in flows:
-        entries = branches[flow.id]
         # Every branch shares the Area, holding state and Operation (the
-        # merge command required it), so the oldest branch represents
-        # them all — and dates the position for the whole merged
-        # quantity.
-        movement = entries[0]
+        # merge command required it), so the representative branch
+        # states them all — while the entry time dates the position for
+        # the whole merged quantity.
+        position = positions[flow.id]
+        movement = position.movement
         state = _LOCATION_STATE_OF[
             processing_state_of(
                 movement.movement_type,
                 direct_processing=flow.current_area_id not in machine_areas,
             )
         ]
-        machine_id = _shared_machine_id(entries, state)
+        machine_id = _machine_id_of(position, state)
         operation = operations[movement.operation_id]
         activity = (operation.name or operation.code) if operation.is_external else None
         key = (flow.current_area_id, state, machine_id, activity)
@@ -393,20 +393,20 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
                 activity=activity,
                 quantity=flow.quantity,
                 state=state,
-                since=movement.occurred_at,
+                since=position.entered_at,
             )
         else:
             since = existing.since
-            if since is None or movement.occurred_at < since:
-                since = movement.occurred_at
+            if since is None or position.entered_at < since:
+                since = position.entered_at
             per_pn[key] = existing._replace(quantity=existing.quantity + flow.quantity, since=since)
         created = flow.created_at
         if flow.part_number not in oldest_flow or created < oldest_flow[flow.part_number]:
             oldest_flow[flow.part_number] = created
 
     terminal_area_ids = [area.id for area in areas.values() if area.is_terminal]
-    stocked = _effective_totals_by_area(session, MovementType.STOCKED, terminal_area_ids)
-    scrapped = _effective_totals_by_area(session, MovementType.SCRAPPED, areas.keys())
+    stocked = effective_totals_by_area(session, MovementType.STOCKED, terminal_area_ids)
+    scrapped = effective_totals_by_area(session, MovementType.SCRAPPED, areas.keys())
     stocked_by_pn: dict[str, int] = {}
     for (pn, _area_id), quantity in stocked.items():
         stocked_by_pn[pn] = stocked_by_pn.get(pn, 0) + quantity

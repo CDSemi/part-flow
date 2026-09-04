@@ -1,7 +1,7 @@
 # Thiết kế GUI PartFlow v18
 
 > **Bản gốc chuẩn:** [`GUI_DESIGN.md`](GUI_DESIGN.md).
-> Baseline upstream: commit `4fd635f2020189fa279adc6988268c36c39d595b`.
+> Baseline upstream: commit `f96bf09` (Production Board — merged quantity theo mọi nhánh lineage).
 > File EN là source of truth cho UI; business rule, thuật ngữ và workflow chuẩn
 > do [`PROJECT_PROFILE.md`](PROJECT_PROFILE.md) định nghĩa.
 >
@@ -485,7 +485,11 @@ retire và content chuyển vào All Areas.
 ## 6.1 Tab strip và toolbar
 
 Desktop tabs: All Areas default rồi từng Area có dot/count. Toolbar search PN/WO/
-Job, sort Due/Priority/Time/Quantity, scope meta PN + pieces.
+Job, sort Due/Priority/Time/Quantity, scope meta PN + pieces, và **trạng thái
+feed** của read live — `● Live` tone success với heartbeat chung, hoặc
+`● Feed stale — reconnecting` tone warning (§5: cùng câu chữ và cùng ý nghĩa với
+Production Board, không bao giờ chỉ bằng màu, và là trạng thái của BOARD chứ
+không phải của kết nối).
 
 ## 6.2 All Areas overview
 
@@ -512,6 +516,36 @@ idle/maintenance. Grid không chui dưới left card; narrow one-column. No-Mach
 render only full-width summary. Hoàn toàn read-only, shared components không action
 rail. Sort Time derive timestamp/shared clock. Long PN ellipsis + tooltip; empty
 `No production in {Area}`.
+
+**Implementation boundary (Phase 11):** production UI thật trên
+`GET /api/area-board` (IMPLEMENTATION_ROADMAP Phase 11). MỘT read của Department
+trả về mọi Area ACTIVE mang **cùng model monitoring Area mà Scan Station đọc**
+(`app/api/area_inventory.py` — mode của Area, mọi Quantity Flow ACTIVE với
+holding state derive ở server, Machine card chỉ giữ quantity đang gán, các nhóm
+queued / processing / finished và tổng), cộng Operation active, scrapped theo PN
+trong Area đó, và — với terminal Stockroom, nơi quantity đã hoàn tất sản xuất
+nên không còn active flow — các stocked line kèm allocation active của PN. All
+Areas overview và per-Area detail là **hai presentation của cùng một trả lời**:
+đổi tab không read lại và hai mode không thể lệch nhau; cả hai render qua
+component chung và cùng mapping client với Scan Station, đó chính là điều giữ
+hai view không drift. Mỗi PN row mang giá trị monitoring cố định của CHÍNH
+quantity đó — timestamp vào Area (đọc qua mọi nhánh lineage: quantity đã merge
+dated theo nhánh cũ nhất), Machine hoàn thành quantity finished (chỉ nêu khi mọi
+nhánh đồng nhất), và Work Order Demand mà quantity được release kèm Job Numbers,
+due date, Hot rank — còn `Time in Area` và due countdown vẫn derive lúc render từ
+UI clock chung (§3.12); row Stockroom hiển thị `allocated a/n` thay countdown và
+không có thời điểm vào. Department là Department active duy nhất hoặc
+`?department=<id>`; cấu hình mơ hồ bị từ chối tường minh. Auto-refresh theo đúng
+nhịp của Production Board (một request in flight, refresh ngay khi kết nối trở
+lại): refresh lỗi giữ board hoàn chỉnh cuối và chuyển status thành `Feed stale —
+reconnecting`, load đầu lỗi là error state có Retry, Department không có Area
+active là empty state tường minh, và `?state=loading|empty|error|long` vẫn render
+preview development mà không request. Search, bốn thứ tự sort và các lựa chọn
+layout (Wrap columns, Summary toggle và phân trang màn hình hẹp) là presentation
+state của view — Area Board không có canonical order để server sở hữu, khác
+Production Board. Mock dataset Phase 2 của board này đã bỏ. **Chưa có:**
+`Total PNs` đếm Part Number chứ không đếm row trên mọi bề mặt dùng nó, và
+highlight thời gian chờ theo expected duration vẫn là phần mở của Phase 11.
 
 ---
 
@@ -869,6 +903,13 @@ session không còn shift end.
   transition, final gates DONE/QUEUE/Undo, Receive settings focus exception.
 - Additional same-round refinements preserve wizard Back path, notification, shared
   PN rows, badge attention tone and responsive behaviors.
+- Area Board chạy trên read thật của Department (§6, §6.1, §6.3): hai mode dùng
+  chung một read, cùng model monitoring và cùng component với Scan Station nên
+  không drift; row lấy due countdown, Job Numbers, Hot rank, `Time in Area` và
+  scrapped từ read đó, quantity finished nêu Machine hoàn thành, Stockroom hiện
+  stocked kèm `allocated a/n`. Toolbar thêm **feed status** `● Live` /
+  `Feed stale — reconnecting` như Production Board; `Total PNs` / `PNs` đếm Part
+  Number chứ không đếm row (đúng cách server đếm).
 
 ## 15.2 Từ GUI Design v16
 
