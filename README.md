@@ -43,7 +43,15 @@ Order completion derived from allocation with the read-only completed
 history — and the **Phase 10 frontend**: the Stockroom station's
 `Receive into Stockroom` workflow with the receiving allocation dialog
 on the Scan Station shell, and the real Completed Work Orders page on
-the server-side history — and the **Phase 11 Production Board**: the
+the server-side history — and the completed **Phase 10.5 Scan
+Station Receive Quantity Gap Closure** — the three-view `Receive
+Quantity` wizard that INTRODUCES a canonical Part Number with no
+active Work Order Demand (a Part Number seen for the first time
+included) as one transaction: the internal Work Order without an
+external number created or reused, its Work Order Demand, the Quantity
+Flow, the `PLANNED` route snapshot and the immutable `RECEIVED`
+Movement carrying the Scan Station and the resolved Operation — and
+the **Phase 11 Production Board**: the
 Department-wide board read model derived from the current-position
 projection and the Movement history (`GET /api/production-board`) and
 the real large-display board on it (auto-refresh, stale feed, kiosk
@@ -55,7 +63,7 @@ mode):
   views — the real views (Administration's minimum-environment
   sections and Management → Machines from Phase 3.5, Management →
   Work Orders from Phase 4 with the Completed Work Orders page from
-  Phase 10, the Scan Station from Phases 5–10, and the Production
+  Phase 10, the Scan Station from Phases 5–10.5, and the Production
   Board from Phase 11) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
@@ -139,7 +147,20 @@ mode):
   dates), due outcome and done date on the site calendar
   (`SITE_TIMEZONE`), server-side sort, keyset paging with a cursor only
   while a further row exists, the matching and the whole-history
-  totals); the Phase 11 monitoring surface — `GET /api/production-board`
+  totals); the Phase 10.5 receipt —
+  `POST /api/scan-stations/{id}/receipts` (`Receive Quantity`: one
+  transaction introducing a canonical PN with no active Work Order
+  Demand — no demand line with a remaining business shortage — and no
+  active quantity at a non-terminal Area, creating the PartNumber
+  master on first use, the internal Work Order without an external
+  number or reusing the single applicable one by raising its existing
+  demand line, the WorkOrderDemand, the QuantityFlow, an AssignedRoute
+  snapshot for `PLANNED` only and the immutable `RECEIVED` Movement
+  with the Scan Station and the resolved Operation; several plausible
+  internal Work Orders are refused with the candidates for an explicit
+  selection, every stale context writes nothing, and the receipt is
+  never undoable because it also created the demand behind the
+  quantity); the Phase 11 monitoring surface — `GET /api/production-board`
   (the Department-wide board: every PN with active quantity in the
   Department's Areas — or stocked quantity with an open demand — with
   its distribution per Area / Machine / External activity, the derived

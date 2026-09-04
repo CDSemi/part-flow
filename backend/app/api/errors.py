@@ -7,11 +7,12 @@ while every response body stays in the standard FastAPI
 
 The deliberate exceptions are the confirmation-required outcomes: the
 release active-quantity confirmation (SLICE1_DATA_MODEL §8.2) carries
-the existing active distribution, and the Phase 5 route-deviation
-confirmation (PROJECT_PROFILE §17) carries the deviation itself,
-because the UI must show them before the user can confirm the intent —
-still no internal detail, only the data the confirmation dialog
-presents.
+the existing active distribution, the Phase 5 route-deviation
+confirmation (PROJECT_PROFILE §17) carries the deviation itself, and
+the Phase 10.5 receipt carries the internal blank-number MODIFY Work
+Orders it refuses to choose between (PROJECT_PROFILE §14), because the
+UI must show them before the user can confirm the intent — still no
+internal detail, only the data the confirmation dialog presents.
 """
 
 from typing import cast
@@ -27,6 +28,7 @@ from app.application.errors import (
     NotFoundError,
     RouteDeviationConfirmationRequiredError,
 )
+from app.application.intake import WorkOrderSelectionRequiredError
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
@@ -81,3 +83,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(RouteDeviationConfirmationRequiredError, route_deviation_handler)
+
+    async def work_order_selection_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Phase 10.5 (PROJECT_PROFILE §14): several internal
+        # blank-number MODIFY Work Orders could take a receipt, so the
+        # station must present them for an explicit choice. The body
+        # carries only what that selection dialog shows.
+        error = cast(WorkOrderSelectionRequiredError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": error.message,
+                "selection_required": True,
+                "work_orders": error.work_orders,
+            },
+        )
+
+    app.add_exception_handler(WorkOrderSelectionRequiredError, work_order_selection_handler)

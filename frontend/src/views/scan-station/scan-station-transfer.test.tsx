@@ -381,6 +381,11 @@ function handle(url: string, method: string, body: unknown): Response {
       })),
       operations: ops.map(operationRef),
       has_active_demand: mine.length > 0,
+      // Phase 10.5: a production Area with no active demand and no
+      // active quantity of the PN receives it (GUI_DESIGN §4.7 item 1).
+      intake_available: mine.length === 0 && terminal !== true,
+      part_number_known: true,
+      internal_work_orders: [],
       transfer_blocked_reason: terminal
         ? `Area 'Stockroom' is a terminal Area. Receiving finished quantity there is the Stockroom workflow, not a transfer.`
         : null,
@@ -1274,15 +1279,18 @@ test('a PN already in the Area offers to receive more from another Area', async 
   ).toBeInTheDocument();
 });
 
-test('a PN with nothing to receive shows the honest placeholder — no intake at the station', async () => {
+test('a PN with no active demand and no quantity opens Receive Quantity — nothing recorded', async () => {
   await renderStation();
 
+  // Phase 10.5 (GUI_DESIGN §4.7 item 1): the station INTRODUCES the PN
+  // instead of the former honest placeholder. Opening the wizard is a
+  // read — only `Confirm receipt` writes.
   scan('PF:PN:NEW-PART-01');
-  const box = await screen.findByRole('dialog', {
-    name: 'No quantity to receive',
-  });
-  expect(box).toHaveTextContent('no active Work Order Demand');
-  expect(box).toHaveTextContent('arrives with a later release');
+  const box = await screen.findByRole('dialog', { name: 'Receive Quantity' });
+  expect(box).toHaveTextContent('NEW-PART-01');
+  expect(box).toHaveTextContent(
+    'No changes are recorded until you review and confirm the final step.',
+  );
   expect(transferRequests()).toHaveLength(0);
 });
 

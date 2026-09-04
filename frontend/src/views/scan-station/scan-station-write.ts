@@ -33,6 +33,14 @@ export interface OneShotWrite<T> {
   submit: () => Promise<void>;
   /** Forget a previous rejection (before changing the intent). */
   clearError: () => void;
+  /**
+   * Start a NEW intent after an explicit refusal: a fresh
+   * `device_event_id`, no standing rejection. A refused request wrote
+   * nothing, so what follows is a different intent and must never
+   * replay the refused one. Never allowed while the outcome is
+   * unknown — that intent stays frozen behind its own id.
+   */
+  resetIntent: () => void;
   /** The confirmed result, once the server answered. */
   result: T | null;
 }
@@ -98,6 +106,13 @@ export function useOneShotWrite<T>({
 
   const clearError = useCallback(() => setServerError(null), []);
 
+  const resetIntent = useCallback(() => {
+    if (outcomeUnknown) return;
+    deviceEventId.current = newDeviceEventId();
+    setServerError(null);
+    setRejected(false);
+  }, [outcomeUnknown]);
+
   return {
     busy,
     serverError,
@@ -106,6 +121,7 @@ export function useOneShotWrite<T>({
     deviceEventId: deviceEventId.current,
     submit,
     clearError,
+    resetIntent,
     result,
   };
 }

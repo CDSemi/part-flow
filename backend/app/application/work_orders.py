@@ -174,7 +174,7 @@ def _iso(value: datetime.date | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def _work_order_snapshot(work_order: WorkOrder) -> dict[str, Any]:
+def work_order_snapshot(work_order: WorkOrder) -> dict[str, Any]:
     return {
         "work_order_number": work_order.work_order_number,
         "received_date": _iso(work_order.received_date),
@@ -183,7 +183,7 @@ def _work_order_snapshot(work_order: WorkOrder) -> dict[str, Any]:
     }
 
 
-def _demand_snapshot(demand: WorkOrderDemand) -> dict[str, Any]:
+def demand_snapshot(demand: WorkOrderDemand) -> dict[str, Any]:
     return {
         "work_order_id": demand.work_order_id,
         "part_number": demand.part_number,
@@ -635,7 +635,7 @@ def create_work_order(
         entity_type=AuditEntityType.WORK_ORDER,
         entity_id=str(work_order.id),
         before_data=None,
-        after_data=_work_order_snapshot(work_order),
+        after_data=work_order_snapshot(work_order),
         actor_reference=actor,
     )
     for demand in demands:
@@ -645,7 +645,7 @@ def create_work_order(
             entity_type=AuditEntityType.WORK_ORDER_DEMAND,
             entity_id=str(demand.id),
             before_data=None,
-            after_data=_demand_snapshot(demand),
+            after_data=demand_snapshot(demand),
             actor_reference=actor,
         )
     commit(session, _WORK_ORDER_CONFLICTS)
@@ -695,7 +695,7 @@ def update_work_order(
     work_order = detail.work_order
     demands_by_id = {demand.id: demand for demand in detail.demands}
 
-    header_before = _work_order_snapshot(work_order)
+    header_before = work_order_snapshot(work_order)
     header_changed = False
 
     # One demand line may appear at most once per save: intermediate
@@ -803,7 +803,7 @@ def update_work_order(
             # carrying only allocated quantity reaches the same guard
             # for its quantity floor alone (Phase 10).
             _guard_released_line_edit(demand, edit, released_quantity)
-        before = _demand_snapshot(demand)
+        before = demand_snapshot(demand)
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):
             demand.updated_at = func.now()
             audited.append((demand, before))
@@ -821,7 +821,7 @@ def update_work_order(
             entity_type=AuditEntityType.WORK_ORDER,
             entity_id=str(work_order.id),
             before_data=header_before,
-            after_data=_work_order_snapshot(work_order),
+            after_data=work_order_snapshot(work_order),
             actor_reference=actor,
         )
     for demand, before in audited:
@@ -831,7 +831,7 @@ def update_work_order(
             entity_type=AuditEntityType.WORK_ORDER_DEMAND,
             entity_id=str(demand.id),
             before_data=before,
-            after_data=_demand_snapshot(demand),
+            after_data=demand_snapshot(demand),
             actor_reference=actor,
         )
     for demand in created:
@@ -841,7 +841,7 @@ def update_work_order(
             entity_type=AuditEntityType.WORK_ORDER_DEMAND,
             entity_id=str(demand.id),
             before_data=None,
-            after_data=_demand_snapshot(demand),
+            after_data=demand_snapshot(demand),
             actor_reference=actor,
         )
 

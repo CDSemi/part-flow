@@ -230,6 +230,19 @@ def _ineligibility(session: Session, station: ScanStation, rows: list[PartMoveme
             "This action is itself a reversal. A reversal is permanent — record the"
             " intended action again instead of reversing the reversal."
         )
+    if _command_kind(rows) == "INTAKE":
+        # A `Receive Quantity` receipt (Phase 10.5) also creates or
+        # raises business demand — an internal Work Order and its
+        # WorkOrderDemand. The Movement-level reversal of
+        # PROJECT_PROFILE §16 restores production state only and never
+        # rewrites business demand, so reversing the receipt would
+        # leave demand behind that nothing produced. The correction
+        # path stays the ordinary production workflows.
+        return (
+            "This action received new quantity into production and created the"
+            " Work Order Demand behind it. It cannot be reversed from a station —"
+            " correct the quantity with the production workflows instead."
+        )
     if _command_kind(rows) == "STOCK" or any(
         row.movement_type == MovementType.STOCKED for row in rows
     ):

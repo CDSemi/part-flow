@@ -307,6 +307,42 @@ export interface TransferCandidate {
 export type ScanResolutionKind =
   'ALREADY_IN_AREA' | 'TRANSFER_SOURCE_AVAILABLE' | 'NO_TRANSFERABLE_QUANTITY';
 
+/**
+ * One internal blank-number MODIFY Work Order a `Receive Quantity`
+ * receipt may reuse (PROJECT_PROFILE §14). Presented by its business
+ * facts — the ids travel with the request only, because an internal
+ * key is never the user-facing Work Order identifier (§7).
+ */
+export interface InternalWorkOrder {
+  workOrderId: number;
+  workOrderDemandId: number;
+  receivedDate: string;
+  dueDate: string | null;
+  /** The quantity its existing demand line for this PN requests. */
+  requestedQuantity: number;
+  jobNumbers: string[];
+}
+
+interface InternalWorkOrderWire {
+  work_order_id: number;
+  work_order_demand_id: number;
+  received_date: string;
+  due_date: string | null;
+  requested_quantity: number;
+  job_numbers: string[];
+}
+
+function toInternalWorkOrder(wire: InternalWorkOrderWire): InternalWorkOrder {
+  return {
+    workOrderId: wire.work_order_id,
+    workOrderDemandId: wire.work_order_demand_id,
+    receivedDate: wire.received_date,
+    dueDate: wire.due_date,
+    requestedQuantity: wire.requested_quantity,
+    jobNumbers: wire.job_numbers,
+  };
+}
+
 export interface ScanResolution {
   partNumber: string;
   stationId: string;
@@ -315,7 +351,21 @@ export interface ScanResolution {
   inArea: FlowInArea[];
   candidates: TransferCandidate[];
   operations: OperationRef[];
+  /** Phase 10.5: a demand line of the PN still has a business shortage
+   * (`requested_quantity > allocated_quantity`), so its quantity
+   * belongs to a production release, not to a station receipt. */
   hasActiveDemand: boolean;
+  /** Phase 10.5: the station may INTRODUCE this PN here — no active
+   * demand, no active quantity anywhere, and an Area that can start
+   * production (GUI_DESIGN §4.7 item 1). */
+  intakeAvailable: boolean;
+  /** The PartNumber master already exists (the Step 1 copy tells a
+   * known PN from a new one). */
+  partNumberKnown: boolean;
+  /** The internal blank-number MODIFY Work Orders a MODIFY receipt may
+   * reuse; more than one REQUIRES an explicit selection and the client
+   * never picks one (PROJECT_PROFILE §14). */
+  internalWorkOrders: InternalWorkOrder[];
   /** Set when the station's Area can never receive a transfer. */
   transferBlockedReason: string | null;
   /** Several flows match: the operator selects exactly one. */
@@ -362,6 +412,9 @@ interface ScanResolutionWire {
   candidates: TransferCandidateWire[];
   operations: OperationRefWire[];
   has_active_demand: boolean;
+  intake_available: boolean;
+  part_number_known: boolean;
+  internal_work_orders: InternalWorkOrderWire[];
   transfer_blocked_reason: string | null;
   requires_selection: boolean;
   combine_groups: number[][];
@@ -413,6 +466,9 @@ export async function resolveScan(
     })),
     operations: wire.operations.map(toOperationRef),
     hasActiveDemand: wire.has_active_demand,
+    intakeAvailable: wire.intake_available,
+    partNumberKnown: wire.part_number_known,
+    internalWorkOrders: wire.internal_work_orders.map(toInternalWorkOrder),
     transferBlockedReason: wire.transfer_blocked_reason,
     requiresSelection: wire.requires_selection,
     combineGroups: wire.combine_groups,
@@ -955,6 +1011,154 @@ export function routeDeviationConfirmation(
   const deviation = record.route_deviation;
   if (!deviation || typeof deviation !== 'object') return null;
   return toRouteDeviation(deviation as RouteDeviationWire);
+}
+
+// ---------------------------------------------------------------------------
+// Receive Quantity — the MODIFY intake (Phase 10.5)
+// ---------------------------------------------------------------------------
+
+export interface ReceiptInput {
+  stationId: string;
+  partNumber: string;
+  /** The physically received quantity — no MAX and no default. */
+  quantity: number;
+  /** Editable default `MODIFY` (GUI_DESIGN §4.7), never forced. */
+  requestType: 'NEW' | 'MODIFY';
+  /** Editable default `FLOATING`, never forced. */
+  routeMode: 'FLOATING' | 'PLANNED';
+  /** Only a PLANNED receipt carries a Planned Route. */
+  routeTemplateId: number | null;
+  /** The Area's Operation; null when the Area resolves it itself. */
+  operationId: number | null;
+  /** Owned by the WorkOrderDemand — the PN never owns a due date. */
+  dueDate: string | null;
+  reason: string | null;
+  /** The explicitly selected internal blank-number MODIFY Work Order
+   * when several were plausible; null otherwise — the client never
+   * picks one itself. */
+  workOrderId: number | null;
+  /** Client-generated UUID, reused verbatim on every retry of the SAME
+   * confirmed intent (idempotency key). */
+  deviceEventId: string;
+}
+
+export interface ReceiptResult {
+  movementId: number;
+  quantityFlowId: number;
+  partNumber: string;
+  quantity: number;
+  requestType: 'NEW' | 'MODIFY';
+  routeMode: 'FLOATING' | 'PLANNED';
+  assignedRouteId: number | null;
+  areaId: number;
+  operationId: number;
+  /** QUEUED (Area with Machines) or PROCESSING (Area without). */
+  processingState: ProcessingState;
+  workOrderId: number;
+  workOrderDemandId: number;
+  /** An existing internal Work Order took this receipt (§14 reuse). */
+  workOrderReused: boolean;
+  reason: string | null;
+  stationId: string;
+  deviceEventId: string;
+  occurredAt: string;
+  /** False for an idempotent replay — nothing was recorded twice. */
+  created: boolean;
+}
+
+interface ReceiptResultWire {
+  movement_id: number;
+  quantity_flow_id: number;
+  part_number: string;
+  quantity: number;
+  request_type: 'NEW' | 'MODIFY';
+  route_mode: 'FLOATING' | 'PLANNED';
+  assigned_route_id: number | null;
+  area_id: number;
+  operation_id: number;
+  processing_state: ProcessingState;
+  work_order_id: number;
+  work_order_demand_id: number;
+  work_order_reused: boolean;
+  reason: string | null;
+  station_id: string;
+  device_event_id: string;
+  occurred_at: string;
+}
+
+/**
+ * Record the confirmed `Receive Quantity` (GUI_DESIGN §4.7,
+ * PROJECT_PROFILE §14). Resolves ONLY when the server confirmed the
+ * write: 201 for a fresh receipt, 200 for an idempotent replay of the
+ * same `deviceEventId` + same intent. Every rejection — active demand
+ * or active quantity that appeared meanwhile, a stale station / Area /
+ * Operation context, a terminal Area, several plausible internal Work
+ * Orders — is an `ApiError` and nothing was recorded.
+ */
+export async function receiveQuantity(
+  input: ReceiptInput,
+): Promise<ReceiptResult> {
+  const { status, data } = await apiRequestWithStatus<ReceiptResultWire>(
+    `/api/scan-stations/${encodeURIComponent(input.stationId)}/receipts`,
+    {
+      method: 'POST',
+      body: {
+        part_number: input.partNumber,
+        quantity: input.quantity,
+        request_type: input.requestType,
+        route_mode: input.routeMode,
+        route_template_id: input.routeTemplateId,
+        operation_id: input.operationId,
+        due_date: input.dueDate,
+        reason: input.reason,
+        work_order_id: input.workOrderId,
+        device_event_id: input.deviceEventId,
+      },
+    },
+  );
+  return {
+    movementId: data.movement_id,
+    quantityFlowId: data.quantity_flow_id,
+    partNumber: data.part_number,
+    quantity: data.quantity,
+    requestType: data.request_type,
+    routeMode: data.route_mode,
+    assignedRouteId: data.assigned_route_id,
+    areaId: data.area_id,
+    operationId: data.operation_id,
+    processingState: data.processing_state,
+    workOrderId: data.work_order_id,
+    workOrderDemandId: data.work_order_demand_id,
+    workOrderReused: data.work_order_reused,
+    reason: data.reason,
+    stationId: data.station_id,
+    deviceEventId: data.device_event_id,
+    occurredAt: data.occurred_at,
+    created: status === 201,
+  };
+}
+
+/**
+ * The internal blank-number MODIFY Work Orders a refused receipt asks
+ * the operator to choose between (the backend's 409 with
+ * `selection_required`), or null for any other failure. Nothing was
+ * recorded either way.
+ */
+export function workOrderSelectionRequired(
+  error: unknown,
+): InternalWorkOrder[] | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const body = error.body;
+  if (!body || typeof body !== 'object') return null;
+  const record = body as {
+    selection_required?: unknown;
+    work_orders?: unknown;
+  };
+  if (record.selection_required !== true) return null;
+  if (!Array.isArray(record.work_orders)) return null;
+  return (record.work_orders as InternalWorkOrderWire[]).map(
+    toInternalWorkOrder,
+  );
 }
 
 // ---------------------------------------------------------------------------

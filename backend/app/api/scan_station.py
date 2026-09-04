@@ -134,6 +134,22 @@ Phase 9 — Undo, corrections, and auditable quantity events
   original action, quantity, source/destination, Machine, timestamp,
   the exact effect of the reversal, and whether Undo is currently
   eligible (with the reason when it is not). A read, no locks;
+Phase 10.5 — ``POST /scan-stations/{station_id}/receipts``: the
+confirmed `Receive Quantity` of GUI_DESIGN §4.7 / PROJECT_PROFILE §14.
+One transaction introduces the PN's quantity where no active Work
+Order Demand remains: the PartNumber master on first use, the internal
+blank-number Work Order created or reused, the WorkOrderDemand, the
+QuantityFlow, an AssignedRoute snapshot for ``PLANNED`` only, and the
+immutable ``RECEIVED`` Movement carrying the station and the resolved
+Operation. 201 fresh / 200 idempotent replay / 409 mismatched reuse;
+409 with nothing recorded for a stale station, Area or Operation
+context, a terminal Area, active quantity or active demand that
+appeared meanwhile, and 409 with ``selection_required`` listing the
+candidates when several internal blank-number MODIFY Work Orders are
+plausible — a first match is never guessed. The PN resolution reports
+``intake_available``, ``part_number_known`` and those
+``internal_work_orders``.
+
 - ``POST /scan-stations/{station_id}/undos`` — reverse the COMPLETE
   command recorded under ``reverses_device_event_id`` as one: a
   compensating ``REVERSED`` Movement per original row (originals
@@ -158,6 +174,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
 from app.api.dependencies import SessionDep
 from app.application import (
     direct_processing,
+    intake,
     machine_processing,
     merges,
     quantity_events,
@@ -395,6 +412,35 @@ class TransferCandidateResponse(BaseModel):
     work_order: WorkOrderContextResponse | None
 
 
+class InternalWorkOrderResponse(BaseModel):
+    """One reusable internal blank-number MODIFY Work Order (§14).
+
+    Presented by its business facts; the ids travel for the request
+    only — an internal key is never the user-facing Work Order
+    identifier (PROJECT_PROFILE §7).
+    """
+
+    work_order_id: int
+    work_order_demand_id: int
+    received_date: datetime.date
+    due_date: datetime.date | None
+    requested_quantity: int
+    job_numbers: list[str]
+
+
+def _internal_work_order(
+    candidate: intake.InternalWorkOrderCandidate,
+) -> InternalWorkOrderResponse:
+    return InternalWorkOrderResponse(
+        work_order_id=candidate.work_order_id,
+        work_order_demand_id=candidate.work_order_demand_id,
+        received_date=candidate.received_date,
+        due_date=candidate.due_date,
+        requested_quantity=candidate.requested_quantity,
+        job_numbers=candidate.job_numbers,
+    )
+
+
 class ScanResolveResponse(BaseModel):
     part_number: str
     station_id: str
@@ -405,7 +451,17 @@ class ScanResolveResponse(BaseModel):
     # combined. More than one means the operator must select.
     candidates: list[TransferCandidateResponse]
     operations: list[OperationRef]
+    # Phase 10.5: a demand line of the PN still has a business
+    # shortage (`requested_quantity > allocated_quantity`), so its
+    # quantity belongs to a production release, not to a receipt.
     has_active_demand: bool
+    # Phase 10.5 `Receive Quantity`: the station may introduce this PN
+    # here, whether its PartNumber master already exists, and the
+    # internal blank-number MODIFY Work Orders a MODIFY receipt may
+    # reuse (several REQUIRE an explicit selection — never a guess).
+    intake_available: bool
+    part_number_known: bool
+    internal_work_orders: list[InternalWorkOrderResponse]
     transfer_blocked_reason: str | None
     # Several flows match: the operator must select exactly one.
     requires_selection: bool
@@ -458,6 +514,11 @@ def resolve_scan(
         ],
         operations=[_operation_ref(operation) for operation in result.operations],
         has_active_demand=result.has_active_demand,
+        intake_available=result.intake_available,
+        part_number_known=result.part_number_known,
+        internal_work_orders=[
+            _internal_work_order(candidate) for candidate in result.internal_work_orders
+        ],
         transfer_blocked_reason=result.transfer_blocked_reason,
         requires_selection=result.requires_selection,
         combine_groups=result.combine_groups,
@@ -1031,6 +1092,112 @@ def add_quantity(
         area_id=result.area_id,
         operation_id=result.operation_id,
         processing_state=result.processing_state.value,
+        reason=result.reason,
+        station_id=result.station_id,
+        device_event_id=result.device_event_id,
+        occurred_at=result.occurred_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Receive Quantity — the MODIFY intake (Phase 10.5)
+# ---------------------------------------------------------------------------
+
+
+class ReceiptRequest(BaseModel):
+    """The confirmed `Receive Quantity` (GUI_DESIGN §4.7 step 3).
+
+    The station sends the whole intent exactly as the operator
+    confirmed it; `Confirm receipt` is the only write point.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    part_number: str
+    # No MAX and no default: the physically received quantity.
+    quantity: StrictInt
+    # Editable defaults live in the UI (MODIFY / FLOATING); the
+    # command never assumes one.
+    request_type: str
+    route_mode: str
+    # Only a PLANNED receipt carries a Planned Route.
+    route_template_id: int | None = None
+    # Optional when the Area resolves it (single active Operation);
+    # required when several are configured.
+    operation_id: int | None = None
+    # Owned by the WorkOrderDemand — the PN never owns a due date.
+    due_date: datetime.date | None = None
+    reason: str | None = None
+    # The explicitly selected internal blank-number MODIFY Work Order
+    # when several were plausible; omitted otherwise.
+    work_order_id: int | None = None
+    device_event_id: str
+
+
+class ReceiptResponse(BaseModel):
+    """The committed receipt, read from its immutable Movement."""
+
+    movement_id: int
+    quantity_flow_id: int
+    part_number: str
+    quantity: int
+    request_type: Literal["NEW", "MODIFY"]
+    route_mode: Literal["FLOATING", "PLANNED"]
+    assigned_route_id: int | None
+    area_id: int
+    operation_id: int
+    # QUEUED (Area with Machines) or PROCESSING (Area without).
+    processing_state: ProcessingStateLiteral
+    work_order_id: int
+    work_order_demand_id: int
+    # An existing internal Work Order took this receipt (§14 reuse).
+    work_order_reused: bool
+    reason: str | None
+    station_id: str
+    device_event_id: str
+    occurred_at: datetime.datetime
+
+
+@router.post("/scan-stations/{station_id}/receipts")
+def receive_quantity(
+    station_id: str, body: ReceiptRequest, session: SessionDep, response: Response
+) -> ReceiptResponse:
+    """Record one confirmed `Receive Quantity` as ONE transaction: 201 fresh,
+    200 on an idempotent replay, 409 on a mismatched id reuse, on a stale
+    station / Area / Operation context, on a terminal Area, on active
+    quantity or active demand that appeared meanwhile, and 409 with
+    ``selection_required`` when several internal blank-number MODIFY Work
+    Orders are plausible; 422 for an invalid PN, quantity, Request Type,
+    Route Mode or Planned Route."""
+    result = intake.receive_quantity(
+        session,
+        station_id=station_id,
+        part_number=body.part_number,
+        quantity=body.quantity,
+        request_type=body.request_type,
+        route_mode=body.route_mode,
+        route_template_id=body.route_template_id,
+        operation_id=body.operation_id,
+        due_date=body.due_date,
+        reason=body.reason,
+        work_order_id=body.work_order_id,
+        device_event_id=body.device_event_id,
+    )
+    response.status_code = 201 if result.created else 200
+    return ReceiptResponse(
+        movement_id=result.movement_id,
+        quantity_flow_id=result.quantity_flow_id,
+        part_number=result.part_number,
+        quantity=result.quantity,
+        request_type=result.request_type.value,
+        route_mode=result.route_mode.value,
+        assigned_route_id=result.assigned_route_id,
+        area_id=result.area_id,
+        operation_id=result.operation_id,
+        processing_state=result.processing_state.value,
+        work_order_id=result.work_order_id,
+        work_order_demand_id=result.work_order_demand_id,
+        work_order_reused=result.work_order_reused,
         reason=result.reason,
         station_id=result.station_id,
         device_event_id=result.device_event_id,

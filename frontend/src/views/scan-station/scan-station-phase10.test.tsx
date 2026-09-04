@@ -300,6 +300,9 @@ function handle(url: string, method: string, body: unknown): Response {
       })),
       operations: ops.map(operationRef),
       has_active_demand: demands.some((d) => d.pn === pn),
+      intake_available: false,
+      part_number_known: true,
+      internal_work_orders: [],
       transfer_blocked_reason: terminal
         ? "Area 'Stockroom' is a terminal Area. Receiving finished quantity there is the Stockroom workflow, not a transfer."
         : null,

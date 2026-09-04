@@ -123,7 +123,7 @@ FINGERPRINT_KEY: Final = "request_fingerprint"
 COMMAND_KEY: Final = "command"
 
 CommandKind = Literal[
-    "ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE", "SCRAP", "ADD", "UNDO", "STOCK"
+    "ASSIGN", "QUEUE", "DONE", "TRANSFER", "MERGE", "SCRAP", "ADD", "UNDO", "STOCK", "INTAKE"
 ]
 
 _MOVEMENT_TYPE_BY_KIND: Final[dict[CommandKind, MovementType]] = {

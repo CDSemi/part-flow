@@ -1338,6 +1338,8 @@ Removing a Work Order Demand must never delete the PartNumber master, any Quanti
 
 The operator-facing dialog is titled **Receive Quantity**, with **Confirm receipt** as the final confirming action; `intake` remains the internal workflow name (identifiers, comments) and never renders to operators.
 
+A Work Order Demand counts as **active** here by its remaining business shortage: `requested_quantity > allocated_quantity`. Released quantity never decides it — a line released in full but not yet allocated is still active demand — and `completed_at` is the aggregate state of the whole Work Order (§8.2), never the state of one line: a fully allocated line is inactive even while its Work Order stays open because of its other lines. While any active demand of the PN exists, its quantity belongs to an explicit production release from Management (§13) and the Scan Station never receives it.
+
 When a scan opens the intake flow (PN has no active Work Order Demand):
 
 1. Scan or enter the PN (created on first valid use, §8.1).
@@ -1348,7 +1350,11 @@ When a scan opens the intake flow (PN has no active Work Order Demand):
 
 On confirmation, the transaction creates or reuses the PartNumber, creates or reuses an applicable internal blank-number MODIFY Work Order, creates the WorkOrderDemand and QuantityFlow, records the initial Movement, establishes the current position, and places quantity in the Area queue (Area with Machines) or directly into Area processing (Area without Machines).
 
-Work Order reuse must never guess: if the same PN has exactly one clearly applicable active blank-number MODIFY Work Order, reuse it; if multiple are plausible, an explicit selection dialog is required.
+Work Order reuse must never guess: if the same PN has exactly one clearly applicable active blank-number MODIFY Work Order — no external number, not completed, and already carrying a `MODIFY` demand line for that PN — reuse it; if multiple are plausible, an explicit selection is required and no first match is taken.
+
+Reuse keeps the one-canonical-PN-per-Work-Order rule intact: the reused Work Order's existing demand line for the PN is **raised** by the received quantity — the restricted edit of §13, where raising a released line's requested quantity is always valid — instead of the Work Order gaining a second line for the same PN, and the receipt releases exactly that increment. Only what restricted edit permits is touched: the requested quantity and, when the operator entered one, the due date. An existing line's Request Type, requester, reason and notes are never rewritten by a station receipt — the receipt's own reason travels on its immutable Movement. A `NEW` receipt never reuses (reuse is defined for blank-number MODIFY Work Orders only) and always creates its own internal Work Order.
+
+A confirmed receipt is not undone at the Scan Station: the reversal of §16 restores production state and never rewrites the business demand a receipt created or raised, so a mistaken receipt is corrected through the production correction workflows rather than half-reversed.
 
 If the PN already has active quantity, the system must explicitly confirm whether the new quantity joins an existing Quantity Flow or creates a separate one. The system must never infer this from PN identity alone.
 

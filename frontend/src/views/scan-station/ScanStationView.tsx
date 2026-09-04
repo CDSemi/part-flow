@@ -47,6 +47,7 @@ import type {
   MachineRef,
   OperationRef,
   QuantityAdditionResult,
+  ReceiptResult,
   ScanResolution,
   ScrapResult,
   StationContext,
@@ -75,6 +76,7 @@ import type { AreaAssignment } from '../area-monitoring';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { normalizeScanInput, parseScan } from './barcode';
 import { AllocationDialog } from './scan-station-allocation-dialog';
+import { IntakeDialog } from './scan-station-intake-dialog';
 import { CombineQuantitiesDialog } from './scan-station-combine-dialog';
 import {
   AddQuantityDialog,
@@ -501,6 +503,15 @@ type Flow =
       candidate: TransferCandidate;
     }
   | { kind: 'in-area'; resolution: ScanResolution; parent?: Flow }
+  | {
+      // Receive Quantity (Phase 10.5, GUI_DESIGN §4.7 item 1): the PN
+      // has no active Work Order Demand and no active quantity, so the
+      // station INTRODUCES it here — including a PN seen for the first
+      // time.
+      kind: 'intake';
+      resolution: ScanResolution;
+      parent?: Flow;
+    }
   | { kind: 'no-quantity'; resolution: ScanResolution; parent?: Flow }
   | {
       // Assign to Machine: Machine-first carries the scanned Machine
@@ -831,6 +842,13 @@ function StationView({
       }
       if (resolution.candidates.length > 1) {
         setFlow({ kind: 'source-select', resolution, parent });
+        return;
+      }
+      if (resolution.intakeAvailable) {
+        // Nothing to transfer and no active Work Order Demand: the PN
+        // is RECEIVED here (GUI_DESIGN §4.7 item 1) — the server
+        // judged the entry condition, the station never guesses it.
+        setFlow({ kind: 'intake', resolution, parent });
         return;
       }
       setFlow({ kind: 'no-quantity', resolution, parent });
@@ -1309,6 +1327,39 @@ function StationView({
       focusScan();
     },
     [context, inventory, focusScan, ready, recordAction],
+  );
+
+  /** A receipt the SERVER confirmed (Phase 10.5): the quantity, its
+   * internal Work Order Demand and the `RECEIVED` Movement exist now.
+   * The receipt is NOT an Undo target — reversing it would leave the
+   * business demand it created behind — so it joins the raw session
+   * log exactly like the Stockroom `STOCKED` command. */
+  const completeReceipt = useCallback(
+    (result: ReceiptResult) => {
+      const areaName = ready?.area.name ?? 'this Area';
+      const queued = result.processingState === 'QUEUED';
+      setHistory((stack) => [
+        ...stack,
+        {
+          pn: result.partNumber,
+          summary: `RECEIVED · ${result.requestType} · ${result.routeMode} · ${result.quantity} pcs into ${areaName}`,
+          deviceEventId: result.deviceEventId,
+        },
+      ]);
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `${result.partNumber} × ${result.quantity} received into ${areaName}${queued ? ' queue' : ''}`,
+        detail: result.created
+          ? `Receipt recorded. The quantity is now ${queued ? 'waiting in the Area queue' : 'in processing at this Area'} under ${result.workOrderReused ? 'the existing internal Work Order' : 'a new internal Work Order'} without an external number. Recorded by the server (RECEIVED #${result.movementId}).`
+          : `This receipt was already recorded by the server (RECEIVED #${result.movementId}) — nothing was recorded twice.`,
+      });
+      context.reload();
+      inventory.reload();
+      setFlow(null);
+      focusScan();
+    },
+    [context, inventory, focusScan, ready],
   );
 
   /** An Undo the SERVER confirmed (Phase 9, §4.5): the undone entry
@@ -2129,6 +2180,19 @@ function StationView({
           }
           onBack={backTo(flow.parent)}
           onCancel={cancelFlow}
+        />
+      )}
+      {flow?.kind === 'intake' && (
+        <IntakeDialog
+          station={station}
+          resolution={flow.resolution}
+          hasMachines={hasMachines}
+          writeBlocked={writeBlocked}
+          onBack={backTo(flow.parent)}
+          onCancel={cancelFlow}
+          onDone={completeReceipt}
+          onRejected={refreshAfterRejection}
+          onAbandonUnknown={() => abandonUnknown('Receipt')}
         />
       )}
       {flow?.kind === 'no-quantity' && (
@@ -3224,7 +3288,7 @@ function NoQuantityDialog({
             ? resolution.transferBlockedReason
             : resolution.hasActiveDemand
               ? 'This Part Number has no active production quantity in another Area. Release quantity from its Work Order in Management → Work Orders first.'
-              : 'This Part Number has no active Work Order Demand and no production quantity. Receiving new quantity at the station arrives with a later release — create the demand in Management → Work Orders.'}
+              : 'This Part Number has no active production quantity that can be received at this Area.'}
       </div>
       {resolution.scrappedQuantity > 0 ? (
         <Guidance tone="info">

@@ -49,10 +49,17 @@ quantity on each Machine (the Machine cards — ON_MACHINE quantity only,
 with the derived Machine operational state), directly processing
 quantity (Areas without Machines — no placeholder cards, no
 queued/on-Machine figures) and finished quantity (READY_TO_TRANSFER —
-Area summary, never a Machine card). Boundaries: no Worker barcodes, no
-Receive Quantity intake from the station (the resolution reports
-whether active demand exists so the UI can present the honest
-placeholder).
+Area summary, never a Machine card). Boundaries: no Worker barcodes.
+
+Receive Quantity (Phase 10.5, PROJECT_PROFILE §14): the resolution
+also reports whether the station may INTRODUCE this PN here — no
+active Work Order Demand (a demand line with a remaining business
+shortage), no active quantity anywhere, and an Area that can start
+production — together with the internal blank-number MODIFY Work
+Orders a MODIFY receipt may reuse and whether the PartNumber master
+already exists. The read model judges the entry condition; the command
+(`app.application.intake`) re-judges it authoritatively when it
+writes.
 
 Stockroom (Phase 10): at a station bound to a terminal Area the same
 resolution lists the PN's candidates as the sources the operator STOCKS
@@ -66,7 +73,7 @@ from typing import Final, Literal, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application import allocations
+from app.application import allocations, intake
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
     area_has_machines,
@@ -268,7 +275,21 @@ class ScanResolution(NamedTuple):
     in_area: list[FlowInArea]
     candidates: list[TransferCandidate]
     operations: list[Operation]
+    # Phase 10.5: the PN still has a business shortage somewhere
+    # (`intake.has_active_demand` — `requested_quantity >
+    # allocated_quantity` on any of its demand lines). While it does,
+    # quantity belongs to a production release from Management and the
+    # station never receives it (PROJECT_PROFILE §14, GUI_DESIGN §4.7).
     has_active_demand: bool
+    # Phase 10.5 `Receive Quantity`: the station may introduce this PN
+    # here — no active demand, no active quantity anywhere, and an
+    # Area that can start production. With the candidates a MODIFY
+    # receipt may reuse (§14 — several REQUIRE an explicit selection)
+    # and whether the PartNumber master already exists (the Step 1
+    # copy tells a known PN from a new one).
+    intake_available: bool
+    part_number_known: bool
+    internal_work_orders: list[intake.InternalWorkOrderCandidate]
     # Set when the station's Area can never receive a transfer
     # (terminal Area): candidates are still listed for information.
     transfer_blocked_reason: str | None
@@ -447,10 +468,7 @@ def resolve_part_number_scan(
             )
         )
 
-    has_active_demand = (
-        session.scalar(select(WorkOrderDemand.id).where(WorkOrderDemand.part_number == pn).limit(1))
-        is not None
-    )
+    receive = intake.intake_context(session, pn, area, has_active_quantity=bool(flows))
     resolution: Resolution
     if in_area:
         resolution = "ALREADY_IN_AREA"
@@ -473,7 +491,10 @@ def resolve_part_number_scan(
         in_area=in_area,
         candidates=candidates,
         operations=operations,
-        has_active_demand=has_active_demand,
+        has_active_demand=receive.has_active_demand,
+        intake_available=receive.available,
+        part_number_known=receive.part_number_known,
+        internal_work_orders=receive.work_orders,
         transfer_blocked_reason=blocked,
         requires_selection=len(in_area) > 1 or (not in_area and len(candidates) > 1),
         combine_groups=combinable_groups(

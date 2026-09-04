@@ -100,8 +100,8 @@ from app.infrastructure.models import (
 # carries the informational initiating WorkOrderDemand (and actor,
 # until authentication exists — Phase 14).
 _FINGERPRINT_KEY: Final = "request_fingerprint"
-_CONTEXT_KEY: Final = "context"
-_DEMAND_ID_KEY: Final = "work_order_demand_id"
+CONTEXT_KEY: Final = "context"
+DEMAND_ID_KEY: Final = "work_order_demand_id"
 _ACTOR_KEY: Final = "actor"
 
 _DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
@@ -204,7 +204,7 @@ def _request_fingerprint(
 # ---------------------------------------------------------------------------
 
 
-def _acquire_part_number_release_lock(session: Session, part_number: str) -> None:
+def acquire_part_number_release_lock(session: Session, part_number: str) -> None:
     """Serialize releases of one canonical PN for this transaction.
 
     ``pg_advisory_xact_lock`` blocks until the concurrent release of
@@ -384,7 +384,7 @@ def release_to_production(
     # Blocks until any concurrent release of this PN finishes, so two
     # unconfirmed releases can never both pass the active-quantity
     # check below.
-    _acquire_part_number_release_lock(session, pn)
+    acquire_part_number_release_lock(session, pn)
 
     # -- Idempotency RE-CHECK after the blocking lock --------------------
     # A concurrent identical retry may have waited here while the
@@ -561,7 +561,7 @@ def release_to_production(
     session.add(flow)
     flush(session, {})
 
-    context: dict[str, Any] = {_DEMAND_ID_KEY: demand.id}
+    context: dict[str, Any] = {DEMAND_ID_KEY: demand.id}
     if actor is not None:
         context[_ACTOR_KEY] = actor
     movement = PartMovement(
@@ -580,7 +580,7 @@ def release_to_production(
         occurred_at=func.now(),
         server_received_at=func.now(),
         device_event_id=event_id,
-        metadata_={_FINGERPRINT_KEY: fingerprint, _CONTEXT_KEY: context},
+        metadata_={_FINGERPRINT_KEY: fingerprint, CONTEXT_KEY: context},
     )
     session.add(movement)
 
@@ -632,7 +632,7 @@ def released_quantities(session: Session, work_order_demand_ids: Collection[int]
     ids = [int(demand_id) for demand_id in work_order_demand_ids]
     if not ids:
         return {}
-    demand_id_value = PartMovement.metadata_[_CONTEXT_KEY][_DEMAND_ID_KEY].as_integer()
+    demand_id_value = PartMovement.metadata_[CONTEXT_KEY][DEMAND_ID_KEY].as_integer()
     rows = session.execute(
         select(demand_id_value, func.sum(PartMovement.quantity))
         .where(
