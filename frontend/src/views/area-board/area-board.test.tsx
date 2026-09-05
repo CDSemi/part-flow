@@ -878,6 +878,117 @@ test('Sort: Priority puts every Hot rank before every unranked row', async () =>
   expect(pns).toEqual(['2027-60-8114-00', '0455-20-0118-03', '214-406']);
 });
 
+test('Sort: Quantity compares the aggregated PN total, not one quantity', async () => {
+  // Deburr holds 81-1042 as TWO quantities of 6 (12 together) and
+  // 78-04-0031 as one of 10: sorting per quantity would put the 10
+  // first, sorting the PN rows puts 12 first.
+  stubFetch(() => {
+    const payload = boardPayload();
+    const deburr = payload.areas[0].inventory as {
+      lines: {
+        part_number: string;
+        total_quantity: number;
+        flows: ReturnType<typeof flowWire>[];
+      }[];
+      total_quantity: number;
+    };
+    const second = flowWire({
+      id: 71,
+      pn: '81-1042',
+      qty: 6,
+      state: 'PROCESSING',
+      minutes: 100,
+      wo: '007021',
+    });
+    const line = deburr.lines.find((item) => item.part_number === '81-1042')!;
+    line.flows.push(second);
+    line.total_quantity = 12;
+    const other = deburr.lines.find(
+      (item) => item.part_number === '78-04-0031',
+    )!;
+    other.flows[0].quantity = 10;
+    other.total_quantity = 10;
+    deburr.total_quantity = 22;
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+  fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'qty' } });
+
+  const deburrColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Deburr'),
+  )!;
+  const rows = Array.from(deburrColumn.querySelectorAll('.mc-list li'));
+  expect(
+    rows.map((row) => [
+      row.querySelector('.p')?.textContent,
+      row.querySelector('.r1 .q')?.textContent,
+    ]),
+  ).toEqual([
+    ['81-1042', '12'],
+    ['78-04-0031', '10'],
+  ]);
+
+  // The detail still sorts the separate quantities themselves, so the
+  // single 10 leads the two 6s there.
+  openArea(/^Deburr/);
+  const detail = Array.from(
+    document.querySelectorAll('.abd-summary .mc-list li'),
+    (row) => [
+      row.querySelector('.p')?.textContent,
+      row.querySelector('.r1 .q')?.textContent,
+    ],
+  );
+  expect(detail).toEqual([
+    ['81-1042', '6'],
+    ['81-1042', '6'],
+    ['78-04-0031', '10'],
+  ]);
+});
+
+test('search reaches every open demand of a PN, not only the defining one', async () => {
+  await renderBoard();
+  const search = screen.getByLabelText('Search PN, WO, Job Number');
+
+  // `007050` / `18999` belong to the Hot PN's SECOND open demand — the
+  // one the row summarizes as `+1 more`.
+  fireEvent.change(search, { target: { value: '007050' } });
+  let latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
+  )!;
+  expect(
+    Array.from(
+      latheColumn.querySelectorAll('.mc-list .p'),
+      (el) => el.textContent,
+    ),
+  ).toEqual(['2027-60-8114-00']);
+
+  fireEvent.change(search, { target: { value: '18999' } });
+  latheColumn = Array.from(document.querySelectorAll('.ms-col')).find((col) =>
+    col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
+  )!;
+  expect(
+    Array.from(
+      latheColumn.querySelectorAll('.mc-list .p'),
+      (el) => el.textContent,
+    ),
+  ).toEqual(['2027-60-8114-00']);
+
+  // The detail narrows on the same demand context.
+  openArea(/^Lathe/);
+  expect(
+    Array.from(
+      document.querySelectorAll('.abd-summary .mc-list .p'),
+      (el) => el.textContent,
+    ),
+  ).toEqual(['2027-60-8114-00', '2027-60-8114-00', '2027-60-8114-00']);
+
+  // A Job Number of no open demand still matches nothing.
+  fireEvent.change(screen.getByLabelText('Search PN, WO, Job Number'), {
+    target: { value: 'NOSUCHJOB' },
+  });
+  expect(document.querySelector('.abd-summary .mc-list li')).toBeNull();
+});
+
 test('Sort: Due date applies canonical order — Hot first', async () => {
   await renderBoard();
   openArea(/^Lathe/);

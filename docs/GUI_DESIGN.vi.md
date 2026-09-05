@@ -500,7 +500,10 @@ Area column có clickable header/color/name/description/Operation chips; meaning
 stats; **một row mỗi Part Number** (các quantity riêng biệt gộp vào chip portion
 của row đó); shared PN-row components với Hot, quantity, WO/Job, due countdown, portion
 context, time, scrap; explicit empty. Terminal shows stocked pcs/PNs. Search filter
-list, sort trong mỗi column. Mobile dots/buttons derive active page từ scroll,
+list (khớp MỌI open demand của PN, kể cả demand nằm trong `+N more`), sort trong
+mỗi column SAU khi gộp theo PN — `Quantity` so tổng của PN (`6 + 6` trên `10`),
+`Time in Area` lấy portion cũ nhất, `Priority`/`Due date` giữ nguyên semantics;
+per-Area detail vẫn sort từng quantity riêng. Mobile dots/buttons derive active page từ scroll,
 Summary-on stacks overview; click header jump tới corresponding detail page.
 
 ## 6.3 Per-Area detail — shared monitoring layout
@@ -549,8 +552,13 @@ gộp thành một giá trị mơ hồ, cũng không âm thầm rút còn cái �
 complete là lịch sử và không cấp gì cả, kể cả khi quantity nó release vẫn còn
 trong Area: row đó đọc `WO — · —` với `No due date` thay vì mượn context không
 còn thuộc về nó. Demand mà quantity BẮT NGUỒN từ đó vẫn nằm trên chính quantity
-như provenance — đó là thứ row và recap của Scan Station nêu, vì operator sắp
-thao tác trên chính lô đó — và hai thứ không bao giờ trộn trong một dòng. Mỗi
+như provenance, và provenance **chỉ là context của workflow và audit**: nó nêu
+đúng lô trong dialog thao tác, confirmation và Last Action recap của Scan
+Station, nơi operator sắp thao tác trên chính lô đó. Nó không bao giờ cấp dữ
+liệu cho một row monitoring, ở cả hai surface — `In this Area now` của station
+và row của Area Board là MỘT presentation, nên một quantity không thể đọc thành
+làm CHO thứ này ở station và thứ khác trên board — và hai thứ không bao giờ
+trộn trong một dòng. Mỗi
 row còn mang giá trị monitoring cố định của CHÍNH quantity: timestamp vào Area
 (đọc qua mọi nhánh lineage nên quantity đã merge dated theo nhánh cũ nhất) và
 Machine ĐÃ HOÀN THÀNH quantity finished — báo từ chính quantity, nên Machine
@@ -564,8 +572,10 @@ request in flight, refresh ngay khi kết nối trở lại): refresh lỗi gi�
 chỉnh cuối và chuyển status thành `Feed stale — reconnecting`, load đầu lỗi là
 error state có Retry, Department không có Area active là empty state tường minh,
 và `?state=loading|empty|error|long` vẫn render preview development mà không
-request. Search, bốn thứ tự sort (`Priority` xếp MỌI Hot rank trước mọi row
-không rank, bất kể số rank lớn tới đâu) và các lựa chọn layout (Wrap columns,
+request. Search (chạm tới mọi open demand của PN, không chỉ demand đứng tên
+row), bốn thứ tự sort (áp lên overview SAU khi gộp theo PN, nên `Quantity` so
+tổng của PN trong Area; `Priority` xếp MỌI Hot rank trước mọi row không rank,
+bất kể số rank lớn tới đâu) và các lựa chọn layout (Wrap columns,
 Summary toggle và phân trang màn hình hẹp) là presentation state của view — Area
 Board không có canonical order để server sở hữu, khác Production Board. Mock
 dataset Phase 2 của board này đã bỏ. **Chưa có:** highlight thời gian chờ theo
@@ -933,10 +943,14 @@ session không còn shift end.
   Area, đếm một lần, các quantity riêng biệt gộp vào chip portion, không mất
   không trùng — còn **per-Area detail theo từng quantity**. Hot rank, due
   countdown, WO Number và Job Numbers của row lấy từ **OPEN demand của PN** theo
-  canonical order: demand quyết định đứng tên row, các demand còn lại nêu `+N
-  more` kèm tooltip đầy đủ, Work Order đã complete không cấp gì (`WO — · —`,
-  `No due date`), còn demand nguồn gốc ở lại trên quantity làm provenance cho
-  Scan Station. Quantity finished giữ Machine hoàn thành kể cả sau khi Machine
+  canonical order — trên CẢ HAI surface, kể cả `In this Area now` của Scan
+  Station: demand quyết định đứng tên row, các demand còn lại nêu `+N more` kèm
+  tooltip đầy đủ và đều tìm được bằng search, Work Order đã complete không cấp
+  gì (`WO — · —`, `No due date`), còn demand nguồn gốc ở lại trên quantity làm
+  **provenance chỉ cho workflow và audit** — dialog thao tác và recap của Scan
+  Station nêu nó, không bao giờ là row monitoring. Search và sort của overview
+  làm việc trên row PN đã gộp: search khớp mọi open demand của PN, và `Quantity`
+  so tổng của PN trong Area chứ không so một quantity. Quantity finished giữ Machine hoàn thành kể cả sau khi Machine
   đó retired; Stockroom hiện stocked kèm `allocated a/n`. Toolbar thêm **feed
   status** `● Live` / `Feed stale — reconnecting` như Production Board;
   `Total PNs` / `PNs` đếm Part Number chứ không đếm row, và sort `Priority` xếp

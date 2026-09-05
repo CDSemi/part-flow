@@ -76,8 +76,10 @@ Production Board + Area Board của Phase 11:
   terminal Stockroom. All Areas overview theo PN (một row mỗi Part Number trong
   một Area, các quantity riêng biệt gộp vào chip portion) còn per-Area detail
   giữ một row mỗi quantity thao tác được; Hot rank, due date và Job Numbers của
-  row lấy từ OPEN Work Order Demand của PN — không lấy Work Order đã complete mà
-  quantity tình cờ bắt nguồn (cái đó ở lại trên quantity làm provenance) — và
+  row monitoring lấy từ OPEN Work Order Demand của PN trên cả hai bề mặt, kể cả
+  Scan Station — không lấy Work Order đã complete mà quantity tình cờ bắt nguồn
+  (cái đó ở lại trên quantity làm provenance, chỉ dành cho dialog thao tác,
+  recap của station và audit) — và
   quantity finished giữ Machine hoàn thành kể cả sau khi Machine đó retired. Tracking, breakdown theo PN của
   Machines và expected-duration monitoring (phần còn lại của Phase 11) vẫn là
   phần chưa làm; Tracking vẫn là mock view chỉ development.

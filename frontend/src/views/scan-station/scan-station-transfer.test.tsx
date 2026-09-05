@@ -117,6 +117,68 @@ function activeOperations(areaId: number) {
   return OPERATIONS.filter((o) => o.area_id === areaId && !o.inactive);
 }
 
+/**
+ * The PN's OPEN Work Order Demands — the monitoring context of every
+ * shared row (Hot rank, due date, Work Order Number, Job Numbers).
+ * `0455-20-0118-03` is deliberately worked for a DIFFERENT, Hot open
+ * demand than the one its quantity was released under, so the two
+ * cannot be confused for each other.
+ */
+const OPEN_DEMANDS: {
+  pn: string;
+  woId: number;
+  demandId: number;
+  number: string | null;
+  type: 'NEW' | 'MODIFY';
+  jobs: string[];
+  due: string | null;
+  rank: number | null;
+}[] = [
+  {
+    pn: '0455-20-0118-03',
+    woId: 3,
+    demandId: 13,
+    number: '007010',
+    type: 'NEW',
+    jobs: ['18190'],
+    due: '2026-09-30',
+    rank: 1,
+  },
+  {
+    pn: '2027-60-8114-00',
+    woId: 1,
+    demandId: 11,
+    number: '007003',
+    type: 'NEW',
+    jobs: ['18112'],
+    due: null,
+    rank: null,
+  },
+];
+
+function demandContextWire(partNumbers: string[]) {
+  const wanted = new Set(partNumbers);
+  const byPn = new Map<string, (typeof OPEN_DEMANDS)[number][]>();
+  for (const demand of OPEN_DEMANDS) {
+    if (!wanted.has(demand.pn)) continue;
+    byPn.set(demand.pn, [...(byPn.get(demand.pn) ?? []), demand]);
+  }
+  return [...byPn].map(([pn, group]) => ({
+    part_number: pn,
+    demands: group.map((demand) => ({
+      work_order_id: demand.woId,
+      work_order_number: demand.number,
+      work_order_demand_id: demand.demandId,
+      request_type: demand.type,
+      requested_quantity: 10,
+      job_numbers: demand.jobs,
+      due_date: demand.due,
+      priority_rank: demand.rank,
+      received_date: '2026-07-12',
+    })),
+  }));
+}
+
 function workOrderWire(flow: Flow) {
   return flow.wo
     ? {
@@ -313,7 +375,7 @@ function handle(url: string, method: string, body: unknown): Response {
         : [];
     return json({
       area: areaRef(areaId),
-      demand_context: [],
+      demand_context: demandContextWire(here.map((f) => f.pn)),
       has_machines: areaHasMachines(areaId),
       lines,
       total_part_numbers: lines.length,
@@ -582,7 +644,9 @@ beforeEach(() => {
       qty: 3,
       areaId: 2,
       routeMode: 'FLOATING',
-      wo: { id: 3, number: '007010', demandId: 13, type: 'NEW' },
+      // Released by a Work Order that has since completed: provenance,
+      // not the demand the PN is currently worked for (007010 below).
+      wo: { id: 9, number: '006990', demandId: 19, type: 'NEW' },
     },
     {
       id: 104,
@@ -717,6 +781,39 @@ test('a station renders its server context and the Area inventory', async () => 
   expect(document.querySelector('.ss-stationfoot')).toHaveTextContent(
     'Station LATHE-ST-01',
   );
+});
+
+test('a station row is worked FOR the open demand while the action keeps the quantity provenance', async () => {
+  await renderStation();
+  await screen.findByText('0455-20-0118-03');
+
+  // The monitoring line of the shared row is the PN's OPEN demand —
+  // the same context the Area Board shows — with its Job Numbers, its
+  // derived countdown and its Hot indicator.
+  const row = document
+    .querySelector('.abd-summary')!
+    .querySelector('.mc-list li')!;
+  expect(row.querySelector('.r2 .wo')?.textContent).toBe('WO 007010 · 18190');
+  expect(row.querySelector('.hot')).not.toBeNull();
+  expect(row.querySelector('.r2 .mono:last-child')?.textContent).toMatch(
+    /days left|due today|overdue/,
+  );
+  // The header Hot statistic counts that same context.
+  const stats = screen.getByLabelText('Area statistics');
+  expect(within(stats).getByText('Hot').previousSibling).toHaveTextContent('1');
+
+  // The quantity's own Work Order — the one it was released under, now
+  // completed — stays the workflow context of the ACTION, and is never
+  // what the monitoring row says.
+  expect(row.textContent).not.toContain('006990');
+  cleanup();
+  await renderStation('CUT-ST-01');
+  scan('PF:PN:0455-20-0118-03');
+  const sources = await screen.findByRole('dialog', {
+    name: 'Receive from another Area',
+  });
+  expect(sources).toHaveTextContent('WO 006990');
+  expect(sources).not.toHaveTextContent('WO 007010');
 });
 
 test('an unknown station shows the server error and never falls back', async () => {

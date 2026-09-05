@@ -77,9 +77,6 @@ function presentBoardArea(entry: AreaBoardArea): AreaPresentation {
   const area = presentationArea(entry.inventory.area, entry.operations);
   const { cards, machines } = presentAreaInventory(entry.inventory, {
     scrapped: entry.scrapped,
-    // A monitoring view says what the PN is worked FOR, never what the
-    // quantity happens to descend from.
-    demandSource: 'open',
   });
   const stocked = entry.stocked.map((line): MockAreaCard => {
     const scrapped = entry.scrapped[line.partNumber];
@@ -161,7 +158,11 @@ function tiaMinutes(card: MockAreaCard, now: number): number {
 
 function matches(card: MockAreaCard, query: string): boolean {
   if (!query) return true;
-  return (card.pn + card.workOrder + card.job).toLowerCase().includes(query);
+  // Every OPEN demand of the PN is searchable, not only the defining
+  // one the row names: a Work Order or Job Number belonging to one of
+  // the row's `+N more` demands keeps that PN visible.
+  const haystack = `${card.pn} ${card.workOrder} ${card.job} ${card.demandsSearch ?? ''}`;
+  return haystack.toLowerCase().includes(query);
 }
 
 /**
@@ -259,7 +260,13 @@ export function AreaBoardView() {
   // separately at the Scan Station); the overview is PN-centric — one
   // row per Part Number in the Area, portions aggregated (§6.2).
   const cardsOf = (key: string) => visible.filter((c) => c.area === key);
-  const overviewRowsOf = (key: string) => aggregateByPartNumber(cardsOf(key));
+  // The overview sorts AFTER aggregating, so `Quantity` compares the
+  // PN's total in the Area rather than its largest single quantity —
+  // 6 + 6 outranks a 10. The other three orders compare PN-level values
+  // (the aggregated row keeps the oldest entry timestamp), so ordering
+  // again cannot change them.
+  const overviewRowsOf = (key: string) =>
+    sortCards(aggregateByPartNumber(cardsOf(key)), sort, now);
 
   const safeDetailPage = Math.min(detailPage, Math.max(0, areas.length - 1));
   const pageArea = areas[safeDetailPage];

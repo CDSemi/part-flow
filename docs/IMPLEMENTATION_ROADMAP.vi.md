@@ -236,8 +236,9 @@
   qua component chung và mapping client chung (`api/area-inventory.ts`,
   `views/area-presentation.ts`), với đúng hành vi polling / stale-feed của board
   (`views/monitoring-feed.ts`). Model chung tách bạch HAI câu hỏi về cùng một
-  quantity: PROVENANCE (demand mà quantity được release cho — Scan Station nêu,
-  audit giữ) và MONITORING context (`allocations.open_demand_context` — PN đang
+  quantity: PROVENANCE (demand mà quantity được release cho — dialog thao tác
+  và recap của Scan Station nêu, audit giữ, không bao giờ là row monitoring) và
+  MONITORING context (`allocations.open_demand_context` — PN đang
   được làm CHO cái gì, các OPEN demand theo canonical order, nguồn của mọi Hot
   rank / due date / Job Numbers trên row monitoring). Model còn mang timestamp
   vào Area và Machine ĐÃ HOÀN THÀNH quantity finished — chính Machine chứ không
@@ -1028,7 +1029,9 @@ inventory nào. Resolve Department dùng đúng quy tắc của Production Board
 Model chung trả lời **HAI câu hỏi khác nhau về cùng một quantity, và không câu
 nào được mượn câu trả lời của câu kia**. *Provenance* là `FlowInArea.work_order`
 — demand mà quantity được RELEASE cho, chỉ identity và request type, giữ cho
-recap của Scan Station và cho audit, vẫn đúng sau khi Work Order đó complete.
+dialog thao tác, confirmation và recap của Scan Station và cho audit, vẫn đúng
+sau khi Work Order đó complete; đây là context workflow/audit và không bao giờ
+là dòng của một row monitoring, trên cả hai bề mặt.
 *Monitoring context* là `AreaInventory.demand_context` — mỗi PN đang được làm CHO
 cái gì: các OPEN Work Order Demand (`allocations.open_demand_context`, một nơi
 duy nhất giữ quy tắc, dùng chung với Production Board) theo canonical demand
@@ -1045,9 +1048,11 @@ NHẤT và chỉ nêu Machine khi mọi nhánh đồng nhất.
 
 *Frontend*: `src/api/area-inventory.ts` là model client DUY NHẤT của contract đó
 (tách khỏi `api/scan-station.ts`, file này re-export lại), `src/views/area-presentation.ts`
-là mapping DUY NHẤT sang shape row chung — với `demandSource` tường minh phân
-biệt hai bề mặt (`origin` cho station, `open` cho board) thay vì để bên nào tự
-đoán — và `src/views/monitoring-feed.ts` là hành vi polling / stale / hồi phục
+là mapping DUY NHẤT sang shape row chung — mọi row monitoring, của Scan Station
+cũng như của board, lấy Hot rank, due date, Work Order Number và Job Numbers từ
+OPEN demand context của PN, còn provenance của flow chỉ đi tới dialog thao tác
+và recap của station (`flowOf`), nên hai bề mặt không có nhánh monitoring riêng
+để drift — và `src/views/monitoring-feed.ts` là hành vi polling / stale / hồi phục
 DUY NHẤT sau feed của cả hai board. `AreaBoardView` chuyển vào registry view thật
 và render cả hai mode từ một read: **All Areas overview theo PN** (một row mỗi
 Part Number trong một Area, các quantity riêng biệt gộp vào chip portion bằng
@@ -1057,8 +1062,13 @@ chung), còn **per-Area detail giữ một row cho mỗi quantity thao tác đư
 bên cạnh các portion có tên. Đã có: loading, error kèm Retry, Department không
 có Area, trạng thái stale-feed, và `?state=long` (fixture DEV inline — không
 import `src/mocks/`). Sort vẫn ở client vì Area Board có bốn thứ tự do người
-dùng chọn; `Priority` xếp mọi Hot rank trước mọi row không rank, không dùng giá
-trị sentinel.
+dùng chọn; overview sort trên row ĐÃ GỘP (nên `Quantity` so tổng của PN trong
+Area và `Time in Area` lấy portion cũ nhất, còn `Priority`/`Due date` giữ nguyên
+semantics cấp PN), detail sort từng quantity riêng, và `Priority` xếp mọi Hot
+rank trước mọi row không rank, không dùng giá trị sentinel. Search khớp toàn bộ
+monitoring context của PN — `demandsSearchText` mang Work Order Number và Job
+Numbers của MỌI open demand vào row, nên demand nằm trong `+N more` vẫn tìm
+được chứ không chỉ nằm trong tooltip.
 
 *Test*: `tests/test_area_board_api.py` (18) — phạm vi Department và các từ chối,
 nội dung Area khẳng định **bằng đúng byte với `GET /api/areas/{id}/inventory`**,
@@ -1068,7 +1078,12 @@ complete không bao giờ cấp context, nhiều demand nêu đủ theo canonica
 scrap trừ reversal, stocked và allocated của Stockroom — cùng suite frontend
 viết lại trên trả lời giả của `GET /api/area-board` (gộp theo PN với quantity
 bảo toàn, dòng demand `+N more`, Machine hoàn thành đã retired, thứ tự Priority
-với rank vượt mọi sentinel). Cố ý chưa có: quản lý Hot rank (Phase 12), tên PN
+với rank vượt mọi sentinel, `Quantity` so tổng PN đã gộp nên `6 + 6` đứng trước
+`10` trong khi detail vẫn liệt kê từng quantity, và search bằng Work Order/Job
+Number của một open demand THỨ CẤP vẫn giữ row PN đó) cùng regression của suite
+Scan Station: row station và Hot count ở header nhận monitoring context từ open
+demand trong khi action của row vẫn mang demand nguồn gốc vào dialog. Cố ý chưa
+có: quản lý Hot rank (Phase 12), tên PN
 master (Phase 13), và highlight thời gian chờ theo expected duration (vẫn là
 phần mở của Phase 11).
 

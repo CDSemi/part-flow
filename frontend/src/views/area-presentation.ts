@@ -100,10 +100,22 @@ export function demandsTitle(demands: readonly DemandContext[]): string {
 }
 
 /**
+ * The searchable text of a PN's whole monitoring context: EVERY open
+ * demand's Work Order Number and Job Numbers, so a search for a demand
+ * the row does not name — one of its `+N more` — still finds it.
+ */
+export function demandsSearchText(demands: readonly DemandContext[]): string {
+  return demands
+    .flatMap((demand) => [demand.workOrderNumber ?? '', ...demand.jobNumbers])
+    .join(' ');
+}
+
+/**
  * The monitoring values a row takes from its PN's OPEN demands: the
  * FIRST demand in the canonical order defines the Hot rank, the due
  * date and the received date the countdown policy uses, while the rest
- * stay counted so the row can say there are more.
+ * stay counted so the row can say there are more — and searchable, so
+ * none of them is reachable only through the tooltip.
  */
 function monitoringContext(demands: readonly DemandContext[]) {
   const defining = demands[0];
@@ -117,6 +129,9 @@ function monitoringContext(demands: readonly DemandContext[]) {
       : {}),
     ...(demands.length > 1 ? { moreDemands: demands.length - 1 } : {}),
     demandsTitle: demandsTitle(demands),
+    ...(demands.length > 0
+      ? { demandsSearch: demandsSearchText(demands) }
+      : {}),
   };
 }
 
@@ -153,24 +168,7 @@ const MACHINE_CARD_STATUS: Record<
  */
 export function presentAreaInventory(
   inventory: AreaInventory,
-  options: {
-    scrapped?: Readonly<Record<string, number>>;
-    /**
-     * Which Work Order question the row answers — the two surfaces ask
-     * a different one about the same quantity, and neither may borrow
-     * the other's answer:
-     *
-     * - `origin` (the Scan Station, default): the demand THIS quantity
-     *   was released for. The operator is about to act on this lot, so
-     *   the row names the Work Order it belongs to — provenance that
-     *   stays true after that Work Order completed.
-     * - `open` (the Area Board): what the PN is currently being worked
-     *   FOR — its OPEN demands in the canonical order, which is where
-     *   a monitoring view's Hot rank, due date and Job Numbers come
-     *   from. A completed Work Order never supplies them.
-     */
-    demandSource?: 'origin' | 'open';
-  } = {},
+  options: { scrapped?: Readonly<Record<string, number>> } = {},
 ): AreaInventoryPresentation {
   // The Area mode is the inventory's own — the SERVER's judgement from
   // the Area's active Machines at the moment this inventory was read
@@ -205,14 +203,12 @@ export function presentAreaInventory(
       const card: MockAreaCard = {
         area: key,
         pn: flow.partNumber,
-        ...(options.demandSource === 'open'
-          ? monitoringContext(inventory.demandContext[flow.partNumber] ?? [])
-          : {
-              workOrder: workOrderLabel(flow.workOrder),
-              job: '—',
-              due: null,
-              received: '',
-            }),
+        // The monitoring line of EVERY shared row — the Scan Station's
+        // and the Area Board's alike — is what the PN is worked FOR.
+        // The demand this quantity descends from is workflow and audit
+        // context: it belongs to the action dialogs and recaps, and
+        // never to a monitoring row (`flow.workOrder`).
+        ...monitoringContext(inventory.demandContext[flow.partNumber] ?? []),
         qty: flow.quantity,
         machines: !hasMachines
           ? external

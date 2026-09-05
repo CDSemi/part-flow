@@ -276,6 +276,12 @@ export interface MockAreaCard {
   moreDemands?: number;
   /** Every open demand of the PN, for the row's tooltip. */
   demandsTitle?: string;
+  /**
+   * Work Order Numbers and Job Numbers of EVERY open demand of the PN,
+   * so the search reaches a demand the row does not name (its
+   * `moreDemands`) instead of only the defining one.
+   */
+  demandsSearch?: string;
   /** Damaged quantity scrapped from this PN in this Area (mock). */
   scrapped?: number;
   /**
