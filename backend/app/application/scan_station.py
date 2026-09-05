@@ -78,6 +78,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.application import allocations, intake, work_orders
+from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
     area_has_machines,
@@ -217,25 +218,22 @@ def available_actions(state: ProcessingState) -> list[FlowAction]:
 
 
 class WorkOrderContext(NamedTuple):
-    """The Work Order Demand a quantity was released for, with the
-    monitoring context every Area presentation shows beside it
-    (GUI_DESIGN §4.10 PN row): the external Job Numbers, the due date
-    the countdown derives from, the Hot rank and the Work Order's
-    received date, which orders undated demand (PROJECT_PROFILE §18).
+    """The Work Order Demand a quantity ORIGINATED from (its RECEIVED).
 
-    This is the demand THIS quantity descends from — one demand, not a
-    choice among the PN's several — so it stays the flow's own
-    production context whatever else the PN is demanded for.
+    Provenance, not monitoring: this is the demand the quantity was
+    released for, kept for the station's workflow recaps and for audit
+    — it stays what it is even after that Work Order completed. What a
+    PN is currently being worked FOR is a different question, answered
+    per PN by the OPEN demand context (`AreaInventory.demand_context`,
+    `allocations.open_demand_context`); a monitoring surface must read
+    the Hot rank, due date, Work Order Number and Job Numbers there and
+    never from this provenance.
     """
 
     work_order_id: int
     work_order_number: str | None
     work_order_demand_id: int
     request_type: str
-    job_numbers: list[str]
-    due_date: datetime.date | None
-    priority_rank: int | None
-    received_date: datetime.date
 
 
 class FlowInArea(NamedTuple):
@@ -261,7 +259,10 @@ class FlowInArea(NamedTuple):
     # and stays in the Area until transferred. None in every other
     # state, and on merged finished quantity whose lineage branches
     # were completed on different Machines (`effective_positions`).
-    completed_machine_id: int | None
+    # The MACHINE, not just its id: a Machine retired after it finished
+    # the work is no longer an Area card, and the finished quantity
+    # must still say where it was completed.
+    completed_machine: Machine | None
     # When this quantity entered its current position — the fixed
     # timestamp every monitoring surface derives `Time in Area` from,
     # read across every lineage branch (the OLDEST entry of merged
@@ -410,16 +411,9 @@ def _work_order_contexts(session: Session, flow_ids: list[int]) -> dict[int, Wor
     received = _received_contexts(session, sorted(set[int]().union(*origins.values())))
     contexts: dict[int, WorkOrderContext] = {}
     for flow_id, origin_ids in origins.items():
-        # Identity is the demand, so the origins are compared by their
-        # demand id — the context itself carries list-valued Job Numbers
-        # and is deliberately not compared as a whole.
-        found = {
-            received[origin].work_order_demand_id: received[origin]
-            for origin in origin_ids
-            if origin in received
-        }
+        found = {received[origin] for origin in origin_ids if origin in received}
         if len(found) == 1:
-            contexts[flow_id] = next(iter(found.values()))
+            contexts[flow_id] = next(iter(found))
     return contexts
 
 
@@ -432,12 +426,8 @@ def _received_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkO
             PartMovement.quantity_flow_id,
             WorkOrder.id,
             WorkOrder.work_order_number,
-            WorkOrder.received_date,
             WorkOrderDemand.id,
             WorkOrderDemand.request_type,
-            WorkOrderDemand.job_numbers,
-            WorkOrderDemand.due_date,
-            WorkOrderDemand.priority_rank,
         )
         .join(WorkOrderDemand, WorkOrderDemand.id == demand_id_value)
         .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
@@ -447,27 +437,30 @@ def _received_contexts(session: Session, flow_ids: list[int]) -> dict[int, WorkO
         )
     )
     return {
-        flow_id: WorkOrderContext(
-            work_order_id=wo_id,
-            work_order_number=wo_number,
-            work_order_demand_id=demand_id,
-            request_type=request_type,
-            job_numbers=list(job_numbers),
-            due_date=due_date,
-            priority_rank=priority_rank,
-            received_date=received_date,
-        )
-        for (
-            flow_id,
-            wo_id,
-            wo_number,
-            received_date,
-            demand_id,
-            request_type,
-            job_numbers,
-            due_date,
-            priority_rank,
-        ) in rows
+        flow_id: WorkOrderContext(wo_id, wo_number, demand_id, request_type)
+        for flow_id, wo_id, wo_number, demand_id, request_type in rows
+    }
+
+
+def _completed_machines(
+    session: Session, positions: dict[int, EffectivePosition]
+) -> dict[int, Machine]:
+    """The Machines that completed finished quantity, RETIRED included.
+
+    Looked up by id rather than among the Area's active Machine cards:
+    a Machine retired after it finished the work is no longer a card,
+    and the finished quantity must still name where it was completed.
+    """
+    wanted = {
+        position.completed_machine_id
+        for position in positions.values()
+        if position.completed_machine_id is not None
+    }
+    if not wanted:
+        return {}
+    return {
+        machine.id: machine
+        for machine in session.scalars(select(Machine).where(Machine.id.in_(wanted)))
     }
 
 
@@ -477,6 +470,7 @@ def _flow_in_area(
     operation: Operation,
     state: ProcessingState,
     work_order: WorkOrderContext | None,
+    completed_machines: dict[int, Machine],
 ) -> FlowInArea:
     """One flow as the shared Area monitoring model presents it.
 
@@ -494,8 +488,11 @@ def _flow_in_area(
         operation=operation,
         processing_state=state,
         machine_id=flow.current_machine_id,
-        completed_machine_id=(
-            position.completed_machine_id if state is ProcessingState.READY_TO_TRANSFER else None
+        completed_machine=(
+            completed_machines.get(position.completed_machine_id)
+            if state is ProcessingState.READY_TO_TRANSFER
+            and position.completed_machine_id is not None
+            else None
         ),
         entered_at=position.entered_at,
         available_actions=available_actions(state),
@@ -523,6 +520,7 @@ def resolve_part_number_scan(
     positions = effective_positions(session, [flow.id for flow in flows])
     latest = {flow_id: position.movement for flow_id, position in positions.items()}
     recorded = _recorded_operations(session, latest)
+    completed_machines = _completed_machines(session, positions)
     # Every flow's state depends on the mode of the Area it is in.
     machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
     operations = active_area_operations(session, area.id)
@@ -553,6 +551,7 @@ def resolve_part_number_scan(
                     recorded[latest[flow.id].operation_id],
                     state,
                     contexts.get(flow.id),
+                    completed_machines,
                 )
             )
             continue
@@ -725,6 +724,7 @@ def resolve_machine_scan(
             recorded[latest[flow.id].operation_id],
             ProcessingState.QUEUED,
             contexts.get(flow.id),
+            {},
         )
         for flow in flows
         # The resolved Machine is active and in this Area, so the Area
@@ -771,6 +771,15 @@ class MachineInventory(NamedTuple):
 
 class AreaInventory(NamedTuple):
     area: Area
+    # The OPEN Work Order Demands of every PN in the Area, in the
+    # canonical demand order (`allocations.open_demand_context`) — what
+    # each PN is currently being worked FOR. Every monitoring surface
+    # takes the Hot rank, due date, Work Order Number and Job Numbers
+    # from here, and the FIRST demand of a PN is the defining one; the
+    # rest stay listed, never summed or silently dropped. A PN whose
+    # every Work Order is complete is simply absent: its quantity is
+    # still shown, without a monitoring context it no longer has.
+    demand_context: dict[str, list[DemandContext]]
     # The Area mode (PROJECT_PROFILE §12): with Machines the quantity
     # splits into queued / Machine cards / finished; without Machines
     # into directly processing / finished — no placeholder cards and no
@@ -814,6 +823,11 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     (``has_machines``): a Machine Area never has directly processing
     quantity, an Area without Machines never has queued or on-Machine
     quantity.
+    ``demand_context`` answers the other question a monitoring surface
+    asks about the same quantity — what each PN is currently being
+    worked FOR (its OPEN demands in canonical order), which is not the
+    demand a flow originated from (`FlowInArea.work_order`, kept as
+    provenance for the station's recaps and audit).
     """
     area = session.get(Area, area_id)
     if area is None:
@@ -832,6 +846,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     positions = effective_positions(session, [flow.id for flow in flows])
     latest = {flow_id: position.movement for flow_id, position in positions.items()}
     recorded = _recorded_operations(session, latest)
+    completed_machines = _completed_machines(session, positions)
     active_machines = list(
         session.scalars(
             select(Machine)
@@ -853,6 +868,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
                 recorded[latest[flow.id].operation_id],
                 state,
                 contexts.get(flow.id),
+                completed_machines,
             )
         )
     lines = _lines(items)
@@ -882,6 +898,7 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
         )
     return AreaInventory(
         area=area,
+        demand_context=open_demand_context(session, {item.part_number for item in items}),
         has_machines=has_machines,
         lines=lines,
         total_part_numbers=len(lines),

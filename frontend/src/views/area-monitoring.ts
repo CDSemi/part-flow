@@ -33,8 +33,10 @@ export interface AreaAssignment {
  * Split each card's quantity into Machine assignments, queue /
  * direct-processing portions, and finished (`READY_TO_TRANSFER`)
  * portions. Every piece appears exactly once — quantities are never
- * duplicated or lost by the grouping. In a no-Machine Area the direct
- * processing portion is the remainder after the finished portions.
+ * duplicated or lost by the grouping, whether the card is one Quantity
+ * Flow (the per-Area detail) or a PN's whole presence in an Area (the
+ * aggregated All Areas overview row). The direct-processing portion is
+ * always the remainder after the named and finished portions.
  */
 export function splitAssignments(cards: readonly MockAreaCard[]): {
   assigned: AreaAssignment[];
@@ -63,6 +65,16 @@ export function splitAssignments(cards: readonly MockAreaCard[]): {
         } else {
           assigned.push({ card, context, qty, state: 'machine' });
         }
+      }
+      // Quantity conservation, not a special case: an aggregated
+      // overview row may hold named portions AND a direct remainder
+      // (one PN processing internally beside an external Operation in
+      // the same Area). The remainder is its own portion so nothing is
+      // dropped; for a single-quantity row it is always zero.
+      const named = card.machines.reduce((sum, [, qty]) => sum + qty, 0);
+      const remainder = card.qty - named - finishedQty;
+      if (remainder > 0) {
+        queued.push({ card, context: '—', qty: remainder, state: 'direct' });
       }
     }
     for (const portion of card.finished ?? []) {

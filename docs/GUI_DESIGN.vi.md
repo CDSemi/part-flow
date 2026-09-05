@@ -497,7 +497,8 @@ Desktop một column mỗi Area, horizontal scroll mặc định; `Wrap columns`
 giữ state khi đổi tab. Mobile dùng Summary toggle/carousel như §2.5.
 
 Area column có clickable header/color/name/description/Operation chips; meaningful
-stats; shared PN-row components với Hot, quantity, WO/Job, due countdown, portion
+stats; **một row mỗi Part Number** (các quantity riêng biệt gộp vào chip portion
+của row đó); shared PN-row components với Hot, quantity, WO/Job, due countdown, portion
 context, time, scrap; explicit empty. Terminal shows stocked pcs/PNs. Search filter
 list, sort trong mỗi column. Mobile dots/buttons derive active page từ scroll,
 Summary-on stacks overview; click header jump tới corresponding detail page.
@@ -527,25 +528,48 @@ trong Area đó, và — với terminal Stockroom, nơi quantity đã hoàn tấ
 nên không còn active flow — các stocked line kèm allocation active của PN. All
 Areas overview và per-Area detail là **hai presentation của cùng một trả lời**:
 đổi tab không read lại và hai mode không thể lệch nhau; cả hai render qua
-component chung và cùng mapping client với Scan Station, đó chính là điều giữ
-hai view không drift. Mỗi PN row mang giá trị monitoring cố định của CHÍNH
-quantity đó — timestamp vào Area (đọc qua mọi nhánh lineage: quantity đã merge
-dated theo nhánh cũ nhất), Machine hoàn thành quantity finished (chỉ nêu khi mọi
-nhánh đồng nhất), và Work Order Demand mà quantity được release kèm Job Numbers,
-due date, Hot rank — còn `Time in Area` và due countdown vẫn derive lúc render từ
-UI clock chung (§3.12); row Stockroom hiển thị `allocated a/n` thay countdown và
-không có thời điểm vào. Department là Department active duy nhất hoặc
-`?department=<id>`; cấu hình mơ hồ bị từ chối tường minh. Auto-refresh theo đúng
-nhịp của Production Board (một request in flight, refresh ngay khi kết nối trở
-lại): refresh lỗi giữ board hoàn chỉnh cuối và chuyển status thành `Feed stale —
-reconnecting`, load đầu lỗi là error state có Retry, Department không có Area
-active là empty state tường minh, và `?state=loading|empty|error|long` vẫn render
-preview development mà không request. Search, bốn thứ tự sort và các lựa chọn
-layout (Wrap columns, Summary toggle và phân trang màn hình hẹp) là presentation
-state của view — Area Board không có canonical order để server sở hữu, khác
-Production Board. Mock dataset Phase 2 của board này đã bỏ. **Chưa có:**
-`Total PNs` đếm Part Number chứ không đếm row trên mọi bề mặt dùng nó, và
-highlight thời gian chờ theo expected duration vẫn là phần mở của Phase 11.
+component chung và cùng mapping client với Scan Station.
+
+**Overview theo PN, detail theo từng quantity** — cố ý, vì hai chỗ trả lời hai
+câu hỏi khác nhau. Một Part Number trong một Area là ĐÚNG MỘT row overview và
+được đếm một lần trong mọi con số PN (count trên tab, dòng meta toolbar,
+`Total PNs` / `PNs`), dù PN đó giữ bao nhiêu quantity riêng biệt: các quantity
+được gộp vào chip portion của row (`Lathe 3 × 3`, `queue × 2`, `processing × 6`,
+`done × 1`), và các chip luôn cộng đủ tổng của row — không mất, không đếm trùng,
+kể cả khi PN vừa xử lý nội bộ vừa ở Operation external trong cùng Area (phần dư
+direct là chip riêng). Per-Area detail giữ MỘT row cho MỖI quantity riêng biệt,
+vì mỗi quantity được scan và thao tác riêng tại Scan Station (§4.10).
+
+**Row được làm CHO cái gì là OPEN demand của PN, không phải nguồn gốc của
+quantity.** Hot rank, due countdown, Work Order Number và Job Numbers của mọi
+row monitoring lấy từ các OPEN Work Order Demand của PN theo canonical demand
+order (PROJECT_PROFILE §18) — demand ĐẦU TIÊN quyết định. Khi PN có nhiều open
+demand, row nêu demand quyết định kèm `· +N more`, tooltip liệt kê đầy đủ: không
+gộp thành một giá trị mơ hồ, cũng không âm thầm rút còn cái đầu. Work Order đã
+complete là lịch sử và không cấp gì cả, kể cả khi quantity nó release vẫn còn
+trong Area: row đó đọc `WO — · —` với `No due date` thay vì mượn context không
+còn thuộc về nó. Demand mà quantity BẮT NGUỒN từ đó vẫn nằm trên chính quantity
+như provenance — đó là thứ row và recap của Scan Station nêu, vì operator sắp
+thao tác trên chính lô đó — và hai thứ không bao giờ trộn trong một dòng. Mỗi
+row còn mang giá trị monitoring cố định của CHÍNH quantity: timestamp vào Area
+(đọc qua mọi nhánh lineage nên quantity đã merge dated theo nhánh cũ nhất) và
+Machine ĐÃ HOÀN THÀNH quantity finished — báo từ chính quantity, nên Machine
+retired sau khi làm xong vẫn nêu được nơi hoàn thành dù card đã biến mất.
+`Time in Area` và due countdown vẫn derive lúc render từ UI clock chung (§3.12);
+row Stockroom hiển thị `allocated a/n` thay countdown và không có thời điểm vào.
+
+Department là Department active duy nhất hoặc `?department=<id>`; cấu hình mơ hồ
+bị từ chối tường minh. Auto-refresh theo đúng nhịp của Production Board (một
+request in flight, refresh ngay khi kết nối trở lại): refresh lỗi giữ board hoàn
+chỉnh cuối và chuyển status thành `Feed stale — reconnecting`, load đầu lỗi là
+error state có Retry, Department không có Area active là empty state tường minh,
+và `?state=loading|empty|error|long` vẫn render preview development mà không
+request. Search, bốn thứ tự sort (`Priority` xếp MỌI Hot rank trước mọi row
+không rank, bất kể số rank lớn tới đâu) và các lựa chọn layout (Wrap columns,
+Summary toggle và phân trang màn hình hẹp) là presentation state của view — Area
+Board không có canonical order để server sở hữu, khác Production Board. Mock
+dataset Phase 2 của board này đã bỏ. **Chưa có:** highlight thời gian chờ theo
+expected duration vẫn là phần mở của Phase 11.
 
 ---
 
@@ -905,11 +929,18 @@ session không còn shift end.
   PN rows, badge attention tone and responsive behaviors.
 - Area Board chạy trên read thật của Department (§6, §6.1, §6.3): hai mode dùng
   chung một read, cùng model monitoring và cùng component với Scan Station nên
-  không drift; row lấy due countdown, Job Numbers, Hot rank, `Time in Area` và
-  scrapped từ read đó, quantity finished nêu Machine hoàn thành, Stockroom hiện
-  stocked kèm `allocated a/n`. Toolbar thêm **feed status** `● Live` /
-  `Feed stale — reconnecting` như Production Board; `Total PNs` / `PNs` đếm Part
-  Number chứ không đếm row (đúng cách server đếm).
+  không drift. **All Areas overview theo PN** — một row mỗi Part Number trong một
+  Area, đếm một lần, các quantity riêng biệt gộp vào chip portion, không mất
+  không trùng — còn **per-Area detail theo từng quantity**. Hot rank, due
+  countdown, WO Number và Job Numbers của row lấy từ **OPEN demand của PN** theo
+  canonical order: demand quyết định đứng tên row, các demand còn lại nêu `+N
+  more` kèm tooltip đầy đủ, Work Order đã complete không cấp gì (`WO — · —`,
+  `No due date`), còn demand nguồn gốc ở lại trên quantity làm provenance cho
+  Scan Station. Quantity finished giữ Machine hoàn thành kể cả sau khi Machine
+  đó retired; Stockroom hiện stocked kèm `allocated a/n`. Toolbar thêm **feed
+  status** `● Live` / `Feed stale — reconnecting` như Production Board;
+  `Total PNs` / `PNs` đếm Part Number chứ không đếm row, và sort `Priority` xếp
+  mọi Hot rank trước mọi row không rank.
 
 ## 15.2 Từ GUI Design v16
 

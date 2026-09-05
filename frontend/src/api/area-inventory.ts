@@ -33,12 +33,10 @@ export interface OperationRef {
 }
 
 /**
- * The Work Order Demand a quantity was released for, with the
- * monitoring context the shared PN row shows beside it (§4.10): the
- * external Job Numbers, the due date the countdown is derived from
- * (null is valid data), the Hot rank and the Work Order's received
- * date, which orders undated demand. One demand — the one THIS
- * quantity descends from — never a choice among the PN's several.
+ * The demand a quantity ORIGINATED from — provenance, not monitoring:
+ * the Scan Station's recaps and the audit trail read it, and it stays
+ * what it is after that Work Order completed. What the PN is currently
+ * being worked FOR is `DemandContext` below.
  */
 export interface WorkOrderContext {
   workOrderId: number;
@@ -46,12 +44,24 @@ export interface WorkOrderContext {
   workOrderNumber: string | null;
   workOrderDemandId: number;
   requestType: 'NEW' | 'MODIFY';
+}
+
+/**
+ * One OPEN Work Order Demand of a PN — the monitoring context the
+ * shared PN row shows (§4.10): the Work Order Number, the external Job
+ * Numbers, the due date the countdown is derived from (null is valid
+ * data), the Hot rank, and the Work Order's received date, which
+ * orders undated demand.
+ */
+export interface DemandContext {
+  workOrderId: number;
+  workOrderNumber: string | null;
+  workOrderDemandId: number;
+  requestType: 'NEW' | 'MODIFY';
+  requestedQuantity: number;
   jobNumbers: string[];
-  /** ISO `YYYY-MM-DD`, or null when the demand has no due date. */
   dueDate: string | null;
-  /** Manager-defined Hot rank (1 = highest), null when not Hot. */
   priorityRank: number | null;
-  /** ISO `YYYY-MM-DD` received date of the parent Work Order. */
   receivedDate: string;
 }
 
@@ -96,9 +106,11 @@ export interface FlowInArea {
    * The Machine that COMPLETED finished quantity (READY_TO_TRANSFER) —
    * completion context only: the quantity is no longer assigned to it
    * and stays in the Area until transferred. null in every other state
-   * and on merged quantity whose branches disagree.
+   * and on merged quantity whose branches disagree. The Machine
+   * itself, so a Machine retired after finishing the work — no longer
+   * an Area card — still names the completion.
    */
-  completedMachineId: number | null;
+  completedMachine: { id: number; name: string } | null;
   /**
    * ISO timestamp of the moment this quantity entered its current
    * position. `Time in Area` and its sort order are DERIVED from it at
@@ -145,10 +157,23 @@ export interface WorkOrderContextWire {
   work_order_number: string | null;
   work_order_demand_id: number;
   request_type: 'NEW' | 'MODIFY';
+}
+
+interface DemandContextWire {
+  work_order_id: number;
+  work_order_number: string | null;
+  work_order_demand_id: number;
+  request_type: 'NEW' | 'MODIFY';
+  requested_quantity: number;
   job_numbers: string[];
   due_date: string | null;
   priority_rank: number | null;
   received_date: string;
+}
+
+interface PartNumberDemandsWire {
+  part_number: string;
+  demands: DemandContextWire[];
 }
 
 export interface FlowInAreaWire {
@@ -165,7 +190,7 @@ export interface FlowInAreaWire {
   };
   processing_state: ProcessingState;
   machine_id: number | null;
-  completed_machine_id: number | null;
+  completed_machine: { id: number; name: string } | null;
   entered_at: string;
   available_actions: FlowAction[];
   work_order: WorkOrderContextWire | null;
@@ -225,6 +250,16 @@ export function toWorkOrderContext(
     workOrderNumber: wire.work_order_number,
     workOrderDemandId: wire.work_order_demand_id,
     requestType: wire.request_type,
+  };
+}
+
+function toDemandContext(wire: DemandContextWire): DemandContext {
+  return {
+    workOrderId: wire.work_order_id,
+    workOrderNumber: wire.work_order_number,
+    workOrderDemandId: wire.work_order_demand_id,
+    requestType: wire.request_type,
+    requestedQuantity: wire.requested_quantity,
     jobNumbers: [...wire.job_numbers],
     dueDate: wire.due_date,
     priorityRank: wire.priority_rank,
@@ -247,7 +282,7 @@ export function toFlowInArea(wire: FlowInAreaWire): FlowInArea {
     },
     processingState: wire.processing_state,
     machineId: wire.machine_id,
-    completedMachineId: wire.completed_machine_id,
+    completedMachine: wire.completed_machine,
     enteredAt: wire.entered_at,
     availableActions: [...wire.available_actions],
     workOrder: toWorkOrderContext(wire.work_order),
@@ -278,6 +313,15 @@ export interface MachineInventory {
 
 export interface AreaInventory {
   area: AreaRef;
+  /**
+   * What each PN in the Area is currently being worked FOR: its OPEN
+   * demands in the canonical order, the FIRST one defining the row's
+   * Hot rank and due date. Every other stays listed — never summed
+   * away — and a PN whose every Work Order is complete is simply
+   * absent: its quantity is still shown, without a context it no
+   * longer has.
+   */
+  demandContext: Record<string, DemandContext[]>;
   /** The Area mode (PROJECT_PROFILE §12), decided by the server from
    * the Area's active Machines: true → queued / Machine cards /
    * finished; false → directly processing / finished with no cards. */
@@ -308,6 +352,7 @@ export interface InventoryLineWire {
 
 export interface AreaInventoryWire {
   area: AreaRefWire;
+  demand_context: PartNumberDemandsWire[];
   has_machines: boolean;
   lines: InventoryLineWire[];
   total_part_numbers: number;
@@ -338,6 +383,12 @@ export function toInventoryLines(lines: InventoryLineWire[]): InventoryLine[] {
 export function toAreaInventory(wire: AreaInventoryWire): AreaInventory {
   return {
     area: toAreaRef(wire.area),
+    demandContext: Object.fromEntries(
+      wire.demand_context.map((entry) => [
+        entry.part_number,
+        entry.demands.map(toDemandContext),
+      ]),
+    ),
     hasMachines: wire.has_machines,
     lines: toInventoryLines(wire.lines),
     totalPartNumbers: wire.total_part_numbers,

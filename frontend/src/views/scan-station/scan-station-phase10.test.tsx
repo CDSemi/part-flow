@@ -110,7 +110,7 @@ function flowWire(flow: Flow) {
     },
     processing_state: 'PROCESSING',
     machine_id: null,
-    completed_machine_id: null,
+    completed_machine: null,
     entered_at: '2026-08-01T06:30:00Z',
     available_actions: ['DONE', 'TRANSFER', 'SCRAP'],
     work_order: null,
@@ -241,6 +241,7 @@ function handle(url: string, method: string, body: unknown): Response {
       operations: OPERATIONS.filter((o) => o.area_id === station.area_id).map(
         operationRef,
       ),
+      demand_context: [],
       has_machines: false,
     });
   }
@@ -251,6 +252,7 @@ function handle(url: string, method: string, body: unknown): Response {
     const lines = inventoryLines(here);
     return json({
       area: areaRef(areaId),
+      demand_context: [],
       has_machines: false,
       lines,
       total_part_numbers: lines.length,

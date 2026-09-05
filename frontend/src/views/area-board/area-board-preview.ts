@@ -15,6 +15,7 @@
 import type { AreaBoard, AreaBoardArea } from '../../api/area-board';
 import type {
   AreaInventory,
+  DemandContext,
   FlowInArea,
   InventoryLine,
   MachineRef,
@@ -60,7 +61,13 @@ function flow(item: PreviewFlow, operationName: string): FlowInArea {
     },
     processingState: item.state,
     machineId: item.machineId ?? null,
-    completedMachineId: item.completedMachineId ?? null,
+    completedMachine:
+      item.completedMachineId === undefined
+        ? null
+        : {
+            id: item.completedMachineId,
+            name: `Lathe ${item.completedMachineId}`,
+          },
     enteredAt: minutesAgoIso(item.minutesInArea),
     availableActions: ['TRANSFER', 'SCRAP'],
     workOrder: {
@@ -68,12 +75,30 @@ function flow(item: PreviewFlow, operationName: string): FlowInArea {
       workOrderNumber: item.woNumber,
       workOrderDemandId: item.id,
       requestType: 'NEW',
-      jobNumbers: [item.job],
-      dueDate: item.dueInDays === null ? null : isoDateIn(item.dueInDays),
-      priorityRank: item.hotRank ?? null,
-      receivedDate: isoDateIn(-24),
     },
   };
+}
+
+/** The PN's OPEN demand context — what the row is worked FOR. */
+function demandContext(items: PreviewFlow[]): Record<string, DemandContext[]> {
+  const byPn: Record<string, DemandContext[]> = {};
+  for (const item of items) {
+    if (byPn[item.pn]) continue;
+    byPn[item.pn] = [
+      {
+        workOrderId: item.id,
+        workOrderNumber: item.woNumber,
+        workOrderDemandId: item.id,
+        requestType: 'NEW',
+        requestedQuantity: item.qty,
+        jobNumbers: [item.job],
+        dueDate: item.dueInDays === null ? null : isoDateIn(item.dueInDays),
+        priorityRank: item.hotRank ?? null,
+        receivedDate: isoDateIn(-24),
+      },
+    ];
+  }
+  return byPn;
 }
 
 function lines(flows: FlowInArea[]): InventoryLine[] {
@@ -106,6 +131,7 @@ function inventory(
   area: AreaInventory['area'],
   flows: FlowInArea[],
   machines: MachineRef[],
+  demands: Record<string, DemandContext[]> = {},
 ): AreaInventory {
   const byState = (state: FlowInArea['processingState']) =>
     lines(flows.filter((item) => item.processingState === state));
@@ -115,6 +141,7 @@ function inventory(
       .reduce((sum, item) => sum + item.quantity, 0);
   return {
     area,
+    demandContext: demands,
     hasMachines: machines.length > 0,
     lines: lines(flows),
     totalPartNumbers: lines(flows).length,
@@ -169,98 +196,85 @@ function longPreviewBoard(): AreaBoard {
     machine(2, 'Lathe 2', true),
     machine(3, 'Lathe 3 — Horizontal Boring Mill', false),
   ];
-  const latheFlows: FlowInArea[] = [
-    flow(
-      {
-        id: 1,
-        pn: LONG_PN,
-        qty: 14,
-        state: 'ON_MACHINE',
-        machineId: 1,
-        minutesInArea: 585,
-        woNumber: '007042',
-        job: '19311-CUSTOMER-REFERENCE-00098',
-        dueInDays: 4,
-        hotRank: 1,
-      },
-      'Turning',
-    ),
-    flow(
-      {
-        id: 2,
-        pn: '2027-60-8114-00',
-        qty: 6,
-        state: 'ON_MACHINE',
-        machineId: 2,
-        minutesInArea: 220,
-        woNumber: '007001',
-        job: '18112',
-        dueInDays: 2,
-      },
-      'Turning',
-    ),
-    flow(
-      {
-        id: 3,
-        pn: '2027-60-8114-00',
-        qty: 2,
-        state: 'READY_TO_TRANSFER',
-        completedMachineId: 2,
-        minutesInArea: 45,
-        woNumber: '007001',
-        job: '18112',
-        dueInDays: 2,
-      },
-      'Turning',
-    ),
-    ...Array.from({ length: 14 }, (_, index) => {
+  const latheSpecs: PreviewFlow[] = [
+    {
+      id: 1,
+      pn: LONG_PN,
+      qty: 14,
+      state: 'ON_MACHINE',
+      machineId: 1,
+      minutesInArea: 585,
+      woNumber: '007042',
+      job: '19311-CUSTOMER-REFERENCE-00098',
+      dueInDays: 4,
+      hotRank: 1,
+    },
+    {
+      id: 2,
+      pn: '2027-60-8114-00',
+      qty: 6,
+      state: 'ON_MACHINE',
+      machineId: 2,
+      minutesInArea: 220,
+      woNumber: '007001',
+      job: '18112',
+      dueInDays: 2,
+    },
+    {
+      // The same PN, a second separate quantity, finished on Lathe 2:
+      // the overview aggregates both into ONE row, the detail keeps
+      // them apart.
+      id: 3,
+      pn: '2027-60-8114-00',
+      qty: 2,
+      state: 'READY_TO_TRANSFER',
+      completedMachineId: 2,
+      minutesInArea: 45,
+      woNumber: '007001',
+      job: '18112',
+      dueInDays: 2,
+    },
+    ...Array.from({ length: 14 }, (_, index): PreviewFlow => {
       const n = index + 1;
-      return flow(
-        {
-          id: 100 + n,
-          pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
-          qty: (n % 6) + 1,
-          state: 'QUEUED',
-          minutesInArea: ((n % 8) + 1) * 60 + 10,
-          woNumber: n % 4 === 0 ? null : String(7200 + n).padStart(6, '0'),
-          job: String(19000 + n),
-          dueInDays: n % 5 === 0 ? null : (n % 15) + 3,
-        },
-        'Turning',
-      );
+      return {
+        id: 100 + n,
+        pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
+        qty: (n % 6) + 1,
+        state: 'QUEUED',
+        minutesInArea: ((n % 8) + 1) * 60 + 10,
+        woNumber: n % 4 === 0 ? null : String(7200 + n).padStart(6, '0'),
+        job: String(19000 + n),
+        dueInDays: n % 5 === 0 ? null : (n % 15) + 3,
+      };
     }),
   ];
-  const deburrFlows: FlowInArea[] = [
-    flow(
-      {
-        id: 60,
-        pn: '81-1042',
-        qty: 6,
-        state: 'PROCESSING',
-        minutesInArea: 140,
-        woNumber: '007021',
-        job: '18615',
-        dueInDays: 7,
-      },
-      'Deburring',
-    ),
-    flow(
-      {
-        id: 61,
-        pn: '78-04-0031',
-        qty: 3,
-        state: 'READY_TO_TRANSFER',
-        minutesInArea: 30,
-        woNumber: '007002',
-        job: '18102',
-        dueInDays: 16,
-      },
-      'Deburring',
-    ),
+  const deburrSpecs: PreviewFlow[] = [
+    {
+      id: 60,
+      pn: '81-1042',
+      qty: 6,
+      state: 'PROCESSING',
+      minutesInArea: 140,
+      woNumber: '007021',
+      job: '18615',
+      dueInDays: 7,
+    },
+    {
+      id: 61,
+      pn: '78-04-0031',
+      qty: 3,
+      state: 'READY_TO_TRANSFER',
+      minutesInArea: 30,
+      woNumber: '007002',
+      job: '18102',
+      dueInDays: 16,
+    },
   ];
+  const latheFlows = latheSpecs.map((spec) => flow(spec, 'Turning'));
+  const deburrFlows = deburrSpecs.map((spec) => flow(spec, 'Deburring'));
   const areas: AreaBoardArea[] = [
     {
-      inventory: inventory(deburr, deburrFlows, []),
+      inventory: inventory(deburr, deburrFlows, [], demandContext(deburrSpecs)),
       operations: [
         { id: 5, code: 'DEB', name: 'Deburring', isExternal: false },
       ],
@@ -268,7 +282,12 @@ function longPreviewBoard(): AreaBoard {
       stocked: [],
     },
     {
-      inventory: inventory(lathe, latheFlows, machines),
+      inventory: inventory(
+        lathe,
+        latheFlows,
+        machines,
+        demandContext(latheSpecs),
+      ),
       operations: [{ id: 1, code: 'TURN', name: 'Turning', isExternal: false }],
       scrapped: { '2027-60-8114-00': 1 },
       stocked: [],

@@ -267,6 +267,15 @@ export interface MockAreaCard {
   hotRank?: number;
   /** Parent Work Order received date (ISO) — orders undated demands. */
   received: string;
+  /**
+   * How many OPEN Work Order Demands the PN has BESIDE the defining
+   * one named by `workOrder`/`job` (absent when it has only that one).
+   * A monitoring row states that there are more instead of hiding them
+   * behind the first — the full list is in `demandsTitle`.
+   */
+  moreDemands?: number;
+  /** Every open demand of the PN, for the row's tooltip. */
+  demandsTitle?: string;
   /** Damaged quantity scrapped from this PN in this Area (mock). */
   scrapped?: number;
   /**

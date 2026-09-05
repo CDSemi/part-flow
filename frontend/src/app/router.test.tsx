@@ -63,6 +63,7 @@ beforeEach(() => {
       if (/\/api\/areas\/\d+\/inventory$/.test(url)) {
         return json({
           area: { ...AREAS[0], description: null, is_terminal: false },
+          demand_context: [],
           has_machines: false,
           lines: [],
           total_part_numbers: 0,
@@ -105,6 +106,7 @@ beforeEach(() => {
             {
               inventory: {
                 area: { ...AREAS[0], description: null, is_terminal: false },
+                demand_context: [],
                 has_machines: false,
                 lines: [],
                 total_part_numbers: 0,

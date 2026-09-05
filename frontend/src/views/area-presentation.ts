@@ -19,10 +19,10 @@
 import type {
   AreaInventory,
   AreaRef,
+  DemandContext,
   FlowInArea,
   MachineRef,
   OperationRef,
-  WorkOrderContext,
 } from '../api/area-inventory';
 import { areaRefColor } from '../api/area-inventory';
 import type { MockArea, MockAreaCard, MockAreaMachine } from './view-models';
@@ -62,16 +62,62 @@ export function areaKey(areaId: number): MockArea['key'] {
   return `area-${areaId}` as MockArea['key'];
 }
 
-/** Work Order context line of a flow, in the shared card label form. */
-export function workOrderLabel(workOrder: WorkOrderContext | null): string {
-  if (!workOrder) return 'WO —';
-  return `WO ${workOrder.workOrderNumber ?? '—'} · ${workOrder.requestType}`;
+/**
+ * Work Order label of one demand, in the shared card label form. A PN
+ * with no open demand reads `WO —`: monitoring says what the quantity
+ * is worked FOR, and "nothing open" is an honest answer — never the
+ * completed Work Order the quantity happens to descend from.
+ */
+export function workOrderLabel(
+  demand:
+    { workOrderNumber: string | null; requestType: string } | null | undefined,
+): string {
+  if (!demand) return 'WO —';
+  return `WO ${demand.workOrderNumber ?? '—'} · ${demand.requestType}`;
 }
 
-/** Job Number line of a flow (`—` when the demand names none). */
-export function jobNumbersLabel(workOrder: WorkOrderContext | null): string {
-  if (!workOrder || workOrder.jobNumbers.length === 0) return '—';
-  return workOrder.jobNumbers.join(', ');
+/** Job Number line of one demand (`—` when it names none). */
+export function jobNumbersLabel(demand: DemandContext | undefined): string {
+  if (!demand || demand.jobNumbers.length === 0) return '—';
+  return demand.jobNumbers.join(', ');
+}
+
+/**
+ * The full monitoring context of a PN, spelled out for the row's
+ * tooltip: every OPEN demand in the canonical order, so several
+ * demands are never hidden behind the defining one.
+ */
+export function demandsTitle(demands: readonly DemandContext[]): string {
+  if (demands.length === 0) return 'No open Work Order Demand';
+  return demands
+    .map(
+      (demand) =>
+        `WO ${demand.workOrderNumber ?? '—'} · ${jobNumbersLabel(demand)} · ${
+          demand.requestedQuantity
+        } pcs`,
+    )
+    .join('\n');
+}
+
+/**
+ * The monitoring values a row takes from its PN's OPEN demands: the
+ * FIRST demand in the canonical order defines the Hot rank, the due
+ * date and the received date the countdown policy uses, while the rest
+ * stay counted so the row can say there are more.
+ */
+function monitoringContext(demands: readonly DemandContext[]) {
+  const defining = demands[0];
+  return {
+    workOrder: workOrderLabel(defining),
+    job: jobNumbersLabel(defining),
+    due: defining?.dueDate ?? null,
+    received: defining?.receivedDate ?? '',
+    ...(defining?.priorityRank !== null && defining?.priorityRank !== undefined
+      ? { hotRank: defining.priorityRank }
+      : {}),
+    ...(demands.length > 1 ? { moreDemands: demands.length - 1 } : {}),
+    demandsTitle: demandsTitle(demands),
+  };
 }
 
 export interface AreaInventoryPresentation {
@@ -99,14 +145,32 @@ const MACHINE_CARD_STATUS: Record<
  * processing`), or the finished rack (`READY_TO_TRANSFER`, Area summary
  * only, naming the Machine that completed the work as context).
  *
- * Each card carries the fixed monitoring values of its flow — the
- * Area-entry timestamp, the demand's due date, Job Numbers, Hot rank
- * and received date — and, when the caller supplies it, the PN's
+ * Each card carries the fixed monitoring values of its quantity — the
+ * Area-entry timestamp from the flow, and the due date, Job Numbers
+ * and Hot rank of the PN's OPEN demands (never of the demand the
+ * quantity descends from) — and, when the caller supplies it, the PN's
  * scrapped quantity in this Area.
  */
 export function presentAreaInventory(
   inventory: AreaInventory,
-  options: { scrapped?: Readonly<Record<string, number>> } = {},
+  options: {
+    scrapped?: Readonly<Record<string, number>>;
+    /**
+     * Which Work Order question the row answers — the two surfaces ask
+     * a different one about the same quantity, and neither may borrow
+     * the other's answer:
+     *
+     * - `origin` (the Scan Station, default): the demand THIS quantity
+     *   was released for. The operator is about to act on this lot, so
+     *   the row names the Work Order it belongs to — provenance that
+     *   stays true after that Work Order completed.
+     * - `open` (the Area Board): what the PN is currently being worked
+     *   FOR — its OPEN demands in the canonical order, which is where
+     *   a monitoring view's Hot rank, due date and Job Numbers come
+     *   from. A completed Work Order never supplies them.
+     */
+    demandSource?: 'origin' | 'open';
+  } = {},
 ): AreaInventoryPresentation {
   // The Area mode is the inventory's own — the SERVER's judgement from
   // the Area's active Machines at the moment this inventory was read
@@ -133,16 +197,22 @@ export function presentAreaInventory(
       // Area's name or the station's active Operations.
       const external =
         flow.processingState === 'PROCESSING' && flow.operation.isExternal;
-      const completedBy =
-        flow.completedMachineId !== null
-          ? machineById.get(flow.completedMachineId)?.name
-          : undefined;
+      // The completing Machine comes from the flow itself, never from
+      // the Area's active cards: a Machine retired after finishing the
+      // work is no longer a card and must still name the completion.
+      const completedBy = flow.completedMachine?.name;
       const scrapped = options.scrapped?.[flow.partNumber];
       const card: MockAreaCard = {
         area: key,
         pn: flow.partNumber,
-        workOrder: workOrderLabel(flow.workOrder),
-        job: jobNumbersLabel(flow.workOrder),
+        ...(options.demandSource === 'open'
+          ? monitoringContext(inventory.demandContext[flow.partNumber] ?? [])
+          : {
+              workOrder: workOrderLabel(flow.workOrder),
+              job: '—',
+              due: null,
+              received: '',
+            }),
         qty: flow.quantity,
         machines: !hasMachines
           ? external
@@ -157,13 +227,7 @@ export function presentAreaInventory(
           flow.processingState === 'READY_TO_TRANSFER'
             ? [{ qty: flow.quantity, ...(completedBy ? { completedBy } : {}) }]
             : undefined,
-        due: flow.workOrder?.dueDate ?? null,
         enteredAreaAt: flow.enteredAt,
-        ...(flow.workOrder?.priorityRank !== null &&
-        flow.workOrder?.priorityRank !== undefined
-          ? { hotRank: flow.workOrder.priorityRank }
-          : {}),
-        received: flow.workOrder?.receivedDate ?? '',
         ...(scrapped ? { scrapped } : {}),
       };
       cards.push(card);
@@ -190,3 +254,63 @@ export const EMPTY_AREA_PRESENTATION: AreaInventoryPresentation = {
   machineByName: new Map(),
   flowOf: new Map(),
 };
+
+/**
+ * The All Areas overview is PN-centric (GUI_DESIGN §6.2): one row per
+ * Part Number in an Area, whatever number of separate quantities the
+ * PN holds there. The portions of every quantity are aggregated into
+ * that one row — `Lathe 3 × 3`, `queue × 2`, `done × 1` — so the PN is
+ * counted once and its pieces are neither lost nor counted twice; the
+ * per-Area DETAIL keeps one row per quantity, because each is acted on
+ * separately at the Scan Station.
+ *
+ * Rows keep the order of their first card, so the toolbar's search and
+ * sort still decide the column order. The aggregated row is dated from
+ * the OLDEST portion — the longest wait is what a monitoring view must
+ * not hide — and every other value is the PN's own (its monitoring
+ * context and its scrapped quantity are PN-level already).
+ */
+export function aggregateByPartNumber(
+  cards: readonly MockAreaCard[],
+): MockAreaCard[] {
+  const rows = new Map<string, MockAreaCard>();
+  for (const card of cards) {
+    const merged = rows.get(card.pn);
+    if (merged === undefined) {
+      rows.set(card.pn, {
+        ...card,
+        machines: card.machines.map(
+          (portion) => [...portion] as [string, number],
+        ),
+        ...(card.finished
+          ? { finished: card.finished.map((part) => ({ ...part })) }
+          : {}),
+      });
+      continue;
+    }
+    merged.qty += card.qty;
+    for (const [context, qty] of card.machines) {
+      const existing = merged.machines.find(
+        (portion) => portion[0] === context,
+      );
+      if (existing) existing[1] += qty;
+      else merged.machines.push([context, qty]);
+    }
+    for (const part of card.finished ?? []) {
+      merged.finished ??= [];
+      const existing = merged.finished.find(
+        (entry) => entry.completedBy === part.completedBy,
+      );
+      if (existing) existing.qty += part.qty;
+      else merged.finished.push({ ...part });
+    }
+    if (
+      card.enteredAreaAt !== null &&
+      (merged.enteredAreaAt === null ||
+        card.enteredAreaAt < merged.enteredAreaAt)
+    ) {
+      merged.enteredAreaAt = card.enteredAreaAt;
+    }
+  }
+  return [...rows.values()];
+}

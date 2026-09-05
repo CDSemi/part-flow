@@ -67,6 +67,19 @@ function timeInArea(card: MockAreaCard, now: number): string | null {
   return formatElapsedSince(card.enteredAreaAt, now);
 }
 
+/**
+ * Work Order / Job line of a row: the DEFINING open demand, plus an
+ * explicit `+N more` when the PN has further open demands — never a
+ * silent choice among them. The tooltip spells every demand out.
+ */
+function demandLine(card: MockAreaCard): { text: string; title: string } {
+  const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const text = card.moreDemands
+    ? `${woJob} · +${card.moreDemands} more`
+    : woJob;
+  return { text, title: card.demandsTitle ?? text };
+}
+
 /** Quantity with its `pcs` unit; the number stays its own element. */
 export function QuantityStatus({ qty }: { qty: number }) {
   return (
@@ -132,7 +145,7 @@ export function AreaPnRow({
 }) {
   const now = useUiClock('minute');
   const { card, context, qty, state } = entry;
-  const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const demand = demandLine(card);
   const status = inAreaStatusLabel(entry, directLabel);
   const tia = timeInArea(card, now);
   const contextChip =
@@ -154,8 +167,8 @@ export function AreaPnRow({
           </span>
         </div>
         <div className="r2">
-          <span className="mono wo" title={woJob}>
-            {woJob}
+          <span className="mono wo" title={demand.title}>
+            {demand.text}
           </span>
           <CardDueStatus card={card} now={now} />
         </div>
@@ -182,15 +195,16 @@ export function AreaPnRow({
 
 /**
  * One PN row of the All Areas overview — the same shared row shell and
- * subcomponents as the detail surfaces, with the card's portions
- * aggregated into compact context chips (Machine × qty, queue × qty,
- * processing × qty, done × qty) instead of one row per portion. The
- * overview and the detail views therefore cannot drift apart.
+ * subcomponents as the detail surfaces, with the PN's whole presence
+ * in the Area aggregated into compact context chips (Machine × qty,
+ * queue × qty, processing × qty, done × qty) instead of one row per
+ * portion or per Quantity Flow. The overview and the detail views
+ * therefore cannot drift apart.
  */
 export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
   const now = useUiClock('minute');
   const { assigned, queued, finished } = splitAssignments([card]);
-  const woJob = `${card.workOrder.split(' ·')[0]} · ${card.job}`;
+  const demand = demandLine(card);
   const tia = timeInArea(card, now);
   const portions: { key: string; label: string; done?: boolean }[] = [
     ...assigned.map((e) => ({
@@ -206,11 +220,8 @@ export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
             ? `queue × ${e.qty}`
             : e.state === 'vendor'
               ? `vendor × ${e.qty}`
-              : card.finished?.length
-                ? `processing × ${e.qty}`
-                : '',
-      }))
-      .filter((p) => p.label !== ''),
+              : `processing × ${e.qty}`,
+      })),
     ...finished.map((e) => ({
       key: `d-${e.context}`,
       label: `done × ${e.qty}`,
@@ -229,8 +240,8 @@ export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
           </span>
         </div>
         <div className="r2">
-          <span className="mono wo" title={woJob}>
-            {woJob}
+          <span className="mono wo" title={demand.title}>
+            {demand.text}
           </span>
           <CardDueStatus card={card} now={now} />
         </div>

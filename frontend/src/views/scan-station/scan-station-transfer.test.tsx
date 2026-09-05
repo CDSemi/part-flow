@@ -124,10 +124,6 @@ function workOrderWire(flow: Flow) {
         work_order_number: flow.wo.number,
         work_order_demand_id: flow.wo.demandId,
         request_type: flow.wo.type,
-        job_numbers: ['18112'],
-        due_date: null,
-        priority_rank: null,
-        received_date: '2026-07-12',
       }
     : null;
 }
@@ -157,7 +153,7 @@ function flowWire(flow: Flow) {
     },
     processing_state: state,
     machine_id: flow.machineId ?? null,
-    completed_machine_id: null,
+    completed_machine: null,
     entered_at: '2026-08-01T06:30:00Z',
     available_actions:
       state === 'ON_MACHINE'
@@ -289,6 +285,7 @@ function handle(url: string, method: string, body: unknown): Response {
       department: { id: 1, name: 'Machining' },
       area: areaRef(areaId),
       operations: activeOperations(areaId).map(operationRef),
+      demand_context: [],
       has_machines: areaHasMachines(areaId),
     });
   }
@@ -316,6 +313,7 @@ function handle(url: string, method: string, body: unknown): Response {
         : [];
     return json({
       area: areaRef(areaId),
+      demand_context: [],
       has_machines: areaHasMachines(areaId),
       lines,
       total_part_numbers: lines.length,

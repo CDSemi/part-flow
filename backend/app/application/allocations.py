@@ -233,6 +233,49 @@ def canonical_demand_order(query: Select[Any]) -> Select[Any]:
     )
 
 
+class DemandContext(NamedTuple):
+    """One OPEN Work Order Demand of a PN, with its Work Order."""
+
+    demand: WorkOrderDemand
+    work_order: WorkOrder
+
+
+def open_demand_context(
+    session: Session, part_numbers: Collection[str]
+) -> dict[str, list[DemandContext]]:
+    """The OPEN demands of each PN, in the canonical demand order.
+
+    OPEN is the Work Order not completed (PROJECT_PROFILE §18): a
+    completed Work Order is history and never supplies a monitoring
+    row's Hot rank, dates or Work Order / Job Number metadata, even
+    while quantity it released is still in production. The demands of
+    one PN are returned as they are, in the canonical order — the
+    caller presents all of them and takes the FIRST as the defining
+    one; nothing is picked arbitrarily or summed into a single
+    ambiguous value.
+
+    This is the ONE monitoring demand context: the Production Board,
+    the Area Board and the Area inventory the Scan Station renders all
+    read it here, so no two surfaces can disagree about what a PN is
+    currently being worked for.
+    """
+    wanted = set(part_numbers)
+    if not wanted:
+        return {}
+    query = (
+        select(WorkOrderDemand, WorkOrder)
+        .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
+        .where(
+            WorkOrderDemand.part_number.in_(wanted),
+            WorkOrder.completed_at.is_(None),
+        )
+    )
+    contexts: dict[str, list[DemandContext]] = {}
+    for demand, work_order in session.execute(canonical_demand_order(query)):
+        contexts.setdefault(demand.part_number, []).append(DemandContext(demand, work_order))
+    return contexts
+
+
 class OutstandingDemand(NamedTuple):
     """One demand of the PN with remaining shortage, in canonical order."""
 

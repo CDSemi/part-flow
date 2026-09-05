@@ -73,8 +73,12 @@ Production Board + Area Board của Phase 11:
   mà Scan Station đọc — nên All Areas overview và per-Area detail là hai
   presentation của cùng một trả lời và không thể lệch khỏi station — cộng
   Operation của Area, scrapped theo PN và stocked line kèm allocation của
-  terminal Stockroom; row nay mang due date, Job Numbers, Hot rank, thời gian
-  trong Area và Machine hoàn thành thật. Tracking, breakdown theo PN của
+  terminal Stockroom. All Areas overview theo PN (một row mỗi Part Number trong
+  một Area, các quantity riêng biệt gộp vào chip portion) còn per-Area detail
+  giữ một row mỗi quantity thao tác được; Hot rank, due date và Job Numbers của
+  row lấy từ OPEN Work Order Demand của PN — không lấy Work Order đã complete mà
+  quantity tình cờ bắt nguồn (cái đó ở lại trên quantity làm provenance) — và
+  quantity finished giữ Machine hoàn thành kể cả sau khi Machine đó retired. Tracking, breakdown theo PN của
   Machines và expected-duration monitoring (phần còn lại của Phase 11) vẫn là
   phần chưa làm; Tracking vẫn là mock view chỉ development.
 

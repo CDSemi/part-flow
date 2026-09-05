@@ -315,9 +315,15 @@ active Area with the same Area monitoring model the Scan Station reads
 — so the All Areas overview and the per-Area detail are two
 presentations of one answer and cannot drift from the station — plus
 each Area's Operations, its scrapped quantity per PN and the terminal
-Stockroom's stocked lines with their allocation; the rows now carry
-their real due date, Job Numbers, Hot rank, time in Area and completing
-Machine. Every other view (Tracking, Priority, Planned Routes,
+Stockroom's stocked lines with their allocation. The All Areas overview
+is PN-centric (one row per Part Number in an Area, its separate
+quantities aggregated into that row's portion chips) while the per-Area
+detail keeps one row per separately actionable quantity; a row's Hot
+rank, due date and Job Numbers come from the PN's OPEN Work Order
+Demands — never from a completed Work Order the quantity happens to
+descend from, which stays on the quantity as provenance — and finished
+quantity keeps the Machine that completed it even after that Machine is
+retired. Every other view (Tracking, Priority, Planned Routes,
 Part Numbers) renders development-only mock data; the remaining
 Phase 11 monitoring read models (Tracking, the Machines per-PN
 assigned breakdown, expected-duration monitoring) arrive next — the movement-type check admits the

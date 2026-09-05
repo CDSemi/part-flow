@@ -18,6 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.application.allocations import DemandContext
 from app.application.scan_station import (
     AreaInventory,
     FlowInArea,
@@ -45,19 +46,41 @@ class OperationRef(BaseModel):
 
 
 class WorkOrderContextResponse(BaseModel):
+    """The demand a quantity ORIGINATED from — provenance, not
+    monitoring: the station's recaps and the audit trail read it, and
+    it stays what it is after that Work Order completed. What the PN is
+    currently being worked FOR is `DemandContextResponse` below."""
+
     work_order_id: int
     # NULL for an internal blank-number Work Order (rendered `—`).
     work_order_number: str | None
     work_order_demand_id: int
     request_type: str
-    # Monitoring context of the demand this quantity descends from
-    # (GUI_DESIGN §4.10 PN row): the external Job Numbers, the due date
-    # the countdown is derived from (NULL is valid data), the Hot rank,
-    # and the Work Order's received date, which orders undated demand.
+
+
+class DemandContextResponse(BaseModel):
+    """One OPEN Work Order Demand of a PN (GUI_DESIGN §4.10 PN row):
+    the Work Order Number, the external Job Numbers, the due date the
+    countdown is derived from (NULL is valid data), the Hot rank, and
+    the Work Order's received date, which orders undated demand."""
+
+    work_order_id: int
+    work_order_number: str | None
+    work_order_demand_id: int
+    request_type: str
+    requested_quantity: int
     job_numbers: list[str]
     due_date: datetime.date | None
     priority_rank: int | None
     received_date: datetime.date
+
+
+class PartNumberDemandsResponse(BaseModel):
+    """A PN's OPEN demands in the canonical order; the FIRST is the
+    defining one and every other stays listed — never summed away."""
+
+    part_number: str
+    demands: list[DemandContextResponse]
 
 
 ProcessingStateLiteral = Literal["QUEUED", "PROCESSING", "ON_MACHINE", "READY_TO_TRANSFER"]
@@ -77,6 +100,15 @@ class RecordedOperationRef(BaseModel):
     is_active: bool
 
 
+class CompletedMachineRef(BaseModel):
+    """The Machine that completed finished quantity — identity only,
+    and reported whatever its lifecycle (a retired Machine keeps
+    naming the work it did)."""
+
+    id: int
+    name: str
+
+
 class FlowInAreaResponse(BaseModel):
     part_number: str
     quantity_flow_id: int
@@ -91,8 +123,10 @@ class FlowInAreaResponse(BaseModel):
     machine_id: int | None
     # The Machine that completed READY_TO_TRANSFER quantity — completion
     # context only (the quantity is no longer assigned to it), NULL in
-    # every other state and where merged branches disagree.
-    completed_machine_id: int | None
+    # every other state and where merged branches disagree. The MACHINE
+    # itself, so a Machine retired after finishing the work — no longer
+    # an Area card — still names the completion.
+    completed_machine: CompletedMachineRef | None
     # The fixed instant this quantity entered its current position; the
     # displayed `Time in Area` is derived from it at render.
     entered_at: datetime.datetime
@@ -163,11 +197,33 @@ def work_order_context(context: WorkOrderContext | None) -> WorkOrderContextResp
         work_order_number=context.work_order_number,
         work_order_demand_id=context.work_order_demand_id,
         request_type=context.request_type,
-        job_numbers=list(context.job_numbers),
-        due_date=context.due_date,
-        priority_rank=context.priority_rank,
-        received_date=context.received_date,
     )
+
+
+def demand_context(
+    contexts: dict[str, list[DemandContext]],
+) -> list[PartNumberDemandsResponse]:
+    """The OPEN demand context per PN, PNs in a stable order."""
+    return [
+        PartNumberDemandsResponse(
+            part_number=part_number,
+            demands=[
+                DemandContextResponse(
+                    work_order_id=entry.work_order.id,
+                    work_order_number=entry.work_order.work_order_number,
+                    work_order_demand_id=entry.demand.id,
+                    request_type=entry.demand.request_type,
+                    requested_quantity=entry.demand.requested_quantity,
+                    job_numbers=list(entry.demand.job_numbers),
+                    due_date=entry.demand.due_date,
+                    priority_rank=entry.demand.priority_rank,
+                    received_date=entry.work_order.received_date,
+                )
+                for entry in demands
+            ],
+        )
+        for part_number, demands in sorted(contexts.items())
+    ]
 
 
 def flow_response(item: FlowInArea) -> FlowInAreaResponse:
@@ -185,7 +241,11 @@ def flow_response(item: FlowInArea) -> FlowInAreaResponse:
         ),
         processing_state=item.processing_state.value,
         machine_id=item.machine_id,
-        completed_machine_id=item.completed_machine_id,
+        completed_machine=(
+            CompletedMachineRef(id=item.completed_machine.id, name=item.completed_machine.name)
+            if item.completed_machine is not None
+            else None
+        ),
         entered_at=item.entered_at,
         available_actions=list(item.available_actions),
         work_order=work_order_context(item.work_order),
@@ -213,6 +273,10 @@ class MachineInventoryResponse(BaseModel):
 
 class AreaInventoryResponse(BaseModel):
     area: AreaRef
+    # What each PN in the Area is currently being worked FOR: its OPEN
+    # demands in the canonical order (the first one defining), never
+    # the demand a flow originated from.
+    demand_context: list[PartNumberDemandsResponse]
     # The Area mode (PROJECT_PROFILE §12): true → queued / Machine cards
     # / finished; false → directly processing / finished, with no
     # placeholder cards and structurally zero queued/on-Machine figures.
@@ -258,6 +322,7 @@ def area_inventory_response(inventory: AreaInventory) -> AreaInventoryResponse:
     """The shared Area monitoring answer — the ONE converter of it."""
     return AreaInventoryResponse(
         area=area_ref(inventory.area),
+        demand_context=demand_context(inventory.demand_context),
         has_machines=inventory.has_machines,
         lines=inventory_lines(inventory.lines),
         total_part_numbers=inventory.total_part_numbers,

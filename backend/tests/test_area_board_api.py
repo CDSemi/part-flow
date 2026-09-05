@@ -425,6 +425,12 @@ def _flow(entry: dict[str, Any], pn: str) -> dict[str, Any]:
     return flows[0]
 
 
+def _demands(entry: dict[str, Any], pn: str) -> list[dict[str, Any]]:
+    """The PN's OPEN demand context in the Area — the monitoring one."""
+    found = [item for item in entry["inventory"]["demand_context"] if item["part_number"] == pn]
+    return list(found[0]["demands"]) if found else []
+
+
 # ---------------------------------------------------------------------------
 # Department scope and Area listing
 # ---------------------------------------------------------------------------
@@ -594,10 +600,13 @@ def test_machine_cards_hold_only_assigned_quantity_and_finished_names_its_machin
     # Finished quantity names the Machine that COMPLETED it as context;
     # quantity in any other state never carries one.
     finished = next(item for item in _flows(entry, pn) if item["quantity_flow_id"] == finished_flow)
-    assert finished["completed_machine_id"] == shop.lathe.machine_id
+    assert finished["completed_machine"] == {
+        "id": shop.lathe.machine_id,
+        "name": shop.lathe.machine_names[0],
+    }
     assert finished["machine_id"] is None
     queued = next(item for item in _flows(entry, pn) if item["quantity_flow_id"] == queued_flow)
-    assert queued["completed_machine_id"] is None
+    assert queued["completed_machine"] is None
 
     # Quantity RETURNED from a Machine to the queue is the sharp case:
     # its position-bearing Movement names the Machine it left, and it
@@ -619,7 +628,63 @@ def test_machine_cards_hold_only_assigned_quantity_and_finished_names_its_machin
     )
     assert released["processing_state"] == "QUEUED"
     assert released["machine_id"] is None
-    assert released["completed_machine_id"] is None
+    assert released["completed_machine"] is None
+
+
+def test_finished_quantity_keeps_its_completing_machine_after_retirement(
+    client: TestClient, shop: _Shop
+) -> None:
+    """The Machine that finished the work is completion CONTEXT, not a
+    card lookup: retiring it removes the card, never the answer to
+    where the quantity was completed."""
+    cell = _Cell(
+        client,
+        shop.department_id,
+        name=f"Mill {uuid.uuid4().hex[:6].upper()}",
+        machine_count=2,
+    )
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 5}])
+    flow = _release(client, shop.material, work_order, pn, quantity=5)
+    _transfer(client, shop.material, cell, flow, pn, 5)
+    assigned = _machine_action(
+        client, "machine-assignments", cell, flow, pn, 5, machine_id=cell.machine_ids[0]
+    )
+    _machine_action(
+        client,
+        "area-completions",
+        cell,
+        int(assigned["quantity_flow_id"]),
+        pn,
+        5,
+        machine_id=cell.machine_ids[0],
+    )
+
+    entry = _area(_board(client, shop.department_id), cell.area_id)
+    assert _flow(entry, pn)["completed_machine"] == {
+        "id": cell.machine_ids[0],
+        "name": cell.machine_names[0],
+    }
+
+    # Retirement is allowed now: the Machine holds no assigned quantity
+    # any more — the finished quantity waits in the Area.
+    retired = client.post(
+        f"/api/machines/{cell.machine_ids[0]}/retire",
+        json={"reason": "replaced", "actor": "tester"},
+    )
+    assert retired.status_code == 200, retired.text
+
+    entry = _area(_board(client, shop.department_id), cell.area_id)
+    # The card is gone…
+    assert cell.machine_ids[0] not in {
+        card["machine"]["id"] for card in entry["inventory"]["machines"]
+    }
+    # …and the finished quantity still names where it was completed.
+    assert _flow(entry, pn)["completed_machine"] == {
+        "id": cell.machine_ids[0],
+        "name": cell.machine_names[0],
+    }
+    assert _flow(entry, pn)["processing_state"] == "READY_TO_TRANSFER"
 
 
 def test_an_area_without_machines_processes_directly(client: TestClient, shop: _Shop) -> None:
@@ -641,7 +706,7 @@ def test_an_area_without_machines_processes_directly(client: TestClient, shop: _
 # ---------------------------------------------------------------------------
 
 
-def test_a_row_carries_its_demands_job_numbers_due_date_hot_rank_and_received_date(
+def test_a_pn_carries_its_open_demand_context_job_numbers_due_date_and_hot_rank(
     client: TestClient, shop: _Shop, db_engine: Engine
 ) -> None:
     pn = _unique("PN")
@@ -662,16 +727,28 @@ def test_a_row_carries_its_demands_job_numbers_due_date_hot_rank_and_received_da
     flow = _release(client, shop.material, work_order, pn, quantity=5)
 
     entry = _area(_board(client, shop.department_id), shop.material.area_id)
-    context = _flow(entry, pn)["work_order"]
-    assert context["work_order_number"] == "WO-AB-1"
-    assert context["work_order_demand_id"] == work_order.demand_id
-    assert context["request_type"] == "NEW"
-    assert context["job_numbers"] == ["18112", "18113"]
-    assert context["due_date"] == "2026-09-30"
-    assert context["priority_rank"] == 1
-    assert context["received_date"] == "2026-07-12"
+    demands = _demands(entry, pn)
+    assert len(demands) == 1
+    assert demands[0]["work_order_number"] == "WO-AB-1"
+    assert demands[0]["work_order_demand_id"] == work_order.demand_id
+    assert demands[0]["request_type"] == "NEW"
+    assert demands[0]["job_numbers"] == ["18112", "18113"]
+    assert demands[0]["due_date"] == "2026-09-30"
+    assert demands[0]["priority_rank"] == 1
+    assert demands[0]["received_date"] == "2026-07-12"
+    assert demands[0]["requested_quantity"] == 5
 
-    # The same quantity, read by the Scan Station: one model, one answer.
+    # The flow keeps the demand it ORIGINATED from as provenance —
+    # identity and request type only, never the monitoring values.
+    provenance = _flow(entry, pn)["work_order"]
+    assert provenance == {
+        "work_order_id": work_order.id,
+        "work_order_number": "WO-AB-1",
+        "work_order_demand_id": work_order.demand_id,
+        "request_type": "NEW",
+    }
+
+    # The same Area, read by the Scan Station: one model, one answer.
     station = client.get(f"/api/areas/{shop.material.area_id}/inventory").json()
     station_flow = next(
         item
@@ -680,24 +757,139 @@ def test_a_row_carries_its_demands_job_numbers_due_date_hot_rank_and_received_da
         for item in line["flows"]
         if item["quantity_flow_id"] == flow
     )
-    assert station_flow["work_order"] == context
+    assert station_flow["work_order"] == provenance
+    assert station["demand_context"] == entry["inventory"]["demand_context"]
 
 
-def test_an_internal_work_order_reports_a_blank_number_as_null(
+def test_the_monitoring_context_is_the_open_demands_never_the_completed_origin(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    """A completed Work Order is history: quantity it released keeps
+    moving, but the row's Hot rank, dates and Job Numbers come from the
+    PN's OPEN demand — never from the demand the quantity originated
+    from, which stays on the flow as provenance."""
+    pn = _unique("PN")
+    origin = _create_work_order(
+        client,
+        [
+            {
+                "part_number": pn,
+                "requested_quantity": 4,
+                "due_date": "2026-08-01",
+                "job_numbers": ["ORIGIN-JOB"],
+            }
+        ],
+        number="WO-AB-ORIGIN",
+    )
+    _set_priority(db_engine, origin.demand_id, 2)
+    flow = _release(client, shop.material, origin, pn, quantity=4)
+    _transfer(client, shop.material, shop.lathe, flow, pn, 4)
+
+    # While the origin Work Order is open it IS the PN's open demand.
+    entry = _area(_board(client, shop.department_id), shop.lathe.area_id)
+    assert [item["work_order_number"] for item in _demands(entry, pn)] == ["WO-AB-ORIGIN"]
+
+    # A second Work Order supplies the stocked quantity that completes
+    # the origin demand (allocation is PN-level), so the origin Work
+    # Order completes while the quantity it released is still in the
+    # Lathe.
+    current = _create_work_order(
+        client,
+        [
+            {
+                "part_number": pn,
+                "requested_quantity": 6,
+                "due_date": "2026-12-24",
+                "job_numbers": ["CURRENT-JOB"],
+            }
+        ],
+        number="WO-AB-CURRENT",
+    )
+    _set_priority(db_engine, current.demand_id, 1)
+    supply = _release(client, shop.material, current, pn, quantity=4, confirm_active_quantity=True)
+    _stock(client, shop.material, shop.stockroom, supply, pn, 4)
+    _allocate(client, pn, [(origin.demand_id, 4)])
+
+    entry = _area(_board(client, shop.department_id), shop.lathe.area_id)
+    demands = _demands(entry, pn)
+    # The completed origin is gone from the monitoring context; the open
+    # Work Order is what the row is worked for now.
+    assert [item["work_order_number"] for item in demands] == ["WO-AB-CURRENT"]
+    assert demands[0]["priority_rank"] == 1
+    assert demands[0]["job_numbers"] == ["CURRENT-JOB"]
+    # …while the quantity still names where it came from, and is still
+    # on the board.
+    provenance = _flow(entry, pn)["work_order"]
+    assert provenance["work_order_number"] == "WO-AB-ORIGIN"
+    assert provenance["work_order_demand_id"] == origin.demand_id
+    assert _flow(entry, pn)["quantity"] == 4
+
+
+def test_quantity_without_any_open_demand_keeps_its_row_and_no_context(
     client: TestClient, shop: _Shop
 ) -> None:
+    """Found quantity added at the station (Phase 9) belongs to no
+    demand: it is shown, with an empty monitoring context rather than a
+    borrowed one."""
     pn = _unique("PN")
-    work_order = _create_work_order(
-        client, [{"part_number": pn, "requested_quantity": 2, "request_type": "MODIFY"}]
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 3}])
+    flow = _release(client, shop.material, work_order, pn, quantity=3)
+    _transfer(client, shop.material, shop.lathe, flow, pn, 3)
+    added = client.post(
+        f"/api/scan-stations/{shop.lathe.station_id}/quantity-additions",
+        json={
+            "part_number": pn,
+            "quantity": 2,
+            "reason": "found on the rack",
+            "operation_id": shop.lathe.operation_id,
+            "device_event_id": str(uuid.uuid4()),
+        },
     )
-    _release(client, shop.material, work_order, pn, quantity=2)
+    assert added.status_code == 201, added.text
+    addition = int(added.json()["quantity_flow_id"])
+
+    # Its Work Order is still open, so the PN has a context…
+    entry = _area(_board(client, shop.department_id), shop.lathe.area_id)
+    assert len(_demands(entry, pn)) == 1
+    added_flow = next(item for item in _flows(entry, pn) if item["quantity_flow_id"] == addition)
+    # …but the added quantity itself never borrowed a provenance.
+    assert added_flow["work_order"] is None
+    assert added_flow["quantity"] == 2
+
+
+def test_several_open_demands_stay_explicit_in_the_canonical_order(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    pn = _unique("PN")
+    hot = _create_work_order(
+        client,
+        [{"part_number": pn, "requested_quantity": 2, "due_date": "2026-11-30"}],
+        number="WO-AB-HOT",
+    )
+    dated = _create_work_order(
+        client,
+        [{"part_number": pn, "requested_quantity": 3, "due_date": "2026-10-01"}],
+        number="WO-AB-DATED",
+    )
+    undated = _create_work_order(
+        client,
+        [{"part_number": pn, "requested_quantity": 4}],
+        number="WO-AB-UNDATED",
+    )
+    _set_priority(db_engine, hot.demand_id, 3)
+    _release(client, shop.material, dated, pn, quantity=3)
 
     entry = _area(_board(client, shop.department_id), shop.material.area_id)
-    context = _flow(entry, pn)["work_order"]
-    assert context["work_order_number"] is None
-    assert context["request_type"] == "MODIFY"
-    assert context["due_date"] is None
-    assert context["job_numbers"] == []
+    # All three are reported — nothing is picked or summed — in the
+    # canonical demand order: Hot rank first, then the earliest due
+    # date, then the undated demand.
+    assert [item["work_order_number"] for item in _demands(entry, pn)] == [
+        "WO-AB-HOT",
+        "WO-AB-DATED",
+        "WO-AB-UNDATED",
+    ]
+    assert [item["priority_rank"] for item in _demands(entry, pn)] == [3, None, None]
+    assert undated.number == "WO-AB-UNDATED"
 
 
 def test_the_entry_timestamp_follows_the_effective_position_bearing_movement(
@@ -812,7 +1004,7 @@ def test_merged_quantity_is_dated_from_the_oldest_branch_and_needs_one_machine(
     # The branches were completed on different Machines: the merged
     # quantity is shown with NO completing Machine rather than crediting
     # one of them with all of it.
-    assert result["completed_machine_id"] is None
+    assert result["completed_machine"] is None
 
 
 # ---------------------------------------------------------------------------

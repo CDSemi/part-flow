@@ -164,7 +164,13 @@ function flowWire(flow: Flow) {
     },
     processing_state: flow.state,
     machine_id: flow.machineId,
-    completed_machine_id: flow.completedMachineId ?? null,
+    completed_machine:
+      flow.completedMachineId === undefined || flow.completedMachineId === null
+        ? null
+        : {
+            id: flow.completedMachineId,
+            name: `Machine ${flow.completedMachineId}`,
+          },
     entered_at: flow.enteredAt ?? '2026-08-01T06:30:00Z',
     available_actions: actionsOf(flow.state),
     work_order: {
@@ -172,10 +178,6 @@ function flowWire(flow: Flow) {
       work_order_number: '007003',
       work_order_demand_id: 11,
       request_type: 'NEW',
-      job_numbers: ['18112'],
-      due_date: null,
-      priority_rank: null,
-      received_date: '2026-07-12',
     },
   };
 }
@@ -212,6 +214,7 @@ function inventory(areaId: number) {
   const all = lines(here);
   return json({
     area: areaRef(areaId),
+    demand_context: [],
     has_machines: hasMachines(areaId),
     lines: all,
     total_part_numbers: all.length,

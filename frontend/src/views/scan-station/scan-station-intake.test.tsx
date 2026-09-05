@@ -155,7 +155,7 @@ function flowWire(flow: Flow) {
     },
     processing_state: flow.state,
     machine_id: null,
-    completed_machine_id: null,
+    completed_machine: null,
     entered_at: '2026-08-01T06:30:00Z',
     available_actions: ['TRANSFER', 'SCRAP'],
     work_order: null,
@@ -201,6 +201,7 @@ function inventory(areaId: number) {
   const processing = here.filter((flow) => flow.state === 'PROCESSING');
   return json({
     area: areaRef(areaId),
+    demand_context: [],
     has_machines: areaHasMachines,
     lines: lines(here),
     total_part_numbers: lines(here).length,
@@ -258,6 +259,7 @@ function handle(url: string, method: string, body: unknown): Response {
       department: { id: 1, name: 'Machining' },
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
+      demand_context: [],
       has_machines: areaHasMachines,
     });
   }

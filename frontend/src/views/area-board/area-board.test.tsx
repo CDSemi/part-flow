@@ -45,13 +45,49 @@ interface FlowSpec {
   qty: number;
   state: State;
   machineId?: number;
-  completedMachineId?: number;
+  /** The Machine that completed finished quantity — a reference, so a
+   * retired Machine (no card) still names the completion. */
+  completedMachine?: { id: number; name: string };
   minutes: number;
+  /** The demand the quantity ORIGINATED from (provenance). */
   wo?: string | null;
+  external?: boolean;
+}
+
+/** One OPEN demand of a PN — the monitoring context of its rows. */
+interface DemandSpec {
+  id: number;
+  pn: string;
+  wo: string | null;
   jobs?: string[];
   dueInDays?: number | null;
   hotRank?: number | null;
-  external?: boolean;
+  requested?: number;
+  requestType?: 'NEW' | 'MODIFY';
+}
+
+function demandContextWire(demands: DemandSpec[]) {
+  const byPn = new Map<string, DemandSpec[]>();
+  for (const demand of demands) {
+    byPn.set(demand.pn, [...(byPn.get(demand.pn) ?? []), demand]);
+  }
+  return [...byPn].map(([pn, group]) => ({
+    part_number: pn,
+    demands: group.map((demand) => ({
+      work_order_id: demand.id,
+      work_order_number: demand.wo,
+      work_order_demand_id: demand.id,
+      request_type: demand.requestType ?? 'NEW',
+      requested_quantity: demand.requested ?? 10,
+      job_numbers: demand.jobs ?? [],
+      due_date:
+        demand.dueInDays === undefined || demand.dueInDays === null
+          ? null
+          : isoDateIn(demand.dueInDays),
+      priority_rank: demand.hotRank ?? null,
+      received_date: '2026-07-12',
+    })),
+  }));
 }
 
 function flowWire(flow: FlowSpec) {
@@ -69,7 +105,7 @@ function flowWire(flow: FlowSpec) {
     },
     processing_state: flow.state,
     machine_id: flow.machineId ?? null,
-    completed_machine_id: flow.completedMachineId ?? null,
+    completed_machine: flow.completedMachine ?? null,
     entered_at: minutesAgoIso(flow.minutes),
     available_actions: ['TRANSFER', 'SCRAP'],
     work_order:
@@ -80,13 +116,6 @@ function flowWire(flow: FlowSpec) {
             work_order_number: flow.wo,
             work_order_demand_id: flow.id,
             request_type: 'NEW',
-            job_numbers: flow.jobs ?? [],
-            due_date:
-              flow.dueInDays === undefined || flow.dueInDays === null
-                ? null
-                : isoDateIn(flow.dueInDays),
-            priority_rank: flow.hotRank ?? null,
-            received_date: '2026-07-12',
           },
   };
 }
@@ -132,6 +161,7 @@ function inventoryWire(
   },
   flows: FlowSpec[],
   machines: ReturnType<typeof machineWire>[],
+  demands: DemandSpec[] = [],
 ) {
   const of = (state: State) => flows.filter((flow) => flow.state === state);
   const total = (state: State) =>
@@ -144,6 +174,7 @@ function inventoryWire(
       description: area.description,
       is_terminal: area.is_terminal ?? false,
     },
+    demand_context: demandContextWire(demands),
     has_machines: machines.length > 0,
     lines: linesWire(flows),
     total_part_numbers: linesWire(flows).length,
@@ -176,7 +207,9 @@ const OPERATION = {
 };
 
 // Lathe: 4 Machines (one idle, one under maintenance), 3 PNs, 12 pcs =
-// 4 queued + 7 on Machines + 1 finished (completed by Lathe 3).
+// 4 queued + 7 on Machines + 1 finished (completed by Lathe 3). The Hot
+// PN holds THREE separate quantities — one row in the PN-centric
+// overview, three rows in the per-Area detail.
 const LATHE_FLOWS: FlowSpec[] = [
   {
     id: 1,
@@ -186,9 +219,6 @@ const LATHE_FLOWS: FlowSpec[] = [
     machineId: 3,
     minutes: 125,
     wo: '007001',
-    jobs: ['18112'],
-    dueInDays: 2,
-    hotRank: 1,
   },
   {
     id: 2,
@@ -197,21 +227,17 @@ const LATHE_FLOWS: FlowSpec[] = [
     state: 'QUEUED',
     minutes: 125,
     wo: '007001',
-    jobs: ['18112'],
-    dueInDays: 2,
-    hotRank: 1,
   },
   {
     id: 3,
     pn: '2027-60-8114-00',
     qty: 1,
     state: 'READY_TO_TRANSFER',
-    completedMachineId: 3,
+    // Completed on a Machine that has since been RETIRED: it is no
+    // longer one of the Area's cards, and the row must still say so.
+    completedMachine: { id: 9, name: 'Lathe 9' },
     minutes: 40,
     wo: '007001',
-    jobs: ['18112'],
-    dueInDays: 2,
-    hotRank: 1,
   },
   {
     id: 4,
@@ -221,20 +247,48 @@ const LATHE_FLOWS: FlowSpec[] = [
     machineId: 2,
     minutes: 65,
     wo: '007003',
-    jobs: ['18190'],
-    dueInDays: 9,
   },
   {
-    // An internal MODIFY-style Work Order without an external number:
-    // the blank number displays as `—`.
     id: 5,
     pn: '214-406',
     qty: 2,
     state: 'QUEUED',
     minutes: 372,
+    // Quantity released by a Work Order that has since completed: the
+    // provenance stays, the monitoring context comes from elsewhere.
+    wo: '006990',
+  },
+];
+
+const LATHE_DEMANDS: DemandSpec[] = [
+  {
+    id: 1,
+    pn: '2027-60-8114-00',
+    wo: '007001',
+    jobs: ['18112'],
+    dueInDays: 2,
+    hotRank: 1,
+    requested: 6,
+  },
+  {
+    // A SECOND open demand for the Hot PN: the row names the defining
+    // one and states there are more — it never picks silently.
+    id: 11,
+    pn: '2027-60-8114-00',
+    wo: '007050',
+    jobs: ['18999'],
+    dueInDays: 20,
+    requested: 4,
+  },
+  { id: 4, pn: '0455-20-0118-03', wo: '007003', jobs: ['18190'], dueInDays: 9 },
+  {
+    // An internal MODIFY demand without an external number: the blank
+    // number displays as `—`.
+    id: 5,
+    pn: '214-406',
     wo: null,
-    jobs: [],
     dueInDays: -1,
+    requestType: 'MODIFY',
   },
 ];
 
@@ -246,8 +300,6 @@ const DEBURR_FLOWS: FlowSpec[] = [
     state: 'PROCESSING',
     minutes: 140,
     wo: '007021',
-    jobs: ['18615'],
-    dueInDays: 7,
   },
   {
     id: 7,
@@ -256,9 +308,12 @@ const DEBURR_FLOWS: FlowSpec[] = [
     state: 'READY_TO_TRANSFER',
     minutes: 30,
     wo: '007002',
-    jobs: ['18102'],
-    dueInDays: 16,
   },
+];
+
+const DEBURR_DEMANDS: DemandSpec[] = [
+  { id: 6, pn: '81-1042', wo: '007021', jobs: ['18615'], dueInDays: 7 },
+  { id: 7, pn: '78-04-0031', wo: '007002', jobs: ['18102'], dueInDays: 16 },
 ];
 
 function boardPayload() {
@@ -275,6 +330,7 @@ function boardPayload() {
           },
           DEBURR_FLOWS,
           [],
+          DEBURR_DEMANDS,
         ),
         operations: [{ ...OPERATION, id: 5, code: 'DEB', name: 'Deburring' }],
         scrapped: [],
@@ -298,6 +354,7 @@ function boardPayload() {
               expected: '2026-08-06',
             }),
           ],
+          LATHE_DEMANDS,
         ),
         operations: [OPERATION],
         scrapped: [
@@ -632,7 +689,16 @@ test('finished quantity lives in the Area summary, naming its completing Machine
 
   const summary = document.querySelector('.abd-summary')!;
   expect(summary.querySelector('.ctx.done')).not.toBeNull();
-  expect(summary.textContent).toContain('Finished at Lathe 3 — ready to move');
+  // `Lathe 9` completed the work and has since been retired: it is not
+  // one of the Area's four cards, and the completion context survives
+  // that — the Machine travels with the quantity, not with the cards.
+  expect(
+    Array.from(
+      document.querySelectorAll('.abd-machine .mname'),
+      (el) => el.textContent,
+    ),
+  ).not.toContain('Lathe 9');
+  expect(summary.textContent).toContain('Finished at Lathe 9 — ready to move');
   // The finished pc is not presented as Stocked and never inside a
   // Machine card.
   for (const card of document.querySelectorAll('.abd-machine')) {
@@ -641,27 +707,76 @@ test('finished quantity lives in the Area summary, naming its completing Machine
   expect(summary.textContent).not.toContain('Stocked');
 });
 
-test('the PN row carries the demand context and the derived time in Area', async () => {
+test('the PN row carries the OPEN demand context and the derived time in Area', async () => {
   await renderBoard();
   openArea(/^Lathe/);
 
   const summary = document.querySelector('.abd-summary')!;
   const rows = Array.from(summary.querySelectorAll('.mc-list li'));
   const hot = rows.find((row) => row.textContent?.includes('2027-60-8114-00'))!;
-  // Work Order Number · Job Numbers, the derived countdown, the derived
-  // `Time in Area` — none of them stored as text by the server.
-  expect(hot.querySelector('.r2 .wo')?.textContent).toBe('WO 007001 · 18112');
+  // The DEFINING open demand (canonical order) with its Job Numbers,
+  // the derived countdown and the derived `Time in Area` — none of
+  // them stored as text by the server.
+  const wo = hot.querySelector<HTMLElement>('.r2 .wo')!;
+  expect(wo.textContent).toBe('WO 007001 · 18112 · +1 more');
+  // The second open demand is never hidden: the tooltip spells every
+  // one of them out, in the canonical order.
+  expect(wo.getAttribute('title')).toBe(
+    'WO 007001 · 18112 · 6 pcs\nWO 007050 · 18999 · 4 pcs',
+  );
   expect(hot.querySelector('.r2 .mono:last-child')?.textContent).toMatch(
     /days left|due today/,
   );
   expect(hot.querySelector('.r3 .tia')?.textContent).toMatch(/in Area$/);
-  // Hot rank from the demand's priority rank.
+  // Hot rank from the defining demand's priority rank.
   expect(hot.querySelector('.hot')).not.toBeNull();
   // Scrapped quantity of the PN in THIS Area, as text only.
   expect(summary.textContent).toContain('1 scrapped');
   expect(summary.textContent).not.toContain('⊘');
   // The blank-number internal Work Order renders as `—`.
   expect(summary.textContent).toContain('WO —');
+});
+
+test("the monitoring context is the open demand, never the quantity's origin", async () => {
+  // `214-406` was released by Work Order 006990, which has completed;
+  // the PN's own open demand is the internal blank-number one.
+  await renderBoard();
+  openArea(/^Lathe/);
+
+  const summary = document.querySelector('.abd-summary')!;
+  const row = Array.from(summary.querySelectorAll('.mc-list li')).find((item) =>
+    item.textContent?.includes('214-406'),
+  )!;
+  expect(row.querySelector('.r2 .wo')?.textContent).toBe('WO — · —');
+  expect(row.textContent).not.toContain('006990');
+});
+
+test('a PN with no open demand keeps its row without borrowing a context', async () => {
+  stubFetch(() => {
+    const payload = boardPayload();
+    // Drop the Hot PN's demands: its quantity is still in the Area.
+    payload.areas[1].inventory.demand_context =
+      payload.areas[1].inventory.demand_context.filter(
+        (entry: { part_number: string }) =>
+          entry.part_number !== '2027-60-8114-00',
+      );
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+  openArea(/^Lathe/);
+
+  const summary = document.querySelector('.abd-summary')!;
+  const row = Array.from(summary.querySelectorAll('.mc-list li')).find((item) =>
+    item.textContent?.includes('2027-60-8114-00'),
+  )!;
+  // The quantity is still shown, with an empty context rather than the
+  // completed Work Order it descends from.
+  expect(row.querySelector('.r2 .wo')?.textContent).toBe('WO — · —');
+  expect(row.querySelector('.r2 .wo')?.getAttribute('title')).toBe(
+    'No open Work Order Demand',
+  );
+  expect(row.querySelector('.hot')).toBeNull();
+  expect(row.textContent).toContain('No due date');
 });
 
 test('the terminal Stockroom shows stocked quantity with its allocation', async () => {
@@ -707,8 +822,9 @@ test('Sort: Time in Area orders by the elapsed time since the Area entry', async
   await renderBoard();
   fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'tia' } });
 
-  // Lathe column (All Areas overview): 214-406 (6h 12m) has waited the
-  // longest, then the two 2027 portions (2h 05m), then 0455 (1h 05m).
+  // The overview is PN-centric: one row per PN, ordered by the OLDEST
+  // quantity of that PN — 214-406 (6h 12m), then 2027 (2h 05m, its
+  // longest-waiting portion), then 0455 (1h 05m).
   const latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
     (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
   );
@@ -717,16 +833,49 @@ test('Sort: Time in Area orders by the elapsed time since the Area entry', async
     latheColumn!.querySelectorAll('.mc-list .p'),
     (el) => el.textContent,
   );
-  // Every separate quantity is its own row and sorts on its own entry
-  // time: 214-406 (6h 12m), the two 2027 portions (2h 05m), 0455
-  // (1h 05m), then the finished 2027 portion (40m).
-  expect(pns).toEqual([
-    '214-406',
-    '2027-60-8114-00',
-    '2027-60-8114-00',
-    '0455-20-0118-03',
-    '2027-60-8114-00',
-  ]);
+  expect(pns).toEqual(['214-406', '2027-60-8114-00', '0455-20-0118-03']);
+
+  // The detail keeps one row per separate quantity — each is acted on
+  // separately at the Scan Station — grouped by holding state.
+  openArea(/^Lathe/);
+  const detail = Array.from(
+    document.querySelectorAll('.abd-summary .mc-list .p'),
+    (el) => el.textContent,
+  );
+  expect(detail.length).toBe(5);
+  expect(detail.filter((pn) => pn === '2027-60-8114-00').length).toBe(3);
+});
+
+test('Sort: Priority puts every Hot rank before every unranked row', async () => {
+  // A rank well past any sentinel value a comparator might assume.
+  stubFetch(() => {
+    const payload = boardPayload();
+    const demands = payload.areas[1].inventory.demand_context as {
+      part_number: string;
+      demands: { priority_rank: number | null }[];
+    }[];
+    for (const entry of demands) {
+      if (entry.part_number === '0455-20-0118-03') {
+        entry.demands[0].priority_rank = 12;
+      }
+    }
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+  fireEvent.change(screen.getByLabelText('Sort'), {
+    target: { value: 'prio' },
+  });
+
+  const latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
+  )!;
+  const pns = Array.from(
+    latheColumn.querySelectorAll('.mc-list .p'),
+    (el) => el.textContent,
+  );
+  // Hot #1, then Hot #12 — and the unranked PN last, however high the
+  // rank number above it climbs.
+  expect(pns).toEqual(['2027-60-8114-00', '0455-20-0118-03', '214-406']);
 });
 
 test('Sort: Due date applies canonical order — Hot first', async () => {
@@ -745,29 +894,117 @@ test('Sort: Due date applies canonical order — Hot first', async () => {
 // All Areas overview
 // ---------------------------------------------------------------------------
 
-test('the All Areas overview reuses the shared PN row presentation', async () => {
+test('the All Areas overview is PN-centric and reuses the shared row presentation', async () => {
   await renderBoard();
 
   const latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
     (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
   )!;
+  // ONE row per Part Number, whatever number of separate quantities it
+  // holds in the Area: the Hot PN has three.
+  const pns = Array.from(
+    latheColumn.querySelectorAll('.mc-list .p'),
+    (el) => el.textContent,
+  );
+  // Canonical demand order (the default sort): Hot #1 first, then the
+  // overdue internal demand, then the dated one.
+  expect(pns).toEqual(['2027-60-8114-00', '214-406', '0455-20-0118-03']);
+  expect(new Set(pns).size).toBe(pns.length);
+
   // Shared row shell: rowmain grid lines with the shared subcomponents.
   const row = latheColumn.querySelector('.mc-list li .rowmain')!;
   expect(row.querySelector('.r1 .r1r .qtyline')?.textContent).toMatch(
     /\d+ pcs/,
   );
   const wo = row.querySelector<HTMLElement>('.r2 .wo');
-  expect(wo?.getAttribute('title')).toBe(wo?.textContent);
-  // Aggregated portion chips distinguish machine / queue / done.
+  expect(wo?.getAttribute('title')).toContain('WO 007001');
+
+  // The PN's whole presence is aggregated into that one row: its three
+  // quantities become the portion chips, and the row total is their sum
+  // — nothing lost, nothing counted twice.
+  const hotRow = latheColumn.querySelectorAll('.mc-list li')[0];
+  expect(hotRow.querySelector('.r1 .q')?.textContent).toBe('6');
   const chips = Array.from(
-    latheColumn.querySelectorAll('.mc-list .ctxs .ctx'),
+    hotRow.querySelectorAll('.ctxs .ctx'),
     (el) => el.textContent,
   );
-  expect(chips).toContain('Lathe 3 × 3');
-  expect(chips).toContain('queue × 2');
-  expect(chips).toContain('done × 1');
+  expect(chips).toEqual(['Lathe 3 × 3', 'queue × 2', 'done × 1']);
+  // The column's pieces still reconcile with the Area total.
+  const total = Array.from(
+    latheColumn.querySelectorAll('.mc-list .r1 .q'),
+    (el) => Number(el.textContent),
+  ).reduce((sum, qty) => sum + qty, 0);
+  expect(total).toBe(12);
   // The overview column shows the Done stat with the success tone.
   expect(latheColumn.querySelector('.stat .n.d')?.textContent).toBe('1');
+});
+
+test('a Part Number is counted once per Area, never once per quantity', async () => {
+  await renderBoard();
+
+  // Tab count, toolbar meta and the column list agree: 3 PNs in Lathe,
+  // although the Area holds five separate quantities.
+  const tabs = document.querySelector<HTMLElement>('.ab-tabs')!;
+  const latheTab = within(tabs).getByRole('button', { name: /^Lathe/ });
+  expect(latheTab.querySelector('.cnt')?.textContent?.trim()).toBe('3');
+  // Across all Areas: 3 in Lathe, 2 in Deburr, 1 stocked PN.
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('6 PN');
+
+  openArea(/^Lathe/);
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('3 PN');
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('12');
+  // The Area summary counts Part Numbers too, while listing every
+  // separate quantity as its own row.
+  const summary = document.querySelector('.abd-summary')!;
+  expect(summary.querySelector('.stat .n')?.textContent).toBe('3');
+  expect(summary.querySelectorAll('.mc-list li').length).toBe(5);
+});
+
+test('an aggregated overview row keeps a direct remainder beside a named portion', async () => {
+  // One PN processing internally AND at an external Operation in the
+  // same no-Machine Area: aggregation must keep both pieces.
+  stubFetch(() => {
+    const payload = boardPayload();
+    const deburr = payload.areas[0].inventory as {
+      lines: {
+        part_number: string;
+        total_quantity: number;
+        flows: unknown[];
+      }[];
+      total_quantity: number;
+      processing: unknown[];
+      processing_quantity: number;
+    };
+    const external = flowWire({
+      id: 70,
+      pn: '81-1042',
+      qty: 4,
+      state: 'PROCESSING',
+      minutes: 90,
+      wo: '007021',
+      external: true,
+    });
+    const line = deburr.lines.find((item) => item.part_number === '81-1042')!;
+    line.flows.push(external);
+    line.total_quantity += 4;
+    deburr.total_quantity += 4;
+    deburr.processing_quantity += 4;
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+
+  const deburrColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Deburr'),
+  )!;
+  const row = Array.from(deburrColumn.querySelectorAll('.mc-list li')).find(
+    (item) => item.textContent?.includes('81-1042'),
+  )!;
+  expect(row.querySelector('.r1 .q')?.textContent).toBe('10');
+  const chips = Array.from(
+    row.querySelectorAll('.ctxs .ctx'),
+    (el) => el.textContent,
+  );
+  expect(chips).toEqual(['vendor × 4', 'processing × 6']);
 });
 
 test('the All Areas overview wraps columns via the slide toggle', async () => {

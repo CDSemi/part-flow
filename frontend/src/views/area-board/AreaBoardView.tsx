@@ -25,7 +25,11 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { useUiClock } from '../../components/ui-clock';
-import { presentAreaInventory, presentationArea } from '../area-presentation';
+import {
+  aggregateByPartNumber,
+  presentAreaInventory,
+  presentationArea,
+} from '../area-presentation';
 import { splitAssignments } from '../area-monitoring';
 import { elapsedMinutesSince } from '../dates';
 import { compareDemandOrder } from '../demand-order';
@@ -73,6 +77,9 @@ function presentBoardArea(entry: AreaBoardArea): AreaPresentation {
   const area = presentationArea(entry.inventory.area, entry.operations);
   const { cards, machines } = presentAreaInventory(entry.inventory, {
     scrapped: entry.scrapped,
+    // A monitoring view says what the PN is worked FOR, never what the
+    // quantity happens to descend from.
+    demandSource: 'open',
   });
   const stocked = entry.stocked.map((line): MockAreaCard => {
     const scrapped = entry.scrapped[line.partNumber];
@@ -107,8 +114,18 @@ function sortCards(
     switch (sort) {
       case 'qty':
         return b.card.qty - a.card.qty || a.seq - b.seq;
-      case 'prio':
-        return (a.card.hotRank ?? 9) - (b.card.hotRank ?? 9) || a.seq - b.seq;
+      case 'prio': {
+        // Every Hot rank before every unranked row, whatever the rank
+        // number: a Manager may rank past any fixed value, so there is
+        // no sentinel — "not Hot" is its own tier, always last.
+        const left = a.card.hotRank;
+        const right = b.card.hotRank;
+        if (left === undefined || right === undefined) {
+          if (left === right) return a.seq - b.seq;
+          return left === undefined ? 1 : -1;
+        }
+        return left - right || a.seq - b.seq;
+      }
       case 'tia':
         // Longest time in Area first — the most-waiting work surfaces.
         // Derived from the fixed Area-entry timestamps and the shared
@@ -238,7 +255,11 @@ export function AreaBoardView() {
     sort,
     now,
   );
+  // The detail keeps one row per separate quantity (each is acted on
+  // separately at the Scan Station); the overview is PN-centric — one
+  // row per Part Number in the Area, portions aggregated (§6.2).
   const cardsOf = (key: string) => visible.filter((c) => c.area === key);
+  const overviewRowsOf = (key: string) => aggregateByPartNumber(cardsOf(key));
 
   const safeDetailPage = Math.min(detailPage, Math.max(0, areas.length - 1));
   const pageArea = areas[safeDetailPage];
@@ -246,15 +267,17 @@ export function AreaBoardView() {
     activeTab === 'all'
       ? undefined
       : areas.find((entry) => entry.area.key === activeTab);
+  // The meta line counts PART NUMBERS, never rows: one PN may hold
+  // several separate quantities in an Area.
   const metaFor = (entry: AreaPresentation | undefined) =>
     entry === undefined ? (
       <>
-        <b>{visible.length}</b> PN ·{' '}
+        <b>{new Set(visible.map((c) => `${c.area}|${c.pn}`)).size}</b> PN ·{' '}
         <b>{visible.reduce((s, c) => s + c.qty, 0)}</b> pcs across all Areas
       </>
     ) : (
       <>
-        <b>{cardsOf(entry.area.key).length}</b> PN ·{' '}
+        <b>{overviewRowsOf(entry.area.key).length}</b> PN ·{' '}
         <b>{cardsOf(entry.area.key).reduce((s, c) => s + c.qty, 0)}</b> pcs in{' '}
         {entry.area.name}
       </>
@@ -300,7 +323,10 @@ export function AreaBoardView() {
             aria-pressed={activeTab === 'all'}
             onClick={() => setActiveTab('all')}
           >
-            All Areas <span className="cnt">{allCards.length}</span>
+            All Areas{' '}
+            <span className="cnt">
+              {new Set(allCards.map((c) => `${c.area}|${c.pn}`)).size}
+            </span>
           </button>
           {areas.map((entry) => (
             <button
@@ -311,7 +337,9 @@ export function AreaBoardView() {
             >
               <AreaDot colorVar={entry.area.colorVar} />
               {entry.area.name}{' '}
-              <span className="cnt">{entry.cards.length}</span>
+              <span className="cnt">
+                {new Set(entry.cards.map((c) => c.pn)).size}
+              </span>
             </button>
           ))}
         </div>
@@ -376,7 +404,7 @@ export function AreaBoardView() {
         summary ? (
           <AllAreasOverview
             areas={areas}
-            cardsOf={cardsOf}
+            cardsOf={overviewRowsOf}
             wrap
             onOpenArea={(key) => {
               // A summary card header jumps straight to that Area's
@@ -401,7 +429,7 @@ export function AreaBoardView() {
       ) : activeTab === 'all' ? (
         <AllAreasOverview
           areas={areas}
-          cardsOf={cardsOf}
+          cardsOf={overviewRowsOf}
           wrap={wrapOverview}
           onOpenArea={(key) => setActiveTab(key)}
         />
@@ -663,11 +691,8 @@ function AllAreasOverview({
             </div>
             {areaCards.length ? (
               <ul className="mc-list">
-                {areaCards.map((c, index) => (
-                  <AreaOverviewRow
-                    key={`${c.pn}-${c.workOrder}-${index}`}
-                    card={c}
-                  />
+                {areaCards.map((c) => (
+                  <AreaOverviewRow key={c.pn} card={c} />
                 ))}
               </ul>
             ) : (

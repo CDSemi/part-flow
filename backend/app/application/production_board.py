@@ -96,7 +96,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application.allocations import canonical_demand_order
+from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, NotFoundError
 from app.application.machines import areas_with_machines
 from app.application.projections import (
@@ -113,8 +113,6 @@ from app.infrastructure.models import (
     Operation,
     PartMovement,
     QuantityFlow,
-    WorkOrder,
-    WorkOrderDemand,
 )
 
 LocationState = Literal["MACHINE", "QUEUE", "PROCESSING", "DONE", "STOCKED"]
@@ -153,9 +151,10 @@ class BoardLocation(NamedTuple):
     since: datetime.datetime | None
 
 
-class BoardDemand(NamedTuple):
-    demand: WorkOrderDemand
-    work_order: WorkOrder
+# The board's demand context is the shared one (`allocations`), so the
+# Production Board, the Area Board and the Area inventory can never
+# disagree about what a PN is currently being worked for.
+BoardDemand = DemandContext
 
 
 class BoardRow(NamedTuple):
@@ -254,29 +253,6 @@ def effective_totals_by_area(
         .group_by(PartMovement.part_number, PartMovement.to_area_id)
     )
     return {(str(pn), int(area_id)): int(total) for pn, area_id, total in rows}
-
-
-def _demand_context(session: Session, part_numbers: set[str]) -> dict[str, list[BoardDemand]]:
-    """The OPEN demands per PN in canonical order.
-
-    A completed Work Order is history: it never supplies a row's Hot
-    rank, dates or Work Order / Job Number metadata, even while
-    quantity it released is still in production.
-    """
-    if not part_numbers:
-        return {}
-    query = (
-        select(WorkOrderDemand, WorkOrder)
-        .join(WorkOrder, WorkOrder.id == WorkOrderDemand.work_order_id)
-        .where(
-            WorkOrderDemand.part_number.in_(part_numbers),
-            WorkOrder.completed_at.is_(None),
-        )
-    )
-    contexts: dict[str, list[BoardDemand]] = {}
-    for demand, work_order in session.execute(canonical_demand_order(query)):
-        contexts.setdefault(demand.part_number, []).append(BoardDemand(demand, work_order))
-    return contexts
 
 
 def _machine_id_of(position: EffectivePosition, state: LocationState) -> int | None:
@@ -415,7 +391,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
         scrapped_by_pn[pn] = scrapped_by_pn.get(pn, 0) + quantity
 
     part_numbers = set(groups) | set(stocked_by_pn)
-    demands = _demand_context(session, part_numbers)
+    demands = open_demand_context(session, part_numbers)
     zone = ZoneInfo(site_timezone())
 
     rows: list[BoardRow] = []
