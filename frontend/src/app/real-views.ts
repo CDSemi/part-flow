@@ -48,4 +48,9 @@ export const REAL_VIEWS: Partial<
       default: m.AreaBoardView,
     })),
   ),
+  tracking: lazy(() =>
+    import('../views/tracking/TrackingView').then((m) => ({
+      default: m.TrackingView,
+    })),
+  ),
 };

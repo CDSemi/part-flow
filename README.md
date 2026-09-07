@@ -52,13 +52,17 @@ external number created or reused, its Work Order Demand, the Quantity
 Flow, the `PLANNED` route snapshot and the immutable `RECEIVED`
 Movement carrying the Scan Station and the resolved Operation, dated
 from the scan itself — and
-the **Phase 11 Production Board and Area Board**: the
+the **Phase 11 Production Board, Area Board and PN Tracking**: the
 Department-wide board read model derived from the current-position
 projection and the Movement history (`GET /api/production-board`) and
 the real large-display board on it (auto-refresh, stale feed, kiosk
-mode), plus the Management Area Board on `GET /api/area-board` —
+mode), the Management Area Board on `GET /api/area-board` —
 one read of the Department carrying the SAME Area monitoring model
-the Scan Station reads:
+the Scan Station reads — and the PN-centric Management Tracking on
+`GET /api/tracking` (the searchable, filterable PN list) and
+`GET /api/tracking/detail` (one PN's demand, current quantity by Area
+/ Machine, Quantity Flows with lineage and routes, and its paged
+immutable Movement history):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -67,7 +71,7 @@ the Scan Station reads:
   sections and Management → Machines from Phase 3.5, Management →
   Work Orders from Phase 4 with the Completed Work Orders page from
   Phase 10, the Scan Station from Phases 5–10.5, and the Production
-  Board from Phase 11) read and
+  Board, Area Board and PN Tracking from Phase 11) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -177,7 +181,19 @@ the Scan Station reads:
   scrapped quantities, the open demand context with Work Order Number,
   Job Numbers and allocated quantity, the Hot rank, in the canonical
   demand ordering; `department_id` selects the Department, omitted only for a
-  single active Department); the PN resolution
+  single active Department), `GET /api/area-board` (every active Area
+  of the Department with the shared Area monitoring model) and the PN
+  Tracking reads — `GET /api/tracking` (the PN list with server-side
+  search over PN / Work Order Number / Job Number, the Area /
+  Operation / Machine / Request Type / Hot / status / due-window
+  filters, the canonical order and offset paging), `GET
+  /api/tracking/detail?part_number=` (the read-only PN detail with the
+  optional master, the open demand figures, the current quantity by
+  Area / Machine, the stock and allocation history, the reconciliation
+  figures, every Quantity Flow with lineage, PLANNED snapshot or
+  FLOATING trace, and the first page of the immutable Movement
+  history) and `GET /api/tracking/movements?part_number=&before=`
+  (older history pages, keyset on the Movement id); the PN resolution
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
@@ -325,10 +341,24 @@ a completed Work Order the quantity happens to descend from, which
 stays on the quantity as provenance for the station's action dialogs,
 recaps and the audit alone — and finished
 quantity keeps the Machine that completed it even after that Machine is
-retired. Every other view (Tracking, Priority, Planned Routes,
-Part Numbers) renders development-only mock data; the remaining
-Phase 11 monitoring read models (Tracking, the Machines per-PN
-assigned breakdown, expected-duration monitoring) arrive next — the movement-type check admits the
+retired. Phase 11 also makes **PN Tracking** real: the PN-centric
+Management list reads `GET /api/tracking` (every PN with production
+history or an open demand, searched and filtered server-side, in the
+canonical demand order, bounded and paged) through the same polling /
+stale-feed behaviour as the boards, and the modeless detail overlay
+reads `GET /api/tracking/detail` — the open demand with released /
+allocated / shortage figures, the current quantity by Area / Machine
+through the same derivation the boards use, the stock and allocation
+history, the reconciliation `introduced = active + stocked +
+scrapped`, every Quantity Flow with its lineage and its PLANNED
+snapshot (done / current / future, confirmed deviations) or FLOATING
+actual trace (repeated Areas, Repair, the inherited split prefix),
+and the immutable Movement history paged on the Movement id with
+reversed originals kept visible beside their `REVERSED` rows. Every
+other view (Priority, Planned Routes, Part Numbers) renders
+development-only mock data; the remaining Phase 11 monitoring work
+(the Machines per-PN assigned breakdown, expected-duration
+monitoring) arrives next — the movement-type check admits the
 Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
 `SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`, `STOCKED`).
@@ -351,7 +381,7 @@ an application-level not-found state):
 | `/production-board/kiosk` | Production Board in kiosk mode — the top application navigation is hidden and the board renders its own wall-display header (presentation only) |
 | `/management/area-board` | Management → Area Board (All Areas overview + per-Area detail) |
 | `/management/machines` | Management → Machines (Machine lifecycle and maintenance — permission-based production master data) |
-| `/management/tracking` | Management → Tracking (PN-centric) |
+| `/management/tracking` | Management → PN Tracking (PN-centric list + modeless detail overlay) |
 | `/management/work-orders` | Management → Work Orders |
 | `/management/work-orders/completed` | Management → Work Orders → Completed Work Orders (read-only history) |
 | `/management/planned-routes` | Management → Planned Routes (reusable route definitions — permission-based production master data) |

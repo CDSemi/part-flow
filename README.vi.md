@@ -13,7 +13,7 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 ## Trạng thái hiện tại
 
 Repository hiện có nền tảng từ Phase 1 đến Phase 10.5 triển khai end to end và
-Production Board + Area Board của Phase 11:
+Production Board + Area Board + PN Tracking của Phase 11:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -59,7 +59,7 @@ Production Board + Area Board của Phase 11:
   Part Number tạo Quantity Flow RIÊNG và chỉ sau explicit confirmation của
   operator — không bao giờ merge gì, và `Combine quantities` vẫn là merge duy
   nhất (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32).
-- **Phase 11 (Production Board + Area Board):** read model board toàn Department derive từ
+- **Phase 11 (Production Board + Area Board + PN Tracking):** read model board toàn Department derive từ
   projection vị trí hiện tại và Movement history (`GET /api/production-board`:
   phân bổ theo Area / Machine / External activity kèm timestamp vào vị trí,
   stocked và scrapped, Work Order / Job Number context, Hot rank, theo canonical
@@ -80,9 +80,20 @@ Production Board + Area Board của Phase 11:
   Scan Station — không lấy Work Order đã complete mà quantity tình cờ bắt nguồn
   (cái đó ở lại trên quantity làm provenance, chỉ dành cho dialog thao tác,
   recap của station và audit) — và
-  quantity finished giữ Machine hoàn thành kể cả sau khi Machine đó retired. Tracking, breakdown theo PN của
-  Machines và expected-duration monitoring (phần còn lại của Phase 11) vẫn là
-  phần chưa làm; Tracking vẫn là mock view chỉ development.
+  quantity finished giữ Machine hoàn thành kể cả sau khi Machine đó retired.
+  **PN Tracking** cũng đã thật: list Management theo PN đọc `GET /api/tracking`
+  (mọi PN có lịch sử production hoặc open demand, search và filter server-side,
+  theo canonical demand order, có bound và phân trang) qua cùng polling /
+  stale-feed như các board, còn overlay detail modeless đọc
+  `GET /api/tracking/detail` — open demand với released / allocated / shortage,
+  current quantity theo Area / Machine qua cùng derivation các board dùng, stock
+  và allocation history, reconciliation `introduced = active + stocked +
+  scrapped`, mọi Quantity Flow với lineage và PLANNED snapshot (done / current /
+  future, deviation đã confirm) hoặc FLOATING actual trace (repeated Area,
+  Repair, prefix kế thừa từ split), và Movement history bất biến phân trang theo
+  id Movement (`GET /api/tracking/movements`) với original đã reverse vẫn hiển
+  thị cạnh row `REVERSED`. Breakdown theo PN của Machines và expected-duration
+  monitoring (phần còn lại của Phase 11) vẫn là phần chưa làm.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
@@ -92,7 +103,7 @@ chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát tri�
 
 - `frontend/` — Vite + React + TypeScript. Các view có backend (Administration
   Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station gồm
-  cả `Receive Quantity`, Production Board, Area Board) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
+  cả `Receive Quantity`, Production Board, Area Board, PN Tracking) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
   khỏi production bundle.
 - `backend/` — FastAPI. Application service sở hữu business rule và transaction;
   domain vocabulary độc lập framework; SQLAlchemy mapping khớp schema chuẩn.
@@ -128,7 +139,7 @@ action, hoặc implicit `AREA_COMPLETED` + `TRANSFERRED`, nhưng vẫn idempoten
 | `/production-board/kiosk` | Production Board kiosk, tự có wall-display header |
 | `/management/area-board` | Management → Area Board |
 | `/management/machines` | Management → Machines |
-| `/management/tracking` | Management → PN Tracking |
+| `/management/tracking` | Management → PN Tracking (list theo PN + overlay detail modeless) |
 | `/management/work-orders` | Management → Work Orders |
 | `/management/work-orders/completed` | Completed Work Orders, chỉ đọc |
 | `/management/planned-routes` | Planned Routes |

@@ -85,20 +85,21 @@ test('development builds expose the remaining mock views through the dev-only re
   // production builds compile the registry to null and render the
   // not-connected state for these routes instead. Machines and
   // Administration left this registry with Phase 3.5, Work Orders with
-  // Phase 4, the Scan Station with Phase 5 and the Production Board and
-  // the Area Board with Phase 11 — they are real views now.
+  // Phase 4, the Scan Station with Phase 5 and the Production Board,
+  // the Area Board and PN Tracking with Phase 11 — they are real views
+  // now.
   expect(DEV_MOCK_VIEWS).not.toBeNull();
   expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(
-    ['part-numbers', 'planned-routes', 'priority', 'tracking'].sort(),
+    ['part-numbers', 'planned-routes', 'priority'].sort(),
   );
 });
 
 test('the real views ship in every build', () => {
   // Management → Machines, Administration (Phase 3.5), Management →
   // Work Orders (Phase 4), the Scan Station (Phase 5) and the
-  // Production Board and Area Board (Phase 11) read real server state —
-  // they live in the always-available registry, never behind the
-  // development-only boundary.
+  // Production Board, Area Board and PN Tracking (Phase 11) read real
+  // server state — they live in the always-available registry, never
+  // behind the development-only boundary.
   expect(Object.keys(REAL_VIEWS).sort()).toEqual(
     [
       'administration',
@@ -106,6 +107,7 @@ test('the real views ship in every build', () => {
       'machines',
       'production-board',
       'scan-station',
+      'tracking',
       'work-orders',
     ].sort(),
   );
@@ -259,18 +261,21 @@ test('no production module reaches src/mocks/', () => {
   expect(graph).not.toContain(
     join('views', 'scan-station', 'mock-area-state.ts'),
   );
-  // A still-mock view (Tracking) stays cut away…
-  expect(graph).not.toContain(join('views', 'tracking', 'TrackingView.tsx'));
-  // …while the Production Board and the Area Board are REAL views since
-  // Phase 11: they ship in every build on `/api/production-board` and
-  // `/api/area-board` and import nothing from src/mocks/ (their
-  // long-data previews sit behind the DEV boundary).
+  // A still-mock view (Priority) stays cut away…
+  expect(graph).not.toContain(join('views', 'priority', 'PriorityView.tsx'));
+  // …while the Production Board, the Area Board and PN Tracking are
+  // REAL views since Phase 11: they ship in every build on
+  // `/api/production-board`, `/api/area-board` and `/api/tracking` and
+  // import nothing from src/mocks/ (their long-data previews sit behind
+  // the DEV boundary).
   expect(graph).toContain(
     join('views', 'production-board', 'ProductionBoardView.tsx'),
   );
   expect(graph).toContain(join('api', 'production-board.ts'));
   expect(graph).toContain(join('views', 'area-board', 'AreaBoardView.tsx'));
   expect(graph).toContain(join('api', 'area-board.ts'));
+  expect(graph).toContain(join('views', 'tracking', 'TrackingView.tsx'));
+  expect(graph).toContain(join('api', 'tracking.ts'));
   // Both views render the ONE shared Area monitoring model.
   expect(graph).toContain(join('api', 'area-inventory.ts'));
   expect(graph).toContain(join('views', 'area-presentation.ts'));

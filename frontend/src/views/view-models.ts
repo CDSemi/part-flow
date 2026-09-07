@@ -321,29 +321,6 @@ export interface MockPartNumberMaster {
   image?: string;
 }
 
-export interface MockTrackingRow {
-  pn: string;
-  name: string;
-  hotRank?: number;
-  /** `workOrder: '—'` = internal demand without an external WO Number. */
-  demand: { workOrder: string; qty: number; type: RequestType }[];
-  distribution: { area: AreaKey; label: string; qty: number }[];
-  activeQty: number;
-  stockedQty: number;
-  /** Cumulative SCRAPPED quantity (0 = none). */
-  scrappedQty: number;
-  /** Display text; `—` means the relevant WO Demand has no due date. */
-  nextDue: string;
-  status: 'Active' | 'Stocked' | 'Completed';
-  /**
-   * True when no PartNumber master metadata record exists for this PN
-   * (the master was hard-deleted, or never created). The canonical PN
-   * and its history render normally; only master-derived metadata
-   * (name, image, revision, ERP mapping) is absent.
-   */
-  noMaster?: boolean;
-}
-
 export interface MockWorkOrderLine {
   pn: string;
   barcode: string;

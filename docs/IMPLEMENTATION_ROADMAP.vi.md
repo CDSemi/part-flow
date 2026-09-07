@@ -199,9 +199,9 @@
   của operator (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32). Không
   cần migration: shape check của `RECEIVED` đã cho phép Scan Station identity và
   reason.
-- **Phase 11**: đã triển khai **Production Board** và **Area Board** (Tracking,
-  breakdown theo PN của Machines và expected-duration monitoring là phần còn mở
-  của phase). Backend `app/application/production_board.py` trên
+- **Phase 11**: đã triển khai **Production Board**, **Area Board** và **PN
+  Tracking** (breakdown theo PN của Machines và expected-duration monitoring là
+  phần còn mở của phase). Backend `app/application/production_board.py` trên
   `GET /api/production-board` derive board toàn Department từ projection vị trí
   hiện tại và Movement history: mọi PN có active quantity trong Area của
   Department (hoặc stocked quantity kèm demand còn mở), phân bổ theo Area /
@@ -244,8 +244,27 @@
   vào Area và Machine ĐÃ HOÀN THÀNH quantity finished — chính Machine chứ không
   chỉ id, nên Machine retired vẫn nêu được nơi hoàn thành — cả hai derive qua
   `projections.effective_positions`. Overview theo PN (một row mỗi Part Number
-  trong một Area, gộp các quantity), detail theo từng quantity thao tác được. Mục
-  Phase 11 bên dưới ghi chi tiết trạng thái và ranh giới.
+  trong một Area, gộp các quantity), detail theo từng quantity thao tác được.
+  **PN Tracking** (`app/application/tracking.py` trên `GET /api/tracking`,
+  `GET /api/tracking/detail` và `GET /api/tracking/movements`;
+  `src/api/tracking.ts`, `views/tracking/TrackingView.tsx`) là read model thứ ba
+  trên cùng nền và là giao diện quản lý chính (PROJECT_PROFILE §21, GUI_DESIGN
+  §7): list theo PN — mọi PN có lịch sử production hoặc open demand, search theo
+  PN / WO Number / Job Number và lọc theo Area, Operation, Machine, Request Type,
+  Hot only, status derive và due window hoàn toàn server-side, theo canonical
+  demand order với offset paging — mang open demand context, distribution hiện
+  tại, active / stocked / scrapped quantity, next due date và status derive của
+  mỗi PN; và detail read-only — master tùy chọn kèm barcode derive, open demand
+  với released / allocated / shortage, current quantity theo Area / Machine qua
+  CÙNG derivation branch-aware của các board, stocked quantity kèm active
+  allocation, reconciliation §11, mọi Quantity Flow với lineage, PLANNED snapshot
+  (done / current / future, deviation đã confirm, off-route) hoặc FLOATING actual
+  trace derive từ Movement history (repeated Area, Repair, prefix kế thừa từ
+  split), allocation history, và Movement history bất biến phân trang theo id
+  append-only, original đã reverse vẫn hiển thị. View thật thay mock Phase 2
+  (overlay detail modeless giữ nguyên) với polling / stale-feed chung, các state
+  loading / error / empty và paging long-data có bound. Mục Phase 11 bên dưới
+  ghi chi tiết trạng thái và ranh giới.
 
 ## Nguyên tắc triển khai
 
@@ -899,8 +918,8 @@ Phase 11 vẫn chỉ là read-model / monitoring. Nó không được hút vào 
 write của Scan Station, Priority write, master-data management, Worker session
 hay authentication.
 
-Trạng thái triển khai (một phần — Production Board và Area Board hoàn tất end to
-end; phần Phase 11 còn mở là Tracking, breakdown theo PN của Machines và
+Trạng thái triển khai (một phần — Production Board, Area Board và PN Tracking
+hoàn tất end to end; phần Phase 11 còn mở là breakdown theo PN của Machines và
 expected-duration monitoring): **Backend**
 (`app/application/production_board.py`, `app/api/production_board.py` —
 `GET /api/production-board?department_id=`): read model read-only toàn Department,
@@ -1001,8 +1020,7 @@ mất kết nối hiện feed stale và refresh ngay khi trở lại, row tint c
 rank với hai tier mạnh hơn được giữ,
 Department trống, state preview không request) và `production-boundary.test.ts`
 (board trong registry view thật, có trong production module graph, không
-import `src/mocks/`). Cố ý chưa có trong riêng slice Production Board: read model
-và view Tracking (vẫn là mock view chỉ development), dòng tên / revision
+import `src/mocks/`). Cố ý chưa có trong riêng slice Production Board: dòng tên / revision
 PN master (Part Numbers management, Phase 13 — dòng phụ chỉ render khi có tên),
 thời gian rotation theo Department và Due Soon policy từ Administration (Phase
 13 — dùng default đặt tên trong `board-logic` và `views/dates`), quản lý Hot rank
@@ -1086,6 +1104,131 @@ demand trong khi action của row vẫn mang demand nguồn gốc vào dialog. C
 có: quản lý Hot rank (Phase 12), tên PN
 master (Phase 13), và highlight thời gian chờ theo expected duration (vẫn là
 phần mở của Phase 11).
+
+**PN Tracking** (PROJECT_PROFILE §21 Tracking, GUI_DESIGN §7). Quyết định chi
+phối slice này: Tracking không tự bịa derivation nào — mọi con số nó hiện đều là
+con số Production Board, Area Board hoặc Scan Station đã derive, nên không hai
+surface nào nói khác nhau về một quantity. *Backend*
+(`app/application/tracking.py`, `app/api/tracking.py`): `GET /api/tracking` là
+list theo PN — tập PN là mọi PN có lịch sử production (một QuantityFlow) hoặc
+open Work Order Demand; `search` chạm PN và WO Number / Job Number của MỌI demand
+của PN (WO đã complete vẫn tìm được theo số); các select judged server-side trên
+row derive — `area_id` (active quantity trong Area, hoặc stocked quantity ở
+terminal Area), `operation_id` (Operation ghi trên active quantity),
+`machine_id` (quantity ĐANG TRÊN Machine đó), `request_type` và `hot_only` (một
+open demand thuộc loại đó), `status`, và `due` (`OVERDUE` / `THIS_WEEK` /
+`THIS_MONTH`, judged trên site calendar theo NEXT due date của PN — sớm nhất
+trong các open demand; PN không có open demand có ngày chỉ khớp `ANY`); rows
+theo canonical demand order của open demand đầu tiên (row không có demand xếp
+cuối, theo PN) với `offset` / `limit` (mặc định 100, tối đa 200) và `total`
+khớp. Mỗi row mang open demand context (`allocations.open_demand_context` — MỘT
+monitoring demand context), distribution theo Area (active, và stocked ở
+terminal Area), active quantity từ derivation vị trí dùng chung
+(`production_board.flow_positions` / `group_locations`, tách ra từ board để cả
+hai đọc một code path), stocked và scrapped quantity từ effective history, master
+tùy chọn có tồn tại hay không, và **status derive**: `ACTIVE` khi còn quantity
+trong production; nếu không, `COMPLETED` khi không còn open demand (chỉ còn
+history — kể cả PN đã stock và allocate đủ); nếu không, `STOCKED` khi stocked
+quantity chờ open demand; nếu không, `OPEN` — open demand không có quantity
+trong production hay trong stock (chưa release, scrap hết, release đã undo).
+`OPEN` là bổ sung do implementation vào ba pill GUI_DESIGN §7.1 nêu (Active /
+Stocked / Completed): bộ giá trị đã duyệt không có giá trị trung thực cho trạng
+thái đó, và báo nó bằng bất kỳ giá trị nào trong ba giá trị kia đều nói sai
+production — bản GUI_DESIGN chấp nhận nó là việc tài liệu, không phải thay đổi
+hành vi. `GET /api/tracking/detail?part_number=` là detail read-only (PN đi
+trong query parameter và được canonicalize theo MỘT quy tắc domain; không có
+production, demand lẫn master → 404): master khi tồn tại (chỉ tồn tại — name,
+revision, image và ERP id đến với Part Numbers management, Phase 13) và barcode
+`PF:PN:` derive dù có hay không, các open demand với released
+(`production_release.released_quantities`), allocated và remaining shortage,
+current quantity theo Area / Machine (nhóm `BoardLocation` — entry CŨ NHẤT mỗi
+nhóm, Machine chỉ khi mọi nhánh lineage đồng ý), stocked quantity theo terminal
+Area kèm active allocation và phần available, các hạng mục reconciliation §11
+(`introduced = active + stocked + scrapped`, introduced là effective `RECEIVED`
++ `QUANTITY_ADJUSTED`), các Quantity Flow (ACTIVE trước, rồi closed mới nhất
+trước, tối đa 50 kèm total) mỗi flow với status và lifecycle, vị trí derive,
+parent / child lineage HIỆU LỰC (`projections.effective_lineage_edges` — cạnh
+của SPLIT/MERGED đã undo là vô hiệu), PLANNED snapshot với mỗi step judged
+`DONE` / `CURRENT` / `FUTURE` từ last known step của flow
+(`lineage.last_known_step_id` — Movement đã reverse không tính; flow closed
+không có current step), cờ `off_route` và mọi deviation đã confirm đọc lại từ
+Movement ghi nó, và **actual route trace** derive từ Movement history — các Area
+quantity đã đến, theo thứ tự (`RECEIVED`, `TRANSFERRED`, `QUANTITY_ADJUSTED`,
+`STOCKED`; không bao giờ `AREA_COMPLETED`, vốn là hoàn thành trong Area nguồn),
+giữ repeated Area, Repair transfer được gắn cờ, split child kế thừa trace của
+parent duy nhất tới điểm split (cờ `inherited`), merge result bắt đầu tại điểm
+merge còn các nguồn giữ trace riêng, arrival đã reverse bị loại; allocation
+history (mới nhất trước, tối đa 100, reversal đứng cạnh allocation nó thu hồi);
+và page đầu của **Movement history bất biến** — mọi Movement của PN mới nhất
+trước, `movements_limit` (mặc định 50, tối đa 200) với keyset tiếp trên id
+append-only (`GET /api/tracking/movements?part_number=&before=`), mỗi row với
+Area, Operation, Machine, station, reason, `movement_reason`, command sequence,
+snapshot step đã fulfil, route deviation đã ghi, các cạnh lineage của SPLIT /
+MERGED, demand khởi phát của `RECEIVED`, và — trên original đã undo — row
+`REVERSED` đã undo nó, nên current state loại history đã reverse còn audit trail
+không bao giờ mất. *Frontend* (`src/api/tracking.ts`,
+`views/tracking/TrackingView.tsx`, `tracking-feed.ts`, `tracking-logic.ts`,
+`tracking-preview.ts`; view thật trong `src/app/real-views.ts` có trong mọi
+build, mock dataset Phase 2 `src/mocks/tracking.ts` đã bỏ): list đọc
+`GET /api/tracking` qua monitoring feed chung (`views/monitoring-feed` — refresh
+15 s, một request tại một thời điểm, refresh lỗi giữ page hoàn chỉnh cuối với
+status `Feed stale — reconnecting` cạnh title, load đầu lỗi là error state có
+Retry, refresh ngay khi kết nối trở lại) với search debounce và mọi select gửi
+thành query parameter (lựa chọn Area / Operation / Machine đọc một lần từ
+environment và Machines API — chỉ mục active); rows render các cột §7.1 đã
+duyệt (Hot trước PN, mọi open demand với WO Number trống là `—`, chấm màu Area,
+các con số, next due date, status pill — dòng tên từ master giữ `—` tới Phase
+13); long data có bound — `Showing n of m PNs` với `Show more` mở rộng page một
+lần tới bound của server, quá đó yêu cầu thu hẹp search; overlay detail modeless
+(GUI v14 — whole-row selection, nút đóng accessible, Escape, click ngoài, trả
+focus, không reflow table) giữ nguyên và nay key theo PN, mỗi lựa chọn là polled
+detail read riêng với loading và error-with-Retry trong panel và ghi chú stale
+khi refresh lỗi; panel render các section §7.2 — PN master (`PnImage` dùng chung,
+barcode, metadata vắng là `—`, ghi chú rõ khi không có master record), Active WO
+Demand (WO · Job · Type · requested · released · allocated · shortage · due ·
+priority với thanh allocation progress), Current quantity by Area (thanh theo
+Area / Machine với các row queue, direct processing, ready-to-transfer và
+stocked phân biệt, wording `Completed processing at … — ready to transfer`),
+Quantity Flows & Routes (một block mỗi flow với `RouteModeChip` compact, dòng vị
+trí kèm lineage, chip PLANNED snapshot hoặc FLOATING trace là các item step /
+arrow sibling riêng với `⟲ REPAIR`, actual path và ghi chú off-route của flow
+PLANNED, mọi deviation đã confirm), Movement history (reverse-chronological với
+badge type canonical, badge REPAIR, original đã undo vẫn hiển thị với badge
+REVERSED, và `Show older Movements` nối page keyset kế — page bị bỏ và bắt đầu
+lại khi refresh dời ranh giới page đầu, nên history không bao giờ hở khoảng),
+Scrap history (con số tích lũy và dòng reconciliation) và Stocked & Allocation
+history (stocked / allocated / available và các allocation entry). Chỉ
+development: `?state=loading|empty|error|long` render state xác định không
+request (`tracking-preview.ts`, fixture DEV inline — không import `src/mocks/`).
+*Test*: `tests/test_tracking_api.py` (14) — status derive mọi trường hợp và
+filter mặc định `ACTIVE`, search theo PN / WO Number / Job Number với ký tự LIKE
+là literal và WO đã complete vẫn tìm được, con số row với distribution, next due
+date qua các demand, master đã xóa cứng, mọi select filter, due window trên site
+calendar, canonical order với offset paging, 404 / canonicalize của detail, các
+con số demand / vị trí / stock / allocation / reconciliation của detail với một
+allocation reversal, FLOATING trace với repeated Area, Repair và prefix kế thừa
+từ split, merge result nêu mọi nguồn, PLANNED snapshot state với deviation đã
+confirm và closure stocked, history phân trang giữ original đã reverse cạnh các
+row `REVERSED`, và audit context lineage / scrap / Machine — cùng suite frontend
+viết lại (30) trên trả lời giả `GET /api/tracking*` (read mặc định và các cột
+render, search debounce và query parameter của select, lựa chọn filter, loading
+dưới header, load đầu lỗi có Retry, kết quả rỗng, feed stale khi refresh lỗi và
+khi mất kết nối, `Show more` và bound, state preview không request, detail read
+với các section, step / arrow sibling, Floating trace với Repair marker, quy
+tắc finished-rack, ready-to-transfer không bao giờ là Stocked, badge history với
+original đã reverse, nối page cũ hơn, history read-only, lỗi detail trong panel
+có Retry, master vắng, `describeMovement` cho lineage / stocking / addition, và
+tương tác overlay v14 giữ nguyên), `production-boundary.test.ts` (Tracking trong
+registry view thật, có trong production module graph, không import
+`src/mocks/`) và `rendered-copy.test.ts` (tên Movement canonical nay guard trong
+`tracking-logic.ts`). Cố ý chưa có: section Corrections của GUI_DESIGN §7.2 mục
+8 (luồng correction có authorization và authorization của chúng là Phase 14 —
+section ẩn hoàn toàn, đúng presentation §7.3 cho user không có quyền, thay vì
+render nút vô hiệu), name / revision / image / ERP id từ master (Phase 13 —
+render `—`), quản lý Hot rank (Phase 12), Worker identity trên row Movement
+(Phase 13 — station là identity đã ghi), và highlight thời gian tại mỗi Area
+theo expected duration (vẫn là phần mở của Phase 11 — timestamp vào vị trí đã
+có, phán xét thì chưa).
 
 ## Phase 12 — Priority Management
 

@@ -274,7 +274,8 @@ def _machine_id_of(position: EffectivePosition, state: LocationState) -> int | N
     return None
 
 
-def _location_sort_key(location: BoardLocation) -> tuple[str, int, int, str, int]:
+def location_sort_key(location: BoardLocation) -> tuple[str, int, int, str, int]:
+    """Presentation order of one PN's locations: Area name, then state, then Machine."""
     return (
         location.area.name,
         location.area.id,
@@ -282,6 +283,118 @@ def _location_sort_key(location: BoardLocation) -> tuple[str, int, int, str, int
         location.machine.name if location.machine is not None else "",
         location.machine.id if location.machine is not None else 0,
     )
+
+
+class FlowPosition(NamedTuple):
+    """One ACTIVE flow's derived position as a monitoring row reads it.
+
+    The shared per-flow answer behind the grouped board locations and
+    the PN Tracking read model (Phase 11): the flow, its branch-aware
+    `EffectivePosition`, the location state, the Machine the location
+    shows (`_machine_id_of` — the executor of MACHINE quantity, the
+    completing Machine of DONE quantity, none otherwise), the recorded
+    Operation and the External activity it names.
+    """
+
+    flow: QuantityFlow
+    position: EffectivePosition
+    state: LocationState
+    machine: Machine | None
+    operation: Operation
+    activity: str | None
+
+
+def flow_positions(session: Session, flows: Iterable[QuantityFlow]) -> dict[int, FlowPosition]:
+    """`FlowPosition` per ACTIVE flow — the one location derivation.
+
+    The shared monitoring derivation (`projections.effective_positions`)
+    supplies the representative Movement, the entry time of the OLDEST
+    lineage branch and the Machines every branch agrees on; the Area
+    mode (`areas_with_machines`) turns the Movement into the holding
+    state exactly as every Scan Station read model does.
+    """
+    wanted = list(flows)
+    if not wanted:
+        return {}
+    positions = effective_positions(session, [flow.id for flow in wanted])
+    machine_areas = areas_with_machines(session, {flow.current_area_id for flow in wanted})
+    operation_ids = {position.movement.operation_id for position in positions.values()}
+    operations = {
+        operation.id: operation
+        for operation in session.scalars(select(Operation).where(Operation.id.in_(operation_ids)))
+    }
+    machine_ids = {
+        machine_id
+        for position in positions.values()
+        for machine_id in (position.assigned_machine_id, position.completed_machine_id)
+        if machine_id is not None
+    }
+    machines = (
+        {
+            machine.id: machine
+            for machine in session.scalars(select(Machine).where(Machine.id.in_(machine_ids)))
+        }
+        if machine_ids
+        else {}
+    )
+    found: dict[int, FlowPosition] = {}
+    for flow in wanted:
+        # Every branch shares the Area, holding state and Operation (the
+        # merge command required it), so the representative branch
+        # states them all — while the entry time dates the position for
+        # the whole merged quantity.
+        position = positions[flow.id]
+        movement = position.movement
+        state = _LOCATION_STATE_OF[
+            processing_state_of(
+                movement.movement_type,
+                direct_processing=flow.current_area_id not in machine_areas,
+            )
+        ]
+        machine_id = _machine_id_of(position, state)
+        operation = operations[movement.operation_id]
+        found[flow.id] = FlowPosition(
+            flow=flow,
+            position=position,
+            state=state,
+            machine=machines[machine_id] if machine_id is not None else None,
+            operation=operation,
+            activity=(operation.name or operation.code) if operation.is_external else None,
+        )
+    return found
+
+
+def group_locations(
+    positions: Iterable[FlowPosition], areas: dict[int, Area]
+) -> dict[str, list[BoardLocation]]:
+    """Active quantity per PN grouped by (Area, state, Machine, activity).
+
+    Each group carries the OLDEST entry of its portions, so a long stay
+    is never hidden by a newer portion; the groups of one PN come in
+    the presentation order (`location_sort_key`).
+    """
+    groups: dict[str, dict[tuple[int, str, int | None, str | None], BoardLocation]] = {}
+    for entry in positions:
+        flow = entry.flow
+        machine_id = entry.machine.id if entry.machine is not None else None
+        key = (flow.current_area_id, entry.state, machine_id, entry.activity)
+        per_pn = groups.setdefault(flow.part_number, {})
+        existing = per_pn.get(key)
+        if existing is None:
+            per_pn[key] = BoardLocation(
+                area=areas[flow.current_area_id],
+                machine=entry.machine,
+                activity=entry.activity,
+                quantity=flow.quantity,
+                state=entry.state,
+                since=entry.position.entered_at,
+            )
+        else:
+            since = existing.since
+            if since is None or entry.position.entered_at < since:
+                since = entry.position.entered_at
+            per_pn[key] = existing._replace(quantity=existing.quantity + flow.quantity, since=since)
+    return {pn: sorted(per_pn.values(), key=location_sort_key) for pn, per_pn in groups.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -308,74 +421,10 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
         if areas
         else []
     )
-    flow_ids = [flow.id for flow in flows]
-    # The shared monitoring derivation: the representative Movement of
-    # each flow's position, the entry time of the OLDEST lineage branch
-    # and the Machines every branch agrees on.
-    positions = effective_positions(session, flow_ids)
-    machine_areas = areas_with_machines(session, {flow.current_area_id for flow in flows})
-    operation_ids = {position.movement.operation_id for position in positions.values()}
-    operations = (
-        {
-            operation.id: operation
-            for operation in session.scalars(
-                select(Operation).where(Operation.id.in_(operation_ids))
-            )
-        }
-        if operation_ids
-        else {}
-    )
-    machine_ids = {
-        machine_id
-        for position in positions.values()
-        for machine_id in (position.assigned_machine_id, position.completed_machine_id)
-        if machine_id is not None
-    }
-    machines = (
-        {
-            machine.id: machine
-            for machine in session.scalars(select(Machine).where(Machine.id.in_(machine_ids)))
-        }
-        if machine_ids
-        else {}
-    )
-
     # Active quantity grouped per PN and (Area, state, Machine, activity).
-    groups: dict[str, dict[tuple[int, str, int | None, str | None], BoardLocation]] = {}
+    groups = group_locations(flow_positions(session, flows).values(), areas)
     oldest_flow: dict[str, datetime.datetime] = {}
     for flow in flows:
-        # Every branch shares the Area, holding state and Operation (the
-        # merge command required it), so the representative branch
-        # states them all — while the entry time dates the position for
-        # the whole merged quantity.
-        position = positions[flow.id]
-        movement = position.movement
-        state = _LOCATION_STATE_OF[
-            processing_state_of(
-                movement.movement_type,
-                direct_processing=flow.current_area_id not in machine_areas,
-            )
-        ]
-        machine_id = _machine_id_of(position, state)
-        operation = operations[movement.operation_id]
-        activity = (operation.name or operation.code) if operation.is_external else None
-        key = (flow.current_area_id, state, machine_id, activity)
-        per_pn = groups.setdefault(flow.part_number, {})
-        existing = per_pn.get(key)
-        if existing is None:
-            per_pn[key] = BoardLocation(
-                area=areas[flow.current_area_id],
-                machine=machines[machine_id] if machine_id is not None else None,
-                activity=activity,
-                quantity=flow.quantity,
-                state=state,
-                since=position.entered_at,
-            )
-        else:
-            since = existing.since
-            if since is None or position.entered_at < since:
-                since = position.entered_at
-            per_pn[key] = existing._replace(quantity=existing.quantity + flow.quantity, since=since)
         created = flow.created_at
         if flow.part_number not in oldest_flow or created < oldest_flow[flow.part_number]:
             oldest_flow[flow.part_number] = created
@@ -396,7 +445,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
 
     rows: list[BoardRow] = []
     for pn in sorted(part_numbers):
-        active_locations = list(groups.get(pn, {}).values())
+        active_locations = list(groups.get(pn, []))
         context = demands.get(pn, [])
         if not active_locations and not context:
             # Stocked quantity of finished work: no longer the
@@ -414,7 +463,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
             for (stocked_pn, area_id), quantity in stocked.items()
             if stocked_pn == pn
         ]
-        locations.sort(key=_location_sort_key)
+        locations.sort(key=location_sort_key)
         first = context[0] if context else None
         if first is not None:
             received_date = first.work_order.received_date

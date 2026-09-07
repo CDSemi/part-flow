@@ -189,7 +189,7 @@ from app.infrastructure.models import (
 # SLICE1 §14; shared with the in-Area commands); the route-deviation
 # block records a confirmed deviation (PROJECT_PROFILE §17 step 4).
 _FINGERPRINT_KEY: Final = FINGERPRINT_KEY
-_ROUTE_DEVIATION_KEY: Final = "route_deviation"
+ROUTE_DEVIATION_KEY: Final = "route_deviation"
 
 _DEVICE_EVENT_ID_CONSTRAINT: Final = DEVICE_EVENT_ID_CONSTRAINT
 
@@ -627,7 +627,7 @@ def _result_from_command(command: list[PartMovement], *, created: bool) -> AreaT
         operation_id=movement.operation_id,
         station_id=movement.station_id,
         assigned_route_step_id=movement.assigned_route_step_id,
-        route_deviation=(movement.metadata_ or {}).get(_ROUTE_DEVIATION_KEY),
+        route_deviation=(movement.metadata_ or {}).get(ROUTE_DEVIATION_KEY),
         completed_movement_id=completed.id if completed is not None else None,
         completed_machine_id=completed.source_machine_id if completed is not None else None,
         source_quantity_flow_id=split.source_quantity_flow_id if split else None,
@@ -1083,7 +1083,7 @@ def record_arrival(
         sequence += 1
     transfer_metadata: dict[str, Any] = dict(metadata)
     if deviation is not None:
-        transfer_metadata[_ROUTE_DEVIATION_KEY] = {
+        transfer_metadata[ROUTE_DEVIATION_KEY] = {
             **deviation,
             "confirmed": True,
             "reason": reason,

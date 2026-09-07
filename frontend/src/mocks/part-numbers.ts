@@ -4,11 +4,10 @@ import type { MockPartNumberMaster } from '../views/view-models';
 // Development-only sample data: the canonical PN string is the
 // identity; these records are optional metadata only. The list aligns
 // with the PN catalog consumed by Work Orders and the Scan Station
-// (mocks/work-orders.ts derives MOCK_PN_CATALOG from it), and with the
-// Tracking detail sample (2027-60-8114-00: revision C, ERP-PN-40412).
-// TEST-SCRAP-PLATE (mocks/tracking.ts) deliberately has NO record
-// here: its junk/test master was hard-deleted — production history
-// keeps showing the canonical PN.
+// (mocks/work-orders.ts derives MOCK_PN_CATALOG from it).
+// TEST-SCRAP-PLATE deliberately has NO record here: its junk/test
+// master was hard-deleted — production history keeps showing the
+// canonical PN.
 export const MOCK_PART_NUMBERS: MockPartNumberMaster[] = [
   {
     pn: '0455-20-0118-03',

@@ -17,6 +17,7 @@ from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
 from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
+from app.api.tracking import router as tracking_router
 from app.api.work_orders import router as work_orders_router
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(allocations_router)
     app.include_router(production_board_router)
     app.include_router(area_board_router)
+    app.include_router(tracking_router)
     register_exception_handlers(app)
     return app
 

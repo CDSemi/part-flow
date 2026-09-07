@@ -27,6 +27,79 @@
   margin-bottom: 14px;
 }
 
+/* Title row: the heading and the list's feed status side by side. */
+.tk-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* Feed status (GUI_DESIGN §5/§6.1): the shared `Live` / `Feed stale —
+   reconnecting` statement of a live view — the same tones and heartbeat
+   as the Production Board and the Area Board; never color-only. */
+.tk-feed {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--ok-t);
+  margin-bottom: 14px;
+}
+
+.tk-feed .ld {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 9px var(--ok);
+  animation: pf-heartbeat 2s infinite;
+}
+
+.tk-feed.stale {
+  color: var(--warn-t);
+}
+
+.tk-feed.stale .ld {
+  background: var(--warn);
+  box-shadow: 0 0 9px var(--warn);
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tk-feed .ld {
+    animation: none;
+  }
+}
+
+/* Paging summary under the list and under the Movement history:
+   `Showing n of m` with the explicit continuation control. */
+.tk-paging {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.tk-paging b {
+  color: var(--text);
+}
+
+.tk-stale {
+  color: var(--warn-t);
+  font-weight: 700;
+}
+
+.tk-error {
+  color: var(--err-t);
+}
+
 .tk-filters {
   display: flex;
   gap: 9px;
@@ -455,6 +528,18 @@
   line-height: 1.5;
 }
 
+/* A confirmed route deviation keeps the warning tone: the previous
+   route stays recorded, the actual path differs. */
+.devnote.deviation {
+  color: var(--warn-t);
+}
+
+/* A consumed or closed Quantity Flow (split, merged, scrapped, stocked)
+   stays listed for its lineage and history, quieter than active ones. */
+.qflow.closed {
+  opacity: 0.72;
+}
+
 .mv {
   list-style: none;
   font-size: 12.5px;
@@ -465,6 +550,14 @@
   gap: 10px;
   padding: 8px 0;
   border-bottom: 1px dashed var(--hair);
+}
+
+/* An original undone by a REVERSED row stays visible (history is
+   append-only) — quieter, with its explicit REVERSED badge. */
+.mv li.reversed .desc {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--hair);
 }
 
 .mv li:last-child {

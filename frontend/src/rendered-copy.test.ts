@@ -154,8 +154,11 @@ test('the copy audit really covers the current mockup', () => {
 
 test('canonical Movement names remain allowed as audit/history data', () => {
   // The guard must never rot into banning legitimate audit vocabulary:
-  // the Movement history mock still carries canonical type names.
-  const tracking = readFileSync(join(srcDir, 'mocks', 'tracking.ts'), 'utf8');
+  // the Movement history presentation still carries canonical type names.
+  const tracking = readFileSync(
+    join(srcDir, 'views', 'tracking', 'tracking-logic.ts'),
+    'utf8',
+  );
   for (const name of ['AREA_COMPLETED', 'TRANSFERRED', 'SCRAPPED']) {
     expect(tracking).toContain(name);
   }

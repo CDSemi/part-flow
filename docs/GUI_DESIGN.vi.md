@@ -594,7 +594,20 @@ reflow table; close bằng ✕/Escape/selected-row/outside click; ≤900px spans
 
 Search PN/WO/Job; filters Area/Operation/Machine/Request Type/Hot/status/due. Columns:
 PN+name/Hot, active Demand, distribution dots, active/stocked/scrapped quantity,
-next due và status. Deleted-master PN vẫn canonical, metadata `—`; null WO `—`.
+next due và status pill (Active / Stocked / Open / Completed — status derive của
+IMPLEMENTATION_ROADMAP Phase 11: `Active` khi còn quantity trong production,
+`Completed` khi không còn open Work Order Demand, `Stocked` khi chỉ còn stocked
+quantity chờ open demand, và `Open` — implementation thêm vào — khi open demand
+không có quantity nào trong production hay trong stock). Deleted-master PN vẫn
+canonical, metadata `—`; null WO `—`. **Ranh giới triển khai (Phase 11):** list
+là production UI thật trên `GET /api/tracking` — search (debounce, trên PN, WO
+Number và Job Number của MỌI demand của PN) và mọi select được đánh giá server-side
+trên row derive, due window judged trên site calendar theo next due date của PN,
+rows theo canonical demand order, và list có bound: `Showing n of m PNs` với
+`Show more` mở rộng page một lần tới bound của server rồi yêu cầu thu hẹp search.
+Title row mang feed status của live view (`● Live` / `Feed stale — reconnecting`,
+§5 — status của chính list, không phải của kết nối), list tự refresh theo nhịp
+monitoring chung.
 
 ## 7.2 Detail panel
 
@@ -614,7 +627,15 @@ next due và status. Deleted-master PN vẫn canonical, metadata `—`; null WO 
 ## 7.3 States
 
 Per-section skeleton; `No PNs match — clear filters`; unauthorized user không thấy
-Corrections thay vì disabled controls.
+Corrections thay vì disabled controls. **Ranh giới triển khai (Phase 11):** detail
+là production UI thật trên `GET /api/tracking/detail` — mỗi PN được chọn là một
+polled read riêng với skeleton loading và error-with-Retry ngay trong panel,
+refresh lỗi giữ detail hoàn chỉnh cuối kèm ghi chú `Feed stale — reconnecting`
+dưới PN, Movement history phân trang (`Showing n of m Movements`, `Show older
+Movements` nối thêm page kế của history bất biến), name / revision / image / ERP
+id từ master render `—` cho đến khi Part Numbers management (Phase 13) cung cấp,
+và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
+corrections (Phase 14) — không bao giờ render nút vô hiệu.
 
 ---
 
@@ -955,6 +976,29 @@ session không còn shift end.
   status** `● Live` / `Feed stale — reconnecting` như Production Board;
   `Total PNs` / `PNs` đếm Part Number chứ không đếm row, và sort `Priority` xếp
   mọi Hot rank trước mọi row không rank.
+- PN Tracking chạy trên read model thật (§7, §7.1, §7.3; IMPLEMENTATION_ROADMAP
+  Phase 11 — ranh giới triển khai, cộng ba bổ sung presentation): PN Tracking
+  thành production UI thật trên `GET /api/tracking` và `GET /api/tracking/detail`,
+  thay mock dataset Phase 2; overlay detail modeless v14 và whole-row selection
+  giữ nguyên. Mọi giá trị đều là giá trị các monitoring view khác đã derive:
+  current quantity theo Area / Machine qua derivation branch-aware của các board,
+  open demand context theo canonical order, stocked và scrapped quantity từ
+  effective history, PLANNED snapshot judged từ last known step của flow kèm mọi
+  deviation đã confirm, và FLOATING actual trace derive từ Movement history —
+  giữ repeated Area, `⟲ REPAIR` cho Repair return, split child kế thừa trace của
+  nguồn tới điểm split. Movement history giữ original đã undo hiển thị với badge
+  `REVERSED` rõ ràng bên cạnh row `REVERSED` đã undo nó. **Bổ sung presentation:**
+  (a) **feed status** cạnh title và ghi chú stale dưới PN đang chọn — cùng câu
+  `● Live` / `Feed stale — reconnecting` như các board; (b) **status pill thêm
+  `Open`** cho PN mà open Work Order Demand không có quantity trong production
+  hay trong stock (chưa release, scrap hết, release đã undo) — không giá trị nào
+  trong ba giá trị đã duyệt mô tả trung thực trạng thái đó, nên status filter của
+  list cũng có `Open`; (c) **long data có bound** — `Showing n of m PNs` với `Show
+  more` trên list, `Showing n of m Movements` với `Show older Movements` trên
+  history. Section Corrections vẫn ẩn cho đến khi có authorized corrections
+  (Phase 14), các field metadata từ master render `—` cho đến Phase 13. Mockup
+  v18 không đổi (feed state, paging control và pill `Open` chỉ có trong
+  application).
 
 ## 15.2 Từ GUI Design v16
 

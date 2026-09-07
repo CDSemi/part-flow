@@ -471,6 +471,30 @@ def consumed_flow_ids(session: Session, flow_ids: Iterable[int] | None = None) -
     return {int(flow_id) for flow_id in session.scalars(query)}
 
 
+def effective_lineage_edges(session: Session, flow_ids: Iterable[int]) -> list[QuantityFlowLineage]:
+    """Every EFFECTIVE lineage edge touching one of the flows, by id.
+
+    An edge of an undone SPLIT/MERGED command (Phase 9) is void and
+    absent, exactly as in `consumed_flow_ids` — so a read model
+    following descent (PN Tracking, Phase 11) sees the lineage history
+    currently says, never a reopened parent as consumed.
+    """
+    wanted = list(flow_ids)
+    if not wanted:
+        return []
+    return list(
+        session.scalars(
+            select(QuantityFlowLineage)
+            .where(
+                QuantityFlowLineage.device_event_id.not_in(_reversed_command_ids()),
+                (QuantityFlowLineage.parent_flow_id.in_(wanted))
+                | (QuantityFlowLineage.child_flow_id.in_(wanted)),
+            )
+            .order_by(QuantityFlowLineage.id)
+        )
+    )
+
+
 def visited_area_ids(session: Session, flow_id: int) -> set[int]:
     """Every Area the flow's quantity has actually been in (Repair, §14).
 

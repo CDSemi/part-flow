@@ -16,7 +16,7 @@ import { dirname, join, relative } from 'node:path';
 // src/production-boundary.test.ts) so this check cannot rot.
 export const MOCK_SENTINELS = [
   '0455-20-0118-03', // mocks/work-orders.ts (and others)
-  '2027-60-8114-00', // mocks/tracking.ts, area-board, …
+  '2027-60-8114-00', // mocks/area-board.ts, priority, work-orders, …
   '0118-40-0022-07', // long-data sets
   '007010', // mocks/work-orders.ts (mock Work Order Number)
   '118-052', // mocks/work-orders.ts (undated-demand PN)
