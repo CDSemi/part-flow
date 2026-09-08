@@ -156,3 +156,14 @@ Rules:
 - Follow it with one bullet per material logical change.
 - Every bullet uses the most specific Conventional Commits-style prefix (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `ci:`, `chore:`, `perf:`, or `revert:`), with optional scope.
 - Enclose the entire commit description in one standalone fenced `text` block.
+
+## 9. Release Information
+
+When the user asks for "release info", release details, or content for a GitHub Release:
+
+- Read `docs/DEPLOYMENT.md` §10 (Release and Versioning); it owns the version convention, notes template, and publication gates.
+- Resolve the intended target commit and previous release baseline from the request, existing context, and current repository tags/releases. Inspect the relevant changes, migrations, configuration, and validation evidence. NEVER derive release scope solely from the latest commit message, a phase number, or uncommitted work.
+- Ask concise questions in Vietnamese only for missing decisions that materially affect the release, such as the target revision, comparison baseline, intended use, or release maturity. Reuse known context and repository facts; do not ask the user to supply information you can verify.
+- Once those decisions are resolved, return exactly these three fields for a release-info-only request: `Tag`, `Release title`, and `Description`, in that order. Put each of the first two values in its own `text` code block and the Description in one `markdown` code block, ready to paste into GitHub.
+- Use English for field values unless explicitly requested otherwise. Follow the §10 Description template, including the full source SHA, pre-release flag, migration/configuration notes, limitations, and evidence-based validation status. Mark unknown checks as pending or unverified; NEVER invent results or production readiness.
+- Preparing release info is read-only. NEVER edit files, create or move tags, publish a release, or deploy unless the user explicitly requests those actions.

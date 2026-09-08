@@ -13,13 +13,13 @@ and Admin Maintenance** in `IMPLEMENTATION_ROADMAP.md`. Phase 16 covers backups,
 migrations, HTTPS/internal access, observability, rollback, reconciliation,
 pilot deployment, and administrative archive/purge maintenance.
 
-At source commit `194ffc2e5e8e22c389abecd0830292a6707955d9`, the repository has
-Phases 1–10 implemented end to end (through Phase 10 — Stockroom and
-WorkOrderAllocation, backend and frontend); the monitoring read models
-(Phase 11), Priority Management (Phase 12), and full Administration
-(Phase 13) are still development-only previews or honest unavailable states.
-Authentication and role enforcement are Phase 14. Production hardening and
-production deployment artifacts are Phase 16.
+At source commit `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`, the repository has
+Phases 1–10 implemented end to end, plus Phase 10.5 — Scan Station Receive
+Quantity and the Phase 11 Production Board, Area Board, and PN Tracking
+read models and real frontend views. Priority Management (Phase 12) and full
+Administration (Phase 13) remain development-only previews or honest
+unavailable states. Authentication and role enforcement are Phase 14.
+Production hardening and production deployment artifacts are Phase 16.
 
 Therefore:
 
@@ -176,7 +176,7 @@ browser's local time. Staging and production must use the same value.
 
 Every platform follows the same release order:
 
-1. Select and record an immutable release commit/tag.
+1. Select and record an immutable release commit/tag following §10.
 2. Confirm CI and release quality gates for that exact revision.
 3. Read the migration notes from the currently deployed revision to the target.
 4. Verify the latest backup and create a fresh pre-release backup.
@@ -217,3 +217,144 @@ These references describe platform capabilities, not PartFlow readiness:
   requires support-side whitelisting; plan-specific capability must still be
   confirmed before selecting shared hosting.
 
+## 10. Release and Versioning
+
+This section owns PartFlow's release naming, release notes, and publication
+checklist. A release is a traceable deployment candidate, not proof of
+production readiness. The gates in §5 still apply to pilot/production.
+
+### 10.1 Release identity
+
+Use one application release for the frontend, backend, and migrations from
+the same commit. Record its Git tag and full commit SHA. Alembic revisions
+identify the database schema separately; package metadata is not release
+history.
+
+Create a release for a version selected for testing or deployment, not for
+every commit. Redeploying the same version does not require a new release.
+Never move, overwrite, or reuse a published release tag, or replace its
+published build artifacts. Changed release content requires a new version.
+
+Use versioned tags, not `Stage`, `Production`, `Latest`, or phase numbers.
+Existing non-versioned tags can remain historical references, but must not
+become moving deployment targets. Environment and phase belong in the notes.
+
+### 10.2 Version convention
+
+Use [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with a lowercase
+`v` prefix for Git tags: `vMAJOR.MINOR.PATCH`, optionally followed by
+`-alpha.N`, `-beta.N`, or `-rc.N`. Start `N` at 1; do not use leading zeroes.
+
+| Situation | Example |
+| --- | --- |
+| First internal development snapshot selected for staging | `v0.1.0-alpha.1` |
+| Another snapshot of the same planned release | `v0.1.0-alpha.2` |
+| A new development milestone with a materially larger scope | `v0.2.0-alpha.1` |
+| Intended scope is implemented; broader testing remains | `v0.2.0-beta.1` |
+| Candidate for the first stable production release | `v1.0.0-rc.1` |
+| First accepted stable production release, after §5 passes | `v1.0.0` |
+| Compatible bug fix after `v1.0.0` | `v1.0.1` |
+| Compatible feature addition after `v1.0.0` | `v1.1.0` |
+| Breaking change to the supported contract after `v1.x` | `v2.0.0` |
+
+These are examples, not reserved tags or a mandatory sequence. Choose the next
+unused version from the actual release history and change scope. Before 1.0,
+compatibility is not guaranteed; breaking changes must still be documented.
+
+For PartFlow, the supported contract includes documented API behavior and
+configuration/data-upgrade requirements. A database migration alone does not
+require a major increment; assess its compatibility impact.
+
+`alpha`, `beta`, and `rc` express release maturity, not the deployment host.
+Mark all three as GitHub pre-releases; do not designate them as the latest
+stable release. A stable version may be rehearsed in staging before production.
+The suffix never waives §5 or proves that deployment validation passed.
+
+### 10.3 Release title and description
+
+Use `PartFlow <tag>` with an optional short purpose:
+`PartFlow v0.1.0-alpha.1 — Internal Staging`. Keep release titles and descriptions
+in English unless explicitly requested otherwise.
+
+For the first release, summarize implemented scope. For later releases, describe
+the changes from the selected previous release to the exact target commit,
+not just the latest commit or the phase plan. Exclude uncommitted work.
+
+Use this Description template, replacing placeholders with verified information:
+
+```markdown
+## Summary
+<Release purpose and intended use.>
+
+## Changes
+<Implemented additions, fixes, and breaking changes since the previous release;
+summarize available functionality for an initial release.>
+
+## Deployment
+- Source commit: <full commit SHA>
+- Previous release: <tag, or Initial release>
+- Intended use: <internal staging, release validation, or production>
+- GitHub pre-release: <Yes or No>
+- Deployment guide: <repository guide path>
+
+## Database and configuration
+- Migrations: <required revisions and upgrade notes, or No new migrations>
+- Configuration: <required changes, or No changes>
+- Rollback: <application/schema compatibility and recovery requirements>
+
+## Known limitations
+<Relevant restrictions and unavailable features.>
+
+## Validation
+<Completed checks and their evidence for this exact commit;
+identify pending or unverified checks explicitly.>
+```
+
+Do not infer "No new migrations", compatibility, or successful validation from
+the release name. Check the revision range and actual evidence. Unknown results
+remain `Pending` or `Not verified` in a draft; they cannot satisfy a release
+gate. Keep NAS smoke-test results separate from CI results. Never include
+secrets, credentials, or private deployment details in public release notes.
+
+### 10.4 Publication checklist
+
+1. Select the exact target commit and previous release used for comparison.
+   Resolve any local-only changes before selecting the published source.
+2. Check local and remote tags for collisions. Confirm the repository CI and
+   relevant quality gates passed for that exact commit; a successful run for
+   another revision does not count.
+3. Review changes, migrations, configuration, rollback requirements, and known
+   limitations. Complete the release notes; apply §5 for pilot/production.
+4. Create an annotated tag at the selected commit, not at an unchecked moving
+   branch tip, and push that specific tag.
+5. In GitHub Releases, draft a release from the existing tag. Enter its title
+   and description, set the pre-release flag consistently with §10.2, and
+   attach any intended build artifacts before publication.
+6. Publish when the applicable gates are satisfied. Deploy using §7 and the
+   platform runbook, recording the tag, SHA, database revision, operator, time,
+   and smoke-test results. Keep the previous release and required backups.
+
+A draft can be prepared before validation finishes. Publishing the release and
+deploying it are separate operations; neither is authorized merely by a request
+to prepare release information.
+
+### 10.5 Current workflow and rollback boundary
+
+At the source revision in §1, `.github/workflows/ci.yml` runs for pushes to
+`main` and pull requests. It checks code and builds development images; it does
+not publish release images or deploy to Synology when a tag/release is created.
+GitHub source archives are not prebuilt production images. A fixed source tag
+also does not guarantee identical later rebuilds when base images can change.
+
+Manual releases are sufficient for this stage. When production image publication
+is implemented, record the image digests alongside the release tag and retain
+the deployed artifacts. Do not introduce a separate version service, release
+branch hierarchy, or automatic publisher solely to apply this convention.
+
+Rollback follows the operations runbook: switching application tags does not
+undo a migration. Confirm schema compatibility or use the approved database
+recovery plan, accounting for writes after the backup. Never assume restoring
+an older backup preserves newer production Movements.
+
+References: [Git tags](https://git-scm.com/docs/git-tag) and
+[GitHub release management](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).
