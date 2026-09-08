@@ -16,7 +16,16 @@ The read-only management surface of `app.application.tracking`:
   Quantity Flows with lineage, routes and traces, the allocation
   history, and the first page of the immutable Movement history.
 - ``GET /tracking/movements?part_number=&before=`` — a further page of
-  that history (keyset on the append-only Movement id, newest first).
+  that history: reverse-chronological ``(occurred_at DESC, id DESC)``,
+  ``before`` naming the last Movement delivered and the server resolving
+  its timestamp for the keyset; ``movement_type=SCRAPPED`` is the Scrap
+  history — the same immutable history restricted to scrap events.
+- ``GET /tracking/flows?part_number=&before=`` — a further page of the
+  PN's closed Quantity Flows (newest first, keyset on the flow id; the
+  first page inside the detail carries every ACTIVE flow as well).
+- ``GET /tracking/allocations?part_number=&before=`` — a further page of
+  the allocation history (``allocated_at DESC, id DESC``, ``before``
+  naming the last allocation delivered).
 
 A PN is addressed by its canonical value in a query parameter (a PN is
 an opaque string that may carry path-hostile characters); the input is
@@ -35,6 +44,7 @@ from app.application import tracking
 from app.application.allocations import DemandContext
 from app.application.production_board import BoardLocation, LocationState
 from app.application.transfers import ROUTE_DEVIATION_KEY
+from app.domain.enums import MovementType
 
 router = APIRouter(prefix="/api")
 
@@ -128,6 +138,10 @@ class TrackingRowResponse(BaseModel):
     distribution: list[DistributionResponse]
     active_quantity: int
     stocked_quantity: int
+    # The PN's active allocation and the stocked quantity still
+    # unallocated — the figure the STOCKED / OPEN status is judged on.
+    allocated_quantity: int
+    available_stocked_quantity: int
     scrapped_quantity: int
     # The earliest due date among the open demands; null when none is dated.
     next_due_date: datetime.date | None
@@ -173,6 +187,8 @@ def _row(row: tracking.TrackingRow) -> TrackingRowResponse:
         distribution=[_distribution(entry) for entry in row.distribution],
         active_quantity=row.active_quantity,
         stocked_quantity=row.stocked_quantity,
+        allocated_quantity=row.allocated_quantity,
+        available_stocked_quantity=row.available_stocked_quantity,
         scrapped_quantity=row.scrapped_quantity,
         next_due_date=row.next_due_date,
         status=row.status,
@@ -381,6 +397,23 @@ class MovementPageResponse(BaseModel):
     next_before_movement_id: int | None
 
 
+class FlowPageResponse(BaseModel):
+    # Every ACTIVE flow (first page only) followed by closed flows,
+    # newest first.
+    flows: list[FlowResponse]
+    total: int
+    has_more: bool
+    # Pass as `before` for the next page of closed flows; null on the last.
+    next_before_flow_id: int | None
+
+
+class AllocationPageResponse(BaseModel):
+    allocations: list[AllocationResponse]
+    total: int
+    has_more: bool
+    next_before_allocation_id: int | None
+
+
 class TrackingDetailResponse(BaseModel):
     part_number: str
     master: TrackingMasterResponse | None
@@ -395,11 +428,13 @@ class TrackingDetailResponse(BaseModel):
     available_stocked_quantity: int
     scrapped_quantity: int
     introduced_quantity: int
-    flows: list[FlowResponse]
-    flow_total: int
-    allocations: list[AllocationResponse]
-    allocation_total: int
+    flows: FlowPageResponse
+    allocations: AllocationPageResponse
     movements: MovementPageResponse
+    # The SCRAPPED events of the PN — the same immutable history
+    # restricted to scrap, newest first; `scrapped_quantity` above is
+    # the effective (net of reversed) total.
+    scrap_history: MovementPageResponse
 
 
 def _work_order_ref(demand: Any, work_order: Any) -> TrackingWorkOrderRef:
@@ -598,6 +633,24 @@ def _movement_page(page: tracking.MovementPage) -> MovementPageResponse:
     )
 
 
+def _flow_page(page: tracking.FlowPage) -> FlowPageResponse:
+    return FlowPageResponse(
+        flows=[_flow(entry) for entry in page.flows],
+        total=page.total,
+        has_more=page.has_more,
+        next_before_flow_id=page.next_before_flow_id,
+    )
+
+
+def _allocation_page(page: tracking.AllocationPage) -> AllocationPageResponse:
+    return AllocationPageResponse(
+        allocations=[_allocation(entry) for entry in page.entries],
+        total=page.total,
+        has_more=page.has_more,
+        next_before_allocation_id=page.next_before_allocation_id,
+    )
+
+
 @router.get("/tracking/detail")
 def get_tracking_detail(
     session: SessionDep,
@@ -606,12 +659,20 @@ def get_tracking_detail(
     movements_limit: int = Query(
         tracking.DEFAULT_MOVEMENT_LIMIT, ge=1, le=tracking.MAX_MOVEMENT_LIMIT
     ),
+    flows_limit: int = Query(tracking.DEFAULT_FLOW_LIMIT, ge=1, le=tracking.MAX_FLOW_LIMIT),
+    allocations_limit: int = Query(
+        tracking.DEFAULT_ALLOCATION_LIMIT, ge=1, le=tracking.MAX_ALLOCATION_LIMIT
+    ),
+    scrap_limit: int = Query(tracking.DEFAULT_SCRAP_LIMIT, ge=1, le=tracking.MAX_MOVEMENT_LIMIT),
 ) -> TrackingDetailResponse:
     detail = tracking.tracking_detail(
         session,
         part_number,
         movements_before=movements_before,
         movements_limit=movements_limit,
+        flows_limit=flows_limit,
+        allocations_limit=allocations_limit,
+        scrap_limit=scrap_limit,
     )
     return TrackingDetailResponse(
         part_number=detail.part_number,
@@ -633,11 +694,10 @@ def get_tracking_detail(
         available_stocked_quantity=max(detail.stocked_quantity - detail.allocated_quantity, 0),
         scrapped_quantity=detail.scrapped_quantity,
         introduced_quantity=detail.introduced_quantity,
-        flows=[_flow(entry) for entry in detail.flows],
-        flow_total=detail.flow_total,
-        allocations=[_allocation(entry) for entry in detail.allocations],
-        allocation_total=detail.allocation_total,
+        flows=_flow_page(detail.flows),
+        allocations=_allocation_page(detail.allocations),
         movements=_movement_page(detail.movements),
+        scrap_history=_movement_page(detail.scrap_history),
     )
 
 
@@ -647,7 +707,45 @@ def get_tracking_movements(
     part_number: str,
     before: int | None = None,
     limit: int = Query(tracking.DEFAULT_MOVEMENT_LIMIT, ge=1, le=tracking.MAX_MOVEMENT_LIMIT),
+    movement_type: Literal["SCRAPPED"] | None = None,
 ) -> MovementPageResponse:
-    """A further page of one PN's Movement history (newest first, older
-    than ``before``). The PN is canonicalized; an unknown PN is 404."""
-    return _movement_page(tracking.movement_history_of(session, part_number, before, limit))
+    """A further page of one PN's Movement history — reverse-chronological
+    ``(occurred_at DESC, id DESC)``, continuing below the Movement
+    ``before`` names (its timestamp resolved server-side). With
+    ``movement_type=SCRAPPED`` it is the Scrap history. The PN is
+    canonicalized; an unknown PN or a ``before`` outside its history is
+    404."""
+    return _movement_page(
+        tracking.movement_history_of(
+            session,
+            part_number,
+            before,
+            limit,
+            movement_types=(MovementType(movement_type),) if movement_type else None,
+        )
+    )
+
+
+@router.get("/tracking/flows")
+def get_tracking_flows(
+    session: SessionDep,
+    part_number: str,
+    before: int | None = None,
+    limit: int = Query(tracking.DEFAULT_FLOW_LIMIT, ge=1, le=tracking.MAX_FLOW_LIMIT),
+) -> FlowPageResponse:
+    """A further page of one PN's closed Quantity Flows, newest first
+    and older than the flow ``before`` names (the detail's first page
+    carries every ACTIVE flow; continuations carry closed flows only)."""
+    return _flow_page(tracking.flow_page_of(session, part_number, before, limit))
+
+
+@router.get("/tracking/allocations")
+def get_tracking_allocations(
+    session: SessionDep,
+    part_number: str,
+    before: int | None = None,
+    limit: int = Query(tracking.DEFAULT_ALLOCATION_LIMIT, ge=1, le=tracking.MAX_ALLOCATION_LIMIT),
+) -> AllocationPageResponse:
+    """A further page of one PN's allocation history — ``(allocated_at
+    DESC, id DESC)``, continuing below the allocation ``before`` names."""
+    return _allocation_page(tracking.allocation_history_of(session, part_number, before, limit))

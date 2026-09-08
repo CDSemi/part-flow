@@ -260,8 +260,11 @@
   allocation, reconciliation §11, mọi Quantity Flow với lineage, PLANNED snapshot
   (done / current / future, deviation đã confirm, off-route) hoặc FLOATING actual
   trace derive từ Movement history (repeated Area, Repair, prefix kế thừa từ
-  split), allocation history, và Movement history bất biến phân trang theo id
-  append-only, original đã reverse vẫn hiển thị. View thật thay mock Phase 2
+  split qua toàn bộ single-parent ancestry), Scrap history (chính các event
+  SCRAPPED, event đã undo đánh dấu), allocation history, và Movement history
+  bất biến — tất cả phân trang: history theo thời gian ngược `(occurred_at DESC,
+  id DESC)` trên keyset server resolve, closed flow và allocation entry nối tiếp
+  dưới page đầu — original đã reverse vẫn hiển thị. View thật thay mock Phase 2
   (overlay detail modeless giữ nguyên) với polling / stale-feed chung, các state
   loading / error / empty và paging long-data có bound. Mục Phase 11 bên dưới
   ghi chi tiết trạng thái và ranh giới.
@@ -1126,16 +1129,20 @@ monitoring demand context), distribution theo Area (active, và stocked ở
 terminal Area), active quantity từ derivation vị trí dùng chung
 (`production_board.flow_positions` / `group_locations`, tách ra từ board để cả
 hai đọc một code path), stocked và scrapped quantity từ effective history, master
-tùy chọn có tồn tại hay không, và **status derive**: `ACTIVE` khi còn quantity
-trong production; nếu không, `COMPLETED` khi không còn open demand (chỉ còn
-history — kể cả PN đã stock và allocate đủ); nếu không, `STOCKED` khi stocked
-quantity chờ open demand; nếu không, `OPEN` — open demand không có quantity
-trong production hay trong stock (chưa release, scrap hết, release đã undo).
+tùy chọn có tồn tại hay không, active allocation và **available stocked
+quantity** (`effective STOCKED − active allocation`, từ MỘT query allocation gộp
+— `allocations.active_allocated_quantities` — không bao giờ theo từng row), và
+**status derive**: `ACTIVE` khi còn quantity trong production; nếu không,
+`COMPLETED` khi không còn open demand (chỉ còn history — kể cả PN đã stock và
+allocate đủ); nếu không, `STOCKED` chỉ khi stocked quantity CÒN AVAILABLE chờ
+open demand; nếu không, `OPEN` — open demand không có quantity trong production
+và không còn stock chưa allocate (chưa release, scrap hết, release đã undo, hoặc
+mọi stocked piece đã allocate cho work trước: stock đã allocate cho Work Order
+hoàn tất không bao giờ làm demand mới của cùng PN thành `STOCKED`).
 `OPEN` là bổ sung do implementation vào ba pill GUI_DESIGN §7.1 nêu (Active /
 Stocked / Completed): bộ giá trị đã duyệt không có giá trị trung thực cho trạng
 thái đó, và báo nó bằng bất kỳ giá trị nào trong ba giá trị kia đều nói sai
-production — bản GUI_DESIGN chấp nhận nó là việc tài liệu, không phải thay đổi
-hành vi. `GET /api/tracking/detail?part_number=` là detail read-only (PN đi
+production — GUI_DESIGN §7.1 ghi nhận nó. `GET /api/tracking/detail?part_number=` là detail read-only (PN đi
 trong query parameter và được canonicalize theo MỘT quy tắc domain; không có
 production, demand lẫn master → 404): master khi tồn tại (chỉ tồn tại — name,
 revision, image và ERP id đến với Part Numbers management, Phase 13) và barcode
@@ -1145,8 +1152,11 @@ current quantity theo Area / Machine (nhóm `BoardLocation` — entry CŨ NHẤT
 nhóm, Machine chỉ khi mọi nhánh lineage đồng ý), stocked quantity theo terminal
 Area kèm active allocation và phần available, các hạng mục reconciliation §11
 (`introduced = active + stocked + scrapped`, introduced là effective `RECEIVED`
-+ `QUANTITY_ADJUSTED`), các Quantity Flow (ACTIVE trước, rồi closed mới nhất
-trước, tối đa 50 kèm total) mỗi flow với status và lifecycle, vị trí derive,
++ `QUANTITY_ADJUSTED`), các Quantity Flow (MỌI active flow — current state —
+rồi các closed flow mới nhất, mặc định 50, kèm total và keyset nối tiếp theo id
+flow: `GET /api/tracking/flows?part_number=&before=` phân trang closed flow mới
+nhất trước không chồng lấp, nên không flow nào ngoài tầm với) mỗi flow với
+status và lifecycle, vị trí derive,
 parent / child lineage HIỆU LỰC (`projections.effective_lineage_edges` — cạnh
 của SPLIT/MERGED đã undo là vô hiệu), PLANNED snapshot với mỗi step judged
 `DONE` / `CURRENT` / `FUTURE` từ last known step của flow
@@ -1156,12 +1166,26 @@ Movement ghi nó, và **actual route trace** derive từ Movement history — c�
 quantity đã đến, theo thứ tự (`RECEIVED`, `TRANSFERRED`, `QUANTITY_ADJUSTED`,
 `STOCKED`; không bao giờ `AREA_COMPLETED`, vốn là hoàn thành trong Area nguồn),
 giữ repeated Area, Repair transfer được gắn cờ, split child kế thừa trace của
-parent duy nhất tới điểm split (cờ `inherited`), merge result bắt đầu tại điểm
-merge còn các nguồn giữ trace riêng, arrival đã reverse bị loại; allocation
-history (mới nhất trước, tối đa 100, reversal đứng cạnh allocation nó thu hồi);
-và page đầu của **Movement history bất biến** — mọi Movement của PN mới nhất
-trước, `movements_limit` (mặc định 50, tối đa 200) với keyset tiếp trên id
-append-only (`GET /api/tracking/movements?part_number=&before=`), mỗi row với
+parent duy nhất tới điểm split (cờ `inherited`) đệ quy lên TOÀN BỘ single-parent
+ancestry — lineage hiệu lực của mỗi ancestor được đọc từ history khi walk tới,
+nên prefix không phụ thuộc detail page liệt kê flow nào — merge result bắt đầu
+tại điểm merge còn các nguồn giữ trace riêng, arrival đã reverse bị loại;
+allocation history (`(allocated_at DESC, id DESC)`, mặc định 100, reversal đứng
+cạnh allocation nó thu hồi, nối tiếp qua
+`GET /api/tracking/allocations?part_number=&before=` với keyset resolve từ
+allocation đó); **Scrap history** — chính Movement history bất biến giới hạn
+vào row `SCRAPPED` (`movement_type=SCRAPPED` trên read movements, mặc định 20,
+phân trang cùng cách), mỗi event với timestamp, quantity, Area, reason, station
+và, khi đã undo, row `REVERSED` đã undo nó, còn `scrapped_quantity` vẫn là tổng
+net hiệu lực — không có nguồn scrap song song; và page đầu của **Movement
+history bất biến** — mọi Movement của PN theo thứ tự thời gian ngược của GUI
+`(occurred_at DESC, id DESC)`, `movements_limit` (mặc định 50, tối đa 200) với
+keyset tiếp trên ĐÚNG thứ tự đó (`GET /api/tracking/movements?part_number=&before=`
+nêu Movement cuối đã trả và server resolve `(occurred_at, id)` của nó — id có
+timestamp bị lùi ngày không bao giờ gây hở khoảng hay trùng; `before` ngoài
+history của PN là 404), phục vụ bởi migration `0012_phase11_tracking_index` —
+một composite index `(part_number, occurred_at, id)` trên `part_movements`,
+không column, table hay constraint —, mỗi row với
 Area, Operation, Machine, station, reason, `movement_reason`, command sequence,
 snapshot step đã fulfil, route deviation đã ghi, các cạnh lineage của SPLIT /
 MERGED, demand khởi phát của `RECEIVED`, và — trên original đã undo — row
@@ -1196,12 +1220,23 @@ PLANNED, mọi deviation đã confirm), Movement history (reverse-chronological 
 badge type canonical, badge REPAIR, original đã undo vẫn hiển thị với badge
 REVERSED, và `Show older Movements` nối page keyset kế — page bị bỏ và bắt đầu
 lại khi refresh dời ranh giới page đầu, nên history không bao giờ hở khoảng),
-Scrap history (con số tích lũy và dòng reconciliation) và Stocked & Allocation
-history (stocked / allocated / available và các allocation entry). Chỉ
+Scrap history (con số tích lũy net kèm dòng reconciliation, mọi event SCRAPPED
+là một row history — timestamp, quantity, Area, reason, badge REVERSED trên
+event đã undo — và `Show older scrap events`), Stocked & Allocation history
+(stocked / allocated / available và các allocation entry với `Show older
+allocation entries`), và `Show older Quantity Flows` của section Quantity Flows
+cho closed flow ngoài page đầu — MỘT hành vi nối tiếp chung
+(`tracking-feed.useOlderPages`) sau bốn section. Chỉ
 development: `?state=loading|empty|error|long` render state xác định không
 request (`tracking-preview.ts`, fixture DEV inline — không import `src/mocks/`).
-*Test*: `tests/test_tracking_api.py` (14) — status derive mọi trường hợp và
-filter mặc định `ACTIVE`, search theo PN / WO Number / Job Number với ký tự LIKE
+*Test*: `tests/test_tracking_api.py` (19) — status derive mọi trường hợp và
+filter mặc định `ACTIVE`, stock đã allocate hết cho work trước khiến demand mới
+là `OPEN` còn stock chưa allocate khiến nó `STOCKED`, Scrap history với event
+đã undo được đánh dấu và phân trang trên cùng history, trace ancestry giữ đủ
+ngoài flow page (ancestor SPLIT ở giữa không được liệt kê) kèm nối tiếp closed
+flow, keyset allocation history, thứ tự history `(occurred_at DESC, id DESC)`
+với Movement bị lùi ngày phân trang không hở không trùng, search theo PN / WO
+Number / Job Number với ký tự LIKE
 là literal và WO đã complete vẫn tìm được, con số row với distribution, next due
 date qua các demand, master đã xóa cứng, mọi select filter, due window trên site
 calendar, canonical order với offset paging, 404 / canonicalize của detail, các
@@ -1209,8 +1244,12 @@ con số demand / vị trí / stock / allocation / reconciliation của detail v
 allocation reversal, FLOATING trace với repeated Area, Repair và prefix kế thừa
 từ split, merge result nêu mọi nguồn, PLANNED snapshot state với deviation đã
 confirm và closure stocked, history phân trang giữ original đã reverse cạnh các
-row `REVERSED`, và audit context lineage / scrap / Machine — cùng suite frontend
-viết lại (30) trên trả lời giả `GET /api/tracking*` (read mặc định và các cột
+row `REVERSED`, và audit context lineage / scrap / Machine —
+`tests/test_phase11_schema.py` (ranh giới head: đúng history index, parity
+models↔migration, downgrade sạch về 0011 — schema test Phase 10 nay pin ở 0011),
+cùng suite frontend viết lại (32) trên trả lời giả `GET /api/tracking*` (row
+Scrap history với marker REVERSED và page cũ hơn, nối tiếp closed flow và
+allocation, read mặc định và các cột
 render, search debounce và query parameter của select, lựa chọn filter, loading
 dưới header, load đầu lỗi có Retry, kết quả rỗng, feed stale khi refresh lỗi và
 khi mất kết nối, `Show more` và bound, state preview không request, detail read

@@ -11,7 +11,12 @@
 // allocation, the reconciliation figures, the Quantity Flows with their
 // lineage, routes and actual traces, the allocation history and the
 // first page of the immutable Movement history, which
-// `GET /api/tracking/movements` continues older than a Movement id.
+// `GET /api/tracking/movements` continues below a Movement — in the
+// reverse-chronological `(occurred_at DESC, id DESC)` order the server
+// resolves from that Movement's timestamp. The Scrap history is the
+// same history restricted to `SCRAPPED` rows; the closed Quantity
+// Flows and the allocation history page the same way through
+// `GET /api/tracking/flows` and `GET /api/tracking/allocations`.
 //
 // Search and every filter are judged server-side on the derived row;
 // the server never sends a derived time value — dwell times and due
@@ -118,6 +123,10 @@ export interface TrackingRow {
   distribution: TrackingDistribution[];
   activeQuantity: number;
   stockedQuantity: number;
+  /** The PN's active allocation and the stocked quantity it leaves
+   * unallocated — the figure the STOCKED / OPEN status is judged on. */
+  allocatedQuantity: number;
+  availableStockedQuantity: number;
   scrappedQuantity: number;
   /** The earliest due date among the open demands; null when none is
    * dated. */
@@ -264,6 +273,23 @@ export interface TrackingMovementPage {
   nextBeforeMovementId: number | null;
 }
 
+/** Every ACTIVE flow (first page) plus a page of closed flows. */
+export interface TrackingFlowPage {
+  flows: TrackingFlow[];
+  total: number;
+  hasMore: boolean;
+  /** Pass as `before` for the next page of closed flows; null on the
+   * last. */
+  nextBeforeFlowId: number | null;
+}
+
+export interface TrackingAllocationPage {
+  allocations: TrackingAllocation[];
+  total: number;
+  hasMore: boolean;
+  nextBeforeAllocationId: number | null;
+}
+
 export interface TrackingDetail {
   pn: string;
   /** The optional master record (existence only until Phase 13). */
@@ -279,11 +305,12 @@ export interface TrackingDetail {
   availableStockedQuantity: number;
   scrappedQuantity: number;
   introducedQuantity: number;
-  flows: TrackingFlow[];
-  flowTotal: number;
-  allocations: TrackingAllocation[];
-  allocationTotal: number;
+  flows: TrackingFlowPage;
+  allocations: TrackingAllocationPage;
   movements: TrackingMovementPage;
+  /** The PN's SCRAPPED events — the same immutable history restricted
+   * to scrap, newest first; `scrappedQuantity` is the net total. */
+  scrapHistory: TrackingMovementPage;
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +363,8 @@ interface RowWire {
   distribution: DistributionWire[];
   active_quantity: number;
   stocked_quantity: number;
+  allocated_quantity: number;
+  available_stocked_quantity: number;
   scrapped_quantity: number;
   next_due_date: string | null;
   status: TrackingStatus;
@@ -453,6 +482,20 @@ interface AllocationWire {
   allocated_at: string;
 }
 
+interface FlowPageWire {
+  flows: FlowWire[];
+  total: number;
+  has_more: boolean;
+  next_before_flow_id: number | null;
+}
+
+interface AllocationPageWire {
+  allocations: AllocationWire[];
+  total: number;
+  has_more: boolean;
+  next_before_allocation_id: number | null;
+}
+
 interface DetailWire {
   part_number: string;
   master: { part_number: string; created_at: string } | null;
@@ -474,11 +517,10 @@ interface DetailWire {
   available_stocked_quantity: number;
   scrapped_quantity: number;
   introduced_quantity: number;
-  flows: FlowWire[];
-  flow_total: number;
-  allocations: AllocationWire[];
-  allocation_total: number;
+  flows: FlowPageWire;
+  allocations: AllocationPageWire;
   movements: MovementPageWire;
+  scrap_history: MovementPageWire;
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +577,8 @@ function toRow(wire: RowWire): TrackingRow {
     distribution: wire.distribution.map(toDistribution),
     activeQuantity: wire.active_quantity,
     stockedQuantity: wire.stocked_quantity,
+    allocatedQuantity: wire.allocated_quantity,
+    availableStockedQuantity: wire.available_stocked_quantity,
     scrappedQuantity: wire.scrapped_quantity,
     nextDueDate: wire.next_due_date,
     status: wire.status,
@@ -666,6 +710,24 @@ function toAllocation(wire: AllocationWire): TrackingAllocation {
   };
 }
 
+function toFlowPage(wire: FlowPageWire): TrackingFlowPage {
+  return {
+    flows: wire.flows.map(toFlow),
+    total: wire.total,
+    hasMore: wire.has_more,
+    nextBeforeFlowId: wire.next_before_flow_id,
+  };
+}
+
+function toAllocationPage(wire: AllocationPageWire): TrackingAllocationPage {
+  return {
+    allocations: wire.allocations.map(toAllocation),
+    total: wire.total,
+    hasMore: wire.has_more,
+    nextBeforeAllocationId: wire.next_before_allocation_id,
+  };
+}
+
 function toDetail(wire: DetailWire): TrackingDetail {
   return {
     pn: wire.part_number,
@@ -697,11 +759,10 @@ function toDetail(wire: DetailWire): TrackingDetail {
     availableStockedQuantity: wire.available_stocked_quantity,
     scrappedQuantity: wire.scrapped_quantity,
     introducedQuantity: wire.introduced_quantity,
-    flows: wire.flows.map(toFlow),
-    flowTotal: wire.flow_total,
-    allocations: wire.allocations.map(toAllocation),
-    allocationTotal: wire.allocation_total,
+    flows: toFlowPage(wire.flows),
+    allocations: toAllocationPage(wire.allocations),
     movements: toMovementPage(wire.movements),
+    scrapHistory: toMovementPage(wire.scrap_history),
   };
 }
 
@@ -773,18 +834,59 @@ export async function loadTrackingDetail(
   return toDetail(wire);
 }
 
+/**
+ * The next (older) page of the Movement history below `before` — the
+ * last Movement a page delivered; `movementType: 'SCRAPPED'` continues
+ * the Scrap history instead.
+ */
 export async function loadTrackingMovements(
   pn: string,
   before: number,
   limit: number,
+  movementType?: 'SCRAPPED',
 ): Promise<TrackingMovementPage> {
   const params = new URLSearchParams({
     part_number: pn,
     before: String(before),
     limit: String(limit),
   });
+  if (movementType) params.set('movement_type', movementType);
   const wire = await apiRequest<MovementPageWire>(
     `/api/tracking/movements?${params.toString()}`,
   );
   return toMovementPage(wire);
+}
+
+/** The next (older) page of closed Quantity Flows below `before`. */
+export async function loadTrackingFlows(
+  pn: string,
+  before: number,
+  limit: number,
+): Promise<TrackingFlowPage> {
+  const params = new URLSearchParams({
+    part_number: pn,
+    before: String(before),
+    limit: String(limit),
+  });
+  const wire = await apiRequest<FlowPageWire>(
+    `/api/tracking/flows?${params.toString()}`,
+  );
+  return toFlowPage(wire);
+}
+
+/** The next (older) page of the allocation history below `before`. */
+export async function loadTrackingAllocations(
+  pn: string,
+  before: number,
+  limit: number,
+): Promise<TrackingAllocationPage> {
+  const params = new URLSearchParams({
+    part_number: pn,
+    before: String(before),
+    limit: String(limit),
+  });
+  const wire = await apiRequest<AllocationPageWire>(
+    `/api/tracking/allocations?${params.toString()}`,
+  );
+  return toAllocationPage(wire);
 }

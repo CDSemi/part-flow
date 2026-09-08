@@ -2,8 +2,8 @@ import './tracking.css';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
 import type {
+  TrackingAllocation,
   TrackingDetail,
   TrackingFilters,
   TrackingFlow,
@@ -12,6 +12,8 @@ import type {
 } from '../../api/tracking';
 import {
   DEFAULT_TRACKING_FILTERS,
+  loadTrackingAllocations,
+  loadTrackingFlows,
   loadTrackingMovements,
   trackingListQuery,
 } from '../../api/tracking';
@@ -31,14 +33,19 @@ import {
   LoadingState,
 } from '../../components/view-states';
 import { formatIsoDateShort, formatTimeOfDay } from '../dates';
+import type { OlderPages } from './tracking-feed';
 import {
+  useOlderPages,
   useTrackingDetailFeed,
   useTrackingFilterOptions,
   useTrackingListFeed,
 } from './tracking-feed';
 import {
+  ALLOCATIONS_PAGE_SIZE,
+  FLOWS_PAGE_SIZE,
   FLOW_STATUS_LABEL,
   MOVEMENTS_PAGE_SIZE,
+  SCRAP_PAGE_SIZE,
   SEARCH_DEBOUNCE_MS,
   STATUS_CLASS,
   STATUS_LABEL,
@@ -528,12 +535,45 @@ function CloseDetailButton({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** One paged detail section: the first page plus the older pages loaded. */
+interface PagedSection<T> {
+  items: T[];
+  total: number;
+  hasOlder: boolean;
+  loading: boolean;
+  error: string | null;
+  showOlder: () => void;
+}
+
+function pagedSection<T>(
+  first: { items: T[]; total: number; hasMore: boolean },
+  older: OlderPages<T> | null,
+  showOlder: () => void,
+): PagedSection<T> {
+  return {
+    items: [...first.items, ...(older?.items ?? [])],
+    total: first.total,
+    hasOlder: older === null ? first.hasMore : older.nextBefore !== null,
+    loading: older?.loading ?? false,
+    error: older?.error ?? null,
+    showOlder,
+  };
+}
+
+interface DetailPaging {
+  movements: PagedSection<TrackingMovement>;
+  scrap: PagedSection<TrackingMovement>;
+  flows: PagedSection<TrackingFlow>;
+  allocations: PagedSection<TrackingAllocation>;
+}
+
 /**
- * The floating detail overlay of ONE PN: its own polled read, with
- * older Movement history pages appended on request. The pages continue
- * below the id the first page ended on; a refresh that moves that
- * boundary (new Movements arrived) drops the appended pages so the
- * history never shows a gap.
+ * The floating detail overlay of ONE PN: its own polled read, with the
+ * older pages of each paged section (Movement history, Scrap history,
+ * closed Quantity Flows, allocation history) appended on request. The
+ * pages continue below the keyset the first page ended on; a refresh
+ * that moves that boundary (new rows arrived) drops the appended pages
+ * so a section never shows a gap.
  */
 function TrackingDetailPanel({
   pn,
@@ -546,51 +586,60 @@ function TrackingDetailPanel({
 }) {
   const { status: connectivity } = useConnectivity();
   const feed = useTrackingDetailFeed(pn, connectivity, enabled);
-  const [older, setOlder] = useState<{
-    boundary: number;
-    movements: TrackingMovement[];
-    nextBefore: number | null;
-    loading: boolean;
-    error: string | null;
-  } | null>(null);
-
   const detail = feed.state.status === 'ready' ? feed.state.data : null;
   const stale =
     connectivity !== 'connected' ||
     detail === null ||
     (feed.state.status === 'ready' && feed.state.stale);
-  const boundary = detail?.movements.nextBeforeMovementId ?? null;
 
-  const showOlder = () => {
-    if (boundary === null) return;
-    const before = older?.nextBefore ?? boundary;
-    setOlder((current) => ({
-      boundary,
-      movements: current?.boundary === boundary ? current.movements : [],
-      nextBefore: current?.boundary === boundary ? current.nextBefore : null,
-      loading: true,
-      error: null,
-    }));
-    void loadTrackingMovements(pn, before, MOVEMENTS_PAGE_SIZE).then(
-      (page) =>
-        setOlder((current) =>
-          current === null || current.boundary !== boundary
-            ? current
-            : {
-                ...current,
-                movements: [...current.movements, ...page.movements],
-                nextBefore: page.nextBeforeMovementId,
-                loading: false,
-              },
+  const movements = useOlderPages(
+    detail?.movements.nextBeforeMovementId ?? null,
+    useCallback(
+      (before: number) =>
+        loadTrackingMovements(pn, before, MOVEMENTS_PAGE_SIZE).then((page) => ({
+          items: page.movements,
+          nextBefore: page.nextBeforeMovementId,
+        })),
+      [pn],
+    ),
+  );
+  const scrap = useOlderPages(
+    detail?.scrapHistory.nextBeforeMovementId ?? null,
+    useCallback(
+      (before: number) =>
+        loadTrackingMovements(pn, before, SCRAP_PAGE_SIZE, 'SCRAPPED').then(
+          (page) => ({
+            items: page.movements,
+            nextBefore: page.nextBeforeMovementId,
+          }),
         ),
-      (error: unknown) =>
-        setOlder((current) =>
-          current === null || current.boundary !== boundary
-            ? current
-            : { ...current, loading: false, error: errorMessage(error) },
+      [pn],
+    ),
+  );
+  const flows = useOlderPages(
+    detail?.flows.nextBeforeFlowId ?? null,
+    useCallback(
+      (before: number) =>
+        loadTrackingFlows(pn, before, FLOWS_PAGE_SIZE).then((page) => ({
+          items: page.flows,
+          nextBefore: page.nextBeforeFlowId,
+        })),
+      [pn],
+    ),
+  );
+  const allocations = useOlderPages(
+    detail?.allocations.nextBeforeAllocationId ?? null,
+    useCallback(
+      (before: number) =>
+        loadTrackingAllocations(pn, before, ALLOCATIONS_PAGE_SIZE).then(
+          (page) => ({
+            items: page.allocations,
+            nextBefore: page.nextBeforeAllocationId,
+          }),
         ),
-    );
-  };
+      [pn],
+    ),
+  );
 
   return (
     <aside className="tk-right" aria-label="PN detail">
@@ -619,8 +668,44 @@ function TrackingDetailPanel({
         <TrackingDetailContent
           detail={detail}
           stale={stale}
-          older={older !== null && older.boundary === boundary ? older : null}
-          onShowOlder={showOlder}
+          paging={{
+            movements: pagedSection(
+              {
+                items: detail.movements.movements,
+                total: detail.movements.total,
+                hasMore: detail.movements.hasMore,
+              },
+              movements.older,
+              movements.showOlder,
+            ),
+            scrap: pagedSection(
+              {
+                items: detail.scrapHistory.movements,
+                total: detail.scrapHistory.total,
+                hasMore: detail.scrapHistory.hasMore,
+              },
+              scrap.older,
+              scrap.showOlder,
+            ),
+            flows: pagedSection(
+              {
+                items: detail.flows.flows,
+                total: detail.flows.total,
+                hasMore: detail.flows.hasMore,
+              },
+              flows.older,
+              flows.showOlder,
+            ),
+            allocations: pagedSection(
+              {
+                items: detail.allocations.allocations,
+                total: detail.allocations.total,
+                hasMore: detail.allocations.hasMore,
+              },
+              allocations.older,
+              allocations.showOlder,
+            ),
+          }}
           onClose={onClose}
         />
       )}
@@ -628,22 +713,72 @@ function TrackingDetailPanel({
   );
 }
 
+/** `Showing n of m <noun>` with the explicit continuation control. */
+function OlderControl<T>({
+  section,
+  noun,
+  label,
+}: {
+  section: PagedSection<T>;
+  noun: string;
+  label: string;
+}) {
+  return (
+    <div className="tk-paging">
+      <span>
+        Showing <b>{section.items.length}</b> of <b>{section.total}</b> {noun}
+      </span>
+      {section.hasOlder ? (
+        <button
+          className="btn ghost"
+          onClick={section.showOlder}
+          disabled={section.loading}
+        >
+          {section.loading ? 'Loading…' : label}
+        </button>
+      ) : null}
+      {section.error ? (
+        <span className="tk-error" role="alert">
+          {section.error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/** One row of the immutable Movement history (also the Scrap history). */
+function MovementRow({ movement: m }: { movement: TrackingMovement }) {
+  return (
+    <li className={m.reversedByMovementId !== null ? 'reversed' : ''}>
+      <span className="t">{timestamp(m.occurredAt)}</span>
+      <span className={`mtype ${movementTypeClass(m.movementType)}`}>
+        {m.movementType}
+      </span>
+      {m.movementReason === 'REPAIR' ? (
+        <span className="mtype scr">REPAIR</span>
+      ) : null}
+      {m.reversedByMovementId !== null ? (
+        <span
+          className="mtype rev"
+          title={`Reversed by Movement #${m.reversedByMovementId}`}
+        >
+          REVERSED
+        </span>
+      ) : null}
+      <span className="desc">{describeMovement(m)}</span>
+    </li>
+  );
+}
+
 function TrackingDetailContent({
   detail: d,
   stale,
-  older,
-  onShowOlder,
+  paging,
   onClose,
 }: {
   detail: TrackingDetail;
   stale: boolean;
-  older: {
-    movements: TrackingMovement[];
-    nextBefore: number | null;
-    loading: boolean;
-    error: string | null;
-  } | null;
-  onShowOlder: () => void;
+  paging: DetailPaging;
   onClose: () => void;
 }) {
   const now = useUiClock('minute');
@@ -651,9 +786,6 @@ function TrackingDetailContent({
   const allocatedTotal = d.demands.reduce((s, x) => s + x.allocatedQuantity, 0);
   const shareTotal = d.activeQuantity + d.stockedQuantity;
   const ready = readyNote(d.locations);
-  const movements = [...d.movements.movements, ...(older?.movements ?? [])];
-  const hasOlder =
-    older === null ? d.movements.hasMore : older.nextBefore !== null;
 
   return (
     <>
@@ -846,16 +978,15 @@ function TrackingDetailContent({
             not at one step
           </span>
         </h4>
-        {d.flows.map((flow) => (
+        {paging.flows.items.map((flow) => (
           <FlowBlock flow={flow} now={now} key={flow.id} />
         ))}
-        {d.flowTotal > d.flows.length ? (
-          <div className="prognote">
-            Showing {d.flows.length} of {d.flowTotal} Quantity Flows — the
-            oldest closed flows are not listed; their Movements stay in the
-            history below.
-          </div>
-        ) : null}
+        {/* Every ACTIVE flow is always listed; the closed flows page. */}
+        <OlderControl
+          section={paging.flows}
+          noun="Quantity Flows"
+          label="Show older Quantity Flows"
+        />
       </div>
 
       <div className="tk-sec">
@@ -863,51 +994,16 @@ function TrackingDetailContent({
           Movement history{' '}
           <span className="tag">complete activity history</span>
         </h4>
-        <ul className="mv">
-          {movements.map((m) => (
-            <li
-              key={m.id}
-              className={m.reversedByMovementId !== null ? 'reversed' : ''}
-            >
-              <span className="t">{timestamp(m.occurredAt)}</span>
-              <span className={`mtype ${movementTypeClass(m.movementType)}`}>
-                {m.movementType}
-              </span>
-              {m.movementReason === 'REPAIR' ? (
-                <span className="mtype scr">REPAIR</span>
-              ) : null}
-              {m.reversedByMovementId !== null ? (
-                <span
-                  className="mtype rev"
-                  title={`Reversed by Movement #${m.reversedByMovementId}`}
-                >
-                  REVERSED
-                </span>
-              ) : null}
-              <span className="desc">{describeMovement(m)}</span>
-            </li>
+        <ul className="mv history">
+          {paging.movements.items.map((m) => (
+            <MovementRow movement={m} key={m.id} />
           ))}
         </ul>
-        <div className="tk-paging">
-          <span>
-            Showing <b>{movements.length}</b> of <b>{d.movements.total}</b>{' '}
-            Movements
-          </span>
-          {hasOlder ? (
-            <button
-              className="btn ghost"
-              onClick={onShowOlder}
-              disabled={older?.loading === true}
-            >
-              {older?.loading ? 'Loading…' : 'Show older Movements'}
-            </button>
-          ) : null}
-          {older?.error ? (
-            <span className="tk-error" role="alert">
-              {older.error}
-            </span>
-          ) : null}
-        </div>
+        <OlderControl
+          section={paging.movements}
+          noun="Movements"
+          label="Show older Movements"
+        />
       </div>
 
       <div className="tk-sec">
@@ -918,11 +1014,28 @@ function TrackingDetailContent({
           </span>
         </h4>
         <div className="prognote" style={{ marginTop: 0 }}>
-          Cumulative scrapped: <b>{d.scrappedQuantity}</b> pcs — each SCRAPPED
-          event is recorded in the Movement history above. Reconciliation:
-          introduced {d.introducedQuantity} = active {d.activeQuantity} +
-          stocked {d.stockedQuantity} + scrapped {d.scrappedQuantity}.
+          Cumulative scrapped: <b>{d.scrappedQuantity}</b> pcs (an undone scrap
+          stays listed below, marked REVERSED, and no longer counts).
+          Reconciliation: introduced {d.introducedQuantity} = active{' '}
+          {d.activeQuantity} + stocked {d.stockedQuantity} + scrapped{' '}
+          {d.scrappedQuantity}.
         </div>
+        {paging.scrap.total === 0 ? (
+          <div className="prognote">No scrap recorded for this PN.</div>
+        ) : (
+          <>
+            <ul className="mv scrap">
+              {paging.scrap.items.map((m) => (
+                <MovementRow movement={m} key={m.id} />
+              ))}
+            </ul>
+            <OlderControl
+              section={paging.scrap}
+              noun="scrap events"
+              label="Show older scrap events"
+            />
+          </>
+        )}
       </div>
 
       <div className="tk-sec">
@@ -930,7 +1043,7 @@ function TrackingDetailContent({
           Stocked &amp; Allocation history{' '}
           <span className="tag">stocked quantity assigned to demand</span>
         </h4>
-        {d.stockedQuantity === 0 && d.allocations.length === 0 ? (
+        {d.stockedQuantity === 0 && paging.allocations.total === 0 ? (
           <div className="prognote" style={{ marginTop: 0 }}>
             Nothing stocked yet for this PN. Allocation suggestions follow the
             Hot rank first, then the earliest due date.
@@ -944,7 +1057,7 @@ function TrackingDetailContent({
               rank first, then the earliest due date.
             </div>
             <ul className="mv">
-              {d.allocations.map((a) => (
+              {paging.allocations.items.map((a) => (
                 <li
                   key={a.id}
                   className={
@@ -972,12 +1085,11 @@ function TrackingDetailContent({
                 </li>
               ))}
             </ul>
-            {d.allocationTotal > d.allocations.length ? (
-              <div className="prognote">
-                Showing the newest {d.allocations.length} of {d.allocationTotal}{' '}
-                allocation entries.
-              </div>
-            ) : null}
+            <OlderControl
+              section={paging.allocations}
+              noun="allocation entries"
+              label="Show older allocation entries"
+            />
           </>
         )}
       </div>

@@ -395,7 +395,7 @@ def _detail(client: TestClient, pn: str, **params: Any) -> dict[str, Any]:
 
 
 def _flow(detail: dict[str, Any], flow_id: int) -> dict[str, Any]:
-    found = [flow for flow in detail["flows"] if flow["id"] == flow_id]
+    found = [flow for flow in detail["flows"]["flows"] if flow["id"] == flow_id]
     assert len(found) == 1
     return cast(dict[str, Any], found[0])
 
@@ -551,7 +551,7 @@ def _row_flow_ids(client: TestClient, shop: _Shop, pn: str) -> dict[int, list[in
     """ACTIVE flow ids of the PN per Area (from the detail)."""
     detail = _detail(client, pn)
     found: dict[int, list[int]] = {}
-    for flow in detail["flows"]:
+    for flow in detail["flows"]["flows"]:
         if flow["status"] == "ACTIVE":
             found.setdefault(flow["position"]["area"]["id"], []).append(flow["id"])
     return found
@@ -736,15 +736,17 @@ def test_detail_demand_positions_stock_allocation_and_reconciliation(
     assert detail["scrapped_quantity"] == 1
     # introduced = active + stocked + scrapped (PROJECT_PROFILE §11).
     assert detail["introduced_quantity"] == 10 == 8 + 1 + 1
-    [allocation] = detail["allocations"]
+    [allocation] = detail["allocations"]["allocations"]
     assert allocation["id"] == allocation_id
     assert allocation["quantity"] == 1
     assert allocation["work_order"]["work_order_number"] == wo.number
     assert allocation["reversed_by_allocation_id"] is None
-    assert detail["allocation_total"] == 1
+    assert detail["allocations"]["total"] == 1
+    assert detail["allocations"]["has_more"] is False
     # Every flow of the PN stays listed with its status and lineage.
-    assert detail["flow_total"] == len(detail["flows"])
-    statuses = {flow["status"] for flow in detail["flows"]}
+    assert detail["flows"]["total"] == len(detail["flows"]["flows"])
+    assert detail["flows"]["has_more"] is False
+    statuses = {flow["status"] for flow in detail["flows"]["flows"]}
     assert {"ACTIVE", "SPLIT", "STOCKED", "SCRAPPED"} <= statuses
     source = _flow(detail, flow)
     assert source["status"] == "SPLIT"
@@ -759,8 +761,9 @@ def test_detail_demand_positions_stock_allocation_and_reconciliation(
     )
     assert reversed_.status_code == 201, reversed_.text
     detail = _detail(client, pn)
-    assert [a["reverses_allocation_id"] for a in detail["allocations"]] == [allocation_id, None]
-    assert detail["allocations"][1]["reversed_by_allocation_id"] == detail["allocations"][0]["id"]
+    entries = detail["allocations"]["allocations"]
+    assert [a["reverses_allocation_id"] for a in entries] == [allocation_id, None]
+    assert entries[1]["reversed_by_allocation_id"] == entries[0]["id"]
     assert detail["allocated_quantity"] == 0
 
 
@@ -1012,3 +1015,245 @@ def test_lineage_scrap_and_machine_movements_carry_their_audit_context(
     assert newest["movement_type"] == "SCRAPPED"
     assert newest["reason"] == "damaged"
     assert newest["station_id"] == shop.lathe.station_id
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 follow-up regressions
+# ---------------------------------------------------------------------------
+
+
+def _set_occurred_at(engine: Engine, movement_id: int, occurred_at: datetime.datetime) -> None:
+    """Pin a Movement's ``occurred_at`` on the disposable test database.
+
+    History is append-only to the application (the raise-on-write
+    trigger); the seed bypasses the trigger for this one statement as
+    the database superuser so ids and timestamps can disagree.
+    """
+    with engine.begin() as connection:
+        connection.execute(sa.text("SET LOCAL session_replication_role = 'replica'"))
+        connection.execute(
+            sa.update(models.PartMovement)
+            .where(models.PartMovement.id == movement_id)
+            .values(occurred_at=occurred_at)
+        )
+
+
+def test_stock_allocated_to_earlier_work_never_makes_new_demand_stocked(
+    client: TestClient, shop: _Shop
+) -> None:
+    # Every stocked piece went to WO1 (now complete); WO2 for the same
+    # PN has nothing in production and nothing left in stock: OPEN.
+    pn = _unique("PN-ALLOC")
+    first = _work_order(client, [_line(pn, 4)])
+    flow = _release(client, shop.material, first, pn, quantity=4)
+    _stock(client, shop.material, shop.stockroom, flow, pn, 4)
+    _allocate(client, pn, [(first.demand_id, 4)])
+    assert _row(client, pn)["status"] == "COMPLETED"
+    second = _work_order(client, [_line(pn, 3)])
+    row = _row(client, pn)
+    assert row["status"] == "OPEN"
+    assert (row["stocked_quantity"], row["allocated_quantity"]) == (4, 4)
+    assert row["available_stocked_quantity"] == 0
+    assert [d["work_order_demand_id"] for d in row["demands"]] == [second.demand_id]
+    detail = _detail(client, pn)
+    assert detail["status"] == "OPEN"
+    assert detail["available_stocked_quantity"] == 0
+
+    # Unallocated stock left over IS available to open demand: STOCKED —
+    # until the last piece is allocated too, when the still-open demand
+    # turns OPEN.
+    other = _unique("PN-ALLOC")
+    first = _work_order(client, [_line(other, 6)])
+    flow = _release(client, shop.material, first, other, quantity=6)
+    _stock(client, shop.material, shop.stockroom, flow, other, 6)
+    _allocate(client, other, [(first.demand_id, 4)])
+    _work_order(client, [_line(other, 3)])
+    row = _row(client, other)
+    assert row["status"] == "STOCKED"
+    assert (row["stocked_quantity"], row["allocated_quantity"]) == (6, 4)
+    assert row["available_stocked_quantity"] == 2
+    assert _detail(client, other)["status"] == "STOCKED"
+    assert [r["part_number"] for r in _rows(client, status="OPEN", search=pn)] == [pn]
+    assert [r["part_number"] for r in _rows(client, status="STOCKED", search=other)] == [other]
+    _allocate(client, other, [(first.demand_id, 2)])
+    row = _row(client, other)
+    assert (row["status"], row["available_stocked_quantity"]) == ("OPEN", 0)
+
+
+def test_scrap_history_lists_every_scrap_event_with_its_reversed_state(
+    client: TestClient, shop: _Shop
+) -> None:
+    pn = _unique("PN-SCRH")
+    wo = _work_order(client, [_line(pn, 10)])
+    flow = _release(client, shop.material, wo, pn, quantity=10)
+    first_scrap = _scrap(client, shop.material, flow, pn, 2)
+    remainder = _row_flow_ids(client, shop, pn)[shop.material.area_id][0]
+    second_scrap = _scrap(client, shop.material, remainder, pn, 3)
+    _undo(client, shop.material, pn, str(second_scrap["device_event_id"]))
+
+    detail = _detail(client, pn, scrap_limit=1)
+    # Cumulative scrapped stays the effective (net) figure.
+    assert detail["scrapped_quantity"] == 2
+    assert detail["introduced_quantity"] == 10 == detail["active_quantity"] + 2
+    scrap = detail["scrap_history"]
+    assert scrap["total"] == 2
+    assert scrap["has_more"] is True
+    [undone] = scrap["movements"]
+    assert undone["movement_type"] == "SCRAPPED"
+    assert undone["quantity"] == 3
+    assert undone["to_area"]["id"] == shop.material.area_id
+    assert undone["reason"] == "damaged"
+    assert undone["station_id"] == shop.material.station_id
+    # The undone scrap stays listed, marked by the REVERSED row that undid it.
+    assert undone["reversed_by_movement_id"] is not None
+    assert scrap["next_before_movement_id"] == undone["id"]
+
+    older = client.get(
+        "/api/tracking/movements",
+        params={
+            "part_number": pn,
+            "movement_type": "SCRAPPED",
+            "before": scrap["next_before_movement_id"],
+            "limit": 5,
+        },
+    ).json()
+    assert [m["movement_type"] for m in older["movements"]] == ["SCRAPPED"]
+    assert older["movements"][0]["quantity"] == 2
+    assert older["movements"][0]["reversed_by_movement_id"] is None
+    assert older["movements"][0]["device_event_id"] == first_scrap["device_event_id"]
+    assert older["has_more"] is False
+    assert older["total"] == 2
+    # The full history still carries the REVERSED rows themselves.
+    assert "REVERSED" in _types(detail["movements"]["movements"])
+
+
+def test_the_trace_keeps_the_whole_split_ancestry_beyond_the_flow_page(
+    client: TestClient, shop: _Shop
+) -> None:
+    # A(12) at Material → Cut; split off B(5) to Lathe; split off C(2)
+    # from B back to Cut: the intermediate ancestor B is a closed flow.
+    pn = _unique("PN-ANC")
+    wo = _work_order(client, [_line(pn, 12)])
+    root = _release(client, shop.material, wo, pn, quantity=12)
+    _transfer(client, shop.material, shop.cut, root, pn, 12)
+    _transfer(client, shop.cut, shop.lathe, root, pn, 5)
+    [middle] = _row_flow_ids(client, shop, pn)[shop.lathe.area_id]
+    _transfer(client, shop.lathe, shop.cut, middle, pn, 2)
+    by_area = _row_flow_ids(client, shop, pn)
+    full = _detail(client, pn)
+    grandchild = next(
+        flow_id
+        for flow_id in by_area[shop.cut.area_id]
+        if [link["quantity_flow_id"] for link in _flow(full, flow_id)["parents"]] == [middle]
+    )
+    # One more split AFTER the ancestry (the root's remainder at Cut
+    # sends 1 pc back to Material), so the newest closed flow is not an
+    # ancestor of the grandchild at all.
+    remainder = next(
+        flow_id
+        for flow_id in by_area[shop.cut.area_id]
+        if [link["quantity_flow_id"] for link in _flow(full, flow_id)["parents"]] == [root]
+    )
+    _transfer(client, shop.cut, shop.material, remainder, pn, 1)
+
+    # A flow page listing every ACTIVE flow but only ONE closed flow —
+    # the newest, which is neither the root nor the middle ancestor…
+    detail = _detail(client, pn, flows_limit=1)
+    page = detail["flows"]
+    listed = {flow["id"] for flow in page["flows"]}
+    closed_listed = [flow["id"] for flow in page["flows"] if flow["status"] != "ACTIVE"]
+    assert closed_listed == [remainder]
+    assert middle not in listed and root not in listed
+    assert page["has_more"] is True
+    # …yet the grandchild's trace carries the full inherited prefix
+    # Material → Cut → Lathe before its own arrival back at Cut.
+    trace = [
+        (step["area"]["name"], step["inherited"], step["quantity_flow_id"])
+        for step in _flow(detail, grandchild)["trace"]
+    ]
+    assert [(name, inherited) for name, inherited, _ in trace] == [
+        (shop.material.name, True),
+        (shop.cut.name, True),
+        (shop.lathe.name, True),
+        (shop.cut.name, False),
+    ]
+    assert trace[0][2] == root and trace[2][2] == middle
+
+    # The closed flows continue on the flow keyset without overlap.
+    seen = list(listed)
+    before = page["next_before_flow_id"]
+    while before is not None:
+        more = client.get(
+            "/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 1}
+        ).json()
+        assert all(flow["status"] != "ACTIVE" for flow in more["flows"])
+        seen.extend(flow["id"] for flow in more["flows"])
+        before = more["next_before_flow_id"]
+    assert len(seen) == len(set(seen)) == page["total"]
+    assert {root, middle} <= set(seen)
+
+
+def test_allocation_history_pages_newest_first_on_the_allocation_keyset(
+    client: TestClient, shop: _Shop
+) -> None:
+    pn = _unique("PN-ALP")
+    wo = _work_order(client, [_line(pn, 3)])
+    flow = _release(client, shop.material, wo, pn, quantity=3)
+    _stock(client, shop.material, shop.stockroom, flow, pn, 3)
+    ids = [_allocate(client, pn, [(wo.demand_id, 1)]) for _ in range(3)]
+
+    detail = _detail(client, pn, allocations_limit=2)
+    page = detail["allocations"]
+    assert [a["id"] for a in page["allocations"]] == [ids[2], ids[1]]
+    assert (page["total"], page["has_more"], page["next_before_allocation_id"]) == (3, True, ids[1])
+    more = client.get(
+        "/api/tracking/allocations",
+        params={"part_number": pn, "before": page["next_before_allocation_id"], "limit": 2},
+    ).json()
+    assert [a["id"] for a in more["allocations"]] == [ids[0]]
+    assert (more["has_more"], more["next_before_allocation_id"]) == (False, None)
+    assert (
+        client.get(
+            "/api/tracking/allocations", params={"part_number": pn, "before": 999_999_999}
+        ).status_code
+        == 404
+    )
+
+
+def test_history_is_reverse_chronological_by_timestamp_and_pages_without_gaps(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    pn = _unique("PN-TS")
+    wo = _work_order(client, [_line(pn, 6)])
+    flow = _release(client, shop.material, wo, pn, quantity=6)
+    _transfer(client, shop.material, shop.cut, flow, pn, 6)
+    _transfer(client, shop.cut, shop.lathe, flow, pn, 6)
+    # Five Movements in id order; the RECEIVED is backdated to be the
+    # NEWEST by timestamp, so id order and time order disagree.
+    ids = [m["id"] for m in _detail(client, pn, movements_limit=10)["movements"]["movements"]]
+    received_id = min(ids)
+    _set_occurred_at(db_engine, received_id, datetime.datetime(2099, 1, 1, tzinfo=datetime.UTC))
+
+    first = _detail(client, pn, movements_limit=2)["movements"]
+    assert [m["id"] for m in first["movements"]][0] == received_id
+    assert first["movements"][0]["movement_type"] == "RECEIVED"
+    assert first["next_before_movement_id"] == first["movements"][-1]["id"]
+
+    walked = [m["id"] for m in first["movements"]]
+    before = first["next_before_movement_id"]
+    while before is not None:
+        page = client.get(
+            "/api/tracking/movements", params={"part_number": pn, "before": before, "limit": 2}
+        ).json()
+        walked.extend(m["id"] for m in page["movements"])
+        before = page["next_before_movement_id"]
+    # Every Movement exactly once, in (occurred_at DESC, id DESC).
+    assert len(walked) == len(set(walked)) == first["total"] == 5
+    assert walked[0] == received_id
+    assert walked[1:] == sorted(walked[1:], reverse=True)
+    assert (
+        client.get(
+            "/api/tracking/movements", params={"part_number": pn, "before": 999_999_999}
+        ).status_code
+        == 404
+    )

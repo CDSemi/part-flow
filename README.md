@@ -235,7 +235,11 @@ immutable Movement history):
   `STOCKED` type and flow closure, `work_orders.completed_at` with its
   keyset index, and the append-only `work_order_allocations` table —
   allocation and reversal rows, UNIQUE `reverses_allocation_id`, the
-  `device_event_id` + `command_sequence` idempotency pair)
+  `device_event_id` + `command_sequence` idempotency pair) and the
+  Phase 11 read-path index (`0012_phase11_tracking_index` — one
+  composite index `(part_number, occurred_at, id)` on `part_movements`
+  for PN Tracking's reverse-chronological history read; no column, table
+  or constraint)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -353,8 +357,14 @@ history, the reconciliation `introduced = active + stocked +
 scrapped`, every Quantity Flow with its lineage and its PLANNED
 snapshot (done / current / future, confirmed deviations) or FLOATING
 actual trace (repeated Areas, Repair, the inherited split prefix),
-and the immutable Movement history paged on the Movement id with
-reversed originals kept visible beside their `REVERSED` rows. Every
+the Scrap history (the `SCRAPPED` events themselves, undone ones
+marked), and the immutable Movement history paged in reverse-
+chronological `(occurred_at DESC, id DESC)` order with reversed
+originals kept visible beside their `REVERSED` rows — closed flows and
+allocation entries page too, so nothing is truncated out of reach; the
+derived status counts stock only while it is still unallocated
+(`Stocked`), an open demand with nothing in production and no
+available stock reading `Open`. Every
 other view (Priority, Planned Routes, Part Numbers) renders
 development-only mock data; the remaining Phase 11 monitoring work
 (the Machines per-PN assigned breakdown, expected-duration

@@ -21,15 +21,13 @@ SLICE1_DATA_MODEL §17/§18):
   FK + UNIQUE (one reversal per allocation, also under a race), the
   `device_event_id` + `command_sequence` idempotency pair, the demand
   and station FKs, and the raise-on-write trigger;
-- models↔migration metadata parity at head (moved here from the
-  Phase 9 schema test, which is now pinned to 0010);
 - clean downgrade back to the Phase 9 boundary with a successful
   re-upgrade, and the downgrade refusing to drop Phase 10 history.
 
-Phase 10 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to
-`0011_phase10_stock_allocation` and move the head-level coverage into
-that phase's schema test.
+This module is pinned to `0011_phase10_stock_allocation` (Phase 11
+added the read-path index migration 0012): every assertion documents
+the Phase 10 boundary as it shipped, and the head-level coverage
+(models↔schema parity at head) lives in `test_phase11_schema.py`.
 """
 
 import datetime
@@ -106,14 +104,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated 0011 → base → 0011 through real Alembic runs."""
     name = "partflow_test_phase10_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE10_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE10_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -352,22 +350,13 @@ class TestMigrationSchema:
         for value in ("ACTIVE", "SPLIT", "MERGED", "SCRAPPED", "REVERSED", "STOCKED"):
             assert value in status
 
-    def test_models_metadata_matches_the_migrated_schema(self, migrated_engine: Engine) -> None:
-        from alembic.autogenerate import compare_metadata
-        from alembic.migration import MigrationContext
-
-        with migrated_engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            diffs = compare_metadata(context, models.Base.metadata)
-        assert diffs == []
-
     def test_downgrade_restores_the_phase9_boundary(self, admin_engine: Engine) -> None:
         name = "partflow_test_phase10_downgrade"
         _create_temp_database(admin_engine, name)
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE10_REVISION)
             command.downgrade(config, _PHASE9_REVISION)
             engine = create_engine(url)
             try:
@@ -381,7 +370,7 @@ class TestMigrationSchema:
                     connection.rollback()
             finally:
                 engine.dispose()
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE10_REVISION)
         finally:
             _drop_temp_database(admin_engine, name)
 
@@ -397,7 +386,7 @@ class TestMigrationSchema:
         url = make_url(os.environ["DATABASE_URL"]).set(database=name)
         config = _alembic_config(url)
         try:
-            command.upgrade(config, "head")
+            command.upgrade(config, _PHASE10_REVISION)
             engine = create_engine(url)
             try:
                 with engine.connect() as connection:

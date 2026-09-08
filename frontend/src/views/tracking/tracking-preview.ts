@@ -66,6 +66,8 @@ function row(
     distribution: [{ area, quantity, stocked: false }],
     activeQuantity: quantity,
     stockedQuantity: 0,
+    allocatedQuantity: 0,
+    availableStockedQuantity: 0,
     scrappedQuantity: 0,
     nextDueDate: isoDateIn(dueInDays),
     status: 'ACTIVE',

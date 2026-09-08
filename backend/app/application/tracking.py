@@ -46,9 +46,19 @@ Board, the Area Board or the Scan Station about a quantity:
 
 Derived status of a PN: ``ACTIVE`` while any quantity is in production;
 otherwise ``COMPLETED`` when no open demand remains (only history);
-otherwise ``STOCKED`` when stocked quantity waits for that open demand;
-otherwise ``OPEN`` — open demand with no quantity in production or in
-stock (nothing released yet, everything scrapped, or a release undone).
+otherwise ``STOCKED`` when AVAILABLE stocked quantity — effective
+``STOCKED`` minus the active allocation — waits for that open demand;
+otherwise ``OPEN`` — open demand with no quantity in production and no
+unallocated stock (nothing released yet, everything scrapped, a release
+undone, or every stocked piece already allocated to earlier work).
+
+Long history never loads whole: the Movement history and the Scrap
+history (the same immutable history restricted to ``SCRAPPED`` rows)
+page in reverse-chronological order ``(occurred_at DESC, id DESC)`` on a
+keyset the server resolves from a Movement id; the Quantity Flows list
+carries every ACTIVE flow plus a bounded page of closed flows continued
+on the flow id; the allocation history pages on
+``(allocated_at DESC, id DESC)`` resolved from an allocation id.
 """
 
 import calendar
@@ -56,13 +66,13 @@ import datetime
 from collections.abc import Collection, Iterable, Mapping
 from typing import Any, Final, Literal, NamedTuple
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.orm import Session, aliased
 
 from app.application.allocations import (
     DemandContext,
+    active_allocated_quantities,
     active_allocated_quantity_of,
-    list_allocations,
     open_demand_context,
 )
 from app.application.errors import NotFoundError
@@ -108,10 +118,13 @@ RouteStepState = Literal["DONE", "CURRENT", "FUTURE"]
 # the Movement history on the append-only id.
 DEFAULT_ROW_LIMIT: Final = 100
 MAX_ROW_LIMIT: Final = 200
-FLOW_LIMIT: Final = 50
-ALLOCATION_LIMIT: Final = 100
+DEFAULT_FLOW_LIMIT: Final = 50
+MAX_FLOW_LIMIT: Final = 200
+DEFAULT_ALLOCATION_LIMIT: Final = 100
+MAX_ALLOCATION_LIMIT: Final = 200
 DEFAULT_MOVEMENT_LIMIT: Final = 50
 MAX_MOVEMENT_LIMIT: Final = 200
+DEFAULT_SCRAP_LIMIT: Final = 20
 
 # The Movements that bring quantity INTO an Area — the steps of the
 # actual route trace. AREA_COMPLETED is completion inside the source
@@ -163,6 +176,10 @@ class TrackingRow(NamedTuple):
     distribution: list[DistributionEntry]
     active_quantity: int
     stocked_quantity: int
+    # The PN's ACTIVE allocation and the stocked quantity it leaves
+    # unallocated (`stocked − allocated`, never negative).
+    allocated_quantity: int
+    available_stocked_quantity: int
     scrapped_quantity: int
     # The earliest due date among the open demands; None when none is dated.
     next_due_date: datetime.date | None
@@ -243,11 +260,28 @@ class TrackingFlow(NamedTuple):
     deviations: list[RouteDeviationView]
 
 
+class FlowPage(NamedTuple):
+    """Every ACTIVE flow of the PN plus a page of its closed flows."""
+
+    flows: list[TrackingFlow]
+    total: int
+    has_more: bool
+    # The id of the oldest closed flow delivered — `before` of the next page.
+    next_before_flow_id: int | None
+
+
 class AllocationEntry(NamedTuple):
     allocation: WorkOrderAllocation
     demand: WorkOrderDemand
     work_order: WorkOrder
     reversed_by_allocation_id: int | None
+
+
+class AllocationPage(NamedTuple):
+    entries: list[AllocationEntry]
+    total: int
+    has_more: bool
+    next_before_allocation_id: int | None
 
 
 class HistoryMovement(NamedTuple):
@@ -287,11 +321,11 @@ class TrackingDetail(NamedTuple):
     allocated_quantity: int
     scrapped_quantity: int
     introduced_quantity: int
-    flows: list[TrackingFlow]
-    flow_total: int
-    allocations: list[AllocationEntry]
-    allocation_total: int
+    flows: FlowPage
+    allocations: AllocationPage
     movements: MovementPage
+    # The PN's SCRAPPED Movements — the same immutable history, newest first.
+    scrap_history: MovementPage
 
 
 # ---------------------------------------------------------------------------
@@ -300,13 +334,16 @@ class TrackingDetail(NamedTuple):
 
 
 def derived_status(
-    active_quantity: int, stocked_quantity: int, open_demands: Collection[Any]
+    active_quantity: int, available_stocked_quantity: int, open_demands: Collection[Any]
 ) -> TrackingStatus:
+    """The PN's status (module docstring): stock counts only while it is
+    still available to the open demand — stock allocated to earlier
+    work belongs to that work."""
     if active_quantity > 0:
         return "ACTIVE"
     if not open_demands:
         return "COMPLETED"
-    if stocked_quantity > 0:
+    if available_stocked_quantity > 0:
         return "STOCKED"
     return "OPEN"
 
@@ -528,6 +565,8 @@ def tracking_list(
         effective_totals_by_area(session, MovementType.SCRAPPED, areas.keys())
     )
     stocked_by_pn = _totals_by_part_number(stocked)
+    # One grouped query for every PN's active allocation — never per row.
+    allocated_by_pn = active_allocated_quantities(session, stocked_by_pn.keys())
     demands = open_demand_context(session, part_numbers)
     masters = _masters(session, part_numbers)
     due_bounds = due_window_bounds(filters.due, site_today())
@@ -538,6 +577,8 @@ def tracking_list(
         context = demands.get(pn, [])
         active_quantity = sum(location.quantity for location in locations)
         stocked_quantity = stocked_by_pn.get(pn, 0)
+        allocated_quantity = allocated_by_pn.get(pn, 0)
+        available_stocked = max(stocked_quantity - allocated_quantity, 0)
         first = context[0] if context else None
         row = TrackingRow(
             part_number=pn,
@@ -547,9 +588,11 @@ def tracking_list(
             distribution=_distribution(locations, stocked, pn, areas),
             active_quantity=active_quantity,
             stocked_quantity=stocked_quantity,
+            allocated_quantity=allocated_quantity,
+            available_stocked_quantity=available_stocked,
             scrapped_quantity=scrapped_by_pn.get(pn, 0),
             next_due_date=next_due_date(context),
-            status=derived_status(active_quantity, stocked_quantity, context),
+            status=derived_status(active_quantity, available_stocked, context),
         )
         if _passes(row, positions_by_pn.get(pn, []), filters, due_bounds):
             rows.append(row)
@@ -583,20 +626,31 @@ def _own_arrivals(
     return list(session.scalars(query.order_by(PartMovement.id)))
 
 
+def _effective_parents(session: Session, flow_id: int) -> list[LineageLink]:
+    """The flow's parents by the EFFECTIVE lineage (an undone descent void)."""
+    return [
+        LineageLink(edge.parent_flow_id, edge.relation)
+        for edge in effective_lineage_edges(session, [flow_id])
+        if edge.child_flow_id == flow_id
+    ]
+
+
 def flow_trace(
     session: Session,
     flow_id: int,
-    parents_of: Mapping[int, list[LineageLink]],
     areas: Mapping[int, Area],
 ) -> list[TraceStep]:
     """The actual route trace of one flow, derived from Movement history.
 
     The flow's own effective arrivals, prefixed — while the descent has
     exactly ONE parent (a SPLIT child) — by that parent's arrivals
-    written before the child existed, recursively; a merge result has
-    several parents whose traces are their own, so its trace starts at
-    the merge. Repeated Areas are preserved (the trace is history), a
-    Repair transfer is flagged, reversed arrivals never count.
+    written before the child existed, recursively up the WHOLE
+    single-parent ancestry (each ancestor's lineage is read from history
+    as the walk reaches it, so the prefix never depends on which flows a
+    detail page happens to list); a merge result has several parents
+    whose traces are their own, so its trace starts at the merge.
+    Repeated Areas are preserved (the trace is history), a Repair
+    transfer is flagged, reversed arrivals never count.
     """
     steps: list[TraceStep] = []
     current = flow_id
@@ -617,7 +671,7 @@ def flow_trace(
             for movement in _own_arrivals(session, current, bound)
         ]
         steps = own + steps
-        parents = parents_of.get(current, [])
+        parents = _effective_parents(session, current)
         if len(parents) != 1:
             break
         bound = _first_movement_id(session, current)
@@ -707,45 +761,59 @@ def _operations(session: Session, operation_ids: Collection[int]) -> dict[int, O
     }
 
 
-def _flows_of(session: Session, pn: str) -> tuple[list[QuantityFlow], int]:
-    """The PN's flows — ACTIVE first (oldest first), then closed newest first — bounded."""
+def _flows_of(
+    session: Session, pn: str, *, before_flow_id: int | None, limit: int
+) -> tuple[list[QuantityFlow], int, bool]:
+    """The PN's flows for one page, with the total and whether closed flows remain.
+
+    The FIRST page (no ``before_flow_id``) carries every ACTIVE flow —
+    the current state, oldest first — followed by the newest ``limit``
+    closed flows; a continuation carries only closed flows older than
+    ``before_flow_id`` (keyset on the flow id, newest first), so the
+    two never overlap and no flow is skipped.
+    """
     total = int(
         session.scalar(
             select(func.count()).select_from(QuantityFlow).where(QuantityFlow.part_number == pn)
         )
         or 0
     )
-    active = list(
-        session.scalars(
-            select(QuantityFlow)
-            .where(QuantityFlow.part_number == pn, QuantityFlow.status == QuantityFlowStatus.ACTIVE)
-            .order_by(QuantityFlow.id)
-            .limit(FLOW_LIMIT)
-        )
-    )
-    remaining = FLOW_LIMIT - len(active)
-    closed = (
+    active = (
         list(
             session.scalars(
                 select(QuantityFlow)
                 .where(
                     QuantityFlow.part_number == pn,
-                    QuantityFlow.status != QuantityFlowStatus.ACTIVE,
+                    QuantityFlow.status == QuantityFlowStatus.ACTIVE,
                 )
-                .order_by(QuantityFlow.id.desc())
-                .limit(remaining)
+                .order_by(QuantityFlow.id)
             )
         )
-        if remaining > 0
+        if before_flow_id is None
         else []
     )
-    return active + closed, total
+    closed_query = select(QuantityFlow).where(
+        QuantityFlow.part_number == pn, QuantityFlow.status != QuantityFlowStatus.ACTIVE
+    )
+    if before_flow_id is not None:
+        closed_query = closed_query.where(QuantityFlow.id < before_flow_id)
+    closed = list(session.scalars(closed_query.order_by(QuantityFlow.id.desc()).limit(limit + 1)))
+    has_more = len(closed) > limit
+    return active + closed[:limit], total, has_more
 
 
 def _tracking_flows(
-    session: Session, pn: str, positions: Mapping[int, FlowPosition], areas: Mapping[int, Area]
-) -> tuple[list[TrackingFlow], int]:
-    flows, total = _flows_of(session, pn)
+    session: Session,
+    pn: str,
+    positions: Mapping[int, FlowPosition],
+    areas: Mapping[int, Area],
+    *,
+    before_flow_id: int | None,
+    limit: int,
+) -> FlowPage:
+    flows, total, has_more = _flows_of(session, pn, before_flow_id=before_flow_id, limit=limit)
+    # The lineage links a block names (its parents and children); the
+    # trace walks the ancestry from history on its own.
     edges = effective_lineage_edges(session, [flow.id for flow in flows])
     parents_of: dict[int, list[LineageLink]] = {}
     children_of: dict[int, list[LineageLink]] = {}
@@ -823,14 +891,29 @@ def _tracking_flows(
                 current_area=areas[flow.current_area_id] if flow.id in positions else None,
                 parents=parents_of.get(flow.id, []),
                 children=children_of.get(flow.id, []),
-                trace=flow_trace(session, flow.id, parents_of, areas),
+                trace=flow_trace(session, flow.id, areas),
                 route_steps=route_steps,
                 source_template=templates.get(template_id) if template_id is not None else None,
                 off_route=off_route,
                 deviations=_deviations(session, flow, areas, operations),
             )
         )
-    return result, total
+    closed_ids = [flow.id for flow in flows if flow.status != QuantityFlowStatus.ACTIVE]
+    return FlowPage(
+        flows=result,
+        total=total,
+        has_more=has_more,
+        next_before_flow_id=min(closed_ids) if has_more and closed_ids else None,
+    )
+
+
+def flow_page_of(
+    session: Session, part_number: object, before_flow_id: int | None, limit: int
+) -> FlowPage:
+    """A further page of one PN's closed Quantity Flows (canonicalized; unknown → 404)."""
+    pn = _require_tracked(session, part_number)
+    areas = _all_areas(session)
+    return _tracking_flows(session, pn, {}, areas, before_flow_id=before_flow_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -873,35 +956,63 @@ def _demand_of(demands: Mapping[int, DemandContext], demand_id: int | None) -> D
     return demands.get(demand_id) if demand_id is not None else None
 
 
+def _history_cursor(
+    session: Session, pn: str, before_movement_id: int
+) -> tuple[datetime.datetime, int]:
+    """The ``(occurred_at, id)`` keyset a Movement id stands for.
+
+    The public cursor is the id of the last row a page delivered; the
+    server resolves its timestamp so the continuation follows the SAME
+    reverse-chronological order the page had — never the id order
+    alone, which a backdated ``occurred_at`` would disagree with.
+    """
+    occurred_at = session.scalar(
+        select(PartMovement.occurred_at).where(
+            PartMovement.id == before_movement_id, PartMovement.part_number == pn
+        )
+    )
+    if occurred_at is None:
+        raise NotFoundError(f"Movement {before_movement_id} is not part of {pn}'s history.")
+    return occurred_at, before_movement_id
+
+
 def movement_history(
     session: Session,
     pn: str,
     *,
     before_movement_id: int | None = None,
     limit: int = DEFAULT_MOVEMENT_LIMIT,
+    movement_types: Collection[MovementType] | None = None,
 ) -> MovementPage:
     """One page of the PN's immutable Movement history, newest first.
 
-    Keyset paging on the append-only id: ``before_movement_id`` continues
-    below a previously delivered row, so history that grows while the
-    reader pages never shifts a page. Every row is reported — a
-    reversed original beside the ``REVERSED`` row that undid it — with
-    the audit context the row carries: the lineage edges of a SPLIT /
-    MERGED command, the initiating demand of a ``RECEIVED``, the
-    fulfilled snapshot step.
+    Reverse-chronological — ``(occurred_at DESC, id DESC)``, the id
+    breaking ties deterministically — with keyset paging on that same
+    order: ``before_movement_id`` names the last row a page delivered
+    and the server resolves its ``(occurred_at, id)``, so history that
+    grows while the reader pages never shifts a page and no row is
+    skipped or repeated. ``movement_types`` restricts the read (the
+    Scrap history is this read for ``SCRAPPED`` rows). Every row is
+    reported — a reversed original beside the ``REVERSED`` row that
+    undid it — with the audit context the row carries: the lineage
+    edges of a SPLIT / MERGED command, the initiating demand of a
+    ``RECEIVED``, the fulfilled snapshot step.
     """
-    query: Select[tuple[PartMovement]] = select(PartMovement).where(PartMovement.part_number == pn)
+    scope: Select[tuple[PartMovement]] = select(PartMovement).where(PartMovement.part_number == pn)
+    if movement_types is not None:
+        scope = scope.where(PartMovement.movement_type.in_(movement_types))
+    query = scope
     if before_movement_id is not None:
-        query = query.where(PartMovement.id < before_movement_id)
-    page = list(session.scalars(query.order_by(PartMovement.id.desc()).limit(limit + 1)))
+        cursor = _history_cursor(session, pn, before_movement_id)
+        query = query.where(tuple_(PartMovement.occurred_at, PartMovement.id) < cursor)
+    page = list(
+        session.scalars(
+            query.order_by(PartMovement.occurred_at.desc(), PartMovement.id.desc()).limit(limit + 1)
+        )
+    )
     has_more = len(page) > limit
     page = page[:limit]
-    total = int(
-        session.scalar(
-            select(func.count()).select_from(PartMovement).where(PartMovement.part_number == pn)
-        )
-        or 0
-    )
+    total = int(session.scalar(select(func.count()).select_from(scope.subquery())) or 0)
     ids = [movement.id for movement in page]
     reversed_by: dict[int, int] = {}
     if ids:
@@ -997,23 +1108,72 @@ def movement_history(
     )
 
 
-def _allocation_entries(session: Session, pn: str) -> tuple[list[AllocationEntry], int]:
-    rows = list_allocations(session, part_number=pn)
-    total = len(rows)
-    newest = list(reversed(rows))[:ALLOCATION_LIMIT]
-    demands = _demand_contexts(session, {row.work_order_demand_id for row in newest})
-    reversed_by = {
-        row.reverses_allocation_id: row.id for row in rows if row.reverses_allocation_id is not None
-    }
-    return [
-        AllocationEntry(
-            allocation=row,
-            demand=demands[row.work_order_demand_id].demand,
-            work_order=demands[row.work_order_demand_id].work_order,
-            reversed_by_allocation_id=reversed_by.get(row.id),
+def allocation_history(
+    session: Session,
+    pn: str,
+    *,
+    before_allocation_id: int | None = None,
+    limit: int = DEFAULT_ALLOCATION_LIMIT,
+) -> AllocationPage:
+    """One page of the PN's allocation rows (allocations and reversals),
+    newest first — ``(allocated_at DESC, id DESC)`` with keyset paging
+    resolved from the id of the last row delivered."""
+    scope = select(WorkOrderAllocation).where(WorkOrderAllocation.part_number == pn)
+    query = scope
+    if before_allocation_id is not None:
+        allocated_at = session.scalar(
+            select(WorkOrderAllocation.allocated_at).where(
+                WorkOrderAllocation.id == before_allocation_id,
+                WorkOrderAllocation.part_number == pn,
+            )
         )
-        for row in newest
-    ], total
+        if allocated_at is None:
+            raise NotFoundError(f"Allocation {before_allocation_id} is not part of {pn}'s history.")
+        query = query.where(
+            tuple_(WorkOrderAllocation.allocated_at, WorkOrderAllocation.id)
+            < (allocated_at, before_allocation_id)
+        )
+    rows = list(
+        session.scalars(
+            query.order_by(
+                WorkOrderAllocation.allocated_at.desc(), WorkOrderAllocation.id.desc()
+            ).limit(limit + 1)
+        )
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    total = int(session.scalar(select(func.count()).select_from(scope.subquery())) or 0)
+    demands = _demand_contexts(session, {row.work_order_demand_id for row in rows})
+    reversed_by: dict[int, int] = {}
+    if rows:
+        for reversal_id, original_id in session.execute(
+            select(WorkOrderAllocation.id, WorkOrderAllocation.reverses_allocation_id).where(
+                WorkOrderAllocation.reverses_allocation_id.in_([row.id for row in rows])
+            )
+        ):
+            reversed_by[int(original_id)] = int(reversal_id)
+    return AllocationPage(
+        entries=[
+            AllocationEntry(
+                allocation=row,
+                demand=demands[row.work_order_demand_id].demand,
+                work_order=demands[row.work_order_demand_id].work_order,
+                reversed_by_allocation_id=reversed_by.get(row.id),
+            )
+            for row in rows
+        ],
+        total=total,
+        has_more=has_more,
+        next_before_allocation_id=rows[-1].id if has_more and rows else None,
+    )
+
+
+def allocation_history_of(
+    session: Session, part_number: object, before_allocation_id: int | None, limit: int
+) -> AllocationPage:
+    """`allocation_history` for a raw PN input (canonicalized; unknown → 404)."""
+    pn = _require_tracked(session, part_number)
+    return allocation_history(session, pn, before_allocation_id=before_allocation_id, limit=limit)
 
 
 def _is_tracked(session: Session, pn: str) -> bool:
@@ -1027,14 +1187,29 @@ def _is_tracked(session: Session, pn: str) -> bool:
     return False
 
 
-def movement_history_of(
-    session: Session, part_number: object, before_movement_id: int | None, limit: int
-) -> MovementPage:
-    """`movement_history` for a raw PN input (canonicalized; unknown → 404)."""
+def _require_tracked(session: Session, part_number: object) -> str:
     pn = canonical_part_number(part_number)
     if not _is_tracked(session, pn):
         raise NotFoundError(f"Part Number {pn} is not known to PartFlow.")
-    return movement_history(session, pn, before_movement_id=before_movement_id, limit=limit)
+    return pn
+
+
+def movement_history_of(
+    session: Session,
+    part_number: object,
+    before_movement_id: int | None,
+    limit: int,
+    movement_types: Collection[MovementType] | None = None,
+) -> MovementPage:
+    """`movement_history` for a raw PN input (canonicalized; unknown → 404)."""
+    pn = _require_tracked(session, part_number)
+    return movement_history(
+        session,
+        pn,
+        before_movement_id=before_movement_id,
+        limit=limit,
+        movement_types=movement_types,
+    )
 
 
 def tracking_detail(
@@ -1043,6 +1218,9 @@ def tracking_detail(
     *,
     movements_before: int | None = None,
     movements_limit: int = DEFAULT_MOVEMENT_LIMIT,
+    flows_limit: int = DEFAULT_FLOW_LIMIT,
+    allocations_limit: int = DEFAULT_ALLOCATION_LIMIT,
+    scrap_limit: int = DEFAULT_SCRAP_LIMIT,
 ) -> TrackingDetail:
     """The read-only detail of one PN (GUI_DESIGN §7.2).
 
@@ -1051,9 +1229,7 @@ def tracking_detail(
     absent — the history and current state are untouched. Unknown to
     production, demand and master alike → 404.
     """
-    pn = canonical_part_number(part_number)
-    if not _is_tracked(session, pn):
-        raise NotFoundError(f"Part Number {pn} is not known to PartFlow.")
+    pn = _require_tracked(session, part_number)
     areas = _all_areas(session)
     positions = flow_positions(session, _active_flows(session, [pn]))
     locations = group_locations(positions.values(), areas).get(pn, [])
@@ -1069,14 +1245,14 @@ def tracking_detail(
     stocked_quantity = sum(entry.quantity for entry in stocked)
     context = open_demand_context(session, [pn]).get(pn, [])
     released = released_quantities(session, [entry.demand.id for entry in context])
-    flows, flow_total = _tracking_flows(session, pn, positions, areas)
-    allocations, allocation_total = _allocation_entries(session, pn)
+    allocated_quantity = active_allocated_quantity_of(session, pn)
+    available_stocked = max(stocked_quantity - allocated_quantity, 0)
     master = _masters(session, [pn]).get(pn)
     return TrackingDetail(
         part_number=pn,
         master=master,
         barcode_value=f"{PART_NUMBER_BARCODE_PREFIX}{pn}",
-        status=derived_status(active_quantity, stocked_quantity, context),
+        status=derived_status(active_quantity, available_stocked, context),
         demands=[
             TrackingDemand(context=entry, released_quantity=released.get(entry.demand.id, 0))
             for entry in context
@@ -1085,14 +1261,17 @@ def tracking_detail(
         stocked=stocked,
         active_quantity=active_quantity,
         stocked_quantity=stocked_quantity,
-        allocated_quantity=active_allocated_quantity_of(session, pn),
+        allocated_quantity=allocated_quantity,
         scrapped_quantity=_effective_total(session, pn, (MovementType.SCRAPPED,)),
         introduced_quantity=_effective_total(session, pn, _INTRODUCING_TYPES),
-        flows=flows,
-        flow_total=flow_total,
-        allocations=allocations,
-        allocation_total=allocation_total,
+        flows=_tracking_flows(
+            session, pn, positions, areas, before_flow_id=None, limit=flows_limit
+        ),
+        allocations=allocation_history(session, pn, limit=allocations_limit),
         movements=movement_history(
             session, pn, before_movement_id=movements_before, limit=movements_limit
+        ),
+        scrap_history=movement_history(
+            session, pn, limit=scrap_limit, movement_types=(MovementType.SCRAPPED,)
         ),
     )

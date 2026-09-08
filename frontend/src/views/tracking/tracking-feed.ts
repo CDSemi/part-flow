@@ -9,8 +9,9 @@
 // A Management view is read while work moves on the floor, so it
 // follows the feed rather than waiting for a manual reload.
 
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 
+import { errorMessage } from '../../api/client';
 import type { Area, Operation } from '../../api/environment';
 import { listAreas, listOperations } from '../../api/environment';
 import type { Machine } from '../../api/machines';
@@ -100,4 +101,68 @@ export function useTrackingFilterOptions(
 ): TrackingFilterOptions {
   const { state } = useApiData(enabled ? loadFilterOptions : loadNoOptions);
   return state.status === 'ready' ? state.data : NO_OPTIONS;
+}
+
+/** Older pages of one paged detail section, appended on request. */
+export interface OlderPages<T> {
+  items: T[];
+  /** The keyset of the next page; null once the last page arrived. */
+  nextBefore: number | null;
+  loading: boolean;
+  error: string | null;
+}
+
+/**
+ * Continuation of a paged section below the FIRST page the detail feed
+ * delivered. `boundary` is that page's keyset (`next_before_*`): the
+ * older pages continue below it, and when a refresh moves it (new rows
+ * arrived on the first page) the appended pages are dropped and start
+ * again, so the section never shows a gap or a duplicate.
+ */
+export function useOlderPages<T>(
+  boundary: number | null,
+  load: (before: number) => Promise<{ items: T[]; nextBefore: number | null }>,
+): {
+  older: OlderPages<T> | null;
+  /** Load the next older page (a no-op while one is loading). */
+  showOlder: () => void;
+} {
+  const [state, setState] = useState<
+    (OlderPages<T> & { boundary: number }) | null
+  >(null);
+  const current = state !== null && state.boundary === boundary ? state : null;
+
+  const showOlder = useCallback(() => {
+    if (boundary === null || current?.loading) return;
+    const before = current?.nextBefore ?? boundary;
+    if (current !== null && current.nextBefore === null) return;
+    setState({
+      boundary,
+      items: current?.items ?? [],
+      nextBefore: current?.nextBefore ?? null,
+      loading: true,
+      error: null,
+    });
+    void load(before).then(
+      (page) =>
+        setState((latest) =>
+          latest === null || latest.boundary !== boundary
+            ? latest
+            : {
+                ...latest,
+                items: [...latest.items, ...page.items],
+                nextBefore: page.nextBefore,
+                loading: false,
+              },
+        ),
+      (error: unknown) =>
+        setState((latest) =>
+          latest === null || latest.boundary !== boundary
+            ? latest
+            : { ...latest, loading: false, error: errorMessage(error) },
+        ),
+    );
+  }, [boundary, current, load]);
+
+  return { older: current, showOlder };
 }

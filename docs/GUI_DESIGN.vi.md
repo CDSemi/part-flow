@@ -596,9 +596,11 @@ Search PN/WO/Job; filters Area/Operation/Machine/Request Type/Hot/status/due. Co
 PN+name/Hot, active Demand, distribution dots, active/stocked/scrapped quantity,
 next due và status pill (Active / Stocked / Open / Completed — status derive của
 IMPLEMENTATION_ROADMAP Phase 11: `Active` khi còn quantity trong production,
-`Completed` khi không còn open Work Order Demand, `Stocked` khi chỉ còn stocked
-quantity chờ open demand, và `Open` — implementation thêm vào — khi open demand
-không có quantity nào trong production hay trong stock). Deleted-master PN vẫn
+`Completed` khi không còn open Work Order Demand, `Stocked` chỉ khi còn stocked
+quantity CHƯA ALLOCATE — effective `STOCKED` trừ active allocation — chờ open
+demand, và `Open` — implementation thêm vào — khi open demand không có quantity
+nào trong production và không còn stock chưa allocate, kể cả stock đã allocate
+cho work trước đó). Deleted-master PN vẫn
 canonical, metadata `—`; null WO `—`. **Ranh giới triển khai (Phase 11):** list
 là production UI thật trên `GET /api/tracking` — search (debounce, trên PN, WO
 Number và Job Number của MỌI demand của PN) và mọi select được đánh giá server-side
@@ -631,8 +633,16 @@ Corrections thay vì disabled controls. **Ranh giới triển khai (Phase 11):**
 là production UI thật trên `GET /api/tracking/detail` — mỗi PN được chọn là một
 polled read riêng với skeleton loading và error-with-Retry ngay trong panel,
 refresh lỗi giữ detail hoàn chỉnh cuối kèm ghi chú `Feed stale — reconnecting`
-dưới PN, Movement history phân trang (`Showing n of m Movements`, `Show older
-Movements` nối thêm page kế của history bất biến), name / revision / image / ERP
+dưới PN, Movement history theo thứ tự thời gian ngược (`occurred_at`, id
+Movement phân định hòa) và phân trang trên đúng thứ tự đó (`Showing n of m
+Movements`, `Show older Movements` nối thêm page kế của history bất biến, không
+hở khoảng không trùng), Scrap history (§7.2 mục 6) liệt kê các event `SCRAPPED`
+của PN như row của chính history đó — timestamp, quantity, Area, reason, event
+đã undo vẫn giữ kèm badge `REVERSED` — dưới con số tích lũy net, có `Show older
+scrap events`, section Quantity Flows luôn liệt kê mọi active flow và phân
+trang các closed flow (`Show older Quantity Flows`), allocation history phân
+trang tương tự (`Show older allocation entries`) — không gì bị cắt ngoài tầm
+với —, name / revision / image / ERP
 id từ master render `—` cho đến khi Part Numbers management (Phase 13) cung cấp,
 và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
 corrections (Phase 14) — không bao giờ render nút vô hiệu.
@@ -991,11 +1001,14 @@ session không còn shift end.
   (a) **feed status** cạnh title và ghi chú stale dưới PN đang chọn — cùng câu
   `● Live` / `Feed stale — reconnecting` như các board; (b) **status pill thêm
   `Open`** cho PN mà open Work Order Demand không có quantity trong production
-  hay trong stock (chưa release, scrap hết, release đã undo) — không giá trị nào
-  trong ba giá trị đã duyệt mô tả trung thực trạng thái đó, nên status filter của
-  list cũng có `Open`; (c) **long data có bound** — `Showing n of m PNs` với `Show
-  more` trên list, `Showing n of m Movements` với `Show older Movements` trên
-  history. Section Corrections vẫn ẩn cho đến khi có authorized corrections
+  và không còn stock chưa allocate (chưa release, scrap hết, release đã undo,
+  hoặc mọi stocked piece đã allocate cho work trước — `Stocked` nghĩa là stock
+  CÒN available cho open demand) — không giá trị nào trong ba giá trị đã duyệt
+  mô tả trung thực trạng thái đó, nên status filter của list cũng có `Open`; (c)
+  **long data có bound** — `Showing n of m PNs` với `Show more` trên list, và
+  `Showing n of m …` với `Show older …` trên Movement history (thời gian ngược
+  theo timestamp), Scrap history (chính các event SCRAPPED, event đã undo đánh
+  dấu `REVERSED`), các closed Quantity Flow và allocation entry. Section Corrections vẫn ẩn cho đến khi có authorized corrections
   (Phase 14), các field metadata từ master render `—` cho đến Phase 13. Mockup
   v18 không đổi (feed state, paging control và pill `Open` chỉ có trong
   application).

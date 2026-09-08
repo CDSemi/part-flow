@@ -30,6 +30,12 @@ export const TRACKING_MAX_ROWS = 200;
 /** Movements per history page (the detail's first page and each
  * `Show older Movements` continuation). */
 export const MOVEMENTS_PAGE_SIZE = 50;
+/** Scrap events per Scrap history page. */
+export const SCRAP_PAGE_SIZE = 20;
+/** Closed Quantity Flows per continuation page. */
+export const FLOWS_PAGE_SIZE = 50;
+/** Allocation entries per continuation page. */
+export const ALLOCATIONS_PAGE_SIZE = 100;
 
 /** Debounce of the search field before it reaches the server. */
 export const SEARCH_DEBOUNCE_MS = 250;
@@ -68,8 +74,9 @@ export const STATUS_CLASS: Record<TrackingStatus, string> = {
 
 export const STATUS_TITLE: Record<TrackingStatus, string> = {
   ACTIVE: 'Quantity in production',
-  STOCKED: 'No quantity in production — stocked quantity waits for open demand',
-  OPEN: 'Open Work Order Demand — no quantity in production or in stock',
+  STOCKED:
+    'No quantity in production — unallocated stocked quantity is available to the open demand',
+  OPEN: 'Open Work Order Demand — no quantity in production and no unallocated stock',
   COMPLETED: 'No open Work Order Demand — history only',
 };
 

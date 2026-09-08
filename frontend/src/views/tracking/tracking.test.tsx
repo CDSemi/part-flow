@@ -99,6 +99,8 @@ function listPayload() {
         ],
         active_quantity: 10,
         stocked_quantity: 0,
+        allocated_quantity: 0,
+        available_stocked_quantity: 0,
         scrapped_quantity: 1,
         next_due_date: '2030-07-24',
         status: 'ACTIVE',
@@ -112,6 +114,8 @@ function listPayload() {
         distribution: [{ area: STOCKROOM, quantity: 20, stocked: true }],
         active_quantity: 0,
         stocked_quantity: 20,
+        allocated_quantity: 20,
+        available_stocked_quantity: 0,
         scrapped_quantity: 0,
         next_due_date: null,
         status: 'COMPLETED',
@@ -239,70 +243,78 @@ function detailPayload() {
     available_stocked_quantity: 0,
     scrapped_quantity: 1,
     introduced_quantity: 11,
-    flows: [
-      {
-        id: 140,
-        quantity: 6,
-        status: 'ACTIVE',
-        route_mode: 'PLANNED',
-        created_at: '2030-07-12T08:02:00Z',
-        closed_at: null,
-        position: {
-          area: LATHE,
-          machine: null,
-          operation: OPERATION,
-          activity: null,
-          state: 'QUEUE',
-          since: '2030-07-22T11:20:00Z',
+    flows: {
+      flows: [
+        {
+          id: 140,
+          quantity: 6,
+          status: 'ACTIVE',
+          route_mode: 'PLANNED',
+          created_at: '2030-07-12T08:02:00Z',
+          closed_at: null,
+          position: {
+            area: LATHE,
+            machine: null,
+            operation: OPERATION,
+            activity: null,
+            state: 'QUEUE',
+            since: '2030-07-22T11:20:00Z',
+          },
+          parents: [],
+          children: [{ quantity_flow_id: 141, relation: 'SPLIT' }],
+          trace: [trace(1, MATERIAL), trace(2, CUT), trace(3, LATHE)],
+          route_steps: [
+            step(1, MATERIAL, 'DONE'),
+            step(2, CUT, 'DONE'),
+            step(3, LATHE, 'CURRENT'),
+            step(4, DEBURR, 'FUTURE'),
+            step(5, STOCKROOM, 'FUTURE'),
+          ],
+          source_template: { id: 7, name: 'Bracket std v3' },
+          off_route: false,
+          deviations: [],
         },
-        parents: [],
-        children: [{ quantity_flow_id: 141, relation: 'SPLIT' }],
-        trace: [trace(1, MATERIAL), trace(2, CUT), trace(3, LATHE)],
-        route_steps: [
-          step(1, MATERIAL, 'DONE'),
-          step(2, CUT, 'DONE'),
-          step(3, LATHE, 'CURRENT'),
-          step(4, DEBURR, 'FUTURE'),
-          step(5, STOCKROOM, 'FUTURE'),
-        ],
-        source_template: { id: 7, name: 'Bracket std v3' },
-        off_route: false,
-        deviations: [],
-      },
-      {
-        id: 141,
-        quantity: 4,
-        status: 'ACTIVE',
-        route_mode: 'FLOATING',
-        created_at: '2030-07-20T15:22:00Z',
-        closed_at: null,
-        position: {
-          area: CUT,
-          machine: null,
-          operation: OPERATION,
-          activity: null,
-          state: 'PROCESSING',
-          since: '2030-07-22T13:40:00Z',
+        {
+          id: 141,
+          quantity: 4,
+          status: 'ACTIVE',
+          route_mode: 'FLOATING',
+          created_at: '2030-07-20T15:22:00Z',
+          closed_at: null,
+          position: {
+            area: CUT,
+            machine: null,
+            operation: OPERATION,
+            activity: null,
+            state: 'PROCESSING',
+            since: '2030-07-22T13:40:00Z',
+          },
+          parents: [{ quantity_flow_id: 140, relation: 'SPLIT' }],
+          children: [],
+          // The repeated Cut visit is a confirmed Repair return; the
+          // three earlier arrivals were recorded on the source flow.
+          trace: [
+            trace(1, MATERIAL, { inherited: true }),
+            trace(2, CUT, { inherited: true }),
+            trace(3, LATHE, { inherited: true }),
+            trace(9, CUT, { quantity_flow_id: 141, repair: true }),
+          ],
+          route_steps: [],
+          source_template: null,
+          off_route: false,
+          deviations: [],
         },
-        parents: [{ quantity_flow_id: 140, relation: 'SPLIT' }],
-        children: [],
-        // The repeated Cut visit is a confirmed Repair return; the
-        // three earlier arrivals were recorded on the source flow.
-        trace: [
-          trace(1, MATERIAL, { inherited: true }),
-          trace(2, CUT, { inherited: true }),
-          trace(3, LATHE, { inherited: true }),
-          trace(9, CUT, { quantity_flow_id: 141, repair: true }),
-        ],
-        route_steps: [],
-        source_template: null,
-        off_route: false,
-        deviations: [],
-      },
-    ],
-    flow_total: 2,
-    allocations: [],
-    allocation_total: 0,
+      ],
+      total: 2,
+      has_more: false,
+      next_before_flow_id: null,
+    },
+    allocations: {
+      allocations: [],
+      total: 0,
+      has_more: false,
+      next_before_allocation_id: null,
+    },
     movements: {
       movements: [
         movement({
@@ -352,6 +364,43 @@ function detailPayload() {
       has_more: true,
       next_before_movement_id: 5,
     },
+    // The same history restricted to scrap: the newest event first, an
+    // older (undone) one on the next page.
+    scrap_history: {
+      movements: [
+        movement({
+          id: 11,
+          movement_type: 'SCRAPPED',
+          quantity: 1,
+          from_area: LATHE,
+          reason: 'tool crash — gouged face',
+          occurred_at: '2030-07-22T14:10:00Z',
+        }),
+      ],
+      total: 2,
+      has_more: true,
+      next_before_movement_id: 11,
+    },
+  };
+}
+
+function olderScrapPayload() {
+  return {
+    movements: [
+      movement({
+        id: 4,
+        movement_type: 'SCRAPPED',
+        quantity: 2,
+        from_area: MATERIAL,
+        to_area: MATERIAL,
+        reason: 'wrong material',
+        reversed_by_movement_id: 7,
+        occurred_at: '2030-07-13T09:00:00Z',
+      }),
+    ],
+    total: 2,
+    has_more: false,
+    next_before_movement_id: null,
   };
 }
 
@@ -405,8 +454,13 @@ function stubFetch(
 function defaultAnswer(url: string): Response {
   if (url.startsWith('/api/tracking/detail'))
     return jsonResponse(detailPayload());
-  if (url.startsWith('/api/tracking/movements'))
-    return jsonResponse(olderPayload());
+  if (url.startsWith('/api/tracking/movements')) {
+    return jsonResponse(
+      url.includes('movement_type=SCRAPPED')
+        ? olderScrapPayload()
+        : olderPayload(),
+    );
+  }
   if (url.startsWith('/api/tracking')) return jsonResponse(listPayload());
   if (url === '/api/areas') return jsonResponse([]);
   if (url === '/api/operations') return jsonResponse([]);
@@ -926,7 +980,7 @@ test('Movement history lists every type with its badge and keeps a reversed orig
   await renderTracking();
   await openFirstRow();
 
-  const items = Array.from(document.querySelectorAll('.mv li'));
+  const items = Array.from(document.querySelectorAll('.mv.history li'));
   expect(items.length).toBe(5);
   const badge = items[0].querySelector('.mtype')!;
   expect(badge.textContent).toBe('AREA_COMPLETED');
@@ -951,7 +1005,7 @@ test('Movement history lists every type with its badge and keeps a reversed orig
   expect(items[4].querySelector('.mtype.rev')?.textContent).toBe('REVERSED');
   expect(items[4].textContent).toContain('Lathe queue → Lathe M2 · qty 2');
   const paging = document
-    .querySelector('.mv')!
+    .querySelector('.mv.history')!
     .parentElement!.querySelector('.tk-paging');
   expect(paging?.textContent).toContain('Showing 5 of 9 Movements');
 });
@@ -966,7 +1020,7 @@ test('older Movement pages append below the first page on request', async () => 
   expect(trackingCalls(fetchMock).at(-1)).toBe(
     '/api/tracking/movements?part_number=2027-60-8114-00&before=5&limit=50',
   );
-  const items = Array.from(document.querySelectorAll('.mv li'));
+  const items = Array.from(document.querySelectorAll('.mv.history li'));
   expect(items.length).toBe(6);
   expect(items[5].querySelector('.mtype')?.textContent).toBe('RECEIVED');
   expect(items[5].textContent).toContain(
@@ -977,16 +1031,169 @@ test('older Movement pages append below the first page on request', async () => 
     screen.queryByRole('button', { name: 'Show older Movements' }),
   ).toBeNull();
   const paging = document
-    .querySelector('.mv')!
+    .querySelector('.mv.history')!
     .parentElement!.querySelector('.tk-paging');
   expect(paging?.textContent).toContain('Showing 6 of 9 Movements');
+});
+
+test('the Scrap history lists every scrap event with its reversed state and pages on the same history', async () => {
+  const fetchMock = stubFetch();
+  await renderTracking();
+  await openFirstRow();
+
+  const list = document.querySelector('.mv.scrap') as HTMLElement;
+  const section = list.closest('.tk-sec') as HTMLElement;
+  expect(section.textContent).toContain('Cumulative scrapped: 1 pcs');
+  let items = list.querySelectorAll('li');
+  expect(items.length).toBe(1);
+  expect(items[0].querySelector('.mtype')?.textContent).toBe('SCRAPPED');
+  expect(items[0].textContent).toContain('Jul 22 ');
+  expect(items[0].textContent).toContain(
+    'Scrapped 1 at Lathe · QF-140 · reason: tool crash — gouged face · LATHE-ST-1',
+  );
+  expect(section.textContent).toContain('Showing 1 of 2 scrap events');
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older scrap events' }),
+  );
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/movements?part_number=2027-60-8114-00&before=11&limit=20&movement_type=SCRAPPED',
+  );
+  items = list.querySelectorAll('li');
+  expect(items.length).toBe(2);
+  // The undone scrap stays listed — timestamp, quantity, Area and reason
+  // intact — marked REVERSED and quieter; the cumulative figure above
+  // is the net one.
+  expect(items[1].classList.contains('reversed')).toBe(true);
+  expect(items[1].querySelector('.mtype.rev')?.textContent).toBe('REVERSED');
+  expect(items[1].textContent).toContain(
+    'Scrapped 2 at Material · QF-140 · reason: wrong material',
+  );
+  expect(section.textContent).toContain('Showing 2 of 2 scrap events');
+  expect(
+    screen.queryByRole('button', { name: 'Show older scrap events' }),
+  ).toBeNull();
+});
+
+test('closed Quantity Flows and allocation entries page below the first page', async () => {
+  const workOrder = {
+    work_order_id: 1,
+    work_order_number: '007001',
+    work_order_demand_id: 10,
+    request_type: 'NEW',
+  };
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      return jsonResponse({
+        ...base,
+        flows: {
+          ...base.flows,
+          total: 5,
+          has_more: true,
+          next_before_flow_id: 120,
+        },
+        allocations: {
+          allocations: [
+            {
+              id: 31,
+              quantity: 2,
+              work_order: workOrder,
+              source: 'STOCKROOM',
+              is_manual_override: false,
+              allocation_reason: null,
+              reverses_allocation_id: null,
+              reversed_by_allocation_id: null,
+              station_id: 'STOCK-ST-1',
+              allocated_at: '2030-07-23T08:00:00Z',
+            },
+          ],
+          total: 2,
+          has_more: true,
+          next_before_allocation_id: 31,
+        },
+      });
+    }
+    if (url.startsWith('/api/tracking/flows')) {
+      const closed = {
+        ...detailPayload().flows.flows[0],
+        id: 120,
+        status: 'SPLIT',
+        position: null,
+        children: [],
+      };
+      return jsonResponse({
+        flows: [closed],
+        total: 5,
+        has_more: false,
+        next_before_flow_id: null,
+      });
+    }
+    if (url.startsWith('/api/tracking/allocations')) {
+      return jsonResponse({
+        allocations: [
+          {
+            id: 30,
+            quantity: 1,
+            work_order: workOrder,
+            source: 'MANAGEMENT',
+            is_manual_override: true,
+            allocation_reason: 'rush',
+            reverses_allocation_id: null,
+            reversed_by_allocation_id: 31,
+            station_id: null,
+            allocated_at: '2030-07-20T08:00:00Z',
+          },
+        ],
+        total: 2,
+        has_more: false,
+        next_before_allocation_id: null,
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  expect(document.querySelectorAll('.qflow').length).toBe(2);
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older Quantity Flows' }),
+  );
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/flows?part_number=2027-60-8114-00&before=120&limit=50',
+  );
+  expect(document.querySelectorAll('.qflow').length).toBe(3);
+  expect(document.querySelectorAll('.qflow.closed').length).toBe(1);
+  expect(
+    screen.queryByRole('button', { name: 'Show older Quantity Flows' }),
+  ).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older allocation entries' }),
+  );
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/allocations?part_number=2027-60-8114-00&before=31&limit=100',
+  );
+  const entries = Array.from(document.querySelectorAll('.tk-sec')).find((el) =>
+    el.textContent?.includes('Stocked & Allocation history'),
+  )!;
+  const rows = entries.querySelectorAll('.mv li');
+  expect(rows.length).toBe(2);
+  expect(rows[1].classList.contains('reversed')).toBe(true);
+  expect(rows[1].textContent).toContain(
+    '1 pcs · WO 007001 · management · manual override · reason: rush',
+  );
+  expect(entries.textContent).toContain('Showing 2 of 2 allocation entries');
 });
 
 test('the Movement history stays read-only — its only control pages the history', async () => {
   await renderTracking();
   await openFirstRow();
 
-  const section = document.querySelector('.mv')!.closest('.tk-sec')!;
+  const section = document.querySelector('.mv.history')!.closest('.tk-sec')!;
   // Immutable audit data: no edit, delete, or any other affordance
   // besides the paging control exists in the history section.
   const controls = section.querySelectorAll('button, a, input, select');
@@ -1030,7 +1237,7 @@ test('a PN whose master record is absent still renders its history', async () =>
   expect(panel.textContent).toContain(
     'no Part Number master record — history unaffected',
   );
-  expect(panel.querySelectorAll('.mv li').length).toBe(5);
+  expect(panel.querySelectorAll('.mv.history li').length).toBe(5);
 });
 
 test('describeMovement states lineage, stocking and additions as recorded', () => {

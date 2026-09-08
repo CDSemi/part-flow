@@ -1064,6 +1064,14 @@ class PartMovement(Base):
         # two concurrent Undo submissions.
         UniqueConstraint("reverses_movement_id", name="uq_part_movements_reverses_movement_id"),
         Index("ix_part_movements_quantity_flow_id_id", "quantity_flow_id", "id"),
+        # The per-PN reverse-chronological history read of PN Tracking
+        # (Phase 11): `(occurred_at DESC, id DESC)` with keyset paging.
+        Index(
+            "ix_part_movements_part_number_occurred_at_id",
+            "part_number",
+            "occurred_at",
+            "id",
+        ),
     )
 
 
