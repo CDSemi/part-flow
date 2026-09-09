@@ -9,7 +9,7 @@
 // A Management view is read while work moves on the floor, so it
 // follows the feed rather than waiting for a manual reload.
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { errorMessage } from '../../api/client';
 import type { Area, Operation } from '../../api/environment';
@@ -106,63 +106,117 @@ export function useTrackingFilterOptions(
 /** Older pages of one paged detail section, appended on request. */
 export interface OlderPages<T> {
   items: T[];
-  /** The keyset of the next page; null once the last page arrived. */
+  /** The keyset of the next page; null once the last page arrived
+   * (meaningful once a page was appended — see `loaded`). */
   nextBefore: number | null;
+  /** Pages appended so far (0 while the first older page is loading). */
+  loaded: number;
   loading: boolean;
   error: string | null;
 }
 
+interface OlderState<T> extends OlderPages<T> {
+  /** The generation of the first page the pages continue below. */
+  generation: string;
+  /** The depth (pages) the reader asked for. */
+  wanted: number;
+}
+
 /**
  * Continuation of a paged section below the FIRST page the detail feed
- * delivered. `boundary` is that page's keyset (`next_before_*`): the
- * older pages continue below it, and when a refresh moves it (new rows
- * arrived on the first page) the appended pages are dropped and start
- * again, so the section never shows a gap or a duplicate.
+ * delivered.
+ *
+ * `boundary` is that page's keyset (`next_before_*`): the older pages
+ * continue below it. `revision` is the section's revision signature —
+ * the figures of the polled detail whose change means rows already
+ * appended may read differently now (a flow closed or reopened, a
+ * scrap undone, a new row inserted below the boundary), even when the
+ * boundary itself did not move. When either changes, the appended
+ * pages are dropped and the same depth is read again below the new
+ * boundary, so the section never shows a gap, a duplicate or a stale
+ * row; a refresh that changes neither keeps the pages as they are.
  */
 export function useOlderPages<T>(
   boundary: number | null,
+  revision: string,
   load: (before: number) => Promise<{ items: T[]; nextBefore: number | null }>,
 ): {
   older: OlderPages<T> | null;
   /** Load the next older page (a no-op while one is loading). */
   showOlder: () => void;
 } {
-  const [state, setState] = useState<
-    (OlderPages<T> & { boundary: number }) | null
-  >(null);
-  const current = state !== null && state.boundary === boundary ? state : null;
+  const generation = `${boundary ?? 'none'}|${revision}`;
+  const [state, setState] = useState<OlderState<T> | null>(null);
+  const current =
+    state !== null && state.generation === generation ? state : null;
 
-  const showOlder = useCallback(() => {
-    if (boundary === null || current?.loading) return;
-    const before = current?.nextBefore ?? boundary;
-    if (current !== null && current.nextBefore === null) return;
-    setState({
-      boundary,
-      items: current?.items ?? [],
-      nextBefore: current?.nextBefore ?? null,
-      loading: true,
-      error: null,
-    });
+  useEffect(() => {
+    if (state === null) return;
+    if (state.generation !== generation) {
+      // The first page changed under the appended pages: start again
+      // below the new boundary, to the depth the reader had reached.
+      setState(
+        boundary !== null && state.wanted > 0
+          ? {
+              generation,
+              items: [],
+              nextBefore: null,
+              loading: false,
+              error: null,
+              loaded: 0,
+              wanted: state.wanted,
+            }
+          : null,
+      );
+      return;
+    }
+    if (state.loading || state.error !== null || state.loaded >= state.wanted)
+      return;
+    const before = state.loaded === 0 ? boundary : state.nextBefore;
+    if (before === null) return;
+    setState({ ...state, loading: true });
     void load(before).then(
       (page) =>
         setState((latest) =>
-          latest === null || latest.boundary !== boundary
+          latest === null || latest.generation !== generation
             ? latest
             : {
                 ...latest,
                 items: [...latest.items, ...page.items],
                 nextBefore: page.nextBefore,
                 loading: false,
+                loaded: latest.loaded + 1,
               },
         ),
       (error: unknown) =>
         setState((latest) =>
-          latest === null || latest.boundary !== boundary
+          latest === null || latest.generation !== generation
             ? latest
             : { ...latest, loading: false, error: errorMessage(error) },
         ),
     );
-  }, [boundary, current, load]);
+  }, [state, generation, boundary, load]);
+
+  const showOlder = useCallback(() => {
+    if (boundary === null) return;
+    setState((latest) => {
+      const base: OlderState<T> =
+        latest !== null && latest.generation === generation
+          ? latest
+          : {
+              generation,
+              items: [],
+              nextBefore: null,
+              loading: false,
+              error: null,
+              loaded: 0,
+              wanted: 0,
+            };
+      if (base.loading || (base.loaded > 0 && base.nextBefore === null))
+        return latest;
+      return { ...base, wanted: base.loaded + 1, error: null };
+    });
+  }, [boundary, generation]);
 
   return { older: current, showOlder };
 }

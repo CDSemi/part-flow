@@ -9,6 +9,7 @@
 
 import type {
   LocationState,
+  TrackingDetail,
   TrackingFilters,
   TrackingFlow,
   TrackingLocation,
@@ -32,13 +33,50 @@ export const TRACKING_MAX_ROWS = 200;
 export const MOVEMENTS_PAGE_SIZE = 50;
 /** Scrap events per Scrap history page. */
 export const SCRAP_PAGE_SIZE = 20;
-/** Closed Quantity Flows per continuation page. */
+/** Quantity Flows per page (the detail's first page and each `Show
+ * older Quantity Flows` continuation — one order: ACTIVE flows oldest
+ * first, then closed flows newest first). */
 export const FLOWS_PAGE_SIZE = 50;
 /** Allocation entries per continuation page. */
 export const ALLOCATIONS_PAGE_SIZE = 100;
 
 /** Debounce of the search field before it reaches the server. */
 export const SEARCH_DEBOUNCE_MS = 250;
+
+/** The revision signature of each paged detail section (`useOlderPages`). */
+export interface DetailRevisions {
+  movements: string;
+  scrap: string;
+  flows: string;
+  allocations: string;
+}
+
+/**
+ * The figures of one polled detail whose change means rows appended
+ * BELOW a section's first page may now read differently, so the
+ * appended pages are read again — deliberately narrow per section, so
+ * a refresh that changes none of them keeps the pages as they are:
+ *
+ * - Movement history: its row count — every write to the PN appends a
+ *   Movement, and one dated below the boundary lands among the older
+ *   pages without moving the first page.
+ * - Scrap history: its row count and the net scrapped quantity — an
+ *   undone scrap keeps its place in the history while the net figure
+ *   changes and the row gains its REVERSED mark.
+ * - Quantity Flows: the flow count and the Movement count — a flow's
+ *   status, position and trace only ever change through a Movement of
+ *   the PN, and the flow that closed or reopened may sit on any page.
+ * - Allocation history: its row count — allocation rows are append-only,
+ *   a reversal being a new row beside the one it takes back.
+ */
+export function detailRevisions(detail: TrackingDetail): DetailRevisions {
+  return {
+    movements: `${detail.movements.total}`,
+    scrap: `${detail.scrapHistory.total}|${detail.scrappedQuantity}`,
+    flows: `${detail.flows.total}|${detail.movements.total}`,
+    allocations: `${detail.allocations.total}`,
+  };
+}
 
 export function filtersAreDefault(filters: TrackingFilters): boolean {
   return (

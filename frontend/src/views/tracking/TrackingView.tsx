@@ -40,6 +40,7 @@ import {
   useTrackingFilterOptions,
   useTrackingListFeed,
 } from './tracking-feed';
+import type { DetailRevisions } from './tracking-logic';
 import {
   ALLOCATIONS_PAGE_SIZE,
   FLOWS_PAGE_SIZE,
@@ -53,6 +54,7 @@ import {
   TRACKING_MAX_ROWS,
   TRACKING_PAGE_SIZE,
   describeMovement,
+  detailRevisions,
   filtersAreDefault,
   flowId,
   locationPercent,
@@ -553,7 +555,10 @@ function pagedSection<T>(
   return {
     items: [...first.items, ...(older?.items ?? [])],
     total: first.total,
-    hasOlder: older === null ? first.hasMore : older.nextBefore !== null,
+    hasOlder:
+      older === null || older.loaded === 0
+        ? first.hasMore
+        : older.nextBefore !== null,
     loading: older?.loading ?? false,
     error: older?.error ?? null,
     showOlder,
@@ -567,13 +572,23 @@ interface DetailPaging {
   allocations: PagedSection<TrackingAllocation>;
 }
 
+const NO_REVISIONS: DetailRevisions = {
+  movements: '',
+  scrap: '',
+  flows: '',
+  allocations: '',
+};
+
 /**
  * The floating detail overlay of ONE PN: its own polled read, with the
  * older pages of each paged section (Movement history, Scrap history,
- * closed Quantity Flows, allocation history) appended on request. The
- * pages continue below the keyset the first page ended on; a refresh
- * that moves that boundary (new rows arrived) drops the appended pages
- * so a section never shows a gap.
+ * Quantity Flows, allocation history) appended on request. The pages
+ * continue below the keyset the first page ended on; a refresh that
+ * moves that boundary (new rows arrived) or changes the section's
+ * revision signature (`detailRevisions` — rows already appended may
+ * read differently now) drops the appended pages and reads the same
+ * depth again, so a section never shows a gap, a duplicate or a stale
+ * row; a refresh that changes neither keeps the pages.
  */
 function TrackingDetailPanel({
   pn,
@@ -591,9 +606,11 @@ function TrackingDetailPanel({
     connectivity !== 'connected' ||
     detail === null ||
     (feed.state.status === 'ready' && feed.state.stale);
+  const revisions = detail === null ? NO_REVISIONS : detailRevisions(detail);
 
   const movements = useOlderPages(
     detail?.movements.nextBeforeMovementId ?? null,
+    revisions.movements,
     useCallback(
       (before: number) =>
         loadTrackingMovements(pn, before, MOVEMENTS_PAGE_SIZE).then((page) => ({
@@ -605,6 +622,7 @@ function TrackingDetailPanel({
   );
   const scrap = useOlderPages(
     detail?.scrapHistory.nextBeforeMovementId ?? null,
+    revisions.scrap,
     useCallback(
       (before: number) =>
         loadTrackingMovements(pn, before, SCRAP_PAGE_SIZE, 'SCRAPPED').then(
@@ -618,6 +636,7 @@ function TrackingDetailPanel({
   );
   const flows = useOlderPages(
     detail?.flows.nextBeforeFlowId ?? null,
+    revisions.flows,
     useCallback(
       (before: number) =>
         loadTrackingFlows(pn, before, FLOWS_PAGE_SIZE).then((page) => ({
@@ -629,6 +648,7 @@ function TrackingDetailPanel({
   );
   const allocations = useOlderPages(
     detail?.allocations.nextBeforeAllocationId ?? null,
+    revisions.allocations,
     useCallback(
       (before: number) =>
         loadTrackingAllocations(pn, before, ALLOCATIONS_PAGE_SIZE).then(
@@ -981,7 +1001,9 @@ function TrackingDetailContent({
         {paging.flows.items.map((flow) => (
           <FlowBlock flow={flow} now={now} key={flow.id} />
         ))}
-        {/* Every ACTIVE flow is always listed; the closed flows page. */}
+        {/* One bounded page at a time — ACTIVE flows (oldest first)
+            before closed ones (newest first); the current quantities
+            above come from `locations`, complete regardless of paging. */}
         <OlderControl
           section={paging.flows}
           noun="Quantity Flows"

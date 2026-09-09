@@ -263,8 +263,10 @@
   split qua toàn bộ single-parent ancestry), Scrap history (chính các event
   SCRAPPED, event đã undo đánh dấu), allocation history, và Movement history
   bất biến — tất cả phân trang: history theo thời gian ngược `(occurred_at DESC,
-  id DESC)` trên keyset server resolve, closed flow và allocation entry nối tiếp
-  dưới page đầu — original đã reverse vẫn hiển thị. View thật thay mock Phase 2
+  id DESC)` trên keyset server resolve, các Quantity Flow theo một thứ tự có
+  bound (ACTIVE trước closed) và allocation entry nối tiếp dưới page đầu trên
+  cursor được validate, các page đã nối được đọc lại mỗi khi refresh làm đổi
+  nội dung chúng hiển thị — original đã reverse vẫn hiển thị. View thật thay mock Phase 2
   (overlay detail modeless giữ nguyên) với polling / stale-feed chung, các state
   loading / error / empty và paging long-data có bound. Mục Phase 11 bên dưới
   ghi chi tiết trạng thái và ranh giới.
@@ -1152,10 +1154,18 @@ current quantity theo Area / Machine (nhóm `BoardLocation` — entry CŨ NHẤT
 nhóm, Machine chỉ khi mọi nhánh lineage đồng ý), stocked quantity theo terminal
 Area kèm active allocation và phần available, các hạng mục reconciliation §11
 (`introduced = active + stocked + scrapped`, introduced là effective `RECEIVED`
-+ `QUANTITY_ADJUSTED`), các Quantity Flow (MỌI active flow — current state —
-rồi các closed flow mới nhất, mặc định 50, kèm total và keyset nối tiếp theo id
-flow: `GET /api/tracking/flows?part_number=&before=` phân trang closed flow mới
-nhất trước không chồng lấp, nên không flow nào ngoài tầm với) mỗi flow với
++ `QUANTITY_ADJUSTED`), các Quantity Flow theo MỘT thứ tự — mọi ACTIVE flow
+trước, cũ nhất trước, rồi các closed flow mới nhất trước — với `flows_limit`
+(mặc định 50, tối đa 200) là hard bound của MỌI page kể cả page đầu, nên PN có
+nhiều ACTIVE flow hơn limit vẫn trả một page có bound (current quantity vẫn đầy
+đủ: `locations` mang toàn bộ active quantity), kèm total và keyset nối tiếp
+`GET /api/tracking/flows?part_number=&before=` — `before` là flow cuối đã trả
+và server resolve vị trí của nó trong thứ tự đó từ chính flow (cursor ACTIVE
+tiếp bằng các ACTIVE flow trẻ hơn rồi các closed flow từ đầu, cursor closed
+bằng các closed flow cũ hơn), nên mọi flow được đọc đúng một lần; `before`
+không phải flow của PN — flow của PN khác dù ACTIVE hay closed, hoặc id không
+tồn tại — là 404, không bao giờ đọc như `id < before` trần mà bỏ sót dữ liệu,
+đúng như cursor Movement và allocation được validate — mỗi flow với
 status và lifecycle, vị trí derive,
 parent / child lineage HIỆU LỰC (`projections.effective_lineage_edges` — cạnh
 của SPLIT/MERGED đã undo là vô hiệu), PLANNED snapshot với mỗi step judged
@@ -1218,23 +1228,36 @@ trí kèm lineage, chip PLANNED snapshot hoặc FLOATING trace là các item ste
 arrow sibling riêng với `⟲ REPAIR`, actual path và ghi chú off-route của flow
 PLANNED, mọi deviation đã confirm), Movement history (reverse-chronological với
 badge type canonical, badge REPAIR, original đã undo vẫn hiển thị với badge
-REVERSED, và `Show older Movements` nối page keyset kế — page bị bỏ và bắt đầu
-lại khi refresh dời ranh giới page đầu, nên history không bao giờ hở khoảng),
+REVERSED, và `Show older Movements` nối page keyset kế),
 Scrap history (con số tích lũy net kèm dòng reconciliation, mọi event SCRAPPED
 là một row history — timestamp, quantity, Area, reason, badge REVERSED trên
 event đã undo — và `Show older scrap events`), Stocked & Allocation history
 (stocked / allocated / available và các allocation entry với `Show older
 allocation entries`), và `Show older Quantity Flows` của section Quantity Flows
-cho closed flow ngoài page đầu — MỘT hành vi nối tiếp chung
-(`tracking-feed.useOlderPages`) sau bốn section. Chỉ
+cho các flow ngoài page đầu có bound (ACTIVE trước closed) — MỘT hành vi nối
+tiếp chung (`tracking-feed.useOlderPages`) sau bốn section, nhất quán với live
+refresh: mỗi section có một **revision signature**
+(`tracking-logic.detailRevisions` — số Movement cho history, số row scrap kèm
+scrapped quantity net cho Scrap history, số flow kèm số Movement cho flows, số
+row allocation cho allocations); khi refresh dời ranh giới của section hoặc đổi
+revision của nó, các page đã nối bị bỏ và được đọc lại tới cùng độ sâu dưới
+ranh giới mới — ACTIVE flow đóng sau khi older page đã load vẫn được liệt kê
+với status mới, closed flow được Undo mở lại không bao giờ xuất hiện cùng lúc
+ở page đầu và một older page cũ, scrap bị undo trên older Scrap page nhận dấu
+REVERSED cùng lúc với con số tích lũy dù ranh giới scrap không dời — còn
+refresh không đổi gì trong hai thứ đó giữ nguyên các page (không đọc lại sau
+mỗi poll). Chỉ
 development: `?state=loading|empty|error|long` render state xác định không
 request (`tracking-preview.ts`, fixture DEV inline — không import `src/mocks/`).
-*Test*: `tests/test_tracking_api.py` (19) — status derive mọi trường hợp và
+*Test*: `tests/test_tracking_api.py` (21) — status derive mọi trường hợp và
 filter mặc định `ACTIVE`, stock đã allocate hết cho work trước khiến demand mới
 là `OPEN` còn stock chưa allocate khiến nó `STOCKED`, Scrap history với event
 đã undo được đánh dấu và phân trang trên cùng history, trace ancestry giữ đủ
 ngoài flow page (ancestor SPLIT ở giữa không được liệt kê) kèm nối tiếp closed
-flow, keyset allocation history, thứ tự history `(occurred_at DESC, id DESC)`
+flow, `flows_limit` bound page đầu chỉ gồm ACTIVE flow và các page đọc mọi
+flow đúng một lần theo một thứ tự với vị trí derive trên ACTIVE flow ở page
+nối tiếp, flow cursor của PN khác hoặc id không tồn tại bị từ chối, keyset
+allocation history, thứ tự history `(occurred_at DESC, id DESC)`
 với Movement bị lùi ngày phân trang không hở không trùng, search theo PN / WO
 Number / Job Number với ký tự LIKE
 là literal và WO đã complete vẫn tìm được, con số row với distribution, next due
@@ -1247,9 +1270,12 @@ confirm và closure stocked, history phân trang giữ original đã reverse c�
 row `REVERSED`, và audit context lineage / scrap / Machine —
 `tests/test_phase11_schema.py` (ranh giới head: đúng history index, parity
 models↔migration, downgrade sạch về 0011 — schema test Phase 10 nay pin ở 0011),
-cùng suite frontend viết lại (32) trên trả lời giả `GET /api/tracking*` (row
+cùng suite frontend viết lại (36) trên trả lời giả `GET /api/tracking*` (row
 Scrap history với marker REVERSED và page cũ hơn, nối tiếp closed flow và
-allocation, read mặc định và các cột
+allocation, các page đã nối được đọc lại tới cùng độ sâu khi refresh đóng một
+ACTIVE flow dưới ranh giới, mở lại một closed flow hoặc undo một scrap trên
+older Scrap page, và giữ nguyên khi refresh không đổi gì liên quan, read mặc
+định và các cột
 render, search debounce và query parameter của select, lựa chọn filter, loading
 dưới header, load đầu lỗi có Retry, kết quả rỗng, feed stale khi refresh lỗi và
 khi mất kết nối, `Show more` và bound, state preview không request, detail read

@@ -1156,12 +1156,13 @@ def test_the_trace_keeps_the_whole_split_ancestry_beyond_the_flow_page(
     )
     _transfer(client, shop.cut, shop.material, remainder, pn, 1)
 
-    # A flow page listing every ACTIVE flow but only ONE closed flow —
-    # the newest, which is neither the root nor the middle ancestor…
-    detail = _detail(client, pn, flows_limit=1)
+    # A flow page bounded to the four ACTIVE flows plus ONE closed flow
+    # — the newest, which is neither the root nor the middle ancestor…
+    detail = _detail(client, pn, flows_limit=5)
     page = detail["flows"]
     listed = {flow["id"] for flow in page["flows"]}
     closed_listed = [flow["id"] for flow in page["flows"] if flow["status"] != "ACTIVE"]
+    assert len(listed) == 5
     assert closed_listed == [remainder]
     assert middle not in listed and root not in listed
     assert page["has_more"] is True
@@ -1180,6 +1181,7 @@ def test_the_trace_keeps_the_whole_split_ancestry_beyond_the_flow_page(
     assert trace[0][2] == root and trace[2][2] == middle
 
     # The closed flows continue on the flow keyset without overlap.
+    assert page["next_before_flow_id"] == remainder
     seen = list(listed)
     before = page["next_before_flow_id"]
     while before is not None:
@@ -1191,6 +1193,102 @@ def test_the_trace_keeps_the_whole_split_ancestry_beyond_the_flow_page(
         before = more["next_before_flow_id"]
     assert len(seen) == len(set(seen)) == page["total"]
     assert {root, middle} <= set(seen)
+
+
+def test_flows_limit_bounds_active_flows_and_the_pages_reach_every_flow_once(
+    client: TestClient, shop: _Shop
+) -> None:
+    # Three partial transfers out of the Material remainder: 4 ACTIVE
+    # flows (3 at Cut, the remainder at Material) and 3 closed SPLIT
+    # sources — more ACTIVE flows than the page bound.
+    pn = _unique("PN-FLB")
+    wo = _work_order(client, [_line(pn, 10)])
+    _release(client, shop.material, wo, pn, quantity=10)
+    for quantity in (1, 2, 3):
+        [source] = _row_flow_ids(client, shop, pn)[shop.material.area_id]
+        _transfer(client, shop.material, shop.cut, source, pn, quantity)
+    by_area = _row_flow_ids(client, shop, pn)
+    active_ids = sorted(by_area[shop.cut.area_id] + by_area[shop.material.area_id])
+    assert len(active_ids) == 4
+
+    detail = _detail(client, pn, flows_limit=3)
+    page = detail["flows"]
+    # The first page is bounded by `flows_limit` even though every flow
+    # on it is ACTIVE; the current state is complete regardless — the
+    # locations carry the whole active quantity.
+    assert [flow["id"] for flow in page["flows"]] == active_ids[:3]
+    assert all(flow["status"] == "ACTIVE" for flow in page["flows"])
+    assert (page["total"], page["has_more"], page["next_before_flow_id"]) == (
+        7,
+        True,
+        active_ids[2],
+    )
+    assert detail["active_quantity"] == 10
+    assert sum(location["quantity"] for location in detail["locations"]) == 10
+
+    # The continuation follows the one flow order — the younger ACTIVE
+    # flow, then the closed flows newest first — every flow exactly once.
+    walked = list(page["flows"])
+    before = page["next_before_flow_id"]
+    while before is not None:
+        more = client.get(
+            "/api/tracking/flows", params={"part_number": pn, "before": before, "limit": 3}
+        ).json()
+        assert len(more["flows"]) <= 3
+        walked.extend(more["flows"])
+        before = more["next_before_flow_id"]
+    ids = [flow["id"] for flow in walked]
+    assert len(ids) == len(set(ids)) == page["total"] == 7
+    statuses = [flow["status"] for flow in walked]
+    assert statuses == ["ACTIVE"] * 4 + ["SPLIT"] * 3
+    assert ids[:4] == active_ids
+    assert ids[4:] == sorted(ids[4:], reverse=True)
+    # An ACTIVE flow delivered on a continuation page carries its derived
+    # position like one on the first page; a closed flow carries none.
+    for flow in walked:
+        if flow["status"] == "ACTIVE":
+            expected_area = (
+                shop.cut.area_id
+                if flow["id"] in by_area[shop.cut.area_id]
+                else shop.material.area_id
+            )
+            assert flow["position"]["area"]["id"] == expected_area
+        else:
+            assert flow["position"] is None
+
+
+def test_a_flow_cursor_must_be_a_flow_of_the_same_pn(client: TestClient, shop: _Shop) -> None:
+    pn = _unique("PN-FLC")
+    other = _unique("PN-FLO")
+    wo = _work_order(client, [_line(pn, 2), _line(other, 2)])
+    mine = _release(client, shop.material, wo, pn, demand_id=wo.demand_ids[0], quantity=2)
+    theirs = _release(client, shop.material, wo, other, demand_id=wo.demand_ids[1], quantity=2)
+    _transfer(client, shop.material, shop.cut, theirs, other, 1)
+    other_closed = [
+        flow["id"]
+        for flow in _detail(client, other)["flows"]["flows"]
+        if flow["status"] != "ACTIVE"
+    ]
+    assert other_closed == [theirs]
+
+    def flows(before: int) -> Any:
+        return client.get("/api/tracking/flows", params={"part_number": pn, "before": before})
+
+    # Another PN's flow — ACTIVE or closed — and an unknown id are
+    # rejected outright, never read as a bare `id < before`.
+    for cursor in (*_row_flow_ids(client, shop, other)[shop.cut.area_id], theirs, 999_999_999):
+        assert flows(cursor).status_code == 404, cursor
+    assert flows(mine).status_code == 200
+    assert flows(mine).json() == {
+        "flows": [],
+        "total": 1,
+        "has_more": False,
+        "next_before_flow_id": None,
+    }
+    assert (
+        client.get("/api/tracking/flows", params={"part_number": pn, "before": "x"}).status_code
+        == 422
+    )
 
 
 def test_allocation_history_pages_newest_first_on_the_allocation_keyset(

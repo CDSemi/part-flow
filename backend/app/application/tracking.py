@@ -56,9 +56,11 @@ Long history never loads whole: the Movement history and the Scrap
 history (the same immutable history restricted to ``SCRAPPED`` rows)
 page in reverse-chronological order ``(occurred_at DESC, id DESC)`` on a
 keyset the server resolves from a Movement id; the Quantity Flows list
-carries every ACTIVE flow plus a bounded page of closed flows continued
-on the flow id; the allocation history pages on
-``(allocated_at DESC, id DESC)`` resolved from an allocation id.
+pages in ONE order — every ACTIVE flow first (oldest first), then the
+closed flows newest first — with ``flows_limit`` a hard bound of every
+page and a keyset the server resolves from the last flow delivered; the
+allocation history pages on ``(allocated_at DESC, id DESC)`` resolved
+from an allocation id.
 """
 
 import calendar
@@ -114,8 +116,9 @@ RouteStepState = Literal["DONE", "CURRENT", "FUTURE"]
 
 # Bounds of one answer (long-data behaviour): the list pages on
 # offset / limit over the derived rows in their one deterministic
-# order, the detail bounds its flows and allocation entries and pages
-# the Movement history on the append-only id.
+# order; every paged detail section — the flows, the allocation
+# entries, the Movement and Scrap history — is bounded by its limit
+# and continued on a server-resolved keyset.
 DEFAULT_ROW_LIMIT: Final = 100
 MAX_ROW_LIMIT: Final = 200
 DEFAULT_FLOW_LIMIT: Final = 50
@@ -261,12 +264,12 @@ class TrackingFlow(NamedTuple):
 
 
 class FlowPage(NamedTuple):
-    """Every ACTIVE flow of the PN plus a page of its closed flows."""
+    """One bounded page of the PN's flows in the one flow order."""
 
     flows: list[TrackingFlow]
     total: int
     has_more: bool
-    # The id of the oldest closed flow delivered — `before` of the next page.
+    # The id of the last flow delivered — `before` of the next page.
     next_before_flow_id: int | None
 
 
@@ -761,16 +764,35 @@ def _operations(session: Session, operation_ids: Collection[int]) -> dict[int, O
     }
 
 
+def _flow_cursor(session: Session, pn: str, before_flow_id: int) -> QuantityFlow:
+    """The flow a paging cursor names — of THIS PN, or the cursor is
+    rejected (never read as a bare ``id < before`` that could skip
+    another PN's, or a nonexistent, position)."""
+    flow = session.scalar(
+        select(QuantityFlow).where(
+            QuantityFlow.id == before_flow_id, QuantityFlow.part_number == pn
+        )
+    )
+    if flow is None:
+        raise NotFoundError(f"Quantity Flow {before_flow_id} is not part of {pn}'s history.")
+    return flow
+
+
 def _flows_of(
     session: Session, pn: str, *, before_flow_id: int | None, limit: int
 ) -> tuple[list[QuantityFlow], int, bool]:
-    """The PN's flows for one page, with the total and whether closed flows remain.
+    """One bounded page of the PN's flows, with the total and whether more remain.
 
-    The FIRST page (no ``before_flow_id``) carries every ACTIVE flow —
-    the current state, oldest first — followed by the newest ``limit``
-    closed flows; a continuation carries only closed flows older than
-    ``before_flow_id`` (keyset on the flow id, newest first), so the
-    two never overlap and no flow is skipped.
+    The flows have ONE order: every ACTIVE flow first — the current
+    state, oldest first (id ascending) — then the closed flows newest
+    first (id descending). ``limit`` bounds the whole page, ACTIVE
+    flows included, so a PN with more ACTIVE flows than the limit still
+    answers one bounded page; ``before_flow_id`` names the last flow a
+    page delivered and the server resolves its position in that order
+    from the flow itself (an ACTIVE cursor continues with the younger
+    ACTIVE flows and then the closed ones from the top; a closed cursor
+    with the older closed flows), so every flow is reached exactly once.
+    The cursor must be a flow of this PN.
     """
     total = int(
         session.scalar(
@@ -778,40 +800,50 @@ def _flows_of(
         )
         or 0
     )
-    active = (
-        list(
-            session.scalars(
-                select(QuantityFlow)
-                .where(
-                    QuantityFlow.part_number == pn,
-                    QuantityFlow.status == QuantityFlowStatus.ACTIVE,
-                )
-                .order_by(QuantityFlow.id)
-            )
-        )
-        if before_flow_id is None
-        else []
+    active_query = (
+        select(QuantityFlow)
+        .where(QuantityFlow.part_number == pn, QuantityFlow.status == QuantityFlowStatus.ACTIVE)
+        .order_by(QuantityFlow.id)
     )
-    closed_query = select(QuantityFlow).where(
-        QuantityFlow.part_number == pn, QuantityFlow.status != QuantityFlowStatus.ACTIVE
+    closed_query = (
+        select(QuantityFlow)
+        .where(QuantityFlow.part_number == pn, QuantityFlow.status != QuantityFlowStatus.ACTIVE)
+        .order_by(QuantityFlow.id.desc())
     )
+    read_active = True
     if before_flow_id is not None:
-        closed_query = closed_query.where(QuantityFlow.id < before_flow_id)
-    closed = list(session.scalars(closed_query.order_by(QuantityFlow.id.desc()).limit(limit + 1)))
-    has_more = len(closed) > limit
-    return active + closed[:limit], total, has_more
+        cursor = _flow_cursor(session, pn, before_flow_id)
+        if cursor.status == QuantityFlowStatus.ACTIVE:
+            active_query = active_query.where(QuantityFlow.id > cursor.id)
+        else:
+            read_active = False
+            closed_query = closed_query.where(QuantityFlow.id < cursor.id)
+    page: list[QuantityFlow] = []
+    if read_active:
+        page.extend(session.scalars(active_query.limit(limit + 1)))
+    if len(page) <= limit:
+        page.extend(session.scalars(closed_query.limit(limit + 1 - len(page))))
+    has_more = len(page) > limit
+    return page[:limit], total, has_more
 
 
 def _tracking_flows(
     session: Session,
     pn: str,
-    positions: Mapping[int, FlowPosition],
+    positions: Mapping[int, FlowPosition] | None,
     areas: Mapping[int, Area],
     *,
     before_flow_id: int | None,
     limit: int,
 ) -> FlowPage:
+    """One page of `TrackingFlow` blocks. `positions` is the detail's
+    derivation of every ACTIVE flow of the PN; a continuation page
+    (`None`) derives the positions of the ACTIVE flows it carries."""
     flows, total, has_more = _flows_of(session, pn, before_flow_id=before_flow_id, limit=limit)
+    if positions is None:
+        positions = flow_positions(
+            session, [flow for flow in flows if flow.status == QuantityFlowStatus.ACTIVE]
+        )
     # The lineage links a block names (its parents and children); the
     # trace walks the ancestry from history on its own.
     edges = effective_lineage_edges(session, [flow.id for flow in flows])
@@ -898,22 +930,22 @@ def _tracking_flows(
                 deviations=_deviations(session, flow, areas, operations),
             )
         )
-    closed_ids = [flow.id for flow in flows if flow.status != QuantityFlowStatus.ACTIVE]
     return FlowPage(
         flows=result,
         total=total,
         has_more=has_more,
-        next_before_flow_id=min(closed_ids) if has_more and closed_ids else None,
+        next_before_flow_id=flows[-1].id if has_more and flows else None,
     )
 
 
 def flow_page_of(
     session: Session, part_number: object, before_flow_id: int | None, limit: int
 ) -> FlowPage:
-    """A further page of one PN's closed Quantity Flows (canonicalized; unknown → 404)."""
+    """A further page of one PN's Quantity Flows (canonicalized; unknown
+    PN, or a cursor that is not a flow of the PN → 404)."""
     pn = _require_tracked(session, part_number)
     areas = _all_areas(session)
-    return _tracking_flows(session, pn, {}, areas, before_flow_id=before_flow_id, limit=limit)
+    return _tracking_flows(session, pn, None, areas, before_flow_id=before_flow_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------

@@ -360,8 +360,9 @@ actual trace (repeated Areas, Repair, the inherited split prefix),
 the Scrap history (the `SCRAPPED` events themselves, undone ones
 marked), and the immutable Movement history paged in reverse-
 chronological `(occurred_at DESC, id DESC)` order with reversed
-originals kept visible beside their `REVERSED` rows — closed flows and
-allocation entries page too, so nothing is truncated out of reach; the
+originals kept visible beside their `REVERSED` rows — Quantity Flows
+(active before closed) and allocation entries page too, so nothing is
+truncated out of reach; the
 derived status counts stock only while it is still unallocated
 (`Stocked`), an open demand with nothing in production and no
 available stock reading `Open`. Every

@@ -639,10 +639,15 @@ Movements`, `Show older Movements` nối thêm page kế của history bất bi�
 hở khoảng không trùng), Scrap history (§7.2 mục 6) liệt kê các event `SCRAPPED`
 của PN như row của chính history đó — timestamp, quantity, Area, reason, event
 đã undo vẫn giữ kèm badge `REVERSED` — dưới con số tích lũy net, có `Show older
-scrap events`, section Quantity Flows luôn liệt kê mọi active flow và phân
-trang các closed flow (`Show older Quantity Flows`), allocation history phân
-trang tương tự (`Show older allocation entries`) — không gì bị cắt ngoài tầm
-với —, name / revision / image / ERP
+scrap events`, section Quantity Flows phân trang theo một thứ tự — mọi active
+flow trước (cũ nhất trước), rồi các closed flow (mới nhất trước) — mỗi lần một
+page có bound (`Show older Quantity Flows`; current quantity vẫn đầy đủ ở
+section `Current quantity by Area` bất kể phân trang flow), allocation history
+phân trang tương tự (`Show older allocation entries`) — không gì bị cắt ngoài
+tầm với —, page đã nối của bất kỳ section nào bị bỏ và đọc lại tới cùng độ sâu
+khi refresh dời ranh giới của nó hoặc đổi nội dung các row nó hiển thị (flow
+đóng hoặc mở lại, scrap bị undo), không bao giờ khi refresh không đổi gì liên
+quan, name / revision / image / ERP
 id từ master render `—` cho đến khi Part Numbers management (Phase 13) cung cấp,
 và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
 corrections (Phase 14) — không bao giờ render nút vô hiệu.
@@ -1008,7 +1013,10 @@ session không còn shift end.
   **long data có bound** — `Showing n of m PNs` với `Show more` trên list, và
   `Showing n of m …` với `Show older …` trên Movement history (thời gian ngược
   theo timestamp), Scrap history (chính các event SCRAPPED, event đã undo đánh
-  dấu `REVERSED`), các closed Quantity Flow và allocation entry. Section Corrections vẫn ẩn cho đến khi có authorized corrections
+  dấu `REVERSED`), các Quantity Flow (mỗi lần một page có bound, active flow
+  trước closed flow) và allocation entry — page đã nối được đọc lại khi refresh
+  đổi nội dung chúng hiển thị, nên detail live không bao giờ giữ row cũ, trùng
+  hay thiếu. Section Corrections vẫn ẩn cho đến khi có authorized corrections
   (Phase 14), các field metadata từ master render `—` cho đến Phase 13. Mockup
   v18 không đổi (feed state, paging control và pill `Open` chỉ có trong
   application).

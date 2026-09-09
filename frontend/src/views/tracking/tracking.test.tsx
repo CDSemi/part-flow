@@ -1189,6 +1189,259 @@ test('closed Quantity Flows and allocation entries page below the first page', a
   expect(entries.textContent).toContain('Showing 2 of 2 allocation entries');
 });
 
+// ---------------------------------------------------------------------------
+// Live refresh under appended pages (the per-section revision)
+// ---------------------------------------------------------------------------
+
+/** A Floating flow block in the wire shape, ACTIVE at Cut or closed. */
+function flowPayload(
+  id: number,
+  status: 'ACTIVE' | 'STOCKED' | 'SPLIT',
+): Record<string, unknown> {
+  const base = detailPayload().flows.flows[1];
+  return {
+    ...base,
+    id,
+    status,
+    closed_at: status === 'ACTIVE' ? null : '2030-07-23T09:00:00Z',
+    position: status === 'ACTIVE' ? base.position : null,
+    parents: [],
+    children: [],
+    trace: [
+      {
+        movement_id: id,
+        quantity_flow_id: id,
+        movement_type: 'TRANSFERRED',
+        area: CUT,
+        occurred_at: '2030-07-20T08:12:00Z',
+        repair: false,
+        inherited: false,
+      },
+    ],
+  };
+}
+
+function flowIds(): string[] {
+  return Array.from(document.querySelectorAll('.qflow .qf-id')).map(
+    (el) => el.textContent ?? '',
+  );
+}
+
+test('an ACTIVE flow that closes after older flow pages were loaded stays listed with its new status', async () => {
+  vi.useFakeTimers();
+  // v1: two ACTIVE flows on the bounded first page, a younger ACTIVE flow
+  // and a closed one below it; v2 (a STOCKED Movement appended, the first
+  // page and its boundary unchanged): the younger flow closed STOCKED.
+  let version = 1;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      return jsonResponse({
+        ...base,
+        flows: {
+          ...base.flows,
+          total: 4,
+          has_more: true,
+          next_before_flow_id: 141,
+        },
+        movements: { ...base.movements, total: version === 1 ? 9 : 10 },
+      });
+    }
+    if (url.startsWith('/api/tracking/flows')) {
+      return jsonResponse({
+        flows:
+          version === 1
+            ? [flowPayload(160, 'ACTIVE'), flowPayload(120, 'SPLIT')]
+            : [flowPayload(160, 'STOCKED'), flowPayload(120, 'SPLIT')],
+        total: 4,
+        has_more: false,
+        next_before_flow_id: null,
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older Quantity Flows' }),
+  );
+  await act(async () => {});
+  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-160', 'QF-120']);
+  expect(flowBlock('QF-160').classList.contains('closed')).toBe(false);
+  expect(
+    trackingCalls(fetchMock).filter((url) => url.includes('/flows')),
+  ).toEqual([
+    '/api/tracking/flows?part_number=2027-60-8114-00&before=141&limit=50',
+  ]);
+
+  version = 2;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  // The boundary did not move, yet the flow section's revision did: the
+  // appended page was read again — the flow neither vanished nor kept
+  // its stale ACTIVE presentation.
+  expect(
+    trackingCalls(fetchMock).filter((url) => url.includes('/flows')).length,
+  ).toBe(2);
+  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-160', 'QF-120']);
+  const closed = flowBlock('QF-160');
+  expect(closed.classList.contains('closed')).toBe(true);
+  expect(closed.textContent).toContain('stocked — complete');
+});
+
+test('a closed flow reopened by Undo never shows on the first page and a stale older page at once', async () => {
+  vi.useFakeTimers();
+  // v1: the first page holds the two ACTIVE flows, the older page the
+  // closed QF-120; v2 (a REVERSED Movement appended): QF-120 is ACTIVE
+  // again and, being the oldest, leads the first page — QF-141 moved
+  // below the boundary.
+  let version = 1;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      const [first, second] = base.flows.flows;
+      return jsonResponse({
+        ...base,
+        flows: {
+          flows:
+            version === 1
+              ? [first, second]
+              : [flowPayload(120, 'ACTIVE'), first],
+          total: 3,
+          has_more: true,
+          next_before_flow_id: version === 1 ? 141 : 140,
+        },
+        movements: { ...base.movements, total: version === 1 ? 9 : 10 },
+      });
+    }
+    if (url.startsWith('/api/tracking/flows')) {
+      return jsonResponse({
+        flows:
+          version === 1
+            ? [flowPayload(120, 'SPLIT')]
+            : [detailPayload().flows.flows[1]],
+        total: 3,
+        has_more: false,
+        next_before_flow_id: null,
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older Quantity Flows' }),
+  );
+  await act(async () => {});
+  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-120']);
+  expect(flowBlock('QF-120').classList.contains('closed')).toBe(true);
+
+  version = 2;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/flows?part_number=2027-60-8114-00&before=140&limit=50',
+  );
+  expect(flowIds()).toEqual(['QF-120', 'QF-140', 'QF-141']);
+  expect(flowBlock('QF-120').classList.contains('closed')).toBe(false);
+});
+
+test('an undone scrap on an older Scrap page reflects the reversal together with the cumulative figure', async () => {
+  vi.useFakeTimers();
+  // v1: the older scrap event still counts (cumulative 3); v2: it was
+  // undone — the net figure drops while the Scrap history's first page
+  // and its boundary are unchanged (the REVERSED row is not a scrap).
+  let version = 1;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      return jsonResponse({
+        ...base,
+        scrapped_quantity: version === 1 ? 3 : 1,
+        movements: { ...base.movements, total: version === 1 ? 9 : 10 },
+      });
+    }
+    if (url.includes('movement_type=SCRAPPED')) {
+      const older = olderScrapPayload();
+      return jsonResponse({
+        ...older,
+        movements: [
+          {
+            ...older.movements[0],
+            reversed_by_movement_id: version === 1 ? null : 7,
+          },
+        ],
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  const list = document.querySelector('.mv.scrap') as HTMLElement;
+  const section = list.closest('.tk-sec') as HTMLElement;
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older scrap events' }),
+  );
+  await act(async () => {});
+  expect(section.textContent).toContain('Cumulative scrapped: 3 pcs');
+  expect(list.querySelectorAll('li').length).toBe(2);
+  expect(list.querySelectorAll('li')[1].classList.contains('reversed')).toBe(
+    false,
+  );
+
+  version = 2;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  expect(
+    trackingCalls(fetchMock).filter((url) => url.includes('SCRAPPED')).length,
+  ).toBe(2);
+  expect(section.textContent).toContain('Cumulative scrapped: 1 pcs');
+  const rows = list.querySelectorAll('li');
+  expect(rows.length).toBe(2);
+  expect(rows[1].classList.contains('reversed')).toBe(true);
+  expect(rows[1].querySelector('.mtype.rev')?.textContent).toBe('REVERSED');
+});
+
+test('a refresh that changes nothing relevant keeps the appended pages without re-reading them', async () => {
+  vi.useFakeTimers();
+  const fetchMock = stubFetch();
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Show older scrap events' }),
+  );
+  await act(async () => {});
+  expect(document.querySelectorAll('.mv.history li').length).toBe(6);
+  expect(document.querySelectorAll('.mv.scrap li').length).toBe(2);
+  const before = trackingCalls(fetchMock).length;
+
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  await act(async () => {});
+  // Only the list and the detail polled; no continuation was re-read.
+  const polled = trackingCalls(fetchMock).slice(before);
+  expect(polled.length).toBe(2);
+  expect(polled.every((url) => !url.includes('/movements'))).toBe(true);
+  expect(document.querySelectorAll('.mv.history li').length).toBe(6);
+  expect(document.querySelectorAll('.mv.scrap li').length).toBe(2);
+});
+
 test('the Movement history stays read-only — its only control pages the history', async () => {
   await renderTracking();
   await openFirstRow();
