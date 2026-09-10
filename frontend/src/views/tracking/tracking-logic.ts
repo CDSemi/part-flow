@@ -34,8 +34,8 @@ export const MOVEMENTS_PAGE_SIZE = 50;
 /** Scrap events per Scrap history page. */
 export const SCRAP_PAGE_SIZE = 20;
 /** Quantity Flows per page (the detail's first page and each `Show
- * older Quantity Flows` continuation — one order: ACTIVE flows oldest
- * first, then closed flows newest first). */
+ * older Quantity Flows` continuation — one immutable order: newest
+ * first on the flow id, status being presentation only). */
 export const FLOWS_PAGE_SIZE = 50;
 /** Allocation entries per continuation page. */
 export const ALLOCATIONS_PAGE_SIZE = 100;

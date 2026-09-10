@@ -273,8 +273,9 @@ export interface TrackingMovementPage {
   nextBeforeMovementId: number | null;
 }
 
-/** One bounded page of the PN's Quantity Flows in the one flow order:
- * ACTIVE flows (oldest first) before closed flows (newest first). */
+/** One bounded page of the PN's Quantity Flows in the one immutable
+ * flow order: newest first on the flow id alone — a flow's ACTIVE /
+ * closed status is presentation, never its paging position. */
 export interface TrackingFlowPage {
   flows: TrackingFlow[];
   total: number;
@@ -858,9 +859,10 @@ export async function loadTrackingMovements(
   return toMovementPage(wire);
 }
 
-/** The next page of Quantity Flows below `before` — the last flow a
- * page delivered; the server resolves its place in the one flow order
- * (the younger ACTIVE flows, then the closed ones). */
+/** The next page of Quantity Flows strictly below `before` — the last
+ * flow a page delivered — in the one immutable flow order (newest first
+ * on the flow id), so a status that changes between two page reads can
+ * neither skip nor repeat a flow. */
 export async function loadTrackingFlows(
   pn: string,
   before: number,

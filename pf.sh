@@ -15,8 +15,23 @@ if [ -n "${PF_PYTHON:-}" ]; then
     PYTHON=$PF_PYTHON
 else
     PYTHON=
-    for candidate in python3 python3.13 python3.12 python3.11 python3.10 python3.9 /var/packages/Python3.9/target/usr/bin/python3.9; do
-        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+    for candidate in \
+        python3 \
+        python3.14 \
+        python3.13 \
+        python3.12 \
+        python3.11 \
+        python3.10 \
+        python3.9 \
+        /var/packages/python314/target/bin/python3.14 \
+        /var/packages/python313/target/bin/python3.13 \
+        /var/packages/python312/target/bin/python3.12 \
+        /var/packages/python311/target/bin/python3.11 \
+        /var/packages/python310/target/bin/python3.10 \
+        /var/packages/Python3.9/target/usr/bin/python3.9
+    do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
             PYTHON=$candidate
             break
         fi

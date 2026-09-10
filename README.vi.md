@@ -94,7 +94,8 @@ Production Board + Area Board + PN Tracking của Phase 11:
   event đã undo được đánh dấu), và Movement history bất biến phân trang theo
   thứ tự thời gian ngược `(occurred_at DESC, id DESC)`
   (`GET /api/tracking/movements`) với original đã reverse vẫn hiển thị cạnh row
-  `REVERSED` — Quantity Flow (active trước closed) và allocation entry cũng
+  `REVERSED` — Quantity Flow (mới nhất trước theo flow id bất biến, status không
+  bao giờ là vị trí phân trang) và allocation entry cũng
   phân trang, không gì bị cắt ngoài tầm với; status derive chỉ tính stock khi còn chưa allocate (`Stocked`),
   open demand không có gì trong production và không còn stock available là
   `Open`. Migration `0012_phase11_tracking_index` thêm một composite index

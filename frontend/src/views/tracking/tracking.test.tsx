@@ -246,35 +246,6 @@ function detailPayload() {
     flows: {
       flows: [
         {
-          id: 140,
-          quantity: 6,
-          status: 'ACTIVE',
-          route_mode: 'PLANNED',
-          created_at: '2030-07-12T08:02:00Z',
-          closed_at: null,
-          position: {
-            area: LATHE,
-            machine: null,
-            operation: OPERATION,
-            activity: null,
-            state: 'QUEUE',
-            since: '2030-07-22T11:20:00Z',
-          },
-          parents: [],
-          children: [{ quantity_flow_id: 141, relation: 'SPLIT' }],
-          trace: [trace(1, MATERIAL), trace(2, CUT), trace(3, LATHE)],
-          route_steps: [
-            step(1, MATERIAL, 'DONE'),
-            step(2, CUT, 'DONE'),
-            step(3, LATHE, 'CURRENT'),
-            step(4, DEBURR, 'FUTURE'),
-            step(5, STOCKROOM, 'FUTURE'),
-          ],
-          source_template: { id: 7, name: 'Bracket std v3' },
-          off_route: false,
-          deviations: [],
-        },
-        {
           id: 141,
           quantity: 4,
           status: 'ACTIVE',
@@ -301,6 +272,35 @@ function detailPayload() {
           ],
           route_steps: [],
           source_template: null,
+          off_route: false,
+          deviations: [],
+        },
+        {
+          id: 140,
+          quantity: 6,
+          status: 'ACTIVE',
+          route_mode: 'PLANNED',
+          created_at: '2030-07-12T08:02:00Z',
+          closed_at: null,
+          position: {
+            area: LATHE,
+            machine: null,
+            operation: OPERATION,
+            activity: null,
+            state: 'QUEUE',
+            since: '2030-07-22T11:20:00Z',
+          },
+          parents: [],
+          children: [{ quantity_flow_id: 141, relation: 'SPLIT' }],
+          trace: [trace(1, MATERIAL), trace(2, CUT), trace(3, LATHE)],
+          route_steps: [
+            step(1, MATERIAL, 'DONE'),
+            step(2, CUT, 'DONE'),
+            step(3, LATHE, 'CURRENT'),
+            step(4, DEBURR, 'FUTURE'),
+            step(5, STOCKROOM, 'FUTURE'),
+          ],
+          source_template: { id: 7, name: 'Bracket std v3' },
           off_route: false,
           deviations: [],
         },
@@ -1117,7 +1117,7 @@ test('closed Quantity Flows and allocation entries page below the first page', a
     }
     if (url.startsWith('/api/tracking/flows')) {
       const closed = {
-        ...detailPayload().flows.flows[0],
+        ...detailPayload().flows.flows[1],
         id: 120,
         status: 'SPLIT',
         position: null,
@@ -1198,7 +1198,7 @@ function flowPayload(
   id: number,
   status: 'ACTIVE' | 'STOCKED' | 'SPLIT',
 ): Record<string, unknown> {
-  const base = detailPayload().flows.flows[1];
+  const base = detailPayload().flows.flows[0];
   return {
     ...base,
     id,
@@ -1229,9 +1229,11 @@ function flowIds(): string[] {
 
 test('an ACTIVE flow that closes after older flow pages were loaded stays listed with its new status', async () => {
   vi.useFakeTimers();
-  // v1: two ACTIVE flows on the bounded first page, a younger ACTIVE flow
-  // and a closed one below it; v2 (a STOCKED Movement appended, the first
-  // page and its boundary unchanged): the younger flow closed STOCKED.
+  // v1: two ACTIVE flows on the bounded first page (newest first), an
+  // older ACTIVE flow and an older closed one below it; v2 (a STOCKED
+  // Movement appended, the first page and its boundary unchanged): the
+  // older ACTIVE flow closed STOCKED — at the same position, the flow
+  // order being the immutable id, never the status.
   let version = 1;
   const fetchMock = stubFetch((url) => {
     if (url.startsWith('/api/tracking/detail')) {
@@ -1242,7 +1244,7 @@ test('an ACTIVE flow that closes after older flow pages were loaded stays listed
           ...base.flows,
           total: 4,
           has_more: true,
-          next_before_flow_id: 141,
+          next_before_flow_id: 140,
         },
         movements: { ...base.movements, total: version === 1 ? 9 : 10 },
       });
@@ -1251,8 +1253,8 @@ test('an ACTIVE flow that closes after older flow pages were loaded stays listed
       return jsonResponse({
         flows:
           version === 1
-            ? [flowPayload(160, 'ACTIVE'), flowPayload(120, 'SPLIT')]
-            : [flowPayload(160, 'STOCKED'), flowPayload(120, 'SPLIT')],
+            ? [flowPayload(120, 'ACTIVE'), flowPayload(110, 'SPLIT')]
+            : [flowPayload(120, 'STOCKED'), flowPayload(110, 'SPLIT')],
         total: 4,
         has_more: false,
         next_before_flow_id: null,
@@ -1267,12 +1269,12 @@ test('an ACTIVE flow that closes after older flow pages were loaded stays listed
     screen.getByRole('button', { name: 'Show older Quantity Flows' }),
   );
   await act(async () => {});
-  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-160', 'QF-120']);
-  expect(flowBlock('QF-160').classList.contains('closed')).toBe(false);
+  expect(flowIds()).toEqual(['QF-141', 'QF-140', 'QF-120', 'QF-110']);
+  expect(flowBlock('QF-120').classList.contains('closed')).toBe(false);
   expect(
     trackingCalls(fetchMock).filter((url) => url.includes('/flows')),
   ).toEqual([
-    '/api/tracking/flows?part_number=2027-60-8114-00&before=141&limit=50',
+    '/api/tracking/flows?part_number=2027-60-8114-00&before=140&limit=50',
   ]);
 
   version = 2;
@@ -1287,43 +1289,37 @@ test('an ACTIVE flow that closes after older flow pages were loaded stays listed
   expect(
     trackingCalls(fetchMock).filter((url) => url.includes('/flows')).length,
   ).toBe(2);
-  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-160', 'QF-120']);
-  const closed = flowBlock('QF-160');
+  expect(flowIds()).toEqual(['QF-141', 'QF-140', 'QF-120', 'QF-110']);
+  const closed = flowBlock('QF-120');
   expect(closed.classList.contains('closed')).toBe(true);
   expect(closed.textContent).toContain('stocked — complete');
 });
 
-test('a closed flow reopened by Undo never shows on the first page and a stale older page at once', async () => {
+test('a closed flow reopened by Undo keeps its place on the older page and regains its ACTIVE presentation', async () => {
   vi.useFakeTimers();
-  // v1: the first page holds the two ACTIVE flows, the older page the
+  // v1: the first page holds the two newest flows, the older page the
   // closed QF-120; v2 (a REVERSED Movement appended): QF-120 is ACTIVE
-  // again and, being the oldest, leads the first page — QF-141 moved
-  // below the boundary.
+  // again. Its position never moves — the flow order is the immutable
+  // id, not the status — so the first page and its boundary are
+  // unchanged, yet the flow section's revision re-reads the older page.
   let version = 1;
   const fetchMock = stubFetch((url) => {
     if (url.startsWith('/api/tracking/detail')) {
       const base = detailPayload();
-      const [first, second] = base.flows.flows;
       return jsonResponse({
         ...base,
         flows: {
-          flows:
-            version === 1
-              ? [first, second]
-              : [flowPayload(120, 'ACTIVE'), first],
+          ...base.flows,
           total: 3,
           has_more: true,
-          next_before_flow_id: version === 1 ? 141 : 140,
+          next_before_flow_id: 140,
         },
         movements: { ...base.movements, total: version === 1 ? 9 : 10 },
       });
     }
     if (url.startsWith('/api/tracking/flows')) {
       return jsonResponse({
-        flows:
-          version === 1
-            ? [flowPayload(120, 'SPLIT')]
-            : [detailPayload().flows.flows[1]],
+        flows: [flowPayload(120, version === 1 ? 'SPLIT' : 'ACTIVE')],
         total: 3,
         has_more: false,
         next_before_flow_id: null,
@@ -1338,7 +1334,7 @@ test('a closed flow reopened by Undo never shows on the first page and a stale o
     screen.getByRole('button', { name: 'Show older Quantity Flows' }),
   );
   await act(async () => {});
-  expect(flowIds()).toEqual(['QF-140', 'QF-141', 'QF-120']);
+  expect(flowIds()).toEqual(['QF-141', 'QF-140', 'QF-120']);
   expect(flowBlock('QF-120').classList.contains('closed')).toBe(true);
 
   version = 2;
@@ -1347,10 +1343,13 @@ test('a closed flow reopened by Undo never shows on the first page and a stale o
   });
   await act(async () => {});
   await act(async () => {});
-  expect(trackingCalls(fetchMock).at(-1)).toBe(
+  expect(
+    trackingCalls(fetchMock).filter((url) => url.includes('/flows')),
+  ).toEqual([
     '/api/tracking/flows?part_number=2027-60-8114-00&before=140&limit=50',
-  );
-  expect(flowIds()).toEqual(['QF-120', 'QF-140', 'QF-141']);
+    '/api/tracking/flows?part_number=2027-60-8114-00&before=140&limit=50',
+  ]);
+  expect(flowIds()).toEqual(['QF-141', 'QF-140', 'QF-120']);
   expect(flowBlock('QF-120').classList.contains('closed')).toBe(false);
 });
 

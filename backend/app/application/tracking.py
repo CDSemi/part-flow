@@ -56,11 +56,11 @@ Long history never loads whole: the Movement history and the Scrap
 history (the same immutable history restricted to ``SCRAPPED`` rows)
 page in reverse-chronological order ``(occurred_at DESC, id DESC)`` on a
 keyset the server resolves from a Movement id; the Quantity Flows list
-pages in ONE order — every ACTIVE flow first (oldest first), then the
-closed flows newest first — with ``flows_limit`` a hard bound of every
-page and a keyset the server resolves from the last flow delivered; the
-allocation history pages on ``(allocated_at DESC, id DESC)`` resolved
-from an allocation id.
+pages in ONE immutable order — newest first on the flow id alone, a
+flow's ACTIVE / closed status being presentation and never its paging
+position — with ``flows_limit`` a hard bound of every page and a keyset
+on the last flow delivered; the allocation history pages on
+``(allocated_at DESC, id DESC)`` resolved from an allocation id.
 """
 
 import calendar
@@ -766,8 +766,8 @@ def _operations(session: Session, operation_ids: Collection[int]) -> dict[int, O
 
 def _flow_cursor(session: Session, pn: str, before_flow_id: int) -> QuantityFlow:
     """The flow a paging cursor names — of THIS PN, or the cursor is
-    rejected (never read as a bare ``id < before`` that could skip
-    another PN's, or a nonexistent, position)."""
+    rejected (never read as a bare ``id < before`` that would accept
+    another PN's flow, or a nonexistent id, as a position)."""
     flow = session.scalar(
         select(QuantityFlow).where(
             QuantityFlow.id == before_flow_id, QuantityFlow.part_number == pn
@@ -783,16 +783,19 @@ def _flows_of(
 ) -> tuple[list[QuantityFlow], int, bool]:
     """One bounded page of the PN's flows, with the total and whether more remain.
 
-    The flows have ONE order: every ACTIVE flow first — the current
-    state, oldest first (id ascending) — then the closed flows newest
-    first (id descending). ``limit`` bounds the whole page, ACTIVE
-    flows included, so a PN with more ACTIVE flows than the limit still
-    answers one bounded page; ``before_flow_id`` names the last flow a
-    page delivered and the server resolves its position in that order
-    from the flow itself (an ACTIVE cursor continues with the younger
-    ACTIVE flows and then the closed ones from the top; a closed cursor
-    with the older closed flows), so every flow is reached exactly once.
-    The cursor must be a flow of this PN.
+    The flows have ONE immutable order: newest first, on the flow id
+    alone (``id DESC``). A flow's status (ACTIVE / closed) is
+    presentation of the flow, never its paging position — a status is
+    mutable, and a position that followed it could skip or repeat a flow
+    whose status changed between one page read and the next; the id is
+    assigned once. ``limit`` bounds every page, the first one included,
+    so a PN with more ACTIVE flows than the limit still answers one
+    bounded page (the current quantities are complete regardless — the
+    locations carry the whole active quantity); ``before_flow_id`` names
+    the last flow a page delivered and the page continues strictly below
+    it (``id < before``), so every flow is reached exactly once whatever
+    happens to any status in between. The cursor must be a flow of this
+    PN.
     """
     total = int(
         session.scalar(
@@ -800,29 +803,16 @@ def _flows_of(
         )
         or 0
     )
-    active_query = (
+    query = (
         select(QuantityFlow)
-        .where(QuantityFlow.part_number == pn, QuantityFlow.status == QuantityFlowStatus.ACTIVE)
-        .order_by(QuantityFlow.id)
-    )
-    closed_query = (
-        select(QuantityFlow)
-        .where(QuantityFlow.part_number == pn, QuantityFlow.status != QuantityFlowStatus.ACTIVE)
+        .where(QuantityFlow.part_number == pn)
         .order_by(QuantityFlow.id.desc())
+        .limit(limit + 1)
     )
-    read_active = True
     if before_flow_id is not None:
         cursor = _flow_cursor(session, pn, before_flow_id)
-        if cursor.status == QuantityFlowStatus.ACTIVE:
-            active_query = active_query.where(QuantityFlow.id > cursor.id)
-        else:
-            read_active = False
-            closed_query = closed_query.where(QuantityFlow.id < cursor.id)
-    page: list[QuantityFlow] = []
-    if read_active:
-        page.extend(session.scalars(active_query.limit(limit + 1)))
-    if len(page) <= limit:
-        page.extend(session.scalars(closed_query.limit(limit + 1 - len(page))))
+        query = query.where(QuantityFlow.id < cursor.id)
+    page = list(session.scalars(query))
     has_more = len(page) > limit
     return page[:limit], total, has_more
 

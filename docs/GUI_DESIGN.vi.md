@@ -639,8 +639,9 @@ Movements`, `Show older Movements` nối thêm page kế của history bất bi�
 hở khoảng không trùng), Scrap history (§7.2 mục 6) liệt kê các event `SCRAPPED`
 của PN như row của chính history đó — timestamp, quantity, Area, reason, event
 đã undo vẫn giữ kèm badge `REVERSED` — dưới con số tích lũy net, có `Show older
-scrap events`, section Quantity Flows phân trang theo một thứ tự — mọi active
-flow trước (cũ nhất trước), rồi các closed flow (mới nhất trước) — mỗi lần một
+scrap events`, section Quantity Flows phân trang theo một thứ tự ổn định — flow mới nhất
+trước, theo flow id bất biến; status active / closed của flow chỉ là
+presentation, không bao giờ là vị trí — mỗi lần một
 page có bound (`Show older Quantity Flows`; current quantity vẫn đầy đủ ở
 section `Current quantity by Area` bất kể phân trang flow), allocation history
 phân trang tương tự (`Show older allocation entries`) — không gì bị cắt ngoài
@@ -1013,8 +1014,8 @@ session không còn shift end.
   **long data có bound** — `Showing n of m PNs` với `Show more` trên list, và
   `Showing n of m …` với `Show older …` trên Movement history (thời gian ngược
   theo timestamp), Scrap history (chính các event SCRAPPED, event đã undo đánh
-  dấu `REVERSED`), các Quantity Flow (mỗi lần một page có bound, active flow
-  trước closed flow) và allocation entry — page đã nối được đọc lại khi refresh
+  dấu `REVERSED`), các Quantity Flow (mỗi lần một page có bound, mới nhất trước
+  theo flow id bất biến) và allocation entry — page đã nối được đọc lại khi refresh
   đổi nội dung chúng hiển thị, nên detail live không bao giờ giữ row cũ, trùng
   hay thiếu. Section Corrections vẫn ẩn cho đến khi có authorized corrections
   (Phase 14), các field metadata từ master render `—` cho đến Phase 13. Mockup

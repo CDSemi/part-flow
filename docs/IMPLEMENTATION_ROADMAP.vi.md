@@ -263,8 +263,8 @@
   split qua toàn bộ single-parent ancestry), Scrap history (chính các event
   SCRAPPED, event đã undo đánh dấu), allocation history, và Movement history
   bất biến — tất cả phân trang: history theo thời gian ngược `(occurred_at DESC,
-  id DESC)` trên keyset server resolve, các Quantity Flow theo một thứ tự có
-  bound (ACTIVE trước closed) và allocation entry nối tiếp dưới page đầu trên
+  id DESC)` trên keyset server resolve, các Quantity Flow theo một thứ tự bất biến có
+  bound (mới nhất trước theo flow id) và allocation entry nối tiếp dưới page đầu trên
   cursor được validate, các page đã nối được đọc lại mỗi khi refresh làm đổi
   nội dung chúng hiển thị — original đã reverse vẫn hiển thị. View thật thay mock Phase 2
   (overlay detail modeless giữ nguyên) với polling / stale-feed chung, các state
@@ -1154,15 +1154,18 @@ current quantity theo Area / Machine (nhóm `BoardLocation` — entry CŨ NHẤT
 nhóm, Machine chỉ khi mọi nhánh lineage đồng ý), stocked quantity theo terminal
 Area kèm active allocation và phần available, các hạng mục reconciliation §11
 (`introduced = active + stocked + scrapped`, introduced là effective `RECEIVED`
-+ `QUANTITY_ADJUSTED`), các Quantity Flow theo MỘT thứ tự — mọi ACTIVE flow
-trước, cũ nhất trước, rồi các closed flow mới nhất trước — với `flows_limit`
++ `QUANTITY_ADJUSTED`), các Quantity Flow theo MỘT thứ tự ổn định, bất biến — mới
+nhất trước chỉ theo flow id (`id DESC`); status ACTIVE / closed của flow là
+presentation của row, không bao giờ là vị trí phân trang, vì status là mutable
+và vị trí đi theo status có thể bỏ sót hoặc lặp một flow đổi status giữa hai
+lần đọc page — với `flows_limit`
 (mặc định 50, tối đa 200) là hard bound của MỌI page kể cả page đầu, nên PN có
 nhiều ACTIVE flow hơn limit vẫn trả một page có bound (current quantity vẫn đầy
 đủ: `locations` mang toàn bộ active quantity), kèm total và keyset nối tiếp
 `GET /api/tracking/flows?part_number=&before=` — `before` là flow cuối đã trả
-và server resolve vị trí của nó trong thứ tự đó từ chính flow (cursor ACTIVE
-tiếp bằng các ACTIVE flow trẻ hơn rồi các closed flow từ đầu, cursor closed
-bằng các closed flow cũ hơn), nên mọi flow được đọc đúng một lần; `before`
+và page tiếp ngay dưới nó (`id < before`) theo đúng thứ tự đó, nên mọi flow
+được đọc đúng một lần dù status nào đổi giữa hai lần đọc page, và ACTIVE flow
+trả ở bất kỳ page nào vẫn mang vị trí derive; `before`
 không phải flow của PN — flow của PN khác dù ACTIVE hay closed, hoặc id không
 tồn tại — là 404, không bao giờ đọc như `id < before` trần mà bỏ sót dữ liệu,
 đúng như cursor Movement và allocation được validate — mỗi flow với
@@ -1234,7 +1237,7 @@ là một row history — timestamp, quantity, Area, reason, badge REVERSED trê
 event đã undo — và `Show older scrap events`), Stocked & Allocation history
 (stocked / allocated / available và các allocation entry với `Show older
 allocation entries`), và `Show older Quantity Flows` của section Quantity Flows
-cho các flow ngoài page đầu có bound (ACTIVE trước closed) — MỘT hành vi nối
+cho các flow ngoài page đầu có bound (mới nhất trước theo flow id bất biến) — MỘT hành vi nối
 tiếp chung (`tracking-feed.useOlderPages`) sau bốn section, nhất quán với live
 refresh: mỗi section có một **revision signature**
 (`tracking-logic.detailRevisions` — số Movement cho history, số row scrap kèm
@@ -1249,14 +1252,15 @@ refresh không đổi gì trong hai thứ đó giữ nguyên các page (không �
 mỗi poll). Chỉ
 development: `?state=loading|empty|error|long` render state xác định không
 request (`tracking-preview.ts`, fixture DEV inline — không import `src/mocks/`).
-*Test*: `tests/test_tracking_api.py` (21) — status derive mọi trường hợp và
+*Test*: `tests/test_tracking_api.py` (22) — status derive mọi trường hợp và
 filter mặc định `ACTIVE`, stock đã allocate hết cho work trước khiến demand mới
 là `OPEN` còn stock chưa allocate khiến nó `STOCKED`, Scrap history với event
 đã undo được đánh dấu và phân trang trên cùng history, trace ancestry giữ đủ
 ngoài flow page (ancestor SPLIT ở giữa không được liệt kê) kèm nối tiếp closed
-flow, `flows_limit` bound page đầu chỉ gồm ACTIVE flow và các page đọc mọi
-flow đúng một lần theo một thứ tự với vị trí derive trên ACTIVE flow ở page
-nối tiếp, flow cursor của PN khác hoặc id không tồn tại bị từ chối, keyset
+flow, `flows_limit` bound mọi page và các page đọc mọi flow đúng một lần mới
+nhất trước với vị trí derive trên ACTIVE flow ở page nối tiếp, đổi status giữa
+hai lần đọc page (một flow của page đầu, rồi chính cursor flow, được stock
+trước khi gọi nối tiếp bằng cursor cũ) không lặp không bỏ sót flow nào, flow cursor của PN khác hoặc id không tồn tại bị từ chối, keyset
 allocation history, thứ tự history `(occurred_at DESC, id DESC)`
 với Movement bị lùi ngày phân trang không hở không trùng, search theo PN / WO
 Number / Job Number với ký tự LIKE

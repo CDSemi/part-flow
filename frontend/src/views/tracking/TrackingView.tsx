@@ -1001,9 +1001,10 @@ function TrackingDetailContent({
         {paging.flows.items.map((flow) => (
           <FlowBlock flow={flow} now={now} key={flow.id} />
         ))}
-        {/* One bounded page at a time — ACTIVE flows (oldest first)
-            before closed ones (newest first); the current quantities
-            above come from `locations`, complete regardless of paging. */}
+        {/* One bounded page at a time in the one immutable order (newest
+            first on the flow id; a status is presentation, not position);
+            the current quantities above come from `locations`, complete
+            regardless of paging. */}
         <OlderControl
           section={paging.flows}
           noun="Quantity Flows"

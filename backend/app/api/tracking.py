@@ -21,11 +21,11 @@ The read-only management surface of `app.application.tracking`:
   its timestamp for the keyset; ``movement_type=SCRAPPED`` is the Scrap
   history — the same immutable history restricted to scrap events.
 - ``GET /tracking/flows?part_number=&before=`` — a further page of the
-  PN's Quantity Flows in the one flow order (every ACTIVE flow oldest
-  first, then the closed flows newest first), ``before`` naming the
-  last flow delivered and the server resolving its position from the
-  flow itself; every page, the detail's first one included, is bounded
-  by its limit.
+  PN's Quantity Flows in the one immutable flow order (newest first on
+  the flow id alone; a flow's ACTIVE / closed status is presentation,
+  never its paging position), ``before`` naming the last flow delivered
+  and the page continuing strictly below it; every page, the detail's
+  first one included, is bounded by its limit.
 - ``GET /tracking/allocations?part_number=&before=`` — a further page of
   the allocation history (``allocated_at DESC, id DESC``, ``before``
   naming the last allocation delivered).
@@ -401,8 +401,8 @@ class MovementPageResponse(BaseModel):
 
 
 class FlowPageResponse(BaseModel):
-    # One bounded page in the one flow order: ACTIVE flows (oldest
-    # first) before closed flows (newest first).
+    # One bounded page in the one immutable flow order: newest first on
+    # the flow id alone (status is presentation, not position).
     flows: list[FlowResponse]
     total: int
     has_more: bool
@@ -737,12 +737,13 @@ def get_tracking_flows(
     before: int | None = None,
     limit: int = Query(tracking.DEFAULT_FLOW_LIMIT, ge=1, le=tracking.MAX_FLOW_LIMIT),
 ) -> FlowPageResponse:
-    """A further page of one PN's Quantity Flows — the one flow order
-    (ACTIVE oldest first, then closed newest first) continued below the
-    flow ``before`` names, its position resolved server-side from the
-    flow's current status. ``limit`` bounds the whole page. The PN is
-    canonicalized; an unknown PN, or a ``before`` that is not a flow of
-    this PN, is 404."""
+    """A further page of one PN's Quantity Flows — the one immutable
+    flow order (newest first on the flow id alone) continued strictly
+    below the flow ``before`` names; a flow's ACTIVE / closed status is
+    presentation and never its paging position, so a status that changes
+    between two page reads can neither skip nor repeat a flow. ``limit``
+    bounds the whole page. The PN is canonicalized; an unknown PN, or a
+    ``before`` that is not a flow of this PN, is 404."""
     return _flow_page(tracking.flow_page_of(session, part_number, before, limit))
 
 
