@@ -1,0 +1,11 @@
+{
+  "repository": "CDSemi/part-flow",
+  "branch": "main",
+  "project": "partflow-staging",
+  "environment": "staging",
+  "release_channel": "stable",
+  "auto_update": false,
+  "ci_workflow": "ci.yml",
+  "health_timeout_seconds": 180,
+  "minimum_free_mb": 2048
+}
