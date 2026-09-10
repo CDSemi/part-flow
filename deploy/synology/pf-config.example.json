@@ -7,5 +7,6 @@
   "auto_update": false,
   "ci_workflow": "ci.yml",
   "health_timeout_seconds": 180,
-  "minimum_free_mb": 2048
+  "minimum_free_mb": 2048,
+  "backup_read_group": "administrators"
 }

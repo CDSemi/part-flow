@@ -30,8 +30,7 @@ else
         /var/packages/python310/target/bin/python3.10 \
         /var/packages/Python3.9/target/usr/bin/python3.9
     do
-        if command -v "$candidate" >/dev/null 2>&1 &&
-           "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
             PYTHON=$candidate
             break
         fi

@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2 — Hướng dẫn sử dụng
 
 > Bản dịch từ [SYNOLOGY_ADMIN.md](./SYNOLOGY_ADMIN.md); tiếng Anh là nguồn chuẩn của bộ công cụ.
-> Phiên bản **2.1.0**, ngày **2026-09-09**.
+> Phiên bản **2.2.0**, ngày **2026-09-09**.
 > Repo đối chiếu: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
 > Phạm vi: stack **staging nội bộ trên Synology**, chưa phải production.
 > Bộ này không tự commit, push, xuất bản release hoặc tạo lịch DSM.
@@ -70,8 +70,9 @@ sudo docker compose version
 sudo docker-compose version
 ```
 
-`pf.sh` thử các tên Python phổ biến và đường dẫn package Python 3.9 thường gặp của
-Synology. Có thể chỉ định executable thực tế:
+`pf.sh` thử các tên Python phổ biến, đường dẫn Python package chính thức của Synology
+và các đường dẫn `python310`–`python314` thường gặp của SynoCommunity. Có thể chỉ
+định executable thực tế:
 
 ```sh
 sudo env PF_PYTHON=/absolute/path/to/python3 sh ./pf.sh doctor
@@ -147,6 +148,17 @@ sudo sh ./pf.sh status
 sudo sh ./pf.sh backup
 ```
 
+`pf-config.example.json` mặc định cho phép group DSM `administrators` đọc backup qua
+SMB:
+
+```text
+"backup_read_group": "administrators"
+```
+
+Nếu NAS dùng một group quản trị riêng, đổi giá trị này trong
+`deploy/synology/pf-config.json` trước khi chạy `doctor`. Group phải tồn tại trên
+DSM. Không đặt group chung như `users` chỉ để tránh lỗi permission.
+
 Controller cố ý từ chối layout Admin v2 cũ ở root để tránh vô tình dùng nhầm script hoặc
 config trùng. `deploy/synology/pf-config.json` là cấu hình riêng của deployment và đã
 được nested `.gitignore` bỏ qua. `DEPLOYED_SOURCE.txt` cũng là runtime deployment state;
@@ -172,6 +184,22 @@ partflow/
           manifest.json
           manifest.sha256
 ```
+
+`.pf-state-partflow-staging/` vẫn giữ quyền `0700` và không được chia sẻ qua SMB.
+Ngược lại, controller tự đặt ownership group cho cây checkpoint của project theo
+`backup_read_group` với policy:
+
+```text
+Directory: 0750
+File:      0640
+```
+
+Do đó tài khoản thuộc group `administrators` có thể duyệt và copy checkpoint qua
+SMB nhưng không có quyền ghi/xóa bằng POSIX permission. Khi khởi động controller,
+Admin v2.2 cũng tự sửa quyền của các checkpoint v2.x cũ trong
+`backups/revisions/<project>/`, nên không cần chạy `chmod` thủ công cho từng backup.
+Source archive có chứa `.env`; chỉ cấp `backup_read_group` cho nhóm quản trị thực sự
+được phép đọc secret và database backup.
 
 ## 4. Bảng lệnh
 
@@ -430,6 +458,23 @@ sh /volume1/docker/partflow/repo/deploy/synology/backup.sh
 cấp snapshot nhất quán cho logical dump. Bước thử restore tạo rồi xóa database tạm.
 Cần đủ chỗ cho dump, source archive, database thử restore, image mới, và database
 được giữ lại sau reset/restore.
+
+Checkpoint hoàn tất được tự xuất bản với group đọc cấu hình trong
+`backup_read_group`: directory `0750`, file `0640`. Có thể mở qua SMB, ví dụ:
+
+```text
+\\NAS\docker\partflow\backups\revisions\partflow-staging
+```
+
+Nếu Windows vẫn báo `Access denied`, chạy:
+
+```sh
+sudo sh ./pf.sh doctor
+id YOUR_DSM_USER
+```
+
+và xác nhận user nằm trong group được `backup_read_group` chỉ định, đồng thời shared
+folder `docker` cho group đó quyền đọc. Không sửa thành `0777` hoặc `0666`.
 
 Chép cả thư mục checkpoint sang nơi được mã hóa **ngoài NAS**. Tự cấu hình retention
 và cảnh báo riêng. Bộ này không âm thầm xóa checkpoint cũ, image được giữ, database

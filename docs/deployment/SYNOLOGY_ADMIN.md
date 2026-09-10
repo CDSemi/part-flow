@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2
 
 > English is the source of truth for this tool guide. [Vietnamese](./SYNOLOGY_ADMIN.vi.md).
-> Version: **2.1.0**. Prepared: **2026-09-09**.
+> Version: **2.2.0**. Prepared: **2026-09-09**.
 > Repository reference: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
 > Scope: the existing, restricted **Synology staging** stack, not production.
 > This package does not commit, push, publish a release, or schedule a task by itself.
@@ -72,8 +72,9 @@ sudo docker compose version
 sudo docker-compose version
 ```
 
-`pf.sh` tries common Python executable names and the usual Synology Python 3.9
-package path. An explicit executable can be selected without changing the script:
+`pf.sh` tries common Python executable names, the usual Synology Python 3.9
+package path, and common SynoCommunity `python310`–`python314` package paths.
+An explicit executable can be selected without changing the script:
 
 ```sh
 sudo env PF_PYTHON=/absolute/path/to/python3 sh ./pf.sh doctor
@@ -151,6 +152,17 @@ sudo sh ./pf.sh status
 sudo sh ./pf.sh backup
 ```
 
+`pf-config.example.json` allows the DSM `administrators` group to read backup
+artifacts over SMB by default:
+
+```text
+"backup_read_group": "administrators"
+```
+
+If the NAS uses a dedicated administration group, change this value in
+`deploy/synology/pf-config.json` before running `doctor`. The group must exist on
+DSM. Do not use a broad group such as `users` merely to avoid permission errors.
+
 The controller intentionally refuses the old root-level Admin v2 layout so stale duplicate
 scripts/configuration cannot be used accidentally. `deploy/synology/pf-config.json` is
 deployment-local and is ignored by the included nested `.gitignore`. `DEPLOYED_SOURCE.txt`
@@ -178,6 +190,22 @@ partflow/
           manifest.json
           manifest.sha256
 ```
+
+`.pf-state-partflow-staging/` remains private at `0700` and is not intended for
+SMB browsing. The revision checkpoint tree for this project is instead assigned
+to `backup_read_group` with:
+
+```text
+Directory: 0750
+File:      0640
+```
+
+Trusted DSM administrators can therefore browse and copy checkpoints over SMB
+without receiving POSIX write permission. Admin v2.2 also repairs permissions on
+existing v2.x checkpoints under `backups/revisions/<project>/` when the
+controller starts, so historical checkpoints do not require manual `chmod`.
+The source archive includes `.env`; only grant `backup_read_group` to a trusted
+administrative group allowed to read secrets and database backups.
 
 ## 4. Commands at a glance
 
@@ -438,6 +466,25 @@ Schedule it separately from update tasks. Standalone backup does not pause the a
 PostgreSQL supplies the logical dump's consistent snapshot. Restore verification creates
 and removes a temporary database. Allow space for the dump, source archive, verification
 DB, candidate images, and a retained pre-reset/pre-restore database.
+
+Completed checkpoints are automatically published to the configured
+`backup_read_group` with directory mode `0750` and file mode `0640`. They can be
+browsed over SMB, for example:
+
+```text
+\\NAS\docker\partflow\backups\revisions\partflow-staging
+```
+
+If Windows still reports `Access denied`, run:
+
+```sh
+sudo sh ./pf.sh doctor
+id YOUR_DSM_USER
+```
+
+and verify that the user belongs to the configured `backup_read_group` and that
+the `docker` shared folder grants that group read access. Do not make recovery
+artifacts world-writable with `0777` or `0666`.
 
 Copy the entire checkpoint directory to an encrypted off-NAS destination. Configure
 retention and alerts separately. This package never silently deletes old checkpoints,

@@ -1,5 +1,6 @@
 """Offline tests. Docker/PostgreSQL are simulated; archive and filesystem work is real."""
 import contextlib
+import grp
 import importlib.util
 import io
 import json
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -20,6 +22,7 @@ pf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pf)
 OLD = "1" * 40
 NEW = "2" * 40
+TEST_GROUP = grp.getgrgid(os.getgid()).gr_name
 
 
 def fixture(root, revision=OLD, new_migration=False):
@@ -40,6 +43,7 @@ def fixture(root, revision=OLD, new_migration=False):
     admin.mkdir(parents=True, exist_ok=True)
     (admin / "pf-admin.py").write_text("# local stable helper\n")
     (admin / "pf-config.example.json").write_text("{}\n")
+    (admin / "pf-config.json").write_text(json.dumps({"backup_read_group": TEST_GROUP}) + "\n")
     (root / "app-version.txt").write_text(revision)
 
 
@@ -265,14 +269,52 @@ class AdminTests(unittest.TestCase):
         self.assertEqual((self.root / "docs/deployment/SYNOLOGY_ADMIN.md").read_text(), "new docs\n")
 
     def test_controller_reads_runtime_config_from_deploy_synology(self):
-        (self.root / "deploy/synology/pf-config.json").write_text('{"minimum_free_mb": 1234}\n')
+        (self.root / "deploy/synology/pf-config.json").write_text(
+            json.dumps({"minimum_free_mb": 1234, "backup_read_group": TEST_GROUP}) + "\n"
+        )
         controller = pf.Controller(self.root)
         self.assertEqual(controller.config["minimum_free_mb"], 1234)
+
+    def test_controller_repairs_existing_backup_permissions_for_smb_read(self):
+        backup_id = "20260909T120000Z-" + OLD[:12] + "-abcdef"
+        folder = self.root.parent / "backups/revisions/partflow-staging" / backup_id
+        folder.mkdir(parents=True)
+        file = folder / "manifest.json"
+        file.write_text("{}\n")
+        os.chmod(folder, 0o700)
+        os.chmod(file, 0o600)
+
+        pf.Controller(self.root)
+
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o640)
+        self.assertEqual(folder.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
+        self.assertEqual(file.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
+
+    def test_completed_checkpoint_is_group_readable_but_not_group_writable(self):
+        checkpoint = self.c.snapshot("permission-test")
+        folder = self.c.backups_dir / checkpoint["id"]
+
+        for directory in (self.c.backups_root, self.c.revisions_root, self.c.backups_dir, folder):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
+            self.assertEqual(directory.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
+
+        for file in folder.iterdir():
+            if file.is_file():
+                self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o640, file.name)
+                self.assertEqual(file.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
+
+        self.assertEqual(stat.S_IMODE(self.c.state.stat().st_mode), 0o700)
 
     def test_legacy_root_admin_config_is_rejected(self):
         (self.root / "pf-config.json").write_text('{"minimum_free_mb": 9999}\n')
         with self.assertRaises(pf.Failure):
             pf.Controller(self.root)
+
+    def test_missing_backup_read_group_is_rejected_with_configuration_error(self):
+        with mock.patch.object(pf.grp, "getgrnam", side_effect=KeyError("missing")):
+            with self.assertRaisesRegex(pf.Failure, "backup_read_group"):
+                pf.Controller(self.root)
 
     def test_update_missing_ci_does_not_stop_application(self):
         self.c.fail = "ci"
@@ -614,6 +656,11 @@ class AdminTests(unittest.TestCase):
 
 
 class PureTests(unittest.TestCase):
+    def test_root_entry_point_includes_synocommunity_python_paths(self):
+        script = (REPO_PACKAGE / "pf.sh").read_text()
+        self.assertIn("/var/packages/python311/target/bin/python3.11", script)
+        self.assertIn("/var/packages/python312/target/bin/python3.12", script)
+
     def test_local_path_classification_matches_new_layout(self):
         self.assertTrue(pf.is_local_path(".env"))
         self.assertTrue(pf.is_local_path("deploy/synology/pf-config.json"))

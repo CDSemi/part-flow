@@ -1,6 +1,6 @@
 # PartFlow NAS Admin v2 — Validation report
 
-Date: 2026-09-09. Tool version: 2.1.0.
+Date: 2026-09-09. Tool version: 2.2.0.
 
 ## Executed checks
 
@@ -9,10 +9,12 @@ Date: 2026-09-09. Tool version: 2.1.0.
 | Python compilation of `deploy/synology/pf-admin.py` | Passed with Python 3.13.5 |
 | `sh -n` on root `pf.sh` and both `deploy/synology/*.sh` wrappers | Passed |
 | `pf.sh --help` through the real shell entry point | Passed |
-| Offline unittest suite | **69 tests passed** |
+| Offline unittest suite | **73 tests passed** |
 | Filesystem/archive operations used by the tests | Executed against real temporary files |
 | Local Git clone + checkout of a non-tip SHA | Executed successfully against a local test repository |
-| Included Compose and environment examples vs original staging bundle | Byte-for-byte unchanged |
+| Backup permission policy | Existing checkpoint repair and new checkpoint `0750` directories / `0640` files validated on a real temporary filesystem |
+| SynoCommunity Python discovery paths in root `pf.sh` | Statically covered by regression test; shell syntax and real `--help` entry point passed |
+| Included Compose and NAS environment example vs Admin v2.1 | Byte-for-byte unchanged |
 
 Reproduce the offline suite from the extracted package:
 
@@ -33,6 +35,11 @@ not connect to the NAS or run the application's own database integration suite.
 - Preservation of root `.env`, `compose.nas.yaml`, `pf.sh`, and the `deploy/synology/` controller/configuration tree during source replacement.
 - Replacement of normal repository documentation/source while the local admin tree remains stable.
 - Runtime configuration loading from `deploy/synology/pf-config.json`.
+- Configurable trusted DSM `backup_read_group`, defaulting to `administrators`.
+- Repair of existing revision-checkpoint ownership/modes when the controller starts.
+- Completed checkpoint publication as group-readable/read-only (`0750` directories, `0640` files) while `.pf-state-*` remains `0700`.
+- Rejection of a configured backup group that does not exist.
+- SynoCommunity Python 3.10–3.14 package-path discovery in root `pf.sh`.
 - Rejection of stale root-level Admin v2 configuration after the layout migration.
 - Verified checkpoint creation before update/reset/rollback.
 - Dump failure and restore-verification failure stopping the operation.
@@ -76,6 +83,12 @@ unverified. The local Git test does not substitute for NAS network validation.
 No PartFlow container image was built or started here. No real migration, data reset,
 restore, reconciliation, application smoke test, or release deployment was performed.
 No GitHub commit/push/release or DSM scheduled task was created.
+
+The filesystem tests validate POSIX group ownership and modes, not Synology's SMB/ACL
+stack. DSM shared-folder ACL must still grant the configured group read access. The
+controller intentionally does not call `synoacltool` or make backup artifacts
+world-readable/writable. The source archive contains `.env`, so group-readable backup
+access must be limited to trusted administrators.
 
 Passing the offline suite is not approval for production. Rehearse the commands with
 disposable staging data on the actual NAS before enabling scheduled application.

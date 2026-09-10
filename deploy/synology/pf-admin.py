@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import grp
 import hashlib
 import json
 import os
@@ -27,7 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 PAGE_SIZE = 10
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
@@ -35,6 +36,10 @@ DEFAULTS = {
     "release_channel": "stable", "auto_update": False,
     "ci_workflow": "ci.yml", "health_timeout_seconds": 180,
     "minimum_free_mb": 2048,
+    # Revision checkpoints can contain database dumps and a source archive
+    # that includes .env. Keep them unreadable to ordinary users while
+    # allowing trusted DSM administrators to inspect/copy them over SMB.
+    "backup_read_group": "administrators",
 }
 # These paths are deployment-local and survive application source updates/rollbacks.
 # In particular, the running admin controller never self-updates mid-operation.
@@ -292,15 +297,62 @@ class Controller:
         for name in ("health_timeout_seconds", "minimum_free_mb"):
             if type(self.config[name]) is not int or self.config[name] <= 0:
                 raise Failure(f"{name} must be a positive integer.")
+        if not isinstance(self.config["backup_read_group"], str) or not self.config["backup_read_group"].strip():
+            raise Failure("backup_read_group must be a non-empty DSM group name.")
+        try:
+            self.backup_gid = grp.getgrnam(self.config["backup_read_group"]).gr_gid
+        except KeyError as exc:
+            raise Failure(
+                f"Backup read group '{self.config['backup_read_group']}' does not exist. "
+                "Set backup_read_group in deploy/synology/pf-config.json to a trusted DSM group."
+            ) from exc
         self.state = self.root.parent / (".pf-state-" + self.config["project"])
-        self.backups_dir = self.root.parent / "backups" / "revisions" / self.config["project"]
+        self.backups_root = self.root.parent / "backups"
+        self.revisions_root = self.backups_root / "revisions"
+        self.backups_dir = self.revisions_root / self.config["project"]
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.backups_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.backups_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
-        os.chmod(self.backups_dir, 0o700)
+        for directory in (self.backups_root, self.revisions_root, self.backups_dir):
+            os.chown(directory, -1, self.backup_gid)
+            os.chmod(directory, 0o750)
+        # Repair checkpoints created by older Admin v2.x versions as well as
+        # applying the policy to future checkpoints.
+        self.publish_backup_permissions(self.backups_dir)
         self.pending = self.state / "pending.json"
         self.override = self.state / "active-images.yaml"
         self.cli = None
+
+    def publish_backup_permissions(self, root):
+        """Make backup artifacts read-only to the configured trusted DSM group.
+
+        The controller runs with a restrictive umask so state and temporary files
+        stay private. Backups are the exception: administrators need to inspect
+        and copy them over SMB, but must not gain write access to recovery
+        artifacts. Directories are 0750 and regular files are 0640.
+        """
+        root = Path(root)
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise Failure(f"Backup path is not a safe directory: {root}")
+
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            os.chown(current_path, -1, self.backup_gid)
+            os.chmod(current_path, 0o750)
+
+            for name in directories:
+                path = current_path / name
+                if path.is_symlink():
+                    raise Failure(f"Backup tree contains a symbolic link: {path}")
+
+            for name in files:
+                path = current_path / name
+                if path.is_symlink() or not path.is_file():
+                    raise Failure(f"Backup tree contains an unsupported file type: {path}")
+                os.chown(path, -1, self.backup_gid)
+                os.chmod(path, 0o640)
 
     def command(self, argv, *, cwd=None, output=None, input_file=None, text=None, env=None, clean_env_keys=()):
         child_env = os.environ.copy()
@@ -548,6 +600,7 @@ class Controller:
                                        ("source.tar.gz", "database.dump", "database.list")}})
         write_json(folder / "manifest.json", metadata)
         (folder / "manifest.sha256").write_text(digest(folder / "manifest.json") + "\n")
+        self.publish_backup_permissions(folder)
         log("Checkpoint verified: " + str(folder))
         return metadata
 
@@ -973,6 +1026,7 @@ class Controller:
         log("Compose config and source-volume free-space checks passed.")
         log("Project: " + self.config["project"] + " | environment: " + self.config["environment"])
         log("Auto-update: " + str(self.config["auto_update"]) + " | channel: " + self.config["release_channel"])
+        log("Backup SMB access: group=" + self.config["backup_read_group"] + " directories=0750 files=0640")
         log("Database volume capacity, NAS recovery, and production readiness are not certified by doctor.")
 
     def status(self):
