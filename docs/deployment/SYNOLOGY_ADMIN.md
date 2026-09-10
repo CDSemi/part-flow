@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2
 
-> English is the source of truth for this tool guide. [Vietnamese](PF_ADMIN_GUIDE.vi.md).
-> Version: **2.0.0**. Prepared: **2026-09-08**.
+> English is the source of truth for this tool guide. [Vietnamese](./SYNOLOGY_ADMIN.vi.md).
+> Version: **2.1.0**. Prepared: **2026-09-09**.
 > Repository reference: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
 > Scope: the existing, restricted **Synology staging** stack, not production.
 > This package does not commit, push, publish a release, or schedule a task by itself.
@@ -31,18 +31,23 @@ A previously observed release tag changing SHA is refused. Do not reuse tags.
 
 | File | Purpose |
 | --- | --- |
-| `pf.sh` | Entry point, runtime discovery, existing Compose command forwarding |
-| `pf-admin.py` | Update, checkpoint, rollback, reset and release-check workflows |
-| `backup.sh` | Noninteractive scheduled/manual checkpoint wrapper |
-| `release-check.sh` | Scheduler wrapper; check-only unless explicitly enabled |
-| `pf-config.example.json` | Non-secret administration settings |
-| `compose.nas.yaml`, `nas.env.example` | Unchanged copies of the previous staging configuration |
-| `pf-admin-tests/test_pf_admin.py`, `TEST_REPORT.md` | Offline tests and their limitations |
+| `pf.sh` | Root entry point and host Python/runtime discovery |
+| `compose.nas.yaml` | NAS-specific Compose definition kept at repository root |
+| `deploy/synology/pf-admin.py` | Update, checkpoint, rollback, reset and release-check workflows |
+| `deploy/synology/backup.sh` | Noninteractive scheduled/manual checkpoint wrapper |
+| `deploy/synology/release-check.sh` | Scheduler wrapper; check-only unless explicitly enabled |
+| `deploy/synology/pf-config.example.json` | Non-secret administration settings |
+| `deploy/synology/nas.env.example` | Example NAS environment values |
+| `deploy/synology/tests/test_pf_admin.py` | Offline controller tests |
+| `deploy/synology/TEST_REPORT.md` | Validation record and limitations |
+| `deploy/synology/.gitignore` | Ignores local `pf-config.json` and Python cache files |
+| `docs/deployment/SYNOLOGY_ADMIN.md`, `SYNOLOGY_ADMIN.vi.md` | Administration documentation |
 
 The lifecycle logic uses Python's standard library, rather than shell parsing of
 JSON or executing backup metadata as shell code. No pip packages are needed.
-Local controller scripts and local settings are deliberately **not self-updated**
-from the application repository.
+The root entry point, NAS Compose file, and `deploy/synology/` controller/configuration
+tree are deliberately **not self-updated** while a lifecycle command is running. Repository
+documentation and normal application source follow the selected revision.
 
 ## 3. Requirements and installation
 
@@ -88,28 +93,69 @@ cd /volume1/docker/partflow
 saved="backups/admin-tools-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$saved"
 chmod 700 "$saved"
-for file in pf.sh backup.sh compose.nas.yaml; do
-    if [ -f "repo/$file" ]; then
-        cp -p "repo/$file" "$saved/"
+for path in repo/pf.sh repo/compose.nas.yaml repo/deploy/synology; do
+    if [ -e "$path" ]; then
+        cp -Rp "$path" "$saved/"
     fi
 done
 ```
 
-Upload/replace `pf.sh`, `pf-admin.py`, `backup.sh`, `release-check.sh`, and
-`pf-config.example.json` **beside the existing `.env` in `repo/`**. Copy the two
-new guide files there as well. Do not replace a locally customized Compose file
-with the included reference copy. The optional `pf-admin-tests/` directory belongs
-to this controller, not the application; run it on a workstation or a separate test
-copy rather than treating it as the application's database integration suite.
+Extract/upload this package **into the repository root while preserving its directory
+structure**. Do not flatten the files. The resulting layout is:
+
+```text
+repo/
+├── pf.sh
+├── compose.nas.yaml
+├── deploy/
+│   └── synology/
+│       ├── pf-admin.py
+│       ├── backup.sh
+│       ├── release-check.sh
+│       ├── pf-config.example.json
+│       ├── nas.env.example
+│       ├── TEST_REPORT.md
+│       ├── .gitignore
+│       └── tests/
+│           └── test_pf_admin.py
+└── docs/
+    └── deployment/
+        ├── SYNOLOGY_ADMIN.md
+        └── SYNOLOGY_ADMIN.vi.md
+```
+
+Keep the existing root `.env`. Do not replace a locally customized
+`compose.nas.yaml` with the reference copy without reviewing the differences. The tests
+belong to this controller, not the application's database integration suite; run them on
+a workstation or separate test copy.
+
+Migrate the old runtime configuration if this NAS already used Admin v2, then remove the
+obsolete root-level duplicates:
 
 ```sh
 cd /volume1/docker/partflow/repo
-test -f pf-config.json || cp pf-config.example.json pf-config.json
-chmod 600 .env pf-config.json
+if [ -f pf-config.json ] && [ ! -f deploy/synology/pf-config.json ]; then
+  cp -p pf-config.json deploy/synology/pf-config.json
+fi
+test -f deploy/synology/pf-config.json || \
+  cp deploy/synology/pf-config.example.json deploy/synology/pf-config.json
+chmod 600 .env deploy/synology/pf-config.json
+
+rm -f pf-admin.py backup.sh release-check.sh pf-config.json \
+  pf-config.example.json nas.env.example PF_ADMIN_GUIDE.md \
+  PF_ADMIN_GUIDE.vi.md TEST_REPORT.md
+rm -rf pf-admin-tests
+
 sudo sh ./pf.sh doctor
 sudo sh ./pf.sh status
 sudo sh ./pf.sh backup
 ```
+
+The controller intentionally refuses the old root-level Admin v2 layout so stale duplicate
+scripts/configuration cannot be used accidentally. `deploy/synology/pf-config.json` is
+deployment-local and is ignored by the included nested `.gitignore`. `DEPLOYED_SOURCE.txt`
+is also runtime deployment state; add it to the repository root `.gitignore` before
+committing this structure.
 
 Keep `project` as `partflow-staging` when upgrading the old bundle. Changing this
 name selects a different Compose deployment and potentially different volumes.
@@ -183,8 +229,10 @@ approved migrations when needed, replaces the application source, and starts the
 selected images. Backend health and database revision are checked before frontend
 startup. The frontend's `/api/health` is checked afterward.
 
-Local `.env`, `compose.nas.yaml`, the controller, its settings and guides are
-preserved. Other local source changes are archived, not merged into the new checkout.
+Local `.env`, `compose.nas.yaml`, root `pf.sh`, and the complete
+`deploy/synology/` controller/configuration tree are preserved. Repository documentation
+under `docs/` follows the selected source revision. Other local application-source changes
+are archived, not merged into the new checkout.
 The source replacement is **not an atomic directory swap**. It happens while the
 application is stopped, with a persistent journal. Do not edit/upload the source
 or run direct Compose commands concurrently with a managed operation.
@@ -324,13 +372,13 @@ with the required Docker access. Set a schedule in DSM; this package does not cr
 Script for staging pre-releases:
 
 ```sh
-sh /volume1/docker/partflow/repo/release-check.sh --channel prerelease
+sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --channel prerelease
 ```
 
 With only `v0.1.0-alpha.1` published, the default `stable` channel has no eligible
 release. That is expected, not a reason to silently deploy `main`.
 
-For unattended staging application, edit `pf-config.json`:
+For unattended staging application, edit `deploy/synology/pf-config.json`:
 
 ```json
 {
@@ -350,7 +398,7 @@ Then schedule the following **within an approved maintenance window**, for examp
 nightly staging window, not while testers are entering data:
 
 ```sh
-sh /volume1/docker/partflow/repo/release-check.sh --apply
+sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --apply
 ```
 
 Both the flag and configuration opt-in are necessary. Automatic updates require a
@@ -380,10 +428,10 @@ Git clone authentication for a future private repository is not configured by th
 
 ## 9. Scheduled backups
 
-The new `backup.sh` creates a revision checkpoint, not the old four-file dump layout:
+The new `deploy/synology/backup.sh` creates a revision checkpoint, not the old four-file dump layout:
 
 ```sh
-sh /volume1/docker/partflow/repo/backup.sh
+sh /volume1/docker/partflow/repo/deploy/synology/backup.sh
 ```
 
 Schedule it separately from update tasks. Standalone backup does not pause the app;
@@ -428,7 +476,7 @@ automatic business reconciliation remain outside this staging helper.
 
 ## 11. Validation boundary and first NAS rehearsal
 
-See `TEST_REPORT.md`. The delivered controller was checked with real filesystem/archive
+See `deploy/synology/TEST_REPORT.md`. The delivered controller was checked with real filesystem/archive
 operations, real local Git clone/checkout, shell syntax checks and offline workflow
 simulations. Docker, actual PostgreSQL 16 SQL execution and Synology were **not run**
 in this environment. The full live clone from GitHub could not be exercised here because

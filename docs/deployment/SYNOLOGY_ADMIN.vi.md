@@ -1,7 +1,7 @@
 # PartFlow NAS Admin v2 — Hướng dẫn sử dụng
 
-> Bản dịch từ [PF_ADMIN_GUIDE.md](PF_ADMIN_GUIDE.md); tiếng Anh là nguồn chuẩn của bộ công cụ.
-> Phiên bản **2.0.0**, ngày **2026-09-08**.
+> Bản dịch từ [SYNOLOGY_ADMIN.md](./SYNOLOGY_ADMIN.md); tiếng Anh là nguồn chuẩn của bộ công cụ.
+> Phiên bản **2.1.0**, ngày **2026-09-09**.
 > Repo đối chiếu: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
 > Phạm vi: stack **staging nội bộ trên Synology**, chưa phải production.
 > Bộ này không tự commit, push, xuất bản release hoặc tạo lịch DSM.
@@ -31,17 +31,21 @@ Tag đã từng được script ghi nhận mà đổi sang SHA khác sẽ bị t
 
 | File | Vai trò |
 | --- | --- |
-| `pf.sh` | Lệnh vào chính, tìm Python, giữ khả năng chuyển tiếp lệnh Compose |
-| `pf-admin.py` | Update, backup, rollback, reset và kiểm tra release |
-| `backup.sh` | Lệnh backup thủ công hoặc chạy theo lịch |
-| `release-check.sh` | Lệnh cho Task Scheduler; mặc định chỉ kiểm tra |
-| `pf-config.example.json` | Cấu hình quản trị mẫu, không chứa mật khẩu |
-| `compose.nas.yaml`, `nas.env.example` | Bản tham chiếu giữ nguyên từ gói staging trước |
-| `pf-admin-tests/test_pf_admin.py`, `TEST_REPORT.md` | Kiểm thử offline và giới hạn kiểm chứng |
+| `pf.sh` | Entry point ở root, tìm Python và chuyển tiếp lệnh Compose |
+| `compose.nas.yaml` | Compose riêng cho NAS, giữ ở repository root |
+| `deploy/synology/pf-admin.py` | Update, backup, rollback, reset và kiểm tra release |
+| `deploy/synology/backup.sh` | Lệnh backup thủ công hoặc chạy theo lịch |
+| `deploy/synology/release-check.sh` | Lệnh cho Task Scheduler; mặc định chỉ kiểm tra |
+| `deploy/synology/pf-config.example.json` | Cấu hình quản trị mẫu, không chứa mật khẩu |
+| `deploy/synology/nas.env.example` | Mẫu biến môi trường cho NAS |
+| `deploy/synology/tests/test_pf_admin.py` | Kiểm thử offline của controller |
+| `deploy/synology/TEST_REPORT.md` | Báo cáo kiểm chứng và giới hạn |
+| `deploy/synology/.gitignore` | Bỏ qua `pf-config.json` cục bộ và Python cache |
+| `docs/deployment/SYNOLOGY_ADMIN.md`, `SYNOLOGY_ADMIN.vi.md` | Tài liệu quản trị |
 
 Phần điều phối dùng thư viện chuẩn Python để xử lý JSON, file backup và trạng thái
 lỗi, thay vì parse JSON hoặc thực thi metadata bằng shell. Không cần cài gói pip.
-Script quản trị và cấu hình NAS **không tự bị thay thế** khi cập nhật source từ GitHub.
+Root `pf.sh`, `compose.nas.yaml` và toàn bộ cây controller/configuration `deploy/synology/` **không tự bị thay thế** khi một lifecycle command đang chạy. Tài liệu trong repository và source ứng dụng bình thường đi theo revision được chọn.
 
 ## 3. Điều kiện và cách nâng cấp từ bộ cũ
 
@@ -86,28 +90,67 @@ cd /volume1/docker/partflow
 saved="backups/admin-tools-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$saved"
 chmod 700 "$saved"
-for file in pf.sh backup.sh compose.nas.yaml; do
-    if [ -f "repo/$file" ]; then
-        cp -p "repo/$file" "$saved/"
+for path in repo/pf.sh repo/compose.nas.yaml repo/deploy/synology; do
+    if [ -e "$path" ]; then
+        cp -Rp "$path" "$saved/"
     fi
 done
 ```
 
-Upload/thay `pf.sh`, `pf-admin.py`, `backup.sh`, `release-check.sh` và
-`pf-config.example.json` vào **cùng thư mục `repo/` với `.env` hiện có**. Có thể chép
-hai hướng dẫn mới vào đó. Không ghi đè `compose.nas.yaml` nếu đã chỉnh riêng cho NAS;
-file trong ZIP chỉ là bản tham chiếu cũ, không có thay đổi.
-`pf-admin-tests/` là kiểm thử của công cụ quản trị, không phải test nghiệp vụ của app;
-nên chạy trên workstation hoặc bản sao kiểm thử riêng.
+Giải nén/upload gói này **vào repository root và giữ nguyên directory structure**. Không
+flatten toàn bộ file vào root. Kết quả phải có dạng:
+
+```text
+repo/
+├── pf.sh
+├── compose.nas.yaml
+├── deploy/
+│   └── synology/
+│       ├── pf-admin.py
+│       ├── backup.sh
+│       ├── release-check.sh
+│       ├── pf-config.example.json
+│       ├── nas.env.example
+│       ├── TEST_REPORT.md
+│       ├── .gitignore
+│       └── tests/
+│           └── test_pf_admin.py
+└── docs/
+    └── deployment/
+        ├── SYNOLOGY_ADMIN.md
+        └── SYNOLOGY_ADMIN.vi.md
+```
+
+Giữ nguyên `.env` ở root. Không ghi đè `compose.nas.yaml` đã chỉnh riêng cho NAS nếu
+chưa review khác biệt với bản tham chiếu. Các test thuộc controller, không phải integration
+test nghiệp vụ của app; nên chạy trên workstation hoặc bản sao kiểm thử riêng.
+
+Nếu NAS đã dùng Admin v2 cũ, chuyển runtime config sang vị trí mới rồi xóa các bản
+trùng ở root:
 
 ```sh
 cd /volume1/docker/partflow/repo
-test -f pf-config.json || cp pf-config.example.json pf-config.json
-chmod 600 .env pf-config.json
+if [ -f pf-config.json ] && [ ! -f deploy/synology/pf-config.json ]; then
+  cp -p pf-config.json deploy/synology/pf-config.json
+fi
+test -f deploy/synology/pf-config.json || \
+  cp deploy/synology/pf-config.example.json deploy/synology/pf-config.json
+chmod 600 .env deploy/synology/pf-config.json
+
+rm -f pf-admin.py backup.sh release-check.sh pf-config.json \
+  pf-config.example.json nas.env.example PF_ADMIN_GUIDE.md \
+  PF_ADMIN_GUIDE.vi.md TEST_REPORT.md
+rm -rf pf-admin-tests
+
 sudo sh ./pf.sh doctor
 sudo sh ./pf.sh status
 sudo sh ./pf.sh backup
 ```
+
+Controller cố ý từ chối layout Admin v2 cũ ở root để tránh vô tình dùng nhầm script hoặc
+config trùng. `deploy/synology/pf-config.json` là cấu hình riêng của deployment và đã
+được nested `.gitignore` bỏ qua. `DEPLOYED_SOURCE.txt` cũng là runtime deployment state;
+hãy thêm nó vào `.gitignore` ở repository root trước khi commit structure này.
 
 Giữ `project` là `partflow-staging` khi nâng cấp từ bộ cũ. Đổi tên này có thể chọn
 một deployment/volume khác. Bản source tải ZIP phải có `DEPLOYED_SOURCE.txt` chứa
@@ -179,8 +222,7 @@ Sau xác nhận, script dừng frontend/backend, backup source/database cũ, th�
 dụng và chạy các image đã chọn. Backend và revision database được kiểm tra trước
 khi mở frontend. Cuối cùng kiểm tra `/api/health` qua frontend.
 
-`.env`, `compose.nas.yaml`, script quản trị, cấu hình và hướng dẫn cục bộ được giữ.
-Các sửa source khác được backup, không tự merge vào checkout mới.
+`.env`, `compose.nas.yaml`, root `pf.sh` và toàn bộ cây controller/configuration `deploy/synology/` được giữ nguyên. Tài liệu trong `docs/` đi theo source revision được chọn. Các sửa application source khác được backup, không tự merge vào checkout mới.
 Việc thay source **không phải atomic directory swap**: nó được làm khi app đã dừng,
 có journal để nhận diện lỗi dang dở. Không sửa/upload source hoặc chạy Docker trực
 tiếp đồng thời với thao tác quản trị.
@@ -322,13 +364,13 @@ không tự tạo task.
 Kiểm tra các pre-release dùng cho staging:
 
 ```sh
-sh /volume1/docker/partflow/repo/release-check.sh --channel prerelease
+sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --channel prerelease
 ```
 
 Khi repo chỉ có `v0.1.0-alpha.1`, kênh mặc định `stable` chưa có bản phù hợp là bình
 thường. Script không tự dùng `main` để bù vào.
 
-Để cho phép tự update staging, sửa `pf-config.json`:
+Để cho phép tự update staging, sửa `deploy/synology/pf-config.json`:
 
 ```json
 {
@@ -348,7 +390,7 @@ Sau đó đặt lệnh sau **trong khung giờ bảo trì đã chấp thuận**,
 ban đêm dành cho staging, không phải lúc đang nhập dữ liệu thử:
 
 ```sh
-sh /volume1/docker/partflow/repo/release-check.sh --apply
+sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --apply
 ```
 
 Cần cả cờ `--apply` và cấu hình bật tự động. Auto-update đòi hỏi release đã xuất bản,
@@ -378,10 +420,10 @@ hoặc log. Token này không tự cấu hình xác thực Git clone nếu repo 
 
 ## 9. Backup định kỳ
 
-`backup.sh` mới tạo checkpoint revision, không còn dùng cấu trúc bốn file dump cũ:
+`deploy/synology/backup.sh` mới tạo checkpoint revision, không còn dùng cấu trúc bốn file dump cũ:
 
 ```sh
-sh /volume1/docker/partflow/repo/backup.sh
+sh /volume1/docker/partflow/repo/deploy/synology/backup.sh
 ```
 
 Đặt lịch riêng, tránh trùng update. Backup độc lập không dừng app; PostgreSQL cung
@@ -426,7 +468,7 @@ chưa thuộc phạm vi công cụ staging này.
 
 ## 11. Giới hạn kiểm chứng và lần thử đầu trên NAS
 
-Xem `TEST_REPORT.md`. Bộ đã được kiểm tra bằng thao tác filesystem/archive thực,
+Xem `deploy/synology/TEST_REPORT.md`. Bộ đã được kiểm tra bằng thao tác filesystem/archive thực,
 Git clone/checkout cục bộ thực, kiểm tra cú pháp shell và các workflow mô phỏng offline.
 Docker, SQL thực trên PostgreSQL 16 và Synology **chưa được chạy** trong môi trường
 kiểm thử này. Code sandbox không phân giải được github.com nên chưa chạy clone online

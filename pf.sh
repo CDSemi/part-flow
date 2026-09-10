@@ -1,9 +1,16 @@
 #!/bin/sh
-# The entry point and controller are local tools, never updated by GitHub checkout.
+# Root entry point for the local Synology administration controller.
 set -eu
 PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin:/var/packages/Git/target/bin:${PATH:-}"
 export PATH
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ADMIN="$REPO_ROOT/deploy/synology/pf-admin.py"
+
+if [ ! -f "$ADMIN" ]; then
+    echo "Missing Synology admin controller: $ADMIN" >&2
+    exit 2
+fi
+
 if [ -n "${PF_PYTHON:-}" ]; then
     PYTHON=$PF_PYTHON
 else
@@ -15,8 +22,11 @@ else
         fi
     done
 fi
+
 if [ -z "$PYTHON" ] || ! command -v "$PYTHON" >/dev/null 2>&1; then
     echo "Python 3.9+ is required. Set PF_PYTHON to its absolute executable path." >&2
     exit 2
 fi
-exec "$PYTHON" "$SCRIPT_DIR/pf-admin.py" "$@"
+
+export PF_REPO_ROOT="$REPO_ROOT"
+exec "$PYTHON" "$ADMIN" "$@"

@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 PAGE_SIZE = 10
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
@@ -36,12 +36,27 @@ DEFAULTS = {
     "ci_workflow": "ci.yml", "health_timeout_seconds": 180,
     "minimum_free_mb": 2048,
 }
-LOCAL_FILES = {
-    ".env", "compose.nas.yaml", "pf.sh", "pf-admin.py", "backup.sh",
-    "release-check.sh", "pf-config.json", "pf-config.example.json",
-    "nas.env.example", "PF_ADMIN_GUIDE.md", "PF_ADMIN_GUIDE.vi.md",
-    "TEST_REPORT.md", "DEPLOYED_SOURCE.txt", "pf-admin-tests",
-}
+# These paths are deployment-local and survive application source updates/rollbacks.
+# In particular, the running admin controller never self-updates mid-operation.
+LOCAL_PATHS = (
+    Path(".env"),
+    Path("compose.nas.yaml"),
+    Path("pf.sh"),
+    Path("deploy/synology"),
+    Path("DEPLOYED_SOURCE.txt"),
+)
+LEGACY_ADMIN_PATHS = (
+    Path("pf-admin.py"),
+    Path("backup.sh"),
+    Path("release-check.sh"),
+    Path("pf-config.json"),
+    Path("pf-config.example.json"),
+    Path("nas.env.example"),
+    Path("PF_ADMIN_GUIDE.md"),
+    Path("PF_ADMIN_GUIDE.vi.md"),
+    Path("TEST_REPORT.md"),
+    Path("pf-admin-tests"),
+)
 SOURCE_EXCLUDES = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache"}
 AUTO_REVIEW_PATHS = (
     ".env.example", "compose.yaml", "backend/Dockerfile", "frontend/Dockerfile",
@@ -146,6 +161,35 @@ def read_dotenv(path):
     return values
 
 
+def is_local_path(relative):
+    relative = Path(relative)
+    return any(relative == local or local in relative.parents for local in LOCAL_PATHS)
+
+
+def copy_tree_entry(source, destination):
+    source, destination = Path(source), Path(destination)
+    if destination.exists() or destination.is_symlink():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, destination, symlinks=False)
+    elif source.is_file() and not source.is_symlink():
+        shutil.copy2(source, destination)
+    else:
+        raise Failure(f"Unsupported local deployment path: {source}")
+
+
+def copy_local_paths(root, destination):
+    root, destination = Path(root), Path(destination)
+    for relative in LOCAL_PATHS:
+        source = root / relative
+        if source.exists() or source.is_symlink():
+            copy_tree_entry(source, destination / relative)
+
+
 def create_source_archive(root, destination):
     root = Path(root)
     def select(info):
@@ -222,8 +266,15 @@ def confirm(phrase, warning):
 class Controller:
     def __init__(self, root):
         self.root = Path(root).resolve()
+        self.admin_dir = self.root / "deploy" / "synology"
+        legacy = [str(path) for path in LEGACY_ADMIN_PATHS if (self.root / path).exists()]
+        if legacy:
+            raise Failure(
+                "Legacy root-level NAS admin files detected: " + ", ".join(legacy)
+                + ". Move pf-config.json to deploy/synology/ if needed, then remove the old duplicates."
+            )
         self.config = dict(DEFAULTS)
-        config = self.root / "pf-config.json"
+        config = self.admin_dir / "pf-config.json"
         if config.exists():
             supplied = load_json(config)
             unknown = set(supplied) - set(DEFAULTS)
@@ -317,7 +368,7 @@ class Controller:
     def env(self):
         path = self.root / ".env"
         if not path.is_file() or not (self.root / "compose.nas.yaml").is_file():
-            raise Failure("Missing .env or compose.nas.yaml beside pf.sh.")
+            raise Failure("Missing repo-root .env or compose.nas.yaml.")
         result = read_dotenv(path)
         for key in ("POSTGRES_DB", "POSTGRES_USER"):
             quote_identifier(result.get(key, ""))
@@ -611,23 +662,25 @@ class Controller:
 
     def replace_source(self, candidate, revision):
         self.phase("changing-source")
-        for item in self.root.iterdir():
-            if item.name in LOCAL_FILES:
-                continue
-            if item.is_dir() and not item.is_symlink():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
-        for item in Path(candidate).iterdir():
-            if item.name in LOCAL_FILES:
-                continue
-            destination = self.root / item.name
-            if item.is_dir() and not item.is_symlink():
-                shutil.copytree(item, destination, symlinks=False)
-            elif item.is_file() and not item.is_symlink():
-                shutil.copy2(item, destination)
-            else:
-                raise Failure("Downloaded source contains an unsupported link/special file.")
+        # Preserve deployment-local tools/configuration while replacing application source.
+        # This avoids changing the controller that is currently executing.
+        with tempfile.TemporaryDirectory(prefix="local-tools-", dir=self.state) as folder:
+            preserved = Path(folder)
+            copy_local_paths(self.root, preserved)
+            for item in list(self.root.iterdir()):
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            for item in Path(candidate).iterdir():
+                destination = self.root / item.name
+                if item.is_dir() and not item.is_symlink():
+                    shutil.copytree(item, destination, symlinks=False)
+                elif item.is_file() and not item.is_symlink():
+                    shutil.copy2(item, destination)
+                else:
+                    raise Failure("Downloaded source contains an unsupported link/special file.")
+            copy_local_paths(preserved, self.root)
         (self.root / "DEPLOYED_SOURCE.txt").write_text(revision + "\n")
         self.phase("source-replaced")
 
@@ -720,10 +773,7 @@ class Controller:
         for item in destination.rglob("*"):
             if ".git" not in item.relative_to(destination).parts and item.is_symlink():
                 raise Failure("Downloaded source has a symbolic link; manual review is required.")
-        for name in LOCAL_FILES:
-            source = self.root / name
-            if source.is_file():
-                shutil.copy2(source, destination / name)
+        copy_local_paths(self.root, destination)
         (destination / "DEPLOYED_SOURCE.txt").write_text(target["sha"] + "\n")
         self.compose("config", "-q", root=destination)
 
@@ -732,7 +782,7 @@ class Controller:
             raise Deferred("Automatic updates require a Git checkout established by one successful manual update first.")
         changed = self.command(["git", "-c", f"safe.directory={self.root}", "diff", "HEAD", "--name-only"]).splitlines()
         untracked = self.command(["git", "-c", f"safe.directory={self.root}", "ls-files", "--others", "--exclude-standard"]).splitlines()
-        unexpected = [p for p in changed + untracked if p.split("/", 1)[0] not in LOCAL_FILES]
+        unexpected = [p for p in changed + untracked if not is_local_path(p)]
         if unexpected:
             raise Deferred("Local source modifications/untracked files require manual review: " + ", ".join(unexpected[:10]))
         try:
@@ -999,11 +1049,13 @@ def main(argv=None, root=None):
     held_lock = contextlib.ExitStack()
     try:
         if not argv or argv[0] not in known and argv[0] not in ("-h", "--help"):
-            controller = Controller(root or Path(__file__).parent)
+            default_root = Path(os.environ.get("PF_REPO_ROOT", Path(__file__).resolve().parents[2]))
+            controller = Controller(root or default_root)
             controller.passthrough(argv)
             return 0
         args = parser().parse_args(argv)
-        controller = Controller(root or Path(__file__).parent)
+        default_root = Path(os.environ.get("PF_REPO_ROOT", Path(__file__).resolve().parents[2]))
+        controller = Controller(root or default_root)
         held_lock.enter_context(controller.lock(allow_pending=args.command in ("doctor", "status", "backups", "rollback", "resume")))
         if args.command == "doctor":
             controller.doctor()

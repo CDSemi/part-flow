@@ -1,15 +1,15 @@
 # PartFlow NAS Admin v2 — Validation report
 
-Date: 2026-09-08. Tool version: 2.0.0.
+Date: 2026-09-09. Tool version: 2.1.0.
 
 ## Executed checks
 
 | Check | Actual result |
 | --- | --- |
-| Python compilation of `pf-admin.py` | Passed with Python 3.13.5 |
-| `sh -n` on `pf.sh`, `backup.sh`, `release-check.sh` | Passed |
+| Python compilation of `deploy/synology/pf-admin.py` | Passed with Python 3.13.5 |
+| `sh -n` on root `pf.sh` and both `deploy/synology/*.sh` wrappers | Passed |
 | `pf.sh --help` through the real shell entry point | Passed |
-| Offline unittest suite | **65 tests passed** |
+| Offline unittest suite | **69 tests passed** |
 | Filesystem/archive operations used by the tests | Executed against real temporary files |
 | Local Git clone + checkout of a non-tip SHA | Executed successfully against a local test repository |
 | Included Compose and environment examples vs original staging bundle | Byte-for-byte unchanged |
@@ -17,11 +17,11 @@ Date: 2026-09-08. Tool version: 2.0.0.
 Reproduce the offline suite from the extracted package:
 
 ```sh
-python3 -m unittest discover -s pf-admin-tests -v
-python3 -m py_compile pf-admin.py
+python3 -m unittest discover -s deploy/synology/tests -v
+python3 -m py_compile deploy/synology/pf-admin.py
 sh -n pf.sh
-sh -n backup.sh
-sh -n release-check.sh
+sh -n deploy/synology/backup.sh
+sh -n deploy/synology/release-check.sh
 ```
 
 The tests operate on temporary directories and simulated external services. They do
@@ -30,7 +30,10 @@ not connect to the NAS or run the application's own database integration suite.
 ## Coverage exercised
 
 - Fixed-SHA checkout rather than following a branch after selection.
-- Preservation of local scripts/configuration during source replacement.
+- Preservation of root `.env`, `compose.nas.yaml`, `pf.sh`, and the `deploy/synology/` controller/configuration tree during source replacement.
+- Replacement of normal repository documentation/source while the local admin tree remains stable.
+- Runtime configuration loading from `deploy/synology/pf-config.json`.
+- Rejection of stale root-level Admin v2 configuration after the layout migration.
 - Verified checkpoint creation before update/reset/rollback.
 - Dump failure and restore-verification failure stopping the operation.
 - Manual migration approval, rehearsal before the live migration, and failure journaling.

@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 PACKAGE = Path(__file__).resolve().parents[1]
+REPO_PACKAGE = PACKAGE.parents[1]
 spec = importlib.util.spec_from_file_location("pf_admin", PACKAGE / "pf-admin.py")
 pf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pf)
@@ -33,9 +34,12 @@ def fixture(root, revision=OLD, new_migration=False):
     (root / "frontend/app.txt").write_text(revision)
     (root / "DEPLOYED_SOURCE.txt").write_text(revision + "\n")
     (root / ".env").write_text("POSTGRES_DB=partflow_staging\nPOSTGRES_USER=partflow_staging\nPOSTGRES_PASSWORD=abc123\n")
-    (root / "compose.nas.yaml").write_text((PACKAGE / "compose.nas.yaml").read_text())
+    (root / "compose.nas.yaml").write_text((REPO_PACKAGE / "compose.nas.yaml").read_text())
     (root / "pf.sh").write_text("# local stable controller\n")
-    (root / "pf-admin.py").write_text("# local stable helper\n")
+    admin = root / "deploy/synology"
+    admin.mkdir(parents=True, exist_ok=True)
+    (admin / "pf-admin.py").write_text("# local stable helper\n")
+    (admin / "pf-config.example.json").write_text("{}\n")
     (root / "app-version.txt").write_text(revision)
 
 
@@ -183,9 +187,7 @@ class FakeController(pf.Controller):
 
     def clone(self, target, destination):
         fixture(destination, target["sha"], self.new_migration)
-        for name in pf.LOCAL_FILES - {"DEPLOYED_SOURCE.txt"}:
-            if (self.root / name).is_file():
-                shutil.copy2(self.root / name, destination / name)
+        pf.copy_local_paths(self.root, destination)
 
     def build_target(self, candidate, sha):
         images = {}
@@ -242,7 +244,35 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(saved["restore_test"], "passed")
         self.assertEqual(self.c.ci_calls, [NEW])
         self.assertEqual((self.root / "pf.sh").read_text(), "# local stable controller\n")
+        self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "# local stable helper\n")
         self.assertEqual(self.c.env()["POSTGRES_PASSWORD"], "abc123")
+
+    def test_replace_source_preserves_admin_tree_but_replaces_repository_docs(self):
+        (self.root / "compose.nas.yaml").write_text("local compose\n")
+        (self.root / "docs/deployment").mkdir(parents=True)
+        (self.root / "docs/deployment/SYNOLOGY_ADMIN.md").write_text("old docs\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Path(tmp) / "candidate"
+            fixture(candidate, NEW)
+            (candidate / "compose.nas.yaml").write_text("remote compose\n")
+            (candidate / "deploy/synology/pf-admin.py").write_text("remote controller\n")
+            (candidate / "docs/deployment").mkdir(parents=True)
+            (candidate / "docs/deployment/SYNOLOGY_ADMIN.md").write_text("new docs\n")
+            pf.write_json(self.c.pending, {"operation": "test", "phase": "paused"})
+            self.c.replace_source(candidate, NEW)
+        self.assertEqual((self.root / "compose.nas.yaml").read_text(), "local compose\n")
+        self.assertEqual((self.root / "deploy/synology/pf-admin.py").read_text(), "# local stable helper\n")
+        self.assertEqual((self.root / "docs/deployment/SYNOLOGY_ADMIN.md").read_text(), "new docs\n")
+
+    def test_controller_reads_runtime_config_from_deploy_synology(self):
+        (self.root / "deploy/synology/pf-config.json").write_text('{"minimum_free_mb": 1234}\n')
+        controller = pf.Controller(self.root)
+        self.assertEqual(controller.config["minimum_free_mb"], 1234)
+
+    def test_legacy_root_admin_config_is_rejected(self):
+        (self.root / "pf-config.json").write_text('{"minimum_free_mb": 9999}\n')
+        with self.assertRaises(pf.Failure):
+            pf.Controller(self.root)
 
     def test_update_missing_ci_does_not_stop_application(self):
         self.c.fail = "ci"
@@ -584,6 +614,13 @@ class AdminTests(unittest.TestCase):
 
 
 class PureTests(unittest.TestCase):
+    def test_local_path_classification_matches_new_layout(self):
+        self.assertTrue(pf.is_local_path(".env"))
+        self.assertTrue(pf.is_local_path("deploy/synology/pf-config.json"))
+        self.assertTrue(pf.is_local_path("deploy/synology/tests/test_pf_admin.py"))
+        self.assertFalse(pf.is_local_path("deploy/other/tool.sh"))
+        self.assertFalse(pf.is_local_path("docs/deployment/SYNOLOGY_ADMIN.md"))
+
     def test_pagination_25_items(self):
         items = list(range(25))
         self.assertEqual(pf.page_items(items, 1), (list(range(10)), 3, 0))
