@@ -40,7 +40,7 @@ test('a view renders its empty state', async () => {
   renderAt('/management/tracking?state=empty');
 
   expect(
-    await screen.findByText(/No PNs match the current filters/),
+    await screen.findByText('No PN has quantity in production.'),
   ).toBeInTheDocument();
 });
 

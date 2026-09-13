@@ -760,9 +760,15 @@ test('an empty result is the explicit empty state', async () => {
       : defaultAnswer(url),
   );
   await renderTracking();
+  // The default filters are not "active" filters: nothing to clear, so the
+  // empty state names the real situation and points at the Status filter.
   expect(
-    screen.getByText(/No PNs match the current filters — clear filters/),
+    screen.getByText('No PN has quantity in production.'),
   ).toBeInTheDocument();
+  expect(
+    screen.getByText(/set Status to All to see stocked, open and completed/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/clear filters/)).toBeNull();
 });
 
 test('a failed refresh keeps the rows and marks the feed stale until the next good answer', async () => {
