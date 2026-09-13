@@ -217,6 +217,7 @@ function inventory(areaId: number) {
   return json({
     area: areaRef(areaId),
     demand_context: [],
+    scrapped: [],
     has_machines: areaId === 2,
     lines: all,
     total_part_numbers: all.length,

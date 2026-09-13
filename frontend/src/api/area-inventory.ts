@@ -159,7 +159,7 @@ export interface WorkOrderContextWire {
   request_type: 'NEW' | 'MODIFY';
 }
 
-interface DemandContextWire {
+export interface DemandContextWire {
   work_order_id: number;
   work_order_number: string | null;
   work_order_demand_id: number;
@@ -253,7 +253,7 @@ export function toWorkOrderContext(
   };
 }
 
-function toDemandContext(wire: DemandContextWire): DemandContext {
+export function toDemandContext(wire: DemandContextWire): DemandContext {
   return {
     workOrderId: wire.work_order_id,
     workOrderNumber: wire.work_order_number,
@@ -322,6 +322,13 @@ export interface AreaInventory {
    * longer has.
    */
   demandContext: Record<string, DemandContext[]>;
+  /**
+   * Phase 11: the scrapped quantity recorded in THIS Area per PN (net
+   * of reversed scraps) — the `{n} scrapped` line of the shared PN row
+   * on both surfaces (GUI_DESIGN §4.10). A PN without scrap in the
+   * Area is absent.
+   */
+  scrapped: Record<string, number>;
   /** The Area mode (PROJECT_PROFILE §12), decided by the server from
    * the Area's active Machines: true → queued / Machine cards /
    * finished; false → directly processing / finished with no cards. */
@@ -353,6 +360,7 @@ export interface InventoryLineWire {
 export interface AreaInventoryWire {
   area: AreaRefWire;
   demand_context: PartNumberDemandsWire[];
+  scrapped: { part_number: string; quantity: number }[];
   has_machines: boolean;
   lines: InventoryLineWire[];
   total_part_numbers: number;
@@ -388,6 +396,9 @@ export function toAreaInventory(wire: AreaInventoryWire): AreaInventory {
         entry.part_number,
         entry.demands.map(toDemandContext),
       ]),
+    ),
+    scrapped: Object.fromEntries(
+      wire.scrapped.map((line) => [line.part_number, line.quantity]),
     ),
     hasMachines: wire.has_machines,
     lines: toInventoryLines(wire.lines),

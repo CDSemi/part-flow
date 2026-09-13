@@ -242,6 +242,7 @@ function handle(url: string, method: string, body: unknown): Response {
         operationRef,
       ),
       demand_context: [],
+      scrapped: [],
       has_machines: false,
     });
   }
@@ -253,6 +254,7 @@ function handle(url: string, method: string, body: unknown): Response {
     return json({
       area: areaRef(areaId),
       demand_context: [],
+      scrapped: [],
       has_machines: false,
       lines,
       total_part_numbers: lines.length,

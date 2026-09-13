@@ -7,23 +7,28 @@ THIS ONE READ, never two reads that could disagree.
 The per-Area content is the Area inventory the Scan Station renders —
 `scan_station.area_inventory`, unchanged and unwrapped: the Area mode
 (`has_machines`), every ACTIVE flow per PN with its derived holding
-state, the Machine cards holding only actively assigned quantity, and
-the queued / directly processing / finished groups with their totals.
-The Area Board adds nothing to that model and reimplements none of it,
-so the two views can never drift apart (PROJECT_PROFILE §21 "the same
-shared Area/Machine monitoring layout ... without visual drift"). What
-this module adds is the context a monitoring view shows around it and a
-station does not have to load:
+state, the Machine cards holding only actively assigned quantity, the
+queued / directly processing / finished groups with their totals, the
+PN's OPEN demand context and the scrapped quantity recorded in the Area
+per PN (net of reversed scraps) — the `{n} scrapped` line of the shared
+PN row, which both surfaces present alike. The Area Board adds nothing
+to that model and reimplements none of it, so the two views can never
+drift apart (PROJECT_PROFILE §21 "the same shared Area/Machine
+monitoring layout ... without visual drift"). What this module adds is
+the context a monitoring view shows around it and a station does not
+have to load:
 
 - the Area's active **Operations**, for the column and card headers;
-- the **scrapped** quantity recorded in the Area per PN (net of
-  reversed scraps) — the `{n} scrapped` line of the shared PN row;
 - for a terminal Area (the Stockroom, Phase 10) the **stocked** lines:
   quantity is manufacturing-complete there and its flows are closed, so
   a terminal Area holds no ACTIVE inventory at all — its column would
   be permanently empty without them. Each line carries the PN's active
   allocation beside the stocked quantity, which is what the Stockroom
-  row states in place of a due countdown (`allocated 50/50`).
+  row states in place of a due countdown (`allocated 50/50`), and the
+  PN's OPEN demand context (`allocations.open_demand_context` — the one
+  monitoring demand context), so a stocked PN still being worked FOR an
+  open demand names that demand, its Job Numbers and its Hot rank
+  exactly as the Production Board's row for the same quantity does.
 
 Every value is derived from the current-position projection and the
 immutable Movement history, exactly like the Production Board; nothing
@@ -46,8 +51,13 @@ from typing import NamedTuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.application.allocations import active_allocated_quantities
-from app.application.production_board import effective_totals_by_area, resolve_department
+from app.application.allocations import (
+    DemandContext,
+    active_allocated_quantities,
+    open_demand_context,
+)
+from app.application.production_board import resolve_department
+from app.application.projections import effective_totals_by_area
 from app.application.scan_station import AreaInventory, area_inventory
 from app.application.transfers import active_area_operations
 from app.domain.enums import MovementType
@@ -62,12 +72,15 @@ class StockedLine(NamedTuple):
     is the PN's total ACTIVE allocation — Work Order Allocation is a PN
     -level connection to demand and is never divided per Area, so the
     Stockroom row states the two side by side instead of pretending the
-    allocation belongs to one Area's stock.
+    allocation belongs to one Area's stock. ``demands`` is the PN's OPEN
+    demand context in the canonical order (empty once every Work Order
+    of the PN is complete — the row then reads `WO — · —`).
     """
 
     part_number: str
     quantity: int
     allocated_quantity: int
+    demands: list[DemandContext]
 
 
 class AreaBoardArea(NamedTuple):
@@ -75,9 +88,6 @@ class AreaBoardArea(NamedTuple):
 
     inventory: AreaInventory
     operations: list[Operation]
-    # Scrapped quantity recorded in this Area, per PN (net of reversed
-    # scraps); a PN without scrap is absent.
-    scrapped: dict[str, int]
     # Terminal Areas only; empty everywhere else.
     stocked: list[StockedLine]
 
@@ -114,31 +124,25 @@ def area_board(session: Session, department_id: int | None) -> AreaBoard:
             .order_by(Area.name, Area.id)
         )
     )
-    area_ids = [area.id for area in areas]
-    scrapped = effective_totals_by_area(session, MovementType.SCRAPPED, area_ids)
     stocked = effective_totals_by_area(
         session, MovementType.STOCKED, [area.id for area in areas if area.is_terminal]
     )
-    allocated = active_allocated_quantities(
-        session, {part_number for part_number, _area_id in stocked}
-    )
+    stocked_part_numbers = {part_number for part_number, _area_id in stocked}
+    allocated = active_allocated_quantities(session, stocked_part_numbers)
+    demands = open_demand_context(session, stocked_part_numbers)
     return AreaBoard(
         department=department,
         areas=[
             AreaBoardArea(
                 inventory=area_inventory(session, area.id),
                 operations=active_area_operations(session, area.id),
-                scrapped={
-                    part_number: quantity
-                    for (part_number, scrapped_area_id), quantity in scrapped.items()
-                    if scrapped_area_id == area.id
-                },
                 stocked=sorted(
                     (
                         StockedLine(
                             part_number=part_number,
                             quantity=quantity,
                             allocated_quantity=allocated.get(part_number, 0),
+                            demands=demands.get(part_number, []),
                         )
                         for (part_number, stocked_area_id), quantity in stocked.items()
                         if stocked_area_id == area.id

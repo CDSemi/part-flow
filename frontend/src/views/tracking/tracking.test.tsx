@@ -658,6 +658,7 @@ test('the filter selects offer the configured Areas, Operations and Machines', a
           maintenance_expected_return: null,
           state_changed_at: '2030-01-01T00:00:00Z',
           assigned_quantity: 0,
+          assigned_lines: [],
           operational_state: 'IDLE',
           retired_on: null,
         },
@@ -672,6 +673,7 @@ test('the filter selects offer the configured Areas, Operations and Machines', a
           maintenance_expected_return: null,
           state_changed_at: '2030-01-01T00:00:00Z',
           assigned_quantity: 0,
+          assigned_lines: [],
           operational_state: 'IDLE',
           retired_on: '2030-02-02',
         },
@@ -793,6 +795,62 @@ test('a failed refresh keeps the rows and marks the feed stale until the next go
   expect(document.querySelector('.tk-feed')?.textContent).toContain('Live');
 });
 
+test('a changed filter never presents the previous query’s rows as the current list', async () => {
+  // Until the current query is answered the list reads loading — the
+  // rows of the previous filters are not the current list, so they
+  // are neither kept on screen nor called Live; a failed first read of
+  // the new query does not turn them into a "stale" current list either.
+  vi.useFakeTimers();
+  let hold: () => void = () => {};
+  let failStatusAll = false;
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking?status=ALL')) {
+      if (failStatusAll) return jsonResponse({ detail: 'gone' }, 503);
+      return new Promise<Response>((resolve) => {
+        hold = () => resolve(jsonResponse(EMPTY_LIST));
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(2);
+
+  fireEvent.change(screen.getByLabelText('Status'), {
+    target: { value: 'ALL' },
+  });
+  await act(async () => {});
+  // The previous page is gone; the list is loading, not Live.
+  expect(document.querySelector('.tk-table')).toBeNull();
+  expect(
+    screen.getByRole('status', { name: 'Loading PN Tracking' }),
+  ).toBeInTheDocument();
+  expect(document.querySelector('.tk-feed')?.textContent).not.toContain('Live');
+  await act(async () => {
+    hold();
+  });
+  await act(async () => {});
+  expect(
+    screen.getByText('No PNs match the current filters — clear filters.'),
+  ).toBeInTheDocument();
+
+  // Back to the default filters with a failing read of the OTHER query:
+  // its old rows are still not the current list.
+  failStatusAll = true;
+  fireEvent.change(screen.getByLabelText('Status'), {
+    target: { value: 'ACTIVE' },
+  });
+  await act(async () => {});
+  expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(2);
+  fireEvent.change(screen.getByLabelText('Status'), {
+    target: { value: 'ALL' },
+  });
+  await act(async () => {});
+  expect(document.querySelector('.tk-table')).toBeNull();
+  expect(document.querySelector('.tk-feed')?.textContent).toContain(
+    'Feed stale — reconnecting',
+  );
+});
+
 test('an unhealthy connection reads as a stale feed over the kept rows', async () => {
   await renderTracking('unavailable');
   expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(2);
@@ -844,7 +902,7 @@ test('selecting a row reads its detail and renders the demand, locations and fig
   await openFirstRow();
 
   expect(trackingCalls(fetchMock).at(-1)).toBe(
-    '/api/tracking/detail?part_number=2027-60-8114-00&movements_limit=50',
+    '/api/tracking/detail?part_number=2027-60-8114-00&movements_limit=50&flows_limit=50&allocations_limit=100&scrap_limit=20',
   );
   const panel = document.querySelector('.tk-right') as HTMLElement;
   expect(panel.querySelector('h2')?.textContent).toBe('2027-60-8114-00');
@@ -914,6 +972,50 @@ test('route steps and arrows are separate siblings in alternating order', async 
   );
   expect(planned.textContent).toContain('Actual path: Material → Cut → Lathe');
   expect(planned.textContent).toContain('SPLIT into QF-141');
+});
+
+test('a PLANNED flow off its route shows the off-route note and every confirmed deviation', async () => {
+  stubFetch((url) => {
+    if (!url.startsWith('/api/tracking/detail')) return defaultAnswer(url);
+    const payload = detailPayload();
+    const planned = payload.flows.flows.find((flow) => flow.id === 140)!;
+    Object.assign(planned, {
+      off_route: true,
+      position: { ...planned.position, area: DEBURR },
+      deviations: [
+        {
+          movement_id: 3,
+          occurred_at: '2030-07-22T11:20:00Z',
+          kind: 'AREA',
+          expected_area: LATHE,
+          expected_operation: OPERATION,
+          actual_area: DEBURR,
+          actual_operation: null,
+          reason: 'Lathe down',
+          station_id: 'DEB-ST-01',
+        },
+      ],
+    });
+    return jsonResponse(payload);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  const block = flowBlock('QF-140');
+  expect(block.textContent).toContain('Currently off the Planned Route.');
+  const deviation = block.querySelector('.devnote.deviation');
+  expect(deviation?.textContent).toContain('Route deviation confirmed');
+  expect(deviation?.textContent).toContain('at DEB-ST-01');
+  expect(deviation?.textContent).toContain('expected Lathe (Turning)');
+  expect(deviation?.textContent).toContain('actual Deburr');
+  expect(deviation?.textContent).toContain('reason: Lathe down');
+  // The snapshot itself is untouched by the deviation: its steps keep
+  // the server's DONE / CURRENT / FUTURE states.
+  const states = Array.from(
+    block.querySelectorAll('.route .rstep'),
+    (el) => el.className,
+  );
+  expect(states.filter((cls) => cls.includes('cur')).length).toBe(1);
 });
 
 test('the Floating trace keeps repeated Areas and the Repair marker', async () => {
@@ -1476,6 +1578,39 @@ test('a detail read that fails shows its error with Retry inside the panel', asy
   expect(panel.querySelector('table.demand')).not.toBeNull();
 });
 
+test('a failed detail refresh keeps the panel and marks it stale until the next good answer', async () => {
+  vi.useFakeTimers();
+  let fail = false;
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail') && fail) {
+      return jsonResponse({ detail: 'gone' }, 503);
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+  const panel = document.querySelector('.tk-right') as HTMLElement;
+  expect(panel.querySelector('.tk-stale')).toBeNull();
+
+  fail = true;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  // The last complete detail stays; the explicit note says it is stale.
+  expect(panel.querySelector('table.demand')).not.toBeNull();
+  expect(panel.querySelector('.tk-stale')?.textContent).toContain(
+    'Feed stale — reconnecting',
+  );
+
+  fail = false;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  expect(panel.querySelector('.tk-stale')).toBeNull();
+});
+
 test('a PN whose master record is absent still renders its history', async () => {
   stubFetch((url) =>
     url.startsWith('/api/tracking/detail')
@@ -1711,7 +1846,7 @@ test('selecting a different PN switches the panel to that PN with its own read',
   expect(rows[1].getAttribute('aria-pressed')).toBe('true');
   expect(rows[0].getAttribute('aria-pressed')).toBe('false');
   expect(trackingCalls(fetchMock).at(-1)).toBe(
-    '/api/tracking/detail?part_number=142-260&movements_limit=50',
+    '/api/tracking/detail?part_number=142-260&movements_limit=50&flows_limit=50&allocations_limit=100&scrap_limit=20',
   );
   // The panel stays (with this PN's own state) and still offers the
   // close control.

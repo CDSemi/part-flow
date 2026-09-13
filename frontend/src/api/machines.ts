@@ -16,6 +16,12 @@ import type { MachineStatus } from '../views/view-models';
 import { apiRequest } from './client';
 
 /** One physical Machine record as the views render it. */
+/** One PN portion currently assigned to a Machine. */
+export interface AssignedLine {
+  partNumber: string;
+  quantity: number;
+}
+
 export interface Machine {
   /** Stable internal identity — never reused by a replacement. */
   id: number;
@@ -48,6 +54,12 @@ export interface Machine {
    * it; retirement is blocked while it is above zero.
    */
   assignedQuantity: number;
+  /**
+   * The per-PN breakdown of that assigned quantity, in PN order — the
+   * same projection the total sums (Phase 11, GUI_DESIGN §12.1
+   * `Assigned now`). Empty while nothing is assigned.
+   */
+  assignedLines: AssignedLine[];
   /**
    * The derived operational state as the SERVER derives it (maintenance
    * override > assigned ACTIVE quantity = running > idle) — the same
@@ -100,6 +112,7 @@ interface MachineWire {
   retired_on: string | null;
   operational_state: 'MAINTENANCE' | 'RUNNING' | 'IDLE';
   assigned_quantity: number;
+  assigned_lines: { part_number: string; quantity: number }[];
 }
 
 interface MachineLifecycleEventWire {
@@ -140,6 +153,10 @@ function toMachine(wire: MachineWire): Machine {
       : {}),
     stateChangedAt: wire.state_changed_at,
     assignedQuantity: wire.assigned_quantity,
+    assignedLines: wire.assigned_lines.map((line) => ({
+      partNumber: line.part_number,
+      quantity: line.quantity,
+    })),
     operationalState: OPERATIONAL_STATE[wire.operational_state],
     retiredOn: wire.retired_on ?? undefined,
     description: wire.description ?? undefined,

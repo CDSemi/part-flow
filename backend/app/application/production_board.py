@@ -93,8 +93,8 @@ from collections.abc import Iterable
 from typing import Final, Literal, NamedTuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, NotFoundError
@@ -102,6 +102,7 @@ from app.application.machines import areas_with_machines
 from app.application.projections import (
     EffectivePosition,
     effective_positions,
+    effective_totals_by_area,
     processing_state_of,
 )
 from app.application.work_orders import site_timezone
@@ -111,7 +112,6 @@ from app.infrastructure.models import (
     Department,
     Machine,
     Operation,
-    PartMovement,
     QuantityFlow,
 )
 
@@ -229,30 +229,6 @@ def resolve_department(session: Session, department_id: int | None) -> Departmen
 # ---------------------------------------------------------------------------
 # History-derived quantities
 # ---------------------------------------------------------------------------
-
-
-def effective_totals_by_area(
-    session: Session, movement_type: MovementType, area_ids: Iterable[int]
-) -> dict[tuple[str, int], int]:
-    """Σ quantity of the effective Movements of one type per (PN, Area)."""
-    wanted = list(area_ids)
-    if not wanted:
-        return {}
-    reversal = aliased(PartMovement)
-    rows = session.execute(
-        select(
-            PartMovement.part_number,
-            PartMovement.to_area_id,
-            func.sum(PartMovement.quantity),
-        )
-        .where(
-            PartMovement.movement_type == movement_type,
-            PartMovement.to_area_id.in_(wanted),
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
-        )
-        .group_by(PartMovement.part_number, PartMovement.to_area_id)
-    )
-    return {(str(pn), int(area_id)): int(total) for pn, area_id, total in rows}
 
 
 def _machine_id_of(position: EffectivePosition, state: LocationState) -> int | None:

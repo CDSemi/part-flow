@@ -64,6 +64,7 @@ beforeEach(() => {
         return json({
           area: { ...AREAS[0], description: null, is_terminal: false },
           demand_context: [],
+          scrapped: [],
           has_machines: false,
           lines: [],
           total_part_numbers: 0,
@@ -107,6 +108,7 @@ beforeEach(() => {
               inventory: {
                 area: { ...AREAS[0], description: null, is_terminal: false },
                 demand_context: [],
+                scrapped: [],
                 has_machines: false,
                 lines: [],
                 total_part_numbers: 0,

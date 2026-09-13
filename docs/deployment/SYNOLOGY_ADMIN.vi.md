@@ -1,404 +1,222 @@
-# PartFlow NAS Admin v2 — Hướng dẫn sử dụng
+# PartFlow NAS Admin v2.5
 
-> Bản dịch từ [SYNOLOGY_ADMIN.md](./SYNOLOGY_ADMIN.md); tiếng Anh là nguồn chuẩn của bộ công cụ.
-> Phiên bản **2.2.0**, ngày **2026-09-09**.
-> Repo đối chiếu: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
-> Phạm vi: stack **staging nội bộ trên Synology**, chưa phải production.
-> Bộ này không tự commit, push, xuất bản release hoặc tạo lịch DSM.
+> **Bản tiếng Anh là source of truth.** [English source](./SYNOLOGY_ADMIN.md).
+>
+> Version: **2.5.0**
+> Prepared: **2026-09-11**
+> Phạm vi: quản trị **Synology staging** trong LAN giới hạn. Đây chưa phải gói production hardening.
 
-## 1. Nên cập nhật theo commit hay release?
+## 1. Mục đích
 
-**Dùng cả hai, nhưng cho hai mục đích khác nhau.** Khi đang phát triển và thử nghiệm,
-chủ động update staging theo commit mới nhất. Khi chọn một bản để kiểm thử có tổ
-chức hoặc triển khai, tạo release. Không cần release cho từng commit nhỏ.
-Lịch tự động chỉ theo release đã xuất bản, không tự bám `main`.
+PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
+controller chạy với quyền cao. Nhờ vậy các DSM user được tin cậy có thể sửa repository
+mà không đồng thời được quyền sửa code thực thi bởi `sudo pf ...`.
 
-Tại lần kiểm tra repo, `v0.1.0-alpha.1` là **pre-release**, trỏ tới
-`d277f8e53a7ca79e0211c211a344dce60e8c7d7f`; nhánh `main` đã có commit mới hơn.
-GitHub không đưa pre-release vào endpoint `releases/latest`. Vì vậy, kênh chỉ lấy
-stable có thể báo chưa có release phù hợp; script không tự chuyển sang lấy `main`.
+Layout vận hành:
 
-| Kênh | Cách chọn |
-| --- | --- |
-| `stable` | Release mới nhất do GitHub xác định, không phải draft hoặc pre-release |
-| `prerelease` | Bản có thời điểm xuất bản mới nhất trong cả stable và pre-release, bỏ draft |
-
-Script luôn phân giải branch/tag thành **SHA đầy đủ**, rồi checkout SHA đó.
-Không lấy `target_commitish: main` trong thông tin release làm source cố định.
-Tag đã từng được script ghi nhận mà đổi sang SHA khác sẽ bị từ chối. Không tái sử dụng tag.
-
-## 2. Các file trong bộ này
-
-| File | Vai trò |
-| --- | --- |
-| `pf.sh` | Entry point ở root, tìm Python và chuyển tiếp lệnh Compose |
-| `compose.nas.yaml` | Compose riêng cho NAS, giữ ở repository root |
-| `deploy/synology/pf-admin.py` | Update, backup, rollback, reset và kiểm tra release |
-| `deploy/synology/backup.sh` | Lệnh backup thủ công hoặc chạy theo lịch |
-| `deploy/synology/release-check.sh` | Lệnh cho Task Scheduler; mặc định chỉ kiểm tra |
-| `deploy/synology/pf-config.example.json` | Cấu hình quản trị mẫu, không chứa mật khẩu |
-| `deploy/synology/nas.env.example` | Mẫu biến môi trường cho NAS |
-| `deploy/synology/tests/test_pf_admin.py` | Kiểm thử offline của controller |
-| `deploy/synology/TEST_REPORT.md` | Báo cáo kiểm chứng và giới hạn |
-| `deploy/synology/.gitignore` | Bỏ qua `pf-config.json` cục bộ và Python cache |
-| `docs/deployment/SYNOLOGY_ADMIN.md`, `SYNOLOGY_ADMIN.vi.md` | Tài liệu quản trị |
-
-Phần điều phối dùng thư viện chuẩn Python để xử lý JSON, file backup và trạng thái
-lỗi, thay vì parse JSON hoặc thực thi metadata bằng shell. Không cần cài gói pip.
-Root `pf.sh`, `compose.nas.yaml` và toàn bộ cây controller/configuration `deploy/synology/` **không tự bị thay thế** khi một lifecycle command đang chạy. Tài liệu trong repository và source ứng dụng bình thường đi theo revision được chọn.
-
-## 3. Điều kiện và cách nâng cấp từ bộ cũ
-
-Bộ này dành cho một stack staging **đã khởi tạo** theo hướng dẫn DSM trước đó.
-Database phải chạy PostgreSQL 16 và đã migrate. Project phải có đúng một container
-`db`, `backend`, `frontend`. Khi cài mới hoàn toàn, vẫn làm theo hướng dẫn triển khai
-NAS trước; chỉ dùng các lệnh quản trị vòng đời sau khi stack đã sẵn sàng.
-
-Trên NAS cần Git, Python **3.9 trở lên**, Docker và một Compose CLI hoạt động.
-Ưu tiên Python còn được bảo trì, được hỗ trợ cho đúng model/DSM. Không thay thế
-Python hệ thống của DSM. Python trên host chỉ chạy công cụ quản trị; Python/Node
-của ứng dụng vẫn ở trong container. Không cần jq hoặc thư viện Python ngoài.
-
-Kiểm tra bằng SSH:
-
-```sh
-python3 --version
-git --version
-sudo docker version
-sudo docker compose version
-# If Compose v2 is unavailable:
-sudo docker-compose version
+```text
+/volume1/docker/partflow/
+├── repo/                              # application working tree; users đọc/ghi/xóa
+├── control/                           # lifecycle control plane đã cài; root mới được sửa
+│   ├── pf.sh
+│   ├── pf-admin.py
+│   ├── compose.nas.yaml
+│   ├── backup.sh
+│   ├── release-check.sh
+│   ├── pf-config.example.json
+│   └── nas.env.example
+├── config/                            # host/runtime config; trusted users có thể sửa
+│   ├── .env
+│   └── pf-config.json
+├── backups/                           # revision checkpoint; users chỉ đọc/copy
+├── recovery/                          # purge/control-upgrade recovery; users chỉ đọc/copy
+└── .pf-state-<project>/               # lock/journal/image state; chỉ root
 ```
 
-`pf.sh` thử các tên Python phổ biến, đường dẫn Python package chính thức của Synology
-và các đường dẫn `python310`–`python314` thường gặp của SynoCommunity. Có thể chỉ
-định executable thực tế:
+Trong repository vẫn giữ source/reference của `pf.sh`, `compose.nas.yaml` và
+`deploy/synology/*` để version-control và review. Sau khi cài control plane, các bản trong
+repo **không phải** bản được chạy cho thao tác quản trị NAS thông thường.
+
+## 2. Quyền truy cập
+
+Mặc định dùng DSM group `users` cho quyền ghi repository/config và quyền đọc backup.
+Có thể đổi group trong `pf-config.json` nếu sau này muốn dùng một trusted group riêng.
+
+| Path | Mode điển hình | Quyền |
+| --- | --- | --- |
+| directory trong `repo/` | `2770` | owner + `workspace_write_group` đọc/ghi/xóa; setgid giữ group |
+| file thường trong `repo/` | `0660` | owner + `workspace_write_group` đọc/ghi |
+| file executable sẵn có trong `repo/` | `0770` | chỉ là source/working-tree executable, không phải privileged control plane |
+| directory `control/` | `0750` | root sửa; `users` được browse/read |
+| `control/pf.sh`, `backup.sh`, `release-check.sh` | `0740` | root thực thi/sửa; `users` chỉ đọc |
+| file khác trong `control/` | `0640` | root sửa; `users` chỉ đọc |
+| directory `config/` | `2770` | trusted `users` có thể tạo/sửa/xóa config |
+| `config/.env`, `config/pf-config.json` | `0660` | trusted `users` đọc/ghi |
+| directory `backups/`, `recovery/` | `0750` | group được cấu hình chỉ browse/copy, không sửa/xóa |
+| file backup/recovery | `0640` | group được cấu hình đọc/copy, không ghi |
+| `.pf-state-*` | `0700` | chỉ root |
+
+DSM Shared Folder ACL vẫn có hiệu lực. Muốn sửa `repo/` qua SMB thì DSM account/group đó
+cũng phải có **Read/Write** trên shared folder chứa PartFlow. POSIX permission không thể
+vượt qua một DSM ACL đang deny.
+
+Có thể chuẩn hóa lại permission bất cứ lúc nào:
 
 ```sh
-sudo env PF_PYTHON=/absolute/path/to/python3 sh ./pf.sh doctor
+sudo pf permissions
 ```
 
-Thay đường dẫn mẫu bằng executable đã kiểm tra. Nếu cần, đặt cùng `PF_PYTHON` trong
-script Task Scheduler. Không cài ép package không hỗ trợ NAS chỉ để bỏ qua lỗi.
+### Hệ quả của trust policy
 
-### Nâng cấp mà không reset dữ liệu
+Việc cho `users` ghi `repo/` và `config/` là chủ ý theo mô hình sử dụng này. Trusted user
+có thể thay đổi source application và runtime setting, kể cả PostgreSQL password trong
+`config/.env`. Backup/recovery cũng có dữ liệu application; purge recovery còn giữ bản sao
+`.env`. Chỉ cấp SMB access cho những người được phép xem và sửa các thông tin này.
 
-**Giữ nguyên `.env`, Compose đang dùng, source, project name và Docker volume.**
-Sao lưu script cũ trước:
+## 3. Kéo `.env` ra ngoài repo có ảnh hưởng application không?
+
+**Không**, miễn là PartFlow chạy qua installed controller.
+
+Application không quan tâm file `.env` nằm ở directory nào trên NAS. Controller truyền
+file bên ngoài cho Docker Compose một cách explicit:
+
+```text
+--env-file /volume1/docker/partflow/config/.env
+```
+
+Đồng thời controller truyền đúng repository dùng làm build context:
+
+```text
+PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo
+```
+
+Installed `control/compose.nas.yaml` sử dụng path đó:
+
+```yaml
+backend:
+  build:
+    context: "${PARTFLOW_REPO_ROOT}/backend"
+
+frontend:
+  build:
+    context: "${PARTFLOW_REPO_ROOT}/frontend"
+```
+
+Các environment value bên trong container vẫn giống trước đây. Chỉ thay đổi **vị trí lưu
+file trên host**.
+
+Cách tách này còn tránh add nhầm `.env` vào Git và cho phép thay sạch toàn bộ `repo/` khi
+update mà không đụng runtime credential.
+
+Quy tắc vận hành từ v2.5 là:
 
 ```sh
-cd /volume1/docker/partflow
-saved="backups/admin-tools-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$saved"
-chmod 700 "$saved"
-for path in repo/pf.sh repo/compose.nas.yaml repo/deploy/synology; do
-    if [ -e "$path" ]; then
-        cp -Rp "$path" "$saved/"
-    fi
-done
+sudo pf ...
 ```
 
-Giải nén/upload gói này **vào repository root và giữ nguyên directory structure**. Không
-flatten toàn bộ file vào root. Kết quả phải có dạng:
+Không giả định `docker compose` chạy trực tiếp trong `repo/` sẽ tự tìm được external `.env`
+hay installed Compose file. Xem §14 nếu thật sự cần raw Compose.
+
+## 4. Source files và installed control files
+
+Repository giữ các source được version-control:
 
 ```text
 repo/
 ├── pf.sh
 ├── compose.nas.yaml
-├── deploy/
-│   └── synology/
-│       ├── pf-admin.py
-│       ├── backup.sh
-│       ├── release-check.sh
-│       ├── pf-config.example.json
-│       ├── nas.env.example
-│       ├── TEST_REPORT.md
-│       ├── .gitignore
-│       └── tests/
-│           └── test_pf_admin.py
-└── docs/
-    └── deployment/
-        ├── SYNOLOGY_ADMIN.md
-        └── SYNOLOGY_ADMIN.vi.md
+└── deploy/synology/
+    ├── install-control.sh
+    ├── pf-admin.py
+    ├── backup.sh
+    ├── release-check.sh
+    ├── pf-config.example.json
+    ├── nas.env.example
+    ├── TEST_REPORT.md
+    └── tests/
 ```
 
-Giữ nguyên `.env` ở root. Không ghi đè `compose.nas.yaml` đã chỉnh riêng cho NAS nếu
-chưa review khác biệt với bản tham chiếu. Các test thuộc controller, không phải integration
-test nghiệp vụ của app; nên chạy trên workstation hoặc bản sao kiểm thử riêng.
+`install-control.sh` copy các lifecycle source đã review sang `control/`, đổi chúng thành
+root-owned và chỉ-read đối với `users`, rồi cài launcher rất nhỏ:
 
-Nếu NAS đã dùng Admin v2 cũ, chuyển runtime config sang vị trí mới rồi xóa các bản
-trùng ở root:
+```text
+/usr/local/bin/pf
+```
+
+Sau khi cài, `pf.sh` trong repository cố ý từ chối chạy operational command. Dùng:
+
+```sh
+sudo pf status
+```
+
+không dùng:
+
+```sh
+sudo sh ./pf.sh status
+```
+
+Application update **không** âm thầm update privileged control plane. Khi revision mới có
+thay đổi `pf-admin.py`, `compose.nas.yaml` hay lifecycle source khác, hãy review rồi cài lại
+control plane một cách explicit.
+
+## 5. Cài mới control plane hoặc migrate từ Admin v2.4.x
+
+Từ repository root:
 
 ```sh
 cd /volume1/docker/partflow/repo
-if [ -f pf-config.json ] && [ ! -f deploy/synology/pf-config.json ]; then
-  cp -p pf-config.json deploy/synology/pf-config.json
-fi
-test -f deploy/synology/pf-config.json || \
-  cp deploy/synology/pf-config.example.json deploy/synology/pf-config.json
-chmod 600 .env deploy/synology/pf-config.json
-
-rm -f pf-admin.py backup.sh release-check.sh pf-config.json \
-  pf-config.example.json nas.env.example PF_ADMIN_GUIDE.md \
-  PF_ADMIN_GUIDE.vi.md TEST_REPORT.md
-rm -rf pf-admin-tests
-
-sudo sh ./pf.sh doctor
-sudo sh ./pf.sh status
-sudo sh ./pf.sh backup
 ```
 
-`pf-config.example.json` mặc định cho phép group DSM `administrators` đọc backup qua
-SMB:
+Vì `repo/` cho users quyền ghi, trước khi chạy installer bằng root cần bảo đảm source revision
+là bản bạn tin cậy. Tối thiểu hãy xem Git status và các thay đổi trong deployment/control.
+
+Chạy:
+
+```sh
+sudo sh ./deploy/synology/install-control.sh
+```
+
+Installer hiển thị target path và yêu cầu nhập chính xác:
 
 ```text
-"backup_read_group": "administrators"
+INSTALL CONTROL
 ```
 
-Nếu NAS dùng một group quản trị riêng, đổi giá trị này trong
-`deploy/synology/pf-config.json` trước khi chạy `doctor`. Group phải tồn tại trên
-DSM. Không đặt group chung như `users` chỉ để tránh lỗi permission.
+Installer migrate an toàn như sau:
 
-Controller cố ý từ chối layout Admin v2 cũ ở root để tránh vô tình dùng nhầm script hoặc
-config trùng. `deploy/synology/pf-config.json` là cấu hình riêng của deployment và đã
-được nested `.gitignore` bỏ qua. `DEPLOYED_SOURCE.txt` cũng là runtime deployment state;
-hãy thêm nó vào `.gitignore` ở repository root trước khi commit structure này.
+1. Tạo `/volume1/docker/partflow/config/`.
+2. Chuyển `repo/.env` cũ sang `config/.env` nếu có.
+3. Chuyển/copy `deploy/synology/pf-config.json` cũ sang `config/pf-config.json`.
+4. Nếu bản cũ và bản mới của `.env` hoặc `pf-config.json` cùng tồn tại nhưng khác nhau, installer dừng để bạn reconcile; không âm thầm chọn một bản.
+5. Nếu đã có `control/`, archive nó vào `recovery/control-upgrades/` trước khi thay.
+6. Cài bản `control/` root-owned mới.
+7. Cài `/usr/local/bin/pf` nếu path đó chưa bị phần mềm khác sử dụng.
+8. Chạy `pf permissions` để chuẩn hóa quyền repo/config/backup/recovery.
 
-Giữ `project` là `partflow-staging` khi nâng cấp từ bộ cũ. Đổi tên này có thể chọn
-một deployment/volume khác. Bản source tải ZIP phải có `DEPLOYED_SOURCE.txt` chứa
-SHA thực tế đủ 40 ký tự. Với Git checkout, giá trị này phải khớp Git HEAD.
+Installer không xóa container, volume, database, revision backup hay application source.
+Đây không phải redeploy và cũng không reset database.
 
-Các thư mục trạng thái và backup được tạo **ngoài source có thể bị thay thế**:
-
-```text
-partflow/
-  repo/                                    application checkout + local controls
-  .pf-state-partflow-staging/               lock, journal, selected images
-  backups/
-    revisions/
-      partflow-staging/
-        <backup-id>/
-          source.tar.gz
-          database.dump
-          database.list
-          manifest.json
-          manifest.sha256
-```
-
-`.pf-state-partflow-staging/` vẫn giữ quyền `0700` và không được chia sẻ qua SMB.
-Ngược lại, controller tự đặt ownership group cho cây checkpoint của project theo
-`backup_read_group` với policy:
-
-```text
-Directory: 0750
-File:      0640
-```
-
-Do đó tài khoản thuộc group `administrators` có thể duyệt và copy checkpoint qua
-SMB nhưng không có quyền ghi/xóa bằng POSIX permission. Khi khởi động controller,
-Admin v2.2 cũng tự sửa quyền của các checkpoint v2.x cũ trong
-`backups/revisions/<project>/`, nên không cần chạy `chmod` thủ công cho từng backup.
-Source archive có chứa `.env`; chỉ cấp `backup_read_group` cho nhóm quản trị thực sự
-được phép đọc secret và database backup.
-
-## 4. Bảng lệnh
-
-Chạy từ `repo/`, thống nhất cùng tài khoản/quyền quản trị.
-
-| Lệnh | Tác dụng |
-| --- | --- |
-| `sudo sh ./pf.sh doctor` | Kiểm tra công cụ, Compose và dung lượng tối thiểu trên volume source |
-| `sudo sh ./pf.sh status` | Source, container, revision database và thao tác dang dở |
-| `sudo sh ./pf.sh update --latest` | Update thủ công theo commit mới nhất của nhánh cấu hình |
-| `sudo sh ./pf.sh update --commit FULL_SHA` | Update thủ công tới commit cụ thể |
-| `sudo sh ./pf.sh update --release TAG` | Update thủ công tới release đã xuất bản |
-| `sudo sh ./pf.sh update --release latest --channel prerelease` | Chọn bản xuất bản mới nhất phù hợp cho staging |
-| `sudo sh ./pf.sh backups --page 1` | Danh sách backup mới nhất trước, 10 bản/trang |
-| `sudo sh ./pf.sh rollback` | Mở menu chọn backup có phân trang |
-| `sudo sh ./pf.sh rollback BACKUP_ID` | Chọn trực tiếp backup; chỉ rollback code, giữ dữ liệu hiện tại |
-| `sudo sh ./pf.sh rollback BACKUP_ID --restore-db` | Khôi phục code và database của backup đã chọn |
-| `sudo sh ./pf.sh reset-db` | Chuyển instance sang database sạch, đã migrate |
-| `sudo sh ./pf.sh backup` | Backup đầy đủ và thử restore, không dừng ứng dụng |
-| `sudo sh ./pf.sh release-check` | Chỉ kiểm tra release, không cập nhật app/database |
-| `sudo sh ./pf.sh release-check --apply` | Chỉ tự update khi cấu hình cho phép và vượt qua các chốt kiểm tra |
-| `sudo sh ./pf.sh resume` | Chạy lại bản chưa thay đổi sau lỗi xảy ra sớm |
-
-Thay `FULL_SHA`, `TAG`, `BACKUP_ID` bằng giá trị thật. `update` không có lựa chọn
-sẽ dùng kênh release, không mặc định bám nhánh. Các lệnh Compose cũ như `ps`, `logs`,
-`exec`, `build`, `up`, `stop` vẫn dùng được. Project và file Compose được giữ cố định.
-Các tùy chọn xóa volume của `down`/`rm` bị chặn. Người có quyền Docker trực tiếp
-vẫn có thể vượt qua công cụ này; đây không phải lớp phân quyền bảo mật.
-
-## 5. Update thủ công
-
-Đối với thay đổi nhỏ khi đang phát triển:
+Kiểm tra sau khi cài:
 
 ```sh
-sudo sh ./pf.sh update --latest
+sudo pf doctor
+sudo pf status
 ```
 
-Script chốt SHA, kiểm tra lần chạy `ci.yml` dạng push mới nhất cho đúng SHA, clone
-checkout mới và build image có tag riêng mà chưa thay image đang chạy. Sau đó yêu
-cầu nhập:
-
-```text
-UPDATE <12-character-target-SHA>
-```
-
-Sau xác nhận, script dừng frontend/backend, backup source/database cũ, thử restore
-đầy đủ vào database tạm, chạy migration đã được cho phép nếu có, thay source ứng
-dụng và chạy các image đã chọn. Backend và revision database được kiểm tra trước
-khi mở frontend. Cuối cùng kiểm tra `/api/health` qua frontend.
-
-`.env`, `compose.nas.yaml`, root `pf.sh` và toàn bộ cây controller/configuration `deploy/synology/` được giữ nguyên. Tài liệu trong `docs/` đi theo source revision được chọn. Các sửa application source khác được backup, không tự merge vào checkout mới.
-Việc thay source **không phải atomic directory swap**: nó được làm khi app đã dừng,
-có journal để nhận diện lỗi dang dở. Không sửa/upload source hoặc chạy Docker trực
-tiếp đồng thời với thao tác quản trị.
-
-Một bản cài từ ZIP có thể được chuyển thành Git checkout do công cụ quản lý bằng
-update thủ công, kể cả khi SHA được chọn vẫn như cũ. Auto-update yêu cầu checkout
-này và source ứng dụng không có sửa đổi cục bộ chưa được quản lý.
-
-### Khi có migration
-
-Đọc thay đổi và phương án phục hồi trước, rồi cho phép rõ ràng:
+Nếu `/usr/local/bin/pf` không thể cài vì đã có file không thuộc PartFlow, dùng trực tiếp:
 
 ```sh
-sudo sh ./pf.sh update --latest --allow-migrations
-# Or select the exact release:
-sudo sh ./pf.sh update --release TAG --allow-migrations
+sudo /volume1/docker/partflow/control/pf.sh status
 ```
 
-Migration được chạy thử trên bản database đã restore riêng trước. Chỉ khi chạy
-thử đạt mới migrate database đang sử dụng. Nếu một migration cũ bị sửa/xóa, script
-vẫn từ chối dù có cờ này. Nhiều Alembic head hoặc schema hiện tại không nhất quán
-cần được xử lý thủ công.
+## 6. Configuration files
 
-`--skip-ci` là ngoại lệ **thủ công dành cho staging**, không có nghĩa CI đã đạt.
-Lịch tự động không dùng ngoại lệ này. Không lệnh nào tự chạy `alembic downgrade`.
+### `config/pf-config.json`
 
-## 6. Backup và rollback
+Đây là NAS-local administration config thực sự được dùng. Nếu chưa có, controller tạo từ
+root-owned `control/pf-config.example.json`.
 
-Mỗi update/reset/rollback có một checkpoint trước khi thay source hoặc dữ liệu
-đang dùng. Checkpoint gồm source thực tế, PostgreSQL custom dump, Alembic revision,
-PostgreSQL major version, SHA source, checksum và tham chiếu/ID image được giữ cục bộ.
-Script thực sự yêu cầu `pg_restore --exit-on-error` vào database tạm và đối chiếu
-Alembic revision. Đây không chỉ là đọc danh sách archive, nhưng **chưa phải kiểm thử
-ứng dụng hoặc reconciliation số lượng đầy đủ**.
-
-Archive source bỏ `.git`, môi trường ảo, thư mục dependency và cache.
-Nó **có chứa `.env` và file quản trị cục bộ**: bảo vệ cả checkpoint như dữ liệu bí mật.
-Metadata là JSON, không được thực thi như shell. Checksum phát hiện hỏng dữ liệu;
-không phải chữ ký chống người có thể sửa cả dữ liệu và checksum.
-
-### Chọn bản cần rollback
-
-```sh
-sudo sh ./pf.sh rollback
-```
-
-Danh sách mới nhất trước, 10 bản/trang. Dùng `n`, `p`, `q` hoặc số được hiển thị.
-Chọn trực tiếp sẽ bỏ qua menu, nhưng không bỏ bước xác nhận:
-
-```sh
-sudo sh ./pf.sh rollback BACKUP_ID
-```
-
-Có thể dùng SHA đầy đủ nếu chỉ có đúng một checkpoint khớp. Nếu nhiều backup cùng
-SHA, phải chọn backup ID. Backup chưa hoàn chỉnh hoặc source chưa xác minh không
-được dùng làm đích rollback code. Các file dump từ script cũ vẫn giữ nguyên, nhưng
-không xuất hiện như backup revision vì chúng không có source đi kèm.
-
-### Mặc định: chỉ rollback code
-
-Dữ liệu hiện tại được giữ. Fingerprint các file migration hiện hành và revision
-Alembic trong database phải khớp checkpoint. Checksum và image được kiểm tra trước.
-Câu xác nhận là `ROLLBACK BACKUP_ID`.
-
-Đây là chốt tương thích cấu trúc **thận trọng, không phải chứng minh tương thích
-nghiệp vụ**. Cùng Alembic head chưa bảo đảm code cũ hiểu được mọi dữ liệu mà code mới
-đã tạo. Cần đọc những thay đổi về ý nghĩa dữ liệu trước khi xác nhận.
-
-### Khôi phục cả code và database: phải chọn rõ
-
-```sh
-sudo sh ./pf.sh rollback BACKUP_ID --restore-db
-```
-
-Câu xác nhận:
-
-```text
-RESTORE <current-database-name> <backup-id>
-```
-
-Script backup trạng thái hiện tại thêm một lần, restore dump được chọn vào database
-mới và kiểm tra. Sau đó đổi tên database cũ và database đã chuẩn bị trong một
-transaction trên database quản trị PostgreSQL. Bản đang dùng trước đó được giữ dưới
-tên `pf_keep_<timestamp>_<suffix>`, không nhận kết nối mới. App chạy image tương ứng
-với database đã khôi phục.
-
-**Dữ liệu ghi sau thời điểm backup được chọn sẽ không còn trong app đang hoạt động.**
-Nó vẫn ở checkpoint an toàn vừa tạo và database được giữ lại; không tự được merge
-vào lịch sử đã restore. Không sửa trực tiếp Movement history để trộn dữ liệu.
-Giữ bản cũ là bảo vệ dữ liệu, không phải cơ chế reconciliation tự động.
-
-Nếu image cũ bị xóa/prune, rollback dừng thay vì tự build một image có thể khác từ
-base tag đã thay đổi. Archive source không chứa image layers. Chỉ checkpoint này
-**chưa đủ** cho disaster recovery ngoài NAS. Cần bảo toàn/export các image riêng
-trước khi dựa vào khả năng khôi phục trên host khác. Bộ này không tự publish registry
-hoặc export image.
-
-## 7. Reset dữ liệu staging
-
-```sh
-sudo sh ./pf.sh reset-db
-```
-
-Phải gõ đúng tên database đang dùng, ví dụ:
-
-```text
-RESET partflow_staging
-```
-
-Không có `--yes` để bỏ qua. Reset và rollback yêu cầu terminal tương tác; không
-đặt chúng trong Task Scheduler.
-
-Reset **không xóa Docker volume** và không chạy DELETE/TRUNCATE tùy tiện. Nó dừng
-app, tạo và thử restore backup, tạo database mới rỗng, chạy migrations từ image
-hiện hành, rồi đổi tên database trong một transaction. Database trước đó vẫn được
-giữ, khóa kết nối mới. Tên database trong cấu hình và URL ứng dụng không đổi.
-
-Toàn bộ dữ liệu người dùng tạo, kể cả master data/cấu hình môi trường, biến mất khỏi
-instance đang dùng. Các giá trị mặc định do migration tạo vẫn có thể tồn tại.
-Cần cấu hình lại Departments, Areas, Operations, Machines và Scan Stations.
-Nếu còn kết nối database từ IDE hoặc phiên khác, script từ chối đổi database chứ
-không tự giết các phiên đó.
-
-**Khi go-live, nên tạo môi trường/database production riêng và thiết lập master data
-sạch.** Xóa dữ liệu thử không tạo ra authentication, server production, secret
-handling, monitoring, backup retention hay phê duyệt production. Các lệnh thay đổi
-vòng đời của bộ này chủ động từ chối `environment` khác `staging`.
-Không đổi nhãn database production thật thành staging để vượt qua chốt này.
-
-## 8. Kiểm tra hoặc cập nhật release định kỳ
-
-Bắt đầu bằng chế độ chỉ kiểm tra. Trong DSM:
-
-**Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**
-
-Chọn tài khoản quản trị/root có quyền Docker. Anh tự đặt lịch trong DSM; bộ này
-không tự tạo task.
-
-Kiểm tra các pre-release dùng cho staging:
-
-```sh
-sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --channel prerelease
-```
-
-Khi repo chỉ có `v0.1.0-alpha.1`, kênh mặc định `stable` chưa có bản phù hợp là bình
-thường. Script không tự dùng `main` để bù vào.
-
-Để cho phép tự update staging, sửa `deploy/synology/pf-config.json`:
+Default:
 
 ```json
 {
@@ -406,130 +224,571 @@ thường. Script không tự dùng `main` để bù vào.
   "branch": "main",
   "project": "partflow-staging",
   "environment": "staging",
-  "release_channel": "prerelease",
-  "auto_update": true,
+  "release_channel": "stable",
+  "auto_update": false,
   "ci_workflow": "ci.yml",
   "health_timeout_seconds": 180,
-  "minimum_free_mb": 2048
+  "minimum_free_mb": 2048,
+  "backup_read_group": "users",
+  "workspace_write_group": "users"
 }
 ```
 
-Sau đó đặt lệnh sau **trong khung giờ bảo trì đã chấp thuận**, chẳng hạn một khung
-ban đêm dành cho staging, không phải lúc đang nhập dữ liệu thử:
+Trusted users có thể sửa file này qua SMB. Controller validate key được hỗ trợ, project name,
+boolean, numeric value và DSM group trước khi sử dụng.
 
-```sh
-sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --apply
+### `config/.env`
+
+Khi brand-new deploy, `deploy` tạo file này bằng wizard từ installed template
+`control/nas.env.example`. Script tự sinh `POSTGRES_PASSWORD` 64 ký tự hex bằng secure
+randomness và không in password ra terminal.
+
+Ví dụ:
+
+```dotenv
+POSTGRES_USER=partflow_staging
+POSTGRES_PASSWORD=<generated secret>
+POSTGRES_DB=partflow_staging
+SITE_TIMEZONE=America/Los_Angeles
+PARTFLOW_BIND_IP=192.168.0.11
+PARTFLOW_HTTP_PORT=5173
+PARTFLOW_ALLOWED_HOST=localhost
 ```
 
-Cần cả cờ `--apply` và cấu hình bật tự động. Auto-update đòi hỏi release đã xuất bản,
-CI đạt cho đúng SHA, Git checkout sạch do công cụ quản lý, commit mới nằm tiếp theo
-trong lịch sử hiện hành — không tự downgrade/nhảy nhánh — cùng migration files và
-schema head, đồng thời không thay đổi các file triển khai/cấu hình trong
-`AUTO_REVIEW_PATHS` của controller. Image đích phải build và vượt qua health check.
-Release cần migration sẽ dừng ở yêu cầu update thủ công.
+Sau khi PostgreSQL đã initialize, sửa `POSTGRES_USER`, `POSTGRES_PASSWORD` hay `POSTGRES_DB`
+trong file **không đồng nghĩa** credential/database thật bên trong PostgreSQL cũng tự đổi.
+Đừng tùy tiện sửa các field này trên live instance; cần managed deployment/recovery hoặc
+một credential/database migration có kế hoạch.
 
-Script khóa để các thao tác quản trị không chạy chồng. Thao tác bị gián đoạn để lại
-journal chặn những lần auto-update sau. Script không tự restore database cũ khi
-health check thất bại vì có thể làm biến mất dữ liệu mới trên app. Những chốt này
-không hứa hẹn zero downtime hoặc bảo đảm hoàn toàn tính đúng đắn nghiệp vụ.
+## 7. New deployment
 
-| Exit code | Ý nghĩa |
-| --- | --- |
-| `0` | Hoàn tất, kết quả chỉ kiểm tra, không có SHA mới hoặc chưa có release phù hợp |
-| `1` | Lỗi, thao tác bị từ chối, tự động chưa bật hoặc có thao tác dang dở |
-| `2` | Lỗi tham số hoặc điều kiện runtime |
-| `20` | Hoãn update: CI chưa đạt, thay migration/cấu hình, lịch sử source không phù hợp... |
-
-Bật thông báo kết quả/lỗi task trong DSM và đọc stdout/stderr. Bản cần xem xét thủ
-công trả mã khác 0 để không bị hiểu nhầm là đã triển khai. Repo public hiện tại
-không cần token cho các lần đọc thông thường. `GITHUB_TOKEN` tùy chọn được đọc từ
-process environment để xử lý giới hạn API; không đưa token vào URL, file được commit
-hoặc log. Token này không tự cấu hình xác thực Git clone nếu repo sau này thành private.
-
-## 9. Backup định kỳ
-
-`deploy/synology/backup.sh` mới tạo checkpoint revision, không còn dùng cấu trúc bốn file dump cũ:
+Brand-new staging thường dùng:
 
 ```sh
-sh /volume1/docker/partflow/repo/deploy/synology/backup.sh
+sudo pf deploy --latest
 ```
 
-Đặt lịch riêng, tránh trùng update. Backup độc lập không dừng app; PostgreSQL cung
-cấp snapshot nhất quán cho logical dump. Bước thử restore tạo rồi xóa database tạm.
-Cần đủ chỗ cho dump, source archive, database thử restore, image mới, và database
-được giữ lại sau reset/restore.
+Các source selector khác:
 
-Checkpoint hoàn tất được tự xuất bản với group đọc cấu hình trong
-`backup_read_group`: directory `0750`, file `0640`. Có thể mở qua SMB, ví dụ:
+```sh
+sudo pf deploy                         # current clean Git checkout
+sudo pf deploy --commit FULL_SHA
+sudo pf deploy --release TAG
+sudo pf deploy --release latest --channel prerelease
+```
+
+Flow new deploy:
+
+1. Xác nhận Compose project chưa có managed deployment record/container/volume.
+2. Tạo hoặc reuse `config/.env`.
+3. Chỉ hỏi những field deployment-specific không thể suy luận an toàn.
+4. Resolve source thành exact commit SHA.
+5. Verify CI, trừ khi explicit dùng `--skip-ci` cho manual staging.
+6. Build backend/frontend candidate trước khi tạo database.
+7. Yêu cầu `DEPLOY <SHA12>`.
+8. Start PostgreSQL và xác nhận DB còn mới/uninitialized.
+9. Chạy `alembic upgrade head`.
+10. Start backend, check health/schema.
+11. Start frontend, check `/api/health` qua frontend proxy.
+12. Ghi deployed revision vào external `.pf-state-<project>/deployed.json`.
+
+Sau khi smoke test UI/workflow/firewall:
+
+```sh
+sudo pf backup
+```
+
+Nếu first deploy fail trước khi frontend có thể mở cho client:
+
+```sh
+sudo pf abort-deploy
+```
+
+Command có confirmation, chỉ xóa resource của incomplete first deployment và giữ repo cùng
+`config/.env` để có thể retry.
+
+## 8. Repository được sửa tự do và deployed revision
+
+Từ v2.5, `repo/` là working tree chứ không phải bằng chứng duy nhất về code đang chạy.
+Running application sử dụng image đã build/pin từ trước; sửa source qua SMB **không** làm
+application đang chạy đổi ngay.
+
+Kiểm tra:
+
+```sh
+sudo pf status
+```
+
+Nó hiển thị:
 
 ```text
-\\NAS\docker\partflow\backups\revisions\partflow-staging
+Deployed source: <SHA>
+Workspace HEAD: <SHA hoặc non-git>
+Workspace differs from deployed: True/False
+Workspace changes: ...
 ```
 
-Nếu Windows vẫn báo `Access denied`, chạy:
+Manual update khi thấy workspace dirty/khác deployed revision sẽ đưa working tree hiện tại
+vào pre-update checkpoint dưới dạng `workspace.tar.gz`, rồi mới thay `repo/` bằng revision
+được chọn. Unattended release update sẽ **refuse** workspace đang drift thay vì tự xóa local work.
+
+`deploy --current` cũng chỉ nhận clean Git checkout để deployed identity luôn là exact commit.
+
+## 9. Manual update
+
+Staging thường dùng:
 
 ```sh
-sudo sh ./pf.sh doctor
-id YOUR_DSM_USER
+sudo pf update --latest
 ```
 
-và xác nhận user nằm trong group được `backup_read_group` chỉ định, đồng thời shared
-folder `docker` cho group đó quyền đọc. Không sửa thành `0777` hoặc `0666`.
-
-Chép cả thư mục checkpoint sang nơi được mã hóa **ngoài NAS**. Tự cấu hình retention
-và cảnh báo riêng. Bộ này không âm thầm xóa checkpoint cũ, image được giữ, database
-`pf_keep_*` hoặc database thử thất bại. Chúng dùng dung lượng cho đến khi quản trị
-viên xác minh và dọn theo phương án phục hồi.
-`minimum_free_mb` chỉ là ngưỡng sàn trên filesystem source/backup, không chứng minh
-đủ dung lượng cho Docker database volume có thể nằm ở nơi khác.
-
-## 10. Xử lý khi thao tác thất bại
+Hoặc:
 
 ```sh
-sudo sh ./pf.sh status
-sudo sh ./pf.sh logs --tail=150 backend frontend db
+sudo pf update --commit FULL_SHA
+sudo pf update --release TAG
+sudo pf update --release latest --channel prerelease
 ```
 
-Đọc phase và checkpoint ID. Nếu chưa thay source/database đang dùng — phase `paused`
-hoặc `backup-ready` — sửa lỗi rồi chạy `resume`. Lệnh này kiểm tra lại schema/image
-và yêu cầu `RESUME <database-name>`.
+Update resolve exact SHA, check CI, clone candidate riêng, build image riêng, kiểm migration
+contract, yêu cầu confirmation, stop application write, tạo verified pre-update checkpoint,
+rehearse migration được cho phép, thay writable repository rồi activate image mới.
 
-Nếu update chỉ đổi app và không có migration, có thể rollback code sau lỗi khi chốt
-schema vẫn đạt. Nếu đã migrate/reset/restore hoặc không chắc dữ liệu/source đã đổi
-thế nào, dùng checkpoint trước đó với `rollback BACKUP_ID --restore-db` sau khi xác
-định ranh giới mất dữ liệu trên app. Trong phục hồi, script có thể tạo một checkpoint
-khẩn cấp chỉ bảo toàn dữ liệu; checkpoint đó không được coi là source rollback đã xác minh.
+Nếu migration thay đổi:
 
-Các container chạy tác vụ một lần có label quản trị. Khi bắt được lỗi, controller
-cố dừng các tác vụ của nó cùng frontend/backend. Mất điện hoặc hard kill không thể
-chạy cleanup: sau khi NAS khởi động lại phải xem journal, container và database
-trước khi cho người dùng truy cập. Không xóa `pending.json` hay dùng DSM UI để bật
-frontend chỉ nhằm bỏ qua cảnh báo. Thao tác Docker/DSM trực tiếp nằm ngoài lock/chốt
-của script.
+```sh
+sudo pf update --latest --allow-migrations
+```
 
-Không chạy `docker system prune -a`, xóa volume hoặc prune image đang dùng làm
-phương án rollback. Disaster recovery toàn host và reconciliation nghiệp vụ tự động
-chưa thuộc phạm vi công cụ staging này.
+Historical migration đã tồn tại mà bị sửa/xóa vẫn bị refuse. Tool không tự chạy
+`alembic downgrade`.
 
-## 11. Giới hạn kiểm chứng và lần thử đầu trên NAS
+`--skip-ci` chỉ là manual staging exception, không được coi là CI pass.
 
-Xem `deploy/synology/TEST_REPORT.md`. Bộ đã được kiểm tra bằng thao tác filesystem/archive thực,
-Git clone/checkout cục bộ thực, kiểm tra cú pháp shell và các workflow mô phỏng offline.
-Docker, SQL thực trên PostgreSQL 16 và Synology **chưa được chạy** trong môi trường
-kiểm thử này. Code sandbox không phân giải được github.com nên chưa chạy clone online
-thật ở đây; việc đọc repo được thực hiện qua GitHub connector. NAS cần DNS và HTTPS
-riêng hoạt động để clone/update.
+## 10. Backup và rollback
 
-Trước khi bật `--apply`, dùng dữ liệu staging bỏ được để thử: backup, một vòng update/
-rollback code, reset rồi restore, nhập sai câu xác nhận và tình huống dịch vụ lỗi.
-Đối chiếu số lượng/lịch sử trên UI và kiểm tra backup ngoài NAS. Không chạy bộ integration
-test của ứng dụng trên database đang cần giữ dữ liệu.
+Tạo verified revision checkpoint:
 
-## 12. Nguồn đối chiếu
+```sh
+sudo pf backup
+```
 
-- [Deployment và Release policy của PartFlow tại commit đã kiểm tra](https://github.com/CDSemi/part-flow/blob/8d358eea0582b2e910df60569ad9865fd78f9d98/docs/DEPLOYMENT.md)
-- [CI workflow của PartFlow](https://github.com/CDSemi/part-flow/blob/8d358eea0582b2e910df60569ad9865fd78f9d98/.github/workflows/ci.yml)
-- [GitHub REST releases](https://docs.github.com/en/rest/releases/releases)
-- [GitHub REST workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)
-- [PostgreSQL 16 ALTER DATABASE](https://www.postgresql.org/docs/16/sql-alterdatabase.html)
-- [Mã nguồn đổi tên database của PostgreSQL 16](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/commands/dbcommands.c)
+Checkpoint v2.5 gồm:
+
+```text
+source.tar.gz          exact deployed source revision
+workspace.tar.gz       chỉ có khi writable repo khác deployed source
+database.dump          active PostgreSQL database
+database.list
+manifest.json
+manifest.sha256
+```
+
+Active DB dump được restore thử vào temporary DB để verify. Normal revision `source.tar.gz`
+không còn chứa runtime `.env`; file đó nằm ngoài repo. Full purge-recovery bundle sẽ lưu
+`.env` riêng.
+
+Danh sách backup, mới nhất trước, 10 bản/trang:
+
+```sh
+sudo pf backups --page 1
+```
+
+Interactive rollback:
+
+```sh
+sudo pf rollback
+```
+
+Code-only rollback, giữ data hiện tại và yêu cầu schema compatibility:
+
+```sh
+sudo pf rollback BACKUP_ID
+```
+
+Rollback app + database:
+
+```sh
+sudo pf rollback BACKUP_ID --restore-db
+```
+
+Database form có confirmation mạnh hơn, restore dump cũ vào DB mới rồi giữ active DB trước đó
+với tên `pf_keep_*`, không âm thầm xóa newer writes.
+
+## 11. Reset staging data
+
+Muốn giữ application/version hiện tại nhưng dùng database sạch:
+
+```sh
+sudo pf reset-db
+```
+
+Confirmation dùng tên DB thật:
+
+```text
+RESET partflow_staging
+```
+
+`reset-db` tạo và verify checkpoint trước, tạo DB mới tới current Alembic head, switch DB
+transactionally và giữ lại DB cũ. Nó không xóa PostgreSQL Docker volume.
+
+Dùng `reset-db` khi chỉ muốn clear test data. Dùng `purge` khi muốn đưa instance thật sự
+về trạng thái có thể new deploy lại từ đầu.
+
+## 12. Full purge, recovery và clean redeploy
+
+### Liệt kê/chọn instance
+
+```sh
+sudo pf instances
+```
+
+Nếu có nhiều managed PartFlow Compose project, `purge` cho menu phân trang 10 item/trang,
+trừ khi chọn thẳng project:
+
+```sh
+sudo pf purge
+sudo pf purge --project partflow-staging
+```
+
+### Chuỗi an toàn trước khi purge
+
+Tool in summary gồm project, repo, source revision, database, container, volume, network,
+image tag, checkpoint, state và environment. Sau đó yêu cầu nhiều confirmation.
+
+Đầu tiên:
+
+```text
+PURGE <project>
+```
+
+Controller stop application write và tạo verified recovery bundle. Chỉ khi backup hoàn tất
+mới hỏi destructive confirmation tiếp theo, gồm:
+
+```text
+DELETE <database>
+ERASE <project> <random-challenge>
+```
+
+Xóa normal revision backup hoặc reset `pf-config.json` có confirmation riêng. Không có
+`--yes` bypass.
+
+### Purge recovery bundle
+
+Nằm tại:
+
+```text
+recovery/<project>/purge-<timestamp>-<sha12>-<suffix>/
+```
+
+Nó giữ tối đa functional state có thể dựng lại an toàn:
+
+```text
+source.tar.gz                 exact deployed source
+workspace.tar.gz              editable repo hiện tại nếu khác deployed source
+configuration/.env            external runtime environment
+configuration/pf-config.json  snapshot admin settings
+images.tar                    current/available PartFlow application images
+postgres-globals.sql
+databases/active.dump
+databases/<retained>.dump
+revision-checkpoints.tar.gz
+state/*.json
+manifest.json
+manifest.sha256
+```
+
+Database dump được restore-test. Nếu PostgreSQL data volume tồn tại nhưng không tạo được
+recoverable backup, purge refuse xóa volume đó.
+
+Recovery bundle nhằm dựng lại **functional PartFlow state**, không cố khôi phục Docker
+container ID/network ID giống từng byte.
+
+### Giữ/xóa revision backups khi purge
+
+Giữ normal checkpoints:
+
+```sh
+sudo pf purge --keep-backups
+```
+
+Archive chúng vào recovery rồi xóa normal checkpoint tree:
+
+```sh
+sudo pf purge --delete-backups
+```
+
+Reset luôn local admin config:
+
+```sh
+sudo pf purge --reset-admin-config
+```
+
+Root-owned `control/` vẫn được giữ để có thể deploy sạch ngay sau purge.
+
+### Purge bị gián đoạn
+
+Nếu mất điện/SSH sau khi destructive deletion đã bắt đầu, chạy `purge` lại. Journal nhận diện
+incomplete purge và yêu cầu resume confirmation trước khi tiếp tục dựa trên verified bundle.
+
+### Brand-new deploy sau purge
+
+```sh
+sudo pf deploy --latest
+```
+
+Full purge thông thường xóa `config/.env`, vì vậy deploy wizard sẽ tạo environment mới và
+PostgreSQL password mới. Nếu một recovery path cụ thể giữ external configuration thì deploy
+sẽ validate trước khi reuse.
+
+Smoke test xong:
+
+```sh
+sudo pf backup
+```
+
+### Restore nguyên functional instance đã purge
+
+Xem recovery:
+
+```sh
+sudo pf recoveries
+sudo pf recoveries --page 2
+sudo pf recoveries --project partflow-staging
+```
+
+Restore vào target project đang trống:
+
+```sh
+sudo pf restore-instance RECOVERY_ID
+```
+
+Restore sẽ đưa saved repository workspace trở lại, restore `config/.env`, load saved image,
+recreate/restore database set, restore checkpoint history/state rồi health-check backend/frontend.
+Installed root-owned control plane hiện tại được giữ; recovery không downgrade lifecycle
+controller giữa operation. `config/pf-config.json` hiện tại cũng tiếp tục là authoritative config;
+bản được lưu trong recovery chỉ để compare/reapply thủ công, không bị activate giữa restore.
+
+### Khôi phục old data side-by-side
+
+Nếu instance mới đã chạy nhưng cần xem/export data cũ:
+
+```sh
+sudo pf restore-instance RECOVERY_ID --side-by-side
+```
+
+Old active DB được restore dưới tên `pf_recovery_*`. Current app/database không bị thay.
+
+PartFlow **không** generic auto-merge recovered DB vào active DB mới. `PartMovement`, quantity
+lineage, allocation, reversal và derived current state có domain invariant không thể merge
+an toàn bằng generic SQL `INSERT`. Hãy restore side-by-side rồi xây explicit domain-aware
+import/reconciliation cho đúng loại data thật sự cần mang qua.
+
+## 13. Release check và scheduled task
+
+Chỉ check:
+
+```sh
+sudo pf release-check
+```
+
+Muốn cho phép unattended staging update, sửa:
+
+```text
+/volume1/docker/partflow/config/pf-config.json
+```
+
+và đặt:
+
+```text
+"auto_update": true
+```
+
+Scheduled update chặt hơn manual update: phải có eligible published release, CI success đúng
+exact SHA, không có migration/config/dependency condition cần human review, và workspace vẫn
+khớp deployed revision.
+
+DSM Task Scheduler nên gọi root-owned wrapper:
+
+```sh
+/volume1/docker/partflow/control/backup.sh
+```
+
+và:
+
+```sh
+/volume1/docker/partflow/control/release-check.sh --apply
+```
+
+Không schedule `reset-db`, `purge`, `restore-instance` hay destructive interactive command.
+
+## 14. Raw Compose nâng cao
+
+Ưu tiên `sudo pf ...` vì controller pin path và serialize state-changing operation.
+
+Nếu thật sự cần raw Compose, dạng tương đương là:
+
+```sh
+sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
+  docker compose \
+  --project-directory /volume1/docker/partflow/repo \
+  --env-file /volume1/docker/partflow/config/.env \
+  -p partflow-staging \
+  -f /volume1/docker/partflow/control/compose.nas.yaml \
+  ps
+```
+
+Raw Docker/Compose bỏ qua controller lock, recovery check và destructive guard. Không chạy
+song song với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
+
+Không dùng các lệnh rộng như:
+
+```text
+docker system prune --volumes
+docker volume prune
+```
+
+để reset PartFlow trên NAS có thể đang host workload khác.
+
+## 15. Update control plane
+
+Application `update` cố ý không self-update `control/`.
+
+Khi một reviewed repository revision có Admin version mới:
+
+```sh
+cd /volume1/docker/partflow/repo
+# Review deployment/control changes và Git status trước.
+sudo sh ./deploy/synology/install-control.sh
+sudo pf doctor
+```
+
+Installer archive control cũ tại:
+
+```text
+recovery/control-upgrades/
+```
+
+Explicit install step chính là security boundary cho phép `repo/` writable bởi users.
+Không chạy `install-control.sh` chưa review/không rõ nguồn bằng `sudo`.
+
+## 16. Troubleshooting
+
+### SMB thấy `repo/` nhưng không sửa được
+
+Trước tiên:
+
+```sh
+sudo pf permissions
+```
+
+Sau đó kiểm tra DSM Shared Folder permission phải cho account/group Read/Write.
+
+### SMB không sửa/xóa được backup/recovery
+
+Đúng thiết kế. Đây là recovery artifact nên group chỉ read/copy. Muốn chỉnh thì copy sang vị
+trí khác.
+
+### `sudo sh ./pf.sh ...` bị từ chối
+
+Đúng behavior của v2.5. Bản trong repo chỉ là source. Dùng:
+
+```sh
+sudo pf ...
+```
+
+hoặc cài/update control trước:
+
+```sh
+sudo sh ./deploy/synology/install-control.sh
+```
+
+### Có `.env` nhưng Compose báo thiếu biến
+
+Chạy:
+
+```sh
+sudo pf doctor
+```
+
+Raw Compose không tự biết external config. Runtime file authoritative là:
+
+```text
+/volume1/docker/partflow/config/.env
+```
+
+### Có local source edit trước update
+
+Xem:
+
+```sh
+sudo pf status
+```
+
+Manual update lưu workspace khác biệt vào `workspace.tar.gz` trước khi replace. Unattended
+update refuse drift và chờ manual review.
+
+### Lifecycle operation dang dở
+
+Chạy:
+
+```sh
+sudo pf status
+```
+
+Sau đó dùng recovery phù hợp (`resume`, `rollback`, chạy lại/resume `purge`, hoặc
+`restore-instance`) thay vì tự xóa state file.
+
+## 17. Command reference
+
+| Command | Mục đích |
+| --- | --- |
+| `sudo pf doctor` | Validate host tool, control security, Compose, env và capacity cơ bản |
+| `sudo pf permissions` | Chuẩn hóa repo/config writable và backup/recovery read-only |
+| `sudo pf status` | Deployed revision, workspace drift, DB revision, container, pending operation |
+| `sudo pf deploy --latest` | Brand-new staging từ latest configured branch SHA |
+| `sudo pf deploy --commit FULL_SHA` | Brand-new deploy từ exact commit |
+| `sudo pf deploy --release TAG` | Brand-new deploy từ published release |
+| `sudo pf abort-deploy` | Xóa incomplete first deploy trước khi frontend mở |
+| `sudo pf update --latest` | Managed staging update theo latest branch SHA |
+| `sudo pf update --commit FULL_SHA` | Update tới exact commit |
+| `sudo pf update --release TAG` | Update tới release |
+| `sudo pf backup` | Tạo và restore-test revision checkpoint |
+| `sudo pf backups --page N` | List checkpoint, 10/trang |
+| `sudo pf rollback [BACKUP_ID]` | Code rollback, giữ current DB |
+| `sudo pf rollback BACKUP_ID --restore-db` | Restore code + selected database state |
+| `sudo pf reset-db` | Kích hoạt clean migrated DB, vẫn giữ recoverability |
+| `sudo pf instances` | List managed PartFlow instances |
+| `sudo pf purge [--project NAME]` | Full recoverable purge một staging instance |
+| `sudo pf recoveries` | List purge recovery bundles |
+| `sudo pf restore-instance RECOVERY_ID` | Dựng lại functional instance đã purge |
+| `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB bên cạnh current instance |
+| `sudo pf release-check` | Check eligible release, không apply |
+| `sudo pf release-check --apply` | Unattended update chỉ khi mọi gate pass |
+| `sudo pf resume` | Resume chỉ khi early-failure state chưa thay đổi |
+
+## 18. Giới hạn validation
+
+Offline tests đi kèm simulate Docker/PostgreSQL nhưng thực sự chạy controller logic,
+filesystem/archive/checksum, permission policy, deployed-source/workspace separation,
+purge/recovery và path construction. Chúng không thay thế integration rehearsal trên DSM +
+Docker + PostgreSQL thật.
+
+Trước khi dựa vào v2.5 recovery cho data quan trọng, nên chạy ít nhất một vòng disposable
+staging trên NAS thật:
+
+```text
+install-control
+→ doctor
+→ backup
+→ update
+→ purge
+→ restore-instance
+→ verify UI/data
+→ purge
+→ deploy --latest
+→ restore old DB --side-by-side
+```
+
+Không coi staging procedure là production-ready cho tới khi các production phase và
+backup/disaster-recovery gate của repository được hoàn thành riêng.

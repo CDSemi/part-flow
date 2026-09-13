@@ -253,11 +253,17 @@ export function routeSteps(flow: TrackingFlow): RouteStepView[] {
       inherited: false,
     }));
   }
+  // The current step is the last arrival only when the server's derived
+  // position still stands in that Area — the position is the server's
+  // fact, never an index assumption about the trace.
   const last = flow.trace.length - 1;
   return flow.trace.map((step, index) => ({
     key: `trace-${step.movementId}`,
     label: step.area.name,
-    state: index === last && flow.position !== null ? 'cur' : 'done',
+    state:
+      index === last && flow.position?.area.id === step.area.id
+        ? 'cur'
+        : 'done',
     repair: step.repair,
     inherited: step.inherited,
   }));

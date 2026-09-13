@@ -95,6 +95,7 @@ from app.application.part_numbers import (
 from app.application.projections import (
     EffectivePosition,
     effective_positions,
+    effective_totals_by_area,
     origin_flow_ids,
     processing_state_of,
     visited_area_ids,
@@ -780,6 +781,13 @@ class AreaInventory(NamedTuple):
     # every Work Order is complete is simply absent: its quantity is
     # still shown, without a monitoring context it no longer has.
     demand_context: dict[str, list[DemandContext]]
+    # Phase 11: the scrapped quantity recorded in THIS Area per PN (the
+    # effective ``SCRAPPED`` Movements into it, net of reversed scraps)
+    # — the `{n} scrapped` line of the shared PN row (GUI_DESIGN §4.10),
+    # which the Scan Station and the Area Board present alike. A PN
+    # without scrap in the Area is absent; PNs no longer present may
+    # still be listed (their scrap is history of the Area).
+    scrapped: dict[str, int]
     # The Area mode (PROJECT_PROFILE §12): with Machines the quantity
     # splits into queued / Machine cards / finished; without Machines
     # into directly processing / finished — no placeholder cards and no
@@ -899,6 +907,12 @@ def area_inventory(session: Session, area_id: int) -> AreaInventory:
     return AreaInventory(
         area=area,
         demand_context=open_demand_context(session, {item.part_number for item in items}),
+        scrapped={
+            part_number: quantity
+            for (part_number, _area_id), quantity in effective_totals_by_area(
+                session, MovementType.SCRAPPED, [area.id]
+            ).items()
+        },
         has_machines=has_machines,
         lines=lines,
         total_part_numbers=len(lines),

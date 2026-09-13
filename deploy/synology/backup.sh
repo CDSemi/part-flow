@@ -1,9 +1,9 @@
 #!/bin/sh
-# Scheduled backup: no prompts, no update, and no database reset.
+# Installed under <home>/control. Intended for a root-owned DSM scheduled task.
 set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-if [ "$(id -u)" -eq 0 ]; then
-    exec sh "$REPO_ROOT/pf.sh" backup "$@"
+CONTROL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run this scheduled backup as root." >&2
+    exit 2
 fi
-exec sudo sh "$REPO_ROOT/pf.sh" backup "$@"
+exec "$CONTROL_DIR/pf.sh" backup "$@"

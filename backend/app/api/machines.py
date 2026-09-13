@@ -92,6 +92,15 @@ class MachineResponse(BaseModel):
     # assigned ACTIVE quantity means Running, else Idle.
     operational_state: Literal["MAINTENANCE", "RUNNING", "IDLE"]
     assigned_quantity: int
+    # Phase 11 (GUI_DESIGN §12.1 `Assigned now`): the assigned quantity
+    # broken down per canonical PN, in PN order — the same projection
+    # the total sums, so the two never disagree. Empty when Idle.
+    assigned_lines: list["AssignedLineResponse"]
+
+
+class AssignedLineResponse(BaseModel):
+    part_number: str
+    quantity: int
 
 
 class MachineLifecycleEventResponse(BaseModel):
@@ -205,16 +214,24 @@ _STORED_FIELDS = (
 )
 
 
-def _machine_response(machine: Machine, assigned: int) -> MachineResponse:
+def _machine_response(machine: Machine, lines: list[machines.AssignedLine]) -> MachineResponse:
+    # The total IS the sum of the per-PN breakdown (one projection read).
+    assigned = sum(line.quantity for line in lines)
     return MachineResponse(
         **{name: getattr(machine, name) for name in _STORED_FIELDS},
         operational_state=machines.operational_state(machine, assigned).value,
         assigned_quantity=assigned,
+        assigned_lines=[
+            AssignedLineResponse(part_number=line.part_number, quantity=line.quantity)
+            for line in lines
+        ],
     )
 
 
 def _one(session: Session, machine: Machine) -> MachineResponse:
-    return _machine_response(machine, machines.assigned_quantity(session, machine.id))
+    return _machine_response(
+        machine, machines.assigned_lines(session, [machine.id]).get(machine.id, [])
+    )
 
 
 @router.get("/machines")
@@ -222,8 +239,8 @@ def list_machines(
     session: SessionDep, lifecycle: Literal["active", "retired", "all"] = "all"
 ) -> list[MachineResponse]:
     listed = machines.list_machines(session, lifecycle=lifecycle)
-    assigned = machines.assigned_quantities(session, [machine.id for machine in listed])
-    return [_machine_response(machine, assigned.get(machine.id, 0)) for machine in listed]
+    lines = machines.assigned_lines(session, [machine.id for machine in listed])
+    return [_machine_response(machine, lines.get(machine.id, [])) for machine in listed]
 
 
 @router.get("/machines/{machine_id}")

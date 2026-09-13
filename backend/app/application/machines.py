@@ -71,7 +71,7 @@ duplicate.
 
 import datetime
 from collections.abc import Iterable
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, NamedTuple
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -200,6 +200,42 @@ def assigned_quantities(session: Session, machine_ids: list[int]) -> dict[int, i
         .group_by(QuantityFlow.current_machine_id)
     )
     return {int(machine_id): int(total) for machine_id, total in rows}
+
+
+class AssignedLine(NamedTuple):
+    """One PN portion currently assigned to a Machine (Phase 11)."""
+
+    part_number: str
+    quantity: int
+
+
+def assigned_lines(session: Session, machine_ids: list[int]) -> dict[int, list[AssignedLine]]:
+    """The assigned ACTIVE quantity per Machine broken down per PN
+    (read models, unlocked — GUI_DESIGN §12.1 `Assigned now`).
+
+    The same projection reference `assigned_quantities` sums, grouped
+    by canonical PN in PN order, so the breakdown and the total can
+    never disagree; a Machine without assigned quantity is absent.
+    """
+    if not machine_ids:
+        return {}
+    rows = session.execute(
+        select(
+            QuantityFlow.current_machine_id,
+            QuantityFlow.part_number,
+            func.sum(QuantityFlow.quantity),
+        )
+        .where(
+            QuantityFlow.current_machine_id.in_(machine_ids),
+            QuantityFlow.status == QuantityFlowStatus.ACTIVE,
+        )
+        .group_by(QuantityFlow.current_machine_id, QuantityFlow.part_number)
+        .order_by(QuantityFlow.current_machine_id, QuantityFlow.part_number)
+    )
+    found: dict[int, list[AssignedLine]] = {}
+    for machine_id, part_number, total in rows:
+        found.setdefault(int(machine_id), []).append(AssignedLine(str(part_number), int(total)))
+    return found
 
 
 def operational_state(machine: Machine, assigned: int) -> MachineOperationalState:

@@ -1,412 +1,228 @@
-# PartFlow NAS Admin v2
+# PartFlow NAS Admin v2.5
 
-> English is the source of truth for this tool guide. [Vietnamese](./SYNOLOGY_ADMIN.vi.md).
-> Version: **2.2.0**. Prepared: **2026-09-09**.
-> Repository reference: `CDSemi/part-flow@8d358eea0582b2e910df60569ad9865fd78f9d98`.
-> Scope: the existing, restricted **Synology staging** stack, not production.
-> This package does not commit, push, publish a release, or schedule a task by itself.
+> **English is the source of truth.** [Vietnamese translation](./SYNOLOGY_ADMIN.vi.md).
+>
+> Version: **2.5.0**
+> Prepared: **2026-09-11**
+> Scope: restricted-LAN **Synology staging** administration. This is not a production-hardening package.
 
-## 1. Choose a deployment policy
+## 1. Purpose
 
-Use manual commit updates for active staging work. Publish a release when selecting
-an identifiable build for a test session or deployment, not for every small commit.
-Use published releases for unattended updates. Never automatically track `main` on
-a production instance.
+PartFlow NAS Admin separates the writable application repository from the privileged
+lifecycle controller. This allows trusted DSM users to edit the repository over SMB
+without making the code executed by `sudo pf ...` writable by those users.
 
-At the inspected repository revision, `v0.1.0-alpha.1` is a **pre-release** and points
-to `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`. The branch tip is newer. GitHub's
-`releases/latest` endpoint excludes pre-releases, so a stable-only checker can
-correctly report that no eligible release exists. It does not fall back to `main`.
+The operational layout is:
 
-| Channel | Selection |
-| --- | --- |
-| `stable` | GitHub's latest published, non-draft, non-prerelease release |
-| `prerelease` | Latest publication date across non-draft stable releases and pre-releases |
-
-The script resolves the selected branch/tag to a full commit SHA, then checks out
-that SHA. It never treats a release's `target_commitish: main` as its pinned code.
-A previously observed release tag changing SHA is refused. Do not reuse tags.
-
-## 2. What is included
-
-| File | Purpose |
-| --- | --- |
-| `pf.sh` | Root entry point and host Python/runtime discovery |
-| `compose.nas.yaml` | NAS-specific Compose definition kept at repository root |
-| `deploy/synology/pf-admin.py` | Update, checkpoint, rollback, reset and release-check workflows |
-| `deploy/synology/backup.sh` | Noninteractive scheduled/manual checkpoint wrapper |
-| `deploy/synology/release-check.sh` | Scheduler wrapper; check-only unless explicitly enabled |
-| `deploy/synology/pf-config.example.json` | Non-secret administration settings |
-| `deploy/synology/nas.env.example` | Example NAS environment values |
-| `deploy/synology/tests/test_pf_admin.py` | Offline controller tests |
-| `deploy/synology/TEST_REPORT.md` | Validation record and limitations |
-| `deploy/synology/.gitignore` | Ignores local `pf-config.json` and Python cache files |
-| `docs/deployment/SYNOLOGY_ADMIN.md`, `SYNOLOGY_ADMIN.vi.md` | Administration documentation |
-
-The lifecycle logic uses Python's standard library, rather than shell parsing of
-JSON or executing backup metadata as shell code. No pip packages are needed.
-The root entry point, NAS Compose file, and `deploy/synology/` controller/configuration
-tree are deliberately **not self-updated** while a lifecycle command is running. Repository
-documentation and normal application source follow the selected revision.
-
-## 3. Requirements and installation
-
-This package upgrades an **already initialized staging stack** from the earlier
-NAS guide. The database must be running, migrated, and use PostgreSQL 16. There
-must be one existing `db`, `backend`, and `frontend` container in the configured
-Compose project. Initial installation still follows the NAS deployment guide.
-
-The NAS host needs Git, Python **3.9 or newer**, Docker and a working Compose CLI.
-Prefer a maintained Python package supported for the exact NAS/DSM model. Do not
-replace DSM's system interpreter. The application containers still use their own
-runtimes; this additional host Python is only for administration. No jq is needed.
-
-Check over SSH:
-
-```sh
-python3 --version
-git --version
-sudo docker version
-sudo docker compose version
-# If Compose v2 is absent:
-sudo docker-compose version
+```text
+/volume1/docker/partflow/
+├── repo/                              # application working tree; users read/write/delete
+├── control/                           # installed lifecycle control plane; root modifies
+│   ├── pf.sh
+│   ├── pf-admin.py
+│   ├── compose.nas.yaml
+│   ├── backup.sh
+│   ├── release-check.sh
+│   ├── pf-config.example.json
+│   └── nas.env.example
+├── config/                            # host/runtime configuration; trusted users may edit
+│   ├── .env
+│   └── pf-config.json
+├── backups/                           # revision checkpoints; users read/copy only
+├── recovery/                          # purge/control-upgrade recovery; users read/copy only
+└── .pf-state-<project>/               # locks/journal/image state; root only
 ```
 
-`pf.sh` tries common Python executable names, the usual Synology Python 3.9
-package path, and common SynoCommunity `python310`–`python314` package paths.
-An explicit executable can be selected without changing the script:
+The repository still contains source/reference copies of `pf.sh`, `compose.nas.yaml`,
+and `deploy/synology/*` so the control plane remains versioned and reviewable. Those
+repository copies are **not** used for normal NAS administration after installation.
+
+## 2. Permission model
+
+Default DSM groups are `users` for repository/config access and backup reading.
+`pf-config.json` can change these group names if a dedicated trusted group is preferred.
+
+| Path | Typical mode | Access policy |
+| --- | --- | --- |
+| `repo/` directories | `2770` | owner + `workspace_write_group` full read/write/delete; setgid preserves group |
+| `repo/` regular files | `0660` | owner + `workspace_write_group` read/write |
+| `repo/` existing executable files | `0770` | source/working-tree executability only; not the privileged control plane |
+| `control/` directories | `0750` | root modifies; `users` can browse/read |
+| `control/pf.sh`, `backup.sh`, `release-check.sh` | `0740` | root executes/modifies; `users` read only |
+| other `control/` files | `0640` | root modifies; `users` read only |
+| `config/` directory | `2770` | trusted `users` may create/edit/delete host config |
+| `config/.env`, `config/pf-config.json` | `0660` | trusted `users` read/write |
+| `backups/`, `recovery/` directories | `0750` | configured read group can browse/copy, not modify/delete |
+| backup/recovery files | `0640` | configured read group can read/copy, not write |
+| `.pf-state-*` | `0700` | root only |
+
+DSM Shared Folder ACLs still apply. The DSM account must also have **Read/Write** access
+to the shared folder containing `repo/` if SMB editing is expected. POSIX mode bits do
+not override a DSM ACL deny.
+
+Run the managed permission repair at any time:
 
 ```sh
-sudo env PF_PYTHON=/absolute/path/to/python3 sh ./pf.sh doctor
+sudo pf permissions
 ```
 
-Replace the path with a real, verified executable. Set the same override in the
-DSM task if necessary. Do not install an unsupported NAS package just to bypass a
-failed prerequisite check.
+### Trust consequence
 
-### Install without resetting anything
+Giving `users` write access to `repo/` and `config/` is deliberate for this installation.
+A trusted user can therefore change application source and runtime settings, including
+the PostgreSQL password stored in `config/.env`. Backup/recovery bundles can also expose
+application data and, for purge recovery, a copy of `.env`. Only grant SMB access to
+users who are permitted to see and modify this information.
 
-Keep the existing `.env`, `compose.nas.yaml`, source, project name and Docker volumes.
-Save a copy of the old administration files first. Example from SSH:
+## 3. Does moving `.env` outside the repository affect the app?
+
+No, not when PartFlow is run through the installed controller.
+
+The application does not care where the host-side `.env` file is stored. The controller
+explicitly gives Docker Compose the external file:
+
+```text
+--env-file /volume1/docker/partflow/config/.env
+```
+
+It also explicitly provides the repository path used for image build contexts:
+
+```text
+PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo
+```
+
+The installed `control/compose.nas.yaml` uses that value:
+
+```yaml
+backend:
+  build:
+    context: "${PARTFLOW_REPO_ROOT}/backend"
+
+frontend:
+  build:
+    context: "${PARTFLOW_REPO_ROOT}/frontend"
+```
+
+Container environment values remain the same as before. Only the **host storage location**
+of the file changes.
+
+This separation also prevents `.env` from being accidentally added to the Git working
+tree and allows `repo/` to be replaced cleanly during an update without touching runtime
+credentials.
+
+The operational rule is therefore:
 
 ```sh
-cd /volume1/docker/partflow
-saved="backups/admin-tools-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$saved"
-chmod 700 "$saved"
-for path in repo/pf.sh repo/compose.nas.yaml repo/deploy/synology; do
-    if [ -e "$path" ]; then
-        cp -Rp "$path" "$saved/"
-    fi
-done
+sudo pf ...
 ```
 
-Extract/upload this package **into the repository root while preserving its directory
-structure**. Do not flatten the files. The resulting layout is:
+Do not assume a raw `docker compose` command run from `repo/` will automatically discover
+the external `.env` or the installed Compose file. See §14 for the explicit advanced form.
+
+## 4. Source files versus installed control files
+
+The repository contains these version-controlled sources:
 
 ```text
 repo/
 ├── pf.sh
 ├── compose.nas.yaml
-├── deploy/
-│   └── synology/
-│       ├── pf-admin.py
-│       ├── backup.sh
-│       ├── release-check.sh
-│       ├── pf-config.example.json
-│       ├── nas.env.example
-│       ├── TEST_REPORT.md
-│       ├── .gitignore
-│       └── tests/
-│           └── test_pf_admin.py
-└── docs/
-    └── deployment/
-        ├── SYNOLOGY_ADMIN.md
-        └── SYNOLOGY_ADMIN.vi.md
+└── deploy/synology/
+    ├── install-control.sh
+    ├── pf-admin.py
+    ├── backup.sh
+    ├── release-check.sh
+    ├── pf-config.example.json
+    ├── nas.env.example
+    ├── TEST_REPORT.md
+    └── tests/
 ```
 
-Keep the existing root `.env`. Do not replace a locally customized
-`compose.nas.yaml` with the reference copy without reviewing the differences. The tests
-belong to this controller, not the application's database integration suite; run them on
-a workstation or separate test copy.
+`install-control.sh` copies the reviewed lifecycle sources to `control/`, changes them to
+root-owned/read-only-to-users permissions, and installs a small root-owned launcher:
 
-Migrate the old runtime configuration if this NAS already used Admin v2, then remove the
-obsolete root-level duplicates:
+```text
+/usr/local/bin/pf
+```
+
+After installation, the repository `pf.sh` intentionally refuses operational execution.
+Use:
+
+```sh
+sudo pf status
+```
+
+not:
+
+```sh
+sudo sh ./pf.sh status
+```
+
+Application updates do **not** silently update the privileged control plane. If a later
+PartFlow revision changes `pf-admin.py`, `compose.nas.yaml`, or another lifecycle source,
+review that revision and explicitly reinstall the control plane.
+
+## 5. Install or migrate from Admin v2.4.x
+
+Run this from the repository root:
 
 ```sh
 cd /volume1/docker/partflow/repo
-if [ -f pf-config.json ] && [ ! -f deploy/synology/pf-config.json ]; then
-  cp -p pf-config.json deploy/synology/pf-config.json
-fi
-test -f deploy/synology/pf-config.json || \
-  cp deploy/synology/pf-config.example.json deploy/synology/pf-config.json
-chmod 600 .env deploy/synology/pf-config.json
-
-rm -f pf-admin.py backup.sh release-check.sh pf-config.json \
-  pf-config.example.json nas.env.example PF_ADMIN_GUIDE.md \
-  PF_ADMIN_GUIDE.vi.md TEST_REPORT.md
-rm -rf pf-admin-tests
-
-sudo sh ./pf.sh doctor
-sudo sh ./pf.sh status
-sudo sh ./pf.sh backup
 ```
 
-`pf-config.example.json` allows the DSM `administrators` group to read backup
-artifacts over SMB by default:
+Before running a root installer from a users-writable working tree, verify that the source
+revision is one you trust. At minimum inspect the changed deployment files and Git status.
+The installer itself is intentionally explicit because installing it grants the reviewed
+code lifecycle authority on the NAS.
+
+Then run:
+
+```sh
+sudo sh ./deploy/synology/install-control.sh
+```
+
+It shows the target paths and requires this exact confirmation:
 
 ```text
-"backup_read_group": "administrators"
+INSTALL CONTROL
 ```
 
-If the NAS uses a dedicated administration group, change this value in
-`deploy/synology/pf-config.json` before running `doctor`. The group must exist on
-DSM. Do not use a broad group such as `users` merely to avoid permission errors.
+The installer performs these migrations safely:
 
-The controller intentionally refuses the old root-level Admin v2 layout so stale duplicate
-scripts/configuration cannot be used accidentally. `deploy/synology/pf-config.json` is
-deployment-local and is ignored by the included nested `.gitignore`. `DEPLOYED_SOURCE.txt`
-is also runtime deployment state; add it to the repository root `.gitignore` before
-committing this structure.
+1. Creates `/volume1/docker/partflow/config/`.
+2. Moves old `repo/.env` to `config/.env` when present.
+3. Moves/copies old `deploy/synology/pf-config.json` into `config/pf-config.json`.
+4. Refuses installation if old and new copies of `.env` or `pf-config.json` both exist and differ.
+5. Archives an existing `control/` under `recovery/control-upgrades/` before replacement.
+6. Installs a new root-owned `control/` copy.
+7. Installs `/usr/local/bin/pf` when that path is free or already PartFlow-managed.
+8. Runs `pf permissions` to normalize repository/config/backup/recovery modes.
 
-Keep `project` as `partflow-staging` when upgrading the old bundle. Changing this
-name selects a different Compose deployment and potentially different volumes.
-`DEPLOYED_SOURCE.txt` must contain the actual 40-character source SHA for a ZIP
-installation; it must agree with Git HEAD for a Git checkout. Do not invent a SHA.
+The installer preserves Docker containers, volumes, databases, revision backups, and
+application source. It is not a redeploy or database reset.
 
-The following directories are generated **outside the replaceable source tree**:
-
-```text
-partflow/
-  repo/                                    application checkout + local controls
-  .pf-state-partflow-staging/               lock, operation journal, image selection
-  backups/
-    revisions/
-      partflow-staging/
-        <backup-id>/
-          source.tar.gz
-          database.dump
-          database.list
-          manifest.json
-          manifest.sha256
-```
-
-`.pf-state-partflow-staging/` remains private at `0700` and is not intended for
-SMB browsing. The revision checkpoint tree for this project is instead assigned
-to `backup_read_group` with:
-
-```text
-Directory: 0750
-File:      0640
-```
-
-Trusted DSM administrators can therefore browse and copy checkpoints over SMB
-without receiving POSIX write permission. Admin v2.2 also repairs permissions on
-existing v2.x checkpoints under `backups/revisions/<project>/` when the
-controller starts, so historical checkpoints do not require manual `chmod`.
-The source archive includes `.env`; only grant `backup_read_group` to a trusted
-administrative group allowed to read secrets and database backups.
-
-## 4. Commands at a glance
-
-Run commands from `repo/`, using the same administrator/privilege approach each time.
-
-| Command | Effect |
-| --- | --- |
-| `sudo sh ./pf.sh doctor` | Check tools, Compose configuration and source-volume free space |
-| `sudo sh ./pf.sh status` | Show source, containers, database revisions and any incomplete operation |
-| `sudo sh ./pf.sh update --latest` | Manually deploy the latest configured branch commit |
-| `sudo sh ./pf.sh update --commit FULL_SHA` | Manually deploy a specific commit |
-| `sudo sh ./pf.sh update --release TAG` | Manually deploy an explicit published release |
-| `sudo sh ./pf.sh update --release latest --channel prerelease` | Select the newest eligible staging release |
-| `sudo sh ./pf.sh backups --page 1` | List 10 checkpoints, newest first |
-| `sudo sh ./pf.sh rollback` | Interactive paginated checkpoint selection |
-| `sudo sh ./pf.sh rollback BACKUP_ID` | Select an exact checkpoint; retain current database data |
-| `sudo sh ./pf.sh rollback BACKUP_ID --restore-db` | Restore application plus that checkpoint's database |
-| `sudo sh ./pf.sh reset-db` | Switch the active instance to a clean migrated database |
-| `sudo sh ./pf.sh backup` | Create and restore-test a checkpoint without stopping the application |
-| `sudo sh ./pf.sh release-check` | Check the release feed; no application/database update |
-| `sudo sh ./pf.sh release-check --apply` | Apply only if auto-update is enabled and every automated gate passes |
-| `sudo sh ./pf.sh resume` | Resume an unchanged deployment after an early, pre-change failure |
-
-Replace `FULL_SHA`, `TAG`, and `BACKUP_ID` with actual values. `update` without a
-selector defaults to the release channel, not to the moving branch tip. Existing
-Compose commands such as `ps`, `logs`, `exec`, `build`, `up`, and `stop` still work.
-The project and Compose file are fixed. Volume-deleting `down`/`rm` options are
-blocked. Direct Docker access can bypass this tool; it is not an authorization layer.
-
-## 5. Manual update
-
-For everyday staging changes:
+Validate afterward:
 
 ```sh
-sudo sh ./pf.sh update --latest
+sudo pf doctor
+sudo pf status
 ```
 
-The workflow resolves a fixed SHA, verifies the latest `ci.yml` push run for that
-exact SHA, clones a new checkout, and builds uniquely tagged candidate images
-without replacing the running images. It then asks for:
-
-```text
-UPDATE <12-character-target-SHA>
-```
-
-After confirmation it stops frontend/backend, checkpoints the old source and
-database, performs a full restore test in a separate temporary database, applies
-approved migrations when needed, replaces the application source, and starts the
-selected images. Backend health and database revision are checked before frontend
-startup. The frontend's `/api/health` is checked afterward.
-
-Local `.env`, `compose.nas.yaml`, root `pf.sh`, and the complete
-`deploy/synology/` controller/configuration tree are preserved. Repository documentation
-under `docs/` follows the selected source revision. Other local application-source changes
-are archived, not merged into the new checkout.
-The source replacement is **not an atomic directory swap**. It happens while the
-application is stopped, with a persistent journal. Do not edit/upload the source
-or run direct Compose commands concurrently with a managed operation.
-
-A ZIP installation can be converted to the first managed Git checkout by a manual
-update, even when the selected SHA is the same. Unattended updates require that
-managed checkout and a clean application source tree.
-
-### When migrations change
-
-Review the migration and recovery plan, then explicitly allow it:
+If `/usr/local/bin/pf` could not be installed because an unrelated file already uses that
+name, run the installed launcher directly:
 
 ```sh
-sudo sh ./pf.sh update --latest --allow-migrations
-# Or select the exact published release:
-sudo sh ./pf.sh update --release TAG --allow-migrations
+sudo /volume1/docker/partflow/control/pf.sh status
 ```
 
-The new migration is first rehearsed against a restored temporary database. Only
-a successful rehearsal allows the live migration. Existing migration files being
-modified or deleted are refused even with this flag. Multiple Alembic heads and
-an uninitialized/inconsistent current schema require manual intervention.
+## 6. Configuration files
 
-`--skip-ci` is an explicit **manual staging exception**, not a successful CI result.
-It is never used by scheduled updates. No command in this tool runs `alembic downgrade`.
+### `config/pf-config.json`
 
-## 6. Checkpoints and rollback
+This is the actual NAS-local administration configuration. It is created from the
+root-owned `control/pf-config.example.json` if absent.
 
-Every managed update, reset, and rollback creates a checkpoint before changing
-active source/data. Checkpoints include actual source files, a custom PostgreSQL
-dump, Alembic revisions, PostgreSQL major version, source SHA, checksums, and local
-retained image references/IDs. A temporary database is fully restored with
-`pg_restore --exit-on-error`, and its Alembic revisions are compared with the dump's
-recorded source database. This is more than an archive-list check, but it is **not**
-a full application or quantity-reconciliation test.
-
-The source archive excludes `.git`, virtual environments, dependency directories,
-and caches. It **includes `.env` and local administration files**: protect the whole
-checkpoint as a secret. Metadata is JSON and is never sourced as executable shell.
-Checksums detect accidental corruption; they are not a signature against an attacker
-who can rewrite both files and hashes.
-
-### Selection
-
-```sh
-sudo sh ./pf.sh rollback
-```
-
-The menu lists newest first, 10 entries per page. Use `n`, `p`, `q`, or a displayed
-number. Direct selection skips the menu, not the confirmation:
-
-```sh
-sudo sh ./pf.sh rollback BACKUP_ID
-```
-
-A full source SHA is accepted only if it identifies exactly one checkpoint; otherwise
-use the checkpoint ID. Incomplete/unverified checkpoints cannot be source rollback
-targets. Legacy dump-only backups remain untouched but are not source revision entries.
-
-### Code-only rollback: default
-
-Current data is kept. The current migration file fingerprint and live Alembic
-revisions must match the selected checkpoint. Both the checkpoint and retained
-images are verified first. Confirmation is `ROLLBACK BACKUP_ID`.
-
-These checks are a conservative structural gate, **not proof of business-semantic
-compatibility**. A matching Alembic head alone cannot prove an older app understands
-all newer data. Review semantic changes before approving the command.
-
-### Application and database rollback: explicit
-
-```sh
-sudo sh ./pf.sh rollback BACKUP_ID --restore-db
-```
-
-Confirmation is:
-
-```text
-RESTORE <current-database-name> <backup-id>
-```
-
-The current source/database are checkpointed again. The selected dump is restored
-into a new database and checked. The old active database and the prepared database
-are then renamed in one transaction on the PostgreSQL maintenance database. The old
-active copy is retained as `pf_keep_<timestamp>_<suffix>` with new connections disabled.
-The target application's retained images are activated against the restored database.
-
-**Newer writes are no longer present in the active application after this operation.**
-They remain in the new safety checkpoint and the retained database, not automatically
-merged into the restored history. Do not manually edit immutable Movement history to
-combine them. Retention is protection, not an automatic reconciliation solution.
-
-A missing/pruned retained image makes rollback fail closed rather than rebuilding a
-potentially different image from mutable base tags. Source archives do not contain
-image layers. These checkpoints are not by themselves a full off-NAS disaster-recovery
-bundle. Preserve/export the retained images separately before relying on recovery on
-a different host. This package does not automate registry publication or image export.
-
-## 7. Reset staging data
-
-```sh
-sudo sh ./pf.sh reset-db
-```
-
-The required text uses the real database name, for example:
-
-```text
-RESET partflow_staging
-```
-
-There is no `--yes` bypass. Reset and rollback require an interactive terminal and
-must not be placed in Task Scheduler.
-
-Reset does **not** delete the Docker volume or issue ad hoc DELETE/TRUNCATE commands.
-It pauses application writes, creates/restores a verified checkpoint, creates a new
-empty database, runs the current image's migrations against it, and switches database
-names in one transaction. The previous database is retained with connections disabled.
-The application keeps the same configured database name and URL.
-
-All user-created data and master/environment configuration disappear from the active
-instance. Migration-created defaults can still exist. Reconfigure Departments, Areas,
-Operations, Machines and Scan Stations as needed. Existing external database sessions
-cause the switch to be refused; the script does not forcibly terminate unrelated users.
-
-**For go-live, prefer a separate production environment/database and clean master-data
-setup.** Clearing test data does not provide authorization, production web servers,
-secret handling, monitoring, backup retention, or production approval. Mutating lifecycle
-commands in this version deliberately reject `environment` other than `staging`.
-Do not relabel a real production database as staging to bypass this restriction.
-
-## 8. Scheduled release checking/update
-
-Start with check-only. In DSM open **Control Panel → Task Scheduler → Create →
-Scheduled Task → User-defined script**. Use a deployment administrator/root account
-with the required Docker access. Set a schedule in DSM; this package does not create it.
-
-Script for staging pre-releases:
-
-```sh
-sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --channel prerelease
-```
-
-With only `v0.1.0-alpha.1` published, the default `stable` channel has no eligible
-release. That is expected, not a reason to silently deploy `main`.
-
-For unattended staging application, edit `deploy/synology/pf-config.json`:
+Default template:
 
 ```json
 {
@@ -414,132 +230,583 @@ For unattended staging application, edit `deploy/synology/pf-config.json`:
   "branch": "main",
   "project": "partflow-staging",
   "environment": "staging",
-  "release_channel": "prerelease",
-  "auto_update": true,
+  "release_channel": "stable",
+  "auto_update": false,
   "ci_workflow": "ci.yml",
   "health_timeout_seconds": 180,
-  "minimum_free_mb": 2048
+  "minimum_free_mb": 2048,
+  "backup_read_group": "users",
+  "workspace_write_group": "users"
 }
 ```
 
-Then schedule the following **within an approved maintenance window**, for example a
-nightly staging window, not while testers are entering data:
+Trusted users may edit this file over SMB. The controller validates supported keys,
+project naming, booleans, positive numeric values, and configured DSM groups before using it.
 
-```sh
-sh /volume1/docker/partflow/repo/deploy/synology/release-check.sh --apply
+### `config/.env`
+
+For a brand-new deployment, `deploy` creates it interactively from the installed
+`control/nas.env.example` template. It generates a 64-character hexadecimal
+`POSTGRES_PASSWORD` using cryptographically secure randomness and does not print the
+password to the terminal.
+
+Typical content:
+
+```dotenv
+POSTGRES_USER=partflow_staging
+POSTGRES_PASSWORD=<generated secret>
+POSTGRES_DB=partflow_staging
+SITE_TIMEZONE=America/Los_Angeles
+PARTFLOW_BIND_IP=192.168.0.11
+PARTFLOW_HTTP_PORT=5173
+PARTFLOW_ALLOWED_HOST=localhost
 ```
 
-Both the flag and configuration opt-in are necessary. Automatic updates require a
-published release, successful CI for its exact SHA, a clean managed Git checkout,
-a descendant commit (no automatic downgrade or divergent branch), unchanged migration
-files and schema head, and no changes to the reviewed deployment/configuration files
-listed in `AUTO_REVIEW_PATHS` in the controller. The exact target images must build and
-pass the health checks. A target requiring migration is deferred for a manual update.
+Changing `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after PostgreSQL has
+already initialized is **not** equivalent to changing the existing database credentials.
+Do not casually edit those values on a live instance. Use the managed deployment/recovery
+workflow or plan a credential/database migration explicitly.
 
-The script serializes managed operations with an OS file lock. An interrupted operation
-leaves a persistent journal blocking later automatic updates. It does not automatically
-restore an old database after a health failure; that could hide newer writes. There is
-no promise of zero downtime or complete application correctness from these gates.
+## 7. First deployment
 
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Completed, check-only result, no new SHA, or no eligible published release |
-| `1` | Error, refused destructive operation, disabled automation, or incomplete operation |
-| `2` | CLI/runtime prerequisite error |
-| `20` | Update deferred: CI not ready, migration/configuration change, divergent source, etc. |
-
-Enable DSM task result/failure notifications and inspect stdout/stderr. Deferred updates
-use a nonzero code so they are not mistaken for an applied release. The public repository
-does not require a GitHub token for ordinary reads. Optional `GITHUB_TOKEN` is read from
-the process environment for API rate limits; do not put it in a URL, tracked file or log.
-Git clone authentication for a future private repository is not configured by this token.
-
-## 9. Scheduled backups
-
-The new `deploy/synology/backup.sh` creates a revision checkpoint, not the old four-file dump layout:
+For a brand-new staging instance, the usual command is:
 
 ```sh
-sh /volume1/docker/partflow/repo/deploy/synology/backup.sh
+sudo pf deploy --latest
 ```
 
-Schedule it separately from update tasks. Standalone backup does not pause the app;
-PostgreSQL supplies the logical dump's consistent snapshot. Restore verification creates
-and removes a temporary database. Allow space for the dump, source archive, verification
-DB, candidate images, and a retained pre-reset/pre-restore database.
+Other source selectors:
 
-Completed checkpoints are automatically published to the configured
-`backup_read_group` with directory mode `0750` and file mode `0640`. They can be
-browsed over SMB, for example:
+```sh
+sudo pf deploy                         # current clean Git checkout
+sudo pf deploy --commit FULL_SHA
+sudo pf deploy --release TAG
+sudo pf deploy --release latest --channel prerelease
+```
+
+The new-deploy flow:
+
+1. Verifies this Compose project has no managed deployment record, containers, or volumes.
+2. Creates/reuses `config/.env`.
+3. Prompts only for deployment-specific values that cannot be safely inferred.
+4. Resolves the chosen source to an exact commit SHA.
+5. Verifies CI unless `--skip-ci` is explicitly used for manual staging.
+6. Builds backend/frontend candidate images before creating the database.
+7. Requires `DEPLOY <SHA12>` confirmation.
+8. Starts PostgreSQL and confirms it is new/uninitialized.
+9. Runs `alembic upgrade head`.
+10. Starts backend and verifies health/schema.
+11. Starts frontend and verifies `/api/health` through the frontend proxy.
+12. Writes the deployed revision to external `.pf-state-<project>/deployed.json`.
+
+After UI/workflow/firewall smoke testing, create the first rollback baseline:
+
+```sh
+sudo pf backup
+```
+
+If initial deployment fails before frontend access could have opened:
+
+```sh
+sudo pf abort-deploy
+```
+
+The command requires confirmation and removes only resources from that incomplete first
+deployment. It keeps the repository and `config/.env` so deployment can be retried.
+
+## 8. Editable repository and deployed revision
+
+`repo/` is now a working tree, not the authoritative record of what is currently running.
+The running application uses previously built/pinned images; editing a source file over SMB
+does **not** immediately change the running application.
+
+Check both identities with:
+
+```sh
+sudo pf status
+```
+
+It reports:
 
 ```text
-\\NAS\docker\partflow\backups\revisions\partflow-staging
+Deployed source: <SHA>
+Workspace HEAD: <SHA or non-git>
+Workspace differs from deployed: True/False
+Workspace changes: ...
 ```
 
-If Windows still reports `Access denied`, run:
+This distinction prevents a local edit from being mistaken for deployed code.
+
+A manual update that finds a dirty/different workspace first includes that current
+workspace in the pre-update checkpoint as `workspace.tar.gz`, then replaces `repo/` with
+the selected GitHub revision. An unattended release update refuses a dirty/different
+workspace instead of deleting local work automatically.
+
+`deploy --current` also requires a clean Git checkout so the deployed identity remains
+an exact commit.
+
+## 9. Manual update
+
+For active staging development:
 
 ```sh
-sudo sh ./pf.sh doctor
-id YOUR_DSM_USER
+sudo pf update --latest
 ```
 
-and verify that the user belongs to the configured `backup_read_group` and that
-the `docker` shared folder grants that group read access. Do not make recovery
-artifacts world-writable with `0777` or `0666`.
-
-Copy the entire checkpoint directory to an encrypted off-NAS destination. Configure
-retention and alerts separately. This package never silently deletes old checkpoints,
-retained images, `pf_keep_*` databases, or failed verification databases. They consume
-space until an administrator reviews and removes them under a recovery plan.
-`minimum_free_mb` is only a floor on the source/backup filesystem, not a capacity proof
-for a Docker database volume that may live elsewhere.
-
-## 10. Failure recovery
+Or select an exact revision/release:
 
 ```sh
-sudo sh ./pf.sh status
-sudo sh ./pf.sh logs --tail=150 backend frontend db
+sudo pf update --commit FULL_SHA
+sudo pf update --release TAG
+sudo pf update --release latest --channel prerelease
 ```
 
-Read the operation phase and checkpoint ID. If failure occurred before source/live DB
-changes (`paused` or `backup-ready`), fix the error and use `resume`; it rechecks the
-current schema/image relationship and requires `RESUME <database-name>`.
+The update resolves a fixed SHA, checks CI, clones a separate candidate, builds candidate
+images, checks the migration contract, asks for confirmation, stops application writes,
+creates a verified pre-update checkpoint, rehearses approved migrations when necessary,
+replaces the writable repository, then activates the new images.
 
-After an application-only update failure with no migration, code-only rollback remains
-available if its schema gates pass. If a migration, reset, database restoration, or an
-uncertain source/data change occurred, use the verified earlier checkpoint with
-`rollback BACKUP_ID --restore-db` after reviewing its data-loss boundary. Incomplete
-recovery may create an emergency data-preservation checkpoint that cannot be used as a
-verified source rollback target.
+Migration changes require explicit review:
 
-Managed one-off jobs are labelled; on a caught failure the controller attempts to stop
-its jobs and frontend/backend. Power loss or a hard kill cannot run cleanup: after a NAS
-reboot inspect the journal, containers and database before exposing the app again. Do
-not simply delete `pending.json` or start the frontend through the DSM UI to bypass it.
-Manual Docker/DSM actions are outside the script's lock and guards.
+```sh
+sudo pf update --latest --allow-migrations
+```
 
-Do not run `docker system prune -a`, delete volumes, or prune retained images while
-these checkpoints are your rollback plan. Full physical-host disaster recovery and
-automatic business reconciliation remain outside this staging helper.
+Existing historical migration files being modified or deleted remain refused. No lifecycle
+command automatically performs `alembic downgrade`.
 
-## 11. Validation boundary and first NAS rehearsal
+`--skip-ci` is a manual staging exception, not evidence that CI passed.
 
-See `deploy/synology/TEST_REPORT.md`. The delivered controller was checked with real filesystem/archive
-operations, real local Git clone/checkout, shell syntax checks and offline workflow
-simulations. Docker, actual PostgreSQL 16 SQL execution and Synology were **not run**
-in this environment. The full live clone from GitHub could not be exercised here because
-the code sandbox could not resolve github.com; repository inspection used the GitHub
-connector. The NAS must have its own working DNS and HTTPS access.
+## 10. Backups and rollback
 
-Before enabling `--apply`, use disposable staging data to rehearse: backup, one code-only
-update/rollback, reset and restore, rejected confirmation, and a simulated service outage.
-Verify counts/history in the UI and off-NAS backup access. Do not run the application's
-integration test suite against data you intend to keep.
+Create a verified revision checkpoint:
 
-## 12. Sources
+```sh
+sudo pf backup
+```
 
-- [PartFlow deployment and release policy at the inspected commit](https://github.com/CDSemi/part-flow/blob/8d358eea0582b2e910df60569ad9865fd78f9d98/docs/DEPLOYMENT.md)
-- [PartFlow CI workflow at the inspected commit](https://github.com/CDSemi/part-flow/blob/8d358eea0582b2e910df60569ad9865fd78f9d98/.github/workflows/ci.yml)
-- [GitHub REST releases](https://docs.github.com/en/rest/releases/releases)
-- [GitHub REST workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)
-- [PostgreSQL 16 ALTER DATABASE](https://www.postgresql.org/docs/16/sql-alterdatabase.html)
-- [PostgreSQL 16 database rename implementation](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/commands/dbcommands.c)
+A v2.5 checkpoint contains:
+
+```text
+source.tar.gz          exact deployed source revision
+workspace.tar.gz       only when the writable repo differs from deployed source
+database.dump          active PostgreSQL database
+database.list
+manifest.json
+manifest.sha256
+```
+
+The active database dump is restored into a temporary database as part of verification.
+The runtime `.env` is no longer stored in the normal revision `source.tar.gz`; it is host
+configuration outside the repository. A full purge-recovery bundle preserves it separately.
+
+List checkpoints, newest first, ten per page:
+
+```sh
+sudo pf backups --page 1
+```
+
+Interactive rollback:
+
+```sh
+sudo pf rollback
+```
+
+Code-only rollback keeps current data and requires schema compatibility:
+
+```sh
+sudo pf rollback BACKUP_ID
+```
+
+Application + database rollback:
+
+```sh
+sudo pf rollback BACKUP_ID --restore-db
+```
+
+The database form requires a stronger confirmation, restores the old dump into a fresh
+database, and retains the previously active database under a `pf_keep_*` name rather than
+silently deleting newer writes.
+
+## 11. Reset staging data
+
+To keep the installed application/version but activate a clean migrated database:
+
+```sh
+sudo pf reset-db
+```
+
+Confirmation uses the actual database name:
+
+```text
+RESET partflow_staging
+```
+
+`reset-db` creates and verifies a checkpoint first, initializes a new database with the
+current Alembic head, switches databases transactionally, and retains the previous active
+database. It does not delete the PostgreSQL Docker volume.
+
+Use `reset-db` for clearing test data while keeping the deployment. Use `purge` when the
+goal is to return the instance to a genuinely new-deployment state.
+
+## 12. Full purge, recovery, and clean redeploy
+
+### List/select instances
+
+```sh
+sudo pf instances
+```
+
+If multiple managed PartFlow Compose projects exist, `purge` presents a paginated list
+(10 per page) unless `--project` selects one explicitly:
+
+```sh
+sudo pf purge
+sudo pf purge --project partflow-staging
+```
+
+### Purge safety sequence
+
+Before deletion, the tool prints a summary of project, repo, source revision, database,
+containers, volumes, networks, image tags, checkpoints, state, and environment presence.
+It then requires multiple confirmations.
+
+The first confirmation is:
+
+```text
+PURGE <project>
+```
+
+The controller stops application writes and creates a verified recovery bundle. Only after
+that succeeds does it request the destructive confirmations, including:
+
+```text
+DELETE <database>
+ERASE <project> <random-challenge>
+```
+
+Deleting normal revision backups or resetting `pf-config.json` adds separate confirmations.
+There is no `--yes` bypass.
+
+### Purge recovery bundle
+
+Stored under:
+
+```text
+recovery/<project>/purge-<timestamp>-<sha12>-<suffix>/
+```
+
+It preserves as much functional state as can be safely reconstructed:
+
+```text
+source.tar.gz                 exact deployed source
+workspace.tar.gz              current editable repo when it differs
+configuration/.env            external runtime environment
+configuration/pf-config.json  admin settings snapshot
+images.tar                    current/available PartFlow application images
+postgres-globals.sql
+databases/active.dump
+databases/<retained>.dump
+revision-checkpoints.tar.gz
+state/*.json
+manifest.json
+manifest.sha256
+```
+
+Database dumps are restore-tested. If the PostgreSQL data volume exists but a recoverable
+backup cannot be produced, purge refuses to delete that volume.
+
+The recovery bundle is intended to reconstruct **functional PartFlow state**, not Docker
+container IDs/network IDs bit-for-bit.
+
+### Backup retention during purge
+
+Keep normal revision checkpoints:
+
+```sh
+sudo pf purge --keep-backups
+```
+
+Archive them into recovery then delete the normal checkpoint tree:
+
+```sh
+sudo pf purge --delete-backups
+```
+
+Reset the local admin config too:
+
+```sh
+sudo pf purge --reset-admin-config
+```
+
+The root-owned `control/` plane remains installed so a clean deployment can be started
+immediately afterward.
+
+### Interrupted purge
+
+If power/SSH fails after destructive deletion begins, run `purge` again. The operation
+journal identifies the incomplete purge and requires a resume confirmation before
+continuing from the verified recovery bundle.
+
+### Brand-new redeploy after purge
+
+```sh
+sudo pf deploy --latest
+```
+
+Because purge removes `config/.env`, a normal full purge causes the deploy wizard to create
+a new environment and new PostgreSQL password. If the purge variant preserved an external
+configuration for a specific recovery path, the deploy flow validates it before reuse.
+
+After smoke testing:
+
+```sh
+sudo pf backup
+```
+
+### Exact instance restore
+
+List recovery bundles:
+
+```sh
+sudo pf recoveries
+sudo pf recoveries --page 2
+sudo pf recoveries --project partflow-staging
+```
+
+Restore a purged instance into an empty target project:
+
+```sh
+sudo pf restore-instance RECOVERY_ID
+```
+
+The restore recreates the saved repository workspace, restores `config/.env`, loads saved
+application images, recreates/restores the database set, restores checkpoint history/state,
+and health-checks backend/frontend. The current installed root-owned control plane is kept;
+recovery does not downgrade the lifecycle controller mid-operation. The current
+`config/pf-config.json` also remains authoritative. Its saved recovery copy is retained for
+manual comparison/reapplication rather than being activated in the middle of a restore.
+
+### Side-by-side old-data recovery
+
+If a new instance is already active but old data is needed for inspection/export:
+
+```sh
+sudo pf restore-instance RECOVERY_ID --side-by-side
+```
+
+The old active database is restored under an isolated `pf_recovery_*` database name. The
+current application/database are not replaced.
+
+PartFlow does **not** perform a generic automatic merge between the recovered DB and the
+new active DB. `PartMovement`, quantity lineage, allocations, reversals, and derived current
+state have domain invariants that cannot be safely reconciled by generic SQL insertion.
+Recover old data side-by-side, then build an explicit domain-aware import/reconciliation
+procedure for any data that truly must be carried forward.
+
+## 13. Release checks and scheduled tasks
+
+Check without applying:
+
+```sh
+sudo pf release-check
+```
+
+To allow unattended release updates, edit:
+
+```text
+/volume1/docker/partflow/config/pf-config.json
+```
+
+and set:
+
+```text
+"auto_update": true
+```
+
+Scheduled updates are stricter than manual updates: they require an eligible published
+release, matching successful CI for the exact SHA, no migration/config/dependency condition
+requiring human review, and a workspace that still exactly matches the deployed revision.
+
+DSM Task Scheduler should call the root-owned wrappers, for example:
+
+```sh
+/volume1/docker/partflow/control/backup.sh
+```
+
+and:
+
+```sh
+/volume1/docker/partflow/control/release-check.sh --apply
+```
+
+Do not schedule `reset-db`, `purge`, `restore-instance`, or other interactive destructive
+commands.
+
+## 14. Advanced raw Compose access
+
+Prefer `sudo pf ...`. The controller pins all important paths and serializes state-changing
+operations.
+
+If raw Compose access is absolutely necessary, the equivalent shape is:
+
+```sh
+sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
+  docker compose \
+  --project-directory /volume1/docker/partflow/repo \
+  --env-file /volume1/docker/partflow/config/.env \
+  -p partflow-staging \
+  -f /volume1/docker/partflow/control/compose.nas.yaml \
+  ps
+```
+
+Using raw Docker/Compose bypasses controller locks, recovery checks, and destructive guards.
+Do not run it concurrently with `pf update`, `pf backup`, `pf reset-db`, `pf purge`, or
+`pf restore-instance`.
+
+Never use broad cleanup commands such as:
+
+```text
+docker system prune --volumes
+docker volume prune
+```
+
+as a PartFlow reset mechanism on a NAS that may host other workloads.
+
+## 15. Updating the control plane
+
+Application `update` intentionally does not self-update `control/`.
+
+When a reviewed repository revision contains a new Admin version:
+
+```sh
+cd /volume1/docker/partflow/repo
+# Review the deployment/control changes and Git status first.
+sudo sh ./deploy/synology/install-control.sh
+sudo pf doctor
+```
+
+The installer archives the previous control directory under:
+
+```text
+recovery/control-upgrades/
+```
+
+This explicit step is the security boundary that permits `repo/` to remain users-writable.
+Do not run an unreviewed or unknown `install-control.sh` with `sudo`.
+
+## 16. Troubleshooting
+
+### SMB can see `repo/` but cannot edit
+
+First normalize POSIX permissions:
+
+```sh
+sudo pf permissions
+```
+
+Then verify DSM Shared Folder permissions grant the account/group Read/Write access.
+
+### SMB cannot modify backups/recovery
+
+That is intentional. These are recovery artifacts and remain group read-only. Copy them
+elsewhere if an editable copy is needed.
+
+### `sudo sh ./pf.sh ...` refuses to run
+
+Expected in v2.5. The repo copy is source only. Run:
+
+```sh
+sudo pf ...
+```
+
+or install/update control first:
+
+```sh
+sudo sh ./deploy/synology/install-control.sh
+```
+
+### `.env` exists but Compose says variables are missing
+
+Use `sudo pf doctor`. A raw Compose command does not automatically use the external config.
+The authoritative runtime file is:
+
+```text
+/volume1/docker/partflow/config/.env
+```
+
+### Local source edits exist before an update
+
+Check:
+
+```sh
+sudo pf status
+```
+
+A manual update preserves a differing workspace in `workspace.tar.gz` before replacement.
+An unattended update refuses the drift and waits for manual review.
+
+### Incomplete lifecycle operation
+
+Run:
+
+```sh
+sudo pf status
+```
+
+Then use the operation-specific recovery (`resume`, `rollback`, repeat/resume `purge`, or
+`restore-instance`) rather than deleting state files manually.
+
+## 17. Command reference
+
+| Command | Purpose |
+| --- | --- |
+| `sudo pf doctor` | Validate host tools, control security, Compose config, env, and basic capacity |
+| `sudo pf permissions` | Normalize repo/config writable and backup/recovery read-only permissions |
+| `sudo pf status` | Show deployed revision, workspace drift, DB revision, containers, pending operation |
+| `sudo pf deploy --latest` | Brand-new staging deployment from latest configured branch SHA |
+| `sudo pf deploy --commit FULL_SHA` | Brand-new deployment from an explicit commit |
+| `sudo pf deploy --release TAG` | Brand-new deployment from a published release |
+| `sudo pf abort-deploy` | Remove an incomplete first deploy before frontend access opened |
+| `sudo pf update --latest` | Managed staging update from latest branch SHA |
+| `sudo pf update --commit FULL_SHA` | Managed staging update to exact commit |
+| `sudo pf update --release TAG` | Managed staging update to release |
+| `sudo pf backup` | Create and restore-test a revision checkpoint |
+| `sudo pf backups --page N` | List revision checkpoints, 10/page |
+| `sudo pf rollback [BACKUP_ID]` | Code rollback with current DB retained |
+| `sudo pf rollback BACKUP_ID --restore-db` | Restore code + selected database state |
+| `sudo pf reset-db` | Activate a clean migrated DB while preserving recoverability |
+| `sudo pf instances` | List managed PartFlow instances |
+| `sudo pf purge [--project NAME]` | Full recoverable purge of one staging instance |
+| `sudo pf recoveries` | List purge recovery bundles |
+| `sudo pf restore-instance RECOVERY_ID` | Recreate a purged functional instance |
+| `sudo pf restore-instance RECOVERY_ID --side-by-side` | Restore old DB alongside current instance |
+| `sudo pf release-check` | Check eligible release without applying |
+| `sudo pf release-check --apply` | Apply unattended update only when every gate passes |
+| `sudo pf resume` | Resume only an unchanged early-failure state |
+
+## 18. Validation boundary
+
+The included offline tests simulate Docker/PostgreSQL behavior while exercising controller
+logic, filesystem/archive/checksum handling, permission policy, source/workspace separation,
+purge/recovery flow, and path construction. They do not replace a real DSM + Docker +
+PostgreSQL integration rehearsal.
+
+Before relying on v2.5 recovery on important data, perform at least one disposable staging
+cycle on the actual NAS:
+
+```text
+install-control
+→ doctor
+→ backup
+→ update
+→ purge
+→ restore-instance
+→ verify UI/data
+→ purge
+→ deploy --latest
+→ restore old DB --side-by-side
+```
+
+Do not call a staging procedure production-ready until the repository's production phase
+and backup/disaster-recovery gates are completed separately.

@@ -52,6 +52,7 @@ function stationFixture(url: string): Promise<Response> {
     return json({
       area,
       demand_context: [],
+      scrapped: [],
       has_machines: false,
       lines: [],
       total_part_numbers: 0,

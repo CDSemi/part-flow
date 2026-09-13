@@ -6,9 +6,12 @@
 // busy shop. Authored in the API model the real feed delivers.
 //
 // `import.meta.env.DEV` is replaced statically by Vite, so the whole
-// fixture is dead code in a production build and never ships (verified
-// by src/production-boundary.test.ts). It is NOT a mock view: the real
-// view reads the real feed in every build.
+// fixture is dead code in a production build and never ships — the
+// built assets are scanned for its sentinel values by
+// `scripts/check-production-boundary.mjs` as part of `npm run build`
+// (src/production-boundary.test.ts guards the import graph: no
+// `src/mocks/` import reaches the real view). It is NOT a mock view:
+// the real view reads the real feed in every build.
 
 import type {
   TrackingAreaRef,

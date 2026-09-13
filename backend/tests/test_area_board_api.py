@@ -1025,26 +1025,35 @@ def test_scrapped_quantity_is_reported_per_area_and_net_of_reversed_scraps(
     reversed_scrap = _scrap(client, shop.lathe, remainder, pn, 3)
 
     board = _board(client, shop.department_id)
+    # The scrap line belongs to the SHARED Area monitoring model (the
+    # `{n} scrapped` line of the shared PN row), so the Scan Station's
+    # own inventory read carries the same figure.
     scrapped: dict[int, dict[str, int]] = {
         int(entry["inventory"]["area"]["id"]): {
-            str(line["part_number"]): int(line["quantity"]) for line in entry["scrapped"]
+            str(line["part_number"]): int(line["quantity"])
+            for line in entry["inventory"]["scrapped"]
         }
         for entry in board["areas"]
     }
     assert scrapped[shop.material.area_id][pn] == 2
     assert scrapped[shop.lathe.area_id][pn] == 3
     assert pn not in scrapped[shop.deburr.area_id]
+    station_view = client.get(f"/api/areas/{shop.lathe.area_id}/inventory")
+    assert station_view.status_code == 200, station_view.text
+    assert {line["part_number"]: line["quantity"] for line in station_view.json()["scrapped"]}[
+        pn
+    ] == 3
 
     _undo(client, shop.lathe, pn, str(reversed_scrap["device_event_id"]))
     board = _board(client, shop.department_id)
     lathe = {
         line["part_number"]: line["quantity"]
-        for line in _area(board, shop.lathe.area_id)["scrapped"]
+        for line in _area(board, shop.lathe.area_id)["inventory"]["scrapped"]
     }
     assert pn not in lathe
     material = {
         line["part_number"]: line["quantity"]
-        for line in _area(board, shop.material.area_id)["scrapped"]
+        for line in _area(board, shop.material.area_id)["inventory"]["scrapped"]
     }
     assert material[pn] == 2
 
@@ -1066,12 +1075,27 @@ def test_a_terminal_area_reports_stocked_lines_with_their_allocation(
     stocked = {line["part_number"]: line for line in entry["stocked"]}
     assert stocked[pn]["quantity"] == 7
     assert stocked[pn]["allocated_quantity"] == 0
+    # A stocked PN still being worked FOR an open demand names it — the
+    # same monitoring context the Production Board's stocked-only row
+    # carries, never a bare `WO —` while the Work Order is open.
+    assert [demand["work_order_demand_id"] for demand in stocked[pn]["demands"]] == [
+        work_order.demand_id
+    ]
 
     _allocate(client, pn, [(work_order.demand_id, 5)])
     entry = _area(_board(client, shop.department_id), shop.stockroom.area_id)
     stocked = {line["part_number"]: line for line in entry["stocked"]}
     assert stocked[pn]["quantity"] == 7
     assert stocked[pn]["allocated_quantity"] == 5
+    assert len(stocked[pn]["demands"]) == 1
+
+    # Once every Work Order of the PN is complete, the stocked line keeps
+    # its quantity and allocation but carries no demand context any more.
+    _allocate(client, pn, [(work_order.demand_id, 2)])
+    entry = _area(_board(client, shop.department_id), shop.stockroom.area_id)
+    stocked = {line["part_number"]: line for line in entry["stocked"]}
+    assert stocked[pn]["allocated_quantity"] == 7
+    assert stocked[pn]["demands"] == []
 
 
 def test_a_non_terminal_area_never_reports_stocked_lines(client: TestClient, shop: _Shop) -> None:

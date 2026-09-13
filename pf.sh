@@ -1,13 +1,37 @@
 #!/bin/sh
-# Root entry point for the local Synology administration controller.
+# PartFlow NAS control-plane launcher source.
+# Operational use must run the installed root-owned copy under <home>/control.
 set -eu
 PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin:/var/packages/Git/target/bin:${PATH:-}"
 export PATH
-REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ADMIN="$REPO_ROOT/deploy/synology/pf-admin.py"
+
+CONTROL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$(basename -- "$CONTROL_DIR")" != "control" ]; then
+    echo "This is the repository source copy of pf.sh and is intentionally not used for NAS operations." >&2
+    echo "Install/update the root-owned control plane with:" >&2
+    echo "  sudo sh ./deploy/synology/install-control.sh" >&2
+    echo "Then run:" >&2
+    echo "  sudo pf <command>" >&2
+    exit 2
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "PartFlow NAS control commands must run as root. Use: sudo pf <command>" >&2
+    exit 2
+fi
+
+PF_HOME=${PF_HOME:-$(CDPATH= cd -- "$CONTROL_DIR/.." && pwd)}
+PF_REPO_ROOT=${PF_REPO_ROOT:-$PF_HOME/repo}
+PF_CONFIG_DIR=${PF_CONFIG_DIR:-$PF_HOME/config}
+PF_CONTROL_DIR=$CONTROL_DIR
+ADMIN="$CONTROL_DIR/pf-admin.py"
 
 if [ ! -f "$ADMIN" ]; then
-    echo "Missing Synology admin controller: $ADMIN" >&2
+    echo "Missing installed Synology admin controller: $ADMIN" >&2
+    exit 2
+fi
+if [ ! -d "$PF_REPO_ROOT" ]; then
+    echo "Missing PartFlow repository: $PF_REPO_ROOT" >&2
     exit 2
 fi
 
@@ -42,5 +66,5 @@ if [ -z "$PYTHON" ] || ! command -v "$PYTHON" >/dev/null 2>&1; then
     exit 2
 fi
 
-export PF_REPO_ROOT="$REPO_ROOT"
+export PF_HOME PF_REPO_ROOT PF_CONFIG_DIR PF_CONTROL_DIR
 exec "$PYTHON" "$ADMIN" "$@"

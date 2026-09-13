@@ -1,94 +1,67 @@
-# PartFlow NAS Admin v2 — Validation report
+# PartFlow NAS Admin v2.5 — Validation report
 
-Date: 2026-09-09. Tool version: 2.2.0.
+Date: 2026-09-11. Tool version: 2.5.0.
 
 ## Executed checks
 
 | Check | Actual result |
 | --- | --- |
-| Python compilation of `deploy/synology/pf-admin.py` | Passed with Python 3.13.5 |
-| `sh -n` on root `pf.sh` and both `deploy/synology/*.sh` wrappers | Passed |
-| `pf.sh --help` through the real shell entry point | Passed |
-| Offline unittest suite | **73 tests passed** |
-| Filesystem/archive operations used by the tests | Executed against real temporary files |
-| Local Git clone + checkout of a non-tip SHA | Executed successfully against a local test repository |
-| Backup permission policy | Existing checkpoint repair and new checkpoint `0750` directories / `0640` files validated on a real temporary filesystem |
-| SynoCommunity Python discovery paths in root `pf.sh` | Statically covered by regression test; shell syntax and real `--help` entry point passed |
-| Included Compose and NAS environment example vs Admin v2.1 | Byte-for-byte unchanged |
+| Offline unittest suite | **99 tests passed** |
+| Python compilation of `deploy/synology/pf-admin.py` | **Passed with Python 3.13.5** |
+| Python 3.9 grammar compatibility | **Passed** using `ast.parse(..., feature_version=(3, 9))` |
+| Shell syntax: `pf.sh`, `install-control.sh`, `backup.sh`, `release-check.sh` | **Passed** with `sh -n` |
+| External config + control Compose path construction | Covered by regression test |
+| Writable repository / writable config permission policy | Exercised on real temporary filesystem |
+| Read-only backup/recovery permission policy | Exercised on real temporary filesystem |
+| Root-owned non-writable control-plane guard | Covered by regression test |
+| Source archive / workspace archive / checksum operations | Exercised on real temporary files |
+| Local Git checkout pinned to a non-tip SHA | Executed against a local temporary Git repository |
+| Purge recovery bundle structure | Exercised with real filesystem/tar/checksum operations and simulated Docker/PostgreSQL |
 
-Reproduce the offline suite from the extracted package:
+Additional executed checks: `pf-config.example.json` parsed as JSON, `compose.nas.yaml` parsed
+as YAML, the repository launcher refusal path passed, the simulated installed `control/pf.sh
+--help` path passed, and both EN/VI guides were checked for the same 18 top-level sections.
 
-```sh
-python3 -m unittest discover -s deploy/synology/tests -v
-python3 -m py_compile deploy/synology/pf-admin.py
-sh -n pf.sh
-sh -n deploy/synology/backup.sh
-sh -n deploy/synology/release-check.sh
-```
+## v2.5 coverage exercised
 
-The tests operate on temporary directories and simulated external services. They do
-not connect to the NAS or run the application's own database integration suite.
+- Runtime split between `repo/`, `control/`, `config/`, `backups/`, `recovery/`, and `.pf-state-*`.
+- `repo/` group-writable policy (`2770` directories, `0660` regular files) with setgid inheritance.
+- `config/` group-writable policy and external `config/.env` / `config/pf-config.json`.
+- `backups/` and `recovery/` group-readable/read-only policy (`0750` / `0640`).
+- Repository `pf.sh` refusal and installed-control execution boundary.
+- Root-owned/non-group-writable control-plane validation.
+- Controller Compose invocation with explicit `--env-file`, `--project-directory`, installed control Compose file, and `PARTFLOW_REPO_ROOT`.
+- First-run environment creation outside the repository with a cryptographically random PostgreSQL password.
+- Exact deployed revision stored in external state, separate from editable workspace HEAD/dirty state.
+- Manual update preservation of a dirty/different workspace as `workspace.tar.gz` before repository replacement.
+- Automatic update refusal when the editable workspace differs from the deployed revision.
+- Full repository replacement without preserving privileged runtime files inside the repository.
+- Revision checkpoints with exact deployed source plus optional editable-workspace archive.
+- Multi-instance selection, purge confirmation gates, recoverable purge bundle, interrupted purge resume, exact restore, and side-by-side DB recovery.
+- Purge recovery preservation of external `.env`, admin config snapshot, editable workspace archive, database payloads, application images, checkpoint history and state metadata.
+- Recovery keeps the currently installed control plane while restoring repository/runtime state.
+- Explicit refusal to generic-merge recovered production history into a newer active database.
+- Static installer coverage for legacy `.env`/`pf-config.json` migration, conflicting-config refusal, external layout, read-only control permissions, and root-only launcher.
 
-## Coverage exercised
-
-- Fixed-SHA checkout rather than following a branch after selection.
-- Preservation of root `.env`, `compose.nas.yaml`, `pf.sh`, and the `deploy/synology/` controller/configuration tree during source replacement.
-- Replacement of normal repository documentation/source while the local admin tree remains stable.
-- Runtime configuration loading from `deploy/synology/pf-config.json`.
-- Configurable trusted DSM `backup_read_group`, defaulting to `administrators`.
-- Repair of existing revision-checkpoint ownership/modes when the controller starts.
-- Completed checkpoint publication as group-readable/read-only (`0750` directories, `0640` files) while `.pf-state-*` remains `0700`.
-- Rejection of a configured backup group that does not exist.
-- SynoCommunity Python 3.10–3.14 package-path discovery in root `pf.sh`.
-- Rejection of stale root-level Admin v2 configuration after the layout migration.
-- Verified checkpoint creation before update/reset/rollback.
-- Dump failure and restore-verification failure stopping the operation.
-- Manual migration approval, rehearsal before the live migration, and failure journaling.
-- No automatic database downgrade or restoration on application startup failure.
-- Code rollback preserving newer rows in the simulated database.
-- Schema-incompatible code rollback rejection.
-- Explicit database rollback retaining the displaced database.
-- Clean-database reset and preservation of original simulated data.
-- Refusal to terminate unrelated database sessions during a database switch.
-- Exact confirmation text and refusal of noninteractive destructive operations.
-- Newest-first checkpoint selection, 10-item pages and explicit backup selection.
-- Checksum corruption and missing retained image rejection.
-- Archive traversal/link rejection and source archive round-trip.
-- File locks and persistent interruption guards.
-- Check-only/default-disabled automation and required opt-in.
-- Automatic migration and divergent-history rejection.
-- Exact-commit CI matching and refusal to reuse an earlier successful CI attempt.
-- Release tag resolution and detection of previously observed tags being moved.
-- Stable versus pre-release filtering.
-- Production lifecycle-operation guards.
-- Managed one-off job labelling.
-- Removing accidental shell database overrides while preserving deliberate rehearsal overrides.
-- Blocking destructive Compose volume flags.
+Existing update, backup, migration rehearsal, rollback, reset, release selection, CI gating,
+checksum, archive-safety, locking and production-guard regression coverage remains in the
+same suite.
 
 ## Not executed / not certified
 
-**Docker and PostgreSQL interactions were simulated.** No Docker daemon, actual
-PostgreSQL 16 service, Synology DSM, Container Manager, NAS disk/ACL environment,
-reverse proxy or real application workload was available for runtime validation.
-The SQL transaction used for database rename/cutover was generated and checked in
-tests, not executed against a PostgreSQL server here. PostgreSQL 16 documentation
-and upstream rename implementation were inspected, but that is not a live SQL test.
+Docker and PostgreSQL interactions are simulated in this environment. No actual Synology
+DSM, Container Manager, Docker daemon, PostgreSQL 16 instance, SMB ACL stack, reverse proxy,
+or live PartFlow application container was available for integration testing.
 
-A live shell Git clone of GitHub was attempted but the code sandbox could not
-resolve `github.com`. The GitHub connector did read the project at commit
-`8d358eea0582b2e910df60569ad9865fd78f9d98`, its deployment policy, CI workflow and
-release metadata. HTTP success and clone performance from the user's NAS remain
-unverified. The local Git test does not substitute for NAS network validation.
+In particular, the following must still be rehearsed on a disposable NAS staging instance:
 
-No PartFlow container image was built or started here. No real migration, data reset,
-restore, reconciliation, application smoke test, or release deployment was performed.
-No GitHub commit/push/release or DSM scheduled task was created.
+- `install-control.sh` ownership/mode behavior under DSM.
+- `docker compose --env-file` and `--project-directory` behavior with the NAS's installed Compose version.
+- Build contexts that use external `PARTFLOW_REPO_ROOT`.
+- SMB create/edit/delete behavior in `repo/` and `config/`, including DSM Shared Folder ACLs.
+- Read-only SMB behavior for `backups/` and `recovery/`.
+- Real PostgreSQL dump/restore, migration rehearsal, database rename/cutover, purge and recovery.
+- Docker image save/load during full purge recovery.
+- Actual application health and shop-floor workflow behavior after update/recovery.
 
-The filesystem tests validate POSIX group ownership and modes, not Synology's SMB/ACL
-stack. DSM shared-folder ACL must still grant the configured group read access. The
-controller intentionally does not call `synoacltool` or make backup artifacts
-world-readable/writable. The source archive contains `.env`, so group-readable backup
-access must be limited to trusted administrators.
-
-Passing the offline suite is not approval for production. Rehearse the commands with
-disposable staging data on the actual NAS before enabling scheduled application.
+These limitations are intentional and must not be described as passed runtime validation.

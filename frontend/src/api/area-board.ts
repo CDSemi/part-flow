@@ -3,9 +3,10 @@
 //
 // One read: `GET /api/area-board` returns every active Area of the
 // Department with the SHARED Area monitoring model (./area-inventory —
-// the same contract the Scan Station reads), its active Operations,
-// the scrapped quantity per PN, and, for the terminal Stockroom, the
-// stocked lines with the PN's active allocation.
+// the same contract the Scan Station reads, the PN's open demand
+// context and the scrapped quantity per PN included), its active
+// Operations, and, for the terminal Stockroom, the stocked lines with
+// the PN's active allocation and its OPEN demand context.
 //
 // The All Areas overview and the per-Area detail are two presentations
 // of this one answer: switching tabs never re-reads, and the two modes
@@ -18,9 +19,15 @@
 import type {
   AreaInventory,
   AreaInventoryWire,
+  DemandContext,
+  DemandContextWire,
   OperationRef,
 } from './area-inventory';
-import { toAreaInventory, toOperationRef } from './area-inventory';
+import {
+  toAreaInventory,
+  toDemandContext,
+  toOperationRef,
+} from './area-inventory';
 import { apiRequest } from './client';
 
 /** One PN held in a terminal Area (the Stockroom column / group). */
@@ -31,14 +38,17 @@ export interface StockedLine {
   /** The PN's ACTIVE allocation — a PN-level connection to demand,
    * never divided per Area, so the row states both values. */
   allocatedQuantity: number;
+  /** The PN's OPEN demands in the canonical order — the same
+   * monitoring context an inventory row carries, so a stocked PN still
+   * worked FOR an open demand names it (empty once every Work Order of
+   * the PN is complete). */
+  demands: DemandContext[];
 }
 
 export interface AreaBoardArea {
   /** The shared Area monitoring model, identical to the station's. */
   inventory: AreaInventory;
   operations: OperationRef[];
-  /** Scrapped quantity in this Area per PN (net of reversed scraps). */
-  scrapped: Record<string, number>;
   /** Terminal Areas only; empty everywhere else. */
   stocked: StockedLine[];
 }
@@ -56,11 +66,11 @@ interface AreaBoardAreaWire {
     name: string | null;
     is_external: boolean;
   }[];
-  scrapped: { part_number: string; quantity: number }[];
   stocked: {
     part_number: string;
     quantity: number;
     allocated_quantity: number;
+    demands: DemandContextWire[];
   }[];
 }
 
@@ -73,13 +83,11 @@ function toArea(wire: AreaBoardAreaWire): AreaBoardArea {
   return {
     inventory: toAreaInventory(wire.inventory),
     operations: wire.operations.map(toOperationRef),
-    scrapped: Object.fromEntries(
-      wire.scrapped.map((line) => [line.part_number, line.quantity]),
-    ),
     stocked: wire.stocked.map((line) => ({
       partNumber: line.part_number,
       quantity: line.quantity,
       allocatedQuantity: line.allocated_quantity,
+      demands: line.demands.map(toDemandContext),
     })),
   };
 }

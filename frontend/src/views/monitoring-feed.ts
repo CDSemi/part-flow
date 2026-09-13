@@ -62,17 +62,20 @@ export function useMonitoringFeed<T>(
 
   // A regained connection (lost → healthy) refreshes immediately: the
   // generation bump cancels the pending period and issues a fresh
-  // request. The initial `connecting` → `connected` of the shared
-  // probe is not a return — the first load is already in flight.
-  const previousConnectivity = useRef(connectivity);
+  // request. "Lost" is remembered until the connection is healthy
+  // again, because the return may pass through the probe's explicit
+  // `connecting` state (the OFFLINE banner's Retry: `unavailable` →
+  // `connecting` → `connected`) and must still count as a return. The
+  // initial `connecting` → `connected` of the shared probe is not a
+  // return — nothing was lost and the first load is already in flight.
+  const lost = useRef(false);
   useEffect(() => {
-    if (
-      connectivity === 'connected' &&
-      previousConnectivity.current === 'unavailable'
-    ) {
+    if (connectivity === 'unavailable') {
+      lost.current = true;
+    } else if (connectivity === 'connected' && lost.current) {
+      lost.current = false;
       reload();
     }
-    previousConnectivity.current = connectivity;
   }, [connectivity, reload]);
 
   useEffect(() => {

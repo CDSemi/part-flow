@@ -195,8 +195,13 @@ export function TrackingView() {
       return { rows: [], total: 0, offset: 0, limit, hasMore: false };
     }
     if (preview !== null) return null;
-    return feed.state.status === 'ready' ? feed.state.data : null;
-  }, [preview, feed.state, limit]);
+    // A page answers ONE query: after a filter or page-size change the
+    // previous answer is not the current list, so it is never shown as
+    // one — the list reads loading until the current query is answered.
+    return feed.state.status === 'ready' && feed.state.data.query === query
+      ? feed.state.data
+      : null;
+  }, [preview, feed.state, limit, query]);
 
   // The feed status is the LIST's operational status: it reads live
   // only while a complete page is on screen. A first load still running
@@ -210,7 +215,9 @@ export function TrackingView() {
 
   const loading =
     preview === 'loading' ||
-    (preview === null && feed.state.status === 'loading');
+    (preview === null &&
+      (feed.state.status === 'loading' ||
+        (feed.state.status === 'ready' && page === null)));
   const loadError =
     preview === 'error'
       ? 'Check the backend connection and try again.'
@@ -350,12 +357,14 @@ export function TrackingView() {
               message={
                 filters.search.trim()
                   ? `No PNs match “${filters.search.trim()}” — clear filters.`
-                  : 'No PNs match the current filters — clear filters.'
+                  : filtersActive
+                    ? 'No PNs match the current filters — clear filters.'
+                    : 'No PN has quantity in production.'
               }
               hint={
                 filtersActive
                   ? undefined
-                  : 'Part Numbers appear here once a Work Order Demand is saved or quantity is released to production.'
+                  : 'The list shows Active PNs by default — set Status to All to see stocked, open and completed Part Numbers.'
               }
             />
           ) : (

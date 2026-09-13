@@ -162,6 +162,7 @@ function inventoryWire(
   flows: FlowSpec[],
   machines: ReturnType<typeof machineWire>[],
   demands: DemandSpec[] = [],
+  scrapped: { part_number: string; quantity: number }[] = [],
 ) {
   const of = (state: State) => flows.filter((flow) => flow.state === state);
   const total = (state: State) =>
@@ -175,6 +176,7 @@ function inventoryWire(
       is_terminal: area.is_terminal ?? false,
     },
     demand_context: demandContextWire(demands),
+    scrapped,
     has_machines: machines.length > 0,
     lines: linesWire(flows),
     total_part_numbers: linesWire(flows).length,
@@ -333,7 +335,6 @@ function boardPayload() {
           DEBURR_DEMANDS,
         ),
         operations: [{ ...OPERATION, id: 5, code: 'DEB', name: 'Deburring' }],
-        scrapped: [],
         stocked: [],
       },
       {
@@ -355,12 +356,14 @@ function boardPayload() {
             }),
           ],
           LATHE_DEMANDS,
+          // The scrap line belongs to the shared inventory model (the
+          // Scan Station reads the same figure for the same row).
+          [
+            { part_number: '2027-60-8114-00', quantity: 1 },
+            { part_number: '214-406', quantity: 1 },
+          ],
         ),
         operations: [OPERATION],
-        scrapped: [
-          { part_number: '2027-60-8114-00', quantity: 1 },
-          { part_number: '214-406', quantity: 1 },
-        ],
         stocked: [],
       },
       {
@@ -376,9 +379,32 @@ function boardPayload() {
           [],
         ),
         operations: [{ ...OPERATION, id: 9, code: 'STK', name: 'Stocking' }],
-        scrapped: [],
         stocked: [
-          { part_number: '309-127', quantity: 50, allocated_quantity: 50 },
+          // Fully allocated to work that is now complete: no open demand.
+          {
+            part_number: '309-127',
+            quantity: 50,
+            allocated_quantity: 50,
+            demands: [],
+          },
+          // Stocked quantity still worked FOR an open demand: the row
+          // names that demand exactly as every other monitoring row.
+          {
+            part_number: '142-260',
+            quantity: 18,
+            allocated_quantity: 4,
+            demands: demandContextWire([
+              {
+                id: 70,
+                pn: '142-260',
+                wo: '007033',
+                jobs: ['18790'],
+                dueInDays: 9,
+                hotRank: 2,
+                requested: 40,
+              },
+            ])[0].demands,
+          },
         ],
       },
     ],
@@ -644,6 +670,35 @@ test('each Machine gets a monitoring card; inactive Machines stay distinct', asy
   expect(lathe4.textContent).toContain('expected back 2026-08-06');
 });
 
+test('a Machine card counts Part Numbers, not the separate quantities it holds', async () => {
+  // Two separate quantities of ONE PN on the same Machine (a split, two
+  // releases): two rows on the card, ONE PN in its totals — the rule
+  // the Area statistics apply, and what the server's per-Machine lines
+  // say.
+  stubFetch(() => {
+    const payload = boardPayload();
+    const lathe = payload.areas[1].inventory;
+    const split = { ...LATHE_FLOWS[0], id: 41, qty: 2, minutes: 40 };
+    const card = lathe.machines.find((entry) => entry.machine.id === 3)!;
+    card.lines = linesWire([LATHE_FLOWS[0], split]);
+    card.total_quantity = 5;
+    lathe.lines = linesWire([...LATHE_FLOWS, split]);
+    lathe.on_machine_quantity += 2;
+    lathe.total_quantity += 2;
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+  openArea(/^Lathe/);
+
+  const lathe3 = document.querySelectorAll('.abd-machine')[2];
+  expect(lathe3.querySelectorAll('.mc-list li').length).toBe(2);
+  expect(lathe3.querySelector('.mtotals .machine-total-pcs')?.textContent).toBe(
+    '5',
+  );
+  expect(lathe3.querySelector('.mtotals')?.textContent).toContain('1 PN');
+  expect(lathe3.querySelector('.mtotals')?.textContent).not.toContain('2 PNs');
+});
+
 test('Areas without Machines render only the summary card — no placeholders', async () => {
   await renderBoard();
   openArea(/^Deburr/);
@@ -796,6 +851,49 @@ test('the terminal Stockroom shows stocked quantity with its allocation', async 
   expect(stats).toEqual(['PNs', 'Stocked pcs', 'Hot']);
   // Stocked quantity has no entry time: no `Time in Area` is invented.
   expect(summary.querySelector('.r3 .tia')).toBeNull();
+});
+
+test('a stocked PN still worked FOR an open demand names it like every monitoring row', async () => {
+  await renderBoard();
+  openArea(/^Stockroom/);
+
+  const rows = Array.from(document.querySelectorAll('.abd-summary li'));
+  const open = rows.find((row) => row.textContent?.includes('142-260'))!;
+  const done = rows.find((row) => row.textContent?.includes('309-127'))!;
+  // The open demand supplies the Hot rank, Work Order and Job Number —
+  // the same context the Production Board's stocked-only row carries.
+  expect(open.querySelector('.hot')?.textContent).toContain('#2');
+  expect(open.querySelector('.r2 .wo')?.textContent).toBe('WO 007033 · 18790');
+  // The status text stays the allocation, never a due countdown.
+  expect(open.querySelector('.r2')?.textContent).toContain('allocated 4/18');
+  expect(open.textContent).not.toMatch(/days left/);
+  // A stocked PN with no open Work Order any more reads `WO — · —`.
+  expect(done.querySelector('.hot')).toBeNull();
+  expect(done.querySelector('.r2 .wo')?.textContent).toBe('WO — · —');
+  // The Stockroom's Hot statistic counts the open demand's rank.
+  const summary = document.querySelector('.abd-summary')!;
+  const hot = Array.from(summary.querySelectorAll('.stat')).find((el) =>
+    el.querySelector('.l')?.textContent?.startsWith('Hot'),
+  )!;
+  expect(hot.querySelector('.n')?.textContent).toBe('1');
+});
+
+test('the All Areas overview labels stocked portions `stocked`, never `processing`', async () => {
+  await renderBoard();
+  const column = Array.from(document.querySelectorAll('.ms-col')).find((el) =>
+    el.querySelector('.mc-title')?.textContent?.includes('Stockroom'),
+  )!;
+  const chips = Array.from(column.querySelectorAll('.ctxs .ctx'), (el) =>
+    el.textContent?.trim(),
+  );
+  expect(chips).toContain('stocked × 50');
+  expect(chips).not.toContain('processing × 50');
+  // The open demand is searchable through the Stockroom row too.
+  fireEvent.change(screen.getByLabelText('Search PN, WO, Job Number'), {
+    target: { value: '18790' },
+  });
+  expect(column.textContent).toContain('142-260');
+  expect(column.textContent).not.toContain('309-127');
 });
 
 // ---------------------------------------------------------------------------
@@ -1058,8 +1156,8 @@ test('a Part Number is counted once per Area, never once per quantity', async ()
   const tabs = document.querySelector<HTMLElement>('.ab-tabs')!;
   const latheTab = within(tabs).getByRole('button', { name: /^Lathe/ });
   expect(latheTab.querySelector('.cnt')?.textContent?.trim()).toBe('3');
-  // Across all Areas: 3 in Lathe, 2 in Deburr, 1 stocked PN.
-  expect(document.querySelector('.ab-meta')?.textContent).toContain('6 PN');
+  // Across all Areas: 3 in Lathe, 2 in Deburr, 2 stocked PNs.
+  expect(document.querySelector('.ab-meta')?.textContent).toContain('7 PN');
 
   openArea(/^Lathe/);
   expect(document.querySelector('.ab-meta')?.textContent).toContain('3 PN');

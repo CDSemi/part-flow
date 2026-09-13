@@ -27,6 +27,7 @@ import {
 import { useUiClock } from '../../components/ui-clock';
 import {
   aggregateByPartNumber,
+  monitoringContext,
   presentAreaInventory,
   presentationArea,
 } from '../area-presentation';
@@ -71,30 +72,27 @@ function departmentIdFromLocation(): number | null {
  * the other one shows differently. A terminal Area holds no active
  * quantity at all — its stocked lines (Phase 10: manufacturing-complete
  * quantity whose flows are closed) become direct `Stocked` rows whose
- * status text states the PN's allocation instead of a due countdown.
+ * status text states the PN's allocation instead of a due countdown,
+ * while their Hot rank, Work Order Number and Job Numbers come from the
+ * PN's OPEN demands exactly as on every other monitoring row (and as on
+ * the Production Board's stocked-only row for the same quantity) — a
+ * stocked PN reads `WO — · —` only once no Work Order of it is open.
  */
 function presentBoardArea(entry: AreaBoardArea): AreaPresentation {
   const area = presentationArea(entry.inventory.area, entry.operations);
-  const { cards, machines } = presentAreaInventory(entry.inventory, {
-    scrapped: entry.scrapped,
-  });
+  const { cards, machines } = presentAreaInventory(entry.inventory);
   const stocked = entry.stocked.map((line): MockAreaCard => {
-    const scrapped = entry.scrapped[line.partNumber];
+    const scrapped = entry.inventory.scrapped[line.partNumber];
     return {
       area: area.key,
       pn: line.partNumber,
-      // Stocked quantity is manufacturing-complete and PN-level: the
-      // Quantity Flow that carried it is closed, so no Work Order
-      // context remains on it. The allocation below is what the row
-      // states instead.
-      workOrder: 'WO —',
-      job: '—',
+      ...monitoringContext(line.demands),
       qty: line.quantity,
       machines: [],
-      due: null,
+      // The due date stays the demand's (the sort orders by it); the
+      // row's status text is the allocation, never a countdown.
       dueText: `allocated ${line.allocatedQuantity}/${line.quantity}`,
       enteredAreaAt: null,
-      received: '',
       ...(scrapped ? { scrapped } : {}),
     };
   });
@@ -699,7 +697,11 @@ function AllAreasOverview({
             {areaCards.length ? (
               <ul className="mc-list">
                 {areaCards.map((c) => (
-                  <AreaOverviewRow key={c.pn} card={c} />
+                  <AreaOverviewRow
+                    key={c.pn}
+                    card={c}
+                    directLabel={area.terminal ? 'stocked' : 'processing'}
+                  />
                 ))}
               </ul>
             ) : (

@@ -201,7 +201,15 @@ export function AreaPnRow({
  * portion or per Quantity Flow. The overview and the detail views
  * therefore cannot drift apart.
  */
-export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
+export function AreaOverviewRow({
+  card,
+  directLabel = 'processing',
+}: {
+  card: MockAreaCard;
+  /** Chip label of direct (no-Machine) presence — `stocked` in the
+   * terminal Stockroom column, `processing` everywhere else. */
+  directLabel?: string;
+}) {
   const now = useUiClock('minute');
   const { assigned, queued, finished } = splitAssignments([card]);
   const demand = demandLine(card);
@@ -220,7 +228,7 @@ export function AreaOverviewRow({ card }: { card: MockAreaCard }) {
             ? `queue × ${e.qty}`
             : e.state === 'vendor'
               ? `vendor × ${e.qty}`
-              : `processing × ${e.qty}`,
+              : `${directLabel} × ${e.qty}`,
       })),
     ...finished.map((e) => ({
       key: `d-${e.context}`,
@@ -426,6 +434,11 @@ export function MachineMonitoringCard({
 }) {
   const now = useUiClock('minute');
   const totalQty = entries.reduce((s, e) => s + e.qty, 0);
+  // The card lists one entry per separate quantity; the PN count is
+  // the number of DISTINCT Part Numbers (two quantities of one PN on
+  // the Machine — a split, two releases — are one PN), the same rule
+  // the Area statistics apply.
+  const pnCount = new Set(entries.map((e) => e.card.pn)).size;
   return (
     <div className={`abd-card abd-machine ${machine.status}`}>
       <div className="mhead">
@@ -444,8 +457,8 @@ export function MachineMonitoringCard({
           text neutral). Never selected by position. */}
       <div className="mtotals">
         <b className="machine-total-pcs">{totalQty}</b> pcs assigned ·{' '}
-        <b className="machine-total-pns">{entries.length}</b> PN
-        {entries.length === 1 ? '' : 's'}
+        <b className="machine-total-pns">{pnCount}</b> PN
+        {pnCount === 1 ? '' : 's'}
       </div>
       {entries.length ? (
         <AreaPnList

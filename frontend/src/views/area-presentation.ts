@@ -117,7 +117,7 @@ export function demandsSearchText(demands: readonly DemandContext[]): string {
  * stay counted so the row can say there are more — and searchable, so
  * none of them is reachable only through the tooltip.
  */
-function monitoringContext(demands: readonly DemandContext[]) {
+export function monitoringContext(demands: readonly DemandContext[]) {
   const defining = demands[0];
   return {
     workOrder: workOrderLabel(defining),
@@ -161,14 +161,14 @@ const MACHINE_CARD_STATUS: Record<
  * only, naming the Machine that completed the work as context).
  *
  * Each card carries the fixed monitoring values of its quantity — the
- * Area-entry timestamp from the flow, and the due date, Job Numbers
- * and Hot rank of the PN's OPEN demands (never of the demand the
- * quantity descends from) — and, when the caller supplies it, the PN's
- * scrapped quantity in this Area.
+ * Area-entry timestamp from the flow, the due date, Job Numbers and
+ * Hot rank of the PN's OPEN demands (never of the demand the quantity
+ * descends from), and the PN's scrapped quantity in this Area — all of
+ * them the server's, so the Scan Station and the Area Board can never
+ * present the same row with different lines.
  */
 export function presentAreaInventory(
   inventory: AreaInventory,
-  options: { scrapped?: Readonly<Record<string, number>> } = {},
 ): AreaInventoryPresentation {
   // The Area mode is the inventory's own — the SERVER's judgement from
   // the Area's active Machines at the moment this inventory was read
@@ -199,7 +199,7 @@ export function presentAreaInventory(
       // the Area's active cards: a Machine retired after finishing the
       // work is no longer a card and must still name the completion.
       const completedBy = flow.completedMachine?.name;
-      const scrapped = options.scrapped?.[flow.partNumber];
+      const scrapped = inventory.scrapped[flow.partNumber];
       const card: MockAreaCard = {
         area: key,
         pn: flow.partNumber,

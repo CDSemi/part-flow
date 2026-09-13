@@ -702,6 +702,24 @@ test('rows keep the server order: Hot → dated (stocked rows included) → unda
   expect(numbers).toEqual(['1', '2', '3', '4', '5', '6', '7']);
 });
 
+test('a deliberately non-canonical server order is rendered as delivered — the view never re-sorts', async () => {
+  // One ordering rule, owned by the read model: were the client to sort
+  // by Hot rank or due date, this reversed answer would come out in the
+  // canonical order and the test would fail.
+  const reversed = [...BOARD_ROWS].reverse();
+  stubFetch(() =>
+    Promise.resolve(
+      new Response(JSON.stringify(boardPayload(reversed)), { status: 200 }),
+    ),
+  );
+  await renderBoard();
+  const parts = Array.from(
+    visibleTable().querySelectorAll('tbody .part'),
+    (el) => el.textContent,
+  );
+  expect(parts).toEqual(reversed.map((row) => row.part_number));
+});
+
 test('a missing due date renders as — / No due date, not as an error', async () => {
   await renderBoard();
 
@@ -1996,6 +2014,37 @@ test('lost connectivity shows the stale feed on the loaded rows, and its return 
   expect(rowByPn('2027-60-8114-00')).toBeDefined();
 
   // Connectivity back: an immediate refresh, not a wait for the period.
+  view.rerender(connectivityTree('connected'));
+  await act(async () => {});
+  expect(boardCalls()).toBe(2);
+  expect(document.querySelector('.pb-head h1.live')?.className).not.toContain(
+    'stale',
+  );
+});
+
+test('a return through the probe’s connecting state (the OFFLINE banner’s Retry) also refreshes at once', async () => {
+  // The OFFLINE banner's Retry runs an explicit probe: `unavailable` →
+  // `connecting` → `connected`. A lost connection is remembered until
+  // it is healthy again, so this return refreshes immediately too —
+  // never a wait for the next period. The initial `connecting` →
+  // `connected` of the shared probe is NOT a return: nothing was lost.
+  const fetchImpl = stubFetch();
+  window.history.replaceState({}, '', '/production-board');
+  const view = render(connectivityTree('connecting'));
+  await act(async () => {});
+  const boardCalls = () =>
+    fetchImpl.mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/production-board'),
+    ).length;
+  expect(boardCalls()).toBe(1);
+  view.rerender(connectivityTree('connected'));
+  await act(async () => {});
+  expect(boardCalls()).toBe(1);
+
+  view.rerender(connectivityTree('unavailable'));
+  view.rerender(connectivityTree('connecting'));
+  await act(async () => {});
+  expect(boardCalls()).toBe(1);
   view.rerender(connectivityTree('connected'));
   await act(async () => {});
   expect(boardCalls()).toBe(2);

@@ -132,6 +132,7 @@ function inventory(
   flows: FlowInArea[],
   machines: MachineRef[],
   demands: Record<string, DemandContext[]> = {},
+  scrapped: Record<string, number> = {},
 ): AreaInventory {
   const byState = (state: FlowInArea['processingState']) =>
     lines(flows.filter((item) => item.processingState === state));
@@ -142,6 +143,7 @@ function inventory(
   return {
     area,
     demandContext: demands,
+    scrapped,
     hasMachines: machines.length > 0,
     lines: lines(flows),
     totalPartNumbers: lines(flows).length,
@@ -278,7 +280,6 @@ function longPreviewBoard(): AreaBoard {
       operations: [
         { id: 5, code: 'DEB', name: 'Deburring', isExternal: false },
       ],
-      scrapped: {},
       stocked: [],
     },
     {
@@ -287,18 +288,42 @@ function longPreviewBoard(): AreaBoard {
         latheFlows,
         machines,
         demandContext(latheSpecs),
+        { '2027-60-8114-00': 1 },
       ),
       operations: [{ id: 1, code: 'TURN', name: 'Turning', isExternal: false }],
-      scrapped: { '2027-60-8114-00': 1 },
       stocked: [],
     },
     {
       inventory: inventory(stockroom, [], []),
       operations: [{ id: 9, code: 'STK', name: 'Stocking', isExternal: false }],
-      scrapped: {},
       stocked: [
-        { partNumber: '309-127', quantity: 50, allocatedQuantity: 50 },
-        { partNumber: '142-260', quantity: 18, allocatedQuantity: 4 },
+        // Fully allocated to work that is now complete: no open demand.
+        {
+          partNumber: '309-127',
+          quantity: 50,
+          allocatedQuantity: 50,
+          demands: [],
+        },
+        // Still worked FOR an open demand: the row names it (Hot rank,
+        // Work Order, Job Number), exactly as every other monitoring row.
+        {
+          partNumber: '142-260',
+          quantity: 18,
+          allocatedQuantity: 4,
+          demands: [
+            {
+              workOrderId: 70,
+              workOrderNumber: '007033',
+              workOrderDemandId: 70,
+              requestType: 'NEW',
+              requestedQuantity: 40,
+              jobNumbers: ['18790'],
+              dueDate: isoDateIn(9),
+              priorityRank: 2,
+              receivedDate: isoDateIn(-12),
+            },
+          ],
+        },
       ],
     },
   ];

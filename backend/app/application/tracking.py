@@ -83,12 +83,15 @@ from app.application.part_numbers import canonical_part_number
 from app.application.production_board import (
     BoardLocation,
     FlowPosition,
-    effective_totals_by_area,
     flow_positions,
     group_locations,
 )
 from app.application.production_release import released_quantities
-from app.application.projections import effective_lineage_edges, reversed_movement_ids
+from app.application.projections import (
+    effective_lineage_edges,
+    effective_totals_by_area,
+    reversed_movement_ids,
+)
 from app.application.transfers import ROUTE_DEVIATION_KEY
 from app.application.work_orders import site_today
 from app.domain.enums import MovementReason, MovementType, QuantityFlowStatus, RouteMode

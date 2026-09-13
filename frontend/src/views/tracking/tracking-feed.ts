@@ -25,19 +25,41 @@ import { useApiData } from '../../api/use-api-data';
 import type { ConnectivityStatus } from '../../app/connectivity-context';
 import type { MonitoringFeed } from '../monitoring-feed';
 import { useMonitoringFeed } from '../monitoring-feed';
-import { MOVEMENTS_PAGE_SIZE, TRACKING_REFRESH_MS } from './tracking-logic';
+import {
+  ALLOCATIONS_PAGE_SIZE,
+  FLOWS_PAGE_SIZE,
+  MOVEMENTS_PAGE_SIZE,
+  SCRAP_PAGE_SIZE,
+  TRACKING_REFRESH_MS,
+} from './tracking-logic';
 
 /**
  * The list feed. The loader identity is the QUERY the filters produce
  * (`trackingListQuery`), so two filter states that reach the server
  * identically never re-read, while any effective change reads at once.
  */
+/** A list page together with the query it answers. */
+export interface AnsweredTrackingPage extends TrackingPage {
+  query: string;
+}
+
+/**
+ * The list feed. The page carries the QUERY it answers: the shared feed
+ * keeps its last complete answer while a changed query's first read is
+ * in flight (and marks it stale should that read fail), so the view
+ * must never present a page of a previous query as the current one —
+ * it compares `query` and shows the loading state until the answer to
+ * the current filters arrives.
+ */
 export function useTrackingListFeed(
   query: string,
   connectivity: ConnectivityStatus,
   enabled = true,
-): MonitoringFeed<TrackingPage> {
-  const load = useCallback(() => loadTrackingListByQuery(query), [query]);
+): MonitoringFeed<AnsweredTrackingPage> {
+  const load = useCallback(
+    () => loadTrackingListByQuery(query).then((page) => ({ ...page, query })),
+    [query],
+  );
   return useMonitoringFeed(load, TRACKING_REFRESH_MS, connectivity, enabled);
 }
 
@@ -51,7 +73,12 @@ export function useTrackingDetailFeed(
     () =>
       pn === null
         ? Promise.reject(new Error('No Part Number selected.'))
-        : loadTrackingDetail(pn, MOVEMENTS_PAGE_SIZE),
+        : loadTrackingDetail(pn, {
+            movements: MOVEMENTS_PAGE_SIZE,
+            flows: FLOWS_PAGE_SIZE,
+            allocations: ALLOCATIONS_PAGE_SIZE,
+            scrap: SCRAP_PAGE_SIZE,
+          }),
     [pn],
   );
   return useMonitoringFeed(

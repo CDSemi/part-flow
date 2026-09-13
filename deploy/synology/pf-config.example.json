@@ -8,5 +8,6 @@
   "ci_workflow": "ci.yml",
   "health_timeout_seconds": 180,
   "minimum_free_mb": 2048,
-  "backup_read_group": "administrators"
+  "backup_read_group": "users",
+  "workspace_write_group": "users"
 }

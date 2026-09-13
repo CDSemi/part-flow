@@ -149,6 +149,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
           maintenance_note: null,
           maintenance_expected_return: null,
           state_changed_at: T0,
+          operational_state: 'IDLE',
+          assigned_quantity: 0,
+          assigned_lines: [],
         }),
       ),
     );

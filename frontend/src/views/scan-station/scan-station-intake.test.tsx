@@ -202,6 +202,7 @@ function inventory(areaId: number) {
   return json({
     area: areaRef(areaId),
     demand_context: [],
+    scrapped: [],
     has_machines: areaHasMachines,
     lines: lines(here),
     total_part_numbers: lines(here).length,
@@ -260,6 +261,7 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
       demand_context: [],
+      scrapped: [],
       has_machines: areaHasMachines,
     });
   }

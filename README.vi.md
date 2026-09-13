@@ -72,8 +72,9 @@ Production Board + Area Board + PN Tracking của Phase 11:
   (`GET /api/area-board`) trả về mọi Area active mang CHÍNH model monitoring Area
   mà Scan Station đọc — nên All Areas overview và per-Area detail là hai
   presentation của cùng một trả lời và không thể lệch khỏi station — cộng
-  Operation của Area, scrapped theo PN và stocked line kèm allocation của
-  terminal Stockroom. All Areas overview theo PN (một row mỗi Part Number trong
+  Operation của Area và stocked line kèm allocation và demand context mở của PN
+  cho terminal Stockroom (scrapped theo PN trong Area thuộc chính model dùng
+  chung, nên row của station cũng mang dòng `{n} scrapped`). All Areas overview theo PN (một row mỗi Part Number trong
   một Area, các quantity riêng biệt gộp vào chip portion) còn per-Area detail
   giữ một row mỗi quantity thao tác được; Hot rank, due date và Job Numbers của
   row monitoring lấy từ OPEN Work Order Demand của PN trên cả hai bề mặt, kể cả
@@ -99,9 +100,12 @@ Production Board + Area Board + PN Tracking của Phase 11:
   phân trang, không gì bị cắt ngoài tầm với; status derive chỉ tính stock khi còn chưa allocate (`Stocked`),
   open demand không có gì trong production và không còn stock available là
   `Open`. Migration `0012_phase11_tracking_index` thêm một composite index
-  `(part_number, occurred_at, id)` trên `part_movements` cho read này. Breakdown
-  theo PN của Machines và expected-duration monitoring (phần còn lại của Phase
-  11) vẫn là phần chưa làm.
+  `(part_number, occurred_at, id)` trên `part_movements` cho read này. Phase 11
+  cũng liệt kê breakdown theo PN của quantity đang gán cho từng Machine trong
+  Management → Machines (`assigned_lines` trên `/api/machines`), và đã audit ngày
+  2026-09-10 (IMPLEMENTATION_ROADMAP Phase 11) — mục Phase 11 duy nhất còn mở là
+  expected-duration monitoring, bị chặn cho tới khi tài liệu canonical định
+  nghĩa thứ tự ưu tiên nguồn duration.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem

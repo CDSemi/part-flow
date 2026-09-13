@@ -319,6 +319,7 @@ function handle(url: string, method: string, body: unknown): Response {
         retired_on: null,
         operational_state: 'IDLE',
         assigned_quantity: 0,
+        assigned_lines: [],
         description: null,
         manufacturer: null,
         model: null,
@@ -348,6 +349,7 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(areaId),
       operations: activeOperations(areaId).map(operationRef),
       demand_context: [],
+      scrapped: [],
       has_machines: areaHasMachines(areaId),
     });
   }
@@ -376,6 +378,10 @@ function handle(url: string, method: string, body: unknown): Response {
     return json({
       area: areaRef(areaId),
       demand_context: demandContextWire(here.map((f) => f.pn)),
+      // The scrap recorded in THIS Area per PN — part of the shared
+      // monitoring model, so the station row carries it like the board.
+      scrapped:
+        areaId === 2 ? [{ part_number: '0455-20-0118-03', quantity: 2 }] : [],
       has_machines: areaHasMachines(areaId),
       lines,
       total_part_numbers: lines.length,
@@ -801,6 +807,9 @@ test('a station row is worked FOR the open demand while the action keeps the qua
   // The header Hot statistic counts that same context.
   const stats = screen.getByLabelText('Area statistics');
   expect(within(stats).getByText('Hot').previousSibling).toHaveTextContent('1');
+  // The scrap recorded in this Area for the PN is the row's line 4 —
+  // the same server figure the Area Board's row shows (GUI §4.10).
+  expect(row.querySelector('.r4 .scraptxt')?.textContent).toBe('2 scrapped');
 
   // The quantity's own Work Order — the one it was released under, now
   // completed — stays the workflow context of the ACTION, and is never

@@ -471,7 +471,9 @@ xác định mà không request.
   không query/local boolean. `Ctrl+Shift+K` toggle, presentation-only.
 - Kiosk ẩn top nav nhưng giữ OFFLINE banner; dùng same board header, compact theme
   toggle, live status, clock; full viewport không leftover offset.
-- Footer có `Exit kiosk`; shortcut/theme/auto-scale/manual pages vẫn dùng được.
+- Footer có slide switch `Kiosk` On/Off (v18 — `role="switch"`, accessible name
+  `Kiosk mode`, thay nút `Enter kiosk` / `Exit kiosk` của v17); shortcut/theme/
+  auto-scale/manual pages vẫn dùng được.
 - Không browser fullscreen/security guarantee; wall-display operator vẫn phải cấu
   hình browser/device riêng.
 
@@ -526,9 +528,14 @@ rail. Sort Time derive timestamp/shared clock. Long PN ellipsis + tooltip; empty
 trả về mọi Area ACTIVE mang **cùng model monitoring Area mà Scan Station đọc**
 (`app/api/area_inventory.py` — mode của Area, mọi Quantity Flow ACTIVE với
 holding state derive ở server, Machine card chỉ giữ quantity đang gán, các nhóm
-queued / processing / finished và tổng), cộng Operation active, scrapped theo PN
-trong Area đó, và — với terminal Stockroom, nơi quantity đã hoàn tất sản xuất
-nên không còn active flow — các stocked line kèm allocation active của PN. All
+queued / processing / finished và tổng, demand context MỞ của PN, và scrapped
+theo PN trong Area đó — dòng `{n} scrapped` của row dùng chung, nên station cũng
+hiển thị), cộng Operation active, và — với terminal Stockroom, nơi quantity đã
+hoàn tất sản xuất nên không còn active flow — các stocked line kèm allocation
+active của PN và demand context MỞ của PN (Hot rank, Work Order Number và Job
+Numbers của row Stockroom theo cùng quy tắc với mọi row monitoring và row
+stocked-only của Production Board; `WO — · —` chỉ khi không còn Work Order nào
+của PN mở). All
 Areas overview và per-Area detail là **hai presentation của cùng một trả lời**:
 đổi tab không read lại và hai mode không thể lệch nhau; cả hai render qua
 component chung và cùng mapping client với Scan Station.
@@ -832,8 +839,10 @@ Permission-based view cho monitoring/lifecycle/maintenance/asset, không CMMS.
 
 Search + New; columns Machine | State | Assigned now | Asset | Maintenance; no
 Actions. Sort header cycles asc/desc/none, stable, `aria-sort`. State derive
-Maintenance > Running if assigned > Idle, elapsed shared clock. Assigned quantity
-semantic tone; asset metadata content-sized. Per-row accessible On/Off switch chỉ
+Maintenance > Running if assigned > Idle, elapsed shared clock. Assigned now liệt
+kê các phần theo PN của server (`<PN> · <n> pcs`, mỗi PN một dòng — Phase 11,
+cùng projection với tổng; `—` khi không có gì) với quantity mang semantic tone;
+asset metadata content-sized. Per-row accessible On/Off switch chỉ
 mở start/clear dialog và cập nhật sau confirm. Whole row opens Edit; switch stops
 propagation.
 

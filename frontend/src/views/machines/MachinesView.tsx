@@ -70,9 +70,9 @@ import {
 // quantity assigned to each Machine (`assignedQuantity`, derived from
 // the production projection) and the derived state itself
 // (`operationalState`, the same derivation the Scan Station cards show):
-// the Assigned now column shows the total, and retirement stays blocked
-// while it is above zero. The per-PN breakdown of that quantity arrives
-// with the monitoring read models.
+// the Assigned now column shows the PN portions with their quantities
+// (Phase 11 — `assignedLines`, the same projection the total sums),
+// and retirement stays blocked while the total is above zero.
 
 type PendingDialog =
   | { kind: 'new' }
@@ -177,6 +177,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
           barcode: machineBarcode(tag),
           stateChangedAt: '2026-07-01T00:00:00.000Z',
           assignedQuantity: 0,
+          assignedLines: [],
           operationalState: 'idle',
           manufacturer: 'Long-Preview Manufacturing Equipment Co.',
           model: `LP-${String(9000 + n)}-EXTENDED-MODEL-DESIGNATION`,
@@ -192,6 +193,7 @@ const longPreviewMachines: ((areaId: number) => Machine[]) | null = import.meta
         barcode: machineBarcode('CD-LONG-SUPPLEMENTAL'),
         stateChangedAt: '2026-07-01T00:00:00.000Z',
         assignedQuantity: 0,
+        assignedLines: [],
         operationalState: 'idle',
         manufacturer:
           'Supplemental Long-Preview Precision Machinery Manufacturing',
@@ -865,10 +867,16 @@ function ActiveMachineRow({
         {qty === 0 ? (
           <span className="mg-meta">—</span>
         ) : (
-          <div className="mg-assign">
-            <span className={`q ${status}`}>{qty}</span>{' '}
-            <span className="unit">pcs assigned</span>
-          </div>
+          // One line per PN portion (GUI_DESIGN §12.1): the PN reads
+          // first, the separator and unit recede, and the quantity
+          // carries the state tone beside the State column's wording.
+          machine.assignedLines.map((line) => (
+            <div className="mg-assign" key={line.partNumber}>
+              {line.partNumber} <span className="sep">·</span>{' '}
+              <span className={`q ${status}`}>{line.quantity}</span>{' '}
+              <span className="unit">pcs</span>
+            </div>
+          ))
         )}
       </td>
       <td className="mg-metacol">

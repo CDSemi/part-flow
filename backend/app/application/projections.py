@@ -603,6 +603,36 @@ def rebuild_current_positions(session: Session) -> dict[int, CurrentPosition]:
     }
 
 
+def effective_totals_by_area(
+    session: Session, movement_type: MovementType, area_ids: Iterable[int]
+) -> dict[tuple[str, int], int]:
+    """Σ quantity of the effective Movements of one type per (PN, Area).
+
+    The history-derived per-Area figures every monitoring read model
+    shares (Phase 11): the scrapped quantity recorded in an Area (net of
+    reversed scraps) and the stocked quantity of a terminal Area — never
+    a stored counter.
+    """
+    wanted = list(area_ids)
+    if not wanted:
+        return {}
+    reversal = aliased(PartMovement)
+    rows = session.execute(
+        select(
+            PartMovement.part_number,
+            PartMovement.to_area_id,
+            func.sum(PartMovement.quantity),
+        )
+        .where(
+            PartMovement.movement_type == movement_type,
+            PartMovement.to_area_id.in_(wanted),
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.part_number, PartMovement.to_area_id)
+    )
+    return {(str(pn), int(area_id)): int(total) for pn, area_id, total in rows}
+
+
 def stocked_quantity_of(session: Session, part_number: str) -> int:
     """The PN's total stocked quantity (Phase 10, PROJECT_PROFILE §18).
 

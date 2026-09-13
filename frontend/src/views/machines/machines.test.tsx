@@ -40,6 +40,8 @@ interface FakeMachine {
   retired_on: string | null;
   operational_state?: 'MAINTENANCE' | 'RUNNING' | 'IDLE';
   assigned_quantity?: number;
+  /** Phase 11: the per-PN breakdown the server reports beside the total. */
+  assigned_lines?: { part_number: string; quantity: number }[];
 }
 
 interface FakeEvent {
@@ -147,8 +149,13 @@ function seedState(): FakeState {
         model: 'QT-250',
         serial_number: 'Q25-90412',
         installed_on: '2026-02-16',
-        // Phase 6: the server reports the assigned ACTIVE quantity.
+        // Phase 6: the server reports the assigned ACTIVE quantity;
+        // Phase 11 its per-PN breakdown.
         assigned_quantity: 40,
+        assigned_lines: [
+          { part_number: '2027-60-8114-00', quantity: 28 },
+          { part_number: '309-127', quantity: 12 },
+        ],
       }),
       fakeMachine(105, 2, 'Lathe 2', 'CD-0105', {
         manufacturer: 'Mazak',
@@ -287,8 +294,15 @@ function operationalState(
 }
 
 function machineWire(machine: FakeMachine) {
+  const assigned = machine.assigned_quantity ?? 0;
   return {
     ...machine,
+    assigned_quantity: assigned,
+    // The server's breakdown sums to the total; a fixture that names no
+    // breakdown reports one anonymous PN portion of the whole quantity.
+    assigned_lines:
+      machine.assigned_lines ??
+      (assigned > 0 ? [{ part_number: 'PN-FIXTURE', quantity: assigned }] : []),
     operational_state: operationalState(machine),
     barcode_value: `PF:MACHINE:${machine.asset_tag}`,
     created_at: T0,
@@ -509,10 +523,16 @@ test('active Machines list the derived state with the time in state', async () =
   expect(within(lathe2).getByRole('cell', { name: '—' })).toBeInTheDocument();
 
   // Assigned ACTIVE quantity reported by the server (Phase 6) → Running,
-  // with the total shown in the Assigned now column.
+  // with the Assigned now column listing the server's per-PN portions
+  // (Phase 11, GUI_DESIGN §12.1) — one line per PN, never a client-side
+  // split of the total.
   const lathe1 = activeRow('Lathe 1');
   expect(lathe1.querySelector('.mg-state')?.textContent).toMatch(/^Running · /);
-  expect(lathe1.textContent).toContain('40 pcs assigned');
+  const portions = [...lathe1.querySelectorAll('.mg-assign')].map((line) =>
+    line.textContent?.replace(/\s+/g, ' ').trim(),
+  );
+  expect(portions).toEqual(['2027-60-8114-00 · 28 pcs', '309-127 · 12 pcs']);
+  expect(lathe1.querySelector('.mg-assign .q')?.className).toContain('running');
 
   // Explicit maintenance override with its note and expected return.
   const lathe4 = activeRow('Lathe 4');
@@ -540,7 +560,7 @@ test('the state column shows the state the SERVER derived, never a local re-deri
   );
   const row3 = activeRow('Lathe 3');
   expect(row3.querySelector('.mg-state')?.textContent).toMatch(/^Idle · /);
-  expect(row3.textContent).toContain('12 pcs assigned');
+  expect(row3.textContent).toContain('PN-FIXTURE · 12 pcs');
 });
 
 test('the replacement pair stays distinguishable: retired records keep their identity', async () => {
@@ -698,7 +718,7 @@ test('clearing maintenance on a Machine that still holds quantity announces Runn
       activeRow('Lathe 4').querySelector('.mg-state')?.textContent,
     ).toMatch(/^Running · /),
   );
-  expect(activeRow('Lathe 4').textContent).toContain('15 pcs assigned');
+  expect(activeRow('Lathe 4').textContent).toContain('PN-FIXTURE · 15 pcs');
 });
 
 test('an idle Machine retires after typing its Asset Tag and a final summary — never deleted', async () => {

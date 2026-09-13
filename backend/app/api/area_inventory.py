@@ -200,28 +200,31 @@ def work_order_context(context: WorkOrderContext | None) -> WorkOrderContextResp
     )
 
 
+def demand_entries(demands: list[DemandContext]) -> list[DemandContextResponse]:
+    """One PN's OPEN demands as the wire carries them, in the order given
+    (the canonical demand order — the first is the defining one)."""
+    return [
+        DemandContextResponse(
+            work_order_id=entry.work_order.id,
+            work_order_number=entry.work_order.work_order_number,
+            work_order_demand_id=entry.demand.id,
+            request_type=entry.demand.request_type,
+            requested_quantity=entry.demand.requested_quantity,
+            job_numbers=list(entry.demand.job_numbers),
+            due_date=entry.demand.due_date,
+            priority_rank=entry.demand.priority_rank,
+            received_date=entry.work_order.received_date,
+        )
+        for entry in demands
+    ]
+
+
 def demand_context(
     contexts: dict[str, list[DemandContext]],
 ) -> list[PartNumberDemandsResponse]:
     """The OPEN demand context per PN, PNs in a stable order."""
     return [
-        PartNumberDemandsResponse(
-            part_number=part_number,
-            demands=[
-                DemandContextResponse(
-                    work_order_id=entry.work_order.id,
-                    work_order_number=entry.work_order.work_order_number,
-                    work_order_demand_id=entry.demand.id,
-                    request_type=entry.demand.request_type,
-                    requested_quantity=entry.demand.requested_quantity,
-                    job_numbers=list(entry.demand.job_numbers),
-                    due_date=entry.demand.due_date,
-                    priority_rank=entry.demand.priority_rank,
-                    received_date=entry.work_order.received_date,
-                )
-                for entry in demands
-            ],
-        )
+        PartNumberDemandsResponse(part_number=part_number, demands=demand_entries(demands))
         for part_number, demands in sorted(contexts.items())
     ]
 
@@ -271,12 +274,23 @@ class MachineInventoryResponse(BaseModel):
     total_quantity: int
 
 
+class ScrappedLineResponse(BaseModel):
+    """The scrapped quantity recorded in the Area for one PN (net)."""
+
+    part_number: str
+    quantity: int
+
+
 class AreaInventoryResponse(BaseModel):
     area: AreaRef
     # What each PN in the Area is currently being worked FOR: its OPEN
     # demands in the canonical order (the first one defining), never
     # the demand a flow originated from.
     demand_context: list[PartNumberDemandsResponse]
+    # Phase 11: the scrapped quantity recorded in this Area per PN (net
+    # of reversed scraps) — the `{n} scrapped` line of the shared PN row
+    # on BOTH surfaces (GUI_DESIGN §4.10). PNs in a stable order.
+    scrapped: list[ScrappedLineResponse]
     # The Area mode (PROJECT_PROFILE §12): true → queued / Machine cards
     # / finished; false → directly processing / finished, with no
     # placeholder cards and structurally zero queued/on-Machine figures.
@@ -323,6 +337,10 @@ def area_inventory_response(inventory: AreaInventory) -> AreaInventoryResponse:
     return AreaInventoryResponse(
         area=area_ref(inventory.area),
         demand_context=demand_context(inventory.demand_context),
+        scrapped=[
+            ScrappedLineResponse(part_number=part_number, quantity=quantity)
+            for part_number, quantity in sorted(inventory.scrapped.items())
+        ],
         has_machines=inventory.has_machines,
         lines=inventory_lines(inventory.lines),
         total_part_numbers=inventory.total_part_numbers,

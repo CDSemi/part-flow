@@ -822,13 +822,29 @@ export async function loadTrackingListByQuery(
   };
 }
 
+export interface DetailPageSizes {
+  movements: number;
+  flows: number;
+  allocations: number;
+  scrap: number;
+}
+
+/**
+ * Read one PN's detail. Every paged section's first page is requested
+ * at the SAME size its continuation pages use (`tracking-logic`), so a
+ * changed server default can never make the first page and the older
+ * pages of one section differ in size.
+ */
 export async function loadTrackingDetail(
   pn: string,
-  movementsLimit: number,
+  sizes: DetailPageSizes,
 ): Promise<TrackingDetail> {
   const params = new URLSearchParams({
     part_number: pn,
-    movements_limit: String(movementsLimit),
+    movements_limit: String(sizes.movements),
+    flows_limit: String(sizes.flows),
+    allocations_limit: String(sizes.allocations),
+    scrap_limit: String(sizes.scrap),
   });
   const wire = await apiRequest<DetailWire>(
     `/api/tracking/detail?${params.toString()}`,

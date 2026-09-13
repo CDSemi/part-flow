@@ -450,6 +450,7 @@ def test_assign_records_the_canonical_movement_and_projection(
     machine = _machine(client, lathe.machine_id)
     assert machine["operational_state"] == "RUNNING"
     assert machine["assigned_quantity"] == 8
+    assert machine["assigned_lines"] == [{"part_number": pn, "quantity": 8}]
     assert machine["state_changed_at"] > before["state_changed_at"]  # Idle → Running
 
 
@@ -464,6 +465,16 @@ def test_one_machine_holds_several_part_numbers(client: TestClient, db_engine: E
     machine = _machine(client, lathe.machine_id)
     assert machine["assigned_quantity"] == 12
     assert machine["operational_state"] == "RUNNING"
+    # Phase 11 `Assigned now`: the per-PN breakdown of the SAME
+    # projection the total sums, in PN order — never a second count.
+    expected_lines = [
+        {"part_number": first_pn, "quantity": 5},
+        {"part_number": second_pn, "quantity": 7},
+    ]
+    expected_lines.sort(key=lambda line: str(line["part_number"]))
+    assert machine["assigned_lines"] == expected_lines
+    listed = {entry["id"]: entry for entry in client.get("/api/machines?lifecycle=active").json()}
+    assert listed[lathe.machine_id]["assigned_lines"] == machine["assigned_lines"]
     # Already Running: the state age does NOT restart on the second PN.
     assert machine["state_changed_at"] == running_since
     assert _flow_row(db_engine, first_id).current_machine_id == lathe.machine_id
@@ -630,6 +641,7 @@ def test_queue_returns_unfinished_quantity_to_the_queue(
     _assert_replay_matches(db_engine, flow_id)
     machine = _machine(client, lathe.machine_id)
     assert machine["operational_state"] == "IDLE" and machine["assigned_quantity"] == 0
+    assert machine["assigned_lines"] == []
     assert machine["state_changed_at"] > running_since  # Running → Idle
 
     # Queued again means assignable again — never completed.

@@ -199,9 +199,12 @@
   của operator (PROJECT_PROFILE v22 §14, chốt open decision 3 cũ của §32). Không
   cần migration: shape check của `RECEIVED` đã cho phép Scan Station identity và
   reason.
-- **Phase 11**: đã triển khai **Production Board**, **Area Board** và **PN
-  Tracking** (breakdown theo PN của Machines và expected-duration monitoring là
-  phần còn mở của phase). Backend `app/application/production_board.py` trên
+- **Phase 11**: đã triển khai **Production Board**, **Area Board**, **PN
+  Tracking** và breakdown **Assigned now** theo PN của Management → Machines, và
+  đã audit (2026-09-10) đối chiếu PROJECT_PROFILE §21, GUI_DESIGN §5–§7 và
+  roadmap này; mục Phase 11 duy nhất còn mở là expected-duration monitoring, bị
+  chặn cho tới khi tài liệu canonical định nghĩa thứ tự ưu tiên nguồn duration
+  (xem mục Phase 11). Backend `app/application/production_board.py` trên
   `GET /api/production-board` derive board toàn Department từ projection vị trí
   hiện tại và Movement history: mọi PN có active quantity trong Area của
   Department (hoặc stocked quantity kèm demand còn mở), phân bổ theo Area /
@@ -230,9 +233,12 @@
   tảng và cố ý KHÔNG phải một representation thứ hai của Area: một read trả về
   các Area active của Department mang CHÍNH model monitoring Scan Station đang
   đọc (`scan_station.area_inventory` qua schema response dùng chung
-  `app/api/area_inventory.py`), cộng Operation active của Area, scrapped theo PN
-  trong Area đó, và stocked line kèm allocation cho terminal Stockroom; All Areas
-  overview và per-Area detail là hai presentation của cùng một trả lời, render
+  `app/api/area_inventory.py`), cộng Operation active của Area và stocked line
+  của terminal Stockroom kèm allocation và demand context MỞ của PN (PN đã stock
+  mà vẫn đang được làm cho demand mở thì nêu demand đó, như row stocked-only của
+  Production Board) — scrapped theo PN trong Area thuộc về chính model inventory
+  dùng chung, nên row `In this Area now` của Scan Station mang cùng dòng `{n}
+  scrapped` với board; All Areas overview và per-Area detail là hai presentation của cùng một trả lời, render
   qua component chung và mapping client chung (`api/area-inventory.ts`,
   `views/area-presentation.ts`), với đúng hành vi polling / stale-feed của board
   (`views/monitoring-feed.ts`). Model chung tách bạch HAI câu hỏi về cùng một
@@ -923,9 +929,10 @@ Phase 11 vẫn chỉ là read-model / monitoring. Nó không được hút vào 
 write của Scan Station, Priority write, master-data management, Worker session
 hay authentication.
 
-Trạng thái triển khai (một phần — Production Board, Area Board và PN Tracking
-hoàn tất end to end; phần Phase 11 còn mở là breakdown theo PN của Machines và
-expected-duration monitoring): **Backend**
+Trạng thái triển khai (đã audit 2026-09-10 — Production Board, Area Board, PN
+Tracking và breakdown theo PN của Machines hoàn tất end to end và đã audit; mục
+Phase 11 duy nhất còn mở là expected-duration monitoring, bị chặn bởi quyết định
+canonical về nguồn duration ghi bên dưới): **Backend**
 (`app/application/production_board.py`, `app/api/production_board.py` —
 `GET /api/production-board?department_id=`): read model read-only toàn Department,
 không có per-Area mode (PROJECT_PROFILE §21, GUI_DESIGN §5), derive hoàn toàn từ
@@ -1042,11 +1049,19 @@ Department (thứ tự theo tên; Area inactive không bao giờ giữ active qu
 lệnh deactivate từ chối khi còn giữ — nên không giấu gì đang sản xuất) với nội
 dung chính là `scan_station.area_inventory`, trả qua schema response DÙNG CHUNG
 (`app/api/area_inventory.py`, tách ra từ endpoint Scan Station để hai bề mặt gửi
-một contract), cộng Operation active của Area, scrapped theo PN trong Area đó
-(trừ scrap đã reverse), và với terminal Area là các stocked line kèm allocation
-active của PN (`allocations.active_allocated_quantities`) — stocked quantity của
-terminal Area đã hoàn tất sản xuất, flow đã đóng, nên Area đó không có ACTIVE
-inventory nào. Resolve Department dùng đúng quy tắc của Production Board
+một contract), cộng Operation active của Area, và với terminal Area là các
+stocked line kèm allocation active của PN
+(`allocations.active_allocated_quantities`) và demand context MỞ của PN
+(`allocations.open_demand_context` — cùng monitoring context mà một row
+inventory mang, nên PN đã stock vẫn đang được làm CHO demand mở nêu Hot rank,
+Work Order Number và Job Numbers đúng như row stocked-only của Production Board,
+và chỉ đọc `WO — · —` khi không còn Work Order nào của nó mở) — stocked quantity
+của terminal Area đã hoàn tất sản xuất, flow đã đóng, nên Area đó không có
+ACTIVE inventory nào. Scrapped theo PN ghi trong Area (trừ scrap đã reverse —
+`projections.effective_totals_by_area`) là một phần của model inventory DÙNG
+CHUNG (`AreaInventory.scrapped`, có cả trên `GET /areas/{id}/inventory`), vì
+dòng `{n} scrapped` thuộc về PN row dùng chung của GUI_DESIGN §4.10 và Scan
+Station phải hiển thị đúng con số của board. Resolve Department dùng đúng quy tắc của Production Board
 (`production_board.resolve_department`).
 
 Model chung trả lời **HAI câu hỏi khác nhau về cùng một quantity, và không câu
@@ -1107,8 +1122,8 @@ Number của một open demand THỨ CẤP vẫn giữ row PN đó) cùng regres
 Scan Station: row station và Hot count ở header nhận monitoring context từ open
 demand trong khi action của row vẫn mang demand nguồn gốc vào dialog. Cố ý chưa
 có: quản lý Hot rank (Phase 12), tên PN
-master (Phase 13), và highlight thời gian chờ theo expected duration (vẫn là
-phần mở của Phase 11).
+master (Phase 13), và highlight thời gian chờ theo expected duration (mục Phase
+11 còn mở — xem đoạn audit bên dưới).
 
 **PN Tracking** (PROJECT_PROFILE §21 Tracking, GUI_DESIGN §7). Quyết định chi
 phối slice này: Tracking không tự bịa derivation nào — mọi con số nó hiện đều là
@@ -1298,6 +1313,69 @@ render `—`), quản lý Hot rank (Phase 12), Worker identity trên row Movemen
 (Phase 13 — station là identity đã ghi), và highlight thời gian tại mỗi Area
 theo expected duration (vẫn là phần mở của Phase 11 — timestamp vào vị trí đã
 có, phán xét thì chưa).
+
+**Machines → breakdown Assigned now theo PN** (GUI_DESIGN §12.1; presentation
+chỉ-tổng của Phase 6 là stand-in tạm). *Backend*: `machines.assigned_lines` gộp
+assigned ACTIVE quantity của từng Machine theo canonical PN, thứ tự PN, từ CÙNG
+tham chiếu projection (`quantity_flows.current_machine_id`, status `ACTIVE`) mà
+tổng đang cộng, và mọi `MachineResponse` (`GET /api/machines`, `GET
+/api/machines/{id}` và response của các lệnh) mang `assigned_lines`
+(`[{part_number, quantity}]`) cạnh `assigned_quantity` — nay là tổng của các
+line đó, nên breakdown và tổng không thể lệch nhau. *Frontend*: ô Assigned now
+của bảng Machines liệt kê mỗi phần một dòng `<PN> · <n> pcs` theo presentation
+đã duyệt (quantity mang tone trạng thái, separator và đơn vị mờ), `—` khi không
+có gì assigned; `src/api/machines.ts` map `assignedLines`. *Tests*:
+`tests/test_machine_processing_api.py` (breakdown của một và nhiều PN trên một
+Machine, bằng nhau giữa list và single read, rỗng khi Idle) và suite Machines
+(các phần liệt kê và tone của chúng).
+
+**Audit Phase 11 (2026-09-10)** — đã audit implementation đối chiếu
+PROJECT_PROFILE §21 và các domain rule, GUI_DESIGN §5 / §6 / §7 (cùng §4.10 và
+các global rule) và mục này: dữ liệu backend thật trên mọi production path
+(không import `src/mocks/` trong view thật, preview sau `import.meta.env.DEV`,
+sentinel scan khi build); location / state / quantity hiện tại derive từ
+Movement history và lineage; Undo / `REVERSED`, partial `SPLIT`, `MERGED`,
+Repair, Scrap, `AREA_COMPLETED`, assign / release Machine và `STOCKED` không làm
+read model sai hay double-count; board toàn Department theo canonical order;
+nội dung Manager Summary chỉ nằm trong All Areas overview của Area Board; Area
+detail và Scan Station dùng chung một representation; model PN-centric của
+Tracking; history bất biến với correction trình bày như history; các state
+stale-feed, loading, empty, error và long-data; và không phụ thuộc Phase 12+.
+Phát hiện, đều đã sửa trong phạm vi Phase 11: (1) row Stockroom của Area Board
+đọc `WO — · —` không có Hot rank với PN đã stock mà vẫn có demand MỞ, trong khi
+row Production Board của cùng quantity nêu demand đó — stocked line nay mang
+demand context mở của PN (ở trên); (2) row `In this Area now` của Scan Station
+không có dòng `{n} scrapped` trong khi row Area Board của cùng quantity có —
+scrapped theo PN chuyển vào model inventory dùng chung (ở trên); (3) All Areas
+overview gắn nhãn chip của cột Stockroom là `processing × n` — overview row dùng
+chung nhận `directLabel` (`stocked` với terminal Area); (4) `N PN(s)` trên
+Machine card đếm row thay vì PN riêng biệt (hai quantity của một PN đọc `2 PNs`)
+— nay đếm PN riêng biệt, đúng quy tắc của Area statistics; (5) monitoring feed
+dùng chung chỉ refresh khi kết nối trở lại theo chuyển đổi trực tiếp
+`unavailable → connected` và bỏ sót đường Retry của banner OFFLINE (`unavailable
+→ connecting → connected`) — nay nhớ kết nối đã mất cho tới khi khỏe lại; (6)
+PN Tracking hiển thị rows của query TRƯỚC như danh sách hiện tại (và `Live`)
+trong lúc lần đọc đầu của filter mới đang chạy, và như danh sách "stale" khi
+lần đọc đó lỗi — page nay mang query mà nó trả lời và danh sách đọc loading cho
+tới khi query hiện tại được trả lời; (7) detail Tracking chỉ gửi
+`movements_limit` và dựa vào việc default server trùng page size client cho các
+trang flows / allocations / Scrap — nay gửi đủ mọi limit; (8) bước hiện tại của
+trace FLOATING chọn theo index thay vì theo vị trí server derive; (9) hint của
+empty state dưới filter status `Active` mặc định gợi ý rằng không có demand nào.
+Sửa tài liệu: GUI_DESIGN §5.1 vẫn mô tả nút `Enter kiosk` / `Exit kiosk` của
+v17 trong khi implementation và §5 mang slide switch `Kiosk` của v18. Đã thêm
+regression test cho mọi phát hiện (context và nhãn chip của Stockroom trên Area
+Board, PN count của Machine card, dòng scrap ở station, reconnection qua
+`connecting`, đổi filter Tracking, ghi chú stale trong panel, ghi chú off-route
+và deviation đã xác nhận của flow PLANNED, và thứ tự server cố ý không canonical
+được render đúng như nhận). **Còn mở — expected-duration monitoring:**
+PROJECT_PROFILE §17 định nghĩa expected duration trên Route Step (advisory) và
+§8.5 `default_expected_duration` của Operation, nhưng cả PROJECT_PROFILE lẫn
+GUI_DESIGN đều không nói nguồn nào áp dụng khi có cả hai, cũng không nói flow
+FLOATING (không có step) được phán xét theo gì; theo quy tắc ở trên,
+implementation không đoán, nên cờ `long` `>= 3 days` của Production Board vẫn là
+stand-in tạm rõ ràng và Area Board / Tracking cung cấp timestamp vào vị trí mà
+chưa phán xét, cho tới khi quyết định đó được ghi vào PROJECT_PROFILE.
 
 ## Phase 12 — Priority Management
 

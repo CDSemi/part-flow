@@ -332,10 +332,12 @@ presentation — kiosk mode, pagination and rotation, automatic display
 scaling, the manual navigation. Phase 11 also makes the **Area Board**
 real: one read of the Department (`GET /api/area-board`) returns every
 active Area with the same Area monitoring model the Scan Station reads
-— so the All Areas overview and the per-Area detail are two
-presentations of one answer and cannot drift from the station — plus
-each Area's Operations, its scrapped quantity per PN and the terminal
-Stockroom's stocked lines with their allocation. The All Areas overview
+(the scrapped quantity per PN in the Area included, so the station's
+row carries the same `{n} scrapped` line) — so the All Areas overview
+and the per-Area detail are two presentations of one answer and cannot
+drift from the station — plus each Area's Operations and the terminal
+Stockroom's stocked lines with their allocation and the PN's open
+demand context. The All Areas overview
 is PN-centric (one row per Part Number in an Area, its separate
 quantities aggregated into that row's portion chips) while the per-Area
 detail keeps one row per separately actionable quantity; a monitoring
@@ -367,9 +369,13 @@ derived status counts stock only while it is still unallocated
 (`Stocked`), an open demand with nothing in production and no
 available stock reading `Open`. Every
 other view (Priority, Planned Routes, Part Numbers) renders
-development-only mock data; the remaining Phase 11 monitoring work
-(the Machines per-PN assigned breakdown, expected-duration
-monitoring) arrives next — the movement-type check admits the
+development-only mock data; Phase 11 also lists the server's per-PN
+breakdown of each Machine's assigned quantity in Management →
+Machines (`assigned_lines` on `/api/machines`), and was audited on
+2026-09-10 (IMPLEMENTATION_ROADMAP Phase 11) — the one open Phase 11
+item is expected-duration monitoring, blocked until the canonical
+documents define the duration source precedence — the movement-type
+check admits the
 Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,
 `SCRAPPED`, `QUANTITY_ADJUSTED`, `REVERSED`, `STOCKED`).

@@ -1,6 +1,9 @@
 #!/bin/sh
-# Check-only unless both --apply and auto_update=true are explicitly configured.
+# Installed under <home>/control. Check-only unless --apply and auto_update=true.
 set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-exec sh "$REPO_ROOT/pf.sh" release-check "$@"
+CONTROL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run this release check as root." >&2
+    exit 2
+fi
+exec "$CONTROL_DIR/pf.sh" release-check "$@"

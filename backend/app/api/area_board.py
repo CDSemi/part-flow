@@ -4,8 +4,9 @@
 (`app.application.area_board`): every active Area of the Department
 with the SHARED Area monitoring shape (`app.api.area_inventory` — the
 same contract `GET /areas/{id}/inventory` answers the Scan Station
-with), its active Operations, the scrapped quantity per PN, and, for a
-terminal Area, the stocked lines with their active allocation.
+with — the PN's OPEN demand context and the scrapped quantity per PN
+included), its active Operations, and, for a terminal Area, the stocked
+lines with their active allocation and the PN's OPEN demand context.
 
 The All Areas overview and the per-Area detail are two presentations of
 this one answer, so switching tabs never re-reads and the two can never
@@ -23,8 +24,10 @@ from pydantic import BaseModel
 
 from app.api.area_inventory import (
     AreaInventoryResponse,
+    DemandContextResponse,
     OperationRef,
     area_inventory_response,
+    demand_entries,
     operation_ref,
 )
 from app.api.dependencies import SessionDep
@@ -34,23 +37,22 @@ router = APIRouter(prefix="/api")
 
 
 class StockedLineResponse(BaseModel):
-    """One PN held in a terminal Area, with its active allocation."""
+    """One PN held in a terminal Area, with its active allocation and
+    its OPEN demand context (the same shape as the inventory's
+    `demand_context` — the first demand defining the Stockroom row's
+    Hot rank, Work Order Number and Job Numbers; empty when no Work
+    Order of the PN is open any more)."""
 
     part_number: str
     quantity: int
     allocated_quantity: int
-
-
-class ScrappedLineResponse(BaseModel):
-    part_number: str
-    quantity: int
+    demands: list[DemandContextResponse]
 
 
 class AreaBoardAreaResponse(BaseModel):
     # The shared Area monitoring model, identical to the Scan Station's.
     inventory: AreaInventoryResponse
     operations: list[OperationRef]
-    scrapped: list[ScrappedLineResponse]
     # Terminal Areas only (Stockroom): manufacturing-complete quantity
     # whose flows are closed, so it is never part of the inventory.
     stocked: list[StockedLineResponse]
@@ -70,15 +72,12 @@ def _area(entry: area_board.AreaBoardArea) -> AreaBoardAreaResponse:
     return AreaBoardAreaResponse(
         inventory=area_inventory_response(entry.inventory),
         operations=[operation_ref(operation) for operation in entry.operations],
-        scrapped=[
-            ScrappedLineResponse(part_number=part_number, quantity=quantity)
-            for part_number, quantity in sorted(entry.scrapped.items())
-        ],
         stocked=[
             StockedLineResponse(
                 part_number=line.part_number,
                 quantity=line.quantity,
                 allocated_quantity=line.allocated_quantity,
+                demands=demand_entries(line.demands),
             )
             for line in entry.stocked
         ],
