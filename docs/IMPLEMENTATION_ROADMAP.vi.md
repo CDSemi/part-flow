@@ -1188,9 +1188,11 @@ tồn tại — là 404, không bao giờ đọc như `id < before` trần mà b
 status và lifecycle, vị trí derive,
 parent / child lineage HIỆU LỰC (`projections.effective_lineage_edges` — cạnh
 của SPLIT/MERGED đã undo là vô hiệu), PLANNED snapshot với mỗi step judged
-`DONE` / `CURRENT` / `FUTURE` từ last known step của flow
-(`lineage.last_known_step_id` — Movement đã reverse không tính; flow closed
-không có current step), cờ `off_route` và mọi deviation đã confirm đọc lại từ
+`DONE` / `CURRENT` / `FUTURE` từ last known step của flow và cờ `off_route`
+phán xét từ arrival lập nên position hiện tại (`projections.route_positions` —
+derivation route-position dùng chung mà expected duration cũng đọc; Movement đã
+reverse không tính, flow closed không có current step, và deviation quay lại
+Area của step trước vẫn off route), cùng mọi deviation đã confirm đọc lại từ
 Movement ghi nó, và **actual route trace** derive từ Movement history — các Area
 quantity đã đến, theo thứ tự (`RECEIVED`, `TRANSFERRED`, `QUANTITY_ADJUSTED`,
 `STOCKED`; không bao giờ `AREA_COMPLETED`, vốn là hoàn thành trong Area nguồn),
@@ -1378,10 +1380,17 @@ Route Step (advisory) và §8.5 `default_expected_duration` của Operation mà 
 nói nguồn nào áp dụng khi có cả hai, cũng không nói flow FLOATING (không có step)
 được phán xét theo gì; implementation không đoán. Quyết định của owner nay là
 canonical trong PROJECT_PROFILE §17 "Expected duration hiệu lực của một
-position": flow PLANNED lấy `expected_duration` của Assigned Route Step HIỆN TẠI
-(step cuối biết từ Movement history, khi quantity đang ở Area của step đó —
-position off-route không có step hiện tại), nếu không thì
-`default_expected_duration` của Operation đã ghi; flow FLOATING lấy Operation
+position": flow PLANNED lấy `expected_duration` của Assigned Route Step HIỆN TẠI — hiện
+tại theo derivation route-position dùng chung `projections.route_positions`:
+known step là route progress (Movement hiệu lực mới nhất có tham chiếu step),
+và quantity chỉ ON route khi arrival lập nên position hiện tại đã fulfill một
+step; arrival deviation đã confirm không tham chiếu step nên để quantity OFF
+route, không có step hiện tại, kể cả khi quay lại Area của step trước (Repair
+return — không bao giờ dùng Area equality; audit cuối Phase 11 đã tìm ra và bỏ
+rule đó), event trong Area giữ state của arrival, arrival đã undo coi như chưa
+xảy ra, split child / merge result kế thừa state từ arrival của nguồn (on route
+chỉ khi mọi branch on route) — nếu không thì `default_expected_duration` của
+Operation đã ghi; flow FLOATING lấy Operation
 default; không có → không phán xét. Giá trị snapshot luôn thắng; Operation
 default là fallback sống (đổi có hiệu lực ngay, không mutate hay backfill
 snapshot). Elapsed là thời gian của chính position — `now − entered_at` của
@@ -1390,11 +1399,14 @@ timestamp hay persisted state mới; phán xét chỉ advisory (warning highligh
 không bao giờ block scan, transfer, `DONE`, Machine action hay command khác);
 location gộp warning ngay khi BẤT KỲ portion nào đã vượt expected duration CỦA
 CHÍNH NÓ (không average, portion mới không che portion overdue); và rule `>= 3
-days` cố định bị bỏ, không có fallback thay thế. *Backend*: derivation dùng
+days` cố định bị bỏ, không có fallback thay thế. `off_route` / current-step presentation của PN Tracking đọc CÙNG derivation, nên
+hai nơi không thể phán xét một quantity khác nhau. *Backend*: derivation dùng
 chung nằm đúng nơi mọi monitoring read model đã đọc position —
 `projections.effective_positions` giải `EffectivePosition.expected_duration`
-(step id hiện tại của các flow trong một grouped query trên các Movement hiệu
-lực có tham chiếu step, các snapshot step và default sống của Operation) và
+(`route_positions`: known step của các flow trong một grouped query trên các
+Movement hiệu lực có tham chiếu step, arrival hiệu lực mới nhất của chúng — của
+chính flow, hoặc kế thừa qua lineage walk — cho state on/off route, rồi các
+snapshot step và default sống của Operation) và
 expose `expected_by = entered_at + expected_duration` (None khi không áp dụng);
 `BoardLocation` của Production Board (dùng chung với `locations` gộp của
 Tracking) mang `expected_by` SỚM NHẤT trong các portion, còn mỗi surface theo
@@ -1406,8 +1418,12 @@ location của `GET /api/tracking/detail`; server không phán xét theo clock.
 Test: snapshot step thắng Operation default và đổi default sống mà snapshot
 không đổi, event trong Area giữ step, quantity FLOATING và off-route theo
 Operation default, null khi không cấu hình, location gộp warning từ portion
-overdue sớm nhất (`test_production_board_api.py`); `expected_by` trên position
-và location gộp (`test_tracking_api.py`); `expected_by` theo flow kế thừa qua
+overdue sớm nhất, và regression deviation-return — deviation đã confirm và
+Repair return vào Area của step đầu vẫn off route theo Operation default, split
+của partial assignment kế thừa, Undo khôi phục expectation theo từng arrival
+(`test_production_board_api.py`); `expected_by` trên position và location gộp,
+và cùng kịch bản deviation-return trên `off_route` / state các step qua split
+và các Undo (`test_tracking_api.py`); `expected_by` theo flow kế thừa qua
 split và null khi không có nguồn, mọi action vẫn có (`test_area_board_api.py`).
 *Frontend*: một phán xét dùng chung `views/dates.exceedsExpectedDuration(expectedBy,
 now)` — thời điểm cố định của server so với UI clock chung, false khi không có —

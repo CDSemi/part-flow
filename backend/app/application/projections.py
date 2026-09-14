@@ -87,6 +87,18 @@ NON_POSITION_BEARING_TYPES: Final = (
 # effective Movement being one of these makes it inactive inventory.
 CLOSING_MOVEMENT_TYPES: Final = (MovementType.SCRAPPED, MovementType.STOCKED)
 
+# The Movements that ESTABLISH a position in an Area — the arrivals. Only
+# an arrival can fulfil a route step (`assigned_route_step_id`), so the
+# route-position state of a PLANNED flow (on route, or off route after a
+# confirmed deviation) is read from its effective latest arrival; the
+# in-Area events between arrivals keep whatever state the arrival set.
+ARRIVAL_MOVEMENT_TYPES: Final = (
+    MovementType.RECEIVED,
+    MovementType.TRANSFERRED,
+    MovementType.QUANTITY_ADJUSTED,
+    MovementType.STOCKED,
+)
+
 
 def reversed_movement_ids(flow_id: int) -> Select[tuple[int | None]]:
     """The Movements of one flow undone by a ``REVERSED`` row (subquery).
@@ -189,12 +201,21 @@ def _latest_position_bearing(
     flow_id: int,
     before_movement_id: int | None,
     exclude_device_event_id: str | None,
+    *,
+    arrivals_only: bool = False,
 ) -> PartMovement | None:
+    """The flow's newest effective position-bearing Movement — or, with
+    ``arrivals_only``, its newest effective ARRIVAL (the Movement that
+    established its position and may have fulfilled a route step)."""
     query = (
         select(PartMovement)
         .where(
             PartMovement.quantity_flow_id == flow_id,
-            PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES),
+            (
+                PartMovement.movement_type.in_(ARRIVAL_MOVEMENT_TYPES)
+                if arrivals_only
+                else PartMovement.movement_type.not_in(NON_POSITION_BEARING_TYPES)
+            ),
             PartMovement.id.not_in(reversed_movement_ids(flow_id)),
         )
         .order_by(PartMovement.id.desc())
@@ -305,14 +326,18 @@ def effective_latest_movements(
     return found
 
 
-def _position_bearing_branches(session: Session, flow_id: int) -> dict[int, PartMovement]:
+def _position_bearing_branches(
+    session: Session, flow_id: int, *, arrivals_only: bool = False
+) -> dict[int, PartMovement]:
     """The position-bearing Movements one flow's state descends from, by id.
 
     The flow's own newest one when it has it; otherwise the walk
     continues into EVERY parent — each contributed quantity to this
     flow, so each is a branch of the same state, never one arbitrarily
     chosen source — looking at the Movements written before the child
-    existed, exactly like the single-Movement walk above.
+    existed, exactly like the single-Movement walk above. With
+    ``arrivals_only`` the same walk finds the ARRIVALS the position
+    descends from (`route_positions`).
     """
     found: dict[int, PartMovement] = {}
     frontier: list[tuple[int, int | None]] = [(flow_id, None)]
@@ -322,7 +347,9 @@ def _position_bearing_branches(session: Session, flow_id: int) -> dict[int, Part
         if (current, bound) in seen:
             continue
         seen.add((current, bound))
-        movement = _latest_position_bearing(session, current, bound, None)
+        movement = _latest_position_bearing(
+            session, current, bound, None, arrivals_only=arrivals_only
+        )
         if movement is not None:
             found[movement.id] = movement
             continue
@@ -431,16 +458,38 @@ def _shared_machine_id(entries: list[PartMovement], attribute: str) -> int | Non
     return next(iter(named)) if len(named) == 1 else None
 
 
-def _current_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]:
-    """The snapshot step each PLANNED flow's route position is at, by flow.
+class RoutePosition(NamedTuple):
+    """Where a PLANNED flow's current position stands against its route
+    (PROJECT_PROFILE §17) — derived from immutable Movement history alone.
 
-    The newest effective Movement that references a snapshot step — the
-    arrival that fulfilled it, or the lineage row that carried it on to
-    a split child / merge result (`lineage.last_known_step_id`, for
-    several flows at once). A reversed Movement never counts: an undone
-    transfer never happened for the route position. A FLOATING flow
-    references no step and is absent.
+    ``known_step_id`` is the route PROGRESS: the snapshot step the flow's
+    newest effective step-referencing Movement fulfilled — an arrival
+    that matched the step, or the lineage row that carried the step on
+    to a split child / merge result (`lineage.last_known_step_id`). It
+    never moves backwards on a deviation. ``on_route`` says whether the
+    CURRENT position was established by an arrival that fulfilled a
+    step: a confirmed-deviation arrival references no step and leaves
+    the quantity off route until a later arrival fulfils one — coming
+    back into the Area of an earlier step through a deviation (a Repair
+    return) does NOT make that step current again, so Area equality is
+    never the test. The in-Area events between arrivals (a Machine
+    assignment, a release, a completion) keep the state their arrival
+    set; an undone arrival never happened (`REVERSED`, Phase 9); a
+    lineage-created flow that has not arrived anywhere itself inherits
+    the arrivals of its parents, on route only when EVERY branch is.
     """
+
+    known_step_id: int | None
+    on_route: bool
+
+    @property
+    def current_step_id(self) -> int | None:
+        """The step the quantity is AT — its known step while on route."""
+        return self.known_step_id if self.on_route else None
+
+
+def _last_known_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]:
+    """`lineage.last_known_step_id` for several flows in one grouped query."""
     reversal = aliased(PartMovement)
     newest = (
         select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
@@ -460,20 +509,82 @@ def _current_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]:
     return {flow_id: step_id for flow_id, step_id in rows if step_id is not None}
 
 
+def _own_latest_arrivals(session: Session, flow_ids: set[int]) -> dict[int, PartMovement]:
+    """The newest effective ARRIVAL of each flow's OWN history (one grouped
+    query); a lineage-created flow that never arrived itself is absent
+    and takes the arrival walk into its parents at the caller."""
+    reversal = aliased(PartMovement)
+    newest = (
+        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
+        .where(
+            PartMovement.quantity_flow_id.in_(flow_ids),
+            PartMovement.movement_type.in_(ARRIVAL_MOVEMENT_TYPES),
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.quantity_flow_id)
+        .subquery()
+    )
+    return {
+        movement.quantity_flow_id: movement
+        for movement in session.scalars(
+            select(PartMovement).join(newest, newest.c.movement_id == PartMovement.id)
+        )
+    }
+
+
+def route_positions(session: Session, flow_ids: Iterable[int]) -> dict[int, RoutePosition]:
+    """`RoutePosition` per flow — the ONE route-position derivation.
+
+    The expected-duration precedence (`effective_positions`) and PN
+    Tracking's off-route / current-step presentation both read it, so
+    the two can never judge the same quantity differently. A FLOATING
+    flow has no route: its known step is None (and `on_route` is not
+    consulted — nothing is read for it beyond the grouped query).
+    """
+    wanted = set(flow_ids)
+    if not wanted:
+        return {}
+    known = _last_known_step_ids(session, wanted)
+    routed = set(known)
+    arrivals = _own_latest_arrivals(session, routed) if routed else {}
+    found: dict[int, RoutePosition] = {}
+    for flow_id in wanted:
+        step_id = known.get(flow_id)
+        if step_id is None:
+            found[flow_id] = RoutePosition(None, False)
+            continue
+        own = arrivals.get(flow_id)
+        branches = (
+            [own]
+            if own is not None
+            else list(_position_bearing_branches(session, flow_id, arrivals_only=True).values())
+        )
+        on_route = bool(branches) and all(
+            arrival.assigned_route_step_id is not None for arrival in branches
+        )
+        found[flow_id] = RoutePosition(step_id, on_route)
+    return found
+
+
 def _expected_durations(
     session: Session, branches: dict[int, list[PartMovement]]
 ) -> dict[int, datetime.timedelta | None]:
     """The effective expected duration per flow (PROJECT_PROFILE §17).
 
     Precedence: the CURRENT Assigned Route Step's own `expected_duration`
-    — the flow's last known step, and only while the position IS that
-    step's Area (an off-route position, a confirmed deviation, has no
-    current step) — else the recorded Operation's live
+    — the step the quantity is at per `route_positions` (its known step
+    while the current position's arrival fulfilled a step; an off-route
+    position, a confirmed deviation even back into an earlier step's
+    Area, has no current step) — else the recorded Operation's live
     `default_expected_duration`, read at derivation time so a changed
     default applies at once to every position relying on the fallback
     and no snapshot is ever mutated or back-filled; else None.
     """
-    step_ids = _current_step_ids(session, set(branches))
+    step_ids = {
+        flow_id: position.current_step_id
+        for flow_id, position in route_positions(session, branches).items()
+        if position.current_step_id is not None
+    }
     steps = (
         {
             step.id: step
@@ -497,11 +608,7 @@ def _expected_durations(
     for flow_id, entries in branches.items():
         movement = entries[0]
         step = steps.get(step_ids.get(flow_id, -1))
-        if (
-            step is not None
-            and step.area_id == movement.to_area_id
-            and step.expected_duration is not None
-        ):
+        if step is not None and step.expected_duration is not None:
             durations[flow_id] = step.expected_duration
         else:
             durations[flow_id] = defaults.get(movement.operation_id)

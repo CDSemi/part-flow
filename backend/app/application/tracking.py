@@ -29,8 +29,11 @@ Board, the Area Board or the Scan Station about a quantity:
   listed with its status, and an undone command's edges are void.
 - **Routes**: a `PLANNED` flow shows its immutable AssignedRoute
   snapshot with each step judged done / current / future from the
-  flow's last known step (`lineage.last_known_step_id` — reversed
-  Movements never count) and every confirmed deviation read back from
+  flow's last known step and judged off route while the current
+  position's arrival fulfilled no step (`projections.route_positions` —
+  the shared route-position derivation the expected-duration precedence
+  reads too; reversed Movements never count, and a deviation back into
+  an earlier step's Area stays off route) and every confirmed deviation read back from
   the `TRANSFERRED` / `STOCKED` Movement that recorded it. Every flow
   also carries its **actual route trace** derived from Movement
   history: the Areas its quantity arrived in, in order — repeated
@@ -78,7 +81,7 @@ from app.application.allocations import (
     open_demand_context,
 )
 from app.application.errors import NotFoundError
-from app.application.lineage import last_known_step_id, snapshot_steps
+from app.application.lineage import snapshot_steps
 from app.application.part_numbers import canonical_part_number
 from app.application.production_board import (
     BoardLocation,
@@ -91,6 +94,7 @@ from app.application.projections import (
     effective_lineage_edges,
     effective_totals_by_area,
     reversed_movement_ids,
+    route_positions,
 )
 from app.application.transfers import ROUTE_DEVIATION_KEY
 from app.application.work_orders import site_today
@@ -695,8 +699,13 @@ def _route_steps(
     if flow.route_mode != RouteMode.PLANNED or flow.assigned_route_id is None:
         return [], False
     steps = snapshot_steps(session, flow.assigned_route_id)
-    known_id = last_known_step_id(session, flow.id)
-    known = next((step for step in steps if step.id == known_id), None)
+    # The shared route-position derivation (`projections.route_positions`)
+    # — the same one the expected-duration precedence reads: the known
+    # step is the route progress, `on_route` whether the current
+    # position's arrival fulfilled a step. Area equality is never the
+    # test: a deviation back into an earlier step's Area stays off route.
+    route_position = route_positions(session, [flow.id])[flow.id]
+    known = next((step for step in steps if step.id == route_position.known_step_id), None)
     active = flow.status == QuantityFlowStatus.ACTIVE
     views: list[RouteStepView] = []
     for step in steps:
@@ -715,7 +724,7 @@ def _route_steps(
                 state=state,
             )
         )
-    off_route = active and known is not None and known.area_id != flow.current_area_id
+    off_route = active and known is not None and not route_position.on_route
     return views, off_route
 
 

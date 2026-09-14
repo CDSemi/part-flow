@@ -941,10 +941,17 @@ Hai nguồn định nghĩa expected duration: **snapshot per-step tường minh*
 tại** của quantity theo đúng một giá trị hiệu lực, giải theo thứ tự ưu tiên:
 
 - **PLANNED Quantity Flow**: `expected_duration` của Assigned Route Step **hiện
-  tại** — step cuối biết được từ Movement history, khi quantity đang ở Area của
-  step đó — nếu có giá trị; nếu không, `default_expected_duration` của Operation
-  ghi trên effective position hiện tại. Quantity ở position off-route (deviation
-  đã confirm) không có step hiện tại nên lấy Operation default.
+  tại** nếu có giá trị; nếu không, `default_expected_duration` của Operation ghi
+  trên effective position hiện tại. Step hiện tại derive từ Movement history bất
+  biến, không bao giờ từ Area equality: arrival lập nên position hiện tại
+  (`RECEIVED`, `TRANSFERRED`) hoặc đã fulfill một route step — quantity **on
+  route** tại step đó — hoặc là deviation đã confirm không tham chiếu step —
+  quantity **off route**, không có step hiện tại cho tới khi một arrival sau
+  fulfill step. Deviation quay lại Area của một step trước (Repair return) không
+  làm step đó current lần nữa: route vẫn chờ step kế tiếp. Event trong Area
+  (Machine assign, release, `DONE`) giữ state mà arrival đã lập; arrival đã undo
+  coi như chưa xảy ra; split child hay merge result kế thừa state của nguồn.
+  Vì vậy quantity off-route lấy Operation default.
 - **FLOATING Quantity Flow**: `default_expected_duration` của Operation ghi trên
   effective position hiện tại.
 - **Nguồn áp dụng không có giá trị**: không có expected duration, không hiện

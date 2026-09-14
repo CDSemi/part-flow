@@ -1228,3 +1228,108 @@ def test_a_grouped_location_warns_from_its_earliest_overdue_portion(
     # (which would put the warning at about +1 h 20 min from the oldest).
     assert _iso(location["since"]) == now - datetime.timedelta(hours=1)
     assert _iso(location["expected_by"]) == now + datetime.timedelta(minutes=5)
+
+
+def _locations_by_state(
+    client: TestClient, department_id: int, pn: str
+) -> dict[str, dict[str, Any]]:
+    row = _row(_board(client, department_id), pn)
+    by_state = {location["state"]: location for location in row["locations"]}
+    assert len(by_state) == len(row["locations"]), row["locations"]
+    return by_state
+
+
+def test_a_deviation_back_into_an_earlier_steps_area_stays_off_route(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """Regression (Phase 11 final audit): the current route step is read
+    from the arrival that established the position, never from Area
+    equality. Route `A(step 1, 30 min) → C`; a confirmed deviation A → B
+    and a confirmed Repair return B → A leave the quantity OFF route in
+    A (the route still expects C), so A's Operation default (4 h)
+    applies — never step 1's 30 min. In-Area events keep that state, a
+    split while off route inherits it, and Undo restores the earlier
+    expectation step by step."""
+    shop = _Shop(client)
+    area_a, area_b, area_c = shop.lathe, shop.material, shop.external
+    _set_operation_default(client, area_a, "PT4H")
+    template_id = _route_template(
+        db_engine, [(area_a, datetime.timedelta(minutes=30)), (area_c, None)]
+    )
+    pn = _unique("PN-RET")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 10}])
+    flow = _release(client, area_a, work_order, pn, route_template_id=template_id)
+
+    # On route at step 1: the step's own 30 min.
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(minutes=30)
+
+    # Confirmed deviation A → B: off route, B's Operation has no default.
+    to_b = _transfer(
+        client,
+        area_a,
+        area_b,
+        flow,
+        pn,
+        10,
+        confirm_route_deviation=True,
+        route_deviation_reason="Rework at Material",
+    )
+    location = _only_location(client, shop.department_id, pn)
+    assert location["area"]["id"] == area_b.area_id
+    assert location["expected_by"] is None
+
+    # Repair return B → A, confirmed as the deviation it is (the route
+    # expects C): still off route — step 1 is NOT current again, so A's
+    # Operation default judges the stay, never the old 30 min.
+    back_to_a = _transfer(
+        client,
+        area_b,
+        area_a,
+        flow,
+        pn,
+        10,
+        repair=True,
+        repair_reason="Chips found",
+        confirm_route_deviation=True,
+        route_deviation_reason="Repair return",
+    )
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert location["area"]["id"] == area_a.area_id
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=4)
+
+    # A PARTIAL Machine assignment splits the quantity while off route:
+    # the assigned child and the remainder both inherit the off-route
+    # state — both on the Operation default, each dated from its own
+    # position entry.
+    assigned = _machine_action(
+        client, "machine-assignments", area_a, flow, pn, 3, machine_id=area_a.machine_id
+    )
+    by_state = _locations_by_state(client, shop.department_id, pn)
+    for state, quantity in (("MACHINE", 3), ("QUEUE", 7)):
+        portion = by_state[state]
+        portion_since = _iso(portion["since"])
+        assert portion_since is not None
+        assert portion["quantity"] == quantity
+        assert _iso(portion["expected_by"]) == portion_since + datetime.timedelta(hours=4)
+
+    # Undo the assignment (the split with it), then the Repair return:
+    # the quantity is back in B, off route, unjudged.
+    _undo(client, area_a, pn, str(assigned["device_event_id"]))
+    _undo(client, area_a, pn, str(back_to_a["device_event_id"]))
+    location = _only_location(client, shop.department_id, pn)
+    assert location["area"]["id"] == area_b.area_id
+    assert location["expected_by"] is None
+
+    # Undo the deviation itself: the arrival that established the
+    # position is the RECEIVED at step 1 again — on route, 30 min.
+    _undo(client, area_b, pn, str(to_b["device_event_id"]))
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert location["area"]["id"] == area_a.area_id
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(minutes=30)

@@ -1469,3 +1469,106 @@ def test_a_position_carries_the_effective_expected_duration_as_a_fixed_instant(
     position = _flow(_detail(client, other), other_flow)["position"]
     assert position["since"] is not None
     assert position["expected_by"] is None
+
+
+def test_a_deviation_back_into_an_earlier_steps_area_keeps_the_flow_off_route(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    """Regression (Phase 11 final audit): off route is judged from the
+    arrival that established the position — the shared route-position
+    derivation the expected duration reads — never from Area equality.
+    Route `Lathe(step 1) → Stockroom`: a confirmed deviation to Cut and a
+    confirmed Repair return to Lathe leave the flow OFF route in Lathe
+    (the route still expects the Stockroom); a Machine assignment and
+    the split of a partial one keep that state; Undo restores the
+    earlier expectation arrival by arrival."""
+    pn = _unique("PN-RET")
+    template_id = _route_template(
+        db_engine,
+        [shop.lathe, shop.stockroom],
+        expected_durations={0: datetime.timedelta(minutes=30)},
+    )
+    wo = _work_order(client, [_line(pn, 10)])
+    flow = _release(client, shop.lathe, wo, pn, quantity=10, route_template_id=template_id)
+    planned = _flow(_detail(client, pn), flow)
+    assert planned["off_route"] is False
+    assert [step["state"] for step in planned["route_steps"]] == ["CURRENT", "FUTURE"]
+    since = datetime.datetime.fromisoformat(planned["position"]["since"])
+    assert datetime.datetime.fromisoformat(
+        planned["position"]["expected_by"]
+    ) == since + datetime.timedelta(minutes=30)
+
+    to_cut = _transfer(
+        client,
+        shop.lathe,
+        shop.cut,
+        flow,
+        pn,
+        10,
+        confirm_route_deviation=True,
+        route_deviation_reason="Rework",
+    )
+    planned = _flow(_detail(client, pn), flow)
+    assert planned["off_route"] is True
+    assert planned["position"]["area"]["id"] == shop.cut.area_id
+
+    # Back in Lathe through a confirmed Repair return: the route position
+    # is unchanged (step 1 known, the Stockroom expected), the quantity
+    # is still off route — step 1 does not become current again, so its
+    # 30 min do not apply (Lathe's Operation has no default: unjudged).
+    back = _transfer(
+        client,
+        shop.cut,
+        shop.lathe,
+        flow,
+        pn,
+        10,
+        repair=True,
+        repair_reason="Burrs",
+        confirm_route_deviation=True,
+        route_deviation_reason="Repair return",
+    )
+    planned = _flow(_detail(client, pn), flow)
+    assert planned["off_route"] is True
+    assert planned["position"]["area"]["id"] == shop.lathe.area_id
+    assert [step["state"] for step in planned["route_steps"]] == ["CURRENT", "FUTURE"]
+    assert planned["position"]["expected_by"] is None
+    assert [deviation["actual_area"]["id"] for deviation in planned["deviations"]] == [
+        shop.cut.area_id,
+        shop.lathe.area_id,
+    ]
+
+    # A partial Machine assignment keeps the position's state on both
+    # halves of the split: the assigned child and the remainder are off
+    # route alike, each with the same route snapshot progress.
+    assigned = _machine_action(
+        client, "machine-assignments", shop.lathe, flow, pn, 4, machine_id=shop.lathe.machine_ids[0]
+    )
+    detail = _detail(client, pn)
+    for flow_id in (int(assigned["quantity_flow_id"]), int(assigned["remainder_quantity_flow_id"])):
+        child = _flow(detail, flow_id)
+        assert child["status"] == "ACTIVE"
+        assert child["off_route"] is True
+        assert [step["state"] for step in child["route_steps"]] == ["CURRENT", "FUTURE"]
+        assert child["position"]["expected_by"] is None
+
+    # Undo the assignment (and its split), then the Repair return: back
+    # in Cut, still off route.
+    _undo(client, shop.lathe, pn, str(assigned["device_event_id"]))
+    _undo(client, shop.lathe, pn, str(back["device_event_id"]))
+    planned = _flow(_detail(client, pn), flow)
+    assert planned["status"] == "ACTIVE"
+    assert planned["off_route"] is True
+    assert planned["position"]["area"]["id"] == shop.cut.area_id
+
+    # Undo the deviation itself: the RECEIVED at step 1 establishes the
+    # position again — on route, judged by step 1's 30 min.
+    _undo(client, shop.cut, pn, str(to_cut["device_event_id"]))
+    planned = _flow(_detail(client, pn), flow)
+    assert planned["off_route"] is False
+    assert planned["position"]["area"]["id"] == shop.lathe.area_id
+    assert planned["deviations"] == []
+    since = datetime.datetime.fromisoformat(planned["position"]["since"])
+    assert datetime.datetime.fromisoformat(
+        planned["position"]["expected_by"]
+    ) == since + datetime.timedelta(minutes=30)
