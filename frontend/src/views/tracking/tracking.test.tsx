@@ -840,7 +840,8 @@ test('a changed filter never presents the previous query’s rows as the current
   ).toBeInTheDocument();
 
   // Back to the default filters with a failing read of the OTHER query:
-  // its old rows are still not the current list.
+  // its old rows are still not the current list — and not a "stale"
+  // one either: the failed first read of the current query is an error.
   failStatusAll = true;
   fireEvent.change(screen.getByLabelText('Status'), {
     target: { value: 'ACTIVE' },
@@ -852,6 +853,70 @@ test('a changed filter never presents the previous query’s rows as the current
   });
   await act(async () => {});
   expect(document.querySelector('.tk-table')).toBeNull();
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'PN Tracking data could not be loaded.',
+  );
+  expect(document.querySelector('.tk-feed')?.textContent).toContain(
+    'Feed stale — reconnecting',
+  );
+});
+
+test('a failed first read of a changed query is the error state, and Retry reads that query', async () => {
+  // Regression: the previous query's page used to be kept by the feed as
+  // "stale" when the new query's first read failed — the view could not
+  // show it (another query) and had no error either, so it read loading
+  // for ever. A failed first read of the CURRENT query is the error
+  // state with Retry, which asks the current query again.
+  vi.useFakeTimers();
+  const allPage = { ...listPayload(), rows: [listPayload().rows[1]], total: 1 };
+  let failStatusAll = true;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking?status=ALL')) {
+      return failStatusAll
+        ? jsonResponse({ detail: 'gone' }, 503)
+        : jsonResponse(allPage);
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(2);
+
+  fireEvent.change(screen.getByLabelText('Status'), {
+    target: { value: 'ALL' },
+  });
+  await act(async () => {});
+  // Neither the previous rows nor a loading state: an error with Retry.
+  expect(document.querySelector('.tk-table')).toBeNull();
+  expect(
+    screen.queryByRole('status', { name: 'Loading PN Tracking' }),
+  ).toBeNull();
+  const alert = screen.getByRole('alert');
+  expect(alert).toHaveTextContent('PN Tracking data could not be loaded.');
+  expect(within(alert).getByRole('button', { name: 'Retry' })).toBeEnabled();
+
+  failStatusAll = false;
+  const before = trackingCalls(fetchMock).length;
+  fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+  await act(async () => {});
+  // Retry asked the CURRENT query, and its answer is the list.
+  expect(trackingCalls(fetchMock).slice(before)).toEqual([
+    expect.stringMatching(/^\/api\/tracking\?status=ALL/),
+  ]);
+  expect(screen.queryByRole('alert')).toBeNull();
+  const rows = document.querySelectorAll('.tk-table tbody tr');
+  expect(rows.length).toBe(1);
+  expect(rows[0].textContent).toContain('142-260');
+  expect(document.querySelector('.tk-feed')?.textContent).toContain('Live');
+
+  // Once the current query has loaded, a failed REFRESH keeps its rows
+  // as a stale feed — the first-read rule applies to first reads only.
+  failStatusAll = true;
+  await act(async () => {
+    vi.advanceTimersByTime(TRACKING_REFRESH_MS);
+  });
+  await act(async () => {});
+  expect(document.querySelectorAll('.tk-table tbody tr').length).toBe(1);
+  expect(screen.queryByRole('alert')).toBeNull();
   expect(document.querySelector('.tk-feed')?.textContent).toContain(
     'Feed stale — reconnecting',
   );

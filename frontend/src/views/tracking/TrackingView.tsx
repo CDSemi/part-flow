@@ -197,7 +197,10 @@ export function TrackingView() {
     if (preview !== null) return null;
     // A page answers ONE query: after a filter or page-size change the
     // previous answer is not the current list, so it is never shown as
-    // one — the list reads loading until the current query is answered.
+    // one — the list reads loading until the current query is answered
+    // (the feed starts over for the new query; this guards the render
+    // before it has). A failed first read of the current query is the
+    // feed's error state, never a stale note over the previous page.
     return feed.state.status === 'ready' && feed.state.data.query === query
       ? feed.state.data
       : null;

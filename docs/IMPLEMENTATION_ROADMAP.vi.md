@@ -201,7 +201,7 @@
   reason.
 - **Phase 11**: đã triển khai **Production Board**, **Area Board**, **PN
   Tracking** và breakdown **Assigned now** theo PN của Management → Machines, và
-  đã audit (2026-09-10) đối chiếu PROJECT_PROFILE §21, GUI_DESIGN §5–§7 và
+  đã audit (2026-09-13) đối chiếu PROJECT_PROFILE §21, GUI_DESIGN §5–§7 và
   roadmap này; mục Phase 11 duy nhất còn mở là expected-duration monitoring, bị
   chặn cho tới khi tài liệu canonical định nghĩa thứ tự ưu tiên nguồn duration
   (xem mục Phase 11). Backend `app/application/production_board.py` trên
@@ -929,7 +929,7 @@ Phase 11 vẫn chỉ là read-model / monitoring. Nó không được hút vào 
 write của Scan Station, Priority write, master-data management, Worker session
 hay authentication.
 
-Trạng thái triển khai (đã audit 2026-09-10 — Production Board, Area Board, PN
+Trạng thái triển khai (đã audit 2026-09-13 — Production Board, Area Board, PN
 Tracking và breakdown theo PN của Machines hoàn tất end to end và đã audit; mục
 Phase 11 duy nhất còn mở là expected-duration monitoring, bị chặn bởi quyết định
 canonical về nguồn duration ghi bên dưới): **Backend**
@@ -1329,7 +1329,7 @@ có gì assigned; `src/api/machines.ts` map `assignedLines`. *Tests*:
 Machine, bằng nhau giữa list và single read, rỗng khi Idle) và suite Machines
 (các phần liệt kê và tone của chúng).
 
-**Audit Phase 11 (2026-09-10)** — đã audit implementation đối chiếu
+**Audit Phase 11 (2026-09-13)** — đã audit implementation đối chiếu
 PROJECT_PROFILE §21 và các domain rule, GUI_DESIGN §5 / §6 / §7 (cùng §4.10 và
 các global rule) và mục này: dữ liệu backend thật trên mọi production path
 (không import `src/mocks/` trong view thật, preview sau `import.meta.env.DEV`,
@@ -1357,7 +1357,10 @@ dùng chung chỉ refresh khi kết nối trở lại theo chuyển đổi trự
 PN Tracking hiển thị rows của query TRƯỚC như danh sách hiện tại (và `Live`)
 trong lúc lần đọc đầu của filter mới đang chạy, và như danh sách "stale" khi
 lần đọc đó lỗi — page nay mang query mà nó trả lời và danh sách đọc loading cho
-tới khi query hiện tại được trả lời; (7) detail Tracking chỉ gửi
+tới khi query hiện tại được trả lời, và shared monitoring feed bắt đầu lại khi
+load đổi, nên lần đọc ĐẦU của query hiện tại mà lỗi là error state với Retry
+(đọc lại đúng query hiện tại) thay vì loading vô thời hạn — chỉ REFRESH lỗi của
+một query đã được trả lời mới giữ rows như stale feed; (7) detail Tracking chỉ gửi
 `movements_limit` và dựa vào việc default server trùng page size client cho các
 trang flows / allocations / Scrap — nay gửi đủ mọi limit; (8) bước hiện tại của
 trace FLOATING chọn theo index thay vì theo vị trí server derive; (9) hint của

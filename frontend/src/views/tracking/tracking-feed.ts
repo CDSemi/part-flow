@@ -33,23 +33,21 @@ import {
   TRACKING_REFRESH_MS,
 } from './tracking-logic';
 
-/**
- * The list feed. The loader identity is the QUERY the filters produce
- * (`trackingListQuery`), so two filter states that reach the server
- * identically never re-read, while any effective change reads at once.
- */
 /** A list page together with the query it answers. */
 export interface AnsweredTrackingPage extends TrackingPage {
   query: string;
 }
 
 /**
- * The list feed. The page carries the QUERY it answers: the shared feed
- * keeps its last complete answer while a changed query's first read is
- * in flight (and marks it stale should that read fail), so the view
- * must never present a page of a previous query as the current one —
- * it compares `query` and shows the loading state until the answer to
- * the current filters arrives.
+ * The list feed. The loader identity is the QUERY the filters produce
+ * (`trackingListQuery`), so two filter states that reach the server
+ * identically never re-read, while any effective change reads at once
+ * as a first load of the new query: the shared feed drops the previous
+ * query's answer, a failed first read is the error state with Retry,
+ * and only a failed refresh of the CURRENT query keeps its page as
+ * stale. The page still carries the QUERY it answers, so the view never
+ * presents a page of a previous query as the current one in the render
+ * before the feed has started over.
  */
 export function useTrackingListFeed(
   query: string,

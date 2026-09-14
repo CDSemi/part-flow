@@ -103,7 +103,7 @@ Production Board + Area Board + PN Tracking của Phase 11:
   `(part_number, occurred_at, id)` trên `part_movements` cho read này. Phase 11
   cũng liệt kê breakdown theo PN của quantity đang gán cho từng Machine trong
   Management → Machines (`assigned_lines` trên `/api/machines`), và đã audit ngày
-  2026-09-10 (IMPLEMENTATION_ROADMAP Phase 11) — mục Phase 11 duy nhất còn mở là
+  2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11) — mục Phase 11 duy nhất còn mở là
   expected-duration monitoring, bị chặn cho tới khi tài liệu canonical định
   nghĩa thứ tự ưu tiên nguồn duration.
 

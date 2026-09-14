@@ -372,7 +372,7 @@ other view (Priority, Planned Routes, Part Numbers) renders
 development-only mock data; Phase 11 also lists the server's per-PN
 breakdown of each Machine's assigned quantity in Management →
 Machines (`assigned_lines` on `/api/machines`), and was audited on
-2026-09-10 (IMPLEMENTATION_ROADMAP Phase 11) — the one open Phase 11
+2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11) — the one open Phase 11
 item is expected-duration monitoring, blocked until the canonical
 documents define the duration source precedence — the movement-type
 check admits the

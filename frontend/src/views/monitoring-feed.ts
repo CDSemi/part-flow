@@ -14,6 +14,11 @@
 // answer of a superseded request (an unmounted view, a Retry racing a
 // pending refresh).
 //
+// A changed `load` asks a different question (PN Tracking's list under
+// changed filters): its first read is a FIRST load — the previous
+// answer is not that question's, so it is not kept as a stale one, and
+// a failure is the error state with a Retry of the current load.
+//
 // The Production Board and the Area Board share this ONE feed
 // behaviour: a monitoring view must never invent its own refresh,
 // staleness or recovery rules.
@@ -78,8 +83,16 @@ export function useMonitoringFeed<T>(
     }
   }, [connectivity, reload]);
 
+  // The load whose answer `state` holds: a different `load` starts over
+  // from the loading state (a Retry or a regained connection keeps the
+  // same load, and so its last complete answer).
+  const answering = useRef(load);
   useEffect(() => {
     if (!enabled) return undefined;
+    if (answering.current !== load) {
+      answering.current = load;
+      setState({ status: 'loading' });
+    }
     let cancelled = false;
     const run = () => {
       const requested = ++liveGeneration.current;
