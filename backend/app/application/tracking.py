@@ -33,7 +33,9 @@ Board, the Area Board or the Scan Station about a quantity:
   position's arrival fulfilled no step (`projections.route_positions` —
   the shared route-position derivation the expected-duration precedence
   reads too; reversed Movements never count, and a deviation back into
-  an earlier step's Area stays off route) and every confirmed deviation read back from
+  an earlier step's Area stays off route) — off-route quantity has no
+  CURRENT step: its known step reads DONE and the route waits for the
+  next one — and every confirmed deviation read back from
   the `TRANSFERRED` / `STOCKED` Movement that recorded it. Every flow
   also carries its **actual route trace** derived from Movement
   history: the Areas its quantity arrived in, in order — repeated
@@ -707,12 +709,17 @@ def _route_steps(
     route_position = route_positions(session, [flow.id])[flow.id]
     known = next((step for step in steps if step.id == route_position.known_step_id), None)
     active = flow.status == QuantityFlowStatus.ACTIVE
+    # Off-route quantity has no current Assigned Route Step (PROJECT_PROFILE
+    # §17): the known step is then route progress already made — DONE —
+    # and the route waits for the step after it (FUTURE); only ACTIVE,
+    # on-route quantity is AT its known step (CURRENT).
+    current = active and route_position.on_route
     views: list[RouteStepView] = []
     for step in steps:
         state: RouteStepState
         if known is None or step.sequence > known.sequence:
             state = "FUTURE"
-        elif step.sequence < known.sequence or not active:
+        elif step.sequence < known.sequence or not current:
             state = "DONE"
         else:
             state = "CURRENT"

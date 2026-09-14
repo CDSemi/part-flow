@@ -1192,8 +1192,9 @@ của SPLIT/MERGED đã undo là vô hiệu), PLANNED snapshot với mỗi step 
 phán xét từ arrival lập nên position hiện tại (`projections.route_positions` —
 derivation route-position dùng chung mà expected duration cũng đọc; Movement đã
 reverse không tính, flow closed không có current step, và deviation quay lại
-Area của step trước vẫn off route), cùng mọi deviation đã confirm đọc lại từ
-Movement ghi nó, và **actual route trace** derive từ Movement history — các Area
+Area của step trước vẫn off route; quantity off route cũng không có step
+CURRENT — known step của nó đọc `DONE` như tiến độ đã đạt và route chờ step kế
+tiếp), cùng mọi deviation đã confirm đọc lại từ Movement ghi nó, và **actual route trace** derive từ Movement history — các Area
 quantity đã đến, theo thứ tự (`RECEIVED`, `TRANSFERRED`, `QUANTITY_ADJUSTED`,
 `STOCKED`; không bao giờ `AREA_COMPLETED`, vốn là hoàn thành trong Area nguồn),
 giữ repeated Area, Repair transfer được gắn cờ, split child kế thừa trace của
@@ -1422,8 +1423,9 @@ overdue sớm nhất, và regression deviation-return — deviation đã confirm
 Repair return vào Area của step đầu vẫn off route theo Operation default, split
 của partial assignment kế thừa, Undo khôi phục expectation theo từng arrival
 (`test_production_board_api.py`); `expected_by` trên position và location gộp,
-và cùng kịch bản deviation-return trên `off_route` / state các step qua split
-và các Undo (`test_tracking_api.py`); `expected_by` theo flow kế thừa qua
+và cùng kịch bản deviation-return trên `off_route` / state các step — `DONE` /
+`FUTURE` khi off route, `CURRENT` lại khi Undo khôi phục arrival on-route — qua
+split và các Undo (`test_tracking_api.py`); `expected_by` theo flow kế thừa qua
 split và null khi không có nguồn, mọi action vẫn có (`test_area_board_api.py`).
 *Frontend*: một phán xét dùng chung `views/dates.exceedsExpectedDuration(expectedBy,
 now)` — thời điểm cố định của server so với UI clock chung, false khi không có —

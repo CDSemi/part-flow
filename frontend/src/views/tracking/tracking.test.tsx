@@ -1057,6 +1057,11 @@ test('a PLANNED flow off its route shows the off-route note and every confirmed 
     Object.assign(planned, {
       off_route: true,
       position: { ...planned.position, area: DEBURR },
+      // The server's rule: off-route quantity has no CURRENT step — its
+      // known step reads DONE and the route waits for the next one.
+      route_steps: planned.route_steps.map((step) =>
+        step.state === 'CURRENT' ? { ...step, state: 'DONE' } : step,
+      ),
       deviations: [
         {
           movement_id: 3,
@@ -1084,13 +1089,15 @@ test('a PLANNED flow off its route shows the off-route note and every confirmed 
   expect(deviation?.textContent).toContain('expected Lathe (Turning)');
   expect(deviation?.textContent).toContain('actual Deburr');
   expect(deviation?.textContent).toContain('reason: Lathe down');
-  // The snapshot itself is untouched by the deviation: its steps keep
-  // the server's DONE / CURRENT / FUTURE states.
+  // The snapshot renders exactly the server's DONE / CURRENT / FUTURE
+  // states: off route there is no current step — the progress made
+  // reads done, the rest of the route waits.
   const states = Array.from(
     block.querySelectorAll('.route .rstep'),
     (el) => el.className,
   );
-  expect(states.filter((cls) => cls.includes('cur')).length).toBe(1);
+  expect(states.filter((cls) => cls.includes('cur')).length).toBe(0);
+  expect(states.filter((cls) => cls.includes('done')).length).toBe(3);
 });
 
 test('the Floating trace keeps repeated Areas and the Repair marker', async () => {

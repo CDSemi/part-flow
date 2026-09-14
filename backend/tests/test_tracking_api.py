@@ -883,8 +883,10 @@ def test_planned_snapshot_states_and_a_confirmed_deviation(
         route_deviation_reason="Cut backlog",
     )
     planned = _flow(_detail(client, pn), flow)
+    # Off-route quantity has no current step: the Material step is route
+    # progress already made (DONE), the route still waits for Cut.
     assert [step["state"] for step in planned["route_steps"]] == [
-        "CURRENT",
+        "DONE",
         "FUTURE",
         "FUTURE",
         "FUTURE",
@@ -1511,6 +1513,7 @@ def test_a_deviation_back_into_an_earlier_steps_area_keeps_the_flow_off_route(
     planned = _flow(_detail(client, pn), flow)
     assert planned["off_route"] is True
     assert planned["position"]["area"]["id"] == shop.cut.area_id
+    assert [step["state"] for step in planned["route_steps"]] == ["DONE", "FUTURE"]
 
     # Back in Lathe through a confirmed Repair return: the route position
     # is unchanged (step 1 known, the Stockroom expected), the quantity
@@ -1531,7 +1534,9 @@ def test_a_deviation_back_into_an_earlier_steps_area_keeps_the_flow_off_route(
     planned = _flow(_detail(client, pn), flow)
     assert planned["off_route"] is True
     assert planned["position"]["area"]["id"] == shop.lathe.area_id
-    assert [step["state"] for step in planned["route_steps"]] == ["CURRENT", "FUTURE"]
+    # No current step while off route: step 1 is progress made (DONE),
+    # the Stockroom step still waits.
+    assert [step["state"] for step in planned["route_steps"]] == ["DONE", "FUTURE"]
     assert planned["position"]["expected_by"] is None
     assert [deviation["actual_area"]["id"] for deviation in planned["deviations"]] == [
         shop.cut.area_id,
@@ -1549,7 +1554,7 @@ def test_a_deviation_back_into_an_earlier_steps_area_keeps_the_flow_off_route(
         child = _flow(detail, flow_id)
         assert child["status"] == "ACTIVE"
         assert child["off_route"] is True
-        assert [step["state"] for step in child["route_steps"]] == ["CURRENT", "FUTURE"]
+        assert [step["state"] for step in child["route_steps"]] == ["DONE", "FUTURE"]
         assert child["position"]["expected_by"] is None
 
     # Undo the assignment (and its split), then the Repair return: back
@@ -1567,6 +1572,7 @@ def test_a_deviation_back_into_an_earlier_steps_area_keeps_the_flow_off_route(
     planned = _flow(_detail(client, pn), flow)
     assert planned["off_route"] is False
     assert planned["position"]["area"]["id"] == shop.lathe.area_id
+    assert [step["state"] for step in planned["route_steps"]] == ["CURRENT", "FUTURE"]
     assert planned["deviations"] == []
     since = datetime.datetime.fromisoformat(planned["position"]["since"])
     assert datetime.datetime.fromisoformat(

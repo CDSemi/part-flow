@@ -948,7 +948,8 @@ tại** của quantity theo đúng một giá trị hiệu lực, giải theo th
   route** tại step đó — hoặc là deviation đã confirm không tham chiếu step —
   quantity **off route**, không có step hiện tại cho tới khi một arrival sau
   fulfill step. Deviation quay lại Area của một step trước (Repair return) không
-  làm step đó current lần nữa: route vẫn chờ step kế tiếp. Event trong Area
+  làm step đó current lần nữa: route vẫn chờ step kế tiếp, và Tracking hiển thị
+  known step là done — quantity off route không có step hiện tại. Event trong Area
   (Machine assign, release, `DONE`) giữ state mà arrival đã lập; arrival đã undo
   coi như chưa xảy ra; split child hay merge result kế thừa state của nguồn.
   Vì vậy quantity off-route lấy Operation default.
