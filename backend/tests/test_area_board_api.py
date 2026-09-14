@@ -1103,3 +1103,56 @@ def test_a_non_terminal_area_never_reports_stocked_lines(client: TestClient, sho
     for entry in board["areas"]:
         if not entry["inventory"]["area"]["is_terminal"]:
             assert entry["stocked"] == []
+
+
+def test_every_flow_reports_when_its_expected_duration_elapses(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """PROJECT_PROFILE §17: `expected_by` is the position's entry instant
+    plus its effective expected duration — here the recorded
+    Operation's live default (a FLOATING flow has no step) — inherited
+    through a split like the entry instant itself, and null where no
+    expected duration is configured. The shared inventory carries it,
+    so the Scan Station and the Area Board warn alike (advisory only:
+    every action stays available)."""
+    shop = _Shop(client)
+    updated = client.patch(
+        f"/api/operations/{shop.lathe.operation_id}", json={"default_expected_duration": "PT2H"}
+    )
+    assert updated.status_code == 200, updated.text
+    pn = _unique("PN")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 8}])
+    flow = _release(client, shop.material, work_order, pn, quantity=8)
+    entry = _area(_board(client, shop.department_id), shop.material.area_id)
+    assert _flow(entry, pn)["expected_by"] is None
+
+    _transfer(client, shop.material, shop.lathe, flow, pn, 8)
+    entered = datetime.datetime(2026, 8, 1, 6, 30, tzinfo=datetime.UTC)
+    _set_occurred_at(db_engine, _newest_movement_id(db_engine, flow), entered)
+    entry = _area(_board(client, shop.department_id), shop.lathe.area_id)
+    item = _flow(entry, pn)
+    assert datetime.datetime.fromisoformat(item["expected_by"]) == entered + datetime.timedelta(
+        hours=2
+    )
+    assert "TRANSFER" in item["available_actions"]
+
+    # The remainder of a partial assignment keeps its position and so its
+    # deadline; the assigned child is dated — and judged — from its
+    # assignment.
+    assigned = _machine_action(
+        client, "machine-assignments", shop.lathe, flow, pn, 3, machine_id=shop.lathe.machine_id
+    )
+    entry = _area(_board(client, shop.department_id), shop.lathe.area_id)
+    by_flow = {
+        item["quantity_flow_id"]: (item["entered_at"], item["expected_by"])
+        for item in _flows(entry, pn)
+    }
+    remainder_entered, remainder_expected = by_flow[int(assigned["remainder_quantity_flow_id"])]
+    assert remainder_entered.startswith("2026-08-01T06:30")
+    assert datetime.datetime.fromisoformat(remainder_expected) == entered + datetime.timedelta(
+        hours=2
+    )
+    child_entered, child_expected = by_flow[int(assigned["quantity_flow_id"])]
+    assert datetime.datetime.fromisoformat(child_expected) == datetime.datetime.fromisoformat(
+        child_entered
+    ) + datetime.timedelta(hours=2)

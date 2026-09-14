@@ -224,6 +224,7 @@ export function presentAreaInventory(
             ? [{ qty: flow.quantity, ...(completedBy ? { completedBy } : {}) }]
             : undefined,
         enteredAreaAt: flow.enteredAt,
+        ...(flow.expectedBy ? { expectedBy: flow.expectedBy } : {}),
         ...(scrapped ? { scrapped } : {}),
       };
       cards.push(card);
@@ -263,8 +264,10 @@ export const EMPTY_AREA_PRESENTATION: AreaInventoryPresentation = {
  * Rows keep the order of their first card, so the toolbar's search and
  * sort still decide the column order. The aggregated row is dated from
  * the OLDEST portion — the longest wait is what a monitoring view must
- * not hide — and every other value is the PN's own (its monitoring
- * context and its scrapped quantity are PN-level already).
+ * not hide — and warned from the EARLIEST-due portion (its own expected
+ * duration, PROJECT_PROFILE §17); every other value is the PN's own
+ * (its monitoring context and its scrapped quantity are PN-level
+ * already).
  */
 export function aggregateByPartNumber(
   cards: readonly MockAreaCard[],
@@ -306,6 +309,15 @@ export function aggregateByPartNumber(
         card.enteredAreaAt < merged.enteredAreaAt)
     ) {
       merged.enteredAreaAt = card.enteredAreaAt;
+    }
+    // Warned from the EARLIEST-due portion — each judged against its
+    // own expected duration, never an average, so a newer portion never
+    // hides an overdue one (PROJECT_PROFILE §17).
+    if (
+      card.expectedBy !== undefined &&
+      (merged.expectedBy === undefined || card.expectedBy < merged.expectedBy)
+    ) {
+      merged.expectedBy = card.expectedBy;
     }
   }
   return [...rows.values()];

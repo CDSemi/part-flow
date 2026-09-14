@@ -385,6 +385,14 @@ processing / Finished; terminal Stocked. Machine card hiển thị name, derived
 age, total/PN list; idle empty, maintenance dashed error border + note/return date.
 Machine card chỉ ON_MACHINE, finished luôn ở Area summary.
 
+Expected duration (Phase 11, PROJECT_PROFILE §17): row mang thời điểm `expectedBy`
+cố định do shared inventory nêu theo từng flow — thời điểm vào position cộng
+expected duration hiệu lực (snapshot của Assigned Route Step hiện tại, nếu không
+thì Operation default), không có khi cả hai đều thiếu — và `Time in Area` chuyển
+warning tone (`tia.long`, tooltip `Exceeds the expected duration`) khi clock chung
+vượt nó; row không có thì không cờ. Chỉ advisory: action của row ở Scan Station
+giữ y nguyên.
+
 ## 4.11 States
 
 Loading skeleton giữ layout; empty giải thích next action; unknown Station explicit
@@ -423,7 +431,14 @@ Read-only full-screen Department-wide display, không per-Area filter.
 - Assigned Machine chip + `on machine`; queue/direct processing/done rõ. Quantity
   tone: queue warning, processing/Machine info, done success; state word dim. External
   shows activity chip; READY không hiện Machine là executor.
-- Dwell derive từ timestamp/shared clock; unusually long amber. Total row có one
+- Dwell derive từ timestamp/shared clock; amber (`long`, tooltip `Exceeds the
+  expected duration`) khi vị trí đã vượt expected duration hiệu lực
+  (PROJECT_PROFILE §17 — snapshot của Assigned Route Step hiện tại, nếu không thì
+  Operation default): server nêu thời điểm cố định `expected_by` mà portion sớm
+  nhất của location vượt expected duration của chính nó (không average, portion mới
+  không che portion overdue), clock chung đánh giá; không có expected duration thì
+  không cờ — stand-in `≥ 3 ngày` (`LONG_DWELL_MINUTES`) của Phase 2 đã bỏ, không
+  có rule cố định thay thế. Chỉ advisory, không block gì. Total row có one
   continuous separator và reconciled quantity. Scrap là plain error text `n scrapped`.
 - Due countdown derive; Hot sort trước theo rank, rồi canonical due ordering. Chỉ
   urgency text blink; Hot flame pulse riêng; reduced-motion tắt animation.
@@ -444,7 +459,8 @@ canonical board order từ read model của **server** — phân bổ theo Area 
 External activity với state derive, timestamp vào vị trí cố định, stocked và
 scrapped, Work Order / Job Number context còn mở và Hot rank đều derive server-side (Work Order đã complete không cấp context cho row; rows theo đúng canonical demand ordering — stocked không phải tầng sắp xếp; quantity đã merge đọc qua MỌI nhánh lineage nên dated theo entry cũ nhất của cả khối merge và chỉ nêu Machine hoàn thành khi các nhánh đồng nhất) từ
 projection vị trí hiện tại và Movement history — còn mọi giá trị thời gian hiển
-thị (dwell theo vị trí và cờ `long`, due countdown, `Total Days`, đồng hồ) vẫn
+thị (dwell theo vị trí và cờ `long` — đánh giá theo thời điểm `expected_by` cố
+định của server —, due countdown, `Total Days`, đồng hồ) vẫn
 derive lúc render từ UI clock chung (§3.12). Dòng Department nêu Department server
 resolve (Department active duy nhất, hoặc Department chỉ định bằng
 `?department=<id>` trên URL màn hình — địa chỉ presentation cho màn hình treo
@@ -585,8 +601,15 @@ tổng của PN trong Area; `Priority` xếp MỌI Hot rank trước mọi row k
 bất kể số rank lớn tới đâu) và các lựa chọn layout (Wrap columns,
 Summary toggle và phân trang màn hình hẹp) là presentation state của view — Area
 Board không có canonical order để server sở hữu, khác Production Board. Mock
-dataset Phase 2 của board này đã bỏ. **Chưa có:** highlight thời gian chờ theo
-expected duration vẫn là phần mở của Phase 11.
+dataset Phase 2 của board này đã bỏ. **Expected duration:** `Time in Area` của
+row chuyển warning tone (`tia.long`, tooltip `Exceeds the expected duration`) khi
+quantity đã vượt expected duration hiệu lực của position (PROJECT_PROFILE §17 —
+snapshot của Assigned Route Step hiện tại, nếu không thì Operation default; không
+có cả hai thì không cờ): shared inventory nêu thời điểm `expected_by` cố định theo
+từng flow, clock chung đánh giá, và row overview theo PN warning từ portion sớm
+nhất của PN — mỗi portion theo expected duration của chính nó, không average — nên
+portion mới không che portion overdue. Cùng shared row warning y hệt ở Scan Station
+(§4.10); chỉ advisory, mọi action giữ nguyên.
 
 ---
 
@@ -658,7 +681,11 @@ khi refresh dời ranh giới của nó hoặc đổi nội dung các row nó hi
 quan, name / revision / image / ERP
 id từ master render `—` cho đến khi Part Numbers management (Phase 13) cung cấp,
 và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
-corrections (Phase 14) — không bao giờ render nút vô hiệu.
+corrections (Phase 14) — không bao giờ render nút vô hiệu. Dòng position của một
+Quantity Flow thêm ghi chú advisory tường minh `· exceeds expected duration`
+(warning tone, viết ra chữ — không bao giờ chỉ màu) khi position đã vượt expected
+duration hiệu lực (PROJECT_PROFILE §17 — thời điểm `expected_by` cố định của
+server do clock chung đánh giá; không có thì không ghi chú).
 
 ---
 
@@ -1030,6 +1057,19 @@ session không còn shift end.
   (Phase 14), các field metadata từ master render `—` cho đến Phase 13. Mockup
   v18 không đổi (feed state, paging control và pill `Open` chỉ có trong
   application).
+23. **Expected-duration monitoring trên derivation thật** (§4.10, §5, §6, §7.2;
+  PROJECT_PROFILE §17 "Expected duration hiệu lực của một position";
+  IMPLEMENTATION_ROADMAP Phase 11 — khép mục audit Phase 11 để mở): dwell theo vị
+  trí của Production Board chuyển `long` khi clock chung vượt thời điểm
+  `expected_by` cố định của server — thời điểm sớm nhất mà một portion của location
+  vượt expected duration hiệu lực của chính nó (snapshot của Assigned Route Step
+  hiện tại, nếu không thì Operation default) — thay stand-in `≥ 3 ngày` của Phase
+  2, bỏ hẳn không có rule cố định thay thế; `Time in Area` của shared PN row (Scan
+  Station và Area Board detail như nhau, row overview warning từ portion sớm nhất
+  của PN) và dòng position của flow trên Tracking (`· exceeds expected duration`)
+  mang cùng đánh giá advisory, mỗi chỗ có chữ hoặc tooltip bên cạnh tone — không
+  bao giờ chỉ màu — và không có expected duration thì không cờ. Mockup v18 không
+  đổi (highlight đọc dữ liệu của application).
 
 ## 15.2 Từ GUI Design v16
 

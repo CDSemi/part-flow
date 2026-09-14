@@ -259,6 +259,8 @@ function detailPayload() {
             activity: null,
             state: 'PROCESSING',
             since: '2030-07-22T13:40:00Z',
+            // Far ahead: within its expected duration.
+            expected_by: '2030-07-22T17:40:00Z',
           },
           parents: [{ quantity_flow_id: 140, relation: 'SPLIT' }],
           children: [],
@@ -289,6 +291,8 @@ function detailPayload() {
             activity: null,
             state: 'QUEUE',
             since: '2030-07-22T11:20:00Z',
+            // Long past: the position exceeds its expected duration.
+            expected_by: '2020-01-01T00:00:00Z',
           },
           parents: [],
           children: [{ quantity_flow_id: 141, relation: 'SPLIT' }],
@@ -1109,6 +1113,22 @@ test('the Floating trace keeps repeated Areas and the Repair marker', async () =
   );
   // The last arrival is the current position of an active flow.
   expect(floating.querySelector('.rstep.cur')?.textContent).toContain('Cut');
+});
+
+test('a flow position past its expected duration says so, as advisory text', async () => {
+  // PROJECT_PROFILE §17: the server's fixed `expected_by` (the current
+  // Route Step's snapshot value, else the Operation default) judged by
+  // the shared clock — written out beside the position, never a color
+  // alone, and absent within the expected duration or without one.
+  await renderTracking();
+  await openFirstRow();
+
+  const planned = flowBlock('QF-140');
+  expect(planned.querySelector('.qf-pos .qf-over')?.textContent).toBe(
+    ' · exceeds expected duration',
+  );
+  const floating = flowBlock('QF-141');
+  expect(floating.querySelector('.qf-pos .qf-over')).toBeNull();
 });
 
 test('the finished-rack state never adds a route step', async () => {

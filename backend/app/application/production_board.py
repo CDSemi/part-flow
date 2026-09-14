@@ -83,9 +83,18 @@ stored counter:
   any other row. A row without demand context is an unranked, undated
   row ordered by its fallback received date (its PN the tie-breaker).
 
-Time in location versus the expected duration of the active Route
-Step (PROJECT_PROFILE §21 "may be highlighted") is not judged here —
-the display flags an unusually long stay from `since` alone.
+- **Expected duration** (PROJECT_PROFILE §17 "Effective expected
+  duration of a position"): every portion carries the effective
+  expected duration of its own position — the current Assigned Route
+  Step's snapshot value, else the recorded Operation's live default,
+  else none — resolved by the shared derivation
+  (`projections.effective_positions`). A grouped location reports
+  `expected_by`, the EARLIEST instant at which any of its portions
+  exceeds its own expected duration (entered_at + duration), so the
+  display warns as soon as one portion is overdue — durations are never
+  averaged and a newer portion never hides an overdue one. The judgement
+  itself (`now` past `expected_by`) is the display's, from the shared UI
+  clock; the board sends only this fixed instant.
 """
 
 import datetime
@@ -149,6 +158,10 @@ class BoardLocation(NamedTuple):
     # When the OLDEST portion of this group entered its position — None
     # where elapsed time does not apply (stocked quantity).
     since: datetime.datetime | None
+    # The EARLIEST instant at which one of the group's portions exceeds
+    # its own effective expected duration — None when no portion has
+    # one (nothing is judged) or elapsed time does not apply.
+    expected_by: datetime.datetime | None
 
 
 # The board's demand context is the shared one (`allocations`), so the
@@ -346,8 +359,11 @@ def group_locations(
     """Active quantity per PN grouped by (Area, state, Machine, activity).
 
     Each group carries the OLDEST entry of its portions, so a long stay
-    is never hidden by a newer portion; the groups of one PN come in
-    the presentation order (`location_sort_key`).
+    is never hidden by a newer portion, and the EARLIEST `expected_by`
+    of its portions, so an overdue portion is never hidden by a newer
+    one either (each portion judged against its OWN expected duration —
+    never an average); the groups of one PN come in the presentation
+    order (`location_sort_key`).
     """
     groups: dict[str, dict[tuple[int, str, int | None, str | None], BoardLocation]] = {}
     for entry in positions:
@@ -356,6 +372,7 @@ def group_locations(
         key = (flow.current_area_id, entry.state, machine_id, entry.activity)
         per_pn = groups.setdefault(flow.part_number, {})
         existing = per_pn.get(key)
+        expected_by = entry.position.expected_by
         if existing is None:
             per_pn[key] = BoardLocation(
                 area=areas[flow.current_area_id],
@@ -364,12 +381,19 @@ def group_locations(
                 quantity=flow.quantity,
                 state=entry.state,
                 since=entry.position.entered_at,
+                expected_by=expected_by,
             )
         else:
             since = existing.since
             if since is None or entry.position.entered_at < since:
                 since = entry.position.entered_at
-            per_pn[key] = existing._replace(quantity=existing.quantity + flow.quantity, since=since)
+            if expected_by is None or (
+                existing.expected_by is not None and existing.expected_by < expected_by
+            ):
+                expected_by = existing.expected_by
+            per_pn[key] = existing._replace(
+                quantity=existing.quantity + flow.quantity, since=since, expected_by=expected_by
+            )
     return {pn: sorted(per_pn.values(), key=location_sort_key) for pn, per_pn in groups.items()}
 
 
@@ -435,6 +459,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
                 quantity=quantity,
                 state="STOCKED",
                 since=None,
+                expected_by=None,
             )
             for (stocked_pn, area_id), quantity in stocked.items()
             if stocked_pn == pn

@@ -130,6 +130,12 @@ class FlowInAreaResponse(BaseModel):
     # The fixed instant this quantity entered its current position; the
     # displayed `Time in Area` is derived from it at render.
     entered_at: datetime.datetime
+    # `entered_at` + the effective expected duration of the position
+    # (PROJECT_PROFILE §17 — the current Assigned Route Step's snapshot
+    # value, else the recorded Operation's live default); null when
+    # neither applies. Advisory: the display warns once the shared UI
+    # clock passes it, and nothing is ever blocked by it.
+    expected_by: datetime.datetime | None
     # The actions currently valid for this flow (PN-first, §15).
     available_actions: list[FlowActionLiteral]
     work_order: WorkOrderContextResponse | None
@@ -250,6 +256,7 @@ def flow_response(item: FlowInArea) -> FlowInAreaResponse:
             else None
         ),
         entered_at=item.entered_at,
+        expected_by=item.expected_by,
         available_actions=list(item.available_actions),
         work_order=work_order_context(item.work_order),
     )

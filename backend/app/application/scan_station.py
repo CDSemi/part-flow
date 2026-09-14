@@ -269,6 +269,11 @@ class FlowInArea(NamedTuple):
     # read across every lineage branch (the OLDEST entry of merged
     # quantity), never a stored formatted duration.
     entered_at: datetime.datetime
+    # `entered_at` + the position's effective expected duration
+    # (PROJECT_PROFILE §17, `projections.EffectivePosition`), None when
+    # no expected duration applies — the fixed instant every monitoring
+    # surface warns from; advisory only, never a gate on any action.
+    expected_by: datetime.datetime | None
     available_actions: list[FlowAction]
     work_order: WorkOrderContext | None
 
@@ -496,6 +501,7 @@ def _flow_in_area(
             else None
         ),
         entered_at=position.entered_at,
+        expected_by=position.expected_by,
         available_actions=available_actions(state),
         work_order=work_order,
     )

@@ -60,6 +60,7 @@ import {
   locationPercent,
   locationRow,
   movementTypeClass,
+  positionOverdue,
   positionText,
   readyNote,
   routeSteps,
@@ -1144,7 +1145,14 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
           mode={flow.routeMode}
           detail={flow.routeMode === 'FLOATING' ? 'actual trace' : 'snapshot'}
         />
-        <span className="qf-pos">{positionText(flow, now)}</span>
+        <span className="qf-pos">
+          {positionText(flow, now)}
+          {positionOverdue(flow, now) ? (
+            // Advisory: the position is past its effective expected
+            // duration (the current Route Step's, else the Operation's).
+            <span className="qf-over"> · exceeds expected duration</span>
+          ) : null}
+        </span>
       </div>
       {steps.length > 0 ? (
         <div className="route">

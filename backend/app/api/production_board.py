@@ -52,6 +52,12 @@ class BoardLocationResponse(BaseModel):
     # When the oldest portion of this group entered its position; null
     # where elapsed time does not apply (STOCKED).
     since: datetime.datetime | None
+    # The earliest instant at which one portion of this group exceeds
+    # its own effective expected duration (PROJECT_PROFILE §17); null
+    # when no portion has an expected duration — the display then shows
+    # no expected-duration warning. The display compares it with the
+    # shared UI clock; the server sends only this fixed instant.
+    expected_by: datetime.datetime | None
 
 
 class BoardDemandResponse(BaseModel):
@@ -112,6 +118,7 @@ def _location(location: production_board.BoardLocation) -> BoardLocationResponse
         quantity=location.quantity,
         state=location.state,
         since=location.since,
+        expected_by=location.expected_by,
     )
 
 

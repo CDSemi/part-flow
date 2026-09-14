@@ -371,10 +371,12 @@ available stock reading `Open`. Every
 other view (Priority, Planned Routes, Part Numbers) renders
 development-only mock data; Phase 11 also lists the server's per-PN
 breakdown of each Machine's assigned quantity in Management →
-Machines (`assigned_lines` on `/api/machines`), and was audited on
-2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11) — the one open Phase 11
-item is expected-duration monitoring, blocked until the canonical
-documents define the duration source precedence — the movement-type
+Machines (`assigned_lines` on `/api/machines`), was audited on
+2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11), and closes with the
+expected-duration monitoring of PROJECT_PROFILE §17 (the fixed
+`expected_by` instant on every monitoring position — the current
+Assigned Route Step's snapshot value, else the Operation default —
+judged by the shared UI clock; advisory only) — the movement-type
 check admits the
 Phase 3–10 types (`RECEIVED`, `TRANSFERRED`, `ASSIGNED_TO_MACHINE`,
 `RELEASED_FROM_MACHINE`, `AREA_COMPLETED`, `SPLIT`, `MERGED`,

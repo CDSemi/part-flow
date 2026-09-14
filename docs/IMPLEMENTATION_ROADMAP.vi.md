@@ -202,9 +202,10 @@
 - **Phase 11**: đã triển khai **Production Board**, **Area Board**, **PN
   Tracking** và breakdown **Assigned now** theo PN của Management → Machines, và
   đã audit (2026-09-13) đối chiếu PROJECT_PROFILE §21, GUI_DESIGN §5–§7 và
-  roadmap này; mục Phase 11 duy nhất còn mở là expected-duration monitoring, bị
-  chặn cho tới khi tài liệu canonical định nghĩa thứ tự ưu tiên nguồn duration
-  (xem mục Phase 11). Backend `app/application/production_board.py` trên
+  roadmap này, và hoàn tất bằng expected-duration monitoring theo PROJECT_PROFILE
+  §17 "Expected duration hiệu lực của một position" (chốt 2026-09-14 — snapshot
+  của Assigned Route Step hiện tại thắng Operation default sống, elapsed là chính
+  `since` của position, chỉ advisory; xem mục Phase 11). Backend `app/application/production_board.py` trên
   `GET /api/production-board` derive board toàn Department từ projection vị trí
   hiện tại và Movement history: mọi PN có active quantity trong Area của
   Department (hoặc stocked quantity kèm demand còn mở), phân bổ theo Area /
@@ -920,19 +921,18 @@ submission dưới cùng `device_event_id`, nên nó replay chứ không ghi hai
   Machines, thay presentation chỉ-tổng tạm thời của Phase 6;
 - expected-duration monitoring: thay stand-in `>= 3 days` cố định của long-dwell
   trên Production Board bằng hành vi expected-duration advisory canonical theo
-  PROJECT_PROFILE §17 / GUI_DESIGN. Trước khi triển khai, canonical docs phải
-  định nghĩa nguồn duration nào áp dụng khi vừa có duration của Assigned Route
-  step vừa có default của Operation; implementation không được bịa hay đoán quy
-  tắc ưu tiên.
+  PROJECT_PROFILE §17 "Expected duration hiệu lực của một position" (quyết định
+  mà implementation đã chờ: snapshot của Assigned Route Step hiện tại thắng,
+  Operation default là fallback sống, không có cả hai thì không phán xét).
 
 Phase 11 vẫn chỉ là read-model / monitoring. Nó không được hút vào production
 write của Scan Station, Priority write, master-data management, Worker session
 hay authentication.
 
-Trạng thái triển khai (đã audit 2026-09-13 — Production Board, Area Board, PN
-Tracking và breakdown theo PN của Machines hoàn tất end to end và đã audit; mục
-Phase 11 duy nhất còn mở là expected-duration monitoring, bị chặn bởi quyết định
-canonical về nguồn duration ghi bên dưới): **Backend**
+Trạng thái triển khai (đã audit 2026-09-13; expected-duration monitoring hoàn tất
+2026-09-14 theo quyết định canonical ghi bên dưới — Production Board, Area Board,
+PN Tracking, breakdown theo PN của Machines và expected-duration monitoring hoàn
+tất end to end; Phase 11 không còn mục mở): **Backend**
 (`app/application/production_board.py`, `app/api/production_board.py` —
 `GET /api/production-board?department_id=`): read model read-only toàn Department,
 không có per-Area mode (PROJECT_PROFILE §21, GUI_DESIGN §5), derive hoàn toàn từ
@@ -1014,7 +1014,9 @@ server, chip Machine với `on machine`, `queue`, `processing`, chip External
 activity, `done` với Machine hoàn thành trong tooltip, `stocked`), dòng total
 với `n scrapped`, cột Job Numbers nêu mọi demand (`<job numbers> · WO <number
 hoặc —> [· MODIFY] · <n> pcs` hoặc `· allocated a/n`), dwell derive theo vị trí
-(`long` khi ≥ 3 ngày), countdown và `Total Days` từ UI clock chung, ngọn lửa Hot
+(`long` khi clock chung vượt `expected_by` của location; không có expected duration
+thì không cờ — stand-in ≥ 3 ngày và `LONG_DWELL_MINUTES` đã bỏ), countdown và
+`Total Days` từ UI clock chung, ngọn lửa Hot
 và row tint Hot (MỌI Hot rank đều có tint, càng hot càng đỏ theo ba tier của Hot
 presentation chung: rank 1 đỏ, rank 2 cam, từ rank 3 trở xuống dùng amber nền —
 rank thấp thì nhạt hơn chứ không mất hẳn), kiosk, pagination theo chiều cao với rotation tỉ lệ, auto scale và
@@ -1035,9 +1037,9 @@ Department trống, state preview không request) và `production-boundary.test.
 import `src/mocks/`). Cố ý chưa có trong riêng slice Production Board: dòng tên / revision
 PN master (Part Numbers management, Phase 13 — dòng phụ chỉ render khi có tên),
 thời gian rotation theo Department và Due Soon policy từ Administration (Phase
-13 — dùng default đặt tên trong `board-logic` và `views/dates`), quản lý Hot rank
-(Phase 12 — board chỉ đọc `priority_rank`), và highlight thời gian tại vị trí
-theo expected duration (PROJECT_PROFILE §17 — cờ `long` ≥ 3 ngày thay thế).
+13 — dùng default đặt tên trong `board-logic` và `views/dates`) và quản lý Hot rank
+(Phase 12 — board chỉ đọc `priority_rank`); highlight thời gian tại vị trí theo
+expected duration đã hoàn tất (xem **Expected-duration monitoring** bên dưới).
 
 **Area Board** (PROJECT_PROFILE §21, GUI_DESIGN §6 — nội dung Manager Summary
 nằm trong All Areas overview, không có view Manager Summary riêng). Quyết định
@@ -1121,9 +1123,8 @@ với rank vượt mọi sentinel, `Quantity` so tổng PN đã gộp nên `6 + 
 Number của một open demand THỨ CẤP vẫn giữ row PN đó) cùng regression của suite
 Scan Station: row station và Hot count ở header nhận monitoring context từ open
 demand trong khi action của row vẫn mang demand nguồn gốc vào dialog. Cố ý chưa
-có: quản lý Hot rank (Phase 12), tên PN
-master (Phase 13), và highlight thời gian chờ theo expected duration (mục Phase
-11 còn mở — xem đoạn audit bên dưới).
+có: quản lý Hot rank (Phase 12) và tên PN master (Phase 13); highlight thời gian
+chờ theo expected duration đã hoàn tất (xem đoạn audit bên dưới).
 
 **PN Tracking** (PROJECT_PROFILE §21 Tracking, GUI_DESIGN §7). Quyết định chi
 phối slice này: Tracking không tự bịa derivation nào — mọi con số nó hiện đều là
@@ -1310,9 +1311,9 @@ registry view thật, có trong production module graph, không import
 section ẩn hoàn toàn, đúng presentation §7.3 cho user không có quyền, thay vì
 render nút vô hiệu), name / revision / image / ERP id từ master (Phase 13 —
 render `—`), quản lý Hot rank (Phase 12), Worker identity trên row Movement
-(Phase 13 — station là identity đã ghi), và highlight thời gian tại mỗi Area
-theo expected duration (vẫn là phần mở của Phase 11 — timestamp vào vị trí đã
-có, phán xét thì chưa).
+(Phase 13 — station là identity đã ghi); highlight thời gian tại mỗi Area theo
+expected duration, từng là phần mở của Phase 11, đã hoàn tất (xem
+**Expected-duration monitoring** bên dưới).
 
 **Machines → breakdown Assigned now theo PN** (GUI_DESIGN §12.1; presentation
 chỉ-tổng của Phase 6 là stand-in tạm). *Backend*: `machines.assigned_lines` gộp
@@ -1371,14 +1372,54 @@ regression test cho mọi phát hiện (context và nhãn chip của Stockroom t
 Board, PN count của Machine card, dòng scrap ở station, reconnection qua
 `connecting`, đổi filter Tracking, ghi chú stale trong panel, ghi chú off-route
 và deviation đã xác nhận của flow PLANNED, và thứ tự server cố ý không canonical
-được render đúng như nhận). **Còn mở — expected-duration monitoring:**
-PROJECT_PROFILE §17 định nghĩa expected duration trên Route Step (advisory) và
-§8.5 `default_expected_duration` của Operation, nhưng cả PROJECT_PROFILE lẫn
-GUI_DESIGN đều không nói nguồn nào áp dụng khi có cả hai, cũng không nói flow
-FLOATING (không có step) được phán xét theo gì; theo quy tắc ở trên,
-implementation không đoán, nên cờ `long` `>= 3 days` của Production Board vẫn là
-stand-in tạm rõ ràng và Area Board / Tracking cung cấp timestamp vào vị trí mà
-chưa phán xét, cho tới khi quyết định đó được ghi vào PROJECT_PROFILE.
+được render đúng như nhận). **Expected-duration monitoring (hoàn tất 2026-09-14):**
+audit đã để mở mục này vì PROJECT_PROFILE §17 định nghĩa expected duration trên
+Route Step (advisory) và §8.5 `default_expected_duration` của Operation mà không
+nói nguồn nào áp dụng khi có cả hai, cũng không nói flow FLOATING (không có step)
+được phán xét theo gì; implementation không đoán. Quyết định của owner nay là
+canonical trong PROJECT_PROFILE §17 "Expected duration hiệu lực của một
+position": flow PLANNED lấy `expected_duration` của Assigned Route Step HIỆN TẠI
+(step cuối biết từ Movement history, khi quantity đang ở Area của step đó —
+position off-route không có step hiện tại), nếu không thì
+`default_expected_duration` của Operation đã ghi; flow FLOATING lấy Operation
+default; không có → không phán xét. Giá trị snapshot luôn thắng; Operation
+default là fallback sống (đổi có hiệu lực ngay, không mutate hay backfill
+snapshot). Elapsed là thời gian của chính position — `now − entered_at` của
+`EffectivePosition` branch-aware, chính `since` mọi view đã dùng — không timer,
+timestamp hay persisted state mới; phán xét chỉ advisory (warning highlight,
+không bao giờ block scan, transfer, `DONE`, Machine action hay command khác);
+location gộp warning ngay khi BẤT KỲ portion nào đã vượt expected duration CỦA
+CHÍNH NÓ (không average, portion mới không che portion overdue); và rule `>= 3
+days` cố định bị bỏ, không có fallback thay thế. *Backend*: derivation dùng
+chung nằm đúng nơi mọi monitoring read model đã đọc position —
+`projections.effective_positions` giải `EffectivePosition.expected_duration`
+(step id hiện tại của các flow trong một grouped query trên các Movement hiệu
+lực có tham chiếu step, các snapshot step và default sống của Operation) và
+expose `expected_by = entered_at + expected_duration` (None khi không áp dụng);
+`BoardLocation` của Production Board (dùng chung với `locations` gộp của
+Tracking) mang `expected_by` SỚM NHẤT trong các portion, còn mỗi surface theo
+flow — `FlowInArea` của shared Area inventory mà Scan Station và Area Board đọc,
+`position` của flow trên Tracking — mang giá trị của chính nó. Các API thêm
+thời điểm nullable `expected_by` vào location của `GET /api/production-board`,
+flow của `GET /api/area-board` / `GET /api/areas/{id}/inventory` và position /
+location của `GET /api/tracking/detail`; server không phán xét theo clock.
+Test: snapshot step thắng Operation default và đổi default sống mà snapshot
+không đổi, event trong Area giữ step, quantity FLOATING và off-route theo
+Operation default, null khi không cấu hình, location gộp warning từ portion
+overdue sớm nhất (`test_production_board_api.py`); `expected_by` trên position
+và location gộp (`test_tracking_api.py`); `expected_by` theo flow kế thừa qua
+split và null khi không có nguồn, mọi action vẫn có (`test_area_board_api.py`).
+*Frontend*: một phán xét dùng chung `views/dates.exceedsExpectedDuration(expectedBy,
+now)` — thời điểm cố định của server so với UI clock chung, false khi không có —
+gắn cờ dwell của Production Board (`ltime.long`, bỏ `LONG_DWELL_MINUTES`),
+`Time in Area` của shared PN row (`tia.long`, nên Scan Station và Area Board
+detail warning như nhau; row overview theo PN gộp `expectedBy` sớm nhất trong
+`aggregateByPartNumber`) và position của flow trên Tracking (ghi chú tường minh
+`· exceeds expected duration`); mọi highlight có tooltip `Exceeds the expected
+duration` hoặc chữ đi kèm, không bao giờ chỉ màu. Test: board chỉ cờ khi qua
+`expected_by` và 5 ngày không có expected duration thì không cờ, cờ xuất hiện khi
+clock vượt thời điểm; row detail và gộp overview của Area Board; ghi chú Tracking;
+các trường hợp biên của helper.
 
 ## Phase 12 — Priority Management
 

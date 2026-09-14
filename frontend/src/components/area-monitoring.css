@@ -358,6 +358,14 @@
   flex: none;
 }
 
+/* Time in Area past the position's expected duration (PROJECT_PROFILE
+   §17): the warning tone the Production Board's dwell uses — advisory,
+   beside the written status, never a gate on the row's actions. */
+.mc-list .r3 .tia.long {
+  color: var(--warn-t);
+  font-weight: 750;
+}
+
 .mc-list .r4 .scraptxt {
   color: var(--err-t);
   font-weight: 700;

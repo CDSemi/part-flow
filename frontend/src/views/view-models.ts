@@ -264,6 +264,14 @@ export interface MockAreaCard {
    * sort order are DERIVED from it at render — never stored.
    */
   enteredAreaAt: string | null;
+  /**
+   * ISO instant at which this presence exceeds its effective expected
+   * duration (PROJECT_PROFILE §17) — of its earliest-due portion once
+   * aggregated per PN. Absent when no expected duration applies: the
+   * `Time in Area` then carries no warning. Judged at render from the
+   * shared UI clock; advisory only.
+   */
+  expectedBy?: string;
   hotRank?: number;
   /** Parent Work Order received date (ISO) — orders undated demands. */
   received: string;

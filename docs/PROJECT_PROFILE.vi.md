@@ -933,6 +933,44 @@ ghi actor/time/reason. Không ép reality theo plan lỗi thời.
 Advisory cho days-left/total, overdue, queue/processing/bottleneck/estimate; không
 block production.
 
+### Expected duration hiệu lực của một position (đã chốt)
+
+Hai nguồn định nghĩa expected duration: **snapshot per-step tường minh**
+`AssignedRouteStep.expected_duration` (§8.10) và **Operation default sống**
+`Operation.default_expected_duration` (§8.5). Monitoring đánh giá **position hiện
+tại** của quantity theo đúng một giá trị hiệu lực, giải theo thứ tự ưu tiên:
+
+- **PLANNED Quantity Flow**: `expected_duration` của Assigned Route Step **hiện
+  tại** — step cuối biết được từ Movement history, khi quantity đang ở Area của
+  step đó — nếu có giá trị; nếu không, `default_expected_duration` của Operation
+  ghi trên effective position hiện tại. Quantity ở position off-route (deviation
+  đã confirm) không có step hiện tại nên lấy Operation default.
+- **FLOATING Quantity Flow**: `default_expected_duration` của Operation ghi trên
+  effective position hiện tại.
+- **Nguồn áp dụng không có giá trị**: không có expected duration, không hiện
+  warning. Không có fallback duration cài sẵn.
+
+Quy tắc:
+
+- Giá trị snapshot của step là tường minh và luôn thắng Operation default;
+  Operation default là fallback sống — đổi nó có hiệu lực ngay với mọi position
+  đang dựa vào fallback, không bao giờ mutate AssignedRoute snapshot và không
+  backfill vào snapshot chỉ để chứa fallback.
+- **Elapsed duration là thời gian ở position hiện tại**: `now − entered_at` của
+  effective position branch-aware (§21 — chính `since` mà mọi monitoring view đã
+  dùng để định thời điểm vào position). Không tạo timer, timestamp hay persisted
+  monitoring state mới cho việc này.
+- Monitoring **chỉ advisory**: vượt expected duration tạo warning highlight và
+  không bao giờ block scan, transfer, `DONE`, Machine action hay bất kỳ
+  production command nào.
+- Khi một location được render gộp nhiều Quantity Flow / portion (một location
+  trên Production Board, một PN row của Area Board overview), location được
+  warning ngay khi **ít nhất một** portion đã vượt expected duration hiệu lực
+  **của chính nó** — không bao giờ average duration, và portion mới không che
+  portion overdue.
+- Không có fixed dwell rule thay cho expected duration thiếu (rule tạm `≥ 3 ngày`
+  của Production Board trước đây bị bỏ).
+
 ---
 
 # 18. Stockroom và completion allocation
@@ -1062,6 +1100,11 @@ Days Left nằm trong Due Date. Ví dụ:
 ```text
 Cut (3 · 3h 40m), Lathe 1 (4 · 2h 05m), Lathe 2 (2 · 1h 10m), Mill (6 · 45m)
 ```
+
+Time in location được highlight khi vượt expected duration hiệu lực của position
+(§17 — snapshot của Assigned Route Step hiện tại, nếu không thì Operation default;
+không có gì khi cả hai chưa cấu hình). Highlight chỉ advisory; location gộp nhiều
+portion được highlight ngay khi bất kỳ portion nào vượt expected duration của nó.
 
 ## Area Board
 

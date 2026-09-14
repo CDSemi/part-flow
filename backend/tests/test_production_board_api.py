@@ -30,7 +30,12 @@ chain. Covered per IMPLEMENTATION_ROADMAP Phase 11, PROJECT_PROFILE
   exists, and leave once the Work Order completes;
 - the canonical board order and nothing else: Hot rank, dated
   earliest first, undated by received date, the deterministic
-  tie-breaker — stocked quantity is not a sorting tier.
+  tie-breaker — stocked quantity is not a sorting tier;
+- the effective expected duration of a position (PROJECT_PROFILE §17):
+  the current Assigned Route Step's snapshot value over the live
+  Operation default, the default for FLOATING and off-route quantity,
+  null where neither is configured, and a grouped location warned from
+  its earliest overdue portion — never an average.
 
 The API commits real transactions, so tests isolate through fresh
 Departments, PNs and Work Orders; the module database is dropped
@@ -50,6 +55,7 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.orm import Session
 
 from alembic import command
 from app.core.config import get_settings
@@ -250,22 +256,56 @@ def _release(
     *,
     demand_id: int | None = None,
     quantity: int = 10,
+    route_template_id: int | None = None,
     confirm_active_quantity: bool = False,
 ) -> int:
+    payload: dict[str, Any] = {
+        "part_number": pn,
+        "quantity": quantity,
+        "route_mode": "PLANNED" if route_template_id is not None else "FLOATING",
+        "starting_area_id": cell.area_id,
+        "operation_id": cell.operation_id,
+        "confirm_active_quantity": confirm_active_quantity,
+        "device_event_id": str(uuid.uuid4()),
+    }
+    if route_template_id is not None:
+        payload["route_template_id"] = route_template_id
     released = client.post(
         f"/api/work-orders/{work_order.id}/demands/{demand_id or work_order.demand_id}/release",
-        json={
-            "part_number": pn,
-            "quantity": quantity,
-            "route_mode": "FLOATING",
-            "starting_area_id": cell.area_id,
-            "operation_id": cell.operation_id,
-            "confirm_active_quantity": confirm_active_quantity,
-            "device_event_id": str(uuid.uuid4()),
-        },
+        json=payload,
     )
     assert released.status_code == 201, released.text
     return int(released.json()["quantity_flow_id"])
+
+
+def _route_template(engine: Engine, steps: list[tuple[_Cell, datetime.timedelta | None]]) -> int:
+    """A Planned Route through ``steps`` — each with its optional advisory
+    expected duration (Route management is Phase 13; the read model only
+    reads the snapshot)."""
+    with Session(engine) as session:
+        template = models.RouteTemplate(name=_unique("ROUTE"))
+        session.add(template)
+        session.flush()
+        for index, (cell, expected_duration) in enumerate(steps):
+            session.add(
+                models.RouteStep(
+                    route_template_id=template.id,
+                    sequence=(index + 1) * 10,
+                    area_id=cell.area_id,
+                    operation_id=cell.operation_id,
+                    expected_duration=expected_duration,
+                )
+            )
+        session.commit()
+        return int(template.id)
+
+
+def _set_operation_default(client: TestClient, cell: _Cell, duration: str) -> None:
+    """The live Operation default (ISO 8601 duration) through Administration."""
+    response = client.patch(
+        f"/api/operations/{cell.operation_id}", json={"default_expected_duration": duration}
+    )
+    assert response.status_code == 200, response.text
 
 
 def _arrival(
@@ -276,26 +316,32 @@ def _arrival(
     flow_id: int,
     pn: str,
     quantity: int,
+    **kw: Any,
 ) -> dict[str, Any]:
-    response = client.post(
-        f"/api/scan-stations/{target.station_id}/{kind}",
-        json={
-            "part_number": pn,
-            "quantity_flow_id": flow_id,
-            "source_area_id": source.area_id,
-            "target_area_id": target.area_id,
-            "quantity": quantity,
-            "device_event_id": str(uuid.uuid4()),
-        },
-    )
+    payload: dict[str, Any] = {
+        "part_number": pn,
+        "quantity_flow_id": flow_id,
+        "source_area_id": source.area_id,
+        "target_area_id": target.area_id,
+        "quantity": quantity,
+        "device_event_id": str(uuid.uuid4()),
+    }
+    payload.update(kw)
+    response = client.post(f"/api/scan-stations/{target.station_id}/{kind}", json=payload)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
 def _transfer(
-    client: TestClient, source: _Cell, target: _Cell, flow_id: int, pn: str, quantity: int
+    client: TestClient,
+    source: _Cell,
+    target: _Cell,
+    flow_id: int,
+    pn: str,
+    quantity: int,
+    **kw: Any,
 ) -> dict[str, Any]:
-    return _arrival(client, "transfers", source, target, flow_id, pn, quantity)
+    return _arrival(client, "transfers", source, target, flow_id, pn, quantity, **kw)
 
 
 def _stock(
@@ -1011,3 +1057,174 @@ def test_the_first_demand_in_canonical_order_defines_the_rows_dates(
     assert row["hot_rank"] == 1
     assert row["due_date"] is None
     assert row["received_date"] == "2026-04-01"
+
+
+# ---------------------------------------------------------------------------
+# Expected duration (PROJECT_PROFILE §17 — effective expected duration)
+# ---------------------------------------------------------------------------
+
+
+def _iso(value: str | None) -> datetime.datetime | None:
+    return datetime.datetime.fromisoformat(value) if value is not None else None
+
+
+def _only_location(client: TestClient, department_id: int, pn: str) -> dict[str, Any]:
+    row = _row(_board(client, department_id), pn)
+    assert len(row["locations"]) == 1, row["locations"]
+    return cast(dict[str, Any], row["locations"][0])
+
+
+def test_expected_by_takes_the_step_snapshot_over_the_live_operation_default(
+    client: TestClient, db_engine: Engine
+) -> None:
+    shop = _Shop(client)
+    _set_operation_default(client, shop.material, "PT5H")
+    _set_operation_default(client, shop.lathe, "PT2H")
+    template_id = _route_template(
+        db_engine,
+        [
+            (shop.material, datetime.timedelta(minutes=30)),
+            (shop.lathe, None),
+            (shop.stockroom, None),
+        ],
+    )
+    pn = _unique("PN-EXP")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 10}])
+    flow = _release(client, shop.material, work_order, pn, route_template_id=template_id)
+
+    # At the first step: the step's own 30 min wins over the Operation's 5 h.
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(minutes=30)
+
+    # On route at Lathe: the step defines no duration, so the recorded
+    # Operation's live default (2 h) applies.
+    _transfer(client, shop.material, shop.lathe, flow, pn, 10)
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert location["state"] == "QUEUE"
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=2)
+
+    # The Operation default is a LIVE fallback: changing it applies at
+    # once — and the snapshot step is never back-filled with it.
+    _set_operation_default(client, shop.lathe, "PT1H")
+    location = _only_location(client, shop.department_id, pn)
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=1)
+    with db_engine.connect() as connection:
+        snapshot_durations = list(
+            connection.scalars(
+                sa.select(models.AssignedRouteStep.expected_duration)
+                .join(
+                    models.QuantityFlow,
+                    models.QuantityFlow.assigned_route_id
+                    == models.AssignedRouteStep.assigned_route_id,
+                )
+                .where(models.QuantityFlow.id == flow)
+                .order_by(models.AssignedRouteStep.sequence)
+            )
+        )
+    assert snapshot_durations == [datetime.timedelta(minutes=30), None, None]
+
+    # An in-Area event keeps the same step: quantity on a Machine is still
+    # judged against Lathe's duration, dated from its assignment.
+    _machine_action(
+        client, "machine-assignments", shop.lathe, flow, pn, 10, machine_id=shop.lathe.machine_id
+    )
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert location["state"] == "MACHINE"
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=1)
+
+
+def test_floating_quantity_and_off_route_quantity_take_the_operation_default(
+    client: TestClient, db_engine: Engine
+) -> None:
+    shop = _Shop(client)
+    _set_operation_default(client, shop.lathe, "PT2H")
+    # The External Operation defines no default: nothing is judged there.
+    pn_floating = _unique("PN-FLT")
+    work_order = _create_work_order(
+        client, [{"part_number": pn_floating, "requested_quantity": 10}]
+    )
+    floating = _release(client, shop.lathe, work_order, pn_floating, quantity=10)
+    location = _only_location(client, shop.department_id, pn_floating)
+    since = _iso(location["since"])
+    assert since is not None
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=2)
+    _transfer(client, shop.lathe, shop.external, floating, pn_floating, 10)
+    location = _only_location(client, shop.department_id, pn_floating)
+    assert location["since"] is not None
+    assert location["expected_by"] is None
+
+    # A PLANNED flow at an off-route position (a confirmed deviation) has
+    # no current step: its last known step's 30 min does not apply, the
+    # Operation default of where it actually is does.
+    pn = _unique("PN-DEV")
+    deviated_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 5}])
+    template_id = _route_template(
+        db_engine,
+        [
+            (shop.material, datetime.timedelta(minutes=30)),
+            (shop.external, None),
+            (shop.lathe, datetime.timedelta(minutes=15)),
+        ],
+    )
+    flow = _release(
+        client, shop.material, deviated_order, pn, quantity=5, route_template_id=template_id
+    )
+    _transfer(
+        client,
+        shop.material,
+        shop.lathe,
+        flow,
+        pn,
+        5,
+        confirm_route_deviation=True,
+        route_deviation_reason="External backlog",
+    )
+    location = _only_location(client, shop.department_id, pn)
+    since = _iso(location["since"])
+    assert since is not None
+    assert location["area"]["id"] == shop.lathe.area_id
+    assert _iso(location["expected_by"]) == since + datetime.timedelta(hours=2)
+
+
+def test_a_grouped_location_warns_from_its_earliest_overdue_portion(
+    client: TestClient, db_engine: Engine
+) -> None:
+    shop = _Shop(client)
+    _set_operation_default(client, shop.lathe, "PT2H")
+    template_id = _route_template(db_engine, [(shop.lathe, datetime.timedelta(minutes=10))])
+    pn = _unique("PN-GRP")
+    work_order = _create_work_order(client, [{"part_number": pn, "requested_quantity": 30}])
+    # The OLDER portion (Floating, 2 h expected) entered an hour ago; the
+    # NEWER one (Planned, 10 min expected) five minutes ago and is the
+    # first to be overdue.
+    older = _release(client, shop.lathe, work_order, pn, quantity=20)
+    newer = _release(
+        client,
+        shop.lathe,
+        work_order,
+        pn,
+        quantity=10,
+        route_template_id=template_id,
+        confirm_active_quantity=True,
+    )
+    now = datetime.datetime.now(datetime.UTC).replace(microsecond=0)
+    _set_occurred_at(
+        db_engine, _newest_movement_id(db_engine, older), now - datetime.timedelta(hours=1)
+    )
+    _set_occurred_at(
+        db_engine, _newest_movement_id(db_engine, newer), now - datetime.timedelta(minutes=5)
+    )
+
+    location = _only_location(client, shop.department_id, pn)
+    assert location["quantity"] == 30
+    # Dated from the oldest portion, warned from the earliest overdue one
+    # — each portion against ITS OWN expected duration, never an average
+    # (which would put the warning at about +1 h 20 min from the oldest).
+    assert _iso(location["since"]) == now - datetime.timedelta(hours=1)
+    assert _iso(location["expected_by"]) == now + datetime.timedelta(minutes=5)

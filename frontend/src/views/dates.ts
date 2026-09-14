@@ -97,6 +97,24 @@ export function elapsedMinutesSince(sinceIso: string, nowMs: number): number {
 }
 
 /**
+ * Whether a position has exceeded its expected duration (PROJECT_PROFILE
+ * §17): the server states the fixed instant `expectedBy` at which the
+ * effective expected duration of the position — of its earliest-due
+ * portion, for an aggregated location — elapses; the shared UI clock
+ * decides. Nothing is judged without an expected duration (null or
+ * absent): there is no built-in fallback rule. Advisory only — a
+ * warning highlight, never a gate on any action.
+ */
+export function exceedsExpectedDuration(
+  expectedBy: string | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!expectedBy) return false;
+  const deadline = new Date(expectedBy).getTime();
+  return Number.isFinite(deadline) && nowMs > deadline;
+}
+
+/**
  * Whole calendar days from `fromIso` to `toIso` (both `YYYY-MM-DD`;
  * positive when `toIso` is later). String-parsed on purpose — no
  * timezone conversion may shift a business date. Null when either

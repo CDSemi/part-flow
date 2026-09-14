@@ -56,7 +56,12 @@ from sqlalchemy.orm import Session, aliased
 from app.application.errors import ConflictError
 from app.application.machines import areas_with_machines
 from app.domain.enums import MovementType, ProcessingState
-from app.infrastructure.models import PartMovement, QuantityFlowLineage
+from app.infrastructure.models import (
+    AssignedRouteStep,
+    Operation,
+    PartMovement,
+    QuantityFlowLineage,
+)
 
 # The two Movement types that record descent instead of a position.
 LINEAGE_MOVEMENT_TYPES: Final = (MovementType.SPLIT, MovementType.MERGED)
@@ -395,12 +400,29 @@ class EffectivePosition(NamedTuple):
     ``movement`` is the representative branch entry — the one every
     caller reads the Movement type, the recorded Operation and the Area
     from.
+
+    ``expected_duration`` is the advisory **effective expected duration**
+    of the position (PROJECT_PROFILE §17 "Effective expected duration
+    of a position"): the explicit snapshot value of the flow's CURRENT
+    Assigned Route Step when it has one, else the live
+    `Operation.default_expected_duration` of the recorded Operation,
+    else None — nothing is judged then. The elapsed time it is judged
+    against is `now − entered_at`, derived by the presentation from the
+    shared UI clock; nothing here stores or times anything.
     """
 
     movement: PartMovement
     entered_at: datetime.datetime
     assigned_machine_id: int | None
     completed_machine_id: int | None
+    expected_duration: datetime.timedelta | None
+
+    @property
+    def expected_by(self) -> datetime.datetime | None:
+        """The fixed instant the expected duration elapses (None: not judged)."""
+        if self.expected_duration is None:
+            return None
+        return self.entered_at + self.expected_duration
 
 
 def _shared_machine_id(entries: list[PartMovement], attribute: str) -> int | None:
@@ -409,22 +431,105 @@ def _shared_machine_id(entries: list[PartMovement], attribute: str) -> int | Non
     return next(iter(named)) if len(named) == 1 else None
 
 
+def _current_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]:
+    """The snapshot step each PLANNED flow's route position is at, by flow.
+
+    The newest effective Movement that references a snapshot step — the
+    arrival that fulfilled it, or the lineage row that carried it on to
+    a split child / merge result (`lineage.last_known_step_id`, for
+    several flows at once). A reversed Movement never counts: an undone
+    transfer never happened for the route position. A FLOATING flow
+    references no step and is absent.
+    """
+    reversal = aliased(PartMovement)
+    newest = (
+        select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
+        .where(
+            PartMovement.quantity_flow_id.in_(flow_ids),
+            PartMovement.assigned_route_step_id.is_not(None),
+            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+        )
+        .group_by(PartMovement.quantity_flow_id)
+        .subquery()
+    )
+    rows = session.execute(
+        select(PartMovement.quantity_flow_id, PartMovement.assigned_route_step_id).join(
+            newest, newest.c.movement_id == PartMovement.id
+        )
+    )
+    return {flow_id: step_id for flow_id, step_id in rows if step_id is not None}
+
+
+def _expected_durations(
+    session: Session, branches: dict[int, list[PartMovement]]
+) -> dict[int, datetime.timedelta | None]:
+    """The effective expected duration per flow (PROJECT_PROFILE §17).
+
+    Precedence: the CURRENT Assigned Route Step's own `expected_duration`
+    — the flow's last known step, and only while the position IS that
+    step's Area (an off-route position, a confirmed deviation, has no
+    current step) — else the recorded Operation's live
+    `default_expected_duration`, read at derivation time so a changed
+    default applies at once to every position relying on the fallback
+    and no snapshot is ever mutated or back-filled; else None.
+    """
+    step_ids = _current_step_ids(session, set(branches))
+    steps = (
+        {
+            step.id: step
+            for step in session.scalars(
+                select(AssignedRouteStep).where(AssignedRouteStep.id.in_(set(step_ids.values())))
+            )
+        }
+        if step_ids
+        else {}
+    )
+    operation_ids = {entries[0].operation_id for entries in branches.values()}
+    defaults: dict[int, datetime.timedelta | None] = {
+        operation_id: default
+        for operation_id, default in session.execute(
+            select(Operation.id, Operation.default_expected_duration).where(
+                Operation.id.in_(operation_ids)
+            )
+        )
+    }
+    durations: dict[int, datetime.timedelta | None] = {}
+    for flow_id, entries in branches.items():
+        movement = entries[0]
+        step = steps.get(step_ids.get(flow_id, -1))
+        if (
+            step is not None
+            and step.area_id == movement.to_area_id
+            and step.expected_duration is not None
+        ):
+            durations[flow_id] = step.expected_duration
+        else:
+            durations[flow_id] = defaults.get(movement.operation_id)
+    return durations
+
+
 def effective_positions(session: Session, flow_ids: Iterable[int]) -> dict[int, EffectivePosition]:
     """`EffectivePosition` per flow — the shared monitoring derivation.
 
     Every monitoring read model (the Production Board, the Area
-    inventory the Scan Station and the Area Board render) derives the
-    position, its entry time and its Machine context here, so the same
-    quantity can never be dated or attributed differently by two views.
+    inventory the Scan Station and the Area Board render, PN Tracking)
+    derives the position, its entry time, its Machine context and its
+    effective expected duration here, so the same quantity can never be
+    dated, attributed or judged differently by two views.
     """
+    branches = effective_latest_movement_branches(session, flow_ids)
+    if not branches:
+        return {}
+    durations = _expected_durations(session, branches)
     return {
         flow_id: EffectivePosition(
             movement=entries[0],
             entered_at=entries[0].occurred_at,
             assigned_machine_id=_shared_machine_id(entries, "destination_machine_id"),
             completed_machine_id=_shared_machine_id(entries, "source_machine_id"),
+            expected_duration=durations[flow_id],
         )
-        for flow_id, entries in effective_latest_movement_branches(session, flow_ids).items()
+        for flow_id, entries in branches.items()
     }
 
 

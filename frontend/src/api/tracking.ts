@@ -153,6 +153,10 @@ export interface TrackingLocation {
   /** ISO timestamp the oldest portion entered the position; null where
    * elapsed time does not apply. */
   since: string | null;
+  /** ISO instant at which the earliest-due portion exceeds its own
+   * effective expected duration (PROJECT_PROFILE §17); null when none
+   * applies. */
+  expectedBy: string | null;
 }
 
 export interface TrackingFlowPosition {
@@ -162,6 +166,10 @@ export interface TrackingFlowPosition {
   activity: string | null;
   state: LocationState;
   since: string;
+  /** `since` + the flow's effective expected duration (the current
+   * Route Step's snapshot value, else the Operation default); null when
+   * neither applies — the position then carries no warning. */
+  expectedBy: string | null;
 }
 
 export interface TrackingTraceStep {
@@ -436,6 +444,7 @@ interface FlowWire {
     activity: string | null;
     state: LocationState;
     since: string;
+    expected_by: string | null;
   } | null;
   parents: { quantity_flow_id: number; relation: string }[];
   children: { quantity_flow_id: number; relation: string }[];
@@ -511,6 +520,7 @@ interface DetailWire {
     quantity: number;
     state: LocationState;
     since: string | null;
+    expected_by: string | null;
   }[];
   stocked: DistributionWire[];
   active_quantity: number;
@@ -651,6 +661,7 @@ function toFlow(wire: FlowWire): TrackingFlow {
           activity: wire.position.activity,
           state: wire.position.state,
           since: wire.position.since,
+          expectedBy: wire.position.expected_by,
         }
       : null,
     parents: wire.parents.map((link) => ({
@@ -753,6 +764,7 @@ function toDetail(wire: DetailWire): TrackingDetail {
       quantity: location.quantity,
       state: location.state,
       since: location.since,
+      expectedBy: location.expected_by,
     })),
     stocked: wire.stocked.map(toDistribution),
     activeQuantity: wire.active_quantity,

@@ -1552,6 +1552,22 @@ Expected duration may support:
 
 Expected duration is advisory and must never block production.
 
+### Effective expected duration of a position (decided)
+
+Two sources define an expected duration: the **explicit per-step snapshot** `AssignedRouteStep.expected_duration` (§8.10) and the **live Operation default** `Operation.default_expected_duration` (§8.5). Monitoring judges the quantity's **current position** against exactly one effective value, resolved by this precedence:
+
+- **PLANNED Quantity Flow**: the `expected_duration` of the **current** Assigned Route Step — the last route step known from Movement history while the quantity is at that step's Area — when it has a value; otherwise the `default_expected_duration` of the Operation recorded on the current effective position. Quantity at an off-route position (a confirmed deviation) has no current step and therefore takes the Operation default.
+- **FLOATING Quantity Flow**: the `default_expected_duration` of the Operation recorded on the current effective position.
+- **No value from the applicable source**: no expected duration applies, and no expected-duration warning is shown. There is no built-in fallback duration.
+
+Rules:
+
+- The snapshot step value is explicit and always wins over the Operation default; the Operation default is a live fallback — changing it takes effect immediately for every position that relies on the fallback, never mutates an Assigned Route snapshot, and is never back-filled into a snapshot just to carry the fallback.
+- **Elapsed duration is the time in the current position**: `now − entered_at` of the branch-aware effective position (§21 — the same `since` every monitoring view already dates a position from). No timer, timestamp or persisted monitoring state is introduced for it.
+- Monitoring is **advisory only**: exceeding the expected duration produces a warning highlight and never blocks a scan, a transfer, `DONE`, a Machine action or any other production command.
+- When a rendered location aggregates several Quantity Flows or portions (a Production Board location, a PN row of the Area Board overview), the location is warned as soon as **at least one** included portion has exceeded **its own** effective expected duration — durations are never averaged, and a newer portion never hides an overdue one.
+- No fixed dwell rule replaces a missing expected duration (the former `≥ 3 days` stand-in of the Production Board is retired).
+
 ---
 
 # 18. Stockroom and Completion Allocation
@@ -1794,7 +1810,7 @@ Example distribution with time in location:
 Cut (3 · 3h 40m), Lathe 1 (4 · 2h 05m), Lathe 2 (2 · 1h 10m), Mill (6 · 45m)
 ```
 
-Time in location may be highlighted when it exceeds the expected duration of the active Route Step.
+Time in location is highlighted when it exceeds the effective expected duration of the position (§17 Effective expected duration — the current Assigned Route Step's snapshot value, else the Operation default; nothing when neither is configured). The highlight is advisory and a location aggregating several portions is highlighted as soon as any one of them exceeds its own expected duration.
 
 ---
 

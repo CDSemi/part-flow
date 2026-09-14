@@ -470,6 +470,13 @@
   font-size: 12.5px;
 }
 
+/* Past the position's expected duration (PROJECT_PROFILE §17): the
+   shared warning tone, as written text — never color alone. */
+.qflow .qf-pos .qf-over {
+  color: var(--warn-t);
+  font-weight: 700;
+}
+
 /* Route visualization: step and arrow elements are separate sibling
    flex items (step, arrow, step, …). `align-items: center` keeps each
    arrow vertically centered between adjacent steps, and the row-gap

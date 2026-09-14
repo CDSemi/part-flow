@@ -70,7 +70,12 @@ function location(
   state: 'MACHINE' | 'QUEUE' | 'PROCESSING' | 'DONE' | 'STOCKED',
   quantity: number,
   minutesAgo: number | null,
-  extra: { machine?: { id: number; name: string }; activity?: string } = {},
+  extra: {
+    machine?: { id: number; name: string };
+    activity?: string;
+    /** `expected_by` as minutes ago (negative: still ahead). */
+    expectedMinutesAgo?: number;
+  } = {},
 ) {
   return {
     area,
@@ -79,6 +84,10 @@ function location(
     quantity,
     state,
     since: minutesAgo === null ? null : minutesAgoIso(minutesAgo),
+    expected_by:
+      extra.expectedMinutesAgo === undefined
+        ? null
+        : minutesAgoIso(extra.expectedMinutesAgo),
   };
 }
 
@@ -805,6 +814,57 @@ test('active Machine rows render dot + machine chip + qty + `on machine` + time'
   expect(machineRow?.querySelector('.lqty')?.textContent).toBe('3');
   expect(machineRow?.querySelector('.ltag')?.textContent).toBe('on machine');
   expect(machineRow?.querySelector('.ltime')?.textContent).toBe('2h 05m');
+});
+
+test('a dwell is flagged `long` only past the server-stated expected duration, never by a fixed rule', async () => {
+  // PROJECT_PROFILE §17: the read model states `expected_by` — the
+  // instant the earliest-due portion of the position exceeds its own
+  // effective expected duration; the shared clock judges it. Without
+  // an expected duration nothing is flagged: the former ≥ 3 days
+  // stand-in is gone, so a 5-day stay with no expected duration stays
+  // unflagged while a 2-hour stay past a 90-minute expectation is.
+  const rows = [
+    {
+      ...BOARD_ROWS[0],
+      locations: [
+        location(AREA.cut, 'QUEUE', 4, 5 * 24 * 60),
+        location(AREA.lathe, 'QUEUE', 3, 120, { expectedMinutesAgo: 30 }),
+        location(AREA.deburr, 'PROCESSING', 2, 40, {
+          expectedMinutesAgo: -3,
+        }),
+      ],
+    },
+  ];
+  stubFetch(() =>
+    Promise.resolve(
+      new Response(JSON.stringify(boardPayload(rows)), { status: 200 }),
+    ),
+  );
+  await renderBoard();
+
+  const times = Array.from(
+    rowByPn('2027-60-8114-00')?.querySelectorAll(
+      '.locrow:not(.total) .ltime',
+    ) ?? [],
+  );
+  expect(times).toHaveLength(3);
+  const [cut, lathe, deburr] = times;
+  expect(cut.textContent).toBe('5d 00h');
+  expect(cut.classList.contains('long')).toBe(false);
+  expect(lathe.classList.contains('long')).toBe(true);
+  expect(lathe.getAttribute('title')).toBe('Exceeds the expected duration');
+  // Still within its expected duration — until the clock passes it.
+  expect(deburr.classList.contains('long')).toBe(false);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+  });
+  const after = Array.from(
+    rowByPn('2027-60-8114-00')?.querySelectorAll(
+      '.locrow:not(.total) .ltime',
+    ) ?? [],
+  );
+  expect(after[2].classList.contains('long')).toBe(true);
+  expect(after[0].classList.contains('long')).toBe(false);
 });
 
 test('the machine chip carries the explicit machine field — no combined Area label', async () => {

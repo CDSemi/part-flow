@@ -236,7 +236,14 @@ def _release(
     return int(released.json()["quantity_flow_id"])
 
 
-def _route_template(engine: Engine, cells: list[_Cell]) -> int:
+def _route_template(
+    engine: Engine,
+    cells: list[_Cell],
+    *,
+    expected_durations: dict[int, datetime.timedelta] | None = None,
+) -> int:
+    """A Planned Route through ``cells``; ``expected_durations`` maps a
+    step index to its optional advisory expected duration."""
     with Session(engine) as session:
         template = models.RouteTemplate(name=_unique("ROUTE"))
         session.add(template)
@@ -248,6 +255,7 @@ def _route_template(engine: Engine, cells: list[_Cell]) -> int:
                     sequence=(index + 1) * 10,
                     area_id=cell.area_id,
                     operation_id=cell.operation_id,
+                    expected_duration=(expected_durations or {}).get(index),
                 )
             )
         session.commit()
@@ -1416,3 +1424,48 @@ def test_history_is_reverse_chronological_by_timestamp_and_pages_without_gaps(
         ).status_code
         == 404
     )
+
+
+def test_a_position_carries_the_effective_expected_duration_as_a_fixed_instant(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    """PROJECT_PROFILE §17: the current step's snapshot value wins, the
+    recorded Operation's live default is the fallback, none → null —
+    the same shared derivation the boards read, exposed on the flow
+    position and on the grouped location alike."""
+    pn = _unique("PN-EXP")
+    template_id = _route_template(
+        db_engine,
+        [shop.material, shop.cut, shop.stockroom],
+        expected_durations={0: datetime.timedelta(minutes=45)},
+    )
+    updated = client.patch(
+        f"/api/operations/{shop.cut.operation_id}", json={"default_expected_duration": "PT3H"}
+    )
+    assert updated.status_code == 200, updated.text
+    wo = _work_order(client, [_line(pn, 5)])
+    flow = _release(client, shop.material, wo, pn, quantity=5, route_template_id=template_id)
+
+    position = _flow(_detail(client, pn), flow)["position"]
+    since = datetime.datetime.fromisoformat(position["since"])
+    assert datetime.datetime.fromisoformat(position["expected_by"]) == since + datetime.timedelta(
+        minutes=45
+    )
+    [location] = _detail(client, pn)["locations"]
+    assert location["expected_by"] == position["expected_by"]
+
+    # The Cut step defines no duration: Cut's Operation default applies.
+    _transfer(client, shop.material, shop.cut, flow, pn, 5)
+    position = _flow(_detail(client, pn), flow)["position"]
+    since = datetime.datetime.fromisoformat(position["since"])
+    assert datetime.datetime.fromisoformat(position["expected_by"]) == since + datetime.timedelta(
+        hours=3
+    )
+
+    # A FLOATING flow where neither source is configured is not judged.
+    other = _unique("PN-NONE")
+    other_wo = _work_order(client, [_line(other, 2)])
+    other_flow = _release(client, shop.material, other_wo, other, quantity=2)
+    position = _flow(_detail(client, other), other_flow)["position"]
+    assert position["since"] is not None
+    assert position["expected_by"] is None

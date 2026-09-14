@@ -40,6 +40,9 @@ interface PreviewFlow {
   machineId?: number;
   completedMachineId?: number;
   minutesInArea: number;
+  /** Expected duration sample (minutes) — the position is past it when
+   * smaller than `minutesInArea`; absent: no expected duration. */
+  expectedMinutes?: number;
   woNumber: string | null;
   job: string;
   dueInDays: number | null;
@@ -69,6 +72,10 @@ function flow(item: PreviewFlow, operationName: string): FlowInArea {
             name: `Lathe ${item.completedMachineId}`,
           },
     enteredAt: minutesAgoIso(item.minutesInArea),
+    expectedBy:
+      item.expectedMinutes === undefined
+        ? null
+        : minutesAgoIso(item.minutesInArea - item.expectedMinutes),
     availableActions: ['TRANSFER', 'SCRAP'],
     workOrder: {
       workOrderId: item.id,
@@ -206,6 +213,8 @@ function longPreviewBoard(): AreaBoard {
       state: 'ON_MACHINE',
       machineId: 1,
       minutesInArea: 585,
+      // Past its expected duration: the `long` warning sample.
+      expectedMinutes: 480,
       woNumber: '007042',
       job: '19311-CUSTOMER-REFERENCE-00098',
       dueInDays: 4,

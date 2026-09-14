@@ -11,6 +11,7 @@ import {
 import {
   DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
+  exceedsExpectedDuration,
   formatElapsedSince,
 } from '../views/dates';
 import { formatStateAge } from '../views/machine-state';
@@ -61,10 +62,24 @@ function CardDueStatus({ card, now }: { card: MockAreaCard; now: number }) {
   return <DueStatus due={note} dueClass={dueClass} />;
 }
 
-/** Derived `… in Area` text (null without an Area-entry timestamp). */
-function timeInArea(card: MockAreaCard, now: number): string | null {
+/**
+ * Derived `… in Area` text (null without an Area-entry timestamp). The
+ * `long` warning tone marks a presence past its effective expected
+ * duration (PROJECT_PROFILE §17): the server states the fixed instant,
+ * the shared clock judges it, and nothing is flagged without one.
+ * Advisory only — the row's actions stay exactly as they are.
+ */
+function TimeInArea({ card, now }: { card: MockAreaCard; now: number }) {
   if (!card.enteredAreaAt) return null;
-  return formatElapsedSince(card.enteredAreaAt, now);
+  const long = exceedsExpectedDuration(card.expectedBy, now);
+  return (
+    <span
+      className={`mono tia${long ? ' long' : ''}`}
+      title={long ? 'Exceeds the expected duration' : undefined}
+    >
+      {formatElapsedSince(card.enteredAreaAt, now)} in Area
+    </span>
+  );
 }
 
 /**
@@ -147,7 +162,7 @@ export function AreaPnRow({
   const { card, context, qty, state } = entry;
   const demand = demandLine(card);
   const status = inAreaStatusLabel(entry, directLabel);
-  const tia = timeInArea(card, now);
+  const tia = card.enteredAreaAt !== null;
   const contextChip =
     state === 'finished' ? (
       <span className="ctx done">done</span>
@@ -172,14 +187,12 @@ export function AreaPnRow({
           </span>
           <CardDueStatus card={card} now={now} />
         </div>
-        {status || tia !== null ? (
+        {status || tia ? (
           <div className="r3">
             <span className={`st ${state === 'finished' ? 'done' : ''}`}>
               {status}
             </span>
-            {tia !== null ? (
-              <span className="mono tia">{tia} in Area</span>
-            ) : null}
+            <TimeInArea card={card} now={now} />
           </div>
         ) : null}
         {card.scrapped ? (
@@ -213,7 +226,7 @@ export function AreaOverviewRow({
   const now = useUiClock('minute');
   const { assigned, queued, finished } = splitAssignments([card]);
   const demand = demandLine(card);
-  const tia = timeInArea(card, now);
+  const tia = card.enteredAreaAt !== null;
   const portions: { key: string; label: string; done?: boolean }[] = [
     ...assigned.map((e) => ({
       key: `m-${e.context}`,
@@ -253,7 +266,7 @@ export function AreaOverviewRow({
           </span>
           <CardDueStatus card={card} now={now} />
         </div>
-        {portions.length > 0 || tia !== null ? (
+        {portions.length > 0 || tia ? (
           <div className="r3">
             <span className="ctxs">
               {portions.map((portion) => (
@@ -265,9 +278,7 @@ export function AreaOverviewRow({
                 </span>
               ))}
             </span>
-            {tia !== null ? (
-              <span className="mono tia">{tia} in Area</span>
-            ) : null}
+            <TimeInArea card={card} now={now} />
           </div>
         ) : null}
         {card.scrapped ? (

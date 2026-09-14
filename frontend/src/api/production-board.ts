@@ -55,6 +55,16 @@ export interface BoardLocation {
    * timestamp plus the shared UI clock — never stored.
    */
   since: string | null;
+  /**
+   * ISO instant at which the EARLIEST-due portion of this position
+   * exceeds its own effective expected duration (PROJECT_PROFILE §17 —
+   * the current Route Step's snapshot value, else the Operation
+   * default), or null when no portion has an expected duration: the
+   * board then shows no warning — there is no fallback rule. The
+   * judgement (`now` past it) is made at render from the shared UI
+   * clock; advisory only.
+   */
+  expectedBy: string | null;
 }
 
 /** One OPEN Work Order Demand named on a board row (Job Numbers column). */
@@ -140,6 +150,7 @@ interface BoardLocationWire {
   quantity: number;
   state: LocationStateWire;
   since: string | null;
+  expected_by: string | null;
 }
 
 interface BoardDemandWire {
@@ -194,6 +205,7 @@ function toLocation(wire: BoardLocationWire): BoardLocation {
     qty: wire.quantity,
     state: LOCATION_STATE[wire.state],
     since: wire.since,
+    expectedBy: wire.expected_by,
   };
 }
 

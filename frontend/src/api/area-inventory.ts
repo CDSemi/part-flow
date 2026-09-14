@@ -117,6 +117,14 @@ export interface FlowInArea {
    * render (the shared UI clock, §3.12) — never a stored duration.
    */
   enteredAt: string;
+  /**
+   * ISO instant at which the position's effective expected duration
+   * elapses (PROJECT_PROFILE §17 — the current Route Step's snapshot
+   * value, else the Operation default), or null when none applies: the
+   * `Time in Area` then carries no warning. Advisory only — every
+   * action stays available past it.
+   */
+  expectedBy: string | null;
   availableActions: FlowAction[];
   workOrder: WorkOrderContext | null;
 }
@@ -192,6 +200,7 @@ export interface FlowInAreaWire {
   machine_id: number | null;
   completed_machine: { id: number; name: string } | null;
   entered_at: string;
+  expected_by: string | null;
   available_actions: FlowAction[];
   work_order: WorkOrderContextWire | null;
 }
@@ -284,6 +293,7 @@ export function toFlowInArea(wire: FlowInAreaWire): FlowInArea {
     machineId: wire.machine_id,
     completedMachine: wire.completed_machine,
     enteredAt: wire.entered_at,
+    expectedBy: wire.expected_by,
     availableActions: [...wire.available_actions],
     workOrder: toWorkOrderContext(wire.work_order),
   };

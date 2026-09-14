@@ -49,6 +49,9 @@ interface FlowSpec {
    * retired Machine (no card) still names the completion. */
   completedMachine?: { id: number; name: string };
   minutes: number;
+  /** `expected_by` as minutes ago (negative: still ahead); absent: no
+   * expected duration applies. */
+  expectedMinutesAgo?: number;
   /** The demand the quantity ORIGINATED from (provenance). */
   wo?: string | null;
   external?: boolean;
@@ -107,6 +110,10 @@ function flowWire(flow: FlowSpec) {
     machine_id: flow.machineId ?? null,
     completed_machine: flow.completedMachine ?? null,
     entered_at: minutesAgoIso(flow.minutes),
+    expected_by:
+      flow.expectedMinutesAgo === undefined
+        ? null
+        : minutesAgoIso(flow.expectedMinutesAgo),
     available_actions: ['TRANSFER', 'SCRAP'],
     work_order:
       flow.wo === undefined
@@ -790,6 +797,60 @@ test('the PN row carries the OPEN demand context and the derived time in Area', 
   expect(summary.textContent).not.toContain('⊘');
   // The blank-number internal Work Order renders as `—`.
   expect(summary.textContent).toContain('WO —');
+});
+
+test('Time in Area warns past the expected duration — per flow in the detail, from the earliest-due portion in the overview', async () => {
+  // PROJECT_PROFILE §17: the server states `expected_by` per flow (the
+  // current Route Step's snapshot value, else the Operation default);
+  // the shared clock judges it, and a flow without one is never
+  // flagged — no fixed rule. The PN-centric overview row aggregates the
+  // PN's portions and warns as soon as ANY of them is past its own
+  // expected duration, even a newer one.
+  stubFetch(() => {
+    const payload = boardPayload();
+    const lathe = payload.areas[1].inventory;
+    const flows: FlowSpec[] = [
+      // The oldest portion, well within a long expected duration.
+      { ...LATHE_FLOWS[0], expectedMinutesAgo: -600 },
+      // A newer portion already past its short expected duration.
+      { ...LATHE_FLOWS[1], minutes: 30, expectedMinutesAgo: 10 },
+      LATHE_FLOWS[2],
+    ];
+    lathe.lines = linesWire(flows);
+    lathe.queued = linesWire([flows[1]]);
+    return new Response(JSON.stringify(payload), { status: 200 });
+  });
+  await renderBoard();
+
+  const latheColumn = Array.from(document.querySelectorAll('.ms-col')).find(
+    (col) => col.querySelector('.mc-title')?.textContent?.includes('Lathe'),
+  )!;
+  const overviewRow = latheColumn.querySelectorAll('.mc-list li')[0];
+  expect(overviewRow.textContent).toContain('2027-60-8114-00');
+  const overviewTime = overviewRow.querySelector('.r3 .tia')!;
+  // Dated from the oldest portion, warned from the earliest-due one.
+  expect(overviewTime.textContent).toBe('2h 05m in Area');
+  expect(overviewTime.classList.contains('long')).toBe(true);
+  expect(overviewTime.getAttribute('title')).toBe(
+    'Exceeds the expected duration',
+  );
+
+  openArea(/^Lathe/);
+  const summary = document.querySelector('.abd-summary')!;
+  const queued = Array.from(summary.querySelectorAll('.mc-list li')).find(
+    (row) => row.querySelector('.r3 .tia')?.textContent === '30m in Area',
+  )!;
+  expect(queued.querySelector('.r3 .tia')?.classList.contains('long')).toBe(
+    true,
+  );
+  // No expected duration (the finished quantity): nothing is flagged.
+  const finished = Array.from(summary.querySelectorAll('.mc-list li')).find(
+    (row) => row.textContent?.includes('Finished at Lathe 9'),
+  )!;
+  expect(finished.querySelector('.r3 .tia')).not.toBeNull();
+  expect(finished.querySelector('.r3 .tia')?.classList.contains('long')).toBe(
+    false,
+  );
 });
 
 test("the monitoring context is the open demand, never the quantity's origin", async () => {

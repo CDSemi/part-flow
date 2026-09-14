@@ -17,7 +17,7 @@ import type {
   TrackingStatus,
 } from '../../api/tracking';
 import { DEFAULT_TRACKING_FILTERS } from '../../api/tracking';
-import { formatElapsedSince } from '../dates';
+import { exceedsExpectedDuration, formatElapsedSince } from '../dates';
 
 /** Refresh period of the list and of an open detail — the monitoring
  * cadence every live view shares. */
@@ -199,7 +199,7 @@ export function lineageText(flow: TrackingFlow): string | null {
 export function positionText(flow: TrackingFlow, nowMs: number): string {
   const parts: string[] = [];
   if (flow.position) {
-    const { area, machine, activity, state, since } = flow.position;
+    const { area, machine, activity, state, since, expectedBy } = flow.position;
     const row = locationRow({
       area,
       machine,
@@ -207,6 +207,7 @@ export function positionText(flow: TrackingFlow, nowMs: number): string {
       quantity: flow.quantity,
       state,
       since,
+      expectedBy,
     });
     parts.push(
       state === 'MACHINE'
@@ -225,6 +226,16 @@ export function positionText(flow: TrackingFlow, nowMs: number): string {
     parts.push(`${relation} into ${children.join(' + ')}`);
   }
   return parts.join(' · ');
+}
+
+/** Whether an ACTIVE flow's position is past its effective expected
+ * duration (PROJECT_PROFILE §17) — the server's fixed `expectedBy`
+ * judged by the shared UI clock; never without one. Advisory. */
+export function positionOverdue(flow: TrackingFlow, nowMs: number): boolean {
+  return (
+    flow.position !== null &&
+    exceedsExpectedDuration(flow.position.expectedBy, nowMs)
+  );
 }
 
 /** The rendered steps of a flow's route line: the PLANNED snapshot, or

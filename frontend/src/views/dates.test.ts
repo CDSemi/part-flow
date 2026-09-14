@@ -7,6 +7,7 @@ import {
   dueCountdown,
   dueSoonWindowDays,
   elapsedMinutesSince,
+  exceedsExpectedDuration,
   formatDuration,
   formatElapsedSince,
   formatIsoDate,
@@ -170,4 +171,20 @@ test('daysInProductionNote derives Total Days from the received date', () => {
   // input renders the explicit placeholder.
   expect(daysInProductionNote('2026-08-09', NOW)).toBe('0 d');
   expect(daysInProductionNote('garbage', NOW)).toBe('—');
+});
+
+test('exceedsExpectedDuration judges the server-stated instant only', () => {
+  // PROJECT_PROFILE §17: past the instant → exceeded; at or before it,
+  // null, absent or malformed → not judged (no fixed fallback rule).
+  const at = new Date(NOW).toISOString();
+  expect(exceedsExpectedDuration(new Date(NOW - 1).toISOString(), NOW)).toBe(
+    true,
+  );
+  expect(exceedsExpectedDuration(at, NOW)).toBe(false);
+  expect(
+    exceedsExpectedDuration(new Date(NOW + 60_000).toISOString(), NOW),
+  ).toBe(false);
+  expect(exceedsExpectedDuration(null, NOW)).toBe(false);
+  expect(exceedsExpectedDuration(undefined, NOW)).toBe(false);
+  expect(exceedsExpectedDuration('garbage', NOW)).toBe(false);
 });

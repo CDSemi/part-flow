@@ -264,6 +264,10 @@ class LocationResponse(BaseModel):
     quantity: int
     state: LocationState
     since: datetime.datetime | None
+    # The earliest instant at which one portion of the location exceeds
+    # its own effective expected duration (PROJECT_PROFILE §17); null
+    # when none applies.
+    expected_by: datetime.datetime | None
 
 
 class FlowPositionResponse(BaseModel):
@@ -273,6 +277,10 @@ class FlowPositionResponse(BaseModel):
     activity: str | None
     state: LocationState
     since: datetime.datetime
+    # `since` + the flow's effective expected duration (the current
+    # Assigned Route Step's snapshot value, else the recorded
+    # Operation's default); null when neither applies.
+    expected_by: datetime.datetime | None
 
 
 class TraceStepResponse(BaseModel):
@@ -465,6 +473,7 @@ def _location(location: BoardLocation) -> LocationResponse:
         quantity=location.quantity,
         state=location.state,
         since=location.since,
+        expected_by=location.expected_by,
     )
 
 
@@ -490,6 +499,7 @@ def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
                 activity=position.activity,
                 state=position.state,
                 since=position.position.entered_at,
+                expected_by=position.position.expected_by,
             )
             if position is not None and entry.current_area is not None
             else None

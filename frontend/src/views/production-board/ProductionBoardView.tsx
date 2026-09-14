@@ -34,7 +34,7 @@ import {
   dueCountdown,
   dueSoonWindowDays,
   daysInProductionNote,
-  elapsedMinutesSince,
+  exceedsExpectedDuration,
   formatElapsedSince,
   formatIsoDateShort,
 } from '../dates';
@@ -42,7 +42,6 @@ import {
   autoFitScale,
   FALLBACK_PAGE_SIZE,
   fallbackPageBreaks,
-  LONG_DWELL_MINUTES,
   pageBreaksByHeight,
   rotationDurationMs,
 } from './board-logic';
@@ -177,12 +176,13 @@ function locationStateLabel(state: BoardLocation['state']): string {
 
 function BoardLocationRow({ loc }: { loc: BoardLocation }) {
   // Derived per-location dwell time: fixed entry timestamp + shared
-  // minute clock; `long` flags an unusually long dwell (≥ 3 days).
+  // minute clock; `long` flags a dwell past the position's effective
+  // expected duration (PROJECT_PROFILE §17) — the server states the
+  // fixed instant of its earliest-due portion, the clock judges it.
+  // Without an expected duration nothing is flagged; advisory only.
   const now = useUiClock('minute');
   const dwell = loc.since ? formatElapsedSince(loc.since, now) : '—';
-  const dwellLong =
-    loc.since !== null &&
-    elapsedMinutesSince(loc.since, now) >= LONG_DWELL_MINUTES;
+  const dwellLong = exceedsExpectedDuration(loc.expectedBy, now);
   const onMachine = loc.state === 'machine' && loc.machine !== undefined;
   // External activity (`plating`, `vendor`, …) replaces the generic
   // `processing` label with a light informational chip.
@@ -227,7 +227,12 @@ function BoardLocationRow({ loc }: { loc: BoardLocation }) {
           {locationStateLabel(loc.state)}
         </span>
       )}
-      <span className={`ltime ${dwellLong ? 'long' : ''}`}>{dwell}</span>
+      <span
+        className={`ltime ${dwellLong ? 'long' : ''}`}
+        title={dwellLong ? 'Exceeds the expected duration' : undefined}
+      >
+        {dwell}
+      </span>
     </div>
   );
 }
@@ -499,6 +504,7 @@ const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
               qty: 2,
               state: 'machine',
               since: minutesAgoIso(80),
+              expectedBy: null,
             },
             {
               areaId: -2,
@@ -507,6 +513,8 @@ const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
               qty: 6,
               state: 'processing',
               since: minutesAgoIso(7860),
+              // Past its expected duration: the `long` warning sample.
+              expectedBy: minutesAgoIso(60),
             },
           ],
           activeQuantity: 8,
@@ -540,6 +548,7 @@ const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
                 qty: (n % 7) + 1,
                 state: 'queue',
                 since: minutesAgoIso(((n % 9) + 1) * 60 + (n % 6)),
+                expectedBy: null,
               },
             ],
             activeQuantity: (n % 7) + 1,
