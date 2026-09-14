@@ -9,10 +9,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import fcntl
 import grp
 import gzip
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -22,6 +22,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -32,7 +33,29 @@ import urllib.parse
 import urllib.request
 import uuid
 
+
+def _load_sibling_module(name):
+    """Import a module from this file's own directory by absolute path.
+
+    The launcher already selected this control release from the protected
+    bootstrap; importing a sibling by explicit path keeps that choice and does
+    not consult sys.path, PYTHONPATH or the working directory.
+    """
+    path = Path(__file__).resolve().parent / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load control module: " + str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+pf_instance = _load_sibling_module("pf_instance")
+RUNNING_RELEASE = Path(__file__).resolve().parent
+
 VERSION = "2.5.0"
+CHECKPOINT = "PF-A1.1"
 PAGE_SIZE = 10
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
@@ -361,97 +384,248 @@ def confirm(phrase, warning):
         raise Failure("Confirmation did not match; nothing was changed.")
 
 
+# Explicit routes into a pending journal (LIFECYCLE.md section 1, step 2). A
+# command absent from this table is refused while a journal exists. Each
+# handler still validates the exact journal state it accepts; the table only
+# replaces the former blanket ``allow_pending`` bypass.
+PENDING_ROUTES = {
+    "resume": (
+        lambda journal: journal.get("phase") in ("paused", "backup-ready"),
+        "resume the unchanged deployment after a pre-change failure",
+    ),
+    "rollback": (
+        lambda journal: journal.get("operation") in ("update", "rollback", "reset-db"),
+        "roll back to a verified checkpoint (use --restore-db when data/schema may have changed)",
+    ),
+    "abort-deploy": (
+        lambda journal: journal.get("operation") == "deploy",
+        "remove the incomplete first deployment before frontend access opened",
+    ),
+    "purge": (
+        lambda journal: journal.get("operation") == "purge" and journal.get("phase") == "deleting",
+        "resume the recorded purge deletion plan with the already verified recovery bundle",
+    ),
+}
+# Journal keys shown by diagnostics. Anything else is reported by name only.
+JOURNAL_PUBLIC_KEYS = (
+    "operation", "phase", "started", "recovery", "active_checkpoint", "checkpoint", "selected",
+    "database", "migration_required", "delete_backups", "reset_admin_config",
+)
+
+
 class Controller:
-    def __init__(self, root, *, home=None, control_dir=None, config_dir=None):
-        self.root = Path(root).resolve()
-        self.home = Path(home or os.environ.get("PF_HOME") or self.root.parent).resolve()
-        self.control_dir = Path(control_dir or os.environ.get("PF_CONTROL_DIR") or self.home / "control").resolve()
-        self.config_dir = Path(config_dir or os.environ.get("PF_CONFIG_DIR") or self.home / "config").resolve()
+    """Lifecycle controller bound to one immutable, protected InstanceContext.
+
+    Construction resolves paths from the registered context only. It never
+    creates directories, changes ownership or modes, writes configuration or
+    migrates state; those happen in explicit, locked operations.
+    """
+
+    def __init__(self, context, *, validation=None, running_release=None):
+        if not isinstance(context, pf_instance.InstanceContext):
+            raise Failure("Controller requires a resolved InstanceContext; legacy path arguments are not accepted.")
+        self.context = context
+        self.validation = validation
+        self.running_release = running_release
+        self.root = context.paths.workspace
+        self.control_dir = context.control.path
         self.admin_dir = self.control_dir  # Compatibility name used by a few helpers.
-
-        if not self.control_dir.is_dir():
-            raise Failure(
-                "Missing installed root-owned control directory: " + str(self.control_dir)
-                + ". Run deploy/synology/install-control.sh from the repository first."
-            )
-
-        self.config = dict(DEFAULTS)
-        config = self.config_dir / "pf-config.json"
-        example = self.control_dir / "pf-config.example.json"
-
-        # Bootstrap the writable host configuration from the root-owned template.
-        # The default DSM `users` group can edit config without modifying the
-        # executable control plane.
-        try:
-            bootstrap_gid = grp.getgrnam(DEFAULTS["workspace_write_group"]).gr_gid
-        except KeyError as exc:
-            raise Failure(
-                f"Workspace group '{DEFAULTS['workspace_write_group']}' does not exist on this host."
-            ) from exc
-        self.config_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
-        os.chown(self.config_dir, -1, bootstrap_gid)
-        os.chmod(self.config_dir, 0o2770)
-
-        if not config.exists():
-            if not example.is_file():
-                raise Failure("Missing control/pf-config.example.json; cannot initialize local admin configuration.")
-            supplied = load_json(example)
-            unknown = set(supplied) - set(DEFAULTS)
-            if unknown:
-                raise Failure("Unknown configuration keys in pf-config.example.json: " + ", ".join(sorted(unknown)))
-            initial = dict(DEFAULTS)
-            initial.update(supplied)
-            write_json(config, initial)
-            os.chown(config, -1, bootstrap_gid)
-            os.chmod(config, 0o660)
-            log("Created writable host configuration from control/pf-config.example.json: " + str(config))
-
-        supplied = load_json(config)
-        unknown = set(supplied) - set(DEFAULTS)
-        if unknown:
-            raise Failure("Unknown configuration keys: " + ", ".join(sorted(unknown)))
-        self.config.update(supplied)
-        if self.config["repository"] != "CDSemi/part-flow":
-            raise Failure("This controller is scoped to CDSemi/part-flow.")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", self.config["project"]):
-            raise Failure("Invalid Compose project name.")
-        if self.config["release_channel"] not in ("stable", "prerelease"):
-            raise Failure("release_channel must be stable or prerelease.")
-        if type(self.config["auto_update"]) is not bool:
-            raise Failure("auto_update must be a JSON boolean.")
-        for name in ("health_timeout_seconds", "minimum_free_mb"):
-            if type(self.config[name]) is not int or self.config[name] <= 0:
-                raise Failure(f"{name} must be a positive integer.")
-        for name in ("backup_read_group", "workspace_write_group"):
-            if not isinstance(self.config[name], str) or not self.config[name].strip():
-                raise Failure(f"{name} must be a non-empty DSM group name.")
-        try:
-            self.backup_gid = grp.getgrnam(self.config["backup_read_group"]).gr_gid
-            self.workspace_gid = grp.getgrnam(self.config["workspace_write_group"]).gr_gid
-        except KeyError as exc:
-            raise Failure(
-                "Configured DSM group does not exist. Check backup_read_group and workspace_write_group in "
-                + str(config)
-            ) from exc
-
-        self.state = self.home / (".pf-state-" + self.config["project"])
-        self.backups_root = self.home / "backups"
+        self.config_dir = context.paths.configuration
+        self.state = context.state_dir
+        self.backups_root = context.paths.backups
         self.revisions_root = self.backups_root / "revisions"
-        self.backups_dir = self.revisions_root / self.config["project"]
-        self.recovery_root = self.home / "recovery" / self.config["project"]
-        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.backups_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
-        self.recovery_root.mkdir(mode=0o750, parents=True, exist_ok=True)
-        os.chmod(self.state, 0o700)
-        for directory in (self.backups_root, self.revisions_root, self.backups_dir, self.recovery_root.parent, self.recovery_root):
-            os.chown(directory, -1, self.backup_gid)
-            os.chmod(directory, 0o750)
-        self.publish_backup_permissions(self.backups_dir)
-        self.publish_backup_permissions(self.recovery_root)
-        self.publish_config_permissions()
+        self.backups_dir = self.revisions_root / context.compose_project
+        self.recovery_root = context.paths.recovery / context.compose_project
         self.pending = self.state / "pending.json"
         self.override = self.state / "active-images.yaml"
         self.cli = None
+        self._config = None
+        self._backup_gid = None
+        self._workspace_gid = None
+
+    def ensure_config(self):
+        """Load the runtime configuration once (read-only); return the cached values."""
+        if self._config is None:
+            self._config = self.load_app_config()
+        return self._config
+
+    @property
+    def config(self):
+        return self.ensure_config()
+
+    @config.setter
+    def config(self, value):
+        self._config = value
+
+    @property
+    def backup_gid(self):
+        self.ensure_config()
+        return self._backup_gid
+
+    @property
+    def workspace_gid(self):
+        self.ensure_config()
+        return self._workspace_gid
+
+    def load_app_config(self):
+        """Read-only strict load of config/pf-config.json against the installed app schema.
+
+        Missing or invalid configuration is a diagnostic failure; the file is
+        never created from the template or rewritten here.
+        """
+        path = self.config_dir / "pf-config.json"
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except OSError as exc:
+            raise Failure(
+                f"Runtime configuration is missing or unreadable: {path} ({exc.strerror}). "
+                "The controller does not create it; installation/registration provides it."
+            ) from exc
+        try:
+            supplied = pf_instance.parse_strict_json(data, label=str(path))
+        except pf_instance.ContextError as exc:
+            raise Failure(str(exc)) from exc
+        if not isinstance(supplied, dict):
+            raise Failure("Runtime configuration must be a JSON object: " + str(path))
+        unknown = set(supplied) - set(DEFAULTS)
+        if unknown:
+            raise Failure("Unknown configuration keys: " + ", ".join(sorted(unknown)))
+        config = dict(DEFAULTS)
+        config.update(supplied)
+        if config["repository"] != "CDSemi/part-flow":
+            raise Failure("This controller is scoped to CDSemi/part-flow.")
+        if not isinstance(config["project"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", config["project"]):
+            raise Failure("Invalid Compose project name.")
+        if config["release_channel"] not in ("stable", "prerelease"):
+            raise Failure("release_channel must be stable or prerelease.")
+        if type(config["auto_update"]) is not bool:
+            raise Failure("auto_update must be a JSON boolean.")
+        for name in ("health_timeout_seconds", "minimum_free_mb"):
+            if type(config[name]) is not int or config[name] <= 0:
+                raise Failure(f"{name} must be a positive integer.")
+        for name in ("backup_read_group", "workspace_write_group"):
+            if not isinstance(config[name], str) or not config[name].strip():
+                raise Failure(f"{name} must be a non-empty DSM group name.")
+        # The protected registration is authoritative for identity and environment.
+        if config["project"] != self.context.compose_project:
+            raise Failure(
+                f"pf-config.json project {config['project']!r} disagrees with the registered compose_project "
+                f"{self.context.compose_project!r}; the protected registration is authoritative."
+            )
+        if config["environment"] != self.context.approved_environment:
+            raise Failure(
+                f"pf-config.json environment {config['environment']!r} disagrees with the approved environment "
+                f"{self.context.approved_environment!r}; editable configuration cannot change policy."
+            )
+        try:
+            self._backup_gid = grp.getgrnam(config["backup_read_group"]).gr_gid
+            self._workspace_gid = grp.getgrnam(config["workspace_write_group"]).gr_gid
+        except KeyError as exc:
+            raise Failure(
+                "Configured DSM group does not exist. Check backup_read_group and workspace_write_group in "
+                + str(path)
+            ) from exc
+        return config
+
+    def read_journal(self):
+        """Return the pending journal, None, or an unreadable-journal marker. Never creates or repairs it."""
+        try:
+            data = pf_instance.read_bytes_nofollow(self.pending)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return {"operation": "<unreadable>", "phase": "<unreadable>", "error": str(exc)}
+        try:
+            journal = pf_instance.parse_strict_json(data, label=str(self.pending))
+        except pf_instance.ContextError as exc:
+            return {"operation": "<unreadable>", "phase": "<unreadable>", "error": str(exc)}
+        if not isinstance(journal, dict):
+            return {"operation": "<unreadable>", "phase": "<unreadable>", "error": "journal is not a JSON object"}
+        return journal
+
+    def legal_routes(self, journal):
+        routes = []
+        for command, (predicate, description) in PENDING_ROUTES.items():
+            try:
+                accepted = bool(predicate(journal))
+            except (TypeError, AttributeError):
+                accepted = False
+            if accepted:
+                routes.append(f"pf {command} --instance {self.context.slug}: {description}")
+        return routes
+
+    def check_pending_route(self, journal, command):
+        route = PENDING_ROUTES.get(command)
+        if route is not None and route[0](journal):
+            return
+        routes = self.legal_routes(journal)
+        raise Failure(
+            "A previous operation is incomplete (operation="
+            + str(journal.get("operation")) + ", phase=" + str(journal.get("phase")) + "). "
+            + ("Supported next actions: " + "; ".join(routes) + "." if routes else
+               "No automatic route is supported for this journal; review it with status.")
+            + " Automation and other mutations remain blocked."
+        )
+
+    def log_context(self):
+        context = self.context
+        log(
+            f"Instance: {context.slug} ({context.instance_id}) | project: {context.compose_project}"
+            f" | environment: {context.approved_environment} | state: {context.state}"
+        )
+        log(
+            f"Installation root: {context.installation_root} | control release: {context.control.release_id}"
+            f" | profile: {context.profile.id}@{context.profile.version} | policy revision: {context.approved_policy.revision}"
+        )
+        log(f"Workspace: {self.root}")
+        log(f"Configuration: {self.config_dir}")
+
+    def log_journal(self, journal):
+        if journal is None:
+            log("No incomplete managed operation.")
+            return
+        log("INCOMPLETE OPERATION (protected journal, read before live checks):")
+        for key in JOURNAL_PUBLIC_KEYS:
+            if key in journal:
+                log(f"  {key}: {journal[key]}")
+        if "error" in journal:
+            log("  error: " + str(journal["error"]))
+        hidden = sorted(set(journal) - set(JOURNAL_PUBLIC_KEYS) - {"error"})
+        if hidden:
+            log("  (private fields not shown: " + ", ".join(hidden) + ")")
+        routes = self.legal_routes(journal)
+        if routes:
+            log("  Next supported action: " + "; ".join(routes))
+        else:
+            log("  Next supported action: none automatic; review with status, backups and recoveries.")
+
+    def ensure_validation(self):
+        if self.validation is None:
+            self.validation = pf_instance.validate_context(self.context, running_release=self.running_release)
+        return self.validation
+
+    def log_validation(self):
+        validation = self.ensure_validation()
+        if validation.mutation_allowed:
+            log("Protected context: trusted bootstrap, control release, registration and locks verified; mutation allowed")
+        else:
+            log("Protected context: mutation REFUSED")
+        for finding in validation.findings:
+            log("  " + finding.render())
+        log("ACL state on protected paths: " + validation.acl_state)
+
+    def require_trusted_context(self):
+        """Refuse privileged mutation unless the protected context and app configuration validated cleanly.
+
+        Runs before any lock, journal write, transport call or filesystem effect.
+        """
+        validation = self.ensure_validation()
+        if not validation.mutation_allowed:
+            raise Failure(
+                "Protected context validation refused mutation:\n" + "\n".join(validation.blocking_messages())
+            )
+        # A rejected editable configuration blocks the mutation here, not after effects started.
+        self.ensure_config()
 
     def publish_backup_permissions(self, root):
         """Make backup artifacts read-only to the configured trusted DSM group.
@@ -466,6 +640,7 @@ class Controller:
             return
         if root.is_symlink() or not root.is_dir():
             raise Failure(f"Backup path is not a safe directory: {root}")
+        self.refuse_multiply_linked(root)
 
         for current, directories, files in os.walk(root, followlinks=False):
             current_path = Path(current)
@@ -484,9 +659,22 @@ class Controller:
                 os.chown(path, -1, self.backup_gid)
                 os.chmod(path, 0o640)
 
+    def refuse_multiply_linked(self, root):
+        """Pre-scan before any mode/owner change: a hard-linked file would change an inode outside the tree."""
+        for current, _, files in os.walk(root, followlinks=False):
+            for name in files:
+                path = Path(current) / name
+                info = os.lstat(path)
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    raise Failure(
+                        f"Permission change refused: {path} has {info.st_nlink} hard links, so another name "
+                        "outside the managed tree would change. Nothing was modified."
+                    )
+
     def publish_config_permissions(self):
         """Allow the configured workspace group to manage host configuration."""
         self.config_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
+        self.refuse_multiply_linked(self.config_dir)
         os.chown(self.config_dir, -1, self.workspace_gid)
         os.chmod(self.config_dir, 0o2770)
         for path in self.config_dir.iterdir():
@@ -505,6 +693,7 @@ class Controller:
         """
         if not self.root.is_dir():
             raise Failure("Repository root does not exist: " + str(self.root))
+        self.refuse_multiply_linked(self.root)
         for current, directories, files in os.walk(self.root, followlinks=False):
             current_path = Path(current)
             if current_path.is_symlink():
@@ -530,23 +719,6 @@ class Controller:
                               "config", "core.sharedRepository", "group"], cwd=self.root)
             except Failure as exc:
                 log("WARNING: Could not set Git core.sharedRepository=group: " + str(exc))
-
-    def assert_control_plane_secure(self):
-        """Refuse a writable executable control plane when running as root."""
-        required = (
-            self.control_dir,
-            self.control_dir / "pf.sh",
-            self.control_dir / "pf-admin.py",
-            self.control_dir / "compose.nas.yaml",
-        )
-        for path in required:
-            if not path.exists():
-                raise Failure("Installed control-plane file is missing: " + str(path))
-            info = path.stat()
-            if info.st_uid != 0:
-                raise Failure("Installed control-plane path is not owned by root: " + str(path))
-            if info.st_mode & 0o022:
-                raise Failure("Installed control-plane path is group/world writable: " + str(path))
 
     def validate_deploy_env(self, values, *, require_strong_password=False):
         missing = [key for key in REQUIRED_NAS_ENV_KEYS if not values.get(key)]
@@ -835,21 +1007,32 @@ class Controller:
         )
 
     @contextlib.contextmanager
-    def lock(self, allow_pending=False):
-        with (self.state / "operation.lock").open("a+") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise Failure("Another PartFlow operation is running; try again after it finishes.") from exc
-            if self.pending.exists() and not allow_pending:
-                raise Failure("A previous operation is incomplete. Run status, then resume or rollback; automation is blocked.")
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+    def lock(self, pending_route=None):
+        """Hold this instance's stable lock for one mutating operation.
+
+        The lock inode lives under <installation-root>/locks and is never
+        created here or removed by purge. ``pending_route`` is the command
+        name; PENDING_ROUTES decides whether it may enter an existing journal.
+        """
+        try:
+            handle = pf_instance.acquire_instance_lock(self.context)
+        except pf_instance.ContextError as exc:
+            raise Failure(str(exc)) from exc
+        try:
+            journal = self.read_journal()
+            if journal is not None:
+                self.check_pending_route(journal, pending_route)
+            # Private runtime state is created only here, inside a locked mutation route.
+            if not self.state.is_dir():
+                self.state.mkdir(mode=0o700)
+                os.chmod(self.state, 0o700)
+            yield handle
+        finally:
+            handle.release()
 
     def staging(self):
-        if self.config["environment"] != "staging":
+        # The protected approved environment decides; config agreement is enforced on load.
+        if self.context.approved_environment != "staging":
             raise Failure("Mutating lifecycle commands support staging only. This is not a production deployment package.")
 
     def env(self):
@@ -978,8 +1161,12 @@ class Controller:
         return contract
 
     def free_space(self):
-        if shutil.disk_usage(self.home).free < self.config["minimum_free_mb"] * 1024 * 1024:
-            raise Failure("Insufficient free space on the source/backup volume.")
+        try:
+            free = shutil.disk_usage(self.backups_root).free
+        except OSError as exc:
+            raise Failure(f"Cannot measure free space on the registered backup volume {self.backups_root}: {exc}") from exc
+        if free < self.config["minimum_free_mb"] * 1024 * 1024:
+            raise Failure("Insufficient free space on the backup volume.")
 
     def create_database(self, name):
         quote_identifier(name)
@@ -1002,6 +1189,7 @@ class Controller:
                 raise
             revision = "0" * 40
         backup_id = f"{utc()}-{revision[:12]}-{uuid.uuid4().hex[:6]}"
+        self.ensure_backup_tree()
         folder = self.backups_dir / backup_id
         folder.mkdir(mode=0o700)
         log("Creating deployed-source + database checkpoint: " + backup_id)
@@ -1076,8 +1264,25 @@ class Controller:
         log("Checkpoint verified: " + str(folder))
         return metadata
 
+    def ensure_backup_tree(self):
+        """Create the checkpoint tree inside an explicit mutation; construction never does this."""
+        for directory in (self.backups_root, self.revisions_root, self.backups_dir):
+            if not directory.is_dir():
+                directory.mkdir(mode=0o750)
+            os.chown(directory, -1, self.backup_gid)
+            os.chmod(directory, 0o750)
+
+    def ensure_recovery_tree(self):
+        for directory in (self.recovery_root.parent, self.recovery_root):
+            if not directory.is_dir():
+                directory.mkdir(mode=0o750)
+            os.chown(directory, -1, self.backup_gid)
+            os.chmod(directory, 0o750)
+
     def snapshots(self):
         result = []
+        if not self.backups_dir.is_dir():
+            return result
         for folder in self.backups_dir.iterdir():
             if folder.is_dir() and BACKUP_RE.fullmatch(folder.name):
                 try:
@@ -1479,112 +1684,6 @@ class Controller:
             "images": sorted(set(image_refs)),
         }
 
-    def discover_instances(self):
-        """Discover PartFlow Compose projects using the external-control layout."""
-        groups = {}
-        ids = [value for value in self.docker("ps", "-a", "-q").splitlines() if value]
-        if ids:
-            infos = json.loads(self.docker("inspect", *ids))
-            for info in infos:
-                labels = (info.get("Config", {}).get("Labels") or {})
-                project = labels.get("com.docker.compose.project")
-                service = labels.get("com.docker.compose.service")
-                working = labels.get("com.docker.compose.project.working_dir")
-                if not project or service not in ("db", "backend", "frontend") or not working:
-                    continue
-                root = Path(working).resolve()
-                home = root.parent
-                config_path = home / "config" / "pf-config.json"
-                control_path = home / "control" / "pf-admin.py"
-                if not config_path.is_file() or not control_path.is_file():
-                    continue
-                try:
-                    cfg = load_json(config_path)
-                except (OSError, ValueError):
-                    continue
-                if cfg.get("repository") != "CDSemi/part-flow" or cfg.get("project") != project:
-                    continue
-                key = (project, str(root))
-                item = groups.setdefault(key, {
-                    "project": project, "root": str(root), "home": str(home),
-                    "services": set(), "running": set(),
-                })
-                item["services"].add(service)
-                if info.get("State", {}).get("Running"):
-                    item["running"].add(service)
-
-        local_key = (self.config["project"], str(self.root))
-        groups.setdefault(local_key, {
-            "project": self.config["project"], "root": str(self.root),
-            "home": str(self.home), "services": set(), "running": set(),
-        })
-
-        results = []
-        for item in groups.values():
-            home = Path(item["home"])
-            env = {}
-            try:
-                env_path = home / "config" / ".env"
-                if env_path.is_file():
-                    env = read_dotenv(env_path)
-            except (OSError, Failure):
-                pass
-            revision = "unknown"
-            try:
-                deployed = home / (".pf-state-" + item["project"]) / "deployed.json"
-                if deployed.is_file():
-                    candidate = load_json(deployed).get("sha", "")
-                    if SHA_RE.fullmatch(candidate):
-                        revision = candidate
-            except (OSError, ValueError):
-                pass
-            results.append({
-                **item,
-                "services": sorted(item["services"]),
-                "running": sorted(item["running"]),
-                "database": env.get("POSTGRES_DB", "unknown"),
-                "database_user": env.get("POSTGRES_USER", "unknown"),
-                "revision": revision,
-            })
-        return sorted(results, key=lambda item: (item["project"], item["root"]))
-
-    def display_instances(self, items, page=1):
-        selected, pages, start = page_items(items, page)
-        log(f"Managed PartFlow instances | page {page}/{pages} | {len(items)} total")
-        for number, item in enumerate(selected, start + 1):
-            running = ",".join(item["running"]) or "none"
-            services = ",".join(item["services"]) or "filesystem-only"
-            log(
-                f"{number:>3}. {item['project']}  DB={item['database']}  "
-                f"running={running}  services={services}\n"
-                f"     root={item['root']}  revision={item['revision'][:12] if item['revision'] != 'unknown' else 'unknown'}"
-            )
-        return pages
-
-    def choose_instance(self, requested=None):
-        items = self.discover_instances()
-        if requested:
-            matches = [item for item in items if item["project"] == requested]
-            if len(matches) != 1:
-                raise Failure("--project must identify exactly one managed PartFlow instance.")
-            return matches[0]
-        if len(items) == 1:
-            return items[0]
-        if not sys.stdin.isatty():
-            raise Failure("Multiple managed PartFlow instances exist. Pass --project explicitly.")
-        page = 1
-        while True:
-            pages = self.display_instances(items, page)
-            answer = input("Choose an instance number, n=next, p=previous, q=cancel: ").strip().lower()
-            if answer == "q":
-                raise Failure("Cancelled.")
-            if answer == "n":
-                page = min(pages, page + 1)
-            elif answer == "p":
-                page = max(1, page - 1)
-            elif answer.isdigit() and 1 <= int(answer) <= len(items):
-                return items[int(answer) - 1]
-
     def instance_summary(self):
         resources = self.detailed_project_resources()
         values = read_dotenv(self.config_dir / ".env") if (self.config_dir / ".env").is_file() else {}
@@ -1712,8 +1811,9 @@ class Controller:
         self.database_ready()
         checkpoint = self.snapshot("before-purge")
         recovery_id = f"purge-{utc()}-{checkpoint['source_revision'][:12]}-{uuid.uuid4().hex[:6]}"
+        self.ensure_recovery_tree()
         folder = self.recovery_root / recovery_id
-        folder.mkdir(mode=0o700, parents=True)
+        folder.mkdir(mode=0o700)
         db_dir = folder / "databases"
         state_dir = folder / "state"
         saved_config_dir = folder / "configuration"
@@ -1815,7 +1915,8 @@ class Controller:
             "environment": self.config["environment"],
             "repository": self.config["repository"],
             "root": str(self.root),
-            "home": str(self.home),
+            "instance_id": self.context.instance_id,
+            "slug": self.context.slug,
             "source_revision": checkpoint["source_revision"],
             "active_checkpoint": checkpoint["id"],
             "database": active,
@@ -1859,7 +1960,7 @@ class Controller:
         return manifest
 
     def recoveries(self, project=None):
-        base = self.home / "recovery"
+        base = self.recovery_root.parent
         result = []
         if not base.is_dir():
             return result
@@ -2110,7 +2211,7 @@ class Controller:
 
     def restore_revision_checkpoints(self, recovery):
         archive = Path(recovery["_folder"]) / "revision-checkpoints.tar.gz"
-        temporary = Path(tempfile.mkdtemp(prefix="restore-checkpoints-", dir=self.home))
+        temporary = Path(tempfile.mkdtemp(prefix="restore-checkpoints-", dir=self.state))
         try:
             self.extract_tree_archive(archive, temporary)
             source = temporary / self.config["project"]
@@ -2173,7 +2274,7 @@ class Controller:
             "operation": "restore-instance", "phase": "confirmed", "started": utc(),
             "recovery": recovery["id"], "database": recovery["database"],
         })
-        with tempfile.TemporaryDirectory(prefix="restore-source-", dir=self.home) as temp:
+        with tempfile.TemporaryDirectory(prefix="restore-source-", dir=self.state) as temp:
             candidate = Path(temp)
             archive = folder / (recovery.get("workspace_archive") or "source.tar.gz")
             extract_source(archive, candidate)
@@ -2388,7 +2489,13 @@ class Controller:
         self.pending.unlink()
 
     def permissions(self):
-        self.assert_control_plane_secure()
+        self.require_trusted_context()
+        # Refuse every unsafe target before the first effect on any tree.
+        for tree in (self.root, self.config_dir, self.backups_dir, self.recovery_root):
+            if tree.is_dir():
+                self.refuse_multiply_linked(tree)
+        self.ensure_backup_tree()
+        self.ensure_recovery_tree()
         self.publish_workspace_permissions()
         self.publish_config_permissions()
         self.publish_backup_permissions(self.backups_dir)
@@ -2399,41 +2506,81 @@ class Controller:
         log("  backups/, recovery/: group=" + self.config["backup_read_group"] + " read/copy only")
         log("  control/: users read-only, root-owned/root-modifiable; .pf-state-*: root only")
 
-    def doctor(self):
-        log("PartFlow NAS Admin " + VERSION)
-        self.assert_control_plane_secure()
-        log("Python: " + sys.version.split()[0])
-        log("Git: " + self.command(["git", "--version"]))
-        log("Docker: " + self.docker("version", "--format", "{{.Server.Version}}"))
+    def live_sections(self, sections):
+        """Run read-only probes one by one; report each unavailable section instead of stopping."""
+        unavailable = []
+        for label, probe in sections:
+            try:
+                log(f"{label}: {probe()}")
+            except (Failure, OSError, ValueError, KeyError) as exc:
+                unavailable.append(label)
+                detail = str(exc).strip().splitlines()
+                log(f"{label}: unavailable: {detail[0] if detail else type(exc).__name__}")
+        return unavailable
+
+    def env_presence(self):
+        path = self.config_dir / ".env"
+        if not path.is_file():
+            raise Failure("missing: " + str(path))
+        return "present"
+
+    def env_status(self):
+        self.env_presence()
         self.env()
-        self.compose("config", "-q")
-        self.free_space()
-        log("Control plane: root-owned and not group/world writable")
-        log("Repository: " + str(self.root))
-        log("Runtime config: " + str(self.config_dir))
-        log("Compose config and source-volume free-space checks passed.")
-        log("Project: " + self.config["project"] + " | environment: " + self.config["environment"])
-        log("Auto-update: " + str(self.config["auto_update"]) + " | channel: " + self.config["release_channel"])
-        log("Workspace write access: group=" + self.config["workspace_write_group"] + " repo/config writable")
-        log("Backup SMB access: group=" + self.config["backup_read_group"] + " directories=0750 files=0640")
+        return "present and valid"
+
+    def doctor(self):
+        log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
+        self.log_context()
+        self.log_validation()
+        self.log_journal(self.read_journal())
+        unavailable = self.live_sections((
+            ("Python", lambda: sys.version.split()[0]),
+            ("Git", lambda: self.command(["git", "--version"])),
+            ("Docker", lambda: self.docker("version", "--format", "{{.Server.Version}}")),
+            ("Runtime configuration", lambda: (
+                f"ok | project: {self.config['project']} | environment: {self.config['environment']}"
+                f" | auto-update: {self.config['auto_update']} | channel: {self.config['release_channel']}"
+                f" | workspace group: {self.config['workspace_write_group']}"
+                f" | backup group: {self.config['backup_read_group']}"
+            )),
+            ("Runtime .env", self.env_status),
+            ("Compose config", lambda: self.compose("config", "-q") or "ok"),
+            ("Free space", lambda: self.free_space() or "ok"),
+        ))
         log("Database volume capacity, NAS recovery, and production readiness are not certified by doctor.")
+        log("Default doctor is read-only: it created, repaired and migrated nothing.")
+        if unavailable:
+            raise Failure("Doctor found unavailable components: " + ", ".join(unavailable))
 
     def status(self):
-        deployed = self.revision()
+        # Journal and identity come from protected state and are shown before any
+        # app config, .env, Git or Docker access (A1-T16).
+        self.log_context()
+        self.log_journal(self.read_journal())
+        unavailable = self.live_sections((
+            ("Runtime configuration", lambda: "ok | project: " + self.config["project"]),
+            ("Runtime .env", self.env_presence),
+            ("Deployed source", self.revision),
+            ("Workspace", self.describe_workspace),
+            ("Revision checkpoints", lambda: str(len(self.snapshots()))),
+            ("Database revisions", lambda: ", ".join(self.db_heads()) or "uninitialized"),
+            ("Compose services", lambda: "\n" + self.compose("ps")),
+        ))
+        if unavailable:
+            raise Failure("Status is partial; live data unavailable for: " + ", ".join(unavailable))
+
+    def describe_workspace(self):
         workspace = self.workspace_status()
-        log("Deployed source: " + deployed)
-        log("Workspace HEAD: " + (workspace["head"] or "non-git"))
-        log("Workspace differs from deployed: " + str(workspace["dirty"] or workspace["head"] != deployed))
+        try:
+            deployed = self.revision()
+        except Failure:
+            deployed = None
+        differs = workspace["dirty"] or (deployed is not None and workspace["head"] != deployed)
+        text = f"HEAD {workspace['head'] or 'non-git'} | differs from deployed: {differs}"
         if workspace["changes"]:
-            log("Workspace changes: " + ", ".join(workspace["changes"][:10]))
-        log("Project: " + self.config["project"])
-        log("Revision checkpoints: " + str(len(self.snapshots())))
-        log("Database revisions: " + ", ".join(self.db_heads()))
-        log(self.compose("ps"))
-        if self.pending.exists():
-            log("INCOMPLETE OPERATION:\n" + json.dumps(load_json(self.pending), indent=2))
-        else:
-            log("No incomplete managed operation.")
+            text += " | changes: " + ", ".join(workspace["changes"][:10])
+        return text
 
     def passthrough(self, args):
         if not args:
@@ -2445,7 +2592,9 @@ class Controller:
                                                    for v in args[1:]):
             raise Failure("Volume deletion is blocked. Use reset-db or purge for backed-up destructive workflows.")
         read_only = args[0] in ("ps", "logs", "config", "version", "top", "images", "port")
-        with contextlib.nullcontext() if read_only else self.lock():
+        # Catch-all forwarding is removed in PF-A1.4; until then it runs only
+        # through the validated context and, for mutating verbs, the stable lock.
+        with contextlib.nullcontext() if read_only else self.lock(pending_route="compose:" + args[0]):
             if self.cli is None:
                 self.compose("version")
             env_path = self.config_dir / ".env"
@@ -2470,12 +2619,13 @@ class Controller:
 
 def parser():
     result = argparse.ArgumentParser(description="PartFlow NAS staging administration; use --help on a command.")
+    result.add_argument("--installation-root", help=argparse.SUPPRESS)
+    result.add_argument("--instance", help="Registered instance slug or UUID; required when several instances exist and no protected default is set")
     subs = result.add_subparsers(dest="command", required=True)
     for name in ("doctor", "status", "permissions", "backup", "reset-db", "resume", "abort-deploy"):
         subs.add_parser(name)
 
-    instances = subs.add_parser("instances", help="List managed PartFlow instances visible to this Docker daemon")
-    instances.add_argument("--page", type=int, default=1)
+    subs.add_parser("instances", help="List registered instances from the protected registry (no Docker access)")
 
     deploy = subs.add_parser("deploy", help="Create a brand-new managed staging deployment")
     deploy_selection = deploy.add_mutually_exclusive_group()
@@ -2487,7 +2637,7 @@ def parser():
     deploy.add_argument("--skip-ci", action="store_true", help="Explicit manual staging exception; CI is checked by default")
 
     purge = subs.add_parser("purge", help="Create a full recovery bundle, then remove one managed staging instance")
-    purge.add_argument("--project", help="Select one exact managed Compose project; otherwise choose interactively when needed")
+    purge.add_argument("--project", help="Legacy alias: select the registered instance whose Compose project is unique; prefer --instance")
     backup_policy = purge.add_mutually_exclusive_group()
     backup_policy.add_argument("--delete-backups", action="store_true", help="Delete normal revision checkpoints after archiving them into the recovery bundle")
     backup_policy.add_argument("--keep-backups", action="store_true", help="Keep normal revision checkpoints after purge")
@@ -2499,7 +2649,7 @@ def parser():
 
     restore = subs.add_parser("restore-instance", help="Restore a purged instance or recover its old database side-by-side")
     restore.add_argument("recovery_id", nargs="?")
-    restore.add_argument("--project", help="Filter recovery selection by project")
+    restore.add_argument("--project", help="Filter recovery selection by project; the restore target is always the selected registered instance")
     restore.add_argument("--side-by-side", action="store_true", help="Restore only the old active database under a separate recovery DB name; do not replace the current instance")
 
     backups = subs.add_parser("backups", help="List revision checkpoints, newest first, 10 per page")
@@ -2521,59 +2671,178 @@ def parser():
     return result
 
 
-def main(argv=None, root=None):
+KNOWN_COMMANDS = {
+    "doctor", "status", "permissions", "backup", "reset-db", "resume", "deploy", "abort-deploy",
+    "instances", "purge", "recoveries", "restore-instance",
+    "backups", "rollback", "update", "release-check",
+}
+# Commands that never take the instance lock and never mutate managed state.
+READ_ONLY_COMMANDS = {"status", "doctor", "instances", "backups", "recoveries"}
+
+
+def display_registry(registry):
+    """Read-only listing of the protected registry: records, journals and unpublished registrations."""
+    root = registry.root
+    default = registry.default_instance_id
+    log(f"Registered instances at {root} | default: {default or 'none (explicit --instance required when several exist)'}")
+    rows = registry.records()
+    if not rows:
+        log("  (no registrations)")
+    for number, (entry, context, error) in enumerate(rows, 1):
+        marker = " [default]" if entry.instance_id == default else ""
+        if context is None:
+            log(f"{number:>3}. {entry.slug}  {entry.instance_id}{marker}  record=INVALID: {error}")
+            continue
+        journal_path = context.journal_path
+        try:
+            journal = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(journal_path), label=str(journal_path))
+            journal_text = f"{journal.get('operation')}/{journal.get('phase')}" if isinstance(journal, dict) else "unreadable"
+        except FileNotFoundError:
+            journal_text = "none"
+        except (OSError, pf_instance.ContextError):
+            journal_text = "unreadable"
+        log(
+            f"{number:>3}. {context.slug}  {context.instance_id}{marker}  project={context.compose_project}"
+            f"  environment={context.approved_environment}  state={context.state}"
+            f"  control={context.control.release_id}  journal={journal_text}\n"
+            f"     workspace={context.paths.workspace}"
+        )
+    orphans = pf_instance.unpublished_registrations(registry)
+    for orphan in orphans:
+        log(f"UNPUBLISHED registration directory: {orphan} (interrupted registration; rerun the same registration to "
+            "complete it or have an administrator remove it explicitly)")
+    return len(rows)
+
+
+def legacy_unregistered_report(control_dir, argv):
+    """Read-only diagnostics for a v2.5 layout without a protected registration. Nothing is created or repaired."""
+    home = control_dir.parent
+    command = argv[0] if argv else None
+    log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
+    log("UNREGISTERED legacy installation (v2.5 layout) at " + str(home))
+    log("  control: " + str(control_dir))
+    config_path = home / "config" / "pf-config.json"
+    if config_path.is_file():
+        try:
+            supplied = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(config_path), label=str(config_path))
+            unknown = sorted(set(supplied) - set(DEFAULTS)) if isinstance(supplied, dict) else ["<not an object>"]
+            log("  config/pf-config.json: present" + (f"; unknown keys: {', '.join(unknown)}" if unknown else "; keys valid"))
+            if isinstance(supplied, dict) and isinstance(supplied.get("project"), str):
+                log("  project (editable config, not authoritative): " + supplied["project"])
+        except (OSError, pf_instance.ContextError) as exc:
+            log("  config/pf-config.json: invalid: " + str(exc))
+    else:
+        log("  config/pf-config.json: missing")
+    log("  config/.env: " + ("present" if (home / "config" / ".env").is_file() else "missing"))
+    found = False
+    for state_dir in sorted(home.glob(".pf-state-*")):
+        pending = state_dir / "pending.json"
+        if not pending.is_file():
+            continue
+        found = True
+        try:
+            journal = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(pending), label=str(pending))
+        except (OSError, pf_instance.ContextError) as exc:
+            log(f"  INCOMPLETE OPERATION in {state_dir.name}: unreadable journal: {exc}")
+            continue
+        summary = ", ".join(f"{key}={journal[key]}" for key in JOURNAL_PUBLIC_KEYS if isinstance(journal, dict) and key in journal)
+        log(f"  INCOMPLETE OPERATION in {state_dir.name}: {summary or '<no public fields>'}")
+    if not found:
+        log("  Pending journal: none found under " + str(home / ".pf-state-*"))
+    log("Mutating commands require a protected registration (PF-A2 legacy migration). No files were changed.")
+    if command in (None, "-h", "--help", "status", "doctor", "instances"):
+        return 0
+    raise Failure(f"'{command}' is refused on an unregistered installation; read-only diagnostics only.")
+
+
+def main(argv=None, *, installation_root=None, running_release=None, trusted_launch=None):
+    """CLI entry point.
+
+    ``installation_root``/``running_release``/``trusted_launch`` are in-process
+    harness parameters; the installed launcher supplies ``--installation-root``
+    and the process facts are read from ``__file__`` and ``sys.flags``.
+    """
     if sys.version_info < (3, 9):
         print("Python 3.9 or newer is required.", file=sys.stderr)
         return 2
     os.umask(0o077)
     argv = list(sys.argv[1:] if argv is None else argv)
-    known = {
-        "doctor", "status", "permissions", "backup", "reset-db", "resume", "deploy", "abort-deploy",
-        "instances", "purge", "recoveries", "restore-instance",
-        "backups", "rollback", "update", "release-check",
-    }
+    globals_parser = argparse.ArgumentParser(add_help=False)
+    globals_parser.add_argument("--installation-root")
+    globals_parser.add_argument("--instance")
+    options, rest = globals_parser.parse_known_args(argv)
+    root = options.installation_root or installation_root
+    if running_release is None:
+        running_release = RUNNING_RELEASE
+    if trusted_launch is None:
+        trusted_launch = bool(sys.flags.isolated)
+
     controller = None
     managed_started = False
     held_lock = contextlib.ExitStack()
     try:
         if root is None:
+            # No protected installation root: only the installed legacy layout may
+            # be inspected read-only; the writable repository copy is refused.
             source_dir = Path(__file__).resolve().parent
             if source_dir.name != "control":
                 raise Failure(
                     "Refusing to execute the writable repository copy of pf-admin.py as the NAS control plane. "
                     "Run the installed root-owned launcher: sudo pf <command>."
                 )
-            default_home = Path(os.environ.get("PF_HOME", source_dir.parent))
-            default_root = Path(os.environ.get("PF_REPO_ROOT", default_home / "repo"))
-        else:
-            default_root = Path(root)
+            return legacy_unregistered_report(source_dir, rest)
 
-        if not argv or argv[0] not in known and argv[0] not in ("-h", "--help"):
-            controller = Controller(default_root)
-            controller.assert_control_plane_secure()
-            controller.passthrough(argv)
+        root = Path(root)
+        passthrough = not rest or (rest[0] not in KNOWN_COMMANDS and rest[0] not in ("-h", "--help"))
+        # Help is answered before any registry or instance state is read.
+        args = None if passthrough else parser().parse_args(rest)
+        try:
+            registry = pf_instance.load_registry(root)
+        except pf_instance.ContextError as exc:
+            raise Failure(str(exc)) from exc
+
+        def select(project=None):
+            try:
+                context = pf_instance.resolve_instance(registry, instance=options.instance, project=project)
+            except pf_instance.ContextError as exc:
+                raise Failure(str(exc)) from exc
+            validation = pf_instance.validate_context(context, running_release=running_release, interpreter=sys.executable)
+            return Controller(context, validation=validation, running_release=running_release)
+
+        if passthrough:
+            controller = select()
+            controller.require_trusted_context()
+            if not trusted_launch:
+                raise Failure("Compose passthrough requires the installed bootstrap launcher (Python isolated mode).")
+            controller.passthrough(rest)
             return 0
-        args = parser().parse_args(argv)
-        controller = Controller(default_root)
-        controller.assert_control_plane_secure()
+        if args.command == "instances":
+            display_registry(registry)
+            return 0
+        controller = select(project=getattr(args, "project", None))
 
-        # Cross-instance selection commands acquire the selected instance lock
-        # themselves. Holding the bootstrap instance lock here would deadlock
-        # when it is also the selected target.
-        cross_instance = args.command in ("instances", "purge", "recoveries", "restore-instance")
-        if not cross_instance:
-            held_lock.enter_context(controller.lock(allow_pending=args.command in (
-                "doctor", "status", "backups", "rollback", "resume", "abort-deploy"
-            )))
+        if args.command in READ_ONLY_COMMANDS:
+            if args.command == "doctor":
+                controller.doctor()
+            elif args.command == "status":
+                controller.status()
+            elif args.command == "backups":
+                controller.display_page(controller.snapshots(), args.page)
+            elif args.command == "recoveries":
+                controller.display_recoveries(controller.recoveries(project=args.project), args.page)
+            return 0
 
-        if args.command == "doctor":
-            controller.doctor()
-        elif args.command == "permissions":
+        # Every mutation: validated context, sanitized launch, stable lock, explicit journal route.
+        controller.require_trusted_context()
+        if not trusted_launch:
+            raise Failure(
+                "Mutating commands must start through the installed bootstrap launcher "
+                "(Python isolated mode, sanitized environment)."
+            )
+        held_lock.enter_context(controller.lock(pending_route=args.command))
+
+        if args.command == "permissions":
             controller.permissions()
-        elif args.command == "status":
-            controller.status()
-        elif args.command == "instances":
-            controller.display_instances(controller.discover_instances(), args.page)
         elif args.command == "deploy":
             use_current = args.current or not (args.latest or args.commit or args.release)
             target = None if use_current else controller.resolve(
@@ -2584,29 +2853,15 @@ def main(argv=None, root=None):
             managed_started = True
             controller.deploy(target, use_current=use_current, skip_ci=args.skip_ci)
         elif args.command == "purge":
-            selected = controller.choose_instance(args.project)
-            target_controller = Controller(Path(selected["root"]), home=Path(selected["home"]))
-            if target_controller.config["project"] != selected["project"]:
-                raise Failure("Selected Docker project and its local pf-config.json disagree; purge refused.")
             delete_backups = True if args.delete_backups else False if args.keep_backups else None
-            with target_controller.lock():
-                target_controller.purge(
-                    delete_backups=delete_backups,
-                    reset_admin_config=args.reset_admin_config,
-                )
-        elif args.command == "recoveries":
-            controller.display_recoveries(controller.recoveries(project=args.project), args.page)
+            controller.purge(delete_backups=delete_backups, reset_admin_config=args.reset_admin_config)
         elif args.command == "restore-instance":
+            # The mutation target is the selected registered instance, never a
+            # path embedded in the (untrusted) recovery bundle.
             recovery = controller.choose_recovery(args.recovery_id, project=args.project)
-            target_root = controller.root if args.side_by_side else Path(recovery["root"])
-            target_controller = Controller(target_root, home=Path(recovery.get("home") or target_root.parent))
-            controller = target_controller
-            with target_controller.lock():
-                managed_started = not args.side_by_side
-                target_controller.restore_instance(recovery, side_by_side=args.side_by_side)
-                managed_started = False
-        elif args.command == "backups":
-            controller.display_page(controller.snapshots(), args.page)
+            managed_started = not args.side_by_side
+            controller.restore_instance(recovery, side_by_side=args.side_by_side)
+            managed_started = False
         elif args.command == "backup":
             controller.database_ready()
             controller.ensure_local_contract()
@@ -2643,7 +2898,7 @@ def main(argv=None, root=None):
             managed_started = True
             controller.update(target, automatic=True)
         return 0
-    except (Failure, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:
+    except (Failure, pf_instance.ContextError, OSError, ValueError, KeyError, KeyboardInterrupt) as exc:
         print("ERROR: " + str(exc), file=sys.stderr, flush=True)
         if controller is not None and managed_started:
             controller.fail_closed()

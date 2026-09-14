@@ -6,6 +6,20 @@
 > Prepared: **2026-09-11**
 > Phạm vi: quản trị **Synology staging** trong LAN giới hạn. Đây chưa phải gói production hardening.
 
+> **Checkpoint Deployment Admin PF-A1.1 (2026-09-14) — trạng thái phát triển, chưa phải bản phát hành NAS.**
+> Source controller trong repository giờ yêu cầu *protected instance registration*
+> (`pf_instance.py`: installation root với `bootstrap/`, `registry/instances.json`,
+> `locks/`, `releases/<id>/`, `instances/<uuid>/record.json`). Khởi tạo Controller, `--help`,
+> `instances`, `status`, `backups`, `recoveries` và `doctor` mặc định là read-only;
+> `status`/`doctor` in pending journal trước mọi kiểm tra `.env`, Git hay Docker. Lệnh
+> mutation cần `--instance <slug|uuid>` (hoặc default được bảo vệ), stable lock riêng
+> của instance dưới `<root>/locks/` và một route journal tường minh. Layout v2.5 mô tả
+> bên dưới là **chưa đăng ký** trong checkpoint này: `control/pf.sh` đã cài chỉ trả lời
+> chẩn đoán read-only và từ chối mutation cho đến khi có migration PF-A2.
+> `install-control.sh` vẫn là installer legacy v2.5; không chạy nó trên NAS đang hoạt động
+> với checkpoint này. Registration hiện chỉ là một transaction Python cho fixture dùng
+> một lần (`register_instance`), chưa phải lệnh cho người vận hành.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -247,7 +261,7 @@ Ví dụ:
 
 ```dotenv
 POSTGRES_USER=partflow_staging
-POSTGRES_PASSWORD=<generated secret>
+POSTGRES_PASSWORD=<generated-secret>
 POSTGRES_DB=partflow_staging
 SITE_TIMEZONE=America/Los_Angeles
 PARTFLOW_BIND_IP=192.168.0.11

@@ -2,6 +2,19 @@
 
 Date: 2026-09-11. Tool version: 2.5.0.
 
+> **PF-A1.1 checkpoint addendum (2026-09-14).** The v2.5 results below are historical.
+> The current source carries the Deployment Admin PF-A1.1 slice (protected instance
+> context, registry, bootstrap trust, stable locks, read-only construction/diagnostics).
+> Its executed evidence lives in the PF-A1.1 checkpoint package (`IMPLEMENTATION_REPORT.md`,
+> `ACCEPTANCE_RESULTS.json`, logs). Summary of that run, uid 0, Python 3.11.15, Linux
+> container, group `users` present: adapted baseline suite `tests/test_pf_admin.py`
+> **100 tests OK** (99 v2.5 tests, 3 of them converted from asserting constructor side
+> effects to asserting the safe outcome, plus 1 new); PF-A1.1 suite
+> `tests/test_instance_context.py` **37 tests OK, 0 skipped**, also OK under Python 3.9.23;
+> unmodified v2.5 suite in the same environment 99/99 OK; original audit probes against the
+> unmodified v2.5 bundle 19/19 REPRODUCED (defects present, historical baseline, not a pass).
+> A1-T17 host part (real DSM ACL/mount), Docker, PostgreSQL and DSM/SMB were not exercised.
+
 ## Executed checks
 
 | Check | Actual result |

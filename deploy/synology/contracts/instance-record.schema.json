@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deployment Admin protected InstanceRecord v1",
+  "description": "A1 envelope. Structural validation only; runtime also verifies trusted registration, paths, ownership, ACLs, referenced bytes, daemon identity and policy. Examples are not installed records.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "instance_id",
+    "slug",
+    "state",
+    "record_revision",
+    "compose_project",
+    "approved_environment",
+    "daemon",
+    "paths",
+    "control",
+    "profile",
+    "approved_policy",
+    "approved_config_revision"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "instance_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+    },
+    "state": {
+      "enum": [
+        "registered",
+        "active",
+        "purged"
+      ]
+    },
+    "record_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "compose_project": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"
+    },
+    "approved_environment": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "engine_id",
+        "scope",
+        "rootless"
+      ],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "pattern": "^unix:///[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "engine_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "scope": {
+          "const": "local"
+        },
+        "rootless": {
+          "const": false
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace",
+        "configuration",
+        "backups",
+        "recovery",
+        "private_state"
+      ],
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "configuration": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "backups": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "recovery": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "private_state": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release_id",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "path": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "path": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "approved_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "approved_config_revision": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

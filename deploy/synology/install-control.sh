@@ -27,6 +27,7 @@ for path in \
     "$REPO_ROOT/pf.sh" \
     "$REPO_ROOT/compose.nas.yaml" \
     "$SCRIPT_DIR/pf-admin.py" \
+    "$SCRIPT_DIR/pf_instance.py" \
     "$SCRIPT_DIR/backup.sh" \
     "$SCRIPT_DIR/release-check.sh" \
     "$SCRIPT_DIR/pf-config.example.json" \
@@ -103,6 +104,7 @@ rm -rf "$TEMP"
 mkdir -p "$TEMP"
 cp "$REPO_ROOT/pf.sh" "$TEMP/pf.sh"
 cp "$SCRIPT_DIR/pf-admin.py" "$TEMP/pf-admin.py"
+cp "$SCRIPT_DIR/pf_instance.py" "$TEMP/pf_instance.py"
 cp "$REPO_ROOT/compose.nas.yaml" "$TEMP/compose.nas.yaml"
 cp "$SCRIPT_DIR/backup.sh" "$TEMP/backup.sh"
 cp "$SCRIPT_DIR/release-check.sh" "$TEMP/release-check.sh"

@@ -6,6 +6,20 @@
 > Prepared: **2026-09-11**
 > Scope: restricted-LAN **Synology staging** administration. This is not a production-hardening package.
 
+> **Deployment Admin checkpoint PF-A1.1 (2026-09-14) — development state, not a NAS release.**
+> The controller source in this repository now requires a *protected instance registration*
+> (`pf_instance.py`: installation root with `bootstrap/`, `registry/instances.json`,
+> `locks/`, `releases/<id>/`, `instances/<uuid>/record.json`). Construction, `--help`,
+> `instances`, `status`, `backups`, `recoveries` and the default `doctor` are read-only;
+> `status`/`doctor` print the pending journal before any `.env`, Git or Docker check.
+> Mutating commands need `--instance <slug|uuid>` (or a protected default), the stable
+> per-instance lock under `<root>/locks/` and an explicit journal route. The v2.5 layout
+> described below is **unregistered** in this checkpoint: the installed `control/pf.sh`
+> answers read-only diagnostics only and refuses mutations until the PF-A2 migration
+> exists. `install-control.sh` remains the legacy v2.5 installer; do not run it against a
+> live NAS with this checkpoint. Registration exists only as a Python transaction for
+> disposable fixtures (`register_instance`), not as an operator command.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -254,7 +268,7 @@ Typical content:
 
 ```dotenv
 POSTGRES_USER=partflow_staging
-POSTGRES_PASSWORD=<generated secret>
+POSTGRES_PASSWORD=<generated-secret>
 POSTGRES_DB=partflow_staging
 SITE_TIMEZONE=America/Los_Angeles
 PARTFLOW_BIND_IP=192.168.0.11

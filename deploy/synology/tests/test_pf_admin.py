@@ -1,7 +1,6 @@
 """Offline tests. Docker/PostgreSQL are simulated; archive and filesystem work is real."""
 import contextlib
 import grp
-import importlib.util
 import io
 import json
 import os
@@ -16,68 +15,37 @@ import tempfile
 import unittest
 from unittest import mock
 
-PACKAGE = Path(__file__).resolve().parents[1]
-REPO_PACKAGE = PACKAGE.parents[1]
-spec = importlib.util.spec_from_file_location("pf_admin", PACKAGE / "pf-admin.py")
-pf = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pf)
-OLD = "1" * 40
-NEW = "2" * 40
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import protected_fixture as pfx  # noqa: E402
+
+PACKAGE = pfx.PACKAGE
+REPO_PACKAGE = pfx.REPO_PACKAGE
+pf = pfx.pf
+pf_instance = pfx.pf_instance
+OLD = pfx.OLD
+NEW = pfx.NEW
 TEST_GROUP = grp.getgrgid(os.getgid()).gr_name
-
-
-def source_fixture(root, revision=OLD, new_migration=False):
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "backend/alembic/versions").mkdir(parents=True)
-    (root / "backend/alembic.ini").write_text("[alembic]\nscript_location=alembic\n")
-    (root / "backend/alembic/env.py").write_text("# fixture environment\n")
-    (root / "backend/alembic/versions/001.py").write_text("revision='r1'\n")
-    if new_migration:
-        (root / "backend/alembic/versions/002.py").write_text("revision='r2'\ndown_revision='r1'\n")
-    (root / "frontend").mkdir()
-    (root / "frontend/app.txt").write_text(revision)
-    (root / "app-version.txt").write_text(revision)
-    (root / "compose.nas.yaml").write_text((REPO_PACKAGE / "compose.nas.yaml").read_text())
-    (root / "pf.sh").write_text("# repository source copy\n")
-    admin = root / "deploy/synology"
-    admin.mkdir(parents=True, exist_ok=True)
-    (admin / "pf-admin.py").write_text("# repository source helper\n")
+source_fixture = pfx.source_fixture
 
 
 def fixture(root, revision=OLD, new_migration=False):
-    source_fixture(root, revision, new_migration)
+    """Disposable protected installation: <tmp>/install (registry/release) + <tmp>/{repo,config,backups,recovery}.
+
+    Returns the registered InstanceContext for slug ``staging`` / project ``partflow-staging``.
+    v2.5 built an unregistered control/config layout here; PF-A1.1 requires the
+    explicit registration transaction before any Controller exists.
+    """
+    root = Path(root)
     home = root.parent
-    control = home / "control"
-    control.mkdir(exist_ok=True)
-    for name, content in {
-        "pf.sh": "#!/bin/sh\n",
-        "pf-admin.py": "# installed control\n",
-        "compose.nas.yaml": (REPO_PACKAGE / "compose.nas.yaml").read_text(),
-        "pf-config.example.json": json.dumps({
-            "backup_read_group": TEST_GROUP, "workspace_write_group": TEST_GROUP
-        }) + "\n",
-        "nas.env.example": (PACKAGE / "nas.env.example").read_text(),
-    }.items():
-        path = control / name
-        path.write_text(content)
-        os.chmod(path, 0o640)
-    os.chmod(control / "pf.sh", 0o740)
-    os.chmod(control, 0o750)
-
-    config = home / "config"
-    config.mkdir(exist_ok=True)
-    (config / "pf-config.json").write_text(json.dumps({
-        "backup_read_group": TEST_GROUP, "workspace_write_group": TEST_GROUP
-    }) + "\n")
-    (config / ".env").write_text(
-        "POSTGRES_DB=partflow_staging\nPOSTGRES_USER=partflow_staging\nPOSTGRES_PASSWORD=abc123\n"
-        "SITE_TIMEZONE=America/Los_Angeles\nPARTFLOW_BIND_IP=127.0.0.1\n"
-        "PARTFLOW_HTTP_PORT=5173\nPARTFLOW_ALLOWED_HOST=localhost\n"
-    )
-
-    state = home / ".pf-state-partflow-staging"
-    state.mkdir(exist_ok=True)
-    (state / "deployed.json").write_text(json.dumps({"sha": revision}) + "\n")
+    home.mkdir(parents=True, exist_ok=True)
+    layout = pfx.install_root(home)
+    paths = pfx.data_home(home, group=TEST_GROUP, revision=revision)
+    if new_migration:
+        (root / "backend/alembic/versions/002.py").write_text("revision='r2'\ndown_revision='r1'\n")
+    context = pfx.register(layout, "staging", paths, project="partflow-staging")
+    pfx.deployed_record(context, revision)
+    fixture.layout = layout
+    return context
 
 
 
@@ -99,12 +67,12 @@ def write_deploy_env(root, bind_ip="127.0.0.1"):
 
 class FakeController(pf.Controller):
     """Simulate only external commands; execute the real workflow/backup code."""
-    def __init__(self, root):
-        super().__init__(root)
+    def __init__(self, context):
+        super().__init__(context)
         self.config["minimum_free_mb"] = 1
         self.dbs = {"partflow_staging": {"heads": ["r1"], "rows": ["old-record"], "connections": True}}
         self.tags = {"backend:old": "sha256:old-backend", "frontend:old": "sha256:old-frontend"}
-        self.contracts = {"sha256:old-backend": {"files": pf.migration_files(root), "heads": ["r1"]}}
+        self.contracts = {"sha256:old-backend": {"files": pf.migration_files(self.root), "heads": ["r1"]}}
         self.current_images = {"backend": "sha256:old-backend", "frontend": "sha256:old-frontend"}
         self.running = {"db": True, "backend": True, "frontend": True}
         self.calls = []
@@ -310,12 +278,14 @@ class AdminTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "repo"
-        fixture(self.root)
-        self.c = FakeController(self.root)
+        self.context = fixture(self.root)
+        self.layout = fixture.layout
+        self.c = FakeController(self.context)
         self.output = io.StringIO()
         self.capture = contextlib.redirect_stdout(self.output)
         self.capture.__enter__()
-        self.errors = contextlib.redirect_stderr(io.StringIO())
+        self.error_output = io.StringIO()
+        self.errors = contextlib.redirect_stderr(self.error_output)
         self.errors.__enter__()
 
     def tearDown(self):
@@ -323,13 +293,17 @@ class AdminTests(unittest.TestCase):
         self.capture.__exit__(None, None, None)
         self.temp.cleanup()
 
+    def errors_text(self):
+        return self.error_output.getvalue()
+
     def invoke(self, arguments):
         with (
             mock.patch.object(pf, "Controller", return_value=self.c),
             mock.patch.object(pf, "confirm"),
             mock.patch.object(pf, "prompt_yes_no", return_value=True),
         ):
-            return pf.main(arguments, root=self.root)
+            return pf.main(arguments, installation_root=self.layout.root,
+                           running_release=self.layout.release_dir, trusted_launch=True)
 
     def test_deploy_latest_creates_new_database_migrates_and_opens_app(self):
         write_deploy_env(self.root)
@@ -385,7 +359,7 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(all(self.c.running.values()))
 
     def test_prepare_new_env_generates_password_and_direct_lan_values(self):
-        self.c = pf.Controller(self.root)
+        self.c = pf.Controller(self.context)
         (self.c.config_dir / ".env").unlink()
         answers = iter(["", "", "", "1", "1", "", "y"])
         with (
@@ -406,7 +380,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.c.config_dir / ".env").stat().st_mode), 0o660)
 
     def test_prepare_new_env_reverse_proxy_requires_exact_hostname(self):
-        self.c = pf.Controller(self.root)
+        self.c = pf.Controller(self.context)
         (self.c.config_dir / ".env").unlink()
         answers = iter(["", "", "", "2", "partflow.internal.example", "", "y"])
         with (
@@ -478,35 +452,28 @@ class AdminTests(unittest.TestCase):
             "backup_read_group": TEST_GROUP,
             "workspace_write_group": TEST_GROUP,
         }) + "\n")
-        controller = pf.Controller(self.root)
+        controller = pf.Controller(self.context)
         self.assertEqual(controller.config["minimum_free_mb"], 1234)
 
-    def test_controller_bootstraps_runtime_config_from_installed_control_template(self):
+    def test_controller_never_creates_runtime_config_from_installed_control_template(self):
+        # v2.5 wrote config/pf-config.json from the template during construction
+        # (F12). PF-A1.1: construction is read-only; a missing configuration is a
+        # diagnostic failure when it is first needed, and the template is untouched.
         config = self.root.parent / "config/pf-config.json"
-        example = self.root.parent / "control/pf-config.example.json"
+        example = self.c.control_dir / "pf-config.example.json"
         config.unlink()
-        example.write_text(json.dumps({
-            "project": "partflow-staging",
-            "minimum_free_mb": 3456,
-            "backup_read_group": TEST_GROUP,
-            "workspace_write_group": TEST_GROUP,
-        }) + "\n")
+        before = pfx.snapshot_tree(self.root.parent / "config", self.c.control_dir)
 
-        controller = pf.Controller(self.root)
+        controller = pf.Controller(self.context)
+        with self.assertRaisesRegex(pf.Failure, "does not create it"):
+            controller.load_app_config()
 
-        self.assertTrue(config.is_file())
-        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o660)
-        saved = json.loads(config.read_text())
-        self.assertEqual(saved["minimum_free_mb"], 3456)
-        self.assertEqual(saved["backup_read_group"], TEST_GROUP)
-        self.assertEqual(saved["workspace_write_group"], TEST_GROUP)
-        self.assertEqual(controller.config["minimum_free_mb"], 3456)
-        self.assertEqual(controller.config["backup_read_group"], TEST_GROUP)
-        self.assertIn("repository", saved)
-        self.assertIn("release_channel", saved)
+        self.assertFalse(config.exists())
+        self.assertTrue(example.is_file())
+        self.assertEqual(pfx.snapshot_tree(self.root.parent / "config", self.c.control_dir), before)
 
     def test_compose_uses_external_env_control_file_and_explicit_repo_context(self):
-        controller = pf.Controller(self.root)
+        controller = pf.Controller(self.context)
         controller.cli = ["docker", "compose"]
         with mock.patch.object(controller, "command", return_value="") as command:
             controller.compose("config", "-q")
@@ -525,6 +492,7 @@ class AdminTests(unittest.TestCase):
         source = self.root / "frontend/app.txt"
         os.chmod(source, 0o600)
         backup = self.c.backups_dir / "read-only.txt"
+        backup.parent.mkdir(parents=True)
         backup.write_text("backup\n")
         os.chmod(backup, 0o600)
         config = self.c.config_dir / "pf-config.json"
@@ -544,9 +512,9 @@ class AdminTests(unittest.TestCase):
         script = self.c.control_dir / "pf-admin.py"
         os.chmod(script, 0o660)
         with self.assertRaisesRegex(pf.Failure, "group/world writable"):
-            self.c.assert_control_plane_secure()
+            self.c.require_trusted_context()
 
-    def test_controller_repairs_existing_backup_permissions_for_smb_read(self):
+    def test_only_explicit_permissions_command_repairs_backup_permissions_for_smb_read(self):
         backup_id = "20260909T120000Z-" + OLD[:12] + "-abcdef"
         folder = self.root.parent / "backups/revisions/partflow-staging" / backup_id
         folder.mkdir(parents=True)
@@ -555,8 +523,13 @@ class AdminTests(unittest.TestCase):
         os.chmod(folder, 0o700)
         os.chmod(file, 0o600)
 
-        pf.Controller(self.root)
+        # Construction (v2.5 repaired here, F12) changes nothing.
+        pf.Controller(self.context)
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
 
+        # The explicit, locked permissions command does.
+        self.c.permissions()
         self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o750)
         self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o640)
         self.assertEqual(folder.stat().st_gid, grp.getgrnam(TEST_GROUP).gr_gid)
@@ -579,7 +552,7 @@ class AdminTests(unittest.TestCase):
 
     def test_repository_local_admin_config_is_ignored(self):
         (self.root / "pf-config.json").write_text('{"minimum_free_mb": 9999}\n')
-        controller = pf.Controller(self.root)
+        controller = pf.Controller(self.context)
         self.assertNotEqual(controller.config["minimum_free_mb"], 9999)
 
     def test_missing_configured_group_is_rejected_with_configuration_error(self):
@@ -595,7 +568,7 @@ class AdminTests(unittest.TestCase):
             return real_getgrnam(name)
         with mock.patch.object(pf.grp, "getgrnam", side_effect=group_lookup):
             with self.assertRaisesRegex(pf.Failure, "backup_read_group"):
-                pf.Controller(self.root)
+                pf.Controller(self.context).load_app_config()
 
     def test_update_missing_ci_does_not_stop_application(self):
         self.c.fail = "ci"
@@ -776,7 +749,8 @@ class AdminTests(unittest.TestCase):
     def test_auto_update_same_schema_succeeds_without_prompt(self):
         self.c.config["auto_update"] = True
         with mock.patch.object(pf, "Controller", return_value=self.c), mock.patch.object(pf, "confirm") as confirmation:
-            self.assertEqual(pf.main(["release-check", "--apply"], root=self.root), 0)
+            self.assertEqual(pf.main(["release-check", "--apply"], installation_root=self.layout.root,
+                                     running_release=self.layout.release_dir, trusted_launch=True), 0)
             confirmation.assert_not_called()
         self.assertEqual(self.c.revision(), NEW)
 
@@ -793,18 +767,40 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(self.invoke(["release-check", "--apply"]), 20)
         self.assertEqual(self.c.revision(), OLD)
 
+    def mark_config_production(self):
+        # v2.5 tests flipped the in-memory config; the approved environment is now
+        # protected registration data, so the editable file is the only channel
+        # an editor has, and it must be rejected before any effect.
+        config = self.c.config_dir / "pf-config.json"
+        saved = json.loads(config.read_text())
+        saved["environment"] = "production"
+        config.write_text(json.dumps(saved) + "\n")
+        self.c.config = None
+
+    def test_production_registration_is_not_enabled_in_a1(self):
+        paths = pfx.data_home(Path(self.temp.name) / "prod", project="partflow-prod", group=TEST_GROUP,
+                              environment="production")
+        registry_before = (self.layout.root / "registry/instances.json").read_bytes()
+        with self.assertRaisesRegex(pf_instance.ContextError, "not enabled in A1"):
+            pfx.register(self.layout, "prod", paths, project="partflow-prod", environment="production")
+        self.assertEqual((self.layout.root / "registry/instances.json").read_bytes(), registry_before)
+        self.assertEqual(sorted(os.listdir(self.layout.root / "locks")), sorted(["registry.lock", self.context.instance_id + ".lock"]))
+
     def test_production_reset_is_blocked(self):
-        self.c.config["environment"] = "production"
+        self.mark_config_production()
         self.assertEqual(self.invoke(["reset-db"]), 1)
         self.assertEqual(self.c.snapshots(), [])
+        self.assertIn("disagrees with the approved environment", self.errors_text())
 
     def test_production_update_is_blocked(self):
-        self.c.config["environment"] = "production"
+        self.mark_config_production()
         self.assertEqual(self.invoke(["update", "--latest"]), 1)
         self.assertTrue(self.c.running["frontend"])
+        self.assertEqual(self.c.ci_calls, [])
+        self.assertIn("disagrees with the approved environment", self.errors_text())
 
     def test_nested_controller_lock_is_rejected(self):
-        another = pf.Controller(self.root)
+        another = pf.Controller(self.context)
         with self.c.lock():
             with self.assertRaises(pf.Failure):
                 with another.lock():
@@ -939,7 +935,7 @@ class AdminTests(unittest.TestCase):
 
 
     def test_compose_runs_receive_managed_job_label(self):
-        c = pf.Controller(self.root)
+        c = pf.Controller(self.context)
         c.cli = ["docker", "compose"]
         with mock.patch.object(c, "command", return_value="") as run:
             c.compose("run", "--rm", "--no-deps", "backend", "uv", "run", "alembic", "heads")
@@ -949,7 +945,7 @@ class AdminTests(unittest.TestCase):
         self.assertIn("POSTGRES_DB", run.call_args[1]["clean_env_keys"])
 
     def test_command_removes_exported_db_and_preserves_explicit_override(self):
-        c = pf.Controller(self.root)
+        c = pf.Controller(self.context)
         command = [os.sys.executable, "-c", "import os; print(os.environ.get('POSTGRES_DB','absent'))"]
         with mock.patch.dict(os.environ, {"POSTGRES_DB": "unexpected_database"}):
             self.assertEqual(c.command(command, clean_env_keys=["POSTGRES_DB"]), "absent")
@@ -1088,7 +1084,7 @@ class PureTests(unittest.TestCase):
     def test_real_git_clone_is_pinned_to_requested_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             upstream = Path(tmp) / "upstream"
-            fixture(upstream)
+            source_fixture(upstream)
             def git(*args):
                 return subprocess.check_output(["git", *args], cwd=upstream, stderr=subprocess.DEVNULL).decode().strip()
             git("init", "-q")
@@ -1099,9 +1095,9 @@ class PureTests(unittest.TestCase):
             first = git("rev-parse", "HEAD")
             (upstream / "app-version.txt").write_text("second")
             git("commit", "-am", "second", "-q")
-            root = Path(tmp) / "installed"
-            fixture(root)
-            c = pf.Controller(root)
+            root = Path(tmp) / "installed" / "repo"
+            context = fixture(root)
+            c = pf.Controller(context)
             original_command = c.command
             def local_command(args, **kwargs):
                 if args[:3] == ["git", "clone", "--no-checkout"]:
@@ -1122,8 +1118,9 @@ class PurgeRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "repo"
-        fixture(self.root)
-        self.c = FakeController(self.root)
+        self.context = fixture(self.root)
+        self.layout = fixture.layout
+        self.c = FakeController(self.context)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -1136,18 +1133,32 @@ class PurgeRecoveryTests(unittest.TestCase):
         self.assertEqual(pf.parser().parse_args(["instances"]).command, "instances")
         self.assertEqual(pf.parser().parse_args(["recoveries"]).command, "recoveries")
 
-    def test_choose_instance_lists_and_selects_one_of_multiple_projects(self):
-        items = [
-            {"project": "partflow-a", "root": "/a", "services": ["db"], "running": ["db"],
-             "database": "a", "database_user": "u", "revision": OLD},
-            {"project": "partflow-b", "root": "/b", "services": ["db"], "running": [],
-             "database": "b", "database_user": "u", "revision": NEW},
-        ]
-        with mock.patch.object(self.c, "discover_instances", return_value=items), \
-             mock.patch.object(sys.stdin, "isatty", return_value=True), \
-             mock.patch("builtins.input", return_value="2"):
-            selected = self.c.choose_instance()
-        self.assertEqual(selected["project"], "partflow-b")
+    def test_instances_lists_registry_and_purge_requires_explicit_selection(self):
+        # v2.5 discovered instances through Docker and offered an interactive
+        # menu. PF-A1.1 lists the protected registry (no Docker) and refuses an
+        # implicit target when several instances exist without a default.
+        other_paths = pfx.data_home(Path(self.temp.name) / "other", project="partflow-b", group=TEST_GROUP)
+        pfx.register(self.layout, "beta", other_paths, project="partflow-b")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pf.main(["instances"], installation_root=self.layout.root,
+                                     running_release=self.layout.release_dir, trusted_launch=True), 0)
+            listing = output.getvalue()
+            self.assertIn("staging", listing)
+            self.assertIn("beta", listing)
+            self.assertIn("project=partflow-b", listing)
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors), mock.patch.object(pf, "Controller", return_value=self.c):
+                self.assertEqual(pf.main(["purge"], installation_root=self.layout.root,
+                                         running_release=self.layout.release_dir, trusted_launch=True), 1)
+            self.assertIn("pass --instance", errors.getvalue())
+            with mock.patch.object(pf, "Controller", return_value=self.c) as constructed, \
+                 mock.patch.object(self.c, "purge") as purge:
+                self.assertEqual(pf.main(["--instance", "beta", "purge", "--keep-backups"],
+                                         installation_root=self.layout.root,
+                                         running_release=self.layout.release_dir, trusted_launch=True), 0)
+            self.assertEqual(constructed.call_args.args[0].slug, "beta")
+            purge.assert_called_once()
 
     def test_purge_requires_recovery_then_multiple_confirmations_before_cleanup(self):
         summary = {
@@ -1285,8 +1296,9 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "repo"
-        fixture(self.root)
-        self.c = FakeController(self.root)
+        self.context = fixture(self.root)
+        self.layout = fixture.layout
+        self.c = FakeController(self.context)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -1366,8 +1378,9 @@ class RecoverySourceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "repo"
-        fixture(self.root)
-        self.c = FakeController(self.root)
+        self.context = fixture(self.root)
+        self.layout = fixture.layout
+        self.c = FakeController(self.context)
 
     def tearDown(self):
         self.temp.cleanup()
