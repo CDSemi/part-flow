@@ -29,6 +29,9 @@ for path in \
     "$SCRIPT_DIR/pf-admin.py" \
     "$SCRIPT_DIR/pf_instance.py" \
     "$SCRIPT_DIR/pf_bootstrap.py" \
+    "$SCRIPT_DIR/pf_runner.py" \
+    "$SCRIPT_DIR/pf_config.py" \
+    "$SCRIPT_DIR/pf_source.py" \
     "$SCRIPT_DIR/backup.sh" \
     "$SCRIPT_DIR/release-check.sh" \
     "$SCRIPT_DIR/pf-config.example.json" \
@@ -107,6 +110,9 @@ cp "$REPO_ROOT/pf.sh" "$TEMP/pf.sh"
 cp "$SCRIPT_DIR/pf-admin.py" "$TEMP/pf-admin.py"
 cp "$SCRIPT_DIR/pf_instance.py" "$TEMP/pf_instance.py"
 cp "$SCRIPT_DIR/pf_bootstrap.py" "$TEMP/pf_bootstrap.py"
+cp "$SCRIPT_DIR/pf_runner.py" "$TEMP/pf_runner.py"
+cp "$SCRIPT_DIR/pf_config.py" "$TEMP/pf_config.py"
+cp "$SCRIPT_DIR/pf_source.py" "$TEMP/pf_source.py"
 cp "$REPO_ROOT/compose.nas.yaml" "$TEMP/compose.nas.yaml"
 cp "$SCRIPT_DIR/backup.sh" "$TEMP/backup.sh"
 cp "$SCRIPT_DIR/release-check.sh" "$TEMP/release-check.sh"

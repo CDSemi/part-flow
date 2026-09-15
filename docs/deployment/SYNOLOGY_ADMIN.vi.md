@@ -33,6 +33,38 @@
 > với checkpoint này. Registration hiện chỉ là một transaction Python cho fixture dùng một
 > lần (`register_instance`), chưa phải lệnh cho người vận hành.
 
+> **Checkpoint Deployment Admin PF-A1.2 (2026-09-15) — runner, frozen configuration, protected
+> source store; vẫn là trạng thái phát triển, chưa phải bản phát hành NAS.** Mọi tiến trình con
+> của control release (Git, Docker/Compose, các công cụ SQL trong container `db`, chẩn đoán
+> host) giờ đi qua một runner duy nhất (`pf_runner.py`): executable phải được trusted installer
+> đăng ký trong `<root>/bootstrap/tools.conf` (`docker`, `docker_compose` tuỳ chọn, `git`,
+> `ip`, `hostname`; đường dẫn tuyệt đối, được kiểm qua chuỗi symlink tin cậy và ancestor được
+> bảo vệ, không bao giờ tìm trên `PATH`), môi trường con được dựng từ allowlist (`PATH` cố
+> định, `HOME` là thư mục riêng `instances/<uuid>/home` của instance, `DOCKER_CONFIG` bên
+> trong đó với client config rỗng và thư mục plugin rỗng, `DOCKER_HOST` lấy từ daemon
+> endpoint đã đăng ký, `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), đối số là
+> mảng, output được giới hạn và redact (mật khẩu database và dạng URL-encoded của nó không
+> bao giờ lọt vào thông báo hay log), mọi lời gọi đều có deadline, timeout hay ngắt giữa
+> chừng sẽ kết thúc cả process group và ghi unresolved effect vào
+> `instances/<uuid>/operations/<id>/unresolved-effects.json` (`status`/`doctor` liệt kê chúng).
+> `config/.env` được parse nghiêm ngặt (chỉ bảy key PartFlow, không trùng, không `export`,
+> không expansion; literal dạng không quote/single quote/double quote; xem mục 6) và mọi
+> lệnh mutation đều đóng băng nó trước thành snapshot riêng 0400
+> `instances/<uuid>/operations/<id>/app.env`; operation chỉ dùng snapshot đó, sửa
+> `config/.env` giữa chừng sẽ bị phát hiện, và giá trị có sẵn không thể đóng băng literal
+> (dấu nháy đơn, backslash cuối, ký tự điều khiển) là `migration-issue` tường minh — không
+> bao giờ bị ghi đè hay sinh lại. URL kết nối backend được tạo với credential percent-encoded
+> dưới tên `PARTFLOW_DATABASE_URL` (`compose.nas.yaml` không còn ghép `POSTGRES_PASSWORD`
+> thẳng vào URL). Git đặc quyền không bao giờ chạy trên `repo/`: source được fetch vào bare
+> store bảo vệ dưới `<root>/sources/` (cấu hình riêng, không hook/fsmonitor/include/alternates,
+> chỉ HTTPS) và export từng blob (submodule, symlink và Git LFS pointer bị từ chối); workspace
+> được so sánh byte/mode với manifest bảo vệ ghi lại khi công cụ deploy một cây; cây không có
+> provenance như vậy là `unknown`, không bao giờ được gán commit SHA (mục 8). Chẩn đoán
+> read-only đưa cho Compose một env-file rỗng do registration tạo và các giá trị dưới dạng
+> biến allowlist, nên Compose không đọc file nào có thể sửa được. Compose passthrough bị giới
+> hạn trong các từ đã biết và từ chối dump `config` thô cho tới khi PF-A1.4 bỏ hẳn route này;
+> `install-control.sh` vẫn là installer legacy.
+
 ## 1. Mục đích
 
 PartFlow NAS Admin tách repository application có thể sửa qua SMB ra khỏi lifecycle
@@ -287,6 +319,15 @@ trong file **không đồng nghĩa** credential/database thật bên trong Postg
 Đừng tùy tiện sửa các field này trên live instance; cần managed deployment/recovery hoặc
 một credential/database migration có kế hoạch.
 
+Từ PF-A1.2 file này được parse như dữ liệu với grammar nghiêm ngặt: đúng bảy key này, mỗi
+key một lần, `KEY=VALUE` không có khoảng trắng quanh `=` và không có `export`; dòng comment
+bắt đầu bằng `#`; giá trị hoặc không quote (không khoảng trắng, dấu nháy hay `#`; `$` và `\`
+là literal), hoặc single quote (`'...'`, literal, không chứa `'`), hoặc double quote (chỉ
+escape `\\` và `\"`, không expand `$`). Giá trị không bao giờ được expand, evaluate hay ghi
+lại. Giá trị không thể render literal vào snapshot riêng (dấu nháy đơn, backslash cuối, ký tự
+điều khiển) được báo là `migration-issue` và chặn lệnh mutation cho tới khi bạn sửa file bằng
+tay; mật khẩu hiện có không bao giờ bị sinh lại.
+
 ## 7. New deployment
 
 Brand-new staging thường dùng:
@@ -350,16 +391,26 @@ Nó hiển thị:
 
 ```text
 Deployed source: <SHA>
-Workspace HEAD: <SHA hoặc non-git>
-Workspace differs from deployed: True/False
-Workspace changes: ...
+Workspace: provenance git_commit|unknown | manifest commit <SHA hoặc none> | differs from deployed: True/False | changes: ...
 ```
+
+Từ PF-A1.2 dòng Workspace đến từ phép so sánh byte/mode an toàn theo fd giữa `repo/` và
+manifest bảo vệ mà công cụ ghi lại khi deploy một cây
+(`instances/<uuid>/artifacts/source-manifest.json`); không có lệnh Git nào chạy trên `repo/`,
+metadata `.git` của nó (hook, fsmonitor, filter, include, alternates, remote) là dữ liệu của
+người sửa và không bao giờ được dùng. Workspace không có manifest, hoặc khác manifest, có
+provenance `unknown`: `status` vẫn chạy, nhưng không có commit SHA nào được bịa ra.
 
 Manual update khi thấy workspace dirty/khác deployed revision sẽ đưa working tree hiện tại
 vào pre-update checkpoint dưới dạng `workspace.tar.gz`, rồi mới thay `repo/` bằng revision
-được chọn. Unattended release update sẽ **refuse** workspace đang drift thay vì tự xóa local work.
+được export từ protected source store. Unattended release update sẽ **refuse** workspace đang
+drift thay vì tự xóa local work.
 
-`deploy --current` cũng chỉ nhận clean Git checkout để deployed identity luôn là exact commit.
+`deploy --current` chứng minh workspace thay vì tin nó: commit mà checkout tự nhận
+(`.git/HEAD`, đọc như dữ liệu) được fetch vào protected store, export ra candidate riêng, và
+workspace phải bằng đúng cây đó từng byte; nếu không, lệnh dừng kèm danh sách khác biệt và
+yêu cầu `--commit`/`--latest`/`--release` tường minh. Cây chép từ ZIP hay checkout chưa xác
+minh vì thế không bao giờ được deploy như "current".
 
 ## 9. Manual update
 
@@ -657,6 +708,7 @@ Nếu thật sự cần raw Compose, dạng tương đương là:
 
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
+  PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<password percent-encoded>@db:5432/<db>' \
   docker compose \
   --project-directory /volume1/docker/partflow/repo \
   --env-file /volume1/docker/partflow/config/.env \
@@ -664,6 +716,11 @@ sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
   -f /volume1/docker/partflow/control/compose.nas.yaml \
   ps
 ```
+
+Từ PF-A1.2 `compose.nas.yaml` lấy URL kết nối backend từ `PARTFLOW_DATABASE_URL`, do
+controller sinh với credential percent-encoded; lệnh raw phải tự cung cấp biến này
+(controller không bao giờ đưa `.env` cho Compose như file có thể sửa: nó đưa snapshot đã đóng
+băng hoặc env-file rỗng do registration tạo, cộng các biến allowlist).
 
 Raw Docker/Compose bỏ qua controller lock, recovery check và destructive guard. Không chạy
 song song với `pf update`, `pf backup`, `pf reset-db`, `pf purge` hoặc `pf restore-instance`.
@@ -743,6 +800,11 @@ Raw Compose không tự biết external config. Runtime file authoritative là:
 ```text
 /volume1/docker/partflow/config/.env
 ```
+
+Nếu `doctor` báo `migration-issue` hoặc lỗi parse cho file này thì controller đã từ chối
+đề xuất (key lạ/trùng, quoting không hỗ trợ, secret không thể đóng băng literal); sửa file
+bằng tay — controller không bao giờ ghi lại nó. Lệnh raw Compose còn cần
+`PARTFLOW_DATABASE_URL` (mục 14).
 
 ### Có local source edit trước update
 

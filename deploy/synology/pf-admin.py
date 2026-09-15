@@ -10,7 +10,6 @@ import argparse
 import contextlib
 import datetime as dt
 import grp
-import gzip
 import hashlib
 import importlib.util
 import ipaddress
@@ -23,7 +22,6 @@ import shutil
 import signal
 import socket
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -52,11 +50,24 @@ def _load_sibling_module(name):
 
 
 pf_instance = _load_sibling_module("pf_instance")
+pf_runner = _load_sibling_module("pf_runner")
+pf_config = _load_sibling_module("pf_config")
+pf_source = _load_sibling_module("pf_source")
+pf_bootstrap = pf_instance.pf_bootstrap
 RUNNING_RELEASE = Path(__file__).resolve().parent
 
 VERSION = "2.5.0"
-CHECKPOINT = "PF-A1.1"
+CHECKPOINT = "PF-A1.2"
 PAGE_SIZE = 10
+# Explicit per-call limits for the controlled runner (PF-A1.2). A5 tunes budgets; the
+# security floor (every child has a deadline and a bounded, redacted capture) is here.
+TIMEOUT_DIAGNOSTIC = 120.0
+TIMEOUT_COMPOSE = 900.0
+TIMEOUT_BUILD = 3600.0
+TIMEOUT_DATA = 3600.0
+TIMEOUT_GIT_FETCH = 1800.0
+TIMEOUT_PASSTHROUGH = 3600.0
+GITHUB_HTTPS = "https://github.com/"
 DEFAULTS = {
     "repository": "CDSemi/part-flow", "branch": "main",
     "project": "partflow-staging", "environment": "staging",
@@ -167,24 +178,17 @@ def database_swap_sql(current, prepared, retained):
     )
 
 
-def read_dotenv(path):
-    values = {}
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise Failure("Invalid .env entry; expected KEY=VALUE.")
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if value[:1] in ("'", '"'):
-            if len(value) < 2 or value[-1] != value[0]:
-                raise Failure("Unsupported multiline or malformed quoted .env value.")
-            value = value[1:-1]
-        else:
-            value = value.split(" #", 1)[0].rstrip()
-        values[key] = value
-    return values
+def read_app_env(path, *, require_all=True):
+    """Strict data parsing of an application ``.env`` (pf_config grammar). Never evaluates anything."""
+    path = Path(path)
+    try:
+        data = pf_instance.read_bytes_nofollow(path)
+    except OSError as exc:
+        raise Failure(f"Cannot read {path}: {exc.strerror or exc}") from exc
+    try:
+        return pf_config.parse_app_env(data, label=str(path), require_all=require_all)
+    except pf_config.ConfigError as exc:
+        raise Failure(str(exc)) from exc
 
 
 def validate_timezone_name(value):
@@ -260,7 +264,15 @@ def render_env_template(template_path, values):
     missing = required - seen
     if missing:
         raise Failure("NAS environment sample is missing required fields: " + ", ".join(sorted(missing)))
-    return "\n".join(rendered) + "\n"
+    text = "\n".join(rendered) + "\n"
+    # The file this writes must read back literally through the strict parser (A1-T08).
+    try:
+        parsed = pf_config.parse_app_env(text.encode("utf-8"), label="rendered .env")
+    except pf_config.ConfigError as exc:
+        raise Failure("Rendered .env does not round-trip through the strict parser: " + str(exc)) from exc
+    if parsed != {key: str(values[key]) for key in REQUIRED_NAS_ENV_KEYS}:
+        raise Failure("Rendered .env values differ from the approved values; nothing was written.")
+    return text
 
 
 def prompt_value(label, default=None, validator=None):
@@ -442,6 +454,15 @@ class Controller:
         self._config = None
         self._backup_gid = None
         self._workspace_gid = None
+        # PF-A1.2: one runner, one frozen configuration per locked operation, one source store.
+        self.redactor = pf_runner.Redactor()
+        self._runner = None
+        self.frozen = None
+        self.operation_id = None
+        self.operation_dir = None
+        self._snapshots = 0
+        self.remote_override = None          # tests: local approved remote instead of GitHub
+        self.source_protocols = ("https",)   # tests: ("file",) for a local remote
 
     def ensure_config(self):
         """Load the runtime configuration once (read-only); return the cached values."""
@@ -526,6 +547,242 @@ class Controller:
                 + str(path)
             ) from exc
         return config
+
+    # ------------------------------------------------------------ runner (PF-A1.2)
+
+    def registered_tools(self):
+        """Read-only: the host executables registered in ``<root>/bootstrap/tools.conf``."""
+        path = self.context.installation_root / pf_instance.BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME
+        try:
+            return pf_bootstrap.parse_tools_conf(pf_instance.read_bytes_nofollow(path), label=str(path),
+                                                 error=Failure)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise Failure(f"Registered tools cannot be read: {path}: {exc}") from exc
+
+    @property
+    def runner(self):
+        """The single process boundary. Built lazily and read-only; it validates each tool on first use."""
+        if self._runner is None:
+            context = self.context
+            try:
+                self._runner = pf_runner.ProcessRunner(
+                    self.registered_tools(), home=context.home_dir, docker_config=context.docker_config_dir,
+                    docker_host=context.daemon.endpoint, redactor=self.redactor,
+                )
+            except pf_runner.RunnerError as exc:
+                raise Failure(str(exc)) from exc
+        return self._runner
+
+    def command(self, argv, *, cwd=None, output=None, input_file=None, env=None, timeout=None, effect=None,
+                stream=False):
+        """Every child process of the control release. ``argv[0]`` is a typed executable id.
+
+        ``env`` may only carry allowlisted application values (Compose interpolation);
+        the host environment is built by the runner from scratch. Output is bounded and
+        redacted; every call has a deadline; timeouts terminate the process group and,
+        when ``effect`` describes an external effect, record it as unresolved.
+        """
+        if not argv:
+            raise Failure("Empty command.")
+        tool, arguments = str(argv[0]), [str(item) for item in argv[1:]]
+        if tool not in pf_bootstrap.TOOL_IDS:
+            raise Failure(f"{tool!r} is not a registered executable id; the control release never searches PATH.")
+        if timeout is None:
+            timeout = TIMEOUT_DATA if tool == "docker" and arguments[:2] in (["image", "save"], ["image", "load"]) \
+                else TIMEOUT_DIAGNOSTIC
+        try:
+            child_env = self.runner.environment(env or None, allowed_keys=pf_config.CHILD_KEYS)
+            spec = pf_runner.ProcessSpec(
+                tool=tool, argv=tuple(arguments), cwd=str(cwd or self.context.installation_root), env=child_env,
+                timeout=float(timeout), stdin=input_file,
+                stdout="stream" if stream else output, effect=effect, label=tool,
+            )
+            result = self.runner.run(spec)
+        except pf_runner.RunnerError as exc:
+            raise Failure(str(exc)) from exc
+        if not result.ok:
+            status = "timed out" if result.timed_out else f"exit {result.returncode}"
+            raise Failure(f"{tool} failed ({status}).\n{pf_runner.failure_detail(result)}")
+        return result.stdout.strip()
+
+    def docker(self, *args, **kwargs):
+        return self.command(["docker", *args], **kwargs)
+
+    def compose_cli(self):
+        """The Compose entry point: the registered Docker CLI plugin, else a registered standalone binary."""
+        if self.cli is None:
+            try:
+                self.docker("compose", "version")
+                self.cli = ["docker", "compose"]
+            except Failure as exc:
+                if "docker_compose" not in self.registered_tools():
+                    raise Failure("Docker Compose is unavailable: " + str(exc).splitlines()[0]) from exc
+                self.command(["docker_compose", "version"])
+                self.cli = ["docker_compose"]
+        return list(self.cli)
+
+    # --------------------------------------------- application configuration (PF-A1.2)
+
+    def check_app_values(self, values):
+        """Validate accepted values without changing them (canonical form is required as written)."""
+        missing = [key for key in REQUIRED_NAS_ENV_KEYS if not values.get(key)]
+        if missing:
+            raise Failure("Missing required NAS environment values: " + ", ".join(missing))
+        quote_identifier(values["POSTGRES_USER"])
+        quote_identifier(values["POSTGRES_DB"])
+        if values["POSTGRES_DB"] in ("postgres", "template0", "template1"):
+            raise Failure("The application cannot use a PostgreSQL maintenance/template database.")
+        if len(values["POSTGRES_PASSWORD"]) < 4:
+            raise Failure("POSTGRES_PASSWORD is too short to be handled safely (minimum 4 characters).")
+        validate_timezone_name(values["SITE_TIMEZONE"])
+        for key, validator in (("PARTFLOW_BIND_IP", validate_ipv4), ("PARTFLOW_HTTP_PORT", validate_http_port),
+                               ("PARTFLOW_ALLOWED_HOST", validate_allowed_host)):
+            if validator(values[key]) != values[key]:
+                raise Failure(f"{key} must be written in its canonical form ({validator(values[key])!r}); "
+                              "editable configuration is not rewritten by the controller.")
+        problems = pf_config.unsupported_values(values)
+        if problems:
+            raise Failure("migration-issue: config/.env holds values that cannot be frozen literally: "
+                          + "; ".join(f"{key}: {issue}" for key, issue in sorted(problems.items()))
+                          + ". Nothing was changed or regenerated; fix the file explicitly.")
+        return values
+
+    def load_app_env(self):
+        """Strict, read-only load of the editable ``config/.env`` proposal; secrets go to the redactor."""
+        path = self.config_dir / ".env"
+        if not path.is_file():
+            raise Failure("Missing config/.env. Run deploy to create it or restore the host configuration.")
+        values = self.check_app_values(read_app_env(path))
+        for key in pf_config.SECRET_KEYS:
+            self.redactor.add(values[key])
+        return values
+
+    def env(self):
+        """Application values for this process: the frozen snapshot inside an operation, else the proposal."""
+        if self.frozen is not None:
+            return dict(self.frozen.values)
+        if self.operation_dir is not None:
+            raise Failure("This operation has no frozen application configuration; config/.env was absent "
+                          "when the operation started and has not been created by the operation itself.")
+        if not (self.control_dir / "compose.nas.yaml").is_file():
+            raise Failure("Missing installed control/compose.nas.yaml.")
+        return self.load_app_env()
+
+    def freeze_app_config(self, *, explicit=False):
+        """Render the current ``config/.env`` into the operation's private immutable snapshot.
+
+        Implicitly (from ``lock``) it freezes once; a later implicit call only verifies that
+        the editable file still equals the frozen source. ``explicit=True`` is used by the
+        operations that create or restore ``.env`` themselves.
+        """
+        if self.operation_dir is None:
+            raise Failure("Application configuration can only be frozen inside a locked operation.")
+        path = self.config_dir / ".env"
+        try:
+            data = pf_instance.read_bytes_nofollow(path)
+        except OSError as exc:
+            raise Failure(f"Cannot read {path}: {exc.strerror or exc}") from exc
+        if self.frozen is not None and not explicit:
+            if pf_instance.sha256_bytes(data) != self.frozen.source_sha256:
+                raise Failure("config/.env changed after this operation froze it; the operation stops and "
+                              "must be restarted to approve the new values.")
+            return self.frozen
+        try:
+            values = self.check_app_values(pf_config.parse_app_env(data, label=str(path)))
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        for key in pf_config.SECRET_KEYS:
+            self.redactor.add(values[key])
+        self._snapshots += 1
+        directory = self.operation_dir if self._snapshots == 1 else self.operation_dir / f"refreeze-{self._snapshots}"
+        if directory != self.operation_dir:
+            os.mkdir(directory, 0o700)
+            os.chmod(directory, 0o700)
+        try:
+            self.frozen = pf_config.freeze_app_config(values, source_bytes=data, operation_id=self.operation_id,
+                                                      operation_dir=directory)
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        return self.frozen
+
+    def compose_inputs(self, overrides=None):
+        """(values, env_file) one Compose invocation consumes: frozen inside an operation, proposal otherwise."""
+        if self.frozen is not None:
+            try:
+                pf_config.verify_frozen(self.frozen)
+            except pf_config.ConfigError as exc:
+                raise Failure(str(exc)) from exc
+            values, env_file = dict(self.frozen.values), self.frozen.env_file
+        else:
+            if self.operation_dir is not None:
+                raise Failure("This operation has no frozen application configuration; refusing to read the "
+                              "editable config/.env mid-operation.")
+            # Read-only diagnostics interpolate the current proposal; Compose itself reads no
+            # editable file: the registration-created empty env-file replaces <project-directory>/.env.
+            values, env_file = self.load_app_env(), self.context.diagnostic_env_path
+            if not env_file.is_file():
+                raise Failure(f"Registered diagnostics env-file is missing: {env_file}; it is created only by registration.")
+        for key, value in (overrides or {}).items():
+            if key not in pf_config.APP_KEYS:
+                raise Failure(f"Compose override {key!r} is not an application key.")
+            values[key] = value
+        return values, env_file
+
+    def begin_operation(self, command):
+        """Inside the instance lock: private operation directory, effect log and frozen configuration."""
+        if self.operation_dir is not None:
+            raise Failure("An operation is already active in this process.")
+        name = re.sub(r"[^a-z0-9]+", "-", str(command).lower()).strip("-") or "operation"
+        operation_id = f"{utc()}-{name}-{uuid.uuid4().hex[:8]}"
+        directory = self.context.operations_dir / operation_id
+        os.mkdir(directory, 0o700)
+        os.chmod(directory, 0o700)
+        self.operation_id, self.operation_dir, self._snapshots, self.frozen = operation_id, directory, 0, None
+        self.runner.effects_path = directory / "unresolved-effects.json"
+        context = self.context
+        write_json(directory / "operation.json", {
+            "schema_version": 1, "operation_id": operation_id, "command": str(command), "started": utc(),
+            "instance_id": context.instance_id, "slug": context.slug, "compose_project": context.compose_project,
+            "record_sha256": context.record_sha256, "control_release": context.control.release_id,
+            "control_sha256": context.control.sha256, "profile_sha256": context.profile.sha256,
+            "policy_revision": context.approved_policy.revision, "policy_sha256": context.approved_policy.sha256,
+        })
+        if (self.config_dir / ".env").is_file():
+            self.freeze_app_config()
+
+    def end_operation(self):
+        self.frozen = None
+        self.operation_id = None
+        self.operation_dir = None
+        self._snapshots = 0
+        if self._runner is not None:
+            self._runner.effects_path = None
+
+    def unresolved_effects(self):
+        """Every recorded unresolved effect of earlier operations (protected private state, read-only)."""
+        records = []
+        try:
+            names = sorted(os.listdir(self.context.operations_dir))
+        except OSError:
+            return records
+        for name in names:
+            path = self.context.operations_dir / name / "unresolved-effects.json"
+            try:
+                for item in pf_runner.load_unresolved_effects(path):
+                    records.append(dict(item, operation_id=name))
+            except pf_runner.RunnerError as exc:
+                records.append({"operation_id": name, "outcome": "unreadable", "tool": "?", "argv": [],
+                                "recorded_at": "?", "error": str(exc)})
+        return records
+
+    def log_effects(self):
+        records = self.unresolved_effects()
+        if not records:
+            return
+        log(f"UNRESOLVED EFFECTS recorded by earlier operations: {len(records)} (observe before retrying):")
+        for item in records[-10:]:
+            log(f"  {item.get('recorded_at')} {item.get('operation_id')}: {item.get('tool')} "
+                f"{' '.join(item.get('argv', []))[:120]} -> {item.get('outcome')}")
 
     def read_journal(self):
         """Return the pending journal, None, or an unreadable-journal marker. Never creates or repairs it."""
@@ -730,12 +987,9 @@ class Controller:
                 executable = bool(path.stat().st_mode & 0o111)
                 os.chown(path, -1, self.workspace_gid)
                 os.chmod(path, 0o770 if executable else 0o660)
-        if (self.root / ".git").is_dir():
-            try:
-                self.command(["git", "-c", f"safe.directory={self.root}",
-                              "config", "core.sharedRepository", "group"], cwd=self.root)
-            except Failure as exc:
-                log("WARNING: Could not set Git core.sharedRepository=group: " + str(exc))
+        # PF-A1.2: privileged Git never runs against the writable checkout, so the former
+        # ``git config core.sharedRepository group`` call is gone; ``.git`` metadata is
+        # editor data and is only chmod'ed like every other workspace file above.
 
     def validate_deploy_env(self, values, *, require_strong_password=False):
         missing = [key for key in REQUIRED_NAS_ENV_KEYS if not values.get(key)]
@@ -808,18 +1062,23 @@ class Controller:
         sample_path = self.control_dir / "nas.env.example"
 
         if env_path.exists():
-            values = self.validate_deploy_env(read_dotenv(env_path), require_strong_password=True)
+            # An existing file is accepted only as written (strict parse, literal values) or
+            # refused with an explicit issue; its password is never displayed, changed or regenerated.
+            # Inside the operation the frozen snapshot is the only source of these values.
+            current = dict(self.frozen.values) if self.frozen is not None else self.load_app_env()
+            values = self.validate_deploy_env(current, require_strong_password=True)
             log("Existing .env found; POSTGRES_PASSWORD will not be displayed or changed.")
             log(self.environment_summary(values))
             if not prompt_yes_no("Reuse this existing .env for the new deployment", default=True):
                 raise Failure("Existing .env was left unchanged. Move or edit it explicitly, then rerun deploy.")
             os.chown(env_path, -1, self.workspace_gid)
             os.chmod(env_path, 0o660)
+            self.freeze_app_config()
             return values
 
         if not sample_path.is_file():
             raise Failure("Missing installed control/nas.env.example; cannot initialize config/.env.")
-        sample = read_dotenv(sample_path)
+        sample = read_app_env(sample_path)
         missing = [key for key in REQUIRED_NAS_ENV_KEYS if key not in sample]
         if missing:
             raise Failure("NAS environment sample is missing required fields: " + ", ".join(missing))
@@ -875,6 +1134,8 @@ class Controller:
             if temporary.exists():
                 temporary.unlink()
         log("Created " + str(env_path) + " with group-write access for " + self.config["workspace_write_group"] + ". It remains outside the repository.")
+        # The operation consumes the file it just wrote, frozen once, never the editable copy later.
+        self.freeze_app_config(explicit=True)
         return values
 
     def ensure_listener_available(self, values):
@@ -906,122 +1167,229 @@ class Controller:
                 + ". New deploy refuses to adopt or overwrite them; use status/update or inspect the leftover resources first."
             )
 
-    def workspace_status(self, root=None):
-        root = Path(root or self.root).resolve()
-        if not (root / ".git").is_dir():
-            return {"head": None, "dirty": True, "changes": ["<non-git-workspace>"]}
-        head = self.command(["git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"], cwd=root)
-        if not SHA_RE.fullmatch(head):
-            raise Failure("Git returned an invalid workspace SHA.")
-        changed = self.command(["git", "-c", f"safe.directory={root}", "diff", "HEAD", "--name-only"], cwd=root).splitlines()
-        untracked = self.command(["git", "-c", f"safe.directory={root}", "ls-files", "--others", "--exclude-standard"], cwd=root).splitlines()
-        changes = [item for item in changed + untracked if item]
-        return {"head": head, "dirty": bool(changes), "changes": changes}
+    # ------------------------------------------- source store and manifest (PF-A1.2)
 
-    def current_target(self):
+    def approved_remote(self):
+        """The one approved source remote: the configured GitHub repository over HTTPS."""
+        if self.remote_override is not None:
+            return self.remote_override
+        return GITHUB_HTTPS + self.config["repository"] + ".git"
+
+    def store_git(self, argv, *, cwd, stdin=None, stdout=None, timeout=None):
+        """Git for the protected store only; every call carries ``--git-dir`` and goes through the runner."""
+        return self.command(["git", *argv], cwd=cwd, input_file=stdin, output=stdout,
+                            timeout=timeout or TIMEOUT_GIT_FETCH)
+
+    def source_store(self):
+        return pf_source.SourceStore(self.context.installation_root / pf_instance.SOURCES_RELATIVE,
+                                     self.approved_remote(), self.store_git, protocols=self.source_protocols)
+
+    @contextlib.contextmanager
+    def store_lock(self, store):
+        """Exclusive lock for store creation/fetch; the lock inode is created once and never removed."""
+        try:
+            handle = pf_instance.acquire_source_lock(store.lock_path)
+        except pf_instance.ContextError as exc:
+            raise Failure(str(exc)) from exc
+        try:
+            yield handle
+        finally:
+            handle.release()
+
+    def materialize_source(self, target, destination):
+        """Fetch ``target['sha']`` into the protected store and export its tree to a private candidate.
+
+        Replaces the former clone into the workspace parent: the writable
+        checkout is never used as a remote, alternate or object source, and the
+        exported tree carries no ``.git`` metadata, links, submodules or LFS pointers.
+        """
+        if self.operation_dir is None:
+            raise Failure("Source materialization requires a locked operation.")
+        sha = target["sha"]
+        if not SHA_RE.fullmatch(sha):
+            raise Failure("A full commit SHA is required to materialize a source tree.")
+        store = self.source_store()
+        try:
+            with self.store_lock(store):
+                store.ensure()
+                store.fetch_commit(sha, timeout=TIMEOUT_GIT_FETCH)
+            store.export(sha, destination, timeout=TIMEOUT_GIT_FETCH)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
+        self.compose("config", "-q", root=destination)
+
+    def load_source_manifest(self):
+        """The protected manifest of the last deployed tree, or None (no provenance recorded)."""
+        try:
+            return pf_source.load_manifest(self.context.source_manifest_path, pf_instance.parse_strict_json)
+        except (pf_source.SourceError, pf_instance.ContextError) as exc:
+            raise Failure(f"Protected source manifest is unusable: {exc}") from exc
+
+    def record_source_manifest(self, tree, revision, *, verified):
+        """Write the manifest of the tree that was deployed (built from the private candidate)."""
+        source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
+            else {"kind": "unknown"}
+        try:
+            manifest = pf_source.build_manifest(tree, source=source, excludes=SOURCE_EXCLUDES)
+            digest_value = pf_source.write_manifest(self.context.source_manifest_path, manifest)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
+        return digest_value
+
+    def workspace_status(self, root=None):
+        """fd-safe comparison of the workspace with the protected manifest; never runs Git there.
+
+        ``head`` is the commit the protected manifest records (or None), ``dirty`` is
+        True when the workspace differs from that manifest or no manifest exists, and
+        ``provenance`` is ``git_commit`` only for a matching, commit-backed manifest.
+        """
+        root = Path(root or self.root)
+        manifest = self.load_source_manifest()
+        if manifest is None:
+            return {"head": None, "dirty": True, "changes": ["<no-protected-manifest>"], "provenance": "unknown",
+                    "manifest_commit": None}
+        try:
+            report = pf_source.compare_manifest(root, manifest, excludes=SOURCE_EXCLUDES)
+        except (pf_source.SourceError, OSError) as exc:
+            raise Failure(f"Workspace comparison failed: {exc}") from exc
+        source = manifest["source"]
+        commit = source.get("commit") if source["kind"] == "git_commit" else None
+        matches = report["matches"]
+        return {
+            "head": commit,
+            "dirty": not matches,
+            "changes": pf_source.change_summary(report),
+            "provenance": "git_commit" if (matches and commit) else "unknown",
+            "manifest_commit": commit,
+        }
+
+    def current_target(self, destination):
+        """``deploy --current``: prove the workspace equals a commit of the approved remote.
+
+        The workspace's own ``.git/HEAD`` is read as data only, as a *hint* of which
+        commit to fetch into the protected store. The commit is then exported to the
+        private candidate ``destination`` and the workspace must equal that tree byte
+        for byte; otherwise the provenance stays unknown and no SHA is assigned.
+        """
         status = self.workspace_status()
-        if status["head"] is None:
-            raise Failure("deploy --current requires a Git checkout. Use --latest, --commit, or --release otherwise.")
-        if status["dirty"]:
+        hint = status["head"] if status["provenance"] == "git_commit" else pf_source.workspace_head_hint(self.root)
+        if hint is None:
             raise Failure(
-                "deploy --current requires a clean working tree so the deployed revision is exact. "
-                "Commit/revert the workspace first. Changed paths: " + ", ".join(status["changes"][:10])
+                "deploy --current: the workspace has unknown provenance (no protected manifest and no readable "
+                "commit hint). Deploy an explicit source with --latest, --commit or --release; a ZIP or an "
+                "unverified checkout is never assigned a commit SHA."
             )
-        return {"sha": status["head"], "ref": "current-checkout", "release_id": None, "published_at": None, "prerelease": None}
+        self.materialize_source({"sha": hint}, destination)
+        try:
+            candidate = pf_source.build_manifest(destination, source={"kind": "git_commit", "commit": hint,
+                                                                       "remote": self.approved_remote()},
+                                                 excludes=SOURCE_EXCLUDES)
+            report = pf_source.compare_manifest(self.root, candidate, excludes=SOURCE_EXCLUDES)
+        except (pf_source.SourceError, OSError) as exc:
+            raise Failure(f"Workspace comparison failed: {exc}") from exc
+        if not report["matches"]:
+            raise Failure(
+                f"deploy --current: the workspace differs from commit {hint} of the approved remote, so its "
+                "provenance is unknown. Commit and push the changes, then deploy that commit explicitly, or "
+                "restore the workspace. Differences: " + ", ".join(pf_source.change_summary(report))
+            )
+        return {"sha": hint, "ref": "current-checkout", "release_id": None, "published_at": None, "prerelease": None}
 
     def create_deployed_source_archive(self, destination, revision):
-        """Archive the exact deployed Git revision, independent of workspace edits."""
+        """Archive the exact deployed revision from the protected store, or from a workspace proven equal to it."""
         destination = Path(destination)
-        if (self.root / ".git").is_dir():
+        store = self.source_store()
+        store_has_commit = False
+        if store.exists():
             try:
-                self.command(["git", "-c", f"safe.directory={self.root}", "cat-file", "-e", revision + "^{commit}"], cwd=self.root)
-                raw = destination.with_name(destination.name + ".tar")
+                store.verify()
+                store_has_commit = store.has_commit(revision)
+            except pf_source.SourceError as exc:
+                raise Failure(str(exc)) from exc
+        if store_has_commit:
+            with tempfile.TemporaryDirectory(prefix="deployed-source-", dir=self.state) as folder:
+                tree = Path(folder) / "tree"
                 try:
-                    self.command(["git", "-c", f"safe.directory={self.root}", "archive", "--format=tar", "-o", raw, revision], cwd=self.root)
-                    with raw.open("rb") as source, gzip.open(destination, "wb") as output:
-                        shutil.copyfileobj(source, output)
-                finally:
-                    if raw.exists():
-                        raw.unlink()
-                with tarfile.open(destination, "r:gz") as archive:
-                    archive.getmembers()
-                return
-            except Failure:
-                pass
-        status = self.workspace_status()
-        if status["head"] == revision and not status["dirty"]:
-            create_source_archive(self.root, destination)
+                    store.export(revision, tree, timeout=TIMEOUT_GIT_FETCH)
+                except pf_source.SourceError as exc:
+                    raise Failure(str(exc)) from exc
+                create_source_archive(tree, destination)
+            return
+        manifest = self.load_source_manifest()
+        if manifest is not None and manifest["source"]["kind"] == "git_commit" \
+                and manifest["source"]["commit"] == revision:
+            # The archive is built from the workspace bytes while each file is proven equal to
+            # the manifest (one read per file): no separate compare-then-copy window.
+            try:
+                pf_source.archive_verified_tree(self.root, manifest, destination, excludes=SOURCE_EXCLUDES)
+            except pf_source.SourceError as exc:
+                raise Failure("Cannot archive the deployed source from the workspace: " + str(exc)) from exc
             return
         raise Failure(
-            "Cannot reconstruct the exact deployed source revision from the local Git repository. "
-            "No destructive operation will continue until the deployed source can be archived."
+            "Cannot reconstruct the exact deployed source revision: it is neither in the protected source store "
+            "nor proven equal to the workspace by the protected manifest. No destructive operation will continue "
+            "until the deployed source can be archived."
         )
 
-    def command(self, argv, *, cwd=None, output=None, input_file=None, text=None, env=None, clean_env_keys=()):
-        child_env = os.environ.copy()
-        for name in clean_env_keys:
-            child_env.pop(name, None)
-        child_env["GIT_TERMINAL_PROMPT"] = "0"
-        if env:
-            child_env.update(env)
+    def prove_tree_commit(self, tree, revision):
+        """True only when the protected store holds ``revision`` and its exported tree equals ``tree`` byte/mode.
+
+        Checkpoint or bundle metadata alone never assigns a commit to a tree; without the
+        store's proof the tree is recorded with unknown provenance.
+        """
+        if not isinstance(revision, str) or not SHA_RE.fullmatch(revision):
+            return False
+        store = self.source_store()
+        if not store.exists():
+            return False
         try:
-            result = subprocess.run(
-                [str(v) for v in argv], cwd=cwd or self.root, env=child_env,
-                stdin=input_file, input=text.encode() if text is not None else None,
-                stdout=output if output is not None else subprocess.PIPE,
-                stderr=subprocess.PIPE, check=False,
-            )
-        except OSError as exc:
-            raise Failure(f"Cannot execute {argv[0]}: {exc}") from exc
-        if result.returncode:
-            detail = result.stderr.decode("utf-8", "replace")[-5000:].strip()
-            # Command arguments can include SQL/paths. Never print environment secrets.
-            raise Failure(f"{argv[0]} failed (exit {result.returncode}).\n{detail}")
-        return result.stdout.decode("utf-8", "replace").strip() if result.stdout is not None else ""
+            store.verify()
+            if not store.has_commit(revision):
+                return False
+            with tempfile.TemporaryDirectory(prefix="prove-source-", dir=self.state) as folder:
+                exported = Path(folder) / "tree"
+                store.export(revision, exported, timeout=TIMEOUT_GIT_FETCH)
+                manifest = pf_source.build_manifest(
+                    exported, source={"kind": "git_commit", "commit": revision, "remote": self.approved_remote()},
+                    excludes=SOURCE_EXCLUDES)
+                return bool(pf_source.compare_manifest(tree, manifest, excludes=SOURCE_EXCLUDES)["matches"])
+        except (pf_source.SourceError, OSError) as exc:
+            raise Failure("Source provenance check failed: " + str(exc)) from exc
 
-    def docker(self, *args, **kwargs):
-        return self.command(["docker", *args], **kwargs)
-
-    def compose(self, *args, root=None, override=None, **kwargs):
-        root = Path(root or self.root).resolve()
+    def compose(self, *args, root=None, override=None, timeout=None, env=None, **kwargs):
+        """One Compose invocation with frozen inputs: fixed project, files, env-file and directory."""
+        root = Path(root or self.root)
         if args and args[0] == "run":
             args = ("run", "--label", "partflow.admin.project=" + self.config["project"], *args[1:])
-        if self.cli is None:
-            try:
-                self.docker("compose", "version")
-                self.cli = ["docker", "compose"]
-            except Failure:
-                self.command(["docker-compose", "version"])
-                self.cli = ["docker-compose"]
-
+        cli = self.compose_cli()
         compose_file = self.control_dir / "compose.nas.yaml"
-        env_path = self.config_dir / ".env"
         if not compose_file.is_file():
             raise Failure("Missing installed control/compose.nas.yaml.")
-        if not env_path.is_file():
-            raise Failure("Missing config/.env. Run deploy to create it or restore the host configuration.")
-
-        command = self.cli + [
+        values, env_file = self.compose_inputs(env)
+        command = cli + [
             "--project-directory", str(root),
-            "--env-file", str(env_path),
+            "--env-file", str(env_file),
             "-p", self.config["project"],
             "-f", str(compose_file),
         ]
         selected = Path(override) if override else self.override
         if selected.exists():
             command += ["-f", str(selected)]
-
-        # The env file lives outside the writable repository. Compose receives it
-        # explicitly, and build contexts receive the exact source root separately.
-        base_env = read_dotenv(env_path)
-        explicit_env = kwargs.pop("env", None) or {}
-        child_env = dict(base_env)
-        child_env["PARTFLOW_REPO_ROOT"] = str(root)
-        child_env.update(explicit_env)
-        clean = set(base_env) | {"PARTFLOW_REPO_ROOT"}
-        return self.command(
-            command + list(args), cwd=root, clean_env_keys=clean, env=child_env, **kwargs
-        )
+        # Application values reach Compose only as allowlisted child variables derived from
+        # the frozen snapshot (plus the core-generated repository root and encoded database
+        # URL); no editable file is read by Compose and no host variable is inherited.
+        child = pf_config.child_values(values, workspace=root)
+        if timeout is None:
+            verb = args[0] if args else ""
+            data_words = ("exec pg_", "exec createdb", "exec dropdb", "pg_restore")
+            if verb == "build":
+                timeout = TIMEOUT_BUILD
+            elif verb == "run" or (verb == "exec" and any(str(word).startswith(data_words) or str(word) == "pg_restore"
+                                                           for word in args)):
+                timeout = TIMEOUT_DATA
+            else:
+                timeout = TIMEOUT_COMPOSE
+        return self.command(command + list(args), env=child, timeout=timeout, **kwargs)
 
     @contextlib.contextmanager
     def lock(self, pending_route=None):
@@ -1030,6 +1398,8 @@ class Controller:
         The lock inode lives under <installation-root>/locks and is never
         created here or removed by purge. ``pending_route`` is the command
         name; PENDING_ROUTES decides whether it may enter an existing journal.
+        Inside the lock the operation directory is created and the application
+        configuration is frozen (PF-A1.2) before any effect.
         """
         try:
             handle = pf_instance.acquire_instance_lock(self.context)
@@ -1043,8 +1413,10 @@ class Controller:
             if not self.state.is_dir():
                 self.state.mkdir(mode=0o700)
                 os.chmod(self.state, 0o700)
+            self.begin_operation(pending_route or "operation")
             yield handle
         finally:
+            self.end_operation()
             handle.release()
 
     def staging(self):
@@ -1052,47 +1424,14 @@ class Controller:
         if self.context.approved_environment != "staging":
             raise Failure("Mutating lifecycle commands support staging only. This is not a production deployment package.")
 
-    def env(self):
-        path = self.config_dir / ".env"
-        if not path.is_file() or not (self.control_dir / "compose.nas.yaml").is_file():
-            raise Failure("Missing config/.env or installed control/compose.nas.yaml.")
-        result = read_dotenv(path)
-        for key in ("POSTGRES_DB", "POSTGRES_USER"):
-            quote_identifier(result.get(key, ""))
-        if result["POSTGRES_DB"] in ("postgres", "template0", "template1"):
-            raise Failure("The application cannot use a PostgreSQL maintenance/template database.")
-        return result
-
-    def revision(self, root=None):
-        root = Path(root or self.root).resolve()
-        if root != self.root:
-            if (root / ".git").is_dir():
-                revision = self.command(["git", "-c", f"safe.directory={root}", "rev-parse", "HEAD"], cwd=root)
-                if revision and SHA_RE.fullmatch(revision):
-                    return revision
-            marker = root / "DEPLOYED_SOURCE.txt"
-            legacy = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
-            if SHA_RE.fullmatch(legacy):
-                return legacy
-            raise Failure("Cannot determine source revision for the selected source tree.")
-
+    def revision(self):
+        """The deployed source revision recorded in protected state. The workspace is never consulted."""
         deployed = self.state / "deployed.json"
         if deployed.is_file():
             value = load_json(deployed).get("sha", "")
-            if SHA_RE.fullmatch(value):
+            if isinstance(value, str) and SHA_RE.fullmatch(value):
                 return value
-
-        # v2.4 migration compatibility: accept the old marker until the first
-        # v2.5 managed operation writes deployed.json in external state.
-        legacy_marker = self.root / "DEPLOYED_SOURCE.txt"
-        legacy = legacy_marker.read_text(encoding="utf-8").strip() if legacy_marker.is_file() else ""
-        if SHA_RE.fullmatch(legacy):
-            return legacy
-
-        status = self.workspace_status()
-        if status["head"] and not status["dirty"]:
-            return status["head"]
-        raise Failure("No verified deployed source revision is recorded in external state.")
+        raise Failure("No verified deployed source revision is recorded in protected state (deployed.json).")
 
     def sql(self, database, sql):
         quote_identifier(database)
@@ -1204,8 +1543,9 @@ class Controller:
         except Failure:
             if source_verified:
                 raise
-            revision = "0" * 40
-        backup_id = f"{utc()}-{revision[:12]}-{uuid.uuid4().hex[:6]}"
+            # Unknown provenance: no commit is invented; the id carries a zero placeholder only.
+            revision = None
+        backup_id = f"{utc()}-{(revision or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
         self.ensure_backup_tree()
         folder = self.backups_dir / backup_id
         folder.mkdir(mode=0o700)
@@ -1219,6 +1559,7 @@ class Controller:
         metadata = {
             "format": 2, "id": backup_id, "created_at": utc(), "reason": reason,
             "status": "incomplete", "source_revision": revision,
+            "source_provenance": "git_commit" if (source_verified and revision) else "unknown",
             "source_verified": source_verified, "project": self.config["project"],
             "repository": self.config["repository"], "environment": self.config["environment"],
             "database": self.env()["POSTGRES_DB"], "database_user": self.env()["POSTGRES_USER"],
@@ -1238,6 +1579,7 @@ class Controller:
                     raise
                 source_verified = False
                 metadata["source_verified"] = False
+                metadata["source_provenance"] = "unknown"
                 create_source_archive(self.root, source)
                 log("Exact deployed source could not be reconstructed; preserving an emergency data/workspace checkpoint.")
         else:
@@ -1412,8 +1754,20 @@ class Controller:
         self.phase("health-checked")
         log("Application health checks passed. Perform the UI/workflow and network-access smoke tests separately.")
 
-    def replace_source(self, candidate, revision):
+    def replace_source(self, candidate, revision, *, verified=True):
         self.phase("changing-source")
+        # The private candidate is inventoried before the workspace is touched; the
+        # protected manifest then records what was deployed (workspace generation switch
+        # and deployed-artifact persistence remain PF-A3).
+        candidate = Path(candidate)
+        try:
+            source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
+                else {"kind": "unknown"}
+            manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
+        if any(entry["kind"] != "file" for entry in manifest["entries"]):
+            raise Failure("Candidate source contains an unsupported link/special file; nothing was replaced.")
         # v2.5 keeps all runtime control/configuration outside repo/. The writable
         # repository can therefore be replaced as one application working tree.
         for item in list(self.root.iterdir()):
@@ -1421,7 +1775,7 @@ class Controller:
                 shutil.rmtree(item)
             else:
                 item.unlink()
-        for item in Path(candidate).iterdir():
+        for item in candidate.iterdir():
             destination = self.root / item.name
             if item.is_dir() and not item.is_symlink():
                 shutil.copytree(item, destination, symlinks=False)
@@ -1430,15 +1784,18 @@ class Controller:
             else:
                 raise Failure("Downloaded source contains an unsupported link/special file.")
         self.publish_workspace_permissions()
+        try:
+            pf_source.write_manifest(self.context.source_manifest_path, manifest)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
         self.phase("source-replaced")
 
     def github(self, path, missing=False):
+        # Unauthenticated GitHub API only: no credential is taken from the inherited environment
+        # (the installed launcher provides none); protected credentials are a later-WP decision.
         request = urllib.request.Request("https://api.github.com/repos/" + self.config["repository"] + "/" + path,
             headers={"Accept": "application/vnd.github+json", "User-Agent": "PartFlow-NAS-Admin/" + VERSION,
                      "X-GitHub-Api-Version": "2022-11-28"})
-        token = os.environ.get("GITHUB_TOKEN")
-        if token:
-            request.add_header("Authorization", "Bearer " + token)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
@@ -1512,30 +1869,26 @@ class Controller:
             raise Deferred("The latest CI run for the exact target SHA is not a completed success.")
         log("Verified GitHub CI: " + latest["html_url"])
 
-    def clone(self, target, destination):
-        self.command(["git", "clone", "--no-checkout", "--", "https://github.com/" + self.config["repository"] + ".git", str(destination)], cwd=self.root.parent)
-        self.command(["git", "checkout", "--detach", target["sha"]], cwd=destination)
-        actual = self.command(["git", "rev-parse", "HEAD"], cwd=destination)
-        if actual != target["sha"]:
-            raise Failure("Cloned checkout does not match the pinned GitHub SHA.")
-        for item in destination.rglob("*"):
-            if ".git" not in item.relative_to(destination).parts and item.is_symlink():
-                raise Failure("Downloaded source has a symbolic link; manual review is required.")
-        self.compose("config", "-q", root=destination)
-
-    def automatic_guard(self, current, candidate):
-        if not (self.root / ".git").is_dir():
-            raise Deferred("Automatic updates require a Git checkout established by one successful manual update first.")
+    def automatic_guard(self, current, candidate, target_sha):
         workspace = self.workspace_status()
+        if workspace["provenance"] != "git_commit":
+            raise Deferred("Automatic updates require a workspace with a protected manifest established by one "
+                           "successful manual update first.")
         if workspace["head"] != current or workspace["dirty"]:
             raise Deferred(
                 "Automatic update requires the writable repository to match the deployed SHA exactly. "
                 "Use a manual update so workspace changes can be archived and reviewed."
             )
         try:
-            self.command(["git", "merge-base", "--is-ancestor", current, "HEAD"], cwd=candidate)
-        except Failure as exc:
-            raise Deferred("The selected release is not a descendant of the deployed SHA; automatic downgrade/divergence is refused.") from exc
+            store = self.source_store()
+            with self.store_lock(store):
+                store.ensure()
+                store.fetch_commit(current, timeout=TIMEOUT_GIT_FETCH)
+            ancestor = store.is_ancestor(current, target_sha)
+        except pf_source.SourceError as exc:
+            raise Deferred("Ancestry of the deployed SHA cannot be established in the protected store: " + str(exc)) from exc
+        if not ancestor:
+            raise Deferred("The selected release is not a descendant of the deployed SHA; automatic downgrade/divergence is refused.")
         for relative in AUTO_REVIEW_PATHS:
             old, new = self.root / relative, candidate / relative
             if (old.exists() != new.exists()) or (old.exists() and digest(old) != digest(new)):
@@ -1569,22 +1922,27 @@ class Controller:
         if use_current:
             if target is not None:
                 raise Failure("Internal deploy source selection conflict.")
-            target = self.current_target()
         elif target is None:
             raise Failure("A resolved deployment target is required.")
 
-        if skip_ci:
-            log("WARNING: CI verification explicitly bypassed for this manual staging deployment.")
-        else:
-            self.require_ci(target["sha"])
-
-        with contextlib.ExitStack() as stack:
-            if use_current:
-                source = self.root
+        def gate_ci(sha):
+            if skip_ci:
+                log("WARNING: CI verification explicitly bypassed for this manual staging deployment.")
             else:
-                folder = stack.enter_context(tempfile.TemporaryDirectory(prefix="initial-candidate-", dir=self.state))
-                source = Path(folder) / "repo"
-                self.clone(target, source)
+                self.require_ci(sha)
+
+        if not use_current:
+            gate_ci(target["sha"])
+        with contextlib.ExitStack() as stack:
+            # Builds always consume a private immutable candidate exported from the protected
+            # store; for --current the workspace must first prove equal to that candidate.
+            folder = stack.enter_context(tempfile.TemporaryDirectory(prefix="initial-candidate-", dir=self.state))
+            source = Path(folder) / "repo"
+            if use_current:
+                target = self.current_target(source)
+                gate_ci(target["sha"])
+            else:
+                self.materialize_source(target, source)
 
             images, override = self.build_target(source, target["sha"])
             contract = self.image_contract(root=source, override=override)
@@ -1606,6 +1964,7 @@ class Controller:
 
             if use_current:
                 self.publish_workspace_permissions()
+                self.record_source_manifest(source, target["sha"], verified=True)
                 self.phase("source-ready")
             else:
                 self.replace_source(source, target["sha"])
@@ -1703,7 +2062,10 @@ class Controller:
 
     def instance_summary(self):
         resources = self.detailed_project_resources()
-        values = read_dotenv(self.config_dir / ".env") if (self.config_dir / ".env").is_file() else {}
+        try:
+            values = self.env()
+        except Failure:
+            values = {}
         revision = "unknown"
         try:
             revision = self.revision()
@@ -1827,7 +2189,7 @@ class Controller:
         """
         self.database_ready()
         checkpoint = self.snapshot("before-purge")
-        recovery_id = f"purge-{utc()}-{checkpoint['source_revision'][:12]}-{uuid.uuid4().hex[:6]}"
+        recovery_id = f"purge-{utc()}-{(checkpoint['source_revision'] or '0' * 40)[:12]}-{uuid.uuid4().hex[:6]}"
         self.ensure_recovery_tree()
         folder = self.recovery_root / recovery_id
         folder.mkdir(mode=0o700)
@@ -1846,10 +2208,16 @@ class Controller:
         shutil.copy2(checkpoint_folder / "database.dump", db_dir / "active.dump")
         shutil.copy2(checkpoint_folder / "database.list", db_dir / "active.list")
 
-        env_source = self.config_dir / ".env"
-        if not env_source.is_file():
-            raise Failure("config/.env disappeared while creating recovery; purge is refused.")
-        shutil.copy2(env_source, saved_config_dir / ".env")
+        # The bundle preserves the configuration this operation consumed: the frozen
+        # snapshot rendering (literal values), not whatever the editable file holds now.
+        if self.frozen is None:
+            raise Failure("No frozen application configuration for this purge; recovery bundle refused.")
+        try:
+            frozen_bytes = pf_config.render_app_env(self.frozen.values)
+        except pf_config.ConfigError as exc:
+            raise Failure(str(exc)) from exc
+        with (saved_config_dir / ".env").open("wb") as handle:
+            handle.write(frozen_bytes)
         admin_config = self.config_dir / "pf-config.json"
         if admin_config.is_file():
             shutil.copy2(admin_config, saved_config_dir / "pf-config.json")
@@ -1935,6 +2303,8 @@ class Controller:
             "instance_id": self.context.instance_id,
             "slug": self.context.slug,
             "source_revision": checkpoint["source_revision"],
+            "source_verified": bool(checkpoint.get("source_verified")),
+            "source_provenance": checkpoint.get("source_provenance", "unknown"),
             "active_checkpoint": checkpoint["id"],
             "database": active,
             "database_user": self.env()["POSTGRES_USER"],
@@ -2020,7 +2390,7 @@ class Controller:
             log(
                 f"{number:>3}. {item['id']}  [{item.get('status', 'unknown')}]  "
                 f"project={item.get('project', 'unknown')}  db={item.get('database', 'unknown')}  "
-                f"source={item.get('source_revision', 'unknown')[:12]}"
+                f"source={(item.get('source_revision') or 'unknown')[:12]}"
             )
         return pages
 
@@ -2193,9 +2563,20 @@ class Controller:
             reset_admin_config=bool(reset_admin_config),
         )
 
-    def replace_source_for_recovery(self, candidate, revision):
+    def replace_source_for_recovery(self, candidate, revision, *, verified=False):
         """Restore the writable repository; executable control stays external/root-owned."""
         candidate = Path(candidate)
+        # Runtime secrets/state never belong in the writable repository (v1 bundles carried them).
+        for legacy in (candidate / ".env", candidate / "DEPLOYED_SOURCE.txt"):
+            if legacy.exists():
+                legacy.unlink()
+        verified = bool(verified and isinstance(revision, str) and SHA_RE.fullmatch(revision))
+        try:
+            source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
+                else {"kind": "unknown"}
+            manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
         for item in list(self.root.iterdir()):
             if item.is_dir() and not item.is_symlink():
                 shutil.rmtree(item)
@@ -2203,11 +2584,11 @@ class Controller:
                 item.unlink()
         for item in candidate.iterdir():
             copy_tree_entry(item, self.root / item.name)
-        # Runtime secrets/state no longer belong in the writable repository.
-        for legacy in (self.root / ".env", self.root / "DEPLOYED_SOURCE.txt"):
-            if legacy.exists():
-                legacy.unlink()
         self.publish_workspace_permissions()
+        try:
+            pf_source.write_manifest(self.context.source_manifest_path, manifest)
+        except pf_source.SourceError as exc:
+            raise Failure(str(exc)) from exc
 
     def restore_runtime_environment(self, recovery, extracted_source=None):
         folder = Path(recovery["_folder"])
@@ -2274,7 +2655,7 @@ class Controller:
 
         log("Restore target summary:")
         log("  Project: " + recovery["project"])
-        log("  Source: " + recovery["source_revision"])
+        log("  Source: " + str(recovery.get("source_revision") or "unknown provenance"))
         log("  Active database: " + recovery["database"])
         log("  Preserved databases: " + ", ".join(item["name"] for item in recovery["databases"]))
         log("  Recovery bundle: " + recovery["id"])
@@ -2297,7 +2678,13 @@ class Controller:
             extract_source(archive, candidate)
             # v1 bundles stored .env inside source.tar.gz; v2 stores it separately.
             self.restore_runtime_environment(recovery, extracted_source=candidate)
-            self.replace_source_for_recovery(candidate, recovery["source_revision"])
+            # The restored .env is the configuration this operation consumes from here on.
+            self.freeze_app_config(explicit=True)
+            restored_exact = not recovery.get("workspace_archive")
+            self.replace_source_for_recovery(
+                candidate, recovery["source_revision"],
+                verified=restored_exact and bool(recovery.get("source_verified"))
+                and self.prove_tree_commit(candidate, recovery["source_revision"]))
 
         self.phase("loading-images")
         self.command(["docker", "image", "load", "-i", folder / "images.tar"])
@@ -2371,9 +2758,9 @@ class Controller:
         current_contract = self.ensure_local_contract()
         with tempfile.TemporaryDirectory(prefix="candidate-", dir=self.state) as folder:
             candidate = Path(folder) / "repo"
-            self.clone(target, candidate)
+            self.materialize_source(target, candidate)
             if automatic:
-                self.automatic_guard(current, candidate)
+                self.automatic_guard(current, candidate, target["sha"])
             target_files = migration_files(candidate)
             # A changed contract is rejected before spending time building candidate images.
             if current_contract["files"] != target_files and not allow_migrations:
@@ -2458,7 +2845,10 @@ class Controller:
                 if self.db_heads(prepared) != selected["database_heads"]:
                     raise Failure("Restored schema does not match the selected checkpoint.")
                 retained = self.swap_database(prepared)
-            self.replace_source(candidate, selected["source_revision"])
+            # The checkpoint's own flag does not assign provenance: the tree is `git_commit` only
+            # when the protected store proves it, otherwise it is recorded as unknown.
+            self.replace_source(candidate, selected["source_revision"],
+                                verified=self.prove_tree_commit(candidate, selected["source_revision"]))
             self.phase("activating", checkpoint=emergency["id"])
             self.activate(selected["images"], selected["database_heads"])
             write_json(self.state / "deployed.json", {"sha": selected["source_revision"], "ref": "rollback:" + selected["id"],
@@ -2535,6 +2925,23 @@ class Controller:
                 log(f"{label}: unavailable: {detail[0] if detail else type(exc).__name__}")
         return unavailable
 
+    def log_registered_tools(self):
+        """Offline: which host executables the bootstrap registered and whether each resolves as trusted."""
+        try:
+            rows = self.runner.describe()
+        except Failure as exc:
+            log("Registered tools: unavailable: " + str(exc).splitlines()[0])
+            return
+        parts = []
+        for tool, state, detail in rows:
+            if state == "ok":
+                parts.append(f"{tool}={detail}")
+            elif state == "unregistered":
+                parts.append(f"{tool}=unregistered")
+            else:
+                parts.append(f"{tool}=REFUSED ({detail.split(':', 1)[0]})")
+        log("Registered tools (bootstrap/tools.conf; PATH is never searched): " + ", ".join(parts))
+
     def env_presence(self):
         path = self.config_dir / ".env"
         if not path.is_file():
@@ -2552,7 +2959,9 @@ class Controller:
         validation = self.ensure_validation()
         self.log_validation()
         self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
+        self.log_effects()
         log("Python: " + sys.version.split()[0])
+        self.log_registered_tools()
         if not validation.mutation_allowed:
             self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
         try:
@@ -2585,6 +2994,7 @@ class Controller:
         self.log_context()
         validation = self.log_trust_summary()
         self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
+        self.log_effects()
         if not validation.mutation_allowed:
             self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
         try:
@@ -2611,7 +3021,8 @@ class Controller:
         except Failure:
             deployed = None
         differs = workspace["dirty"] or (deployed is not None and workspace["head"] != deployed)
-        text = f"HEAD {workspace['head'] or 'non-git'} | differs from deployed: {differs}"
+        text = (f"provenance {workspace['provenance']} | manifest commit {workspace['head'] or 'none'}"
+                f" | differs from deployed: {differs}")
         if workspace["changes"]:
             text += " | changes: " + ", ".join(workspace["changes"][:10])
         return text
@@ -2625,30 +3036,35 @@ class Controller:
                                                    or v.startswith("-") and not v.startswith("--") and "v" in v
                                                    for v in args[1:]):
             raise Failure("Volume deletion is blocked. Use reset-db or purge for backed-up destructive workflows.")
-        read_only = args[0] in ("ps", "logs", "config", "version", "top", "images", "port")
-        # Catch-all forwarding is removed in PF-A1.4; until then it runs only
-        # through the validated context and, for mutating verbs, the stable lock.
+        if args[0] == "config":
+            # The resolved configuration contains secrets; it stays private (doctor validates it).
+            raise Failure("Raw `compose config` output is not available through this route; use `pf doctor`.")
+        read_only = args[0] in COMPOSE_READ_ONLY_VERBS
+        if not read_only and args[0] not in COMPOSE_MUTATING_VERBS:
+            # An unknown word is not a Compose command either; refuse it before any lock,
+            # operation record or child process (A1-T03). Full explicit dispatch is PF-A1.4.
+            raise Failure(
+                f"Unknown command {args[0]!r}. Managed commands: {', '.join(sorted(KNOWN_COMMANDS))}. "
+                f"Compose passthrough verbs: {', '.join(sorted(COMPOSE_READ_ONLY_VERBS | COMPOSE_MUTATING_VERBS))}."
+            )
+        # Catch-all forwarding is removed in PF-A1.4; until then it runs only through the
+        # validated context, the same runner (registered CLI, allowlisted environment, frozen
+        # inputs, bounded redacted streaming output, deadline, process-group cancellation) and,
+        # for mutating verbs, the stable lock with a frozen configuration.
         with contextlib.nullcontext() if read_only else self.lock(pending_route="compose:" + args[0]):
-            if self.cli is None:
-                self.compose("version")
-            env_path = self.config_dir / ".env"
-            values = read_dotenv(env_path)
-            child_env = os.environ.copy()
-            for name in set(values) | {"PARTFLOW_REPO_ROOT"}:
-                child_env.pop(name, None)
-            child_env.update(values)
-            child_env["PARTFLOW_REPO_ROOT"] = str(self.root)
-            command = self.cli + [
+            cli = self.compose_cli()
+            values, env_file = self.compose_inputs()
+            command = cli + [
                 "--project-directory", str(self.root),
-                "--env-file", str(env_path),
+                "--env-file", str(env_file),
                 "-p", self.config["project"],
                 "-f", str(self.control_dir / "compose.nas.yaml"),
             ]
             if self.override.exists():
                 command += ["-f", str(self.override)]
-            result = subprocess.call(command + args, cwd=self.root, env=child_env)
-            if result:
-                raise Failure(f"Compose exited with status {result}.")
+            effect = None if read_only else {"kind": "compose-passthrough", "verb": args[0]}
+            self.command(command + list(args), env=pf_config.child_values(values, workspace=self.root),
+                         timeout=TIMEOUT_PASSTHROUGH, stream=True, effect=effect)
 
 
 def parser():
@@ -2711,6 +3127,10 @@ KNOWN_COMMANDS = {
 }
 # Commands that never take the instance lock and never mutate managed state.
 READ_ONLY_COMMANDS = {"status", "doctor", "instances", "backups", "recoveries"}
+# Compose words the compatibility passthrough still forwards (bounded; removed in PF-A1.4).
+COMPOSE_READ_ONLY_VERBS = {"ps", "logs", "version", "top", "images", "port", "ls", "events", "stats"}
+COMPOSE_MUTATING_VERBS = {"up", "down", "start", "stop", "restart", "pull", "build", "create", "rm", "exec", "run",
+                          "kill", "pause", "unpause", "cp", "push", "scale", "wait", "attach", "watch"}
 
 
 def display_registry(registry):

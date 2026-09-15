@@ -33,11 +33,17 @@ TRUSTED_UID = 0
 BOOTSTRAP_DIR = "bootstrap"
 LAUNCHER_NAME = "pf"
 BOOTSTRAP_CONF_NAME = "bootstrap.conf"
+TOOLS_CONF_NAME = "tools.conf"
 BOOTSTRAP_MODULE_NAME = "pf_bootstrap.py"
 CONTROL_INVENTORY_NAME = "control-manifest.json"
 CONTROL_ENTRY_POINT = "pf-admin.py"
-REQUIRED_RELEASE_FILES = ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "compose.nas.yaml")
+REQUIRED_RELEASE_FILES = ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_runner.py", "pf_config.py",
+                          "pf_source.py", "compose.nas.yaml")
 BOOTSTRAP_CONF_KEYS = ("interpreter", "control_release", "control_release_sha256")
+# Host executables the control release may start (PF-A1.2 runner). Registered by the
+# trusted installer in ``bootstrap/tools.conf`` as absolute paths; every entry is optional
+# (an unregistered tool is reported as unavailable, never searched for on PATH).
+TOOL_IDS = ("docker", "docker_compose", "git", "ip", "hostname")
 RELEASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA256_RE = re.compile(r"[a-f0-9]{64}\Z")
 EXIT_REFUSED = 2
@@ -238,6 +244,7 @@ class PathChecker:
         self.acl_states = set()
         self.root_dev = None
         self.bootstrap_conf = None
+        self.tools_conf = None
         self.checked_ancestors = set()
 
     def blocking(self):
@@ -338,8 +345,14 @@ class PathChecker:
 # ------------------------------------------------------------ bootstrap contents
 
 
-def parse_bootstrap_conf(data, *, label, error=BootstrapError):
-    """KEY=VALUE data parsing. No shell evaluation; only known keys with normalized absolute paths."""
+def _normalized_absolute_path_value(value):
+    parts = value.split("/")
+    return (re.fullmatch(r"/[A-Za-z0-9._/-]+", value) is not None
+            and not any(part in ("", ".", "..") for part in parts[1:]) and not value.endswith("/"))
+
+
+def _parse_key_value_lines(data, *, label, known_keys, error):
+    """KEY=VALUE data parsing shared by bootstrap.conf and tools.conf. No shell evaluation."""
     values = {}
     for number, raw in enumerate(data.decode("utf-8", "strict").splitlines(), 1):
         line = raw.strip()
@@ -348,23 +361,59 @@ def parse_bootstrap_conf(data, *, label, error=BootstrapError):
         if "=" not in line:
             raise error(f"{label}:{number}: expected key=value")
         key, value = line.split("=", 1)
-        if key not in BOOTSTRAP_CONF_KEYS:
+        if key not in known_keys:
             raise error(f"{label}:{number}: unknown key {key!r}")
         if key in values:
             raise error(f"{label}:{number}: duplicate key {key!r}")
+        values[key] = (number, value)
+    return values
+
+
+def parse_bootstrap_conf(data, *, label, error=BootstrapError):
+    """KEY=VALUE data parsing. No shell evaluation; only known keys with normalized absolute paths."""
+    parsed = _parse_key_value_lines(data, label=label, known_keys=BOOTSTRAP_CONF_KEYS, error=error)
+    values = {}
+    for key, (number, value) in parsed.items():
         if key == "control_release_sha256":
             if not SHA256_RE.fullmatch(value):
                 raise error(f"{label}:{number}: control_release_sha256 must be 64 lowercase hex characters")
-        else:
-            parts = value.split("/")
-            if (not re.fullmatch(r"/[A-Za-z0-9._/-]+", value) or any(part in ("", ".", "..") for part in parts[1:])
-                    or value.endswith("/")):
-                raise error(f"{label}:{number}: {key} must be a normalized absolute path")
+        elif not _normalized_absolute_path_value(value):
+            raise error(f"{label}:{number}: {key} must be a normalized absolute path")
         values[key] = value
     missing = [key for key in BOOTSTRAP_CONF_KEYS if key not in values]
     if missing:
         raise error(f"{label}: missing keys {', '.join(missing)}")
     return values
+
+
+def parse_tools_conf(data, *, label, error=BootstrapError):
+    """``bootstrap/tools.conf``: registered host executables, ``<tool id>=<absolute path>``.
+
+    Data parsing only. Every tool is optional; the runner validates the registered file
+    (trusted owner, replacement-resistant ancestors, trusted link chain, executable) before
+    the first use and never searches PATH or honours an environment override.
+    """
+    parsed = _parse_key_value_lines(data, label=label, known_keys=TOOL_IDS, error=error)
+    values = {}
+    for key, (number, value) in parsed.items():
+        if not _normalized_absolute_path_value(value):
+            raise error(f"{label}:{number}: {key} must be a normalized absolute path")
+        values[key] = value
+    return values
+
+
+def render_tools_conf(tools):
+    """Trusted-installer/fixture rendering of ``tools.conf`` from a {tool id: absolute path} mapping."""
+    lines = ["# Deployment Admin registered host executables. Data only; never sourced by a shell."]
+    for key in TOOL_IDS:
+        if key in tools:
+            if not _normalized_absolute_path_value(str(tools[key])):
+                raise BootstrapError(f"tools.conf: {key} must be a normalized absolute path: {tools[key]!r}")
+            lines.append(f"{key}={tools[key]}")
+    unknown = sorted(set(tools) - set(TOOL_IDS))
+    if unknown:
+        raise BootstrapError("tools.conf: unknown tool ids: " + ", ".join(unknown))
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def load_control_inventory(release_dir, *, error=BootstrapError):
@@ -472,6 +521,14 @@ def verify_installation_anchor(root, *, interpreter=None, isolated=None, checker
             conf = parse_bootstrap_conf(read_bytes_nofollow(conf_path), label=str(conf_path))
         except (BootstrapError, OSError, UnicodeDecodeError) as exc:
             checker.refuse("bootstrap-conf-invalid", conf_path, str(exc))
+    # Registered host executables (PF-A1.2). The file is part of the trust anchor: it is
+    # verified here, before any release code runs, and parsed as data only.
+    tools_path = bootstrap / TOOLS_CONF_NAME
+    if checker.protected(tools_path, kind="file") is not None:
+        try:
+            checker.tools_conf = parse_tools_conf(read_bytes_nofollow(tools_path), label=str(tools_path))
+        except (BootstrapError, OSError, UnicodeDecodeError) as exc:
+            checker.refuse("tools-conf-invalid", tools_path, str(exc))
     if conf is None:
         return checker
     checker.bootstrap_conf = conf

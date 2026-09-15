@@ -2,9 +2,11 @@
 
 Python standard library only. Loading, resolving and validating never create,
 repair or migrate state. The only writers in this module are the explicit
-transactions ``initialize_installation_root`` and ``register_instance``; both
-are for fresh, disposable installations (fixtures and future installers) and
-never touch containers, credentials or an existing legacy NAS layout.
+transactions ``initialize_installation_root`` and ``register_instance`` (both
+for fresh, disposable installations: fixtures and future installers; they never
+touch containers, credentials or an existing legacy NAS layout) and, since
+PF-A1.2, ``acquire_source_lock``, which creates a per-source-store lock inode
+once, under an instance lock, inside a privileged source operation.
 
 Trust model (see ARCHITECTURE.md sections 3-4): the installed bootstrap
 launcher is the trust anchor chosen by the host administrator. Code in this
@@ -64,8 +66,16 @@ REGISTRY_RELATIVE = Path("registry") / "instances.json"
 REGISTRY_LOCK_RELATIVE = Path("locks") / "registry.lock"
 RESERVATIONS_RELATIVE = Path("registry") / "reservations"
 STAGING_RELATIVE = Path("staging")
+SOURCES_RELATIVE = Path("sources")
 ROLE_NAMES = ("workspace", "configuration", "backups", "recovery")
 STATE_SUBDIR = "state"
+HOME_SUBDIR = "home"
+OPERATIONS_SUBDIR = "operations"
+ARTIFACTS_SUBDIR = "artifacts"
+SOURCE_MANIFEST_NAME = "source-manifest.json"
+DIAGNOSTIC_ENV_NAME = "diagnostics.env"
+DOCKER_CLIENT_CONFIG = b"{}\n"
+DIAGNOSTIC_ENV_CONTENT = b"# Deployment Admin: empty env-file handed to Compose by read-only diagnostics. Never edited.\n"
 PROFILE_ID = "partflow-staging-legacy"
 PROFILE_COMPOSE_FILE = "compose.nas.yaml"
 PROFILE_APPLICATION = "partflow"
@@ -366,6 +376,33 @@ class InstanceContext:
     def journal_path(self):
         return self.state_dir / "pending.json"
 
+    # PF-A1.2 private runtime directories (created by registration, verified by validate_context).
+    @property
+    def home_dir(self):
+        """Protected task home for child processes (``HOME``); client configuration lives below it."""
+        return self.paths.private_state / HOME_SUBDIR
+
+    @property
+    def docker_config_dir(self):
+        return self.home_dir / ".docker"
+
+    @property
+    def diagnostic_env_path(self):
+        """Protected empty env-file for Compose in read-only diagnostics (no editable file is read)."""
+        return self.home_dir / DIAGNOSTIC_ENV_NAME
+
+    @property
+    def operations_dir(self):
+        return self.paths.private_state / OPERATIONS_SUBDIR
+
+    @property
+    def artifacts_dir(self):
+        return self.paths.private_state / ARTIFACTS_SUBDIR
+
+    @property
+    def source_manifest_path(self):
+        return self.artifacts_dir / SOURCE_MANIFEST_NAME
+
 
 def context_from_record(root, record, record_path, record_sha256):
     validate_instance_record(record)
@@ -593,7 +630,7 @@ def validate_installation_root(root, checker=None, *, interpreter=None):
     if checker.root_dev is None:
         return checker
     for relative in ("registry", REGISTRY_RELATIVE.parent / "reservations", "locks", "instances", "releases",
-                     "profiles", "policies", STAGING_RELATIVE):
+                     "profiles", "policies", STAGING_RELATIVE, SOURCES_RELATIVE):
         checker.protected(root / relative, kind="dir")
     checker.protected(registry_path(root), kind="file")
     checker.protected(root / REGISTRY_LOCK_RELATIVE, kind="file")
@@ -827,6 +864,19 @@ def validate_context(context, *, running_release=None, interpreter=None, checker
             checker.protected_tree(context.state_dir, allow_group_read=True)
     else:
         checker.note("state-missing", context.state_dir, "no private runtime state yet (not created by diagnostics)")
+    # PF-A1.2: the protected task home/client configuration used by every child process,
+    # the operation directories (frozen snapshots, unresolved effects) and the artifacts
+    # (source manifest) are registration-created private state; diagnostics never create them.
+    for directory in (context.home_dir, context.operations_dir, context.artifacts_dir):
+        if checker.protected(directory, kind="dir", allow_group_read=False) is not None:
+            checker.protected_tree(directory, allow_group_read=True)
+    client_config = context.docker_config_dir / "config.json"
+    if os.path.isdir(str(context.home_dir)) and not os.path.lexists(str(client_config)):
+        checker.refuse("docker-client-config-missing", client_config,
+                       "registered Docker client configuration is missing; it is created only by registration")
+    if os.path.isdir(str(context.home_dir)) and not os.path.lexists(str(context.diagnostic_env_path)):
+        checker.refuse("diagnostic-env-missing", context.diagnostic_env_path,
+                       "registered empty env-file for diagnostics is missing; it is created only by registration")
     checker.protected(context.lock_path, kind="file", allow_group_read=False)
     private_state_trusted = not any(
         finding.severity == "refuse" for finding in checker.findings[private_findings_before:]
@@ -1009,6 +1059,21 @@ def acquire_registry_lock(root):
     )
 
 
+def acquire_source_lock(path):
+    """Per-source-store lock (PF-A1.2). The inode is created once, by the first privileged
+    store operation under an instance lock, and never removed; later callers only open it.
+    Lock order is preserved: the instance lock is already held, no registry lock is taken."""
+    path = Path(path)
+    if path.parent.name != str(SOURCES_RELATIVE):
+        raise ContextError("Source locks live only under <root>/sources: " + str(path))
+    if not os.path.lexists(str(path)):
+        try:
+            _create_lock_file(path)
+        except FileExistsError:
+            pass
+    return acquire_lock(path, busy_message="Another operation is fetching into this source store; try again later.")
+
+
 # ------------------------------------------------------------ explicit transactions
 
 
@@ -1075,7 +1140,7 @@ def build_control_inventory(release_id, files):
 
 
 def initialize_installation_root(root, *, launcher, interpreter, release_id, release_files,
-                                 profile, policy_documents):
+                                 profile, policy_documents, tools=None):
     """Create a fresh, disposable protected installation root.
 
     ``launcher``: launcher script bytes installed as ``bootstrap/pf``.
@@ -1084,6 +1149,8 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
     the required control files. The bootstrap copy of ``pf_bootstrap.py`` is taken from it.
     ``profile``: (file name, bytes) for ``profiles/``.
     ``policy_documents``: mapping file name -> bytes for ``policies/``.
+    ``tools``: {tool id: absolute path} of registered host executables for ``bootstrap/tools.conf``
+    (PF-A1.2); an omitted tool is unavailable to the runner, never searched on PATH.
     Refuses an existing non-empty root. Trusted-installer/fixture primitive, not an operator wizard.
     """
     root = canonical_path(root, label="installation root")
@@ -1101,7 +1168,7 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
     else:
         os.chmod(str(root), 0o755)
     for relative in (BOOTSTRAP_DIR, "registry", RESERVATIONS_RELATIVE, "locks", "instances", "releases",
-                     "profiles", "policies", STAGING_RELATIVE):
+                     "profiles", "policies", STAGING_RELATIVE, SOURCES_RELATIVE):
         _create_private_dir(root / relative, 0o700)
     release_dir = root / "releases" / release_id
     _create_private_dir(release_dir, 0o700)
@@ -1115,6 +1182,11 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
     _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_MODULE_NAME, release_files[BOOTSTRAP_MODULE_NAME], 0o600)
     _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_CONF_NAME,
                         render_bootstrap_conf(interpreter, str(release_dir), sha256_bytes(inventory_bytes)), 0o600)
+    try:
+        tools_bytes = pf_bootstrap.render_tools_conf(dict(tools or {}))
+    except pf_bootstrap.BootstrapError as exc:
+        raise ContextError(str(exc)) from exc
+    _write_private_file(root / BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME, tools_bytes, 0o600)
     _write_private_file(registry_path(root), normalize_json(
         {"schema_version": SCHEMA_VERSION, "default_instance_id": None, "instances": []}), 0o600)
     _create_lock_file(root / REGISTRY_LOCK_RELATIVE)
@@ -1261,7 +1333,18 @@ def _stage_instance_dir(root, record):
     _create_private_dir(staged, 0o700)
     _write_private_file(staged / "record.json", normalize_json(record), 0o600)
     _create_private_dir(staged / STATE_SUBDIR, 0o700)
-    _fsync_directory(staged / STATE_SUBDIR)
+    # PF-A1.2 private runtime directories: task home with the Docker client configuration
+    # (empty config, empty plugin directory: no editor-selectable helpers), operations
+    # (frozen snapshots and unresolved effects) and artifacts (source manifest).
+    _create_private_dir(staged / HOME_SUBDIR, 0o700)
+    _create_private_dir(staged / HOME_SUBDIR / ".docker", 0o700)
+    _create_private_dir(staged / HOME_SUBDIR / ".docker" / "cli-plugins", 0o700)
+    _write_private_file(staged / HOME_SUBDIR / ".docker" / "config.json", DOCKER_CLIENT_CONFIG, 0o600)
+    _write_private_file(staged / HOME_SUBDIR / DIAGNOSTIC_ENV_NAME, DIAGNOSTIC_ENV_CONTENT, 0o600)
+    _create_private_dir(staged / OPERATIONS_SUBDIR, 0o700)
+    _create_private_dir(staged / ARTIFACTS_SUBDIR, 0o700)
+    for relative in (STATE_SUBDIR, HOME_SUBDIR, OPERATIONS_SUBDIR, ARTIFACTS_SUBDIR):
+        _fsync_directory(staged / relative)
     _fsync_directory(staged)
     _publish_instance_dir(staged, root / "instances" / instance_id)
 

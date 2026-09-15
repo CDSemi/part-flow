@@ -86,14 +86,18 @@ class FakeController(pf.Controller):
         self.workspace_dirty = False
 
     def workspace_status(self, root=None):
+        # Simulated protected-manifest comparison (PF-A1.2): the fake tracks what was deployed.
         root = Path(root or self.root)
         if root == self.root:
             return {
                 "head": self.workspace_head,
                 "dirty": self.workspace_dirty,
-                "changes": ["frontend/app.txt"] if self.workspace_dirty else [],
+                "changes": ["changed:frontend/app.txt"] if self.workspace_dirty else [],
+                "provenance": "unknown" if self.workspace_dirty else "git_commit",
+                "manifest_commit": self.workspace_head,
             }
-        return {"head": self.target["sha"], "dirty": False, "changes": []}
+        return {"head": self.target["sha"], "dirty": False, "changes": [], "provenance": "git_commit",
+                "manifest_commit": self.target["sha"]}
 
     def create_deployed_source_archive(self, destination, revision):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,8 +105,8 @@ class FakeController(pf.Controller):
             source_fixture(exact, revision)
             pf.create_source_archive(exact, destination)
 
-    def replace_source(self, candidate, revision):
-        super().replace_source(candidate, revision)
+    def replace_source(self, candidate, revision, *, verified=True):
+        super().replace_source(candidate, revision, verified=verified)
         self.workspace_head = revision
         self.workspace_dirty = False
 
@@ -242,7 +246,10 @@ class FakeController(pf.Controller):
         if self.fail == "ci":
             raise pf.Deferred("CI pending")
 
-    def clone(self, target, destination):
+    def materialize_source(self, target, destination):
+        # The real method fetches into the protected store and exports blobs; the fake
+        # produces the same kind of private candidate tree without Git or network.
+        assert self.operation_dir is not None, "source materialization requires a locked operation"
         source_fixture(destination, target["sha"], self.new_migration)
 
     def build_target(self, candidate, sha):
@@ -258,7 +265,7 @@ class FakeController(pf.Controller):
         self.make_override(images, override)
         return images, override
 
-    def automatic_guard(self, current, candidate):
+    def automatic_guard(self, current, candidate, target_sha):
         if self.fail == "divergence":
             raise pf.Deferred("not a descendant")
         if self.new_migration:
@@ -366,9 +373,13 @@ class AdminTests(unittest.TestCase):
             mock.patch.object(pf.sys.stdin, "isatty", return_value=True),
             mock.patch("builtins.input", side_effect=lambda *args: next(answers)),
             mock.patch.object(self.c, "detect_lan_ipv4", return_value=["192.168.0.11"]),
+            self.c.lock(),
         ):
             values = self.c.prepare_new_env()
-        saved = pf.read_dotenv(self.c.config_dir / ".env")
+            # The operation consumes the file it wrote, frozen once (PF-A1.2).
+            self.assertIsNotNone(self.c.frozen)
+            self.assertEqual(dict(self.c.frozen.values), values)
+        saved = pf.read_app_env(self.c.config_dir / ".env")
         self.assertEqual(saved, values)
         self.assertEqual(saved["POSTGRES_USER"], "partflow_staging")
         self.assertEqual(saved["POSTGRES_DB"], "partflow_staging")
@@ -386,6 +397,7 @@ class AdminTests(unittest.TestCase):
         with (
             mock.patch.object(pf.sys.stdin, "isatty", return_value=True),
             mock.patch("builtins.input", side_effect=lambda *args: next(answers)),
+            self.c.lock(),
         ):
             values = self.c.prepare_new_env()
         self.assertEqual(values["PARTFLOW_BIND_IP"], "127.0.0.1")
@@ -394,7 +406,7 @@ class AdminTests(unittest.TestCase):
     def test_prepare_new_env_never_overwrites_existing_env_without_reuse_confirmation(self):
         write_deploy_env(self.root)
         before = (self.c.config_dir / ".env").read_bytes()
-        with mock.patch.object(pf, "prompt_yes_no", return_value=False):
+        with mock.patch.object(pf, "prompt_yes_no", return_value=False), self.c.lock():
             with self.assertRaises(pf.Failure):
                 self.c.prepare_new_env()
         self.assertEqual((self.c.config_dir / ".env").read_bytes(), before)
@@ -482,11 +494,22 @@ class AdminTests(unittest.TestCase):
         self.assertIn("--project-directory", argv)
         self.assertEqual(argv[argv.index("--project-directory") + 1], str(self.root))
         self.assertIn("--env-file", argv)
-        self.assertEqual(argv[argv.index("--env-file") + 1], str(controller.config_dir / ".env"))
+        # Outside an operation Compose reads no editable file: the registration-created empty
+        # env-file replaces <project-directory>/.env, and the values travel as allowlisted variables.
+        self.assertEqual(argv[argv.index("--env-file") + 1], str(self.context.diagnostic_env_path))
         self.assertIn("-f", argv)
         self.assertEqual(argv[argv.index("-f") + 1], str(controller.control_dir / "compose.nas.yaml"))
         self.assertEqual(kwargs["env"]["PARTFLOW_REPO_ROOT"], str(self.root))
         self.assertEqual(kwargs["env"]["POSTGRES_DB"], "partflow_staging")
+        self.assertEqual(kwargs["env"]["PARTFLOW_DATABASE_URL"],
+                         "postgresql+psycopg://partflow_staging:abc123@db:5432/partflow_staging")
+        self.assertNotIn("PATH", kwargs["env"])
+        # Inside a locked operation the env-file is the frozen private snapshot of that operation.
+        with mock.patch.object(controller, "command", return_value="") as command, controller.lock():
+            controller.compose("config", "-q")
+            argv = command.call_args.args[0]
+            self.assertEqual(argv[argv.index("--env-file") + 1], str(controller.frozen.env_file))
+            self.assertEqual(controller.frozen.env_file.parent, controller.operation_dir)
 
     def test_permissions_make_repo_and_config_writable_but_backups_read_only(self):
         source = self.root / "frontend/app.txt"
@@ -942,14 +965,24 @@ class AdminTests(unittest.TestCase):
         args = run.call_args[0][0]
         self.assertIn("--label", args)
         self.assertIn("partflow.admin.project=partflow-staging", args)
-        self.assertIn("POSTGRES_DB", run.call_args[1]["clean_env_keys"])
+        self.assertIn("POSTGRES_DB", run.call_args[1]["env"])
 
     def test_command_removes_exported_db_and_preserves_explicit_override(self):
+        # PF-A1.2: the child environment is never inherited; only an explicit allowlisted
+        # application value reaches the registered tool, and argv[0] is a typed tool id.
         c = pf.Controller(self.context)
-        command = [os.sys.executable, "-c", "import os; print(os.environ.get('POSTGRES_DB','absent'))"]
+        script = pfx.tool_script(Path(self.temp.name) / "tools", "docker",
+                                 "#!/bin/sh\nprintf '%s' \"${POSTGRES_DB:-absent}\"\n")
+        c._runner = pf.pf_runner.ProcessRunner({"docker": str(script)}, home=self.context.home_dir,
+                                               docker_config=self.context.docker_config_dir,
+                                               docker_host=self.context.daemon.endpoint, redactor=c.redactor)
         with mock.patch.dict(os.environ, {"POSTGRES_DB": "unexpected_database"}):
-            self.assertEqual(c.command(command, clean_env_keys=["POSTGRES_DB"]), "absent")
-            self.assertEqual(c.command(command, clean_env_keys=["POSTGRES_DB"], env={"POSTGRES_DB": "rehearsal"}), "rehearsal")
+            self.assertEqual(c.command(["docker"]), "absent")
+            self.assertEqual(c.command(["docker"], env={"POSTGRES_DB": "rehearsal"}), "rehearsal")
+            with self.assertRaises(pf.Failure):
+                c.command([os.sys.executable, "-c", "print(1)"])  # not a registered tool id
+            with self.assertRaises(pf.Failure):
+                c.command(["docker"], env={"PATH": "/tmp"})  # reserved host variable
 
 
 class PureTests(unittest.TestCase):
@@ -1087,6 +1120,7 @@ class PureTests(unittest.TestCase):
             self.assertEqual(pf.migration_files(root), pf.migration_files(dest))
 
     def test_real_git_clone_is_pinned_to_requested_commit(self):
+        """PF-A1.2: the candidate is exported from the protected store, never cloned/checked out."""
         with tempfile.TemporaryDirectory() as tmp:
             upstream = Path(tmp) / "upstream"
             source_fixture(upstream)
@@ -1100,20 +1134,34 @@ class PureTests(unittest.TestCase):
             first = git("rev-parse", "HEAD")
             (upstream / "app-version.txt").write_text("second")
             git("commit", "-am", "second", "-q")
+            second = git("rev-parse", "HEAD")
             root = Path(tmp) / "installed" / "repo"
             context = fixture(root)
             c = pf.Controller(context)
-            original_command = c.command
-            def local_command(args, **kwargs):
-                if args[:3] == ["git", "clone", "--no-checkout"]:
-                    args = [*args[:-2], str(upstream), args[-1]]
-                return original_command(args, **kwargs)
+            c.remote_override = str(upstream)
+            c.source_protocols = ("file",)
             candidate = Path(tmp) / "candidate"
-            with mock.patch.object(c, "command", side_effect=local_command), mock.patch.object(c, "compose", return_value=""):
-                c.clone({"sha": first}, candidate)
+            with mock.patch.object(c, "compose", return_value=""), c.lock():
+                c.materialize_source({"sha": first}, candidate)
+                store = c.source_store()
+                self.assertTrue(store.path.is_dir())
+                self.assertEqual(store.path.parent, fixture.layout.sources)
+                with self.assertRaises(pf.pf_source.SourceError):
+                    store.is_ancestor(first, second)  # second is not in the store yet: unknown, not False
+                c.materialize_source({"sha": second}, Path(tmp) / "candidate-2")
+                self.assertTrue(store.is_ancestor(first, second))
+                self.assertFalse(store.is_ancestor(second, first))
+                with self.assertRaises(pf.Failure):
+                    c.materialize_source({"sha": "3" * 40}, Path(tmp) / "missing")
             self.assertEqual((candidate / "app-version.txt").read_text(), OLD)
             self.assertFalse((candidate / "DEPLOYED_SOURCE.txt").exists())
-            self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=candidate).decode().strip(), first)
+            self.assertFalse((candidate / ".git").exists())
+            self.assertEqual(sorted(p.name for p in candidate.iterdir()),
+                             sorted(p.name for p in upstream.iterdir() if p.name != ".git"))
+            store_config = pf.pf_source.parse_git_config((store.path / "config").read_text())
+            self.assertEqual(store_config["core.hookspath"], str(store.hooks_path))
+            self.assertEqual(store_config["remote.approved.url"], str(upstream))
+            self.assertEqual(store_config["protocol.allow"], "never")
 
 
 if __name__ == "__main__":
@@ -1365,8 +1413,10 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
                  "containers": ["c"], "volumes": ["v"], "networks": ["n"], "images": []
              }), \
              mock.patch.object(self.c, "compose", side_effect=fake_compose), \
-             mock.patch.object(self.c, "command", side_effect=fake_command):
+             mock.patch.object(self.c, "command", side_effect=fake_command), \
+             self.c.lock():
             recovery = self.c.create_purge_recovery()
+            frozen_values = dict(self.c.frozen.values)
 
         verified = self.c.verify_recovery({**recovery, "_folder": str(self.c.recovery_root / recovery["id"])})
         self.assertEqual(verified["database"], "partflow_staging")
@@ -1376,6 +1426,8 @@ class PurgeRecoveryBundleTests(unittest.TestCase):
         self.assertTrue((folder / "revision-checkpoints.tar.gz").is_file())
         self.assertTrue((folder / "workspace.tar.gz").is_file())
         self.assertTrue((folder / "configuration/.env").is_file())
+        # The bundle carries the frozen configuration (literal values), strictly parseable.
+        self.assertEqual(pf.read_app_env(folder / "configuration/.env"), frozen_values)
         self.assertTrue((folder / "configuration/pf-config.json").is_file())
         self.assertEqual(verified["workspace_archive"], "workspace.tar.gz")
 

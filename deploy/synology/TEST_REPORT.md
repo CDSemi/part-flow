@@ -19,6 +19,26 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > environment. Real DSM ACL/mount, Docker, PostgreSQL, DSM/SMB and power-loss durability were
 > not exercised; A1-T17's host gate is therefore *blocked*, not passed.
 
+> **PF-A1.2 checkpoint addendum (2026-09-15).** The source now carries the Deployment Admin
+> PF-A1.2 slice: one controlled process runner (`pf_runner.py`: registered executables from
+> `bootstrap/tools.conf`, allowlisted child environment, argv arrays, bounded and redacted
+> capture, explicit deadlines, process-group termination, unresolved-effect records), strict
+> application `.env` parsing with a private immutable per-operation snapshot and a
+> percent-encoded `PARTFLOW_DATABASE_URL` (`pf_config.py`, `compose.nas.yaml`), and a
+> protected Git source store with blob-level export plus fd-safe workspace/manifest comparison
+> (`pf_source.py`); privileged Git no longer runs against `repo/`. Executed evidence lives in
+> the PF-A1.2 checkpoint package. Summary of that run, uid 0, Linux container, ext4 with POSIX
+> ACL xattrs: full discovery `tests/` **233 tests OK, 0 skipped** on CPython 3.11.15, 3.12.3 and
+> 3.13.13 (adapted baseline suite `tests/test_pf_admin.py` 100, PF-A1.1 suite
+> `tests/test_instance_context.py` 91, PF-A1.2 suite `tests/test_runner_config_source.py` 42);
+> the PF-A1.1 + PF-A1.2 suites also 133 OK under CPython 3.9.23; installed-launcher evidence
+> 55/55 scenarios (46 PF-A1.1 regressions kept, 9 PF-A1.2); the audit-r1 (15) and audit-r2 (8)
+> probe runners stay 0 reproduced on this source; the protected store fetched commit
+> `bc46deb` over HTTPS from the approved GitHub remote and exported 376 blobs byte-exact.
+> Docker daemon/Compose execution, PostgreSQL, real DSM ACL/mount, SMB and power-loss
+> durability were not exercised (registered fixture tools stand in for Docker; the real Git
+> executable works against local and HTTPS remotes); A1-T17's host gate stays *blocked*.
+
 ## Executed checks
 
 | Check | Actual result |

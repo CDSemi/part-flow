@@ -34,6 +34,40 @@
 > with this checkpoint. Registration exists only as a Python transaction for disposable
 > fixtures (`register_instance`), not as an operator command.
 
+> **Deployment Admin checkpoint PF-A1.2 (2026-09-15) — runner, frozen configuration, protected
+> source store; still a development state, not a NAS release.** Every child process of the
+> control release (Git, Docker/Compose, the SQL tools inside the `db` container, host
+> diagnostics) now goes through one runner (`pf_runner.py`): the executable must be
+> registered by the trusted installer in `<root>/bootstrap/tools.conf` (`docker`,
+> optional `docker_compose`, `git`, `ip`, `hostname`; absolute paths, validated through a
+> trusted link chain and protected ancestors, never looked up on `PATH`), the child
+> environment is built from an allowlist (fixed `PATH`, the instance's private
+> `instances/<uuid>/home` as `HOME`, `DOCKER_CONFIG` inside it with an empty client
+> configuration and plugin directory, `DOCKER_HOST` from the registered daemon endpoint,
+> `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), arguments are arrays, captured
+> output is bounded and redacted (the database password and its URL-encoded form never
+> reach a message or log), every call has a deadline, and a timeout or interruption
+> terminates the whole process group and records the unresolved effect under
+> `instances/<uuid>/operations/<id>/unresolved-effects.json` (`status`/`doctor` list them).
+> `config/.env` is parsed strictly (only the seven PartFlow keys, no duplicates, no
+> `export`, no expansion, single-/double-quoted or unquoted literals; see section 6) and
+> every mutating command first freezes it into a private 0400 snapshot
+> `instances/<uuid>/operations/<id>/app.env`; the operation consumes that snapshot, an
+> edit of `config/.env` during the operation is detected, and an existing value that cannot
+> be frozen literally (a single quote, a trailing backslash, control characters) is an explicit
+> `migration-issue` — it is never rewritten or regenerated. The backend connection URL is
+> generated with percent-encoded credentials as `PARTFLOW_DATABASE_URL` (`compose.nas.yaml` no
+> longer splices `POSTGRES_PASSWORD` into a URL). Privileged Git never runs against `repo/`:
+> sources are fetched into a protected bare store under `<root>/sources/` (own configuration,
+> no hooks/fsmonitor/includes/alternates, HTTPS only) and exported blob by blob (submodules,
+> symbolic links and Git LFS pointers are refused); the workspace is compared byte/mode
+> against a protected manifest recorded when the tool deployed a tree; a tree without such
+> provenance is `unknown`, never assigned a commit SHA (section 8). Read-only diagnostics
+> hand Compose a registration-created empty env-file and the values as allowlisted
+> variables, so no editable file is read by Compose. Compose passthrough is bounded to known
+> words and refuses the raw `config` dump until PF-A1.4 removes the route;
+> `install-control.sh` remains the legacy installer.
+
 ## 1. Purpose
 
 PartFlow NAS Admin separates the writable application repository from the privileged
@@ -295,6 +329,15 @@ already initialized is **not** equivalent to changing the existing database cred
 Do not casually edit those values on a live instance. Use the managed deployment/recovery
 workflow or plan a credential/database migration explicitly.
 
+Since PF-A1.2 the file is parsed as data with a strict grammar: exactly these seven keys,
+each once, `KEY=VALUE` with no whitespace around `=` and no `export`; comment lines start
+with `#`; a value is unquoted (no whitespace, quotes or `#`; `$` and `\` are literal),
+single-quoted (`'...'`, literal, cannot contain `'`) or double-quoted (only `\\` and `\"`
+escapes, no `$` expansion). Values are never expanded, evaluated or rewritten. A value that
+cannot be rendered literally into the private snapshot (a single quote, a trailing backslash,
+control characters) is reported as `migration-issue` and blocks mutating commands until the
+file is fixed by hand; the existing password is never regenerated.
+
 ## 7. First deployment
 
 For a brand-new staging instance, the usual command is:
@@ -358,20 +401,27 @@ It reports:
 
 ```text
 Deployed source: <SHA>
-Workspace HEAD: <SHA or non-git>
-Workspace differs from deployed: True/False
-Workspace changes: ...
+Workspace: provenance git_commit|unknown | manifest commit <SHA or none> | differs from deployed: True/False | changes: ...
 ```
 
-This distinction prevents a local edit from being mistaken for deployed code.
+This distinction prevents a local edit from being mistaken for deployed code. Since
+PF-A1.2 the workspace line comes from an fd-safe byte/mode comparison of `repo/` against
+the protected manifest the tool recorded when it deployed a tree
+(`instances/<uuid>/artifacts/source-manifest.json`); no Git command runs against `repo/`,
+its `.git` metadata (hooks, fsmonitor, filters, includes, alternates, remotes) is editor
+data and is never consulted. A workspace without such a manifest, or one that differs from
+it, has `unknown` provenance: `status` still works, but no commit SHA is invented.
 
 A manual update that finds a dirty/different workspace first includes that current
 workspace in the pre-update checkpoint as `workspace.tar.gz`, then replaces `repo/` with
-the selected GitHub revision. An unattended release update refuses a dirty/different
-workspace instead of deleting local work automatically.
+the selected revision exported from the protected source store. An unattended release
+update refuses a dirty/different workspace instead of deleting local work automatically.
 
-`deploy --current` also requires a clean Git checkout so the deployed identity remains
-an exact commit.
+`deploy --current` proves the workspace instead of trusting it: the commit the checkout
+claims (`.git/HEAD`, read as data) is fetched into the protected store, exported to a private
+candidate, and the workspace must equal that tree byte for byte; otherwise the command stops
+with the differences and asks for an explicit `--commit`/`--latest`/`--release`. A tree
+copied in from a ZIP or an unverified checkout is therefore never deployed as "current".
 
 ## 9. Manual update
 
@@ -680,6 +730,7 @@ If raw Compose access is absolutely necessary, the equivalent shape is:
 
 ```sh
 sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
+  PARTFLOW_DATABASE_URL='postgresql+psycopg://<user>:<percent-encoded password>@db:5432/<db>' \
   docker compose \
   --project-directory /volume1/docker/partflow/repo \
   --env-file /volume1/docker/partflow/config/.env \
@@ -687,6 +738,12 @@ sudo env PARTFLOW_REPO_ROOT=/volume1/docker/partflow/repo \
   -f /volume1/docker/partflow/control/compose.nas.yaml \
   ps
 ```
+
+Since PF-A1.2 `compose.nas.yaml` takes the backend connection URL from
+`PARTFLOW_DATABASE_URL`, which the controller generates with percent-encoded credentials;
+a raw invocation must supply it explicitly (the controller itself never passes `.env` to
+Compose as an editable file: it hands over a frozen snapshot or a registration-created empty
+env-file plus the allowlisted variables).
 
 Using raw Docker/Compose bypasses controller locks, recovery checks, and destructive guards.
 Do not run it concurrently with `pf update`, `pf backup`, `pf reset-db`, `pf purge`, or
@@ -762,6 +819,11 @@ The authoritative runtime file is:
 ```text
 /volume1/docker/partflow/config/.env
 ```
+
+If `doctor` reports `migration-issue` or a parse error for that file, the controller refused
+the proposal (unknown/duplicate key, unsupported quoting, a secret that cannot be frozen
+literally); fix the file by hand — the controller never rewrites it. A raw Compose command
+additionally needs `PARTFLOW_DATABASE_URL` (section 14).
 
 ### Local source edits exist before an update
 

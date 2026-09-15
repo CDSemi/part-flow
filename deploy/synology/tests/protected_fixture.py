@@ -48,6 +48,9 @@ def release_files():
         "pf-admin.py": (PACKAGE / "pf-admin.py").read_bytes(),
         "pf_instance.py": (PACKAGE / "pf_instance.py").read_bytes(),
         "pf_bootstrap.py": (PACKAGE / "pf_bootstrap.py").read_bytes(),
+        "pf_runner.py": (PACKAGE / "pf_runner.py").read_bytes(),
+        "pf_config.py": (PACKAGE / "pf_config.py").read_bytes(),
+        "pf_source.py": (PACKAGE / "pf_source.py").read_bytes(),
         "compose.nas.yaml": (REPO_PACKAGE / "compose.nas.yaml").read_bytes(),
         "pf-config.example.json": (PACKAGE / "pf-config.example.json").read_bytes(),
         "nas.env.example": (PACKAGE / "nas.env.example").read_bytes(),
@@ -75,9 +78,31 @@ class Layout:
         self.launcher = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.LAUNCHER_NAME
         self.bootstrap_conf = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_CONF_NAME
         self.bootstrap_module = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_MODULE_NAME
+        self.tools_conf = self.root / pf_instance.BOOTSTRAP_DIR / pf_bootstrap.TOOLS_CONF_NAME
+        self.sources = self.root / pf_instance.SOURCES_RELATIVE
 
 
-def install_root(base, *, launcher=None, interpreter=None):
+# Host executables the fixture installer registers (PF-A1.2 runner): fixed system
+# locations only, never a PATH search. A missing tool is simply left unregistered.
+TOOL_CANDIDATES = {
+    "docker": ("/usr/bin/docker", "/usr/local/bin/docker"),
+    "git": ("/usr/bin/git", "/usr/local/bin/git"),
+    "ip": ("/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"),
+    "hostname": ("/usr/bin/hostname", "/bin/hostname"),
+}
+
+
+def default_tools():
+    tools = {}
+    for tool, candidates in TOOL_CANDIDATES.items():
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                tools[tool] = candidate
+                break
+    return tools
+
+
+def install_root(base, *, launcher=None, interpreter=None, tools=None):
     """Initialize <base>/install as a trusted installation root."""
     values = pf_instance.initialize_installation_root(
         Path(base) / "install",
@@ -90,8 +115,20 @@ def install_root(base, *, launcher=None, interpreter=None):
             POLICY_NAME: policy_document(),
             "production.json": policy_document(environment="production"),
         },
+        tools=default_tools() if tools is None else tools,
     )
     return Layout(values)
+
+
+def tool_script(directory, name, body):
+    """A root-owned, non-writable executable script in ``directory`` (a protected fixture tool)."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o755)
+    path = directory / name
+    path.write_text(body)
+    os.chmod(path, 0o755)
+    return path
 
 
 def source_fixture(root, revision=OLD, new_migration=False):
