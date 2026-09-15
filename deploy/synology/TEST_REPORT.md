@@ -2,20 +2,22 @@
 
 Date: 2026-09-11. Tool version: 2.5.0.
 
-> **PF-A1.1 checkpoint addendum (2026-09-15, revision r4 = r3 after audit-r1 plus an IDE
-> flow-analysis warning fix in `pf_instance.path_identity`, no behaviour change).** The v2.5 results
+> **PF-A1.1 checkpoint addendum (2026-09-15, revision r5 after audit-r2).** The v2.5 results
 > below are historical. The current source carries the Deployment Admin PF-A1.1 slice
 > (protected instance context, registry with durable reservations, bootstrap verifier run
-> before any release code, managed-path inventory, stable locks, read-only
-> construction/diagnostics that issue no transport when refused). Executed evidence lives in
-> the PF-A1.1 checkpoint package (`IMPLEMENTATION_REPORT.md`, `AUDIT_FIX_MAP.json`,
-> `ACCEPTANCE_RESULTS.json`, logs). Summary of that run, uid 0, Linux container, ext4 with
-> POSIX ACL xattrs, group `users` present: full discovery `tests/` **172 tests OK, 0 skipped**
-> on CPython 3.11.15, 3.12.3 and 3.13.13 (adapted baseline suite `tests/test_pf_admin.py` 100,
-> PF-A1.1 suite `tests/test_instance_context.py` 72); the PF-A1.1 suite also 72 OK under
-> CPython 3.9.23; the fifteen reviewer probes of audit-r1 reproduce 15/15 on the r2 source
-> and 0/15 on this source in the same environment. Real DSM ACL/mount, Docker, PostgreSQL,
-> DSM/SMB and power-loss durability were not exercised.
+> before any release code, canonical managed-path spelling and inventory, runtime
+> daemon/project uniqueness, bootstrap-only installation root, stable locks, read-only
+> construction/diagnostics that issue no transport when refused, legacy report that names
+> but never reads the journal). Executed evidence lives in the PF-A1.1 checkpoint package
+> (`IMPLEMENTATION_REPORT.md`, `AUDIT_FIX_MAP.json`, `ACCEPTANCE_RESULTS.json`, logs).
+> Summary of that run, uid 0, Linux container, ext4 with POSIX ACL xattrs, group `users`
+> present: full discovery `tests/` **191 tests OK, 0 skipped** on CPython 3.11.15, 3.12.3 and
+> 3.13.13 (adapted baseline suite `tests/test_pf_admin.py` 100, PF-A1.1 suite
+> `tests/test_instance_context.py` 91); the PF-A1.1 suite also 91 OK under CPython 3.9.23;
+> the fifteen reviewer probes of audit-r1 stay 0/15 reproduced and the eight round-2 probes
+> of audit-r2 reproduce 8/8 on the r4 source (`5d59d2a`) and 0/8 on this source in the same
+> environment. Real DSM ACL/mount, Docker, PostgreSQL, DSM/SMB and power-loss durability were
+> not exercised; A1-T17's host gate is therefore *blocked*, not passed.
 
 ## Executed checks
 

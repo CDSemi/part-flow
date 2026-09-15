@@ -6,7 +6,7 @@
 > Prepared: **2026-09-11**
 > Phạm vi: quản trị **Synology staging** trong LAN giới hạn. Đây chưa phải gói production hardening.
 
-> **Checkpoint Deployment Admin PF-A1.1 (2026-09-14, đã sửa theo audit-r1) — trạng thái phát triển, chưa phải bản phát hành NAS.**
+> **Checkpoint Deployment Admin PF-A1.1 (2026-09-15, đã sửa theo audit-r1 và audit-r2) — trạng thái phát triển, chưa phải bản phát hành NAS.**
 > Source controller trong repository giờ yêu cầu *protected instance registration*
 > (`pf_instance.py`: installation root với `bootstrap/` (launcher `pf`, `bootstrap.conf`,
 > verifier `pf_bootstrap.py`), `registry/instances.json` và `registry/reservations/`,
@@ -18,12 +18,20 @@
 > **không** gọi Git/Docker/Compose khi context hoặc cấu hình runtime bị từ chối. Lệnh
 > mutation cần `--instance <slug|uuid>` (hoặc default được bảo vệ), inventory đường dẫn sạch
 > (không trùng/lồng/alias giữa các instance), stable lock riêng của instance dưới
-> `<root>/locks/` và một route journal tường minh. Layout v2.5 mô tả bên dưới là **chưa đăng
-> ký** trong checkpoint này: `control/pf.sh` đã cài chỉ in báo cáo read-only bằng shell và
-> không chạy Python nào từ thư mục control legacy. `install-control.sh` vẫn là installer
-> legacy v2.5; không chạy nó trên NAS đang hoạt động với checkpoint này. Registration hiện
-> chỉ là một transaction Python cho fixture dùng một lần (`register_instance`), chưa phải
-> lệnh cho người vận hành.
+> `<root>/locks/` và một route journal tường minh. Đường dẫn managed/authoritative chỉ được
+> chấp nhận ở đúng một cách viết POSIX chuẩn (một dấu `/` đầu, không có thành phần rỗng, `.`
+> hay `..`, không có `/` cuối); mọi cách viết khác như `//volume1/...` bị từ chối, không bao
+> giờ được chuẩn hoá ngầm. Installation root chỉ do bootstrap đã cài quyết định:
+> `--installation-root` là handshake verifier→release, và nếu người vận hành tự truyền
+> `--installation-root` ở bất kỳ vị trí nào thì toàn bộ lệnh bị từ chối trước khi đọc registry
+> hay journal. Hai record đã publish cùng claim một cặp daemon `engine_id` + Compose project
+> được `instances` báo `CONFLICT` và cả hai bên đều bị từ chối mutation cho tới khi quản trị
+> viên sửa registry. Layout v2.5 mô tả bên dưới là **chưa đăng ký** trong checkpoint này:
+> `control/pf.sh` đã cài chỉ in báo cáo read-only bằng shell, không chạy Python nào từ thư
+> mục control legacy và chỉ nêu tên pending journal chứ không đọc hay in nội dung.
+> `install-control.sh` vẫn là installer legacy v2.5; không chạy nó trên NAS đang hoạt động
+> với checkpoint này. Registration hiện chỉ là một transaction Python cho fixture dùng một
+> lần (`register_instance`), chưa phải lệnh cho người vận hành.
 
 ## 1. Mục đích
 

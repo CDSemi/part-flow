@@ -6,7 +6,7 @@
 > Prepared: **2026-09-11**
 > Scope: restricted-LAN **Synology staging** administration. This is not a production-hardening package.
 
-> **Deployment Admin checkpoint PF-A1.1 (2026-09-14, audit-r1 corrections) — development state, not a NAS release.**
+> **Deployment Admin checkpoint PF-A1.1 (2026-09-15, audit-r1 and audit-r2 corrections) — development state, not a NAS release.**
 > The controller source in this repository now requires a *protected instance registration*
 > (`pf_instance.py`: installation root with `bootstrap/` (launcher `pf`, `bootstrap.conf`,
 > verifier `pf_bootstrap.py`), `registry/instances.json` and `registry/reservations/`,
@@ -19,11 +19,20 @@
 > runtime configuration is refused. Mutating commands need `--instance <slug|uuid>` (or a
 > protected default), a clean managed-path inventory (no repeated, nested or aliased paths
 > across instances), the stable per-instance lock under `<root>/locks/` and an explicit
-> journal route. The v2.5 layout described below is **unregistered** in this checkpoint: the
-> installed `control/pf.sh` prints a shell-only read-only report and executes no Python from
-> the legacy control directory. `install-control.sh` remains the legacy v2.5 installer; do not
-> run it against a live NAS with this checkpoint. Registration exists only as a Python
-> transaction for disposable fixtures (`register_instance`), not as an operator command.
+> journal route. Managed and authoritative paths are accepted in exactly one canonical POSIX
+> spelling (single leading `/`, no empty, `.` or `..` component, no trailing `/`); any other
+> spelling such as `//volume1/...` is refused, never normalized. The installation root is
+> chosen by the installed bootstrap alone: `--installation-root` is the verifier→release
+> handshake, and an operator-supplied `--installation-root` anywhere on the command line
+> refuses the whole invocation before any registry or journal is read. Two published records
+> claiming the same daemon `engine_id` and Compose project are reported as a `CONFLICT` by
+> `instances` and refuse mutation on both sides until an administrator repairs the registry.
+> The v2.5 layout described below is **unregistered** in this checkpoint: the installed
+> `control/pf.sh` prints a shell-only read-only report, executes no Python from the legacy
+> control directory and names a pending journal without reading or printing its contents.
+> `install-control.sh` remains the legacy v2.5 installer; do not run it against a live NAS
+> with this checkpoint. Registration exists only as a Python transaction for disposable
+> fixtures (`register_instance`), not as an operator command.
 
 ## 1. Purpose
 

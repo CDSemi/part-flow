@@ -2653,7 +2653,6 @@ class Controller:
 
 def parser():
     result = argparse.ArgumentParser(description="PartFlow NAS staging administration; use --help on a command.")
-    result.add_argument("--installation-root", help=argparse.SUPPRESS)
     result.add_argument("--instance", help="Registered instance slug or UUID; required when several instances exist and no protected default is set")
     subs = result.add_subparsers(dest="command", required=True)
     for name in ("doctor", "status", "permissions", "backup", "reset-db", "resume", "abort-deploy"):
@@ -2748,7 +2747,32 @@ def display_registry(registry):
                 " or have an administrator remove the reservation explicitly)")
         else:
             log(f"UNKNOWN state: {pending.path}: {pending.error} (not deleted; an administrator must inspect it)")
+    for (engine_id, project), owners in sorted(pf_instance.daemon_project_conflicts(registry).items()):
+        log(f"CONFLICT: compose project {project!r} on daemon {engine_id} is claimed by {', '.join(owners)}; "
+            "every party refuses mutation until an administrator repairs the registry (no record is chosen automatically)")
     return len(rows)
+
+
+def bind_installation_root(root, running_release):
+    """The root handed over by the bootstrap must be the installation whose pinned control
+    release is the code running now. Nothing (registry, journals, records) is read from a root
+    that fails this binding; the verifier already proved the real root before exec."""
+    root = Path(root)
+    reason = pf_instance.canonical_path_error(str(root))
+    if reason is not None:
+        raise Failure(f"Installation root {root!s} is not one canonical absolute POSIX path ({reason}); nothing was read.")
+    conf_path = root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_CONF_NAME
+    try:
+        conf = pf_instance.pf_bootstrap.parse_bootstrap_conf(
+            pf_instance.read_bytes_nofollow(conf_path), label=str(conf_path), error=pf_instance.ContextError)
+    except (OSError, UnicodeDecodeError, pf_instance.ContextError) as exc:
+        raise Failure(f"Installation root {root} has no usable bootstrap configuration ({exc}); nothing was read.") from exc
+    if running_release is not None and Path(conf["control_release"]) != Path(running_release):
+        raise Failure(
+            f"Installation root {root} pins control release {conf['control_release']} but this control code runs "
+            f"from {running_release}; the root is not the installation that launched it. Nothing was read."
+        )
+    return root
 
 
 def main(argv=None, *, installation_root=None, running_release=None, trusted_launch=None):
@@ -2763,11 +2787,6 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
         return 2
     os.umask(0o077)
     argv = list(sys.argv[1:] if argv is None else argv)
-    globals_parser = argparse.ArgumentParser(add_help=False)
-    globals_parser.add_argument("--installation-root")
-    globals_parser.add_argument("--instance")
-    options, rest = globals_parser.parse_known_args(argv)
-    root = options.installation_root or installation_root
     if running_release is None:
         running_release = RUNNING_RELEASE
     if trusted_launch is None:
@@ -2777,6 +2796,24 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
     managed_started = False
     held_lock = contextlib.ExitStack()
     try:
+        # The installation root is the bootstrap→release handshake: exactly one
+        # "--installation-root=<root>" as the first argument, placed there by the
+        # installed verifier (or the in-process harness parameter). It is not an
+        # operator option: any further spelling of it, before or after the command,
+        # refuses the whole invocation before any registry or instance state is read.
+        root = installation_root
+        handshake = pf_instance.ROOT_HANDSHAKE_OPTION + "="
+        if argv and argv[0].startswith(handshake) and installation_root is None:
+            root = argv.pop(0)[len(handshake):]
+        injected = pf_instance.pf_bootstrap.operator_supplied_root_arguments(argv)
+        if injected:
+            raise Failure(
+                "root-override: " + " ".join(injected) + ": the installation root is chosen by the installed "
+                "bootstrap; --installation-root is not an operator option. Nothing was read and nothing was changed."
+            )
+        globals_parser = argparse.ArgumentParser(add_help=False)
+        globals_parser.add_argument("--instance")
+        options, rest = globals_parser.parse_known_args(argv)
         if root is None:
             # Without a protected installation root nothing here is trusted: neither
             # the writable repository copy nor an unregistered legacy control directory
@@ -2788,7 +2825,7 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
                 "until the PF-A2 migration registers them."
             )
 
-        root = Path(root)
+        root = bind_installation_root(root, running_release)
         passthrough = not rest or (rest[0] not in KNOWN_COMMANDS and rest[0] not in ("-h", "--help"))
         # Help is answered before any registry or instance state is read.
         args = None if passthrough else parser().parse_args(rest)

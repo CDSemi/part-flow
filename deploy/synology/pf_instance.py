@@ -56,6 +56,8 @@ LAUNCHER_NAME = pf_bootstrap.LAUNCHER_NAME
 BOOTSTRAP_CONF_NAME = pf_bootstrap.BOOTSTRAP_CONF_NAME
 BOOTSTRAP_MODULE_NAME = pf_bootstrap.BOOTSTRAP_MODULE_NAME
 RELEASE_ID_RE = pf_bootstrap.RELEASE_ID_RE
+ROOT_HANDSHAKE_OPTION = pf_bootstrap.ROOT_HANDSHAKE_OPTION
+canonical_path_error = pf_bootstrap.canonical_path_error
 
 SCHEMA_VERSION = 1
 REGISTRY_RELATIVE = Path("registry") / "instances.json"
@@ -274,9 +276,16 @@ def validate_instance_record(record):
 
 
 def _require_normalized_absolute(value, label):
-    path = Path(value)
-    if not path.is_absolute() or str(path) != value or any(part in ("..", ".") for part in path.parts):
-        raise ContextError(f"{label} must be a normalized absolute path without '.' or '..': {value}")
+    """Exactly one canonical spelling per path; alternative spellings such as ``//a/b`` fail closed."""
+    canonical_path(value, label=label)
+
+
+def canonical_path(value, *, label):
+    """``Path(value)`` when ``value`` (a string, or a Path rendered with ``str``) is the single canonical
+    absolute POSIX spelling; raises ContextError ``path-noncanonical`` otherwise. Never normalizes."""
+    if isinstance(value, Path):
+        value = str(value)
+    return pf_bootstrap.canonical_path(value, label=label, error=ContextError)
 
 
 # ------------------------------------------------------------------- data classes
@@ -598,9 +607,7 @@ def path_identity(path):
     as managed-path identity), for a leaf that is not a directory, and for a
     missing leaf. ``Path.resolve()`` alone is not security validation.
     """
-    path = Path(path)
-    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
-        raise ContextError(f"{path}: managed paths must be normalized absolute paths")
+    path = canonical_path(path, label=str(path))
     current = Path(path.anchor)
     info = _managed_directory_info(current)
     for part in path.parts[1:]:
@@ -638,7 +645,18 @@ def managed_path_conflicts(candidate, owner, others, root):
     """
     problems = []
     root = Path(root)
-    entries = [(owner, role, Path(path)) for role, path in candidate.items()]
+    # Lexical comparison is only sound between canonical spellings: a candidate written as
+    # ``//a/b`` or ``/a//b`` is refused here, never compared or normalized.
+    entries = []
+    for role, path in candidate.items():
+        reason = canonical_path_error(str(path))
+        if reason is not None:
+            problems.append(("path-noncanonical", path, f"{role}: {reason}"))
+            continue
+        entries.append((owner, role, Path(path)))
+    if canonical_path_error(str(root)) is not None:
+        problems.append(("root-not-canonical", root, "installation root is not one canonical absolute POSIX path"))
+        return problems
     identities = {}
     for _, role, path in entries:
         if _contains(root, path):
@@ -658,6 +676,13 @@ def managed_path_conflicts(candidate, owner, others, root):
             elif _contains(path_b, path_a):
                 problems.append(("path-nested", path_a, f"{role_a} lies inside {role_b}"))
     for other_owner, other_role, other_path in others:
+        if canonical_path_error(str(other_path)) is not None:
+            # Trusted state carrying an alternative spelling cannot be compared safely: fail closed.
+            for _, role, path in entries:
+                problems.append(("path-noncanonical", path,
+                                 f"{role} vs {other_owner}.{other_role}: the other registration's path "
+                                 f"{other_path!s} is not canonical; the inventory cannot be established"))
+            continue
         other_path = Path(other_path)
         try:
             other_identity = path_identity(other_path)
@@ -695,6 +720,58 @@ def inventory_of(registry, *, exclude_instance_id=None):
         for role in ROLE_NAMES:
             entries.append(("reservation:" + pending.slug, role, Path(pending.record["paths"][role])))
     return entries
+
+
+def daemon_project_conflicts(registry):
+    """Published, non-purged records (and pending reservations) that claim one
+    (daemon.engine_id, compose_project) more than once. Returns {(engine_id, project): [owner, ...]}.
+
+    The registration transaction enforces this uniqueness when a record is published; this
+    re-derives it from trusted state so a corrupted or hand-edited registry is detected at
+    runtime as well. Purged records keep their design semantics: they hold no claim.
+    """
+    claims = {}
+    published = set()
+    for entry, context, error in registry.records():
+        if context is None or context.state == "purged":
+            continue
+        published.add(context.instance_id)
+        claims.setdefault((context.daemon.engine_id, context.compose_project), []).append(context.slug)
+    for pending in pending_registrations(registry.root):
+        # A reservation whose registration is already published is the same registration
+        # awaiting its final acknowledgement, not a competing claim.
+        if pending.kind != "reservation" or pending.record is None or pending.instance_id in published:
+            continue
+        key = (pending.record["daemon"]["engine_id"], pending.record["compose_project"])
+        claims.setdefault(key, []).append("reservation:" + pending.slug)
+    return {key: owners for key, owners in claims.items() if len(owners) > 1}
+
+
+def registry_semantic_conflicts(registry, context):
+    """Trusted-state invariants that a single record cannot prove on its own. Returns (code, path, message).
+
+    * ``registry-record-invalid``: another published record cannot be loaded, so neither the
+      managed-path inventory nor daemon-project uniqueness can be established for ``context``.
+    * ``daemon-project-duplicate``: ``context`` shares (daemon.engine_id, compose_project)
+      with another non-purged record or a pending reservation. Nothing is repaired or chosen;
+      every party to the conflict refuses mutation until an administrator resolves it.
+    """
+    problems = []
+    for entry, other, error in registry.records():
+        if other is None and entry.instance_id != context.instance_id:
+            problems.append(("registry-record-invalid", entry.record_path,
+                             f"published record {entry.slug} cannot be loaded ({error}); the managed-path "
+                             "inventory and daemon-project uniqueness cannot be established"))
+    if context.state != "purged":
+        key = (context.daemon.engine_id, context.compose_project)
+        owners = daemon_project_conflicts(registry).get(key)
+        if owners:
+            others = [owner for owner in owners if owner != context.slug]
+            problems.append(("daemon-project-duplicate", context.record_path,
+                             f"compose project {context.compose_project!r} on daemon {context.daemon.engine_id} "
+                             f"is also claimed by {', '.join(others) or 'another record'}; the registry must be "
+                             "repaired explicitly, no record is chosen automatically"))
+    return problems
 
 
 def validate_context(context, *, running_release=None, interpreter=None, checker=None, registry=None):
@@ -770,6 +847,8 @@ def validate_context(context, *, running_release=None, interpreter=None, checker
         candidate = {role: getattr(context.paths, role) for role in ROLE_NAMES}
         others = inventory_of(registry, exclude_instance_id=context.instance_id)
         for code, path, message in managed_path_conflicts(candidate, context.slug, others, root):
+            checker.refuse(code, path, message)
+        for code, path, message in registry_semantic_conflicts(registry, context):
             checker.refuse(code, path, message)
     acl_state = "posix" if "posix" in checker.acl_states else "none"
     if "unknown" in checker.acl_states:
@@ -1007,7 +1086,7 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
     ``policy_documents``: mapping file name -> bytes for ``policies/``.
     Refuses an existing non-empty root. Trusted-installer/fixture primitive, not an operator wizard.
     """
-    root = Path(root)
+    root = canonical_path(root, label="installation root")
     if not root.is_absolute():
         raise ContextError("Installation root must be absolute.")
     if os.path.lexists(str(root)) and os.listdir(str(root)):
@@ -1247,6 +1326,11 @@ def register_instance(root, spec):
                            "control_release_id", "profile_path", "policy_path", "instance_id"}
     if unknown:
         raise ContextError("Unknown registration fields: " + ", ".join(sorted(unknown)))
+    # Registered paths are accepted in exactly one canonical spelling; nothing is normalized.
+    for role in ROLE_NAMES:
+        if role not in spec["paths"]:
+            raise ContextError(f"Registration is missing paths.{role}.")
+        canonical_path(spec["paths"][role], label="paths." + role)
     release_id = str(spec["control_release_id"])
     if not RELEASE_ID_RE.fullmatch(release_id):
         raise ContextError("Invalid control_release_id.")

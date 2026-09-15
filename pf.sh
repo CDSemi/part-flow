@@ -93,6 +93,15 @@ if [ "$MODE" = bootstrap ]; then
         *) fail "bootstrap.conf: control_release must live under $ROOT/releases." ;;
     esac
     [ -f "$INTERPRETER" ] && [ -x "$INTERPRETER" ] && [ -O "$INTERPRETER" ] || fail "Registered interpreter is missing, not executable or not root-owned: $INTERPRETER"
+    # The installation root is chosen here, from this launcher's own location, and handed
+    # to the verifier as its first argument. It is not an operator option: any operator
+    # spelling of it (before or after the command) refuses the whole invocation.
+    for arg in "$@"; do
+        case "$arg" in
+            --installation-root|--installation-root=*)
+                fail "--installation-root is set by the installed bootstrap, not by the operator; refusing. Nothing was read and nothing was changed." ;;
+        esac
+    done
     # The verifier (installed in bootstrap/, not in the release) re-checks the
     # interpreter, configuration, ancestors and the pinned release tree with
     # no-follow/owner/mode/link/ACL rules, then execs <release>/pf-admin.py.
@@ -104,8 +113,10 @@ if [ "$MODE" = bootstrap ]; then
 fi
 
 # Legacy v2.5 control directory: read-only report produced by this shell only.
-# No interpreter is selected and no file from the unverified legacy control
-# directory is executed. Registration/migration is the PF-A2 installer's job.
+# No interpreter is selected, no file from the unverified legacy control
+# directory is executed, and no file content is read or printed: the journal is
+# private state, so only its existence and location are reported. Registration/
+# migration is the PF-A2 installer's job.
 HOME_DIR=${SELF_DIR%/control}
 COMMAND=${1:-}
 echo "PartFlow NAS Admin (PF-A1.1 checkpoint) - legacy launcher"
@@ -124,10 +135,10 @@ fi
 FOUND=0
 for state_dir in "$HOME_DIR"/.pf-state-*; do
     [ -d "$state_dir" ] || continue
-    if [ -f "$state_dir/pending.json" ]; then
+    if [ -e "$state_dir/pending.json" ]; then
         FOUND=1
-        echo "  INCOMPLETE OPERATION in $(basename -- "$state_dir") (raw journal, no interpretation):"
-        sed 's/^/    /' "$state_dir/pending.json"
+        echo "  INCOMPLETE OPERATION recorded in $state_dir/pending.json (private journal; contents not read or shown here)"
+        echo "    Do not delete or edit it. It is interpreted only by a protected registration after the PF-A2 migration."
     fi
 done
 [ "$FOUND" -eq 1 ] || echo "  Pending journal: none found under $HOME_DIR/.pf-state-*"

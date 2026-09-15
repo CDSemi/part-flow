@@ -41,6 +41,7 @@ BOOTSTRAP_CONF_KEYS = ("interpreter", "control_release", "control_release_sha256
 RELEASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA256_RE = re.compile(r"[a-f0-9]{64}\Z")
 EXIT_REFUSED = 2
+ROOT_HANDSHAKE_OPTION = "--installation-root"
 
 
 class BootstrapError(RuntimeError):
@@ -93,6 +94,41 @@ def parse_strict_json(data, *, label, error=BootstrapError):
         raise error(f"{label}: {exc}") from exc
     except ValueError as exc:
         raise error(f"{label}: invalid JSON: {exc}") from exc
+
+
+def canonical_path_error(value):
+    """Reason why ``value`` is not the single canonical spelling of an absolute POSIX path, or None.
+
+    Accepted: a string with exactly one leading '/', at least one component, no empty
+    ('//'), '.' or '..' component, no trailing '/' and no control characters. Every other
+    spelling that may name the same filesystem object ('//a/b', '/a//b', '/a/./b', '/a/b/')
+    is refused rather than normalized, so no two spellings of one location can coexist in
+    trusted state and lexical containment checks stay sound (A11-R03).
+    """
+    if not isinstance(value, str):
+        return "not a string"
+    if not value.startswith("/"):
+        return "not an absolute path"
+    if value == "/":
+        return "the filesystem root itself is not a managed path"
+    if value.startswith("//"):
+        return "a double leading slash is an implementation-defined POSIX namespace, not a canonical path"
+    components = value.split("/")[1:]
+    if any(part == "" for part in components):
+        return "empty component (repeated or trailing '/')"
+    if any(part in (".", "..") for part in components):
+        return "'.' or '..' component"
+    if any(ord(char) < 0x20 or char == "\x7f" for char in value):
+        return "control character"
+    return None
+
+
+def canonical_path(value, *, label, error=BootstrapError):
+    """Return ``Path(value)`` when ``value`` is canonical (see ``canonical_path_error``); fail closed otherwise."""
+    reason = canonical_path_error(value)
+    if reason is not None:
+        raise error(f"path-noncanonical: {label} must be one canonical absolute POSIX path ({reason}): {value!r}")
+    return Path(value)
 
 
 def writable_by_others(mode):
@@ -410,8 +446,9 @@ def verify_installation_anchor(root, *, interpreter=None, isolated=None, checker
     if isolated is False:
         checker.refuse("not-isolated", str(interpreter or sys.executable),
                        "interpreter was not started in isolated mode (-I); use the installed launcher")
-    if not root.is_absolute() or any(part in ("..", ".") for part in root.parts):
-        checker.refuse("root-not-normalized", root, "installation root must be a normalized absolute path")
+    reason = canonical_path_error(str(root))
+    if reason is not None:
+        checker.refuse("root-not-canonical", root, "installation root must be one canonical absolute POSIX path (" + reason + ")")
         return checker
     if not checker.ancestors(root):
         return checker
@@ -462,14 +499,27 @@ def verify_installation_anchor(root, *, interpreter=None, isolated=None, checker
     return checker
 
 
+def operator_supplied_root_arguments(arguments):
+    """Operator arguments that try to name an installation root. The root is chosen only by the
+    installed bootstrap; ``--installation-root`` is the verifier→release handshake, never a CLI option."""
+    return [item for item in arguments if item == ROOT_HANDSHAKE_OPTION or item.startswith(ROOT_HANDSHAKE_OPTION + "=")]
+
+
 def main(argv=None):
     """Launcher entry: verify, then exec the pinned release entry point. Never imports release code."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) < 2 or argv[0] != "--installation-root":
+    if len(argv) < 2 or argv[0] != ROOT_HANDSHAKE_OPTION:
         print("pf_bootstrap: usage: --installation-root <root> [pf arguments]", file=sys.stderr)
         return EXIT_REFUSED
     root = Path(argv[1])
     rest = argv[2:]
+    injected = operator_supplied_root_arguments(rest)
+    if injected:
+        print("ERROR: installed bootstrap refused the command line:", file=sys.stderr)
+        print(f"  [refuse] root-override: {' '.join(injected)}: the installation root is chosen by the installed "
+              "bootstrap; --installation-root is not an operator option", file=sys.stderr)
+        print("No control code was executed and nothing was changed.", file=sys.stderr)
+        return EXIT_REFUSED
     checker = verify_installation_anchor(
         root, interpreter=sys.executable, isolated=bool(sys.flags.isolated),
         running_bootstrap=Path(__file__).resolve(),
@@ -484,7 +534,9 @@ def main(argv=None):
     conf = checker.bootstrap_conf
     interpreter = conf["interpreter"]
     entry = str(Path(conf["control_release"]) / CONTROL_ENTRY_POINT)
-    command = [interpreter, "-I", "-B", entry, "--installation-root", str(root), *rest]
+    # The handshake is one fixed first argument; the release accepts it only in this
+    # position and refuses any further spelling of it (see pf-admin.py main()).
+    command = [interpreter, "-I", "-B", entry, ROOT_HANDSHAKE_OPTION + "=" + str(root), *rest]
     try:
         os.execv(interpreter, command)
     except OSError as exc:

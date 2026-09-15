@@ -19,6 +19,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import struct
@@ -557,7 +558,11 @@ class PendingJournalVisibility(Base):
         (home / "config" / "pf-config.json").write_text('{"project": "partflow-legacy"}\n')
         state = home / ".pf-state-partflow-legacy"
         state.mkdir()
-        pf.write_json(state / "pending.json", {"operation": "update", "phase": "backup-ready", "checkpoint": "c1"})
+        # The journal carries private fields; the legacy report must not reproduce any of them.
+        secrets = {"private_token": "SHOULD_NOT_BE_PRINTED", "password": "EXAMPLE_SECRET",
+                   "recovery_bundle": "c1-PRIVATE-NAME", "phase": "backup-ready"}
+        pf.write_json(state / "pending.json", dict({"operation": "update"}, **secrets))
+        os.chmod(state / "pending.json", 0o600)
         before = pfx.snapshot_tree(home)
         env = {"PATH": "/usr/bin:/bin", "PF_HOME": str(self.base / "elsewhere"), "PF_CONFIG_DIR": "/nonexistent",
                "PF_PYTHON": "/bin/false"}
@@ -565,16 +570,35 @@ class PendingJournalVisibility(Base):
                                 stderr=subprocess.PIPE, text=True, check=False, timeout=120)
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("UNREGISTERED legacy installation (v2.5 layout) at " + str(home), status.stdout)
-        self.assertIn("INCOMPLETE OPERATION in .pf-state-partflow-legacy", status.stdout)
-        self.assertIn('"phase": "backup-ready"', status.stdout)
+        self.assertIn("INCOMPLETE OPERATION recorded in " + str(state / "pending.json"), status.stdout)
+        self.assertIn("contents not read or shown here", status.stdout)
+        for token in list(secrets) + list(secrets.values()) + ["{", "}", '"operation"', "update"]:
+            self.assertNotIn(token, status.stdout + status.stderr, token)
+        # Static guarantee: the legacy section of the launcher runs no command that reads a
+        # file (no cat/sed/head/tail/awk, no interpreter, no input redirection).
+        legacy_section = (pfx.REPO_PACKAGE / "pf.sh").read_text().split("# Legacy v2.5 control directory")[-1]
+        for line in legacy_section.splitlines():
+            self.assertIsNone(re.match(r"\s*(sed|cat|head|tail|awk|grep|python\S*|exec|\.|source)\b", line), line)
+            self.assertNotIn("< \"", line, line)
+            self.assertNotIn("$(<", line, line)
         self.assertIn("not executed: unverified legacy payload", status.stdout)
         self.assertNotIn("elsewhere", status.stdout)
-        update = subprocess.run(["sh", str(control / "pf.sh"), "update", "--latest"], env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, check=False, timeout=120)
-        self.assertEqual(update.returncode, 1)
-        self.assertIn("refused on an unregistered installation", update.stderr)
+        for arguments in (["update", "--latest"], ["deploy"], ["permissions"]):
+            refused = subprocess.run(["sh", str(control / "pf.sh"), *arguments], env=env, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, check=False, timeout=120)
+            self.assertEqual(refused.returncode, 1, arguments)
+            self.assertIn("refused on an unregistered installation", refused.stderr)
+            for token in secrets.values():
+                self.assertNotIn(token, refused.stdout + refused.stderr)
         self.assertFalse(marker.exists(), "legacy launcher executed unverified payload")
         self.assertEqual(pfx.snapshot_tree(home), before)
+        # No file of the legacy home is read: the journal is only named, so an unreadable or
+        # oversized journal changes nothing about the report.
+        (state / "pending.json").write_bytes(b"\x00" * 4096)
+        again = subprocess.run(["sh", str(control / "pf.sh"), "status"], env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, check=False, timeout=120)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stdout, status.stdout)
         # Running the release entry point directly without an installed bootstrap is refused.
         direct = subprocess.run([sys.executable, "-I", "-B", str(pfx.PACKAGE / "pf-admin.py"), "status"],
                                 env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1328,6 +1352,362 @@ class StaticCallSites(unittest.TestCase):
         verifier = (pfx.PACKAGE / "pf_bootstrap.py").read_text()
         for forbidden in ("import pf_instance", "pf_admin", "importlib", "sys.path"):
             self.assertNotIn(forbidden, verifier)
+
+    def test_installation_root_is_a_bootstrap_handshake_not_an_operator_option(self):
+        launcher = (pfx.REPO_PACKAGE / "pf.sh").read_text()
+        bootstrap_section = launcher.split('if [ "$MODE" = bootstrap ]; then')[1].split("# Legacy v2.5 control directory")[0]
+        self.assertIn("--installation-root|--installation-root=*)", bootstrap_section)
+        verifier = (pfx.PACKAGE / "pf_bootstrap.py").read_text()
+        self.assertIn("operator_supplied_root_arguments(rest)", verifier)
+        self.assertIn('ROOT_HANDSHAKE_OPTION + "=" + str(root)', verifier)
+        admin = (pfx.PACKAGE / "pf-admin.py").read_text()
+        self.assertNotIn('add_argument("--installation-root"', admin)
+        self.assertIn("operator_supplied_root_arguments(argv)", admin)
+        self.assertIn("bind_installation_root(root, running_release)", admin)
+
+
+def double_slash(path):
+    """The POSIX implementation-defined spelling ``//a/b`` of ``/a/b``; pathlib keeps it distinct."""
+    text = str(path)
+    assert text.startswith("/") and not text.startswith("//")
+    return Path("/" + text)
+
+
+def publish_record_directly(layout, template, instance_id, slug, *, paths, compose_project=None, state=None):
+    """Publish a record the way trusted state could be corrupted or hand-edited: no registration
+    transaction, no inventory, no uniqueness check. Returns the registry entry's private state dir."""
+    record = json.loads(template.record_path.read_bytes())
+    record.update({"instance_id": instance_id, "slug": slug})
+    if compose_project is not None:
+        record["compose_project"] = compose_project
+    if state is not None:
+        record["state"] = state
+    record["paths"] = {role: str(paths[role]) for role in pf_instance.ROLE_NAMES}
+    private_state = layout.root / "instances" / instance_id
+    record["paths"]["private_state"] = str(private_state)
+    pf_instance._create_private_dir(private_state, 0o700)
+    pf_instance._write_private_file(private_state / "record.json", pf_instance.normalize_json(record), 0o600)
+    pf_instance._create_private_dir(private_state / "state", 0o700)
+    pf_instance._create_lock_file(layout.root / "locks" / (instance_id + ".lock"))
+    registry = pf_instance.load_registry(layout.root)
+    pf_instance._write_registry(layout.root, pf_instance._registry_document(registry, [
+        {"instance_id": instance_id, "slug": slug, "record_path": str(private_state / "record.json")}]))
+    return private_state
+
+
+@ROOT_REQUIRED
+class CanonicalPathSpelling(Base):
+    """A11-R03 (reopened, r5): managed paths exist in exactly one canonical spelling; ``//a/b`` and every
+    other alternative spelling fail closed at registration, on record load and in the runtime inventory."""
+
+    def setUp(self):
+        super().setUp()
+        self.alpha, self.alpha_paths = self.instance("alpha")
+        pfx.deployed_record(self.alpha)
+
+    def validation(self, context):
+        return pf_instance.validate_context(context, running_release=self.layout.release_dir, interpreter=sys.executable)
+
+    def assert_registration_refused(self, paths, pattern):
+        registry_before = self.registry_bytes()
+        locks_before = sorted(os.listdir(self.layout.root / "locks"))
+        with self.assertRaisesRegex(pf_instance.ContextError, pattern):
+            pfx.register(self.layout, "beta", paths, project="partflow-beta")
+        self.assertEqual(self.registry_bytes(), registry_before)
+        self.assertEqual(sorted(os.listdir(self.layout.root / "locks")), locks_before)
+        self.assertEqual(pf_instance.pending_registrations(self.layout.root), [])
+        self.assertTrue(self.validation(self.alpha).mutation_allowed)
+
+    def test_double_slash_child_of_another_instance_is_refused_at_registration(self):
+        nested = self.alpha_paths["workspace"] / "nested-beta"
+        nested.mkdir()
+        beta = pfx.data_home(self.base / "beta", project="partflow-beta", group=GROUP)
+        self.assert_registration_refused(dict(beta, workspace=double_slash(nested)), "path-noncanonical")
+        # The canonical spelling of the same directory is caught by the nesting rule, as before.
+        self.assert_registration_refused(dict(beta, workspace=nested), "path-nested")
+
+    def test_double_slash_inside_installation_root_is_refused(self):
+        inside = self.layout.root / "workspace-inside"
+        inside.mkdir()
+        os.chmod(inside, 0o755)
+        beta = pfx.data_home(self.base / "beta", project="partflow-beta", group=GROUP)
+        self.assert_registration_refused(dict(beta, workspace=double_slash(inside)), "path-noncanonical")
+        self.assert_registration_refused(dict(beta, workspace=inside), "path-inside-root")
+
+    def test_alternative_spellings_are_refused_never_normalized(self):
+        good = str(self.alpha_paths["workspace"])
+        for spelling in ("/" + good, good + "/", good.replace("/", "//", 1), "/." + good, good + "/.", good + "/..",
+                         good.replace("/alpha/", "/alpha/./", 1), good.replace("/alpha/", "/alpha/../alpha/", 1),
+                         "/", "relative/path", good + "\n"):
+            with self.subTest(spelling=spelling):
+                self.assertIsNotNone(pf_instance.canonical_path_error(spelling))
+                with self.assertRaisesRegex(pf_instance.ContextError, "path-noncanonical"):
+                    pf_instance.canonical_path(spelling, label="paths.workspace")
+                with self.assertRaisesRegex(pf_instance.ContextError, "path-noncanonical"):
+                    pf_instance.path_identity(spelling)
+        self.assertIsNone(pf_instance.canonical_path_error(good))
+        self.assertEqual(pf_instance.canonical_path(good, label="x"), Path(good))
+        # A Path object built from an alternative spelling is judged by its rendered string too.
+        with self.assertRaisesRegex(pf_instance.ContextError, "path-noncanonical"):
+            pf_instance.canonical_path(Path("/" + good), label="paths.workspace")
+
+    def test_lexical_relations_are_only_evaluated_between_canonical_spellings(self):
+        root = self.layout.root
+        child = double_slash(root / "child")
+        problems = pf_instance.managed_path_conflicts({"workspace": child}, "beta", [], root)
+        self.assertEqual([code for code, _, _ in problems], ["path-noncanonical"])
+        problems = pf_instance.managed_path_conflicts({"workspace": root / "child"}, "beta", [], root)
+        self.assertIn("path-inside-root", [code for code, _, _ in problems])
+        # An alternative spelling in the *other* side of the inventory also fails closed.
+        others = [("alpha", "workspace", double_slash(self.alpha_paths["workspace"]))]
+        beta = pfx.data_home(self.base / "beta", project="partflow-beta", group=GROUP)
+        problems = pf_instance.managed_path_conflicts({role: beta[role] for role in pf_instance.ROLE_NAMES}, "beta", others, root)
+        self.assertTrue(problems and all(code == "path-noncanonical" for code, _, _ in problems))
+        # A non-canonical installation root is refused before any comparison.
+        problems = pf_instance.managed_path_conflicts({"workspace": beta["workspace"]}, "beta", [], double_slash(root))
+        self.assertEqual([code for code, _, _ in problems], ["root-not-canonical"])
+
+    def test_published_record_with_alternative_spelling_fails_closed_for_every_party(self):
+        nested = self.alpha_paths["workspace"] / "nested-beta"
+        nested.mkdir()
+        beta_paths = pfx.data_home(self.base / "beta", project="partflow-beta", group=GROUP)
+        beta_paths["workspace"] = double_slash(nested)
+        publish_record_directly(self.layout, self.alpha, "00000000-0000-4000-8000-0000000000dd", "beta",
+                                paths=beta_paths, compose_project="partflow-beta")
+        registry = pf_instance.load_registry(self.layout.root)
+        with self.assertRaisesRegex(pf_instance.ContextError, "path-noncanonical"):
+            pf_instance.resolve_instance(registry, instance="beta")
+        alpha = pf_instance.resolve_instance(registry, instance="alpha")
+        validation = self.validation(alpha)
+        self.assertFalse(validation.mutation_allowed)
+        self.assertIn("registry-record-invalid", validation.refused_codes())
+        env_file = self.alpha_paths["configuration"] / ".env"
+        os.chmod(env_file, 0o600)
+        before = pfx.snapshot_tree(self.base / "alpha")
+        listing = launcher_run(self.layout, ["instances"])
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn("record=INVALID", listing.stdout)
+        self.assertIn("path-noncanonical", listing.stdout)
+        for arguments, expected in ((["--instance", "beta", "status"], "path-noncanonical"),
+                                    (["--instance", "alpha", "permissions"], "registry-record-invalid")):
+            result = launcher_run(self.layout, arguments)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(expected, result.stderr)
+        self.assertEqual(pfx.snapshot_tree(self.base / "alpha"), before)
+
+    def test_installation_root_itself_must_be_canonical(self):
+        checker = pf_instance.pf_bootstrap.verify_installation_anchor(double_slash(self.layout.root), interpreter=sys.executable)
+        self.assertIn("root-not-canonical", [finding.code for finding in checker.findings])
+        with self.assertRaisesRegex(pf_instance.ContextError, "path-noncanonical"):
+            pf_instance.initialize_installation_root(double_slash(self.base / "other"), launcher=b"", interpreter=sys.executable,
+                                                     release_id="x", release_files={}, profile=("p.json", b"{}"), policy_documents={})
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = pf.main(["instances"], installation_root=str(double_slash(self.layout.root)),
+                           running_release=self.layout.release_dir, trusted_launch=True)
+        self.assertEqual(code, 1)
+        self.assertIn("not one canonical absolute POSIX path", stderr.getvalue())
+        self.assertNotIn("alpha", stdout.getvalue())
+
+
+@ROOT_REQUIRED
+class BootstrapRootAuthority(Base):
+    """r5 finding 2: the installation root is chosen by the installed bootstrap only. ``--installation-root``
+    is the verifier→release handshake; any operator spelling of it, in any position, refuses the invocation
+    before registry or instance state is read."""
+
+    def setUp(self):
+        super().setUp()
+        self.genuine, _ = self.instance("genuine")
+        (self.base / "fake").mkdir()
+        self.fake = pfx.install_root(self.base / "fake")
+        pfx.register(self.fake, "planted", pfx.data_home(self.base / "fake/planted", project="partflow-planted", group=GROUP),
+                     project="partflow-planted")
+
+    def assert_launcher_refuses(self, arguments):
+        result = launcher_run(self.layout, arguments)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--installation-root is set by the installed bootstrap, not by the operator", result.stderr)
+        self.assertNotIn("planted", result.stdout + result.stderr)
+        self.assertNotIn("genuine", result.stdout)
+        return result
+
+    def test_operator_root_before_the_command_is_refused(self):
+        self.assert_launcher_refuses(["--installation-root", str(self.fake.root), "instances"])
+        self.assert_launcher_refuses(["--installation-root=" + str(self.fake.root), "instances"])
+
+    def test_operator_root_after_the_command_is_refused(self):
+        self.assert_launcher_refuses(["instances", "--installation-root", str(self.fake.root)])
+        self.assert_launcher_refuses(["--instance", "genuine", "status", "--installation-root=" + str(self.fake.root)])
+        self.assert_launcher_refuses(["compose-passthrough", "ps", "--installation-root", str(self.fake.root)])
+
+    def test_genuine_root_is_still_used_without_operator_input(self):
+        result = launcher_run(self.layout, ["instances"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("genuine", result.stdout)
+        self.assertIn(str(self.layout.root), result.stdout)
+        self.assertNotIn("planted", result.stdout)
+
+    def test_verifier_refuses_operator_root_before_verifying_anything(self):
+        verifier = pf_instance.pf_bootstrap
+        self.assertEqual(verifier.operator_supplied_root_arguments(["instances", "--installation-root", "/x"]), ["--installation-root"])
+        self.assertEqual(verifier.operator_supplied_root_arguments(["--installation-root=/x"]), ["--installation-root=/x"])
+        self.assertEqual(verifier.operator_supplied_root_arguments(["--instance", "a", "status"]), [])
+        # Verifier invoked directly (as the launcher does) with an injected root: refused, exit 2, no exec.
+        for arguments in (["--installation-root", str(self.layout.root), "--installation-root", str(self.fake.root), "instances"],
+                          ["--installation-root", str(self.layout.root), "instances", "--installation-root=" + str(self.fake.root)]):
+            result = subprocess.run([sys.executable, "-I", "-B", str(self.layout.bootstrap_module), *arguments],
+                                    env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("root-override", result.stderr)
+            self.assertIn("No control code was executed", result.stderr)
+            self.assertNotIn("planted", result.stdout)
+
+    def test_release_entry_point_accepts_the_handshake_only_once_and_only_first(self):
+        admin = self.layout.release_dir / "pf-admin.py"
+        handshake = "--installation-root=" + str(self.layout.root)
+        env = {"PATH": "/usr/bin:/bin"}
+
+        def run(*arguments):
+            return subprocess.run([sys.executable, "-I", "-B", str(admin), *arguments], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+
+        ok = run(handshake, "instances")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("genuine", ok.stdout)
+        for arguments in ((handshake, "--installation-root=" + str(self.fake.root), "instances"),
+                          (handshake, "instances", "--installation-root", str(self.fake.root)),
+                          (handshake, "--instance", "genuine", "status", "--installation-root=" + str(self.fake.root)),
+                          ("instances", handshake),
+                          ("--installation-root", str(self.layout.root), "instances")):
+            result = run(*arguments)
+            self.assertEqual(result.returncode, 1, (arguments, result.stdout, result.stderr))
+            self.assertRegex(result.stderr, "root-override|without an installed bootstrap")
+            self.assertNotIn("planted", result.stdout)
+            self.assertNotIn("genuine", result.stdout)
+
+    def test_release_entry_point_refuses_a_root_that_did_not_launch_it(self):
+        # The genuine release's entry point handed a root whose bootstrap pins another release.
+        admin = self.layout.release_dir / "pf-admin.py"
+        result = subprocess.run([sys.executable, "-I", "-B", str(admin), "--installation-root=" + str(self.fake.root), "instances"],
+                                env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("is not the installation that launched it. Nothing was read.", result.stderr)
+        self.assertNotIn("planted", result.stdout)
+        # A root without a usable bootstrap configuration is refused the same way.
+        bare = self.base / "bare-root"
+        bare.mkdir()
+        result = subprocess.run([sys.executable, "-I", "-B", str(admin), "--installation-root=" + str(bare), "instances"],
+                                env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no usable bootstrap configuration", result.stderr)
+
+    def test_in_process_harness_refuses_a_second_root(self):
+        code, out, err = run_main(["--installation-root=" + str(self.fake.root), "instances"], self.layout)
+        self.assertEqual(code, 1)
+        self.assertIn("root-override", err)
+        self.assertNotIn("planted", out)
+        code, out, err = run_main(["instances", "--installation-root", str(self.fake.root)], self.layout)
+        self.assertEqual(code, 1)
+        self.assertIn("root-override", err)
+        self.assertNotIn("planted", out)
+        self.assertFalse(any("installation-root" in option for action in pf.parser()._actions for option in action.option_strings))
+
+
+@ROOT_REQUIRED
+class RegistrySemanticInvariants(Base):
+    """r5 finding 4: (daemon.engine_id, compose_project) is unique among non-purged published records at
+    runtime, not only at registration; corrupted trusted state fails closed for every party."""
+
+    def setUp(self):
+        super().setUp()
+        self.alpha, self.alpha_paths = self.instance("alpha")
+        pfx.deployed_record(self.alpha)
+        self.beta_paths = pfx.data_home(self.base / "beta", project="partflow-alpha", group=GROUP)
+
+    def validation(self, slug):
+        registry = pf_instance.load_registry(self.layout.root)
+        return pf_instance.validate_context(pf_instance.resolve_instance(registry, instance=slug),
+                                            running_release=self.layout.release_dir, interpreter=sys.executable)
+
+    def test_duplicate_daemon_project_records_fail_closed_for_both(self):
+        publish_record_directly(self.layout, self.alpha, "00000000-0000-4000-8000-0000000000ee", "beta", paths=self.beta_paths)
+        for slug in ("alpha", "beta"):
+            validation = self.validation(slug)
+            self.assertFalse(validation.mutation_allowed, slug)
+            self.assertIn("daemon-project-duplicate", validation.refused_codes(), slug)
+            self.assertTrue(any("partflow-alpha" in message and pfx.ENGINE_ID in message for message in validation.blocking_messages()))
+        conflicts = pf_instance.daemon_project_conflicts(pf_instance.load_registry(self.layout.root))
+        self.assertEqual(conflicts, {(pfx.ENGINE_ID, "partflow-alpha"): ["alpha", "beta"]})
+        code, out, err = run_main(["instances"], self.layout)
+        self.assertEqual(code, 0, err)
+        self.assertIn("CONFLICT: compose project 'partflow-alpha' on daemon " + pfx.ENGINE_ID + " is claimed by alpha, beta", out)
+        self.assertIn("no record is chosen automatically", out)
+        # Nothing is repaired, nothing is chosen: both records stay published and unchanged.
+        listing_after = launcher_run(self.layout, ["instances"])
+        self.assertEqual(listing_after.returncode, 0)
+        self.assertIn("CONFLICT", listing_after.stdout)
+        self.assertEqual(sorted(entry.slug for entry in pf_instance.load_registry(self.layout.root).entries), ["alpha", "beta"])
+
+    def test_duplicate_claims_refuse_mutation_through_the_installed_cli_without_transport(self):
+        publish_record_directly(self.layout, self.alpha, "00000000-0000-4000-8000-0000000000ee", "beta", paths=self.beta_paths)
+        os.chmod(self.alpha_paths["configuration"] / ".env", 0o600)
+        before = pfx.snapshot_tree(self.base / "alpha", self.base / "beta")
+        for slug in ("alpha", "beta"):
+            result = launcher_run(self.layout, ["--instance", slug, "permissions"])
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("daemon-project-duplicate", result.stderr)
+        self.assertEqual(pfx.snapshot_tree(self.base / "alpha", self.base / "beta"), before)
+        holder = {}
+
+        class Capture(RecordingController):
+            def __init__(self, context, **kwargs):
+                super().__init__(context, **kwargs)
+                holder["controller"] = self
+
+        with mock.patch.object(pf, "Controller", Capture):
+            code, out, err = run_main(["--instance", "alpha", "status"], self.layout)
+        self.assertEqual(code, 1)
+        self.assertEqual(holder["controller"].calls, [])
+        self.assertIn("daemon-project-duplicate", out)
+        self.assertIn("Live checks skipped", out)
+
+    def test_purged_record_holds_no_claim(self):
+        publish_record_directly(self.layout, self.alpha, "00000000-0000-4000-8000-0000000000ee", "beta",
+                                paths=self.beta_paths, state="purged")
+        self.assertEqual(pf_instance.daemon_project_conflicts(pf_instance.load_registry(self.layout.root)), {})
+        self.assertTrue(self.validation("alpha").mutation_allowed)
+        self.assertNotIn("daemon-project-duplicate", self.validation("beta").refused_codes())
+
+    def test_competing_reservation_is_a_conflict_but_the_own_reservation_is_not(self):
+        record = json.loads(self.alpha.record_path.read_bytes())
+        # The registration's own reservation awaiting its final acknowledgement: not a claim.
+        pf_instance._write_reservation(self.layout.root, record)
+        self.assertTrue(self.validation("alpha").mutation_allowed)
+        pf_instance._clear_reservation(self.layout.root, record["instance_id"])
+        # A reservation for another identity with the same daemon/project: a conflict.
+        competing = dict(record, instance_id="00000000-0000-4000-8000-0000000000ef", slug="beta")
+        competing["paths"] = dict(record["paths"], **{role: str(self.beta_paths[role]) for role in pf_instance.ROLE_NAMES})
+        competing["paths"]["private_state"] = str(self.layout.root / "instances" / competing["instance_id"])
+        pf_instance._write_reservation(self.layout.root, competing)
+        validation = self.validation("alpha")
+        self.assertFalse(validation.mutation_allowed)
+        self.assertIn("daemon-project-duplicate", validation.refused_codes())
+        self.assertTrue(any("reservation:beta" in message for message in validation.blocking_messages()))
+
+    def test_unloadable_other_record_blocks_mutation_with_an_explicit_finding(self):
+        beta_paths = pfx.data_home(self.base / "beta2", project="partflow-beta", group=GROUP)
+        private_state = publish_record_directly(self.layout, self.alpha, "00000000-0000-4000-8000-0000000000ee", "beta",
+                                                paths=beta_paths, compose_project="partflow-beta")
+        self.assertTrue(self.validation("alpha").mutation_allowed)
+        (private_state / "record.json").write_bytes(b"{not json")
+        validation = self.validation("alpha")
+        self.assertFalse(validation.mutation_allowed)
+        self.assertIn("registry-record-invalid", validation.refused_codes())
+        code, out, err = run_main(["instances"], self.layout)
+        self.assertEqual(code, 0)
+        self.assertIn("record=INVALID", out)
+        self.assertTrue((private_state / "record.json").exists())
 
 
 if __name__ == "__main__":
