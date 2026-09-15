@@ -270,20 +270,19 @@ class SelectionAndDefault(Base):
             with self.assertRaises(OSError):
                 pf_instance.register_instance(self.layout.root, spec)
         self.assertEqual(self.registry_bytes(), before_registry)
-        registry = pf_instance.load_registry(self.layout.root)
-        orphans = pf_instance.unpublished_registrations(registry)
-        self.assertEqual(len(orphans), 1)
+        pending = pf_instance.pending_registrations(self.layout.root)
+        self.assertEqual([item.kind for item in pending], ["reservation"])
         code, out, err = run_main(["instances"], self.layout)
         self.assertEqual(code, 0)
-        self.assertIn("UNPUBLISHED registration directory", out)
+        self.assertIn("PENDING registration", out)
         # A conflicting request for the same slug is refused; the same request completes the publication.
         conflicting = pfx.registration_spec(self.layout, "fresh", fresh, project="partflow-other")
         with self.assertRaisesRegex(pf_instance.ContextError, "conflicts"):
             pf_instance.register_instance(self.layout.root, conflicting)
         context = pf_instance.register_instance(self.layout.root, spec)
-        self.assertEqual(context.paths.private_state, orphans[0])
+        self.assertEqual(context.instance_id, pending[0].instance_id)
         self.assertEqual(sorted(os.listdir(self.layout.root / "locks")), sorted(["registry.lock", context.instance_id + ".lock"]))
-        self.assertEqual(pf_instance.unpublished_registrations(pf_instance.load_registry(self.layout.root)), [])
+        self.assertEqual(pf_instance.pending_registrations(self.layout.root), [])
 
 
 @ROOT_REQUIRED
@@ -544,12 +543,14 @@ class PendingJournalVisibility(Base):
         self.assertIn("operation: restore-instance", out)
         self.assertIn("Next supported action: none automatic", out)
 
-    def test_legacy_control_directory_is_diagnostics_only_and_ignores_pf_environment(self):
+    def test_legacy_control_directory_is_diagnostics_only_and_executes_no_payload(self):
         home = self.base / "legacyhome"
         control = home / "control"
         control.mkdir(parents=True)
-        for name in ("pf-admin.py", "pf_instance.py"):
-            shutil.copy2(pfx.PACKAGE / name, control / name)
+        marker = self.base / "legacy-payload-executed.marker"
+        payload = "from pathlib import Path\nPath(%r).write_text('executed')\n" % str(marker)
+        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py"):
+            (control / name).write_text(payload + (pfx.PACKAGE / name).read_text())
         shutil.copy2(pfx.REPO_PACKAGE / "pf.sh", control / "pf.sh")
         os.chmod(control / "pf.sh", 0o700)
         (home / "config").mkdir()
@@ -558,18 +559,28 @@ class PendingJournalVisibility(Base):
         state.mkdir()
         pf.write_json(state / "pending.json", {"operation": "update", "phase": "backup-ready", "checkpoint": "c1"})
         before = pfx.snapshot_tree(home)
-        env = {"PATH": "/usr/bin:/bin", "PF_HOME": str(self.base / "elsewhere"), "PF_CONFIG_DIR": "/nonexistent"}
+        env = {"PATH": "/usr/bin:/bin", "PF_HOME": str(self.base / "elsewhere"), "PF_CONFIG_DIR": "/nonexistent",
+               "PF_PYTHON": "/bin/false"}
         status = subprocess.run(["sh", str(control / "pf.sh"), "status"], env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, check=False, timeout=120)
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("UNREGISTERED legacy installation (v2.5 layout) at " + str(home), status.stdout)
-        self.assertIn("INCOMPLETE OPERATION in .pf-state-partflow-legacy: operation=update, phase=backup-ready", status.stdout)
+        self.assertIn("INCOMPLETE OPERATION in .pf-state-partflow-legacy", status.stdout)
+        self.assertIn('"phase": "backup-ready"', status.stdout)
+        self.assertIn("not executed: unverified legacy payload", status.stdout)
         self.assertNotIn("elsewhere", status.stdout)
         update = subprocess.run(["sh", str(control / "pf.sh"), "update", "--latest"], env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, check=False, timeout=120)
         self.assertEqual(update.returncode, 1)
         self.assertIn("refused on an unregistered installation", update.stderr)
+        self.assertFalse(marker.exists(), "legacy launcher executed unverified payload")
         self.assertEqual(pfx.snapshot_tree(home), before)
+        # Running the release entry point directly without an installed bootstrap is refused.
+        direct = subprocess.run([sys.executable, "-I", "-B", str(pfx.PACKAGE / "pf-admin.py"), "status"],
+                                env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, check=False, timeout=120)
+        self.assertEqual(direct.returncode, 1)
+        self.assertIn("without an installed bootstrap", direct.stderr)
 
 
 def posix_acl(entries):
@@ -718,6 +729,587 @@ class ProtectedPathChecks(Base):
         self.assertIn("control-file-unlisted", self.codes(self.validation()))
 
 
+def launcher_run(layout, arguments, env=None, cwd=None):
+    environment = {"PATH": "/usr/bin:/bin", "TERM": "dumb"}
+    environment.update(env or {})
+    return subprocess.run([str(layout.launcher), *arguments], env=environment, cwd=str(cwd or layout.root.parent),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=120)
+
+
+def append_marker(path, marker):
+    """Append a harmless marker writer to a Python file (probe technique from the audit)."""
+    path.write_text(path.read_text() + "\nfrom pathlib import Path as _AuditPath\n_AuditPath(%r).write_text('executed')\n" % str(marker))
+
+
+@ROOT_REQUIRED
+class TrustBeforeImport(Base):
+    """A11-R01: the installed bootstrap refuses unprotected or changed control code before executing it."""
+
+    def setUp(self):
+        super().setUp()
+        self.context, self.paths = self.instance("staging", project="partflow-staging")
+        pfx.deployed_record(self.context)
+        self.marker = self.base / "release-code-executed.marker"
+
+    def assert_refused_before_execution(self, arguments=("--help",), expected=None):
+        before = pfx.snapshot_tree(self.base / "staging")
+        result = launcher_run(self.layout, list(arguments))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertNotIn("usage:", result.stdout)
+        self.assertFalse(self.marker.exists(), "release code executed before the trust check")
+        self.assertIn("No control code was executed", result.stderr)
+        if expected:
+            self.assertIn(expected, result.stderr)
+        self.assertEqual(pfx.snapshot_tree(self.base / "staging"), before)
+        return result
+
+    def test_healthy_installation_launches_help_status_and_instances(self):
+        result = launcher_run(self.layout, ["--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage:", result.stdout)
+        result = launcher_run(self.layout, ["instances"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("staging", result.stdout)
+        self.assertFalse(self.marker.exists())
+
+    def test_modified_writable_sibling_module_is_refused_before_import(self):
+        target = self.layout.release_dir / "pf_instance.py"
+        append_marker(target, self.marker)
+        os.chmod(target, 0o666)
+        self.assert_refused_before_execution(expected="writable")
+        self.assert_refused_before_execution(["--instance", "staging", "status"])
+
+    def test_replaced_module_with_protected_mode_is_refused_by_the_pin(self):
+        target = self.layout.release_dir / "pf_instance.py"
+        append_marker(target, self.marker)
+        os.chmod(target, 0o600)
+        self.assert_refused_before_execution(expected="control-file-hash")
+
+    def test_modified_entry_point_is_refused_before_execution(self):
+        target = self.layout.release_dir / "pf-admin.py"
+        append_marker(target, self.marker)
+        self.assert_refused_before_execution(expected="control-file-hash")
+
+    def test_symlinked_module_is_refused(self):
+        target = self.layout.release_dir / "pf_instance.py"
+        outside = self.base / "outside_pf_instance.py"
+        target.rename(outside)
+        append_marker(outside, self.marker)
+        target.symlink_to(outside)
+        self.assert_refused_before_execution(expected="symlink")
+
+    def test_extra_module_in_release_is_refused(self):
+        extra = self.layout.release_dir / "sitecustomize.py"
+        extra.write_text("from pathlib import Path\nPath(%r).write_text('executed')\n" % str(self.marker))
+        os.chmod(extra, 0o600)
+        self.assert_refused_before_execution(expected="control-file-unlisted")
+
+    def test_unsafe_ancestor_of_the_installation_root_is_refused(self):
+        append_marker(self.layout.release_dir / "pf_instance.py", self.marker)  # still hash-pinned; ancestor is the first refusal
+        os.chmod(self.base, 0o770)
+        self.assert_refused_before_execution(expected="ancestor-replaceable")
+
+    def test_writable_or_tampered_bootstrap_configuration_is_refused(self):
+        conf = self.layout.bootstrap_conf
+        original = conf.read_bytes()
+        os.chmod(conf, 0o666)
+        self.assert_refused_before_execution(expected="writable")
+        os.chmod(conf, 0o600)
+        conf.write_bytes(original.replace(b"control_release_sha256=", b"control_release_sha256=0"))
+        result = launcher_run(self.layout, ["--help"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("bootstrap.conf", result.stderr)
+        pin = original.split(b"control_release_sha256=")[1].strip()
+        flipped = (b"0" if pin[:1] != b"0" else b"1") + pin[1:]
+        conf.write_bytes(original.replace(pin, flipped))
+        self.assert_refused_before_execution(expected="control-inventory-hash")
+
+    def test_writable_bootstrap_verifier_refuses_itself(self):
+        os.chmod(self.layout.bootstrap_module, 0o666)
+        self.assert_refused_before_execution(expected="writable")
+
+    def test_unknown_acl_attribute_on_release_directory_is_refused(self):
+        try:
+            os.setxattr(self.layout.release_dir, "user.syno_acl_probe", b"opaque")
+        except OSError as exc:
+            self.skipTest("user xattrs unsupported here: " + str(exc))
+        self.assert_refused_before_execution(expected="acl-unknown")
+
+    def test_verifier_and_release_primitives_are_the_same_bytes(self):
+        self.assertEqual(self.layout.bootstrap_module.read_bytes(), (self.layout.release_dir / "pf_bootstrap.py").read_bytes())
+        self.assertEqual((pfx.PACKAGE / "pf_bootstrap.py").read_bytes(), self.layout.bootstrap_module.read_bytes())
+
+
+@ROOT_REQUIRED
+class AncestorAndAclCoverage(Base):
+    """A11-R02: every protected input's containers/ancestors and authoritative storage are checked, ACL uncertainty included."""
+
+    def setUp(self):
+        super().setUp()
+        self.context, self.paths = self.instance("staging", project="partflow-staging")
+        pfx.deployed_record(self.context)
+
+    def validation(self):
+        return pf_instance.validate_context(self.context, running_release=self.layout.release_dir, interpreter=sys.executable)
+
+    def test_healthy_fixture_validates_with_acl_none(self):
+        validation = self.validation()
+        self.assertTrue(validation.mutation_allowed, validation.blocking_messages())
+        self.assertEqual(validation.acl_state, "none")
+
+    def test_writable_or_symlinked_profile_and_policy_parents_are_refused(self):
+        for name in ("profiles", "policies", "registry", "locks", "instances", "staging", "registry/reservations"):
+            with self.subTest(container=name):
+                target = self.layout.root / name
+                os.chmod(target, 0o777)
+                self.assertIn("writable", self.validation().refused_codes())
+                os.chmod(target, 0o700)
+        for name in ("profiles", "policies"):
+            with self.subTest(symlinked=name):
+                target = self.layout.root / name
+                moved = self.base / ("moved-" + name)
+                target.rename(moved)
+                target.symlink_to(moved)
+                self.assertIn("symlink", self.validation().refused_codes())
+                target.unlink()
+                moved.rename(target)
+        self.assertTrue(self.validation().mutation_allowed)
+
+    def test_profile_or_policy_outside_its_container_is_refused(self):
+        record = json.loads(self.context.record_path.read_bytes())
+        moved = self.layout.root / "policies" / "sub"
+        os.mkdir(moved, 0o700)
+        (moved / "staging.json").write_bytes(self.layout.policy_path.read_bytes())
+        os.chmod(moved / "staging.json", 0o600)
+        record["approved_policy"]["path"] = str(moved / "staging.json")
+        data = pf_instance.normalize_json(record)
+        self.context.record_path.write_bytes(data)
+        context = pf_instance.context_from_record(self.layout.root, record, self.context.record_path, pf_instance.sha256_bytes(data))
+        validation = pf_instance.validate_context(context, running_release=self.layout.release_dir, interpreter=sys.executable)
+        self.assertIn("policy-location", validation.refused_codes())
+
+    def set_opaque_acl(self, path):
+        try:
+            os.setxattr(path, "user.syno_acl_audit", b"opaque audit attribute")
+        except OSError as exc:
+            self.skipTest("user xattrs unsupported here: " + str(exc))
+        def cleanup():
+            try:
+                os.removexattr(path, "user.syno_acl_audit")
+            except OSError:
+                pass
+        self.addCleanup(cleanup)
+
+    def test_unknown_acl_on_installation_ancestor_limits_mutation(self):
+        self.set_opaque_acl(self.base)
+        validation = self.validation()
+        self.assertFalse(validation.mutation_allowed)
+        self.assertEqual(validation.acl_state, "unknown")
+        self.assertIn("acl-unknown", validation.refused_codes())
+
+    def test_unknown_acl_on_backups_recovery_and_workspace_parent_limits_mutation(self):
+        for target in (self.paths["backups"], self.paths["recovery"], self.paths["workspace"].parent):
+            with self.subTest(target=str(target)):
+                os.setxattr(target, "user.syno_acl_audit", b"opaque")
+                try:
+                    validation = self.validation()
+                    self.assertFalse(validation.mutation_allowed)
+                    self.assertEqual(validation.acl_state, "unknown")
+                    self.assertIn("acl-unknown", validation.refused_codes())
+                finally:
+                    os.removexattr(target, "user.syno_acl_audit")
+        self.assertTrue(self.validation().mutation_allowed)
+
+    def test_unsupported_acl_query_is_unknown_not_none(self):
+        real = os.listxattr
+
+        def unsupported(path, *args, **kwargs):
+            if str(path) == str(self.layout.root):
+                raise OSError(errno.ENOTSUP, "audit: ACL query unsupported")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(os, "listxattr", side_effect=unsupported):
+            validation = self.validation()
+        self.assertFalse(validation.mutation_allowed)
+        self.assertEqual(validation.acl_state, "unknown")
+        self.assertIn("acl-unknown", validation.refused_codes())
+        self.assertEqual(pf_instance.inspect_posix_acl("/nonexistent-path-for-acl").kind, "unknown")
+
+    def test_private_journal_and_state_files_are_covered(self):
+        journal = self.context.journal_path
+        pf.write_json(journal, {"operation": "purge", "phase": "deleting"})
+        os.chmod(journal, 0o666)
+        self.assertIn("writable", self.validation().refused_codes())
+        os.chmod(journal, 0o600)
+        os.chown(journal, 65534, -1)
+        self.assertIn("untrusted-owner", self.validation().refused_codes())
+        os.chown(journal, 0, -1)
+        outside = self.base / "outside-journal.json"
+        outside.write_bytes(journal.read_bytes())
+        journal.unlink()
+        journal.symlink_to(outside)
+        self.assertIn("symlink", self.validation().refused_codes())
+        journal.unlink()
+        self.assertTrue(self.validation().mutation_allowed)
+
+    def test_workspace_and_configuration_leaves_stay_editor_writable_but_their_location_is_protected(self):
+        os.chmod(self.paths["workspace"], 0o2770)
+        os.chmod(self.paths["configuration"], 0o2770)
+        self.assertTrue(self.validation().mutation_allowed)
+        os.chmod(self.paths["workspace"].parent, 0o777)
+        self.assertIn("ancestor-replaceable", self.validation().refused_codes())
+        os.chmod(self.paths["workspace"].parent, 0o755)
+        os.chown(self.paths["configuration"], 65534, -1)
+        self.assertIn("untrusted-owner", self.validation().refused_codes())
+        os.chown(self.paths["configuration"], 0, -1)
+        self.assertTrue(self.validation().mutation_allowed)
+
+
+@ROOT_REQUIRED
+class ManagedPathInventory(Base):
+    """A11-R03: managed paths may not repeat, nest, alias or traverse symlinks, within or across instances."""
+
+    def setUp(self):
+        super().setUp()
+        self.alpha, self.alpha_paths = self.instance("alpha")
+        pfx.deployed_record(self.alpha)
+
+    def beta_paths(self, **overrides):
+        self.beta_counter = getattr(self, "beta_counter", 0) + 1
+        paths = pfx.data_home(self.base / f"beta{self.beta_counter}", project="partflow-beta", group=GROUP)
+        paths.update(overrides)
+        return paths
+
+    def assert_registration_refused(self, paths, pattern, slug="beta", project="partflow-beta"):
+        registry_before = self.registry_bytes()
+        locks_before = sorted(os.listdir(self.layout.root / "locks"))
+        with self.assertRaisesRegex(pf_instance.ContextError, pattern):
+            pfx.register(self.layout, slug, paths, project=project)
+        self.assertEqual(self.registry_bytes(), registry_before)
+        self.assertEqual(sorted(os.listdir(self.layout.root / "locks")), locks_before)
+        self.assertEqual(pf_instance.pending_registrations(self.layout.root), [])
+
+    def test_cross_role_equality_is_refused(self):
+        self.assert_registration_refused(self.beta_paths(workspace=self.alpha_paths["configuration"]), "path-duplicate")
+        self.assert_registration_refused(self.beta_paths(backups=self.alpha_paths["recovery"]), "path-duplicate")
+
+    def test_nesting_in_both_directions_is_refused(self):
+        nested = pfx.data_home(self.alpha_paths["workspace"] / "beta", project="partflow-beta", group=GROUP)
+        self.assert_registration_refused(nested, "path-nested")
+        container = self.beta_paths(backups=self.alpha_paths["recovery"].parent)  # beta.backups contains alpha.recovery
+        self.assert_registration_refused(container, "path-nested")
+
+    def test_same_instance_containment_and_duplicates_are_refused(self):
+        paths = self.beta_paths()
+        paths["backups"] = paths["workspace"] / "backups"
+        (paths["workspace"] / "backups").mkdir()
+        self.assert_registration_refused(paths, "path-nested")
+        paths = self.beta_paths()
+        paths["recovery"] = paths["backups"]
+        self.assert_registration_refused(paths, "path-duplicate")
+
+    def test_symlink_ancestor_and_symlink_leaf_are_refused(self):
+        real = pfx.data_home(self.base / "real", project="partflow-beta", group=GROUP)
+        alias = self.base / "alias"
+        alias.symlink_to(self.base / "real", target_is_directory=True)
+        self.assert_registration_refused(dict(real, configuration=alias / "config"), "symbolic link|ancestor-symlink")
+        link_leaf = self.base / "link-config"
+        link_leaf.symlink_to(real["configuration"], target_is_directory=True)
+        self.assert_registration_refused(dict(real, configuration=link_leaf), "symbolic link|registered-path-symlink")
+
+    def test_installation_root_overlap_is_refused(self):
+        paths = self.beta_paths(backups=self.layout.root / "instances")
+        self.assert_registration_refused(paths, "path-inside-root")
+        paths = self.beta_paths(workspace=self.base)
+        self.assert_registration_refused(paths, "root-inside-path|path-nested")
+
+    def test_distinct_valid_instances_still_register_and_default_stays_explicit(self):
+        beta = pfx.register(self.layout, "beta", self.beta_paths(), project="partflow-beta")
+        registry = pf_instance.load_registry(self.layout.root)
+        self.assertIsNone(registry.default_instance_id)
+        self.assertEqual({entry.slug for entry in registry.entries}, {"alpha", "beta"})
+        for context in (self.alpha, beta):
+            validation = pf_instance.validate_context(context, running_release=self.layout.release_dir, interpreter=sys.executable)
+            self.assertTrue(validation.mutation_allowed, validation.blocking_messages())
+
+    def write_legacy_overlapping_registration(self):
+        """Publish a record the way r2 could (no inventory check) to prove revalidation refuses it later."""
+        instance_id = "00000000-0000-4000-8000-00000000beef"
+        beta_paths = self.beta_paths(workspace=self.alpha_paths["configuration"])
+        record = json.loads(self.alpha.record_path.read_bytes())
+        record.update({"instance_id": instance_id, "slug": "beta", "compose_project": "partflow-beta"})
+        record["paths"] = {role: str(beta_paths[role]) for role in pf_instance.ROLE_NAMES}
+        record["paths"]["private_state"] = str(self.layout.root / "instances" / instance_id)
+        private_state = self.layout.root / "instances" / instance_id
+        pf_instance._create_private_dir(private_state, 0o700)
+        pf_instance._write_private_file(private_state / "record.json", pf_instance.normalize_json(record), 0o600)
+        pf_instance._create_private_dir(private_state / "state", 0o700)
+        pf_instance._create_lock_file(self.layout.root / "locks" / (instance_id + ".lock"))
+        registry = pf_instance.load_registry(self.layout.root)
+        pf_instance._write_registry(self.layout.root, pf_instance._registry_document(registry, [
+            {"instance_id": instance_id, "slug": "beta", "record_path": str(private_state / "record.json")}]))
+        return pf_instance.resolve_instance(pf_instance.load_registry(self.layout.root), instance="beta")
+
+    def test_existing_overlapping_registration_is_refused_before_mutation_through_the_installed_cli(self):
+        beta = self.write_legacy_overlapping_registration()
+        self.assertEqual(beta.paths.workspace, self.alpha.paths.configuration)
+        env_file = self.alpha_paths["configuration"] / ".env"
+        os.chmod(env_file, 0o600)
+        before = pfx.snapshot_tree(self.base / "alpha")
+        validation = pf_instance.validate_context(beta, running_release=self.layout.release_dir, interpreter=sys.executable)
+        self.assertIn("path-duplicate", validation.refused_codes())
+        result = launcher_run(self.layout, ["--instance", "beta", "permissions"])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("path-duplicate", result.stderr)
+        self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+        self.assertEqual(pfx.snapshot_tree(self.base / "alpha"), before)
+        # alpha itself is also reported as overlapping and refuses mutation until an administrator resolves it.
+        alpha_validation = pf_instance.validate_context(self.alpha, running_release=self.layout.release_dir, interpreter=sys.executable)
+        self.assertIn("path-duplicate", alpha_validation.refused_codes())
+
+    def test_selecting_a_valid_b_through_the_installed_cli_leaves_a_untouched(self):
+        beta = pfx.register(self.layout, "beta", self.beta_paths(), project="partflow-beta")
+        pfx.deployed_record(beta)
+        for path in (self.alpha_paths["configuration"] / ".env", self.alpha_paths["workspace"] / "frontend/app.txt"):
+            os.chmod(path, 0o600)
+        before = pfx.snapshot_tree(self.base / "alpha")
+        status = launcher_run(self.layout, ["--instance", "beta", "status"],
+                              env={"PF_HOME": str(self.base / "alpha"), "PF_CONFIG_DIR": str(self.alpha_paths["configuration"])})
+        self.assertIn("Instance: beta", status.stdout)
+        self.assertIn(str(beta.paths.workspace), status.stdout)
+        permissions = launcher_run(self.layout, ["--instance", "beta", "permissions"])
+        self.assertEqual(permissions.returncode, 0, permissions.stdout + permissions.stderr)
+        self.assertEqual(stat.S_IMODE((beta.paths.configuration / ".env").stat().st_mode), 0o660)
+        self.assertEqual(pfx.snapshot_tree(self.base / "alpha"), before)
+
+
+@ROOT_REQUIRED
+class RegistrationTransaction(Base):
+    """A11-R04: durable reservation, atomic staging/publication and convergent retry at every boundary."""
+
+    def setUp(self):
+        super().setUp()
+        self.anchor, _ = self.instance("anchor")
+        pf_instance.set_default_instance(self.layout.root, self.anchor.instance_id)
+        self.fresh = pfx.data_home(self.base / "fresh", project="partflow-fresh", group=GROUP)
+        self.spec = pfx.registration_spec(self.layout, "fresh", self.fresh, project="partflow-fresh")
+        self.env_bytes = (self.fresh["configuration"] / ".env").read_bytes()
+
+    def injections(self):
+        def fail_record_write(real):
+            def wrapper(path, *args, **kwargs):
+                if Path(path).name == "record.json":
+                    raise OSError("injected: record write")
+                return real(path, *args, **kwargs)
+            return wrapper
+        return [
+            ("before-reservation", "_write_reservation", None),
+            ("record-write-inside-staging", "_write_private_file", fail_record_write),
+            ("before-instance-dir-publish", "_publish_instance_dir", None),
+            ("before-lock", "_create_lock_file", None),
+            ("before-registry-publish", "_write_registry", None),
+            ("after-registry-publish-before-ack", "_clear_reservation", None),
+        ]
+
+    def assert_state_is_diagnosable_and_reserved(self, stage):
+        pending = pf_instance.pending_registrations(self.layout.root)
+        registry = pf_instance.load_registry(self.layout.root)
+        published = [entry for entry in registry.entries if entry.slug == "fresh"]
+        if stage == "before-reservation":
+            self.assertEqual(pending, [])
+            self.assertEqual(published, [])
+            return None
+        if stage == "after-registry-publish-before-ack":
+            self.assertEqual(len(published), 1)
+        else:
+            self.assertEqual(published, [])
+        reservations = [item for item in pending if item.kind == "reservation"]
+        self.assertEqual(len(reservations), 1, [item.kind for item in pending])
+        self.assertEqual([item for item in pending if item.kind != "reservation"], [])
+        reserved = reservations[0]
+        self.assertEqual(reserved.slug, "fresh")
+        code, out, err = run_main(["instances"], self.layout)
+        self.assertEqual(code, 0)
+        self.assertIn("PENDING registration " + reserved.instance_id, out)
+        # Reserved identities cannot be taken by competing registrations.
+        competitor = pfx.data_home(self.base / "competitor", project="partflow-fresh", group=GROUP)
+        taken = "reserved|already registered|conflicts"
+        with self.assertRaisesRegex(pf_instance.ContextError, taken):
+            pfx.register(self.layout, "other", competitor, project="partflow-fresh")
+        with self.assertRaisesRegex(pf_instance.ContextError, taken):
+            pfx.register(self.layout, "fresh", competitor, project="partflow-competitor")
+        with self.assertRaisesRegex(pf_instance.ContextError, "path-duplicate|path-nested"):
+            pfx.register(self.layout, "other", dict(competitor, backups=self.fresh["backups"]), project="partflow-other")
+        with self.assertRaisesRegex(pf_instance.ContextError, taken):
+            pfx.register(self.layout, "other", competitor, project="partflow-other", instance_id=reserved.instance_id)
+        self.assertEqual([item.instance_id for item in pf_instance.pending_registrations(self.layout.root)], [reserved.instance_id])
+        return reserved
+
+    def test_every_interruption_converges_on_retry_without_side_effects(self):
+        for stage, target, factory in self.injections():
+            with self.subTest(stage=stage):
+                base = tempfile.TemporaryDirectory()
+                self.addCleanup(base.cleanup)
+                self.base = Path(base.name)
+                self.layout = pfx.install_root(self.base)
+                self.setUp_instance_state()
+                real = getattr(pf_instance, target)
+                side_effect = factory(real) if factory else OSError("injected: " + stage)
+                registry_before = self.registry_bytes()
+                with mock.patch.object(pf_instance, target, side_effect=side_effect):
+                    with self.assertRaises(OSError):
+                        pf_instance.register_instance(self.layout.root, self.spec)
+                reserved = self.assert_state_is_diagnosable_and_reserved(stage)
+                if stage != "after-registry-publish-before-ack":
+                    self.assertEqual(self.registry_bytes(), registry_before)
+                lock_before = None
+                lock_path = None
+                if reserved is not None:
+                    lock_path = self.layout.root / "locks" / (reserved.instance_id + ".lock")
+                    if lock_path.exists():
+                        lock_before = os.stat(lock_path)
+                # An unrelated registration still works while the reservation is pending.
+                unrelated = pfx.data_home(self.base / "unrelated", project="partflow-unrelated", group=GROUP)
+                pfx.register(self.layout, "unrelated", unrelated, project="partflow-unrelated")
+                # Retry with the same request converges on the reserved identity.
+                context = pf_instance.register_instance(self.layout.root, self.spec)
+                again = pf_instance.register_instance(self.layout.root, self.spec)
+                self.assertEqual(context.instance_id, again.instance_id)
+                if reserved is not None:
+                    self.assertEqual(context.instance_id, reserved.instance_id)
+                if lock_before is not None:
+                    after = os.stat(lock_path)
+                    self.assertEqual((lock_before.st_dev, lock_before.st_ino), (after.st_dev, after.st_ino))
+                registry = pf_instance.load_registry(self.layout.root)
+                self.assertEqual(registry.default_instance_id, self.anchor.instance_id)
+                self.assertEqual([entry.slug for entry in registry.entries if entry.slug == "fresh"], ["fresh"])
+                self.assertEqual(sorted(entry.slug for entry in registry.entries), ["anchor", "fresh", "unrelated"])
+                self.assertEqual(pf_instance.pending_registrations(self.layout.root), [])
+                self.assertEqual(os.listdir(self.layout.root / "staging"), [])
+                self.assertEqual(sorted(os.listdir(self.layout.root / "locks")),
+                                 sorted(["registry.lock"] + [entry.instance_id + ".lock" for entry in registry.entries]))
+                self.assertEqual((self.fresh["configuration"] / ".env").read_bytes(), self.env_bytes)
+                self.assertTrue((context.paths.private_state / "state").is_dir())
+                validation = pf_instance.validate_context(context, running_release=self.layout.release_dir, interpreter=sys.executable)
+                self.assertTrue(validation.mutation_allowed, validation.blocking_messages())
+
+    def setUp_instance_state(self):
+        self.anchor, _ = self.instance("anchor")
+        pf_instance.set_default_instance(self.layout.root, self.anchor.instance_id)
+        self.fresh = pfx.data_home(self.base / "fresh", project="partflow-fresh", group=GROUP)
+        self.spec = pfx.registration_spec(self.layout, "fresh", self.fresh, project="partflow-fresh")
+        self.env_bytes = (self.fresh["configuration"] / ".env").read_bytes()
+
+    def test_reservation_survives_a_different_request_and_reports_conflicts(self):
+        with mock.patch.object(pf_instance, "_write_registry", side_effect=OSError("injected")):
+            with self.assertRaises(OSError):
+                pf_instance.register_instance(self.layout.root, self.spec)
+        reserved = self.assert_state_is_diagnosable_and_reserved("before-registry-publish")
+        changed = pfx.registration_spec(self.layout, "fresh", self.fresh, project="partflow-changed")
+        with self.assertRaisesRegex(pf_instance.ContextError, "conflicts"):
+            pf_instance.register_instance(self.layout.root, changed)
+        self.assertEqual([item.instance_id for item in pf_instance.pending_registrations(self.layout.root)], [reserved.instance_id])
+
+    def test_unknown_instance_directory_is_reported_not_deleted(self):
+        orphan = self.layout.root / "instances" / "00000000-0000-4000-8000-0000000000aa"
+        pf_instance._create_private_dir(orphan, 0o700)
+        (orphan / "note.txt").write_text("unknown")
+        pending = pf_instance.pending_registrations(self.layout.root)
+        self.assertEqual([item.kind for item in pending], ["unknown-instance-directory"])
+        spec = dict(self.spec, instance_id="00000000-0000-4000-8000-0000000000aa")
+        with self.assertRaisesRegex(pf_instance.ContextError, "administrator must inspect"):
+            pf_instance.register_instance(self.layout.root, spec)
+        self.assertTrue((orphan / "note.txt").exists())
+        code, out, err = run_main(["instances"], self.layout)
+        self.assertEqual(code, 0)
+        self.assertIn("UNKNOWN state", out)
+        # A registration with a fresh identity is not blocked by the unknown directory.
+        pf_instance.register_instance(self.layout.root, self.spec)
+
+    def test_unreadable_reservation_blocks_registration_without_deletion(self):
+        bad = self.layout.root / "registry/reservations" / "00000000-0000-4000-8000-0000000000bb.json"
+        bad.write_bytes(b"{not json")
+        os.chmod(bad, 0o600)
+        with self.assertRaisesRegex(pf_instance.ContextError, "unreadable"):
+            pf_instance.register_instance(self.layout.root, self.spec)
+        self.assertTrue(bad.exists())
+
+
+@ROOT_REQUIRED
+class RefusedContextDiagnostics(Base):
+    """A11-R05: refused authority or configuration produces offline diagnostics and zero transport calls."""
+
+    def setUp(self):
+        super().setUp()
+        self.context, self.paths = self.instance("staging", project="partflow-staging")
+        pfx.deployed_record(self.context)
+        pf.write_json(self.context.journal_path, {"operation": "purge", "phase": "deleting", "recovery": "purge-x"})
+
+    def run_recorded(self, command):
+        holder = {}
+
+        class Capture(RecordingController):
+            def __init__(self, context, **kwargs):
+                super().__init__(context, **kwargs)
+                holder["controller"] = self
+
+        before = pfx.snapshot_tree(self.base)
+        with mock.patch.object(pf, "Controller", Capture):
+            code, out, err = run_main(["--instance", "staging", command], self.layout)
+        self.assertEqual(pfx.snapshot_tree(self.base), before)
+        return code, out, err, holder["controller"].calls
+
+    def assert_offline_only(self, command, *, reason, journal_label):
+        code, out, err, calls = self.run_recorded(command)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [], command)
+        self.assertIn("Instance: staging", out)
+        self.assertIn("INCOMPLETE OPERATION", out)
+        self.assertIn(journal_label, out)
+        self.assertIn("operation: purge", out)
+        self.assertIn("Live checks skipped: " + reason, out)
+        if reason.startswith("protected context"):
+            self.assertIn("REFUSED", out)
+            self.assertNotIn("unavailable", out)
+        else:
+            self.assertIn("Protected context: trusted", out)
+            self.assertIn("Runtime configuration: unavailable", out)
+        self.assertIn("No Git, Docker or Compose command was issued", out)
+        self.assertNotIn("Compose services", out)
+        self.assertNotIn("Database revisions", out)
+
+    def test_writable_record_refuses_live_transport_and_labels_the_journal_unverified(self):
+        os.chmod(self.context.record_path, 0o666)
+        for command in ("status", "doctor"):
+            self.assert_offline_only(command, reason="protected context refused", journal_label="UNVERIFIED private state")
+
+    def test_invalid_app_config_refuses_live_transport(self):
+        config = self.paths["configuration"] / "pf-config.json"
+        config.write_text('{"project": "partflow-staging", "unexpected": true}\n')
+        for command in ("status", "doctor"):
+            self.assert_offline_only(command, reason="runtime configuration rejected", journal_label="protected journal")
+
+    def test_invalid_control_and_profile_paths_refuse_live_transport(self):
+        (self.layout.release_dir / "compose.nas.yaml").write_bytes(b"services: {}\n")
+        self.assert_offline_only("status", reason="protected context refused", journal_label="protected journal")
+        self.layout.release_dir.joinpath("compose.nas.yaml").write_bytes(pfx.release_files()["compose.nas.yaml"])
+        self.layout.profile_path.write_bytes(pfx.profile_document(version="tampered"))
+        self.assert_offline_only("doctor", reason="protected context refused", journal_label="protected journal")
+
+    def test_healthy_context_without_env_still_runs_live_checks_after_the_journal(self):
+        (self.paths["configuration"] / ".env").unlink()
+        code, out, err, calls = self.run_recorded("status")
+        self.assertEqual(code, 1)
+        self.assertGreater(len(calls), 0)
+        self.assertLess(out.index("INCOMPLETE OPERATION"), out.index("unavailable"))
+        self.assertIn("Runtime .env: unavailable: missing", out)
+        self.assertIn("Protected context: trusted", out)
+        self.assertFalse((self.paths["configuration"] / ".env").exists())
+        code, out, err, calls = self.run_recorded("doctor")
+        self.assertGreater(len(calls), 0)
+        self.assertLess(out.index("INCOMPLETE OPERATION"), out.index("unavailable"))
+
+
 class StaticCallSites(unittest.TestCase):
     def test_no_privileged_path_override_is_read_from_the_environment(self):
         source = (pfx.PACKAGE / "pf-admin.py").read_text()
@@ -728,8 +1320,14 @@ class StaticCallSites(unittest.TestCase):
         self.assertNotIn("assert_control_plane_secure", source)
         launcher = (pfx.REPO_PACKAGE / "pf.sh").read_text()
         self.assertIn("unset PF_PYTHON PF_HOME PF_REPO_ROOT PF_CONFIG_DIR PF_CONTROL_DIR", launcher)
-        self.assertIn('"$INTERPRETER" -I -B "$ADMIN" --installation-root "$ROOT"', launcher)
+        self.assertIn('"$INTERPRETER" -I -B "$VERIFIER" --installation-root "$ROOT"', launcher)
+        self.assertIn('VERIFIER="$SELF_DIR/pf_bootstrap.py"', launcher)
         self.assertNotIn("${PF_HOME:-", launcher)
+        self.assertNotIn("for candidate in", launcher)  # no PATH/package interpreter search anywhere
+        self.assertNotIn("pf-admin.py", launcher.split("# Legacy v2.5 control directory")[1])
+        verifier = (pfx.PACKAGE / "pf_bootstrap.py").read_text()
+        for forbidden in ("import pf_instance", "pf_admin", "importlib", "sys.path"):
+            self.assertNotIn(forbidden, verifier)
 
 
 if __name__ == "__main__":

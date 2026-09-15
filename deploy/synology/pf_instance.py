@@ -13,25 +13,56 @@ registry, the records and the registered paths against that anchor. It does
 not claim to authenticate itself after import.
 """
 import dataclasses
-import errno
+import importlib.util
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
-import struct
+import sys
 import uuid
 
+
+def _load_sibling_module(name):
+    """Import a module from this file's own directory by absolute path (no sys.path search)."""
+    if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(Path(__file__).resolve().parent / (name + ".py")):
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot load control module: " + str(path))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Shared trust primitives live in the bootstrap-owned module. The installed
+# bootstrap copy verified this release (including its own sibling copy) before
+# this file was imported; see pf_bootstrap.py.
+pf_bootstrap = _load_sibling_module("pf_bootstrap")
+Finding = pf_bootstrap.Finding
+AclState = pf_bootstrap.AclState
+PathChecker = pf_bootstrap.PathChecker
+inspect_posix_acl = pf_bootstrap.inspect_posix_acl
+parse_posix_acl = pf_bootstrap.parse_posix_acl
+sha256_bytes = pf_bootstrap.sha256_bytes
+read_bytes_nofollow = pf_bootstrap.read_bytes_nofollow
+TRUSTED_UID = pf_bootstrap.TRUSTED_UID
+CONTROL_INVENTORY_NAME = pf_bootstrap.CONTROL_INVENTORY_NAME
+BOOTSTRAP_DIR = pf_bootstrap.BOOTSTRAP_DIR
+LAUNCHER_NAME = pf_bootstrap.LAUNCHER_NAME
+BOOTSTRAP_CONF_NAME = pf_bootstrap.BOOTSTRAP_CONF_NAME
+BOOTSTRAP_MODULE_NAME = pf_bootstrap.BOOTSTRAP_MODULE_NAME
+RELEASE_ID_RE = pf_bootstrap.RELEASE_ID_RE
+
 SCHEMA_VERSION = 1
-TRUSTED_UID = 0
-CONTROL_INVENTORY_NAME = "control-manifest.json"
-BOOTSTRAP_DIR = "bootstrap"
-LAUNCHER_NAME = "pf"
-BOOTSTRAP_CONF_NAME = "bootstrap.conf"
 REGISTRY_RELATIVE = Path("registry") / "instances.json"
 REGISTRY_LOCK_RELATIVE = Path("locks") / "registry.lock"
+RESERVATIONS_RELATIVE = Path("registry") / "reservations"
+STAGING_RELATIVE = Path("staging")
+ROLE_NAMES = ("workspace", "configuration", "backups", "recovery")
 STATE_SUBDIR = "state"
 PROFILE_ID = "partflow-staging-legacy"
 PROFILE_COMPOSE_FILE = "compose.nas.yaml"
@@ -44,7 +75,6 @@ UUID_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 NAME_PATTERN = "^[a-z0-9][a-z0-9_-]{0,39}$"
 PATH_PATTERN = "^/[^\\u0000-\\u001f\\u007f]+$"
 SHA256_PATTERN = "^[a-f0-9]{64}$"
-RELEASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 # Embedded copy of contracts/instance-record.schema.json (r3). A test asserts
 # the two stay identical; the runtime validator below implements exactly the
@@ -142,53 +172,15 @@ class LockBusy(ContextError):
 # --------------------------------------------------------------------------- JSON
 
 
-def _reject_duplicate_keys(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ContextError("Duplicate JSON object key: " + key)
-        result[key] = value
-    return result
-
-
-def _reject_constant(name):
-    raise ContextError("Non-finite JSON number is not allowed: " + name)
-
-
 def parse_strict_json(data, *, label):
     """Parse UTF-8 JSON, rejecting duplicate keys and non-finite numbers."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ContextError(f"{label}: not valid UTF-8: {exc}") from exc
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
-    except ValueError as exc:
-        raise ContextError(f"{label}: invalid JSON: {exc}") from exc
+    return pf_bootstrap.parse_strict_json(data, label=label, error=ContextError)
 
 
 def normalize_json(value):
     """Normalized record bytes: sorted keys, UTF-8, no whitespace, no NaN."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                       allow_nan=False).encode("utf-8")
-
-
-def sha256_bytes(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def read_bytes_nofollow(path):
-    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        chunks = []
-        while True:
-            block = os.read(fd, 1024 * 1024)
-            if not block:
-                break
-            chunks.append(block)
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
 
 
 # ---------------------------------------------------------------- schema validation
@@ -510,22 +502,6 @@ def load_registry(root):
                     sha256=sha256_bytes(data))
 
 
-def unpublished_registrations(registry):
-    """Instance directories that exist but are not published in the registry (interrupted registrations)."""
-    instances_root = registry.root / "instances"
-    published = {entry.instance_id for entry in registry.entries}
-    orphans = []
-    try:
-        names = sorted(os.listdir(instances_root))
-    except OSError:
-        return orphans
-    for name in names:
-        if name in published or not _anchored_fullmatch(UUID_PATTERN, name):
-            continue
-        orphans.append(instances_root / name)
-    return orphans
-
-
 def resolve_instance(registry, *, instance=None, project=None):
     """Registry + explicit ID/default selection -> immutable InstanceContext.
 
@@ -574,21 +550,11 @@ def resolve_instance(registry, *, instance=None, project=None):
 
 
 @dataclasses.dataclass(frozen=True)
-class Finding:
-    severity: str  # "refuse" blocks mutation; "note" is informational
-    code: str
-    path: str
-    message: str
-
-    def render(self):
-        return f"[{self.severity}] {self.code}: {self.path}: {self.message}"
-
-
-@dataclasses.dataclass(frozen=True)
 class ContextValidation:
     context: InstanceContext
     findings: tuple
     acl_state: str
+    private_state_trusted: bool = True
 
     @property
     def mutation_allowed(self):
@@ -597,340 +563,173 @@ class ContextValidation:
     def blocking_messages(self):
         return [finding.render() for finding in self.findings if finding.severity == "refuse"]
 
-
-def _lstat(path):
-    try:
-        return os.lstat(str(path))
-    except OSError as exc:
-        raise ContextError(f"Cannot lstat {path}: {exc}") from exc
+    def refused_codes(self):
+        return sorted({finding.code for finding in self.findings if finding.severity == "refuse"})
 
 
-def _writable_by_others(mode):
-    return bool(stat.S_IMODE(mode) & 0o022)
+def _checker(root, checker=None):
+    return checker if checker is not None else PathChecker(root)
 
 
-def _replacement_resistant_ancestor(info):
-    """A root-owned entry inside this directory cannot be renamed/unlinked by editors."""
-    if info.st_uid != TRUSTED_UID:
-        return False
-    if not _writable_by_others(info.st_mode):
-        return True
-    # A sticky world-writable directory (for example /tmp) protects root-owned
-    # entries from being renamed or removed by other users.
-    return bool(info.st_mode & stat.S_ISVTX)
+def validate_installation_root(root, checker=None, *, interpreter=None):
+    """Read-only trust checks for the installation root, bootstrap, interpreter and pinned release.
 
-
-class _Checker:
-    def __init__(self, root):
-        self.root = Path(root)
-        self.findings = []
-        self.acl_states = set()
-        self.root_dev = None
-        self.bootstrap_conf = None
-
-    def blocking(self):
-        return [finding.render() for finding in self.findings if finding.severity == "refuse"]
-
-    def refuse(self, code, path, message):
-        self.findings.append(Finding("refuse", code, str(path), message))
-
-    def note(self, code, path, message):
-        self.findings.append(Finding("note", code, str(path), message))
-
-    def ancestors(self, path, *, stop_at=None):
-        """Check every component above ``path`` (down to ``stop_at`` exclusive) without following links."""
-        path = Path(path)
-        current = Path(path.anchor)
-        for part in path.parts[1:-1]:
-            current = current / part
-            if stop_at is not None and current == stop_at:
-                continue
-            try:
-                info = os.lstat(str(current))
-            except OSError as exc:
-                self.refuse("ancestor-missing", current, str(exc))
-                return False
-            if stat.S_ISLNK(info.st_mode):
-                self.refuse("ancestor-symlink", current, "symbolic link in a protected path")
-                return False
-            if not stat.S_ISDIR(info.st_mode):
-                self.refuse("ancestor-not-directory", current, "not a directory")
-                return False
-            if not _replacement_resistant_ancestor(info):
-                self.refuse(
-                    "ancestor-replaceable", current,
-                    f"owner uid {info.st_uid} mode {oct(stat.S_IMODE(info.st_mode))}: an editor could replace entries",
-                )
-                return False
-        return True
-
-    def protected(self, path, *, kind, allow_group_read=True, require_nlink_one=True):
-        """No-follow lstat checks for one protected entry. Returns the stat or None."""
-        path = Path(path)
-        try:
-            info = os.lstat(str(path))
-        except OSError as exc:
-            self.refuse("missing", path, str(exc))
-            return None
-        if stat.S_ISLNK(info.st_mode):
-            self.refuse("symlink", path, "protected entry is a symbolic link")
-            return None
-        if kind == "dir" and not stat.S_ISDIR(info.st_mode):
-            self.refuse("not-directory", path, "expected a directory")
-            return None
-        if kind == "file" and not stat.S_ISREG(info.st_mode):
-            self.refuse("not-regular", path, "expected a regular file")
-            return None
-        if info.st_uid != TRUSTED_UID:
-            self.refuse("untrusted-owner", path, f"owner uid {info.st_uid}; trusted owner is uid {TRUSTED_UID}")
-        if _writable_by_others(info.st_mode):
-            self.refuse("writable", path, f"mode {oct(stat.S_IMODE(info.st_mode))} is group/world writable")
-        if not allow_group_read and stat.S_IMODE(info.st_mode) & 0o077:
-            self.refuse("exposed", path, f"mode {oct(stat.S_IMODE(info.st_mode))} exposes private state")
-        if kind == "file" and require_nlink_one and info.st_nlink != 1:
-            self.refuse("hardlinked", path, f"{info.st_nlink} links; another name can change this content")
-        if self.root_dev is not None and info.st_dev != self.root_dev:
-            self.refuse("mount-boundary", path, "different device than the installation root; unsupported mount boundary")
-        self.acl(path, info)
-        return info
-
-    def acl(self, path, info):
-        state = inspect_posix_acl(path)
-        self.acl_states.add(state.kind)
-        for message in state.write_grants:
-            self.refuse("acl-write", path, message)
-        if state.kind == "unknown":
-            self.refuse("acl-unknown", path, state.detail or "ACL attributes present but not understood; mutation limited")
-
-    def protected_tree(self, directory):
-        """Every entry below a protected directory must itself be protected (release trees)."""
-        directory = Path(directory)
-        for current, dirs, files in os.walk(str(directory), followlinks=False):
-            for name in dirs:
-                self.protected(Path(current) / name, kind="dir")
-            for name in files:
-                self.protected(Path(current) / name, kind="file")
-
-
-@dataclasses.dataclass(frozen=True)
-class AclState:
-    kind: str  # "none", "posix", "unknown"
-    write_grants: tuple
-    detail: str = ""
-
-
-_ACL_USER_OBJ, _ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP, _ACL_MASK, _ACL_OTHER = 0x01, 0x02, 0x04, 0x08, 0x10, 0x20
-_ACL_WRITE = 0x02
-_ACL_VERSION = 0x0002
-
-
-def parse_posix_acl(blob):
-    """Parse a Linux system.posix_acl_* xattr blob into (tag, perm, id) tuples."""
-    if len(blob) < 4 or (len(blob) - 4) % 8:
-        raise ValueError("unexpected ACL blob length")
-    (version,) = struct.unpack("<I", blob[:4])
-    if version != _ACL_VERSION:
-        raise ValueError(f"unsupported ACL version {version}")
-    entries = []
-    for offset in range(4, len(blob), 8):
-        tag, perm, identifier = struct.unpack("<HHI", blob[offset:offset + 8])
-        entries.append((tag, perm, identifier))
-    return entries
-
-
-def inspect_posix_acl(path):
-    """Report ACL entries granting write access beyond the POSIX mode bits."""
-    if not hasattr(os, "listxattr"):
-        return AclState("unknown", (), "extended attribute API unavailable; ACL state cannot be verified")
-    try:
-        names = os.listxattr(str(path), follow_symlinks=False)
-    except OSError as exc:
-        if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENODATA, errno.ENOENT):
-            return AclState("none", ())
-        return AclState("unknown", (), f"cannot list extended attributes: {exc}")
-    grants = []
-    kind = "none"
-    for name in names:
-        if name in ("system.posix_acl_access", "system.posix_acl_default"):
-            try:
-                entries = parse_posix_acl(os.getxattr(str(path), name, follow_symlinks=False))
-            except (OSError, ValueError) as exc:
-                return AclState("unknown", (), f"{name} present but unreadable: {exc}")
-            kind = "posix"
-            mask = None
-            for tag, perm, _ in entries:
-                if tag == _ACL_MASK:
-                    mask = perm
-            for tag, perm, identifier in entries:
-                effective = perm if mask is None or tag in (_ACL_USER_OBJ, _ACL_OTHER) else perm & mask
-                if tag in (_ACL_USER, _ACL_GROUP, _ACL_GROUP_OBJ, _ACL_OTHER) and effective & _ACL_WRITE:
-                    who = {_ACL_USER: f"user {identifier}", _ACL_GROUP: f"group {identifier}",
-                           _ACL_GROUP_OBJ: "owning group", _ACL_OTHER: "others"}[tag]
-                    grants.append(f"{name} grants write to {who}")
-        elif "acl" in name.lower():
-            return AclState("unknown", tuple(grants), f"unknown ACL attribute {name}; mutation limited")
-    return AclState(kind, tuple(grants))
-
-
-def parse_bootstrap_conf(data, *, label):
-    """KEY=VALUE data parsing. No shell evaluation; only known keys with absolute normalized paths."""
-    values = {}
-    allowed = ("interpreter", "control_release")
-    for number, raw in enumerate(data.decode("utf-8", "strict").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise ContextError(f"{label}:{number}: expected key=value")
-        key, value = line.split("=", 1)
-        if key not in allowed:
-            raise ContextError(f"{label}:{number}: unknown key {key!r}")
-        if key in values:
-            raise ContextError(f"{label}:{number}: duplicate key {key!r}")
-        parts = value.split("/")
-        if (not re.fullmatch(r"/[A-Za-z0-9._/-]+", value) or any(part in ("", ".", "..") for part in parts[1:])
-                or value.endswith("/")):
-            raise ContextError(f"{label}:{number}: {key} must be a normalized absolute path")
-        values[key] = value
-    missing = [key for key in allowed if key not in values]
-    if missing:
-        raise ContextError(f"{label}: missing keys {', '.join(missing)}")
-    return values
-
-
-def load_control_inventory(release_dir):
-    path = Path(release_dir) / CONTROL_INVENTORY_NAME
-    data = read_bytes_nofollow(path)
-    inventory = parse_strict_json(data, label=str(path))
-    expected_keys = {"schema_version", "release_id", "files"}
-    if not isinstance(inventory, dict) or set(inventory) != expected_keys:
-        raise ContextError(f"{path}: control inventory keys must be exactly {sorted(expected_keys)}")
-    if not _same_json_value(inventory["schema_version"], SCHEMA_VERSION):
-        raise ContextError(f"{path}: unsupported control inventory schema_version")
-    if not isinstance(inventory["release_id"], str) or not RELEASE_ID_RE.fullmatch(inventory["release_id"]):
-        raise ContextError(f"{path}: invalid release_id")
-    files = inventory["files"]
-    if not isinstance(files, dict) or not files:
-        raise ContextError(f"{path}: files must be a non-empty object")
-    for name, value in files.items():
-        if not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*", name) or name.startswith("."):
-            raise ContextError(f"{path}: unsupported inventory entry name {name!r}")
-        if not isinstance(value, str) or not _anchored_fullmatch(SHA256_PATTERN, value):
-            raise ContextError(f"{path}: {name}: sha256 must be 64 lowercase hex characters")
-    return inventory, sha256_bytes(data)
-
-
-def validate_installation_root(root, checker=None):
-    """Read-only trust checks for the protected installation root and bootstrap. Returns findings."""
+    Delegates the pre-launch anchor checks to pf_bootstrap (the same code the
+    installed launcher ran before this release was imported) and adds the
+    registry, lock, reservation, staging, instance, profile and policy containers.
+    """
     root = Path(root)
-    checker = checker or _Checker(root)
-    if not root.is_absolute() or any(part in ("..", ".") for part in root.parts):
-        checker.refuse("root-not-normalized", root, "installation root must be a normalized absolute path")
+    checker = _checker(root, checker)
+    pf_bootstrap.verify_installation_anchor(root, interpreter=interpreter, checker=checker)
+    if checker.root_dev is None:
         return checker
-    if not checker.ancestors(root):
-        return checker
-    info = checker.protected(root, kind="dir")
-    if info is None:
-        return checker
-    checker.root_dev = info.st_dev
-    bootstrap = root / BOOTSTRAP_DIR
-    checker.protected(bootstrap, kind="dir")
-    launcher_info = checker.protected(bootstrap / LAUNCHER_NAME, kind="file")
-    if launcher_info is not None and not launcher_info.st_mode & stat.S_IXUSR:
-        checker.refuse("launcher-not-executable", bootstrap / LAUNCHER_NAME, "installed launcher is not executable")
-    conf_path = bootstrap / BOOTSTRAP_CONF_NAME
-    if checker.protected(conf_path, kind="file") is not None:
-        try:
-            conf = parse_bootstrap_conf(read_bytes_nofollow(conf_path), label=str(conf_path))
-        except (ContextError, OSError, UnicodeDecodeError) as exc:
-            checker.refuse("bootstrap-conf-invalid", conf_path, str(exc))
-            conf = None
-        if conf is not None:
-            checker.bootstrap_conf = conf
-            interpreter = Path(conf["interpreter"])
-            if checker.ancestors(interpreter):
-                # The interpreter may live on another filesystem than the root.
-                saved_dev, checker.root_dev = checker.root_dev, None
-                interpreter_info = checker.protected(interpreter, kind="file", require_nlink_one=False)
-                checker.root_dev = saved_dev
-                if interpreter_info is not None and not interpreter_info.st_mode & stat.S_IXUSR:
-                    checker.refuse("interpreter-not-executable", interpreter, "registered interpreter is not executable")
-            if os.path.realpath(str(interpreter)) != str(interpreter):
-                checker.refuse("interpreter-not-canonical", interpreter,
-                               "bootstrap must register the canonical interpreter path")
-            release = Path(conf["control_release"])
-            if release.parent != root / "releases":
-                checker.refuse("bootstrap-release-outside-root", release, "control release must be under <root>/releases")
-    checker.protected(root / "registry", kind="dir")
+    for relative in ("registry", REGISTRY_RELATIVE.parent / "reservations", "locks", "instances", "releases",
+                     "profiles", "policies", STAGING_RELATIVE):
+        checker.protected(root / relative, kind="dir")
     checker.protected(registry_path(root), kind="file")
-    checker.protected(root / "locks", kind="dir")
     checker.protected(root / REGISTRY_LOCK_RELATIVE, kind="file")
-    checker.protected(root / "instances", kind="dir")
-    checker.protected(root / "releases", kind="dir")
     return checker
 
 
-def validate_release(checker, release_dir, expected_sha256=None, expected_release_id=None):
-    release_dir = Path(release_dir)
-    if checker.protected(release_dir, kind="dir") is None:
-        return None
-    checker.protected_tree(release_dir)
+def path_identity(path):
+    """No-follow component walk. Returns (st_dev, st_ino) of an existing directory leaf.
+
+    Raises ContextError for symbolic-link components (aliases are not accepted
+    as managed-path identity), for a leaf that is not a directory, and for a
+    missing leaf. ``Path.resolve()`` alone is not security validation.
+    """
+    path = Path(path)
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        raise ContextError(f"{path}: managed paths must be normalized absolute paths")
+    current = Path(path.anchor)
+    info = _managed_directory_info(current)
+    for part in path.parts[1:]:
+        current = current / part
+        info = _managed_directory_info(current)
+    return (info.st_dev, info.st_ino)
+
+
+def _managed_directory_info(current):
+    """lstat one component of a managed path; it must be a real directory, not a symlink."""
     try:
-        inventory, inventory_sha = load_control_inventory(release_dir)
-    except (ContextError, OSError) as exc:
-        checker.refuse("control-inventory-invalid", release_dir, str(exc))
-        return None
-    if expected_sha256 is not None and inventory_sha != expected_sha256:
-        checker.refuse("control-inventory-hash", release_dir,
-                       "installed control inventory does not match the protected record")
-    if expected_release_id is not None and inventory["release_id"] != expected_release_id:
-        checker.refuse("control-release-id", release_dir,
-                       f"inventory release_id {inventory['release_id']} != registered {expected_release_id}")
-    listed = set()
-    for name, expected in inventory["files"].items():
-        path = release_dir / name
-        listed.add(path)
+        info = os.lstat(str(current))
+    except OSError as exc:
+        raise ContextError(f"{current}: {exc.strerror or exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ContextError(f"{current}: symbolic link in a managed path is not supported")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ContextError(f"{current}: not a directory")
+    return info
+
+
+def _contains(outer, inner):
+    return outer == inner or outer in inner.parents
+
+
+def managed_path_conflicts(candidate, owner, others, root):
+    """Global managed-path inventory check (A11-R03).
+
+    ``candidate``: {role: Path} for one instance; ``others``: iterable of
+    (owner, role, Path) for every other published record and pending
+    reservation. Every candidate role is compared with the installation root,
+    with the candidate's other roles and with every other owner's roles for
+    equality and containment in both directions, and by inode identity when the
+    directories exist. Returns a list of (code, path, message).
+    """
+    problems = []
+    root = Path(root)
+    entries = [(owner, role, Path(path)) for role, path in candidate.items()]
+    identities = {}
+    for _, role, path in entries:
+        if _contains(root, path):
+            problems.append(("path-inside-root", path, f"{role} must not live inside the installation root"))
+        if _contains(path, root):
+            problems.append(("root-inside-path", path, f"installation root must not live inside {role}"))
         try:
-            actual = sha256_bytes(read_bytes_nofollow(path))
-        except OSError as exc:
-            checker.refuse("control-file-missing", path, str(exc))
+            identities[(owner, role)] = path_identity(path)
+        except ContextError as exc:
+            problems.append(("path-component", path, f"{role}: {exc}"))
+    for index, (_, role_a, path_a) in enumerate(entries):
+        for _, role_b, path_b in entries[index + 1:]:
+            if path_a == path_b:
+                problems.append(("path-duplicate", path_a, f"{role_a} and {role_b} are the same path"))
+            elif _contains(path_a, path_b):
+                problems.append(("path-nested", path_b, f"{role_b} lies inside {role_a}"))
+            elif _contains(path_b, path_a):
+                problems.append(("path-nested", path_a, f"{role_a} lies inside {role_b}"))
+    for other_owner, other_role, other_path in others:
+        other_path = Path(other_path)
+        try:
+            other_identity = path_identity(other_path)
+        except ContextError:
+            other_identity = None
+        for _, role, path in entries:
+            label = f"{role} vs {other_owner}.{other_role}"
+            if path == other_path:
+                problems.append(("path-duplicate", path, label + ": same path"))
+            elif _contains(other_path, path):
+                problems.append(("path-nested", path, label + ": lies inside the other instance's path"))
+            elif _contains(path, other_path):
+                problems.append(("path-nested", path, label + ": contains the other instance's path"))
+            elif other_identity is not None and identities.get((owner, role)) == other_identity:
+                problems.append(("path-alias", path, label + ": same directory inode through a different name"))
+    seen = {}
+    for key, identity in identities.items():
+        if identity in seen and candidate[seen[identity][1]] != candidate[key[1]]:
+            problems.append(("path-alias", candidate[key[1]], f"{key[1]} and {seen[identity][1]} are the same directory"))
+        seen.setdefault(identity, key)
+    return problems
+
+
+def inventory_of(registry, *, exclude_instance_id=None):
+    """(owner, role, path) for every loadable published record and every pending reservation."""
+    entries = []
+    for entry, context, error in registry.records():
+        if context is None or entry.instance_id == exclude_instance_id:
             continue
-        if actual != expected:
-            checker.refuse("control-file-hash", path, "installed control file differs from its inventory hash")
-    for current, _, files in os.walk(str(release_dir), followlinks=False):
-        for name in files:
-            path = Path(current) / name
-            if path not in listed and path != release_dir / CONTROL_INVENTORY_NAME:
-                checker.refuse("control-file-unlisted", path, "file is not part of the installed control inventory")
-    return inventory
+        for role in ROLE_NAMES:
+            entries.append((context.slug, role, getattr(context.paths, role)))
+    for pending in pending_registrations(registry.root):
+        if pending.record is None or pending.instance_id == exclude_instance_id:
+            continue
+        for role in ROLE_NAMES:
+            entries.append(("reservation:" + pending.slug, role, Path(pending.record["paths"][role])))
+    return entries
 
 
-def validate_context(context, *, running_release=None, interpreter=None, checker=None):
-    """Context + installed trust anchor -> validation result. Read-only lstat/ACL/hash checks."""
+def validate_context(context, *, running_release=None, interpreter=None, checker=None, registry=None):
+    """Context + installed trust anchor -> validation result. Read-only lstat/xattr/hash checks."""
     root = context.installation_root
-    checker = checker or _Checker(root)
-    validate_installation_root(root, checker)
-    conf = getattr(checker, "bootstrap_conf", None)
-    if interpreter is not None and conf is not None:
-        if os.path.realpath(str(interpreter)) != conf["interpreter"]:
-            checker.refuse("interpreter-mismatch", interpreter,
-                           "process interpreter is not the registered bootstrap interpreter")
-    # Control release pinned by this instance.
+    checker = _checker(root, checker)
+    validate_installation_root(root, checker, interpreter=interpreter)
+    conf = checker.bootstrap_conf
+    # Control release pinned by this instance must be the release the bootstrap runs.
     if context.control.path.parent != root / "releases" or context.control.path.name != context.control.release_id:
         checker.refuse("control-path", context.control.path, "control path must be <root>/releases/<release_id>")
     else:
-        inventory = validate_release(checker, context.control.path, context.control.sha256, context.control.release_id)
+        if conf is not None and Path(conf["control_release"]) != context.control.path:
+            checker.refuse("control-release-mismatch", context.control.path,
+                           f"instance {context.slug} pins release {context.control.release_id}; the installed bootstrap "
+                           f"runs {Path(conf['control_release']).name}. A control binding change is an explicit "
+                           "installation transaction, not a runtime fallback")
+        inventory = pf_bootstrap.verify_release(checker, context.control.path,
+                                                expected_inventory_sha256=context.control.sha256,
+                                                expected_release_id=context.control.release_id)
         if inventory is not None and PROFILE_COMPOSE_FILE not in inventory["files"]:
             checker.refuse("control-compose-missing", context.control.path,
                            f"installed control release does not list {PROFILE_COMPOSE_FILE}")
     if running_release is not None and Path(running_release) != context.control.path:
         checker.refuse("control-release-mismatch", running_release,
-                       f"instance {context.slug} pins release {context.control.release_id}; a control binding change is an "
-                       "explicit installation transaction, not a runtime fallback")
-    # Approved profile and policy bytes.
+                       f"instance {context.slug} pins release {context.control.release_id}; running code is elsewhere")
+    # Approved profile and policy bytes, inside their protected containers.
+    for label, binding, expected_parent in (("profile", context.profile, root / "profiles"),
+                                            ("policy", context.approved_policy, root / "policies")):
+        if binding.path.parent != expected_parent:
+            checker.refuse(label + "-location", binding.path, f"{label} must live directly under {expected_parent}")
     _validate_profile(checker, context)
     _validate_policy(checker, context)
-    # Registration record, private state and stable locks.
+    # Registration record, private state (including journal/state files) and stable lock.
+    private_findings_before = len(checker.findings)
     private_state = context.paths.private_state
     if private_state != root / "instances" / context.instance_id:
         checker.refuse("private-state-path", private_state, "private_state must be <root>/instances/<instance_id>")
@@ -945,26 +744,45 @@ def validate_context(context, *, running_release=None, interpreter=None, checker
         except OSError as exc:
             checker.refuse("record-unreadable", context.record_path, str(exc))
     if os.path.lexists(str(context.state_dir)):
-        checker.protected(context.state_dir, kind="dir", allow_group_read=False)
+        # The state directory itself is private (0700); entries below it are covered by
+        # owner/link/mode-writability/ACL checks and are shielded by the directory mode.
+        if checker.protected(context.state_dir, kind="dir", allow_group_read=False) is not None:
+            checker.protected_tree(context.state_dir, allow_group_read=True)
     else:
         checker.note("state-missing", context.state_dir, "no private runtime state yet (not created by diagnostics)")
     checker.protected(context.lock_path, kind="file", allow_group_read=False)
-    # Registered data paths. Workspace/configuration are editor-writable by
-    # design; backups/recovery must not sit under an editor-replaceable ancestor.
+    private_state_trusted = not any(
+        finding.severity == "refuse" for finding in checker.findings[private_findings_before:]
+    )
+    # Registered data paths: workspace/configuration are editor-writable leaves
+    # in protected locations; backups/recovery are protected authoritative storage.
     for name in ("workspace", "configuration"):
-        path = getattr(context.paths, name)
-        _data_directory(checker, path, name, protected=False)
+        _data_directory(checker, getattr(context.paths, name), name, protected=False)
     for name in ("backups", "recovery"):
-        path = getattr(context.paths, name)
-        _data_directory(checker, path, name, protected=True)
-    _overlap_checks(checker, context)
+        _data_directory(checker, getattr(context.paths, name), name, protected=True)
+    # Global managed-path inventory: this instance against every other registration and reservation.
+    if registry is None:
+        try:
+            registry = load_registry(root)
+        except ContextError as exc:
+            checker.refuse("registry-invalid", registry_path(root), str(exc))
+    if registry is not None:
+        candidate = {role: getattr(context.paths, role) for role in ROLE_NAMES}
+        others = inventory_of(registry, exclude_instance_id=context.instance_id)
+        for code, path, message in managed_path_conflicts(candidate, context.slug, others, root):
+            checker.refuse(code, path, message)
     acl_state = "posix" if "posix" in checker.acl_states else "none"
     if "unknown" in checker.acl_states:
         acl_state = "unknown"
-    return ContextValidation(context=context, findings=tuple(checker.findings), acl_state=acl_state)
+    return ContextValidation(context=context, findings=tuple(checker.findings), acl_state=acl_state,
+                             private_state_trusted=private_state_trusted)
 
 
 def _data_directory(checker, path, name, *, protected):
+    """A registered data directory: protected ancestors always; the leaf per its role."""
+    path = Path(path)
+    if not checker.ancestors(path):
+        return
     try:
         info = os.lstat(str(path))
     except OSError as exc:
@@ -976,22 +794,17 @@ def _data_directory(checker, path, name, *, protected):
     if not stat.S_ISDIR(info.st_mode):
         checker.refuse("registered-path-not-directory", path, f"{name}: not a directory")
         return
+    if info.st_uid != TRUSTED_UID:
+        checker.refuse("untrusted-owner", path, f"{name}: owner uid {info.st_uid}; trusted owner is uid {TRUSTED_UID}")
     if protected:
-        checker.ancestors(path)
-        if info.st_uid != TRUSTED_UID or _writable_by_others(info.st_mode):
+        if pf_bootstrap.writable_by_others(info.st_mode):
             checker.refuse("storage-replaceable", path,
-                           f"{name}: owner uid {info.st_uid} mode {oct(stat.S_IMODE(info.st_mode))}; "
-                           "backup/recovery storage must be root-owned and not group/world writable")
-
-
-def _overlap_checks(checker, context):
-    root = context.installation_root
-    for name in ("workspace", "configuration", "backups", "recovery"):
-        path = getattr(context.paths, name)
-        if path == root or root in path.parents:
-            checker.refuse("path-inside-root", path, f"{name} must not live inside the installation root")
-        if path in root.parents:
-            checker.refuse("root-inside-path", path, f"installation root must not live inside {name}")
+                           f"{name}: mode {oct(stat.S_IMODE(info.st_mode))}; backup/recovery storage must not be "
+                           "group/world writable")
+        checker.acl(path)
+    else:
+        # Editor-writable by design (SMB group access); the location is protected by the ancestor walk.
+        checker.acl(path, editor_writable=True)
 
 
 def load_profile(context):
@@ -1090,7 +903,7 @@ def acquire_lock(path, *, busy_message):
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != TRUSTED_UID or info.st_nlink != 1 \
-                or _writable_by_others(info.st_mode):
+                or pf_bootstrap.writable_by_others(info.st_mode):
             raise ContextError(f"Lock file is not a protected root-owned regular file: {path}")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1161,11 +974,12 @@ def _create_lock_file(path):
     _fsync_directory(Path(path).parent)
 
 
-def render_bootstrap_conf(interpreter, control_release):
+def render_bootstrap_conf(interpreter, control_release, control_release_sha256):
     return (
         "# Deployment Admin bootstrap configuration. Data only; never sourced by a shell.\n"
         f"interpreter={interpreter}\n"
         f"control_release={control_release}\n"
+        f"control_release_sha256={control_release_sha256}\n"
     ).encode("utf-8")
 
 
@@ -1187,7 +1001,8 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
 
     ``launcher``: launcher script bytes installed as ``bootstrap/pf``.
     ``interpreter``: canonical absolute interpreter path written to bootstrap.conf.
-    ``release_files``: mapping relative name -> bytes for ``releases/<release_id>/``.
+    ``release_files``: mapping relative name -> bytes for ``releases/<release_id>/``; must include
+    the required control files. The bootstrap copy of ``pf_bootstrap.py`` is taken from it.
     ``profile``: (file name, bytes) for ``profiles/``.
     ``policy_documents``: mapping file name -> bytes for ``policies/``.
     Refuses an existing non-empty root. Trusted-installer/fixture primitive, not an operator wizard.
@@ -1197,24 +1012,30 @@ def initialize_installation_root(root, *, launcher, interpreter, release_id, rel
         raise ContextError("Installation root must be absolute.")
     if os.path.lexists(str(root)) and os.listdir(str(root)):
         raise ContextError("Refusing to initialize a non-empty installation root: " + str(root))
+    if not RELEASE_ID_RE.fullmatch(release_id):
+        raise ContextError("Invalid release_id: " + release_id)
+    missing = [name for name in pf_bootstrap.REQUIRED_RELEASE_FILES if name not in release_files]
+    if missing:
+        raise ContextError("Release files missing required control files: " + ", ".join(missing))
     if not os.path.lexists(str(root)):
         _create_private_dir(root, 0o755)
     else:
         os.chmod(str(root), 0o755)
-    for name in (BOOTSTRAP_DIR, "registry", "locks", "instances", "releases", "profiles", "policies"):
-        _create_private_dir(root / name, 0o700)
-    if not RELEASE_ID_RE.fullmatch(release_id):
-        raise ContextError("Invalid release_id: " + release_id)
+    for relative in (BOOTSTRAP_DIR, "registry", RESERVATIONS_RELATIVE, "locks", "instances", "releases",
+                     "profiles", "policies", STAGING_RELATIVE):
+        _create_private_dir(root / relative, 0o700)
     release_dir = root / "releases" / release_id
     _create_private_dir(release_dir, 0o700)
     for name, data in release_files.items():
         if "/" in name or name.startswith(".") or name == CONTROL_INVENTORY_NAME:
             raise ContextError("Release files must be flat, visible names: " + name)
         _write_private_file(release_dir / name, data, 0o600)
-    _write_private_file(release_dir / CONTROL_INVENTORY_NAME, build_control_inventory(release_id, release_files), 0o600)
+    inventory_bytes = build_control_inventory(release_id, release_files)
+    _write_private_file(release_dir / CONTROL_INVENTORY_NAME, inventory_bytes, 0o600)
     _write_private_file(root / BOOTSTRAP_DIR / LAUNCHER_NAME, launcher, 0o700)
+    _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_MODULE_NAME, release_files[BOOTSTRAP_MODULE_NAME], 0o600)
     _write_private_file(root / BOOTSTRAP_DIR / BOOTSTRAP_CONF_NAME,
-                        render_bootstrap_conf(interpreter, str(release_dir)), 0o600)
+                        render_bootstrap_conf(interpreter, str(release_dir), sha256_bytes(inventory_bytes)), 0o600)
     _write_private_file(registry_path(root), normalize_json(
         {"schema_version": SCHEMA_VERSION, "default_instance_id": None, "instances": []}), 0o600)
     _create_lock_file(root / REGISTRY_LOCK_RELATIVE)
@@ -1237,27 +1058,186 @@ def _write_registry(root, document):
     return default, entries
 
 
-IDENTITY_FIELDS = ("slug", "compose_project", "approved_environment", "daemon", "control", "profile",
-                   "approved_policy")
-DATA_PATH_FIELDS = ("workspace", "configuration", "backups", "recovery")
+def _registry_document(registry, extra_entries=(), default=None, keep_default=True):
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "default_instance_id": registry.default_instance_id if keep_default else default,
+        "instances": [
+            {"instance_id": entry.instance_id, "slug": entry.slug, "record_path": str(entry.record_path)}
+            for entry in registry.entries
+        ] + list(extra_entries),
+    }
+
+
+# ----------------------------------------------------- reservations and staging
+
+
+@dataclasses.dataclass(frozen=True)
+class PendingRegistration:
+    """A durable reservation (registry/reservations/<uuid>.json) or an instance directory in unknown state."""
+
+    kind: str  # "reservation" | "unknown-instance-directory" | "unknown-staging-directory"
+    path: Path
+    instance_id: str
+    slug: str = ""
+    record: object = None
+    error: str = ""
+
+
+def pending_registrations(root):
+    """Every reservation and every unexplained directory. Read-only; nothing is repaired or deleted."""
+    root = Path(root)
+    pending = []
+    reservations = root / RESERVATIONS_RELATIVE
+    try:
+        names = sorted(os.listdir(reservations))
+    except OSError:
+        names = []
+    reserved_ids = set()
+    for name in names:
+        path = reservations / name
+        if not name.endswith(".json") or not _anchored_fullmatch(UUID_PATTERN, name[:-5]):
+            pending.append(PendingRegistration("reservation", path, name, error="unexpected file in reservations/"))
+            continue
+        instance_id = name[:-5]
+        reserved_ids.add(instance_id)
+        try:
+            record = parse_strict_json(read_bytes_nofollow(path), label=str(path))
+            validate_instance_record(record)
+            if record["instance_id"] != instance_id:
+                raise ContextError("reservation file name does not match its instance_id")
+            pending.append(PendingRegistration("reservation", path, instance_id, record["slug"], record))
+        except (OSError, ContextError) as exc:
+            pending.append(PendingRegistration("reservation", path, instance_id, error=str(exc)))
+    try:
+        registry = load_registry(root)
+        published = {entry.instance_id for entry in registry.entries}
+    except ContextError:
+        published = set()
+    instances_root = root / "instances"
+    try:
+        names = sorted(os.listdir(instances_root))
+    except OSError:
+        names = []
+    for name in names:
+        if name in published or name in reserved_ids:
+            continue
+        pending.append(PendingRegistration("unknown-instance-directory", instances_root / name, name,
+                                           error="instance directory without registry entry or reservation"))
+    staging = root / STAGING_RELATIVE
+    try:
+        names = sorted(os.listdir(staging))
+    except OSError:
+        names = []
+    for name in names:
+        owner = name.split(".", 1)[0]
+        if owner in reserved_ids:
+            continue
+        pending.append(PendingRegistration("unknown-staging-directory", staging / name, owner,
+                                           error="staging directory without a matching reservation"))
+    return pending
+
+
+def unpublished_registrations(registry):
+    """Compatibility view: paths of pending reservations and unexplained directories."""
+    return [pending.path for pending in pending_registrations(registry.root)]
 
 
 def _same_registration_identity(existing, record):
     if not isinstance(existing, dict) or not isinstance(existing.get("paths"), dict):
         return False
-    if any(existing.get(field) != record[field] for field in IDENTITY_FIELDS):
-        return False
-    return all(existing["paths"].get(name) == record["paths"][name] for name in DATA_PATH_FIELDS)
+    for field in ("slug", "compose_project", "approved_environment", "daemon", "control", "profile",
+                  "approved_policy"):
+        if existing.get(field) != record[field]:
+            return False
+    return all(existing["paths"].get(name) == record["paths"][name] for name in ROLE_NAMES)
+
+
+def _write_reservation(root, record):
+    """Durable intent: the complete proposed record, before any instance directory exists."""
+    path = Path(root) / RESERVATIONS_RELATIVE / (record["instance_id"] + ".json")
+    _write_private_file(path, normalize_json(record), 0o600)
+    return path
+
+
+def _clear_reservation(root, instance_id):
+    path = Path(root) / RESERVATIONS_RELATIVE / (instance_id + ".json")
+    try:
+        os.unlink(str(path))
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent)
+
+
+def _stage_instance_dir(root, record):
+    """Build instances/<uuid> completely under staging/, then publish it with one atomic rename."""
+    root = Path(root)
+    instance_id = record["instance_id"]
+    staging_root = root / STAGING_RELATIVE
+    # Leftovers from an earlier attempt of this same reservation are ours to discard.
+    for name in os.listdir(staging_root):
+        if name.split(".", 1)[0] == instance_id:
+            _remove_tree(staging_root / name)
+    staged = staging_root / (instance_id + "." + uuid.uuid4().hex[:8])
+    _create_private_dir(staged, 0o700)
+    _write_private_file(staged / "record.json", normalize_json(record), 0o600)
+    _create_private_dir(staged / STATE_SUBDIR, 0o700)
+    _fsync_directory(staged / STATE_SUBDIR)
+    _fsync_directory(staged)
+    _publish_instance_dir(staged, root / "instances" / instance_id)
+
+
+def _publish_instance_dir(staged, target):
+    os.rename(str(staged), str(target))
+    _fsync_directory(Path(target).parent)
+
+
+def _remove_tree(path):
+    """Remove a staging tree this transaction created. Never used on published or unknown state."""
+    for current, dirs, files in os.walk(str(path), topdown=False, followlinks=False):
+        for name in files:
+            os.unlink(os.path.join(current, name))
+        for name in dirs:
+            os.rmdir(os.path.join(current, name))
+    os.rmdir(str(path))
+
+
+def _existing_instance_dir_state(root, record):
+    """None when absent; 'published-record' when record.json matches; raises for unknown state."""
+    target = Path(root) / "instances" / record["instance_id"]
+    if not os.path.lexists(str(target)):
+        return None
+    record_path = target / "record.json"
+    try:
+        existing = read_bytes_nofollow(record_path)
+    except FileNotFoundError as exc:
+        raise ContextError(
+            f"Instance directory {target} exists without record.json and is not explained by the reservation "
+            "protocol; an administrator must inspect it. Nothing was changed."
+        ) from exc
+    if existing != normalize_json(record):
+        raise ContextError(
+            f"Instance directory {target} holds a record that differs from the reserved identity; "
+            "an administrator must inspect it. Nothing was changed."
+        )
+    return "published-record"
 
 
 def register_instance(root, spec):
-    """Minimal registration transaction for a fresh disposable installation.
+    """Minimal registration transaction for a fresh disposable installation (A11-R04 protocol).
 
-    ``spec`` keys: slug, compose_project, approved_environment, daemon {endpoint, engine_id},
-    paths {workspace, configuration, backups, recovery}, control_release_id, profile_path,
-    policy_path and optional instance_id. Steps: preflight all records/paths, reserve identity
-    under the registry lock, create the private record + stable instance lock, atomically publish
-    the registration. Never changes the default, live containers or credentials.
+    Steps, all under the registry lock:
+      1. preflight: trusted root/release, profile/policy semantics, registered paths, global
+         managed-path inventory against published records and pending reservations;
+      2. reserve: write registry/reservations/<uuid>.json (the complete record) before any
+         instance directory exists — this holds UUID/slug/daemon-project/paths durably;
+      3. stage instances/<uuid> under staging/ and publish it with one atomic rename;
+      4. create the stable lock (kept if it already exists);
+      5. publish the registry entry atomically; the default is never changed;
+      6. clear the reservation.
+    A retry with the same request converges on the same UUID from whichever step failed,
+    including a publication that completed before the caller saw success. Unknown state
+    (directories not explained by a reservation) is reported, never deleted.
     """
     root = Path(root)
     checker = validate_installation_root(root)
@@ -1267,14 +1247,15 @@ def register_instance(root, spec):
                            "control_release_id", "profile_path", "policy_path", "instance_id"}
     if unknown:
         raise ContextError("Unknown registration fields: " + ", ".join(sorted(unknown)))
-    release_id = spec["control_release_id"]
-    if not RELEASE_ID_RE.fullmatch(str(release_id)):
+    release_id = str(spec["control_release_id"])
+    if not RELEASE_ID_RE.fullmatch(release_id):
         raise ContextError("Invalid control_release_id.")
     release_dir = root / "releases" / release_id
-    inventory = validate_release(checker, release_dir, None, release_id)
-    if inventory is None or checker.blocking():
-        raise ContextError("Control release is not trusted; registration refused:\n" + "\n".join(checker.blocking()))
-    _, inventory_sha = load_control_inventory(release_dir)
+    conf = checker.bootstrap_conf
+    if conf is None or Path(conf["control_release"]) != release_dir:
+        raise ContextError("Registration must pin the control release installed by the bootstrap: "
+                           + str(conf["control_release"] if conf else "<no bootstrap configuration>"))
+    _, inventory_sha = pf_bootstrap.load_control_inventory(release_dir, error=ContextError)
     profile_path = Path(spec["profile_path"])
     policy_path = Path(spec["policy_path"])
     if profile_path.parent != root / "profiles" or policy_path.parent != root / "policies":
@@ -1283,123 +1264,141 @@ def register_instance(root, spec):
     policy_bytes = read_bytes_nofollow(policy_path)
     profile_document = parse_strict_json(profile_bytes, label=str(profile_path))
     policy_document = parse_strict_json(policy_bytes, label=str(policy_path))
-    instance_id = spec.get("instance_id") or str(uuid.uuid4())
     daemon = dict(spec["daemon"])
     daemon.setdefault("scope", "local")
     daemon.setdefault("rootless", False)
-    record = {
-        "schema_version": SCHEMA_VERSION,
-        "instance_id": instance_id,
-        "slug": spec["slug"],
-        "state": "registered",
-        "record_revision": 1,
-        "compose_project": spec["compose_project"],
-        "approved_environment": spec["approved_environment"],
-        "daemon": daemon,
-        "paths": {
-            "workspace": str(spec["paths"]["workspace"]),
-            "configuration": str(spec["paths"]["configuration"]),
-            "backups": str(spec["paths"]["backups"]),
-            "recovery": str(spec["paths"]["recovery"]),
-            "private_state": str(root / "instances" / instance_id),
-        },
-        "control": {"release_id": release_id, "path": str(release_dir), "sha256": inventory_sha},
-        "profile": {
-            "id": profile_document.get("id") if isinstance(profile_document, dict) else None,
-            "version": profile_document.get("version") if isinstance(profile_document, dict) else None,
-            "path": str(profile_path), "sha256": sha256_bytes(profile_bytes),
-        },
-        "approved_policy": {
-            "revision": policy_document.get("revision") if isinstance(policy_document, dict) else None,
-            "path": str(policy_path), "sha256": sha256_bytes(policy_bytes),
-        },
-        "approved_config_revision": 0,
-    }
-    record_bytes = normalize_json(record)
-    context = context_from_record(root, record, root / "instances" / instance_id / "record.json",
-                                  sha256_bytes(record_bytes))
-    # Profile/policy semantics and registered data paths are checked before anything is written.
+
+    def build_record(instance_id):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "instance_id": instance_id,
+            "slug": spec["slug"],
+            "state": "registered",
+            "record_revision": 1,
+            "compose_project": spec["compose_project"],
+            "approved_environment": spec["approved_environment"],
+            "daemon": daemon,
+            "paths": {
+                "workspace": str(spec["paths"]["workspace"]),
+                "configuration": str(spec["paths"]["configuration"]),
+                "backups": str(spec["paths"]["backups"]),
+                "recovery": str(spec["paths"]["recovery"]),
+                "private_state": str(root / "instances" / instance_id),
+            },
+            "control": {"release_id": release_id, "path": str(release_dir), "sha256": inventory_sha},
+            "profile": {
+                "id": profile_document.get("id") if isinstance(profile_document, dict) else None,
+                "version": profile_document.get("version") if isinstance(profile_document, dict) else None,
+                "path": str(profile_path), "sha256": sha256_bytes(profile_bytes),
+            },
+            "approved_policy": {
+                "revision": policy_document.get("revision") if isinstance(policy_document, dict) else None,
+                "path": str(policy_path), "sha256": sha256_bytes(policy_bytes),
+            },
+            "approved_config_revision": 0,
+        }
+
+    requested_id = spec.get("instance_id")
+    record = build_record(requested_id or str(uuid.uuid4()))
+    context = context_from_record(root, record, root / "instances" / record["instance_id"] / "record.json",
+                                  sha256_bytes(normalize_json(record)))
     load_profile(context)
     load_policy(context)
     if context.approved_environment not in SUPPORTED_ENVIRONMENTS:
         raise ContextError(f"Environment {context.approved_environment!r} is not enabled in A1.")
-    preflight = _Checker(root)
-    preflight.root_dev = None
+    preflight = PathChecker(root)
     for name in ("workspace", "configuration"):
         _data_directory(preflight, getattr(context.paths, name), name, protected=False)
     for name in ("backups", "recovery"):
         _data_directory(preflight, getattr(context.paths, name), name, protected=True)
-    _overlap_checks(preflight, context)
-    seen = set()
-    for name in ("workspace", "configuration", "backups", "recovery"):
-        value = getattr(context.paths, name)
-        if value in seen:
-            preflight.refuse("path-duplicate", value, f"{name} duplicates another registered path")
-        seen.add(value)
-    if preflight.findings:
+    if preflight.blocking():
         raise ContextError("Registered paths are not acceptable; registration refused:\n"
-                           + "\n".join(f.render() for f in preflight.findings))
+                           + "\n".join(preflight.blocking()))
 
     with acquire_registry_lock(root):
         registry = load_registry(root)
-        if registry.entry(instance_id) is not None:
-            raise ContextError(f"instance_id {instance_id} is already registered.")
-        if any(entry.slug == context.slug for entry in registry.entries):
-            raise ContextError(f"slug {context.slug!r} is already registered.")
+        candidate_paths = {role: getattr(context.paths, role) for role in ROLE_NAMES}
+        # 1a. Idempotent success: the same request is already published.
         for entry, other, error in registry.records():
             if other is None:
                 raise ContextError(f"Registered record {entry.slug} is invalid ({error}); fix it before registering.")
+            if other.slug == context.slug:
+                published_record = parse_strict_json(read_bytes_nofollow(other.record_path), label=str(other.record_path))
+                if _same_registration_identity(published_record, record) and (requested_id in (None, other.instance_id)):
+                    _clear_reservation(root, other.instance_id)
+                    return other
+                raise ContextError(f"slug {context.slug!r} is already registered.")
+        # 1b. Resume a durable reservation for the same request; refuse a conflicting one.
+        pending = pending_registrations(root)
+        for item in pending:
+            if item.kind != "reservation":
+                continue
+            if item.record is None:
+                raise ContextError(f"Reservation {item.path} is unreadable ({item.error}); an administrator must "
+                                   "inspect it explicitly. Nothing was changed.")
+            same_slug = item.slug == context.slug
+            same_id = item.instance_id == record["instance_id"]
+            if same_slug or same_id:
+                if not _same_registration_identity(item.record, record) or (requested_id and requested_id != item.instance_id):
+                    raise ContextError(f"Reservation {item.instance_id} for slug {item.slug!r} conflicts with this "
+                                       "request; an administrator must remove it explicitly. Nothing was changed.")
+                record = dict(item.record)
+                context = context_from_record(root, record, root / "instances" / record["instance_id"] / "record.json",
+                                              sha256_bytes(normalize_json(record)))
+                break
+        # 2. Collision checks against published records and every other reservation.
+        reserved_ids = {entry.instance_id for entry in registry.entries}
+        for entry, other, _ in registry.records():
+            if other is None:
+                continue
             if (other.daemon.engine_id, other.compose_project) == (context.daemon.engine_id, context.compose_project) \
                     and other.state != "purged":
                 raise ContextError(
                     f"Compose project {context.compose_project!r} is already registered on daemon "
                     f"{context.daemon.engine_id} by instance {other.slug}."
                 )
-            for name in ("workspace", "configuration", "backups", "recovery"):
-                if getattr(other.paths, name) == getattr(context.paths, name):
-                    raise ContextError(f"{name} path is already registered by instance {other.slug}.")
-        private_state = context.paths.private_state
-        resumed = False
-        for orphan in unpublished_registrations(registry):
-            try:
-                existing = parse_strict_json(read_bytes_nofollow(orphan / "record.json"), label=str(orphan))
-            except (OSError, ContextError) as exc:
-                raise ContextError(f"Unpublished registration {orphan.name} is unreadable ({exc}); "
-                                   "an administrator must remove it explicitly.") from exc
-            same_identity = _same_registration_identity(existing, record)
-            if (isinstance(existing, dict) and existing.get("slug") == context.slug) or orphan.name == instance_id:
-                if not same_identity:
-                    raise ContextError(f"Unpublished registration {orphan.name} conflicts with this request; "
-                                       "an administrator must remove it explicitly.")
-                # Complete the interrupted registration with its original identity.
-                instance_id = orphan.name
-                record = dict(existing)
-                record_bytes = normalize_json(record)
-                private_state = orphan
-                context = context_from_record(root, record, private_state / "record.json", sha256_bytes(record_bytes))
-                resumed = True
-                break
-        if not resumed:
-            _create_private_dir(private_state, 0o700)
-            _write_private_file(private_state / "record.json", record_bytes, 0o600)
-            _create_private_dir(private_state / STATE_SUBDIR, 0o700)
-        else:
-            if not (private_state / STATE_SUBDIR).is_dir():
-                _create_private_dir(private_state / STATE_SUBDIR, 0o700)
-        lock_path = root / "locks" / (instance_id + ".lock")
+        for item in pending:
+            if item.kind != "reservation" or item.record is None or item.instance_id == record["instance_id"]:
+                continue
+            reserved_ids.add(item.instance_id)
+            if item.slug == context.slug:
+                raise ContextError(f"slug {context.slug!r} is reserved by pending registration {item.instance_id}.")
+            if (item.record["daemon"]["engine_id"], item.record["compose_project"]) == \
+                    (context.daemon.engine_id, context.compose_project):
+                raise ContextError(
+                    f"Compose project {context.compose_project!r} on daemon {context.daemon.engine_id} is reserved "
+                    f"by pending registration {item.instance_id}."
+                )
+        if record["instance_id"] in reserved_ids:
+            raise ContextError(f"instance_id {record['instance_id']} is already registered or reserved.")
+        others = inventory_of(registry, exclude_instance_id=record["instance_id"])
+        problems = managed_path_conflicts(candidate_paths, context.slug, others, root)
+        if problems:
+            raise ContextError("Managed paths overlap or alias other managed paths; registration refused:\n"
+                               + "\n".join(f"[refuse] {code}: {path}: {message}" for code, path, message in problems))
+        for item in pending:
+            if item.kind != "reservation" and item.instance_id == record["instance_id"]:
+                raise ContextError(f"{item.path}: {item.error}; an administrator must inspect it. Nothing was changed.")
+        # 3. Durable reservation before any instance directory exists.
+        reservation_path = root / RESERVATIONS_RELATIVE / (record["instance_id"] + ".json")
+        if not reservation_path.is_file():
+            _write_reservation(root, record)
+        # 4. Instance directory: staged and published atomically, or already there from an earlier attempt.
+        if _existing_instance_dir_state(root, record) is None:
+            _stage_instance_dir(root, record)
+        # 5. Stable lock: created once, kept forever.
+        lock_path = root / "locks" / (record["instance_id"] + ".lock")
         if not os.path.lexists(str(lock_path)):
             _create_lock_file(lock_path)
-        _fsync_directory(private_state)
-        document = {
-            "schema_version": SCHEMA_VERSION,
-            "default_instance_id": registry.default_instance_id,
-            "instances": [
-                {"instance_id": entry.instance_id, "slug": entry.slug, "record_path": str(entry.record_path)}
-                for entry in registry.entries
-            ] + [{"instance_id": instance_id, "slug": context.slug, "record_path": str(private_state / 'record.json')}],
-        }
-        _write_registry(root, document)
-    return load_registry(root).load_record(RegistryEntry(instance_id, context.slug, private_state / "record.json"))
+        # 6. Registry publication (atomic replace); the default is untouched.
+        private_state = root / "instances" / record["instance_id"]
+        if registry.entry(record["instance_id"]) is None:
+            _write_registry(root, _registry_document(registry, [{
+                "instance_id": record["instance_id"], "slug": context.slug, "record_path": str(private_state / "record.json"),
+            }]))
+        # 7. The reservation has done its job.
+        _clear_reservation(root, record["instance_id"])
+    return load_registry(root).load_record(RegistryEntry(record["instance_id"], context.slug, private_state / "record.json"))
 
 
 def set_default_instance(root, instance_id):
@@ -1409,13 +1408,5 @@ def set_default_instance(root, instance_id):
         registry = load_registry(root)
         if instance_id is not None and registry.entry(instance_id) is None:
             raise ContextError(f"{instance_id} is not a registered instance; default unchanged.")
-        document = {
-            "schema_version": SCHEMA_VERSION,
-            "default_instance_id": instance_id,
-            "instances": [
-                {"instance_id": entry.instance_id, "slug": entry.slug, "record_path": str(entry.record_path)}
-                for entry in registry.entries
-            ],
-        }
-        _write_registry(root, document)
+        _write_registry(root, _registry_document(registry, default=instance_id, keep_default=False))
     return load_registry(root)

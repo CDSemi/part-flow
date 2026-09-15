@@ -580,11 +580,15 @@ class Controller:
         log(f"Workspace: {self.root}")
         log(f"Configuration: {self.config_dir}")
 
-    def log_journal(self, journal):
+    def log_journal(self, journal, *, trusted=True):
         if journal is None:
             log("No incomplete managed operation.")
             return
-        log("INCOMPLETE OPERATION (protected journal, read before live checks):")
+        if trusted:
+            log("INCOMPLETE OPERATION (protected journal, read before live checks):")
+        else:
+            log("INCOMPLETE OPERATION (journal read from UNVERIFIED private state; see trust findings; "
+                "shown for recovery orientation only, not as protected truth):")
         for key in JOURNAL_PUBLIC_KEYS:
             if key in journal:
                 log(f"  {key}: {journal[key]}")
@@ -613,6 +617,19 @@ class Controller:
         for finding in validation.findings:
             log("  " + finding.render())
         log("ACL state on protected paths: " + validation.acl_state)
+
+    def log_trust_summary(self):
+        validation = self.ensure_validation()
+        if validation.mutation_allowed:
+            log("Protected context: trusted (mutation allowed)")
+        else:
+            log("Protected context: REFUSED (" + ", ".join(validation.refused_codes()) + "); run doctor for details")
+        return validation
+
+    def refuse_live_checks(self, reason):
+        """Diagnostics stop before any Git/Docker/Compose command when authority or configuration is refused."""
+        log("Live checks skipped: " + reason + ". No Git, Docker or Compose command was issued and nothing was changed.")
+        raise Failure("Diagnostics are offline-only: " + reason)
 
     def require_trusted_context(self):
         """Refuse privileged mutation unless the protected context and app configuration validated cleanly.
@@ -2532,10 +2549,18 @@ class Controller:
     def doctor(self):
         log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
         self.log_context()
+        validation = self.ensure_validation()
         self.log_validation()
-        self.log_journal(self.read_journal())
+        self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
+        log("Python: " + sys.version.split()[0])
+        if not validation.mutation_allowed:
+            self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
+        try:
+            self.ensure_config()
+        except Failure as exc:
+            log("Runtime configuration: unavailable: " + str(exc).splitlines()[0])
+            self.refuse_live_checks("runtime configuration rejected")
         unavailable = self.live_sections((
-            ("Python", lambda: sys.version.split()[0]),
             ("Git", lambda: self.command(["git", "--version"])),
             ("Docker", lambda: self.docker("version", "--format", "{{.Server.Version}}")),
             ("Runtime configuration", lambda: (
@@ -2554,12 +2579,21 @@ class Controller:
             raise Failure("Doctor found unavailable components: " + ", ".join(unavailable))
 
     def status(self):
-        # Journal and identity come from protected state and are shown before any
-        # app config, .env, Git or Docker access (A1-T16).
+        # Identity, trust summary and journal come from protected state and are
+        # shown before any app config, .env, Git or Docker access (A1-T16). A refused
+        # context or a rejected configuration ends here with zero transport calls (A11-R05).
         self.log_context()
-        self.log_journal(self.read_journal())
+        validation = self.log_trust_summary()
+        self.log_journal(self.read_journal(), trusted=validation.private_state_trusted)
+        if not validation.mutation_allowed:
+            self.refuse_live_checks("protected context refused (" + ", ".join(validation.refused_codes()) + ")")
+        try:
+            self.ensure_config()
+        except Failure as exc:
+            log("Runtime configuration: unavailable: " + str(exc).splitlines()[0])
+            self.refuse_live_checks("runtime configuration rejected")
+        log("Runtime configuration: ok | project: " + self.config["project"])
         unavailable = self.live_sections((
-            ("Runtime configuration", lambda: "ok | project: " + self.config["project"]),
             ("Runtime .env", self.env_presence),
             ("Deployed source", self.revision),
             ("Workspace", self.describe_workspace),
@@ -2707,52 +2741,14 @@ def display_registry(registry):
             f"  control={context.control.release_id}  journal={journal_text}\n"
             f"     workspace={context.paths.workspace}"
         )
-    orphans = pf_instance.unpublished_registrations(registry)
-    for orphan in orphans:
-        log(f"UNPUBLISHED registration directory: {orphan} (interrupted registration; rerun the same registration to "
-            "complete it or have an administrator remove it explicitly)")
+    for pending in pf_instance.pending_registrations(root):
+        if pending.kind == "reservation" and pending.record is not None:
+            log(f"PENDING registration {pending.instance_id} slug={pending.slug} project={pending.record['compose_project']}"
+                " (durable reservation of an interrupted registration; rerun the same registration to complete it,"
+                " or have an administrator remove the reservation explicitly)")
+        else:
+            log(f"UNKNOWN state: {pending.path}: {pending.error} (not deleted; an administrator must inspect it)")
     return len(rows)
-
-
-def legacy_unregistered_report(control_dir, argv):
-    """Read-only diagnostics for a v2.5 layout without a protected registration. Nothing is created or repaired."""
-    home = control_dir.parent
-    command = argv[0] if argv else None
-    log(f"PartFlow NAS Admin {VERSION} ({CHECKPOINT} checkpoint)")
-    log("UNREGISTERED legacy installation (v2.5 layout) at " + str(home))
-    log("  control: " + str(control_dir))
-    config_path = home / "config" / "pf-config.json"
-    if config_path.is_file():
-        try:
-            supplied = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(config_path), label=str(config_path))
-            unknown = sorted(set(supplied) - set(DEFAULTS)) if isinstance(supplied, dict) else ["<not an object>"]
-            log("  config/pf-config.json: present" + (f"; unknown keys: {', '.join(unknown)}" if unknown else "; keys valid"))
-            if isinstance(supplied, dict) and isinstance(supplied.get("project"), str):
-                log("  project (editable config, not authoritative): " + supplied["project"])
-        except (OSError, pf_instance.ContextError) as exc:
-            log("  config/pf-config.json: invalid: " + str(exc))
-    else:
-        log("  config/pf-config.json: missing")
-    log("  config/.env: " + ("present" if (home / "config" / ".env").is_file() else "missing"))
-    found = False
-    for state_dir in sorted(home.glob(".pf-state-*")):
-        pending = state_dir / "pending.json"
-        if not pending.is_file():
-            continue
-        found = True
-        try:
-            journal = pf_instance.parse_strict_json(pf_instance.read_bytes_nofollow(pending), label=str(pending))
-        except (OSError, pf_instance.ContextError) as exc:
-            log(f"  INCOMPLETE OPERATION in {state_dir.name}: unreadable journal: {exc}")
-            continue
-        summary = ", ".join(f"{key}={journal[key]}" for key in JOURNAL_PUBLIC_KEYS if isinstance(journal, dict) and key in journal)
-        log(f"  INCOMPLETE OPERATION in {state_dir.name}: {summary or '<no public fields>'}")
-    if not found:
-        log("  Pending journal: none found under " + str(home / ".pf-state-*"))
-    log("Mutating commands require a protected registration (PF-A2 legacy migration). No files were changed.")
-    if command in (None, "-h", "--help", "status", "doctor", "instances"):
-        return 0
-    raise Failure(f"'{command}' is refused on an unregistered installation; read-only diagnostics only.")
 
 
 def main(argv=None, *, installation_root=None, running_release=None, trusted_launch=None):
@@ -2782,15 +2778,15 @@ def main(argv=None, *, installation_root=None, running_release=None, trusted_lau
     held_lock = contextlib.ExitStack()
     try:
         if root is None:
-            # No protected installation root: only the installed legacy layout may
-            # be inspected read-only; the writable repository copy is refused.
-            source_dir = Path(__file__).resolve().parent
-            if source_dir.name != "control":
-                raise Failure(
-                    "Refusing to execute the writable repository copy of pf-admin.py as the NAS control plane. "
-                    "Run the installed root-owned launcher: sudo pf <command>."
-                )
-            return legacy_unregistered_report(source_dir, rest)
+            # Without a protected installation root nothing here is trusted: neither
+            # the writable repository copy nor an unregistered legacy control directory
+            # may run as the control plane. The legacy launcher prints its read-only
+            # report by itself (pf.sh, control mode) without executing this file.
+            raise Failure(
+                "Refusing to run pf-admin.py without an installed bootstrap (--installation-root). "
+                "Use the installed launcher: sudo pf <command>. Legacy v2.5 layouts are diagnostics-only "
+                "until the PF-A2 migration registers them."
+            )
 
         root = Path(root)
         passthrough = not rest or (rest[0] not in KNOWN_COMMANDS and rest[0] not in ("-h", "--help"))

@@ -6,19 +6,24 @@
 > Prepared: **2026-09-11**
 > Scope: restricted-LAN **Synology staging** administration. This is not a production-hardening package.
 
-> **Deployment Admin checkpoint PF-A1.1 (2026-09-14) — development state, not a NAS release.**
+> **Deployment Admin checkpoint PF-A1.1 (2026-09-14, audit-r1 corrections) — development state, not a NAS release.**
 > The controller source in this repository now requires a *protected instance registration*
-> (`pf_instance.py`: installation root with `bootstrap/`, `registry/instances.json`,
-> `locks/`, `releases/<id>/`, `instances/<uuid>/record.json`). Construction, `--help`,
-> `instances`, `status`, `backups`, `recoveries` and the default `doctor` are read-only;
-> `status`/`doctor` print the pending journal before any `.env`, Git or Docker check.
-> Mutating commands need `--instance <slug|uuid>` (or a protected default), the stable
-> per-instance lock under `<root>/locks/` and an explicit journal route. The v2.5 layout
-> described below is **unregistered** in this checkpoint: the installed `control/pf.sh`
-> answers read-only diagnostics only and refuses mutations until the PF-A2 migration
-> exists. `install-control.sh` remains the legacy v2.5 installer; do not run it against a
-> live NAS with this checkpoint. Registration exists only as a Python transaction for
-> disposable fixtures (`register_instance`), not as an operator command.
+> (`pf_instance.py`: installation root with `bootstrap/` (launcher `pf`, `bootstrap.conf`,
+> verifier `pf_bootstrap.py`), `registry/instances.json` and `registry/reservations/`,
+> `locks/`, `releases/<id>/` with a pinned `control-manifest.json`, `instances/<uuid>/record.json`).
+> The installed launcher runs the bootstrap verifier first: interpreter, configuration,
+> every ancestor and the whole pinned release tree are checked before any release code is
+> executed. Construction, `--help`, `instances`, `status`, `backups`, `recoveries` and the
+> default `doctor` are read-only; `status`/`doctor` print identity, trust summary and the
+> pending journal first and issue **no** Git/Docker/Compose command when the context or the
+> runtime configuration is refused. Mutating commands need `--instance <slug|uuid>` (or a
+> protected default), a clean managed-path inventory (no repeated, nested or aliased paths
+> across instances), the stable per-instance lock under `<root>/locks/` and an explicit
+> journal route. The v2.5 layout described below is **unregistered** in this checkpoint: the
+> installed `control/pf.sh` prints a shell-only read-only report and executes no Python from
+> the legacy control directory. `install-control.sh` remains the legacy v2.5 installer; do not
+> run it against a live NAS with this checkpoint. Registration exists only as a Python
+> transaction for disposable fixtures (`register_instance`), not as an operator command.
 
 ## 1. Purpose
 

@@ -25,8 +25,9 @@ def load_module(name, path):
 
 
 pf = load_module("pf_admin", PACKAGE / "pf-admin.py")
-# One module object only: the controller's own explicit sibling import.
+# One module object each: the controller's own explicit sibling imports.
 pf_instance = pf.pf_instance
+pf_bootstrap = pf_instance.pf_bootstrap
 
 OLD = "1" * 40
 NEW = "2" * 40
@@ -46,6 +47,7 @@ def release_files():
     return {
         "pf-admin.py": (PACKAGE / "pf-admin.py").read_bytes(),
         "pf_instance.py": (PACKAGE / "pf_instance.py").read_bytes(),
+        "pf_bootstrap.py": (PACKAGE / "pf_bootstrap.py").read_bytes(),
         "compose.nas.yaml": (REPO_PACKAGE / "compose.nas.yaml").read_bytes(),
         "pf-config.example.json": (PACKAGE / "pf-config.example.json").read_bytes(),
         "nas.env.example": (PACKAGE / "nas.env.example").read_bytes(),
@@ -71,6 +73,8 @@ class Layout:
         self.policy_paths = values["policy_paths"]
         self.policy_path = values["policy_paths"][POLICY_NAME]
         self.launcher = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.LAUNCHER_NAME
+        self.bootstrap_conf = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_CONF_NAME
+        self.bootstrap_module = self.root / pf_instance.BOOTSTRAP_DIR / pf_instance.BOOTSTRAP_MODULE_NAME
 
 
 def install_root(base, *, launcher=None, interpreter=None):

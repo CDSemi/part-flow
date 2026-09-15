@@ -2,6 +2,7 @@ _claude_prompts/
 _staging/
 _to_delete/
 XOA/
+Claude outputs/
 
 # Environment variables and secrets
 .env

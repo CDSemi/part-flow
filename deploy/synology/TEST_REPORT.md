@@ -2,18 +2,20 @@
 
 Date: 2026-09-11. Tool version: 2.5.0.
 
-> **PF-A1.1 checkpoint addendum (2026-09-14).** The v2.5 results below are historical.
-> The current source carries the Deployment Admin PF-A1.1 slice (protected instance
-> context, registry, bootstrap trust, stable locks, read-only construction/diagnostics).
-> Its executed evidence lives in the PF-A1.1 checkpoint package (`IMPLEMENTATION_REPORT.md`,
-> `ACCEPTANCE_RESULTS.json`, logs). Summary of that run, uid 0, Python 3.11.15, Linux
-> container, group `users` present: adapted baseline suite `tests/test_pf_admin.py`
-> **100 tests OK** (99 v2.5 tests, 3 of them converted from asserting constructor side
-> effects to asserting the safe outcome, plus 1 new); PF-A1.1 suite
-> `tests/test_instance_context.py` **37 tests OK, 0 skipped**, also OK under Python 3.9.23;
-> unmodified v2.5 suite in the same environment 99/99 OK; original audit probes against the
-> unmodified v2.5 bundle 19/19 REPRODUCED (defects present, historical baseline, not a pass).
-> A1-T17 host part (real DSM ACL/mount), Docker, PostgreSQL and DSM/SMB were not exercised.
+> **PF-A1.1 checkpoint addendum (2026-09-15, revision r4 = r3 after audit-r1 plus an IDE
+> flow-analysis warning fix in `pf_instance.path_identity`, no behaviour change).** The v2.5 results
+> below are historical. The current source carries the Deployment Admin PF-A1.1 slice
+> (protected instance context, registry with durable reservations, bootstrap verifier run
+> before any release code, managed-path inventory, stable locks, read-only
+> construction/diagnostics that issue no transport when refused). Executed evidence lives in
+> the PF-A1.1 checkpoint package (`IMPLEMENTATION_REPORT.md`, `AUDIT_FIX_MAP.json`,
+> `ACCEPTANCE_RESULTS.json`, logs). Summary of that run, uid 0, Linux container, ext4 with
+> POSIX ACL xattrs, group `users` present: full discovery `tests/` **172 tests OK, 0 skipped**
+> on CPython 3.11.15, 3.12.3 and 3.13.13 (adapted baseline suite `tests/test_pf_admin.py` 100,
+> PF-A1.1 suite `tests/test_instance_context.py` 72); the PF-A1.1 suite also 72 OK under
+> CPython 3.9.23; the fifteen reviewer probes of audit-r1 reproduce 15/15 on the r2 source
+> and 0/15 on this source in the same environment. Real DSM ACL/mount, Docker, PostgreSQL,
+> DSM/SMB and power-loss durability were not exercised.
 
 ## Executed checks
 

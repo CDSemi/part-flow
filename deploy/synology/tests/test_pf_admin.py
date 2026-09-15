@@ -953,10 +953,15 @@ class AdminTests(unittest.TestCase):
 
 
 class PureTests(unittest.TestCase):
-    def test_root_entry_point_includes_synocommunity_python_paths(self):
+    def test_root_entry_point_uses_the_registered_interpreter_not_a_path_search(self):
+        # v2.5 searched PATH and SynoCommunity package paths for an interpreter. PF-A1.1
+        # runs only the canonical interpreter registered in the protected bootstrap.conf
+        # (ARCHITECTURE.md section 4) and never selects one from PATH or PF_PYTHON.
         script = (REPO_PACKAGE / "pf.sh").read_text()
-        self.assertIn("/var/packages/python311/target/bin/python3.11", script)
-        self.assertIn("/var/packages/python312/target/bin/python3.12", script)
+        self.assertNotIn("/var/packages/python311/target/bin/python3.11", script)
+        self.assertNotIn("PF_PYTHON:-", script)
+        self.assertIn("interpreter|control_release)", script)
+        self.assertIn('"$INTERPRETER" -I -B "$VERIFIER"', script)
 
     def test_repository_launcher_refuses_operational_execution(self):
         result = subprocess.run(

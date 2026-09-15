@@ -1,13 +1,18 @@
 #!/bin/sh
 # PartFlow deployment-admin launcher source.
 # Installed copies run in one of two protected locations:
-#   <installation-root>/bootstrap/pf  - trusted bootstrap (PF-A1.1): selects the
-#                                       registered interpreter and control release
-#                                       from bootstrap.conf, then a registered instance.
-#   <home>/control/pf.sh              - legacy v2.5 layout: read-only diagnostics only
-#                                       until PF-A2 migrates it into a registration.
+#   <installation-root>/bootstrap/pf  - trusted bootstrap (PF-A1.1): parses bootstrap.conf as
+#                                       data, then runs the installed verifier
+#                                       bootstrap/pf_bootstrap.py, which checks the interpreter,
+#                                       every ancestor and the pinned control release BEFORE
+#                                       any release code executes.
+#   <home>/control/pf.sh              - legacy v2.5 layout: this script prints a read-only
+#                                       unregistered report itself and executes no Python
+#                                       payload from the unverified legacy control directory.
 # The launcher never accepts PF_PYTHON, PF_HOME, PF_REPO_ROOT, PF_CONFIG_DIR,
 # PF_CONTROL_DIR, PYTHONPATH or the inherited PATH as privileged execution authority.
+# Trust assumption (design r3): the administrator installed bootstrap/ from reviewed bytes
+# and enters through the host's privilege entry (sudo). Nothing here proves its own bytes.
 set -eu
 PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin:/var/packages/Git/target/bin"
 export PATH
@@ -36,8 +41,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 2
 fi
 
-# Only the interpreter's own flags below are trusted; drop every inherited
-# loader/interpreter and legacy override variable before exec.
+# Drop every inherited loader/interpreter and legacy override variable before exec.
 unset PF_PYTHON PF_HOME PF_REPO_ROOT PF_CONFIG_DIR PF_CONTROL_DIR
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONSAFEPATH PYTHONUSERBASE LD_PRELOAD LD_LIBRARY_PATH
 CHILD_TERM=${TERM:-dumb}
@@ -45,9 +49,12 @@ CHILD_TERM=${TERM:-dumb}
 if [ "$MODE" = bootstrap ]; then
     ROOT=${SELF_DIR%/bootstrap}
     CONF="$SELF_DIR/bootstrap.conf"
+    VERIFIER="$SELF_DIR/pf_bootstrap.py"
     [ -f "$CONF" ] && [ ! -L "$CONF" ] && [ -O "$CONF" ] || fail "Missing or untrusted bootstrap configuration: $CONF"
+    [ -f "$VERIFIER" ] && [ ! -L "$VERIFIER" ] && [ -O "$VERIFIER" ] || fail "Missing or untrusted bootstrap verifier: $VERIFIER"
     INTERPRETER=
     RELEASE=
+    RELEASE_SHA=
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             ''|'#'*) continue ;;
@@ -56,67 +63,79 @@ if [ "$MODE" = bootstrap ]; then
         esac
         key=${line%%=*}
         value=${line#*=}
-        case "$value" in
-            /*) ;;
-            *) fail "bootstrap.conf: $key must be an absolute path." ;;
-        esac
-        case "$value" in
-            *[!A-Za-z0-9._/-]*|*/../*|*/..|*//*|*/) fail "bootstrap.conf: $key is not a normalized path." ;;
+        case "$key" in
+            interpreter|control_release)
+                case "$value" in
+                    /*) ;;
+                    *) fail "bootstrap.conf: $key must be an absolute path." ;;
+                esac
+                case "$value" in
+                    *[!A-Za-z0-9._/-]*|*/../*|*/..|*//*|*/) fail "bootstrap.conf: $key is not a normalized path." ;;
+                esac
+                ;;
+            control_release_sha256)
+                case "$value" in
+                    *[!0-9a-f]*|'') fail "bootstrap.conf: control_release_sha256 must be lowercase hex." ;;
+                esac
+                [ "${#value}" -eq 64 ] || fail "bootstrap.conf: control_release_sha256 must be 64 hex characters."
+                ;;
+            *) fail "bootstrap.conf: unknown key '$key'." ;;
         esac
         case "$key" in
             interpreter) [ -z "$INTERPRETER" ] || fail "bootstrap.conf: duplicate interpreter."; INTERPRETER=$value ;;
             control_release) [ -z "$RELEASE" ] || fail "bootstrap.conf: duplicate control_release."; RELEASE=$value ;;
-            *) fail "bootstrap.conf: unknown key '$key'." ;;
+            control_release_sha256) [ -z "$RELEASE_SHA" ] || fail "bootstrap.conf: duplicate control_release_sha256."; RELEASE_SHA=$value ;;
         esac
     done < "$CONF"
-    [ -n "$INTERPRETER" ] && [ -n "$RELEASE" ] || fail "bootstrap.conf must set interpreter and control_release."
+    [ -n "$INTERPRETER" ] && [ -n "$RELEASE" ] && [ -n "$RELEASE_SHA" ] || fail "bootstrap.conf must set interpreter, control_release and control_release_sha256."
     case "$RELEASE" in
         "$ROOT"/releases/*) ;;
         *) fail "bootstrap.conf: control_release must live under $ROOT/releases." ;;
     esac
     [ -f "$INTERPRETER" ] && [ -x "$INTERPRETER" ] && [ -O "$INTERPRETER" ] || fail "Registered interpreter is missing, not executable or not root-owned: $INTERPRETER"
-    ADMIN="$RELEASE/pf-admin.py"
-    [ -f "$ADMIN" ] && [ ! -L "$ADMIN" ] && [ -O "$ADMIN" ] || fail "Installed control release is missing or untrusted: $ADMIN"
+    # The verifier (installed in bootstrap/, not in the release) re-checks the
+    # interpreter, configuration, ancestors and the pinned release tree with
+    # no-follow/owner/mode/link/ACL rules, then execs <release>/pf-admin.py.
     # Isolated mode (-I) ignores PYTHON* variables, user site and the script
-    # directory; -B writes no bytecode into the protected release. The child
-    # environment is rebuilt from an allowlist; nothing inherited reaches it.
+    # directory; -B writes no bytecode. The child environment is rebuilt from
+    # an allowlist; nothing inherited reaches it.
     exec env -i PATH="$PATH" HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="$CHILD_TERM" \
-        "$INTERPRETER" -I -B "$ADMIN" --installation-root "$ROOT" "$@"
+        "$INTERPRETER" -I -B "$VERIFIER" --installation-root "$ROOT" "$@"
 fi
 
-# Legacy v2.5 control directory: read-only diagnostics only (no registration).
-ADMIN="$SELF_DIR/pf-admin.py"
-if [ ! -f "$ADMIN" ]; then
-    echo "Missing installed Synology admin controller: $ADMIN" >&2
-    exit 2
+# Legacy v2.5 control directory: read-only report produced by this shell only.
+# No interpreter is selected and no file from the unverified legacy control
+# directory is executed. Registration/migration is the PF-A2 installer's job.
+HOME_DIR=${SELF_DIR%/control}
+COMMAND=${1:-}
+echo "PartFlow NAS Admin (PF-A1.1 checkpoint) - legacy launcher"
+echo "UNREGISTERED legacy installation (v2.5 layout) at $HOME_DIR"
+echo "  control: $SELF_DIR (not executed: unverified legacy payload)"
+if [ -f "$HOME_DIR/config/pf-config.json" ]; then
+    echo "  config/pf-config.json: present (not parsed here; editable, not authoritative)"
+else
+    echo "  config/pf-config.json: missing"
 fi
-
-PYTHON=
-for candidate in \
-    python3 \
-    python3.14 \
-    python3.13 \
-    python3.12 \
-    python3.11 \
-    python3.10 \
-    python3.9 \
-    /var/packages/python314/target/bin/python3.14 \
-    /var/packages/python313/target/bin/python3.13 \
-    /var/packages/python312/target/bin/python3.12 \
-    /var/packages/python311/target/bin/python3.11 \
-    /var/packages/python310/target/bin/python3.10 \
-    /var/packages/Python3.9/target/usr/bin/python3.9
-do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
-        PYTHON=$candidate
-        break
+if [ -f "$HOME_DIR/config/.env" ]; then
+    echo "  config/.env: present (contents not read)"
+else
+    echo "  config/.env: missing"
+fi
+FOUND=0
+for state_dir in "$HOME_DIR"/.pf-state-*; do
+    [ -d "$state_dir" ] || continue
+    if [ -f "$state_dir/pending.json" ]; then
+        FOUND=1
+        echo "  INCOMPLETE OPERATION in $(basename -- "$state_dir") (raw journal, no interpretation):"
+        sed 's/^/    /' "$state_dir/pending.json"
     fi
 done
-
-if [ -z "$PYTHON" ] || ! command -v "$PYTHON" >/dev/null 2>&1; then
-    echo "Python 3.9+ is required on the fixed PATH; register the interpreter through the protected bootstrap." >&2
-    exit 2
-fi
-
-exec env -i PATH="$PATH" HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM="$CHILD_TERM" \
-    "$PYTHON" -I -B "$ADMIN" "$@"
+[ "$FOUND" -eq 1 ] || echo "  Pending journal: none found under $HOME_DIR/.pf-state-*"
+echo "Mutating commands require a protected registration (PF-A2 legacy migration). No files were changed."
+case "$COMMAND" in
+    ''|-h|--help|status|doctor|instances) exit 0 ;;
+    *)
+        echo "ERROR: '$COMMAND' is refused on an unregistered installation; read-only diagnostics only." >&2
+        exit 1
+        ;;
+esac
