@@ -39,6 +39,28 @@ Date: 2026-09-11. Tool version: 2.5.0.
 > durability were not exercised (registered fixture tools stand in for Docker; the real Git
 > executable works against local and HTTPS remotes); A1-T17's host gate stays *blocked*.
 
+> **PF-A1.2 r2 addendum (2026-09-15, audit A12-R01…R04).** Production wiring of the
+> unresolved-effect journal: `compose()`, `docker()`, `sql()` and `store_git()` attach an effect
+> descriptor (kind, verb, targets; no application values, redacted when persisted) to every
+> mutating child and none to read-only ones, so a timeout/interruption of `up`/`down`/`stop`/
+> `build`/`run`, `createdb`/`dropdb`/`pg_restore`, mutating SQL, Docker `tag`/`rm`/`image load`
+> or a store `fetch` is journaled; A1-T09 now runs through the production wrappers without a
+> hand-passed `effect=`; a mutating child outside a locked operation is refused before it
+> starts (no journal to record into). Provenance: a commit that tracks `.env`, `node_modules`,
+> `.venv`, `__pycache__` or `.pytest_cache` paths is refused before export, a candidate tree
+> carrying one is refused before `repo/` is touched — in `rollback`/`restore-instance` before
+> any confirmation, pause, safety snapshot or database swap — and a manifest listing one
+> cannot be verified (A1-T10 extended, real-Git and no-Git). PostgreSQL client programs run
+> as direct argv inside the `db` service (no `sh -c`; a static test forbids shell strings in
+> every release module),
+> and `re.split` uses `maxsplit=` (a static test compiles the release with
+> `DeprecationWarning` as an error). Summary of the r2 run, uid 0, Linux container: full
+> discovery `tests/` **240 tests OK, 0 skipped** on CPython 3.11.15, 3.12.3 and 3.13.13 (the
+> 3.13 run also with `-W error::DeprecationWarning`); baseline suite 101, PF-A1.1 suite 91,
+> PF-A1.2 suite 48; PF-A1.1 + PF-A1.2 suites 139 OK under CPython 3.9.23; installed-launcher
+> evidence, audit probes and the HTTPS store probe rerun as recorded in the r2 checkpoint
+> package. Host validations remain not exercised; A1-T17's host gate stays *blocked*.
+
 ## Executed checks
 
 | Check | Actual result |

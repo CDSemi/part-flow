@@ -47,8 +47,15 @@
 > `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), arguments are arrays, captured
 > output is bounded and redacted (the database password and its URL-encoded form never
 > reach a message or log), every call has a deadline, and a timeout or interruption
-> terminates the whole process group and records the unresolved effect under
-> `instances/<uuid>/operations/<id>/unresolved-effects.json` (`status`/`doctor` list them).
+> terminates the whole process group. Every mutating child (Compose `up`/`down`/`stop`/
+> `build`/`run`, `createdb`/`dropdb`/`pg_restore`, mutating SQL, Docker `tag`/`rm`/`image load`,
+> store `fetch`) carries an effect descriptor (kind, verb, targets — never application values),
+> so its timeout or interruption is recorded under
+> `instances/<uuid>/operations/<id>/unresolved-effects.json` and listed by `status`/`doctor`
+> before any retry; read-only children (`ps`, `config`, `logs`, `inspect`, `pg_dump`,
+> `pg_restore --list`, health probes, `SELECT`s) record nothing. PostgreSQL client programs
+> run inside the `db` service as direct argument vectors (no `sh -c`), connecting as the
+> frozen configuration's `POSTGRES_USER`.
 > `config/.env` is parsed strictly (only the seven PartFlow keys, no duplicates, no
 > `export`, no expansion, single-/double-quoted or unquoted literals; see section 6) and
 > every mutating command first freezes it into a private 0400 snapshot
@@ -60,8 +67,10 @@
 > longer splices `POSTGRES_PASSWORD` into a URL). Privileged Git never runs against `repo/`:
 > sources are fetched into a protected bare store under `<root>/sources/` (own configuration,
 > no hooks/fsmonitor/includes/alternates, HTTPS only) and exported blob by blob (submodules,
-> symbolic links and Git LFS pointers are refused); the workspace is compared byte/mode
-> against a protected manifest recorded when the tool deployed a tree; a tree without such
+> symbolic links, Git LFS pointers and tracked paths named like ignored workspace artifacts —
+> `.env`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache` — are refused, so nothing
+> deployed is ever outside the manifest); the workspace is compared byte/mode against a
+> protected manifest recorded when the tool deployed a tree; a tree without such
 > provenance is `unknown`, never assigned a commit SHA (section 8). Read-only diagnostics
 > hand Compose a registration-created empty env-file and the values as allowlisted
 > variables, so no editable file is read by Compose. Compose passthrough is bounded to known
@@ -411,6 +420,14 @@ the protected manifest the tool recorded when it deployed a tree
 its `.git` metadata (hooks, fsmonitor, filters, includes, alternates, remotes) is editor
 data and is never consulted. A workspace without such a manifest, or one that differs from
 it, has `unknown` provenance: `status` still works, but no commit SHA is invented.
+
+The comparison ignores *untracked* workspace artifacts by name only (`.env`,
+`node_modules`, `.venv`, `__pycache__`, `.pytest_cache`; `.git` is control metadata). That
+policy never hides tracked content: a commit that tracks a path with one of those names
+is refused by the source store before export (`unsupported source path (tracked reserved
+workspace artifact name)`), a candidate tree carrying one is refused before `repo/` is
+touched, and a manifest that lists one cannot be verified — the tool fails closed instead
+of reporting a match it did not prove.
 
 A manual update that finds a dirty/different workspace first includes that current
 workspace in the pre-update checkpoint as `workspace.tar.gz`, then replaces `repo/` with

@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 import urllib.parse
 from unittest import mock
 
@@ -492,6 +493,49 @@ class WritableGitMetadata(Base):
         self.assertEqual(pfx.snapshot_tree(self.workspace), before)
         self.assert_git_never_touched_workspace()
 
+    def test_tracked_reserved_workspace_names_are_refused_before_export(self):
+        """A12-R02: a commit that tracks a path the workspace manifest ignores (.env, node_modules, ...)
+        is refused as a whole before anything is exported or deployed; provenance never skips it."""
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.base), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=self.upstream_work, stderr=subprocess.DEVNULL,
+                                           env=env).decode().strip()
+
+        (self.upstream_work / ".env").write_text("POSTGRES_PASSWORD=tracked-secret\n")
+        git("add", "-f", ".env")
+        git("commit", "-qm", "tracked env")
+        with_env = git("rev-parse", "HEAD")
+        git("rm", "-q", "-f", ".env")
+        nested = self.upstream_work / "nested" / "node_modules"
+        nested.mkdir(parents=True)
+        (nested / "tracked.js").write_text("module.exports = 1;\n")
+        git("add", "-f", "nested/node_modules/tracked.js")
+        git("commit", "-qm", "tracked node_modules")
+        with_modules = git("rev-parse", "HEAD")
+        subprocess.check_call(["git", "push", "-q", str(self.base / "upstream" / "approved.git"), "HEAD:refs/heads/main"],
+                              cwd=self.upstream_work, env=env, stderr=subprocess.DEVNULL)
+        before = pfx.snapshot_tree(self.workspace)
+        for label, sha, path in (("env", with_env, ".env"), ("node_modules", with_modules, "nested/node_modules/tracked.js")):
+            with self.subTest(entry=label):
+                destination = self.base / ("cand-" + label)
+                with mock.patch.object(self.c, "compose", return_value=""), self.c.lock():
+                    with self.assertRaises(pf.Failure) as caught:
+                        self.c.materialize_source({"sha": sha}, destination)
+                    # The same commit can never be proven deployed either (fail closed, not False).
+                    with self.assertRaisesRegex(pf.Failure, "reserved workspace artifact"):
+                        self.c.prove_tree_commit(self.workspace, sha)
+                self.assertIn("reserved workspace artifact name", str(caught.exception))
+                self.assertIn(path, str(caught.exception))
+                self.assertFalse(destination.exists())
+                self.assertFalse(self.context.source_manifest_path.exists())
+        self.assertEqual(pfx.snapshot_tree(self.workspace), before)
+        self.assert_git_never_touched_workspace()
+        # The clean first commit still exports; the ignore policy applies to untracked content only.
+        with mock.patch.object(self.c, "compose", return_value=""), self.c.lock():
+            self.c.materialize_source({"sha": self.first}, self.base / "cand-clean")
+        self.assertTrue((self.base / "cand-clean" / "app-version.txt").is_file())
+
     def test_checkpoint_metadata_never_assigns_provenance_without_the_store(self):
         candidate = self.base / "candidate"
         with mock.patch.object(self.c, "compose", return_value=""), self.c.lock():
@@ -841,22 +885,29 @@ class SecretsNeverReachLogs(Base):
 @ROOT_REQUIRED
 class TimeoutAndCancellation(Base):
     """A1-T09: a timed-out child and its descendants are terminated as a process group, output is
-    bounded and redacted, and the unresolved external effect is recorded before any retry."""
+    bounded and redacted, and the unresolved external effect is recorded before any retry.
+
+    Audit A12-R01: the effect is produced by the production wrappers (``compose()``,
+    ``docker()``, ``sql()``, ``store_git()``); no test passes ``effect=`` by hand."""
 
     def setUp(self):
         super().setUp()
         self.pidfile = self.base / "descendant.pid"
         body = (
             "#!/bin/sh\n"
+            "if [ \"$1\" = compose ] && [ \"$2\" = version ]; then echo 'Docker Compose version v2-fixture'; exit 0; fi\n"
             f"sleep 300 &\necho $! > {self.pidfile}\n"
-            f"echo 'starting with secret {SECRET}'\n"
+            # The application secret reaches the child only as an allowlisted variable; the
+            # child echoes it back on both streams like a chatty tool would.
+            "echo \"starting with secret ${POSTGRES_PASSWORD:-" + SECRET + "}\"\n"
             "i=0\nwhile [ $i -lt 400 ]; do printf '%s\\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done\n"
-            f"echo 'stderr sees {SECRET} too' >&2\n"
+            "echo \"stderr sees ${POSTGRES_PASSWORD:-" + SECRET + "} too\" >&2\n"
             "exec sleep 300\n"
         )
         self.tool = pfx.tool_script(self.base / "tools", "docker", body)
-        self.install({"docker": str(self.tool)})
+        self.install({"docker": str(self.tool), "git": str(self.tool)})
         self.context, self.paths = self.instance()
+        self.password = dict(line.split("=", 1) for line in pfx.ENV_TEXT.splitlines())["POSTGRES_PASSWORD"]
 
     @staticmethod
     def alive(pid):
@@ -866,39 +917,167 @@ class TimeoutAndCancellation(Base):
         except OSError:
             return False
 
-    def test_timeout_terminates_the_process_group_bounds_output_and_records_the_effect(self):
-        controller = self.controller(self.context)
-        effects = self.base / "effects.json"
-        controller.runner.effects_path = effects
-        controller.redactor.add(SECRET)
-        started = time.monotonic()
-        with self.assertRaises(pf.Failure) as caught:
-            controller.command(["docker", "compose", "up", "-d"], timeout=2,
-                               effect={"kind": "compose", "verb": "up", "project": "partflow-staging"})
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 30)
-        self.assertIn("timed out", str(caught.exception))
-        self.assertNotIn(SECRET, str(caught.exception))
-        result = controller.runner.history[-1]
-        self.assertTrue(result.timed_out)
-        self.assertIsNone(result.returncode)
-        self.assertNotIn(SECRET, result.stdout + result.stderr)
-        self.assertIn("[REDACTED]", result.stderr)
-        self.assertLessEqual(len(result.stdout.encode("utf-8")), pf_runner.DEFAULT_CAPTURE_LIMIT + len("[REDACTED]"))
+    def wait_descendant_dead(self):
         descendant = int(self.pidfile.read_text().strip())
         deadline = time.monotonic() + 5
         while self.alive(descendant) and time.monotonic() < deadline:
             time.sleep(0.05)
         self.assertFalse(self.alive(descendant), "descendant survived the process-group termination")
-        records = pf_runner.load_unresolved_effects(effects)
+
+    def effects(self, controller):
+        return pf_runner.load_unresolved_effects(controller.operation_dir / "unresolved-effects.json")
+
+    def test_timeout_terminates_the_process_group_bounds_output_and_records_the_effect(self):
+        controller = self.controller(self.context)
+        started = time.monotonic()
+        with controller.lock():
+            with self.assertRaises(pf.Failure) as caught:
+                controller.compose("up", "-d", "--no-deps", "db", timeout=2)
+            records = self.effects(controller)
+            operation_id = controller.operation_id
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 30)
+        self.assertIn("timed out", str(caught.exception))
+        self.assertNotIn(self.password, str(caught.exception))
+        result = controller.runner.history[-1]
+        self.assertTrue(result.timed_out)
+        self.assertIsNone(result.returncode)
+        self.assertNotIn(self.password, result.stdout + result.stderr)
+        self.assertIn("[REDACTED]", result.stderr)
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), pf_runner.DEFAULT_CAPTURE_LIMIT + len("[REDACTED]"))
+        self.wait_descendant_dead()
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(pf_runner.group_members(record["process_group"]), [])
         self.assertEqual(record["outcome"], "timeout")
-        self.assertEqual(record["effect"]["verb"], "up")
-        self.assertEqual(record["argv"][:3], ["compose", "up", "-d"])
+        self.assertEqual(record["effect"], {"kind": "compose", "verb": "up", "project": "partflow-staging",
+                                            "targets": ["db"]})
+        self.assertEqual(record["argv"][0], "compose")
+        self.assertEqual(record["argv"][-4:], ["up", "-d", "--no-deps", "db"])
         self.assertEqual(record["id"], result.effect_id)
-        self.assertNotIn(SECRET, json.dumps(records))
+        self.assertNotIn(self.password, json.dumps(records))
+        # The operation directory is the journal location, and status reads it from there.
+        self.assertTrue((self.context.operations_dir / operation_id / "unresolved-effects.json").is_file())
+
+    def test_read_only_timeouts_record_no_effect(self):
+        controller = self.controller(self.context)
+        with controller.lock():
+            for label, call in (
+                ("compose ps", lambda: controller.compose("ps", timeout=2)),
+                ("compose config", lambda: controller.compose("config", "-q", timeout=2)),
+                ("docker ps", lambda: controller.docker("ps", "-a", "-q", timeout=2)),
+                ("docker image inspect", lambda: controller.docker("image", "inspect", "x:y", timeout=2)),
+                ("git rev-parse", lambda: controller.store_git(["--git-dir=/nonexistent", "rev-parse", "--verify",
+                                                                "HEAD"], cwd=self.base, timeout=2)),
+            ):
+                with self.subTest(call=label):
+                    with self.assertRaisesRegex(pf.Failure, "timed out"):
+                        call()
+                    self.assertIsNone(controller.runner.history[-1].effect_id)
+            self.assertFalse((controller.operation_dir / "unresolved-effects.json").exists())
+            # Mutations after the read-only calls are journaled in the same operation; the `run`
+            # descriptor comes from the caller's arguments, not from the managed label.
+            with self.assertRaisesRegex(pf.Failure, "timed out"):
+                controller.docker("volume", "rm", "partflow-staging_pgdata", timeout=2)
+            with self.assertRaisesRegex(pf.Failure, "timed out"):
+                controller.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade",
+                                   "head", timeout=2)
+            records = self.effects(controller)
+        self.assertEqual([item["effect"] for item in records],
+                         [{"kind": "docker", "verb": "volume rm", "targets": ["partflow-staging_pgdata"]},
+                          {"kind": "compose", "verb": "run", "project": "partflow-staging",
+                           "targets": ["backend", "uv", "run", "alembic", "upgrade", "head"]}])
+        self.assertIn("--label", records[1]["argv"])
+
+    def test_mutations_outside_a_locked_operation_are_refused_before_the_child_starts(self):
+        """Fail closed: without an operation there is no journal, so a mutating child never starts."""
+        controller = self.controller(self.context)
+        for label, call in (
+            ("compose up", lambda: controller.compose("up", "-d", "--no-deps", "db", timeout=2)),
+            ("docker tag", lambda: controller.docker("tag", "sha256:x", "r:t", timeout=2)),
+            ("store fetch", lambda: controller.store_git(["--git-dir=/nonexistent", "fetch", "approved", "x"],
+                                                        cwd=self.base, timeout=2)),
+        ):
+            with self.subTest(call=label):
+                with self.assertRaisesRegex(pf.Failure, "requires a locked operation"):
+                    call()
+        self.assertFalse(self.pidfile.exists(), "a mutating child ran without an operation")
+        self.assertEqual([r for r in controller.runner.history if r.effect_id], [])
+        # Read-only diagnostics still run (and still time out) without an operation.
+        with self.assertRaisesRegex(pf.Failure, "timed out"):
+            controller.docker("ps", "-q", timeout=2)
+        self.assertFalse(list(self.context.operations_dir.glob("*/unresolved-effects.json")))
+
+    def test_sql_wrapper_journals_only_statements_declared_as_mutations(self):
+        controller = self.controller(self.context)
+        with controller.lock(), mock.patch.object(controller, "compose", return_value="t") as compose:
+            for query in ("SELECT 1;", "SHOW server_version_num;", "  select datname FROM pg_database;"):
+                controller.sql("postgres", query)
+                self.assertIsNone(compose.call_args.kwargs["effect"], query)
+            # Anything that does not start with SELECT/SHOW is a mutation by default (fail closed;
+            # a CTE query is over-recorded rather than a DDL statement being missed)...
+            for statement in ('ALTER DATABASE "pf_x" ALLOW_CONNECTIONS false;', "BEGIN; SET LOCAL lock_timeout = '10s'; COMMIT;",
+                              "CREATE DATABASE pf_verify_x;", "",
+                              "WITH x AS (SELECT 1 AS n) SELECT n FROM x;"):
+                controller.sql("postgres", statement)
+                self.assertEqual(compose.call_args.kwargs["effect"]["kind"], "database", statement)
+            # ...and the caller's explicit classification wins.
+            controller.sql("postgres", "SELECT pg_terminate_backend(1);", mutation=True)
+            self.assertEqual(compose.call_args.kwargs["effect"]["verb"], "sql")
+            controller.sql("postgres", 'ALTER DATABASE "pf_x" ALLOW_CONNECTIONS false;', mutation=True)
+            self.assertEqual(compose.call_args.kwargs["effect"],
+                             {"kind": "database", "verb": "sql", "database": "postgres",
+                              "statement": 'ALTER DATABASE "pf_x" ALLOW_CONNECTIONS false;'})
+            argv = compose.call_args.args
+            self.assertEqual(argv[:4], ("exec", "-T", "db", "psql"))
+            self.assertNotIn("sh", argv)
+            self.assertIn(("-U", "partflow_staging"), [argv[i:i + 2] for i in range(len(argv))])
+        # Without an explicit descriptor, an exec of psql is a mutation (fail-closed), and the
+        # production classification tables cover every verb the control plane issues.
+        project = "partflow-staging"
+        self.assertEqual(pf.compose_effect(project, ("exec", "-T", "db", "psql", "-c", "SELECT 1"))["verb"], "psql")
+        for read_only in (("ps",), ("ps", "-a", "-q", "db"), ("config", "-q"), ("logs", "db"), ("version",),
+                          ("exec", "-T", "db", "pg_dump", "-U", "u", "-d", "d"),
+                          ("exec", "-T", "db", "pg_dumpall", "-U", "u", "--globals-only"),
+                          ("exec", "-T", "db", "pg_restore", "--list"),
+                          ("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://localhost:5173/api/health")):
+            self.assertIsNone(pf.compose_effect(project, read_only), read_only)
+        for mutation, verb in ((("up", "-d", "--no-deps", "--no-build", "--force-recreate", "backend"), "up"),
+                               (("down", "--volumes", "--remove-orphans"), "down"),
+                               (("stop", "frontend", "backend"), "stop"),
+                               (("build", "backend"), "build"),
+                               (("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head"), "run"),
+                               (("exec", "-T", "db", "createdb", "-U", "u", "--owner=u", "pf_verify_1"), "createdb"),
+                               (("exec", "-T", "db", "dropdb", "-U", "u", "pf_verify_1"), "dropdb"),
+                               (("exec", "-T", "db", "pg_restore", "-U", "u", "-d", "pf_verify_1", "--exit-on-error"), "pg_restore"),
+                               (("exec", "-T", "db", "unknown-program"), "unknown-program"),
+                               (("kill",), "kill")):
+            effect = pf.compose_effect(project, mutation)
+            self.assertEqual((effect["verb"], effect["project"]), (verb, project), mutation)
+        self.assertEqual(pf.compose_effect(project, ("run", "--rm", "--no-deps", "-T", "backend", "uv", "run",
+                                                     "alembic", "upgrade", "head"))["targets"],
+                         ["backend", "uv", "run", "alembic", "upgrade", "head"])
+        self.assertEqual(pf.compose_effect(project, ("exec", "-T", "db", "dropdb", "-U", "u", "pf_verify_1")),
+                         {"kind": "compose-exec", "verb": "dropdb", "project": project, "service": "db",
+                          "targets": ["u", "pf_verify_1"]})
+        for read_only in (("ps", "-a", "-q"), ("inspect", "abc"), ("version", "--format", "x"),
+                          ("image", "inspect", "r:t"), ("image", "ls"), ("volume", "ls"), ("network", "ls"),
+                          ("compose", "version"), ("image", "save", "-o", "/x.tar", "r:t")):
+            self.assertIsNone(pf.docker_effect(read_only), read_only)
+        for mutation, verb in ((("tag", "sha256:x", "r:t"), "tag"), (("stop", "--time", "30", "job"), "stop"),
+                               (("rm", "-f", "c"), "rm"), (("network", "rm", "n"), "network rm"),
+                               (("volume", "rm", "v"), "volume rm"), (("image", "rm", "r:t"), "image rm"),
+                               (("image", "load", "-i", "/x.tar"), "image load"), (("system", "prune"), "system")):
+            self.assertEqual(pf.docker_effect(mutation)["verb"], verb, mutation)
+        for read_only in (["--version"], ["--git-dir=/s", "rev-parse", "--verify", "x"], ["--git-dir=/s", "ls-tree", "-r", "x"],
+                          ["--git-dir=/s", "cat-file", "--batch"], ["--git-dir=/s", "merge-base", "--is-ancestor", "a", "b"]):
+            self.assertIsNone(pf.git_effect(read_only), read_only)
+        for mutation, verb in ((["--git-dir=/s", "fetch", "-q", "approved", "sha"], "fetch"),
+                               (["init", "--bare", "-q", "/s"], "init"),
+                               (["--git-dir=/s", "update-ref", "refs/pinned/x", "x"], "update-ref"),
+                               (["--git-dir=/s", "config", "--local", "k", "v"], "config")):
+            self.assertEqual(pf.git_effect(mutation), {"kind": "source-store", "verb": verb,
+                                                       "targets": pf.effect_targets(mutation[mutation.index(verb) + 1:])})
 
     def test_bounded_capture_with_small_limit_keeps_the_total_count(self):
         controller = self.controller(self.context)
@@ -911,41 +1090,40 @@ class TimeoutAndCancellation(Base):
 
     def test_interruption_terminates_the_group_and_records_the_effect(self):
         controller = self.controller(self.context)
-        effects = self.base / "effects.json"
-        controller.runner.effects_path = effects
-        original_pump = controller.runner._pump
 
         def interrupted(process, *args, **kwargs):
             deadline = time.monotonic() + 5
             while not self.pidfile.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
+            for pipe in (process.stdout, process.stderr):
+                pipe.close()
             raise KeyboardInterrupt("Interrupted by signal 15")
 
-        with mock.patch.object(controller.runner, "_pump", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                controller.command(["docker", "compose", "stop"], timeout=30, effect={"kind": "compose", "verb": "stop"})
-        del original_pump
-        descendant = int(self.pidfile.read_text().strip())
-        deadline = time.monotonic() + 5
-        while self.alive(descendant) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertFalse(self.alive(descendant))
-        records = pf_runner.load_unresolved_effects(effects)
+        controller.cli = ["docker", "compose"]  # the interrupted child is the stop itself, not the version probe
+        with controller.lock():
+            with mock.patch.object(controller.runner, "_pump", side_effect=interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    controller.compose("stop", "frontend", "backend", timeout=30)
+            records = self.effects(controller)
+        self.wait_descendant_dead()
         self.assertEqual([item["outcome"] for item in records], ["interrupted"])
-        self.assertEqual(records[0]["effect"]["verb"], "stop")
+        self.assertEqual(records[0]["effect"], {"kind": "compose", "verb": "stop", "project": "partflow-staging",
+                                                "targets": ["frontend", "backend"]})
+        self.assertNotIn(self.password, json.dumps(records))
 
     def test_status_reports_unresolved_effects_of_earlier_operations(self):
         controller = self.controller(self.context)
         with controller.lock():
             with self.assertRaises(pf.Failure):
-                controller.command(["docker", "compose", "up"], timeout=1, effect={"kind": "compose", "verb": "up"})
+                controller.compose("up", "-d", "--no-deps", "db", timeout=1)
             operation_dir = controller.operation_dir
         self.assertTrue((operation_dir / "unresolved-effects.json").is_file())
         with mock.patch.object(pf.Controller, "command", side_effect=pf.Failure("transport disabled by test")):
             code, out, err = run_main(["--instance", "staging", "status"], self.layout)
         self.assertIn("UNRESOLVED EFFECTS recorded by earlier operations: 1", out)
-        self.assertIn("compose up -> timeout", out)
+        self.assertIn("docker compose up db -> timeout", out)
         self.assertLess(out.index("UNRESOLVED EFFECTS"), out.index("unavailable"))
+        self.assertNotIn(self.password, out)
 
 
 @ROOT_REQUIRED
@@ -1148,6 +1326,67 @@ class ProvenanceWithoutGit(Base):
         shutil.rmtree(git_dir)
         (self.workspace / ".git").symlink_to(outside)
         self.assertIsNone(pf_source.workspace_head_hint(self.workspace))
+
+    def test_tracked_content_is_never_outside_the_manifest_proof(self):
+        """A12-R02 without Git: a candidate that carries a file the manifest policy ignores is refused
+        before the workspace changes; a manifest that lists such a path cannot be verified; untracked
+        artifacts with those names in the workspace remain ignored."""
+        self.c.record_source_manifest(self.workspace, pfx.OLD, verified=True)
+        # Untracked runtime artifacts (not in the manifest) are ignored by policy.
+        (self.workspace / ".env").write_text("POSTGRES_PASSWORD=untracked\n")
+        (self.workspace / "frontend" / "node_modules").mkdir()
+        (self.workspace / "frontend" / "node_modules" / "x.js").write_text("x")
+        self.assertFalse(self.c.workspace_status()["dirty"])
+        (self.workspace / ".env").unlink()
+        shutil.rmtree(self.workspace / "frontend" / "node_modules")
+        # A candidate tree (what a deploy would copy whole) with tracked reserved names is refused.
+        def candidate_with(relative):
+            candidate = self.base / ("candidate-" + relative.replace("/", "-") + "-" + uuid.uuid4().hex[:4])
+            pfx.source_fixture(candidate, pfx.NEW)
+            target = candidate / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("tracked content\n")
+            self.assertEqual(pf_source.reserved_paths(candidate), [relative])
+            return candidate
+
+        before = pfx.snapshot_tree(self.workspace)
+        manifest_before = self.context.source_manifest_path.read_bytes()
+        for relative in (".env", "nested/node_modules/tracked.js"):
+            with self.subTest(candidate_entry=relative):
+                candidate = candidate_with(relative)
+                with self.c.lock():
+                    pf.write_json(self.c.pending, {"operation": "update", "phase": "x"})
+                    with self.assertRaisesRegex(pf.Failure, "cannot verify"):
+                        self.c.replace_source(candidate, pfx.NEW)
+                    self.c.pending.unlink()
+                self.assertEqual(pfx.snapshot_tree(self.workspace), before)
+                self.assertEqual(self.context.source_manifest_path.read_bytes(), manifest_before)
+        with self.c.lock():
+            with self.assertRaisesRegex(pf.Failure, "cannot verify"):
+                self.c.replace_source_for_recovery(candidate_with("nested/node_modules/tracked.js"), pfx.NEW)
+        self.assertEqual(pfx.snapshot_tree(self.workspace), before)
+        self.assertEqual(self.context.source_manifest_path.read_bytes(), manifest_before)
+        # A v1 bundle's top-level runtime .env is stripped from the candidate first (it is runtime
+        # configuration, never source), so the restored workspace and its manifest carry no .env.
+        with self.c.lock():
+            self.c.replace_source_for_recovery(candidate_with(".env"), pfx.NEW, verified=False)
+        self.assertFalse((self.workspace / ".env").exists())
+        self.assertEqual(self.c.workspace_status()["provenance"], "unknown")
+        self.assertFalse(self.c.workspace_status()["dirty"])
+        # A manifest listing a reserved path can never be proven by the walk: comparison fails closed.
+        manifest = pf_source.load_manifest(self.context.source_manifest_path, pf_instance.parse_strict_json)
+        entry = dict(next(e for e in manifest["entries"] if e["kind"] == "file"), path="nested/node_modules/tracked.js")
+        manifest["entries"].append(entry)
+        with self.assertRaisesRegex(pf_source.SourceError, "cannot be verified"):
+            pf_source.compare_manifest(self.workspace, manifest)
+        pf_source.write_manifest(self.context.source_manifest_path, manifest)
+        with self.assertRaisesRegex(pf.Failure, "cannot be verified"):
+            self.c.workspace_status()
+        # Changing the bytes of such a file is therefore never reported as a match either way.
+        (self.workspace / "nested" / "node_modules").mkdir(parents=True)
+        (self.workspace / "nested" / "node_modules" / "tracked.js").write_text("changed")
+        with self.assertRaises(pf.Failure):
+            self.c.workspace_status()
 
     def test_replace_source_records_the_candidate_manifest_and_refuses_links(self):
         candidate = self.base / "candidate"
@@ -1384,6 +1623,12 @@ class StaticCallSites(unittest.TestCase):
                     continue  # the verifier's final execv of the pinned release entry point
                 self.assertNotIn(forbidden, source, f"{name} contains {forbidden}")
         admin = (pfx.PACKAGE / "pf-admin.py").read_text()
+        # A12-R03: control-plane children are argv only; no shell command strings anywhere in the release.
+        for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py", "pf_runner.py"):
+            source = (pfx.PACKAGE / name).read_text()
+            for forbidden in ('"sh", "-c"', "'sh', '-c'", '"bash", "-c"', "'bash', '-c'", "sh -c", "bash -c",
+                              "shell=True", "$POSTGRES_USER", "$POSTGRES_DB", '"$1"', '"$2"'):
+                self.assertNotIn(forbidden, source, f"{name} contains {forbidden!r}")
         self.assertNotIn("os.environ", admin)
         self.assertNotIn("read_dotenv", admin)
         self.assertNotIn("clean_env_keys", admin)
@@ -1396,6 +1641,19 @@ class StaticCallSites(unittest.TestCase):
         compose = (pfx.REPO_PACKAGE / "compose.nas.yaml").read_text()
         self.assertIn("${PARTFLOW_DATABASE_URL", compose)
         self.assertNotIn("${POSTGRES_PASSWORD", compose.split("backend:")[1].split("frontend:")[0])
+
+    def test_release_modules_compile_without_deprecation_warnings(self):
+        """A12-R04: compiling the release raises no syntax-level DeprecationWarning, and the config parser's
+        ``re.split`` path (positional ``maxsplit`` was deprecated in 3.13) runs clean with warnings as errors."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            for name in ("pf-admin.py", "pf_instance.py", "pf_bootstrap.py", "pf_config.py", "pf_source.py",
+                         "pf_runner.py"):
+                compile((pfx.PACKAGE / name).read_text(), str(pfx.PACKAGE / name), "exec")
+            pf_source.parse_git_config("[core]\n\tbare = true # comment\n\tfsmonitor = false ; note\n")
+        self.assertNotIn("re.split(r\"\\s[#;]\", value, 1)", (pfx.PACKAGE / "pf_source.py").read_text())
+        self.assertIn("maxsplit=1", (pfx.PACKAGE / "pf_source.py").read_text())
 
     def test_release_inventory_and_installer_carry_the_new_modules(self):
         for name in ("pf_runner.py", "pf_config.py", "pf_source.py"):

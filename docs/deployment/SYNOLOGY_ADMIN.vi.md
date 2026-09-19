@@ -45,8 +45,15 @@
 > endpoint đã đăng ký, `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`), đối số là
 > mảng, output được giới hạn và redact (mật khẩu database và dạng URL-encoded của nó không
 > bao giờ lọt vào thông báo hay log), mọi lời gọi đều có deadline, timeout hay ngắt giữa
-> chừng sẽ kết thúc cả process group và ghi unresolved effect vào
-> `instances/<uuid>/operations/<id>/unresolved-effects.json` (`status`/`doctor` liệt kê chúng).
+> chừng sẽ kết thúc cả process group. Mọi tiến trình con mutation (Compose `up`/`down`/
+> `stop`/`build`/`run`, `createdb`/`dropdb`/`pg_restore`, SQL mutation, Docker `tag`/`rm`/
+> `image load`, store `fetch`) mang một effect descriptor (kind, verb, targets — không bao giờ
+> chứa giá trị ứng dụng), nên timeout hay ngắt giữa chừng của nó được ghi vào
+> `instances/<uuid>/operations/<id>/unresolved-effects.json` và `status`/`doctor` liệt kê
+> trước mọi lần thử lại; tiến trình con read-only (`ps`, `config`, `logs`, `inspect`,
+> `pg_dump`, `pg_restore --list`, health probe, `SELECT`) không ghi gì. Các chương trình
+> client PostgreSQL chạy trong service `db` bằng argv trực tiếp (không `sh -c`), kết nối
+> bằng `POSTGRES_USER` của cấu hình đã đóng băng.
 > `config/.env` được parse nghiêm ngặt (chỉ bảy key PartFlow, không trùng, không `export`,
 > không expansion; literal dạng không quote/single quote/double quote; xem mục 6) và mọi
 > lệnh mutation đều đóng băng nó trước thành snapshot riêng 0400
@@ -57,9 +64,11 @@
 > dưới tên `PARTFLOW_DATABASE_URL` (`compose.nas.yaml` không còn ghép `POSTGRES_PASSWORD`
 > thẳng vào URL). Git đặc quyền không bao giờ chạy trên `repo/`: source được fetch vào bare
 > store bảo vệ dưới `<root>/sources/` (cấu hình riêng, không hook/fsmonitor/include/alternates,
-> chỉ HTTPS) và export từng blob (submodule, symlink và Git LFS pointer bị từ chối); workspace
-> được so sánh byte/mode với manifest bảo vệ ghi lại khi công cụ deploy một cây; cây không có
-> provenance như vậy là `unknown`, không bao giờ được gán commit SHA (mục 8). Chẩn đoán
+> chỉ HTTPS) và export từng blob (submodule, symlink, Git LFS pointer và đường dẫn được track
+> mang tên artifact workspace bị bỏ qua — `.env`, `node_modules`, `.venv`, `__pycache__`,
+> `.pytest_cache` — đều bị từ chối, nên không có file nào được deploy mà nằm ngoài manifest);
+> workspace được so sánh byte/mode với manifest bảo vệ ghi lại khi công cụ deploy một cây;
+> cây không có provenance như vậy là `unknown`, không bao giờ được gán commit SHA (mục 8). Chẩn đoán
 > read-only đưa cho Compose một env-file rỗng do registration tạo và các giá trị dưới dạng
 > biến allowlist, nên Compose không đọc file nào có thể sửa được. Compose passthrough bị giới
 > hạn trong các từ đã biết và từ chối dump `config` thô cho tới khi PF-A1.4 bỏ hẳn route này;
@@ -400,6 +409,14 @@ manifest bảo vệ mà công cụ ghi lại khi deploy một cây
 metadata `.git` của nó (hook, fsmonitor, filter, include, alternates, remote) là dữ liệu của
 người sửa và không bao giờ được dùng. Workspace không có manifest, hoặc khác manifest, có
 provenance `unknown`: `status` vẫn chạy, nhưng không có commit SHA nào được bịa ra.
+
+Phép so sánh chỉ bỏ qua artifact workspace *không được track* theo tên (`.env`,
+`node_modules`, `.venv`, `__pycache__`, `.pytest_cache`; `.git` là control metadata). Chính
+sách này không bao giờ che nội dung được track: commit track một đường dẫn mang các tên đó
+bị source store từ chối trước khi export (`unsupported source path (tracked reserved
+workspace artifact name)`), candidate tree chứa file như vậy bị từ chối trước khi `repo/`
+bị chạm tới, và manifest liệt kê đường dẫn như vậy không thể được verify — công cụ dừng
+fail-closed thay vì báo khớp khi chưa chứng minh.
 
 Manual update khi thấy workspace dirty/khác deployed revision sẽ đưa working tree hiện tại
 vào pre-update checkpoint dưới dạng `workspace.tar.gz`, rồi mới thay `repo/` bằng revision

@@ -117,6 +117,8 @@ class FakeController(pf.Controller):
 
     def docker(self, *args, **kwargs):
         self.calls.append(("docker", args))
+        if args[:2] in (("image", "save"), ("image", "load")):
+            return self.command(["docker", *args], **kwargs)
         if args[0] == "version":
             return "28.0.0"
         if args[0] == "tag":
@@ -130,7 +132,7 @@ class FakeController(pf.Controller):
             return ""
         raise AssertionError(("docker", args))
 
-    def sql(self, database, sql):
+    def sql(self, database, sql, *, mutation=False):
         self.calls.append(("sql", database, sql))
         if sql == "SELECT 1;":
             assert database in self.dbs
@@ -205,28 +207,31 @@ class FakeController(pf.Controller):
         if args[0] == "exec":
             if "frontend" in args:
                 return json.dumps({"status": "ok", "database": "connected"})
-            if "pg_restore" in args:
+            # PF-A1.2 (A12-R03): database programs are direct argv inside the db service.
+            program = args[3]
+            assert "sh" not in args and "-c" not in args[:4], args
+            if program == "pg_restore" and "--list" in args:
                 content = input_file.read()
                 if output:
                     output.write(b"mock archive list\n")
                 return ""
-            script = args[args.index("-c") + 1]
-            if "pg_dump" in script:
+            assert args[4:6] == ("-U", "partflow_staging"), args  # the frozen role, not a shell variable
+            if program == "pg_dump":
                 if self.fail == "dump":
                     raise pf.Failure("simulated dump failure")
                 output.write(json.dumps(self.dbs["partflow_staging"]).encode())
                 return ""
-            if "pg_restore" in script:
+            if program == "pg_restore":
                 if self.fail == "restore":
                     raise pf.Failure("simulated restore failure")
-                self.dbs[args[-1]] = json.loads(input_file.read())
+                self.dbs[args[args.index("-d") + 1]] = json.loads(input_file.read())
                 return ""
-            if "createdb" in script:
+            if program == "createdb":
                 name = args[-1]
                 assert name not in self.dbs
                 self.dbs[name] = {"heads": [], "rows": [], "connections": True}
                 return ""
-            if "dropdb" in script:
+            if program == "dropdb":
                 name = args[-1]
                 assert name.startswith(("pf_verify_", "pf_migrate_"))
                 del self.dbs[name]
@@ -747,6 +752,35 @@ class AdminTests(unittest.TestCase):
         path.write_text(path.read_text() + " ")
         with self.assertRaises(pf.Failure):
             self.c.verify_snapshot(checkpoint["id"])
+
+    def test_rollback_refuses_checkpoint_source_with_reserved_paths_before_any_effect(self):
+        """A12-R02: a checkpoint archive carrying a path the manifest cannot verify is refused
+        before confirmation, pause, safety snapshot or database swap."""
+        checkpoint = self.c.snapshot("test")
+        folder = self.c.backups_dir / checkpoint["id"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "tree"
+            source_fixture(tree, OLD)
+            (tree / "nested" / "node_modules").mkdir(parents=True)
+            (tree / "nested" / "node_modules" / "tracked.js").write_text("module.exports = 1;\n")
+            with tarfile.open(folder / "source.tar.gz", "w:gz") as archive:
+                for item in sorted(tree.iterdir()):
+                    archive.add(item, arcname=item.name)
+        manifest = pf.load_json(folder / "manifest.json")
+        manifest["checksums"]["source.tar.gz"] = pf.digest(folder / "source.tar.gz")
+        pf.write_json(folder / "manifest.json", manifest)
+        (folder / "manifest.sha256").write_text(pf.digest(folder / "manifest.json") + "\n")
+        with mock.patch.object(self.c, "snapshot", side_effect=AssertionError("snapshot must not run")), \
+             mock.patch.object(self.c, "pause", side_effect=AssertionError("pause must not run")), \
+             mock.patch.object(self.c, "swap_database", side_effect=AssertionError("swap must not run")):
+            with self.assertRaisesRegex(pf.Failure, "cannot verify.*nested/node_modules/tracked.js"):
+                self.c.rollback(checkpoint["id"], restore_database=True)
+            self.assertEqual(self.invoke(["rollback", checkpoint["id"], "--restore-db"]), 1)
+        self.assertFalse(self.c.pending.exists())
+        self.assertTrue(self.c.running["frontend"])
+        self.assertEqual(self.c.revision(), OLD)
+        self.assertFalse(any(name.startswith(("pf_keep_", "pf_restore_")) for name in self.c.dbs))
+        self.assertEqual((self.root / "app-version.txt").read_text(), OLD)
 
     def test_missing_retained_image_blocks_rollback(self):
         checkpoint = self.c.snapshot("test")

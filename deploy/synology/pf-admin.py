@@ -80,8 +80,10 @@ DEFAULTS = {
     "backup_read_group": "users",
     "workspace_write_group": "users",
 }
-# Runtime control/configuration lives outside the writable repository in v2.5.
-SOURCE_EXCLUDES = {".git", ".env", "node_modules", ".venv", "__pycache__", ".pytest_cache"}
+# Runtime control/configuration lives outside the writable repository in v2.5. These names are
+# ignored as *untracked* workspace artifacts only; a verified commit that tracks one of them is
+# refused by the store export, so nothing deployed is ever outside the manifest (A12-R02).
+SOURCE_EXCLUDES = pf_source.DEFAULT_EXCLUDES
 AUTO_REVIEW_PATHS = (
     ".env.example", "compose.yaml", "backend/Dockerfile", "frontend/Dockerfile",
     "backend/.dockerignore", "frontend/.dockerignore", ".github/workflows/ci.yml",
@@ -176,6 +178,74 @@ def database_swap_sql(current, prepared, retained):
         f"ALTER DATABASE {quote_identifier(prepared)} RENAME TO {quote_identifier(current)}; "
         "COMMIT;"
     )
+
+
+# ------------------------------------------------------------ effect descriptors (PF-A1.2)
+# Every child process that can change external state carries an effect descriptor, so a
+# timeout or interruption is journaled in the operation's unresolved-effects.json (A12-R01).
+# Read-only invocations carry none. The classification is fail-closed: an invocation the
+# tables below do not recognise as read-only is recorded as a mutation. Descriptors name the
+# tool, verb and targets needed to reconcile; they never carry application values.
+DOCKER_READ_ONLY = frozenset({
+    ("ps",), ("inspect",), ("version",), ("compose", "version"),
+    ("image", "inspect"), ("image", "ls"), ("volume", "ls"), ("network", "ls"),
+    ("image", "save"),  # writes a host file inside the operation's own folder; the daemon is unchanged
+})
+DOCKER_GROUPS = frozenset({"image", "volume", "network", "compose"})
+COMPOSE_EXEC_READ_ONLY_PROGRAMS = frozenset({"pg_dump", "pg_dumpall", "wget"})
+GIT_READ_ONLY = frozenset({"--version", "rev-parse", "ls-tree", "cat-file", "merge-base"})
+SQL_READ_ONLY_KEYWORDS = frozenset({"SELECT", "SHOW"})
+EFFECT_TARGET_LIMIT = 8
+EFFECT_TARGET_WIDTH = 120
+
+
+def effect_targets(words):
+    """Bounded, option-free rendering of the arguments that identify what an invocation acts on."""
+    return [str(word)[:EFFECT_TARGET_WIDTH] for word in words if not str(word).startswith("-")][:EFFECT_TARGET_LIMIT]
+
+
+def docker_effect(arguments):
+    """Effect descriptor for one Docker CLI invocation, None for the read-only forms."""
+    words = [str(word) for word in arguments]
+    if tuple(words[:1]) in DOCKER_READ_ONLY or tuple(words[:2]) in DOCKER_READ_ONLY:
+        return None
+    width = 2 if words[:1] and words[0] in DOCKER_GROUPS else 1
+    return {"kind": "docker", "verb": " ".join(words[:width]) or "?", "targets": effect_targets(words[width:])}
+
+
+def compose_effect(project, arguments):
+    """Effect descriptor for one Compose invocation of ``project``, None for the read-only verbs.
+
+    ``exec`` is classified by the program run inside the service: dump/health programs are
+    read-only, everything else (createdb, dropdb, pg_restore, psql, unknown) is a mutation
+    unless the caller passes an explicit descriptor (``sql()`` knows its statement).
+    """
+    words = [str(word) for word in arguments]
+    verb = words[0] if words else "?"
+    if verb in COMPOSE_READ_ONLY_VERBS or verb == "config":
+        return None
+    if verb == "exec":
+        positional = [word for word in words[1:] if not word.startswith("-")]
+        service, program = (positional + ["?", "?"])[:2]
+        if program in COMPOSE_EXEC_READ_ONLY_PROGRAMS or (program == "pg_restore" and "--list" in words):
+            return None
+        return {"kind": "compose-exec", "verb": program, "project": project, "service": service,
+                "targets": effect_targets(positional[2:])}
+    return {"kind": "compose", "verb": verb, "project": project, "targets": effect_targets(words[1:])}
+
+
+def git_effect(arguments):
+    """Effect descriptor for one protected-store Git invocation, None for object/ref queries."""
+    words = [str(word) for word in arguments]
+    for index, word in enumerate(words):
+        if not word.startswith("-"):
+            verb, rest = word, words[index + 1:]
+            break
+    else:
+        verb, rest = (words[0] if words else "?"), []
+    if verb in GIT_READ_ONLY:
+        return None
+    return {"kind": "source-store", "verb": verb, "targets": effect_targets(rest)}
 
 
 def read_app_env(path, *, require_all=True):
@@ -587,6 +657,11 @@ class Controller:
         tool, arguments = str(argv[0]), [str(item) for item in argv[1:]]
         if tool not in pf_bootstrap.TOOL_IDS:
             raise Failure(f"{tool!r} is not a registered executable id; the control release never searches PATH.")
+        if effect is not None and self.operation_dir is None:
+            # A child that can change external state must have a journal to record an
+            # unresolved effect in; only a locked operation provides one.
+            raise Failure(f"{tool} {' '.join(arguments[:3])}: a mutating child process requires a locked "
+                          "operation (no unresolved-effect journal outside one).")
         if timeout is None:
             timeout = TIMEOUT_DATA if tool == "docker" and arguments[:2] in (["image", "save"], ["image", "load"]) \
                 else TIMEOUT_DIAGNOSTIC
@@ -606,6 +681,8 @@ class Controller:
         return result.stdout.strip()
 
     def docker(self, *args, **kwargs):
+        if "effect" not in kwargs:
+            kwargs["effect"] = docker_effect(args)
         return self.command(["docker", *args], **kwargs)
 
     def compose_cli(self):
@@ -781,8 +858,17 @@ class Controller:
             return
         log(f"UNRESOLVED EFFECTS recorded by earlier operations: {len(records)} (observe before retrying):")
         for item in records[-10:]:
+            effect = item.get("effect")
+            if isinstance(effect, dict):
+                # The descriptor names what to reconcile (kind, verb, targets); argv is the detail.
+                summary = " ".join(str(part) for part in (effect.get("kind"), effect.get("verb"),
+                                                          effect.get("service"), effect.get("database"),
+                                                          *(effect.get("targets") or []),
+                                                          effect.get("statement")) if part)
+            else:
+                summary = " ".join(item.get("argv", []))[:120]
             log(f"  {item.get('recorded_at')} {item.get('operation_id')}: {item.get('tool')} "
-                f"{' '.join(item.get('argv', []))[:120]} -> {item.get('outcome')}")
+                f"{summary} -> {item.get('outcome')}")
 
     def read_journal(self):
         """Return the pending journal, None, or an unreadable-journal marker. Never creates or repairs it."""
@@ -1178,7 +1264,7 @@ class Controller:
     def store_git(self, argv, *, cwd, stdin=None, stdout=None, timeout=None):
         """Git for the protected store only; every call carries ``--git-dir`` and goes through the runner."""
         return self.command(["git", *argv], cwd=cwd, input_file=stdin, output=stdout,
-                            timeout=timeout or TIMEOUT_GIT_FETCH)
+                            timeout=timeout or TIMEOUT_GIT_FETCH, effect=git_effect(argv))
 
     def source_store(self):
         return pf_source.SourceStore(self.context.installation_root / pf_instance.SOURCES_RELATIVE,
@@ -1224,6 +1310,18 @@ class Controller:
             return pf_source.load_manifest(self.context.source_manifest_path, pf_instance.parse_strict_json)
         except (pf_source.SourceError, pf_instance.ContextError) as exc:
             raise Failure(f"Protected source manifest is unusable: {exc}") from exc
+
+    @staticmethod
+    def refuse_reserved_candidate_paths(candidate, *, allow=()):
+        """A candidate tree is deployed whole; a file the manifest policy would ignore must not be in it.
+
+        ``allow`` names top-level entries a caller consumes and removes before deployment
+        (the runtime ``.env`` a format-1 recovery bundle stored inside its source archive).
+        """
+        reserved = [path for path in pf_source.reserved_paths(candidate, excludes=SOURCE_EXCLUDES) if path not in allow]
+        if reserved:
+            raise Failure("Candidate source carries files the workspace manifest cannot verify (reserved "
+                          "artifact names): " + ", ".join(reserved[:10]) + ". Nothing was replaced.")
 
     def record_source_manifest(self, tree, revision, *, verified):
         """Write the manifest of the tree that was deployed (built from the private candidate)."""
@@ -1359,6 +1457,11 @@ class Controller:
     def compose(self, *args, root=None, override=None, timeout=None, env=None, **kwargs):
         """One Compose invocation with frozen inputs: fixed project, files, env-file and directory."""
         root = Path(root or self.root)
+        if "effect" not in kwargs:
+            # Production wiring of the unresolved-effect journal: every mutating Compose verb
+            # (and every exec that is not a known read-only program) carries a descriptor,
+            # built from the caller's arguments before the managed run label is added.
+            kwargs["effect"] = compose_effect(self.config["project"], args)
         if args and args[0] == "run":
             args = ("run", "--label", "partflow.admin.project=" + self.config["project"], *args[1:])
         cli = self.compose_cli()
@@ -1381,11 +1484,10 @@ class Controller:
         child = pf_config.child_values(values, workspace=root)
         if timeout is None:
             verb = args[0] if args else ""
-            data_words = ("exec pg_", "exec createdb", "exec dropdb", "pg_restore")
+            data_programs = ("pg_dump", "pg_dumpall", "pg_restore", "createdb", "dropdb")
             if verb == "build":
                 timeout = TIMEOUT_BUILD
-            elif verb == "run" or (verb == "exec" and any(str(word).startswith(data_words) or str(word) == "pg_restore"
-                                                           for word in args)):
+            elif verb == "run" or (verb == "exec" and any(str(word) in data_programs for word in args)):
                 timeout = TIMEOUT_DATA
             else:
                 timeout = TIMEOUT_COMPOSE
@@ -1433,11 +1535,32 @@ class Controller:
                 return value
         raise Failure("No verified deployed source revision is recorded in protected state (deployed.json).")
 
-    def sql(self, database, sql):
+    # PostgreSQL client programs run inside the db service as direct argv (no shell string,
+    # A12-R03); the connecting role is the frozen application configuration's POSTGRES_USER,
+    # which database_ready() requires the running container to agree with.
+
+    def sql(self, database, sql, *, mutation=None):
+        """One psql statement on ``database``.
+
+        A statement that is not a ``SELECT``/``SHOW`` query is journaled as an unresolved effect
+        when the child times out or is interrupted (``mutation`` overrides the classification;
+        read-only statements record nothing).
+        """
         quote_identifier(database)
-        return self.compose("exec", "-T", "db", "sh", "-c",
-            'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1" -At -c "$2"',
-            "pf", database, sql)
+        if mutation is None:
+            mutation = sql.lstrip().split(None, 1)[0].upper() not in SQL_READ_ONLY_KEYWORDS if sql.strip() else True
+        effect = {"kind": "database", "verb": "sql", "database": database,
+                  "statement": sql[:EFFECT_TARGET_WIDTH]} if mutation else None
+        return self.compose("exec", "-T", "db", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+                            "-U", self.env()["POSTGRES_USER"], "-d", database, "-At", "-c", sql, effect=effect)
+
+    def database_program(self, program, *arguments, **kwargs):
+        """``createdb``/``dropdb``/``pg_dump``/``pg_dumpall``/``pg_restore`` inside the db service."""
+        return self.compose("exec", "-T", "db", program, "-U", self.env()["POSTGRES_USER"], *arguments, **kwargs)
+
+    def drop_database(self, name):
+        quote_identifier(name)
+        self.database_program("dropdb", name)
 
     def db_heads(self, database=None):
         database = database or self.env()["POSTGRES_DB"]
@@ -1526,15 +1649,13 @@ class Controller:
 
     def create_database(self, name):
         quote_identifier(name)
-        self.compose("exec", "-T", "db", "sh", "-c",
-            'exec createdb -U "$POSTGRES_USER" --owner="$POSTGRES_USER" --template=template0 "$1"', "pf", name)
+        self.database_program("createdb", "--owner=" + self.env()["POSTGRES_USER"], "--template=template0", name)
 
     def restore_into(self, database, dump):
         self.create_database(database)
         with Path(dump).open("rb") as stream:
-            self.compose("exec", "-T", "db", "sh", "-c",
-                'exec pg_restore -U "$POSTGRES_USER" -d "$1" --exit-on-error --no-owner --no-privileges',
-                "pf", database, input_file=stream)
+            self.database_program("pg_restore", "-d", database, "--exit-on-error", "--no-owner", "--no-privileges",
+                                  input_file=stream)
 
     def snapshot(self, reason, source_verified=True):
         self.free_space()
@@ -1595,9 +1716,8 @@ class Controller:
 
         partial = folder / "database.dump.partial"
         with partial.open("wb") as stream:
-            self.compose("exec", "-T", "db", "sh", "-c",
-                'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges',
-                output=stream)
+            self.database_program("pg_dump", "-d", self.env()["POSTGRES_DB"], "--format=custom", "--no-owner",
+                                  "--no-privileges", output=stream)
         if not partial.stat().st_size:
             raise Failure("The database dump is empty; checkpoint is incomplete.")
         dump = folder / "database.dump"
@@ -1610,8 +1730,7 @@ class Controller:
         self.restore_into(verification_db, dump)
         if self.db_heads(verification_db) != metadata["database_heads"]:
             raise Failure("Restored Alembic revisions do not match the snapshot. Verification database retained.")
-        self.compose("exec", "-T", "db", "sh", "-c",
-            'exec dropdb -U "$POSTGRES_USER" "$1"', "pf", verification_db)
+        self.drop_database(verification_db)
         metadata.update({
             "status": "complete", "restore_test": "passed",
             "source_verified": source_verified,
@@ -1755,12 +1874,12 @@ class Controller:
         log("Application health checks passed. Perform the UI/workflow and network-access smoke tests separately.")
 
     def replace_source(self, candidate, revision, *, verified=True):
-        self.phase("changing-source")
         # The private candidate is inventoried before the workspace is touched; the
         # protected manifest then records what was deployed (workspace generation switch
         # and deployed-artifact persistence remain PF-A3).
         candidate = Path(candidate)
         try:
+            self.refuse_reserved_candidate_paths(candidate)
             source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
                 else {"kind": "unknown"}
             manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
@@ -1768,6 +1887,7 @@ class Controller:
             raise Failure(str(exc)) from exc
         if any(entry["kind"] != "file" for entry in manifest["entries"]):
             raise Failure("Candidate source contains an unsupported link/special file; nothing was replaced.")
+        self.phase("changing-source")
         # v2.5 keeps all runtime control/configuration outside repo/. The writable
         # repository can therefore be replaced as one application working tree.
         for item in list(self.root.iterdir()):
@@ -2121,11 +2241,8 @@ class Controller:
         quote_identifier(database)
         destination = Path(destination)
         with destination.open("wb") as output:
-            self.compose(
-                "exec", "-T", "db", "sh", "-c",
-                'exec pg_dump -U "$POSTGRES_USER" -d "$1" --format=custom --no-owner --no-privileges',
-                "pf", database, output=output,
-            )
+            self.database_program("pg_dump", "-d", database, "--format=custom", "--no-owner", "--no-privileges",
+                                  output=output)
         if not destination.is_file() or not destination.stat().st_size:
             raise Failure("Database dump is empty: " + database)
         with destination.open("rb") as stream:
@@ -2238,26 +2355,24 @@ class Controller:
             changed_connections = False
             try:
                 if not item["allow_connections"]:
-                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS true;")
+                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS true;",
+                             mutation=True)
                     changed_connections = True
                 self.dump_database(name, dump_path)
                 verify_name = "pf_verify_" + uuid.uuid4().hex[:20]
                 self.restore_into(verify_name, dump_path)
-                self.compose("exec", "-T", "db", "sh", "-c", 'exec dropdb -U "$POSTGRES_USER" "$1"', "pf", verify_name)
+                self.drop_database(verify_name)
             finally:
                 if changed_connections:
-                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;")
+                    self.sql("postgres", f"ALTER DATABASE {quote_identifier(name)} ALLOW_CONNECTIONS false;",
+                             mutation=True)
             record["dump"] = "databases/" + dump_name
             record["heads"] = self.db_heads(name) if item["allow_connections"] else []
             databases.append(record)
 
         globals_path = folder / "postgres-globals.sql"
         with globals_path.open("wb") as output:
-            self.compose(
-                "exec", "-T", "db", "sh", "-c",
-                'exec pg_dumpall -U "$POSTGRES_USER" -d postgres --globals-only',
-                output=output,
-            )
+            self.database_program("pg_dumpall", "-d", "postgres", "--globals-only", output=output)
         if not globals_path.stat().st_size:
             raise Failure("PostgreSQL globals archive is empty; purge recovery is incomplete.")
 
@@ -2283,7 +2398,7 @@ class Controller:
         images_path = folder / "images.tar"
         if not image_refs:
             raise Failure("No active PartFlow application images were available for recovery.")
-        self.command(["docker", "image", "save", "-o", images_path, *image_refs])
+        self.docker("image", "save", "-o", images_path, *image_refs)
         if not images_path.stat().st_size:
             raise Failure("Docker image recovery archive is empty.")
         with tarfile.open(images_path, "r:") as archive:
@@ -2572,6 +2687,7 @@ class Controller:
                 legacy.unlink()
         verified = bool(verified and isinstance(revision, str) and SHA_RE.fullmatch(revision))
         try:
+            self.refuse_reserved_candidate_paths(candidate)
             source = {"kind": "git_commit", "commit": revision, "remote": self.approved_remote()} if verified \
                 else {"kind": "unknown"}
             manifest = pf_source.build_manifest(candidate, source=source, excludes=SOURCE_EXCLUDES)
@@ -2676,7 +2792,9 @@ class Controller:
             candidate = Path(temp)
             archive = folder / (recovery.get("workspace_archive") or "source.tar.gz")
             extract_source(archive, candidate)
-            # v1 bundles stored .env inside source.tar.gz; v2 stores it separately.
+            # v1 bundles stored .env inside source.tar.gz; v2 stores it separately. Anything
+            # else the manifest could not verify stops here, before configuration is touched.
+            self.refuse_reserved_candidate_paths(candidate, allow=(".env",))
             self.restore_runtime_environment(recovery, extracted_source=candidate)
             # The restored .env is the configuration this operation consumes from here on.
             self.freeze_app_config(explicit=True)
@@ -2687,7 +2805,7 @@ class Controller:
                 and self.prove_tree_commit(candidate, recovery["source_revision"]))
 
         self.phase("loading-images")
-        self.command(["docker", "image", "load", "-i", folder / "images.tar"])
+        self.docker("image", "load", "-i", folder / "images.tar")
         self.verify_images(recovery["active_images"])
         self.make_override(recovery["active_images"], self.override)
 
@@ -2699,7 +2817,7 @@ class Controller:
             raise Failure("Recovered .env database identity does not match the recovery manifest.")
 
         # Replace the empty init database with the verified logical dump.
-        self.compose("exec", "-T", "db", "sh", "-c", 'exec dropdb -U "$POSTGRES_USER" "$1"', "pf", recovery["database"])
+        self.drop_database(recovery["database"])
         self.restore_into(recovery["database"], folder / "databases/active.dump")
         if self.db_heads(recovery["database"]) != recovery["database_heads"]:
             raise Failure("Restored active database Alembic revision does not match the recovery bundle.")
@@ -2709,7 +2827,8 @@ class Controller:
                 continue
             self.restore_into(record["name"], folder / record["dump"])
             if not record["allow_connections"]:
-                self.sql("postgres", f"ALTER DATABASE {quote_identifier(record['name'])} ALLOW_CONNECTIONS false;")
+                self.sql("postgres", f"ALTER DATABASE {quote_identifier(record['name'])} ALLOW_CONNECTIONS false;",
+                         mutation=True)
 
         self.phase("restoring-checkpoints")
         self.restore_revision_checkpoints(recovery)
@@ -2785,7 +2904,7 @@ class Controller:
                              root=candidate, override=override, env={"POSTGRES_DB": rehearsal})
                 if self.db_heads(rehearsal) != target_contract["heads"]:
                     raise Failure("Migration rehearsal did not reach the target head.")
-                self.compose("exec", "-T", "db", "sh", "-c", 'exec dropdb -U "$POSTGRES_USER" "$1"', "pf", rehearsal)
+                self.drop_database(rehearsal)
                 self.phase("migrating-live")
                 self.compose("run", "--rm", "--no-deps", "-T", "backend", "uv", "run", "alembic", "upgrade", "head",
                              root=candidate, override=override)
@@ -2803,7 +2922,7 @@ class Controller:
         if connections != "0":
             raise Failure("Other database sessions remain. Close IDE/psql connections; the script will not kill them.")
         self.phase("switching-database", database_switch={"current": current, "prepared": prepared, "retained": retained})
-        self.sql("postgres", database_swap_sql(current, prepared, retained))
+        self.sql("postgres", database_swap_sql(current, prepared, retained), mutation=True)
         self.phase("database-switched")
         log("Previous database retained (connections disabled): " + retained)
         return retained
@@ -2823,6 +2942,7 @@ class Controller:
         with tempfile.TemporaryDirectory(prefix="rollback-", dir=self.state) as folder:
             candidate = Path(folder)
             extract_source(self.backups_dir / selected["id"] / "source.tar.gz", candidate)
+            self.refuse_reserved_candidate_paths(candidate)  # before any confirmation, pause or effect
             if migration_files(candidate) != selected["migration_files"]:
                 raise Failure("Checkpoint migration fingerprint mismatch.")
             if not restore_database:

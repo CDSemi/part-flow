@@ -598,6 +598,17 @@ class ProcessRunner:
 
     # -- unresolved effects ---------------------------------------------------
 
+    def _redacted(self, value):
+        """The effect descriptor with every string passed through the redactor (defence in depth:
+        descriptors are built from verbs and identifiers, never from application values)."""
+        if isinstance(value, str):
+            return self.redactor.text(value)
+        if isinstance(value, dict):
+            return {str(key): self._redacted(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._redacted(item) for item in value]
+        return value
+
     def _record_effect(self, spec, rendered, executable, process, outcome):
         """Persist what was started and how it ended, before any later operation retries."""
         if self.effects_path is None:
@@ -613,7 +624,7 @@ class ProcessRunner:
             "pid": process.pid,
             "process_group": process.pid,
             "returncode": process.returncode,
-            "effect": spec.effect,
+            "effect": self._redacted(spec.effect),
             "label": spec.label,
         }
         existing = load_unresolved_effects(self.effects_path)

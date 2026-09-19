@@ -38,6 +38,12 @@ MANIFEST_NAME = "source-manifest.json"
 MANIFEST_SCHEMA = 1
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
+# Names of *untracked* workspace artifacts the manifest walk ignores (runtime configuration,
+# dependency and cache directories, Git control metadata). They are an ignore policy for
+# untracked content only: a commit that tracks a path with one of these components is refused
+# by ``SourceStore.list_tree`` before anything is exported, a candidate tree that carries one is
+# refused before deployment (``reserved_paths``), and a manifest that lists one cannot be
+# verified (``compare_manifest``), so no deployed file is ever outside the provenance proof.
 DEFAULT_EXCLUDES = frozenset({".git", ".env", "node_modules", ".venv", "__pycache__", ".pytest_cache"})
 EXPORT_TOTAL_LIMIT = 512 * 1024 * 1024
 EXPORT_FILE_LIMIT = 128 * 1024 * 1024
@@ -100,7 +106,7 @@ def parse_git_config(text):
         if value.startswith("\"") and value.endswith("\"") and len(value) >= 2:
             value = value[1:-1].replace("\\\"", "\"").replace("\\\\", "\\")
         else:
-            value = re.split(r"\s[#;]", value, 1)[0].rstrip()
+            value = re.split(r"\s[#;]", value, maxsplit=1)[0].rstrip()
         values[section + "." + key] = value
     return values
 
@@ -124,7 +130,8 @@ class SourceStore:
     directory is never used.
     """
 
-    def __init__(self, sources_root, remote_url, git, *, protocols=("https",), key=None):
+    def __init__(self, sources_root, remote_url, git, *, protocols=("https",), key=None,
+                 reserved_names=DEFAULT_EXCLUDES):
         self.sources_root = Path(sources_root)
         self.remote_url = str(remote_url)
         self.key = key or store_key(self.remote_url)
@@ -133,6 +140,8 @@ class SourceStore:
         self.lock_path = self.sources_root / (self.key + LOCK_SUFFIX)
         self.git = git
         self.protocols = tuple(protocols)
+        # Path components a verified commit may not track (the manifest's ignore policy).
+        self.reserved_names = frozenset(reserved_names)
 
     # -- invocation --------------------------------------------------------
 
@@ -300,6 +309,10 @@ class SourceStore:
             pieces = path.split("/")
             if any(piece in ("", ".", "..") for piece in pieces) or ".git" in pieces:
                 raise SourceError(f"unsupported source path: {path}")
+            if any(piece in self.reserved_names for piece in pieces):
+                # Tracked content the workspace manifest would ignore can never be proven
+                # deployed; the commit is refused as a whole before any export (A12-R02).
+                raise SourceError(f"unsupported source path (tracked reserved workspace artifact name): {path}")
             if not SHA_RE.fullmatch(blob):
                 raise SourceError("unexpected blob id in ls-tree output")
             entries.append(ExportEntry(path=path, mode=mode, blob=blob))
@@ -443,6 +456,21 @@ def walk_tree(root, *, excludes=DEFAULT_EXCLUDES):
     finally:
         for dir_fd, _ in stack:
             os.close(dir_fd)
+
+
+def reserved_paths(root, *, excludes=DEFAULT_EXCLUDES, limit=CHANGE_LIST_LIMIT):
+    """Files under ``root`` (a private candidate tree) whose path has a component in ``excludes``.
+
+    A candidate is deployed as a whole, so any such file would land in the workspace while the
+    manifest walk ignores it; callers refuse the candidate when this is not empty.
+    """
+    found = []
+    for relative, kind, fd, info in walk_tree(root, excludes=frozenset()):
+        if fd is not None:
+            os.close(fd)
+        if any(piece in excludes for piece in relative.split("/")):
+            found.append(relative)
+    return found[:limit]
 
 
 def build_manifest(root, *, source, excludes=DEFAULT_EXCLUDES):
@@ -615,6 +643,12 @@ def _hash_read(fd):
 def compare_manifest(root, manifest, *, excludes=DEFAULT_EXCLUDES):
     """Compare the tree under ``root`` with ``manifest``. Returns a bounded change report."""
     validate_manifest(manifest)
+    unverifiable = [entry["path"] for entry in manifest["entries"]
+                    if any(piece in excludes for piece in entry["path"].split("/"))]
+    if unverifiable:
+        # The walk would skip these entries, so a match could never prove them: fail closed.
+        raise SourceError("manifest lists paths the workspace policy ignores; they cannot be verified: "
+                          + ", ".join(unverifiable[:10]))
     current = build_manifest(root, source={"kind": "unknown"}, excludes=excludes)
     expected = {entry["path"]: entry for entry in manifest["entries"] if entry["kind"] == "file"}
     unsupported_expected = {entry["path"] for entry in manifest["entries"] if entry["kind"] != "file"}
