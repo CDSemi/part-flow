@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -62,6 +63,10 @@ interface FakeState {
   nextPost: PostFailure | null;
   /** Hold every POST until the test releases it. */
   holdPost: Promise<void> | null;
+  /** Hold the NEXT GET of this path (with its query) until released. */
+  holdRead: { path: string; until: Promise<void> } | null;
+  /** Answer the NEXT GET of this path (with its query) with a 503. */
+  failRead: string | null;
 }
 
 const STALE =
@@ -172,6 +177,8 @@ function seedState(): FakeState {
     committed: new Map(),
     nextPost: null,
     holdPost: null,
+    holdRead: null,
+    failRead: null,
   };
 }
 
@@ -276,15 +283,23 @@ async function change(body: Record<string, unknown>): Promise<Response> {
     if (prior.payload !== payload) {
       return detail('This device event was already used.', 409);
     }
+    // A replay answers whatever the Department configuration is now;
+    // the list itself cannot be shown without one active Department.
     return json(
       {
         device_event_id: key,
         action: body.action,
         created: false,
         changes: prior.changes,
-        entries: currentEntries(),
+        entries: state.departmentRefusal ? null : currentEntries(),
       },
       200,
+    );
+  }
+  if (state.departmentRefusal) {
+    return detail(
+      state.departmentRefusal.detail,
+      state.departmentRefusal.status,
     );
   }
   const current = rankedOrder();
@@ -348,7 +363,22 @@ async function handle(
       ? detail('Service unavailable.', 503)
       : json({ status: 'ok' });
   }
-  if (method === 'GET') state.reads.push(`${url.pathname}${url.search}`);
+  const read = `${url.pathname}${url.search}`;
+  if (method === 'GET') {
+    state.reads.push(read);
+    if (state.holdRead?.path === read) {
+      const { until } = state.holdRead;
+      state.holdRead = null;
+      await until;
+    }
+    if (state.failRead === read) {
+      state.failRead = null;
+      return detail('Service unavailable.', 503);
+    }
+  }
+  if (url.pathname === '/api/hot-list/changes' && method === 'POST') {
+    return change(JSON.parse(String(init?.body)) as Record<string, unknown>);
+  }
   if (state.departmentRefusal && url.pathname.startsWith('/api/hot-list')) {
     return detail(
       state.departmentRefusal.detail,
@@ -362,9 +392,6 @@ async function handle(
     });
   }
   if (url.pathname === '/api/hot-list/candidates') return candidates(url);
-  if (url.pathname === '/api/hot-list/changes' && method === 'POST') {
-    return change(JSON.parse(String(init?.body)) as Record<string, unknown>);
-  }
   return detail('Not found.', 404);
 }
 
@@ -721,6 +748,45 @@ test('removal asks for confirmation; Cancel sends nothing, confirm sends REMOVE'
   expect(undoButton()).toBeEnabled();
 });
 
+test('removing an inactive entry never promises that Undo can restore it', async () => {
+  await renderPriority();
+  const removeDialog = () =>
+    screen.getByRole('dialog', { name: 'Remove from Hot list?' });
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
+  );
+  expect(removeDialog()).toHaveTextContent(
+    'Remaining ranks close the gap; Undo can restore it.',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // Fully allocated line of an open Work Order.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove D-400 from Hot list' }),
+  );
+  expect(removeDialog()).toHaveTextContent(
+    'Undo cannot add it back while the line is fully allocated.',
+  );
+  expect(removeDialog()).not.toHaveTextContent('Undo can restore');
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // Completed Work Order.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove C-300 from Hot list' }),
+  );
+  expect(removeDialog()).toHaveTextContent(
+    'Undo cannot add it back while its Work Order is completed.',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  expect(
+    await screen.findByText(
+      '✕ C-300 · WO 007003 removed from Hot list — remaining ranks close the gap · Undo cannot add it back while its Work Order is completed',
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/Undo can restore it/)).toBeNull();
+});
+
 /* ============ Add ============ */
 
 test('adding by search applies directly at the bottom — no order-change confirmation', async () => {
@@ -839,6 +905,99 @@ test('a PN barcode with no eligible WO Demand adds nothing and says why', async 
 
   expect(state.posts).toEqual([]);
   expect(listedPns()).toEqual(INITIAL);
+});
+
+async function openAddDialog() {
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const dialog = screen.getByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  ) as HTMLInputElement;
+  return { dialog, search };
+}
+
+function scan(search: HTMLInputElement, barcode: string) {
+  fireEvent.change(search, { target: { value: barcode } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+}
+
+/** Focused with its whole value selected: the next scan replaces it. */
+function expectReadyForNextScan(search: HTMLInputElement) {
+  expect(search).toHaveFocus();
+  expect(search.selectionStart).toBe(0);
+  expect(search.selectionEnd).toBe(search.value.length);
+}
+
+test('after an ambiguous or blocked PN scan the scanned value stays selected for the next scan', async () => {
+  await renderPriority();
+  const { dialog, search } = await openAddDialog();
+
+  scan(search, 'PF:PN:F-600');
+  await within(dialog).findByText(
+    'Multiple eligible Work Order Demands use PN F-600 — select the Work Order to add.',
+  );
+  expectReadyForNextScan(search);
+
+  // Blocked: the connection drops while the dialog is open.
+  state.healthDown = true;
+  act(() => {
+    window.dispatchEvent(new Event('offline'));
+  });
+  scan(search, 'PF:PN:G-700');
+  await within(dialog).findByText(
+    'Changes are blocked right now, so nothing was added. Try again once the Hot list is ready.',
+  );
+  expectReadyForNextScan(search);
+  expect(state.posts).toEqual([]);
+});
+
+test('an ambiguous PN scan replaces a failed candidate read with its own list', async () => {
+  await renderPriority();
+  state.failRead = '/api/hot-list/candidates';
+  const { dialog, search } = await openAddDialog();
+  expect(
+    await within(dialog).findByText('Service unavailable.'),
+  ).toBeInTheDocument();
+
+  scan(search, 'PF:PN:F-600');
+  await waitFor(() =>
+    expect(
+      within(dialog).getAllByRole('button', { name: /F-600/ }),
+    ).toHaveLength(2),
+  );
+  expect(within(dialog).queryByText('Service unavailable.')).toBeNull();
+});
+
+test('a PN scan before the candidate list arrives never leaves the list loading', async () => {
+  await renderPriority();
+  let release!: () => void;
+  state.holdRead = {
+    path: '/api/hot-list/candidates',
+    until: new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+  };
+  const { dialog, search } = await openAddDialog();
+  // The default read is on its way, and held.
+  await waitFor(() =>
+    expect(state.reads).toContain('/api/hot-list/candidates'),
+  );
+  expect(
+    within(dialog).getByText('Loading eligible Work Order Demand…'),
+  ).toBeInTheDocument();
+
+  // The scan supersedes the pending read and lists nothing itself.
+  scan(search, 'PF:PN:A-100');
+  await within(dialog).findByText(
+    'No eligible Work Order Demand for A-100 — 1 already on the Hot list. Nothing was added.',
+  );
+  await within(dialog).findByRole('button', { name: /WO 007010/ });
+  expect(
+    within(dialog).queryByText('Loading eligible Work Order Demand…'),
+  ).toBeNull();
+  release();
 });
 
 /* ============ Session Undo / Redo ============ */
@@ -1150,6 +1309,119 @@ test('Reload list abandons the unknown submission and re-reads the list', async 
   expect(screen.getByRole('button', { name: 'Move B-200 down' })).toBeEnabled();
   expect(undoButton()).toBeDisabled();
   expect(state.posts).toHaveLength(1);
+});
+
+test('Reload list keeps writes frozen until the fresh list arrives', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'drop-before' };
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await screen.findByText(/may already have been applied/);
+
+  let release!: () => void;
+  state.holdRead = {
+    path: '/api/hot-list',
+    until: new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+  };
+  fireEvent.click(screen.getByRole('button', { name: 'Reload list' }));
+  expect(
+    await screen.findByText('Reloading the Hot list…'),
+  ).toBeInTheDocument();
+  // The old list stays on screen, but nothing can be changed against it.
+  expect(listedPns()).toEqual(INITIAL);
+  expect(
+    screen.getByRole('button', { name: 'Move B-200 down' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeDisabled();
+  expect(screen.queryByText(/The list was reloaded/)).toBeNull();
+
+  release();
+  expect(
+    await screen.findByText(
+      'The change may already have been applied. The list was reloaded — check it before making another change.',
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: 'Move B-200 down' }),
+    ).toBeEnabled(),
+  );
+  expect(screen.queryByText('Reloading the Hot list…')).toBeNull();
+  expect(state.posts).toHaveLength(1);
+});
+
+test('Reload list is disabled while disconnected, so the same-key Retry survives', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'drop-before' };
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await screen.findByText(/may already have been applied/);
+
+  state.healthDown = true;
+  act(() => {
+    window.dispatchEvent(new Event('offline'));
+  });
+  expect(screen.getByRole('button', { name: 'Reload list' })).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  ).toBeDisabled();
+  expect(listedPns()).toEqual(INITIAL);
+
+  state.healthDown = false;
+  await act(async () => {
+    window.dispatchEvent(new Event('online'));
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: 'Retry the same change' }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(state.posts[1].device_event_id).toBe(state.posts[0].device_event_id);
+});
+
+test('a replay that comes without the list still completes the step and re-reads the list', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'status-after-commit', status: 502 };
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await screen.findByText(/may already have been applied/);
+  const reads = state.reads.filter((read) => read === '/api/hot-list').length;
+
+  // Meanwhile a second Department was activated.
+  state.departmentRefusal = {
+    status: 409,
+    detail:
+      'Several active Departments exist (Machining, Assembly). The Hot list is managed within one Department, so nothing can be shown or changed until exactly one Department is active.',
+  };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  expect(
+    await screen.findByText('The Hot list could not be loaded.'),
+  ).toBeInTheDocument();
+  expect(state.posts).toHaveLength(2);
+  expect(state.posts[1]).toEqual(state.posts[0]);
+  expect(state.reads.filter((read) => read === '/api/hot-list')).toHaveLength(
+    reads + 1,
+  );
+
+  // Once the configuration is fixed, the committed step is in the history.
+  state.departmentRefusal = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(undoButton()).toBeEnabled();
 });
 
 /* ============ Write blocks ============ */

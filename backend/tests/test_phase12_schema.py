@@ -16,8 +16,8 @@ Phase 12 — Priority Management; PROJECT_PROFILE §21; invariant H1):
   11 schema test, which is now pinned to 0012);
 - the refusing pre-check: existing ranks that are not exactly 1..N (a
   duplicate, a rank of 0, a gap) refuse the upgrade, which leaves the
-  database at 0012 with the ranks untouched; dense ranks upgrade
-  cleanly;
+  database at its starting revision (0012, or 0011 when 0012 was
+  pending too) with the ranks untouched; dense ranks upgrade cleanly;
 - clean downgrade back to the Phase 11 boundary with a successful
   re-upgrade.
 
@@ -42,6 +42,7 @@ from alembic import command
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
+_PHASE10_REVISION = "0011_phase10_stock_allocation"
 _PHASE11_REVISION = "0012_phase11_tracking_index"
 _PHASE12_REVISION = "0013_phase12_priority"
 _CHECK = "ck_work_order_demands_priority_rank_positive"
@@ -256,6 +257,35 @@ def test_upgrade_refuses_ranks_that_are_not_dense(
         assert _UNIQUE not in uniques
     finally:
         engine.dispose()
+
+
+def test_a_refused_multi_revision_upgrade_stays_at_its_starting_revision(
+    admin_engine: Engine,
+) -> None:
+    """env.py runs every pending revision in ONE transaction: refusing
+    0013 also rolls back 0012, and the message names no wrong revision."""
+    name = "partflow_test_phase12_precheck_multi"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    engine = create_engine(url)
+    try:
+        command.upgrade(_alembic_config(url), _PHASE10_REVISION)
+        seeded = _reseed(engine, [1, 1])
+        with pytest.raises(RuntimeError) as refused:
+            command.upgrade(_alembic_config(url), "head")
+        message = str(refused.value)
+        assert "Nothing was changed" in message
+        assert "stays at the revision it started from" in message
+        assert _PHASE11_REVISION not in message
+        with engine.connect() as connection:
+            assert _version(connection) == _PHASE10_REVISION
+        assert _stored_ranks(engine) == seeded
+        # 0012's index was rolled back with the refused 0013.
+        indexes = {index["name"] for index in inspect(engine).get_indexes("part_movements")}
+        assert "ix_part_movements_part_number_occurred_at_id" not in indexes
+    finally:
+        engine.dispose()
+        _drop_temp_database(admin_engine, name)
 
 
 def test_upgrade_accepts_dense_ranks(phase11_database: URL) -> None:

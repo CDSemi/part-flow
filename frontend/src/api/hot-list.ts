@@ -107,8 +107,10 @@ export interface HotListChangeResult {
   deviceEventId: string;
   action: HotListAction;
   changes: HotListRankChange[];
-  /** The list as committed (201), or the current list (replay). */
-  entries: HotListEntry[];
+  /** The list as committed (201), or the current list (replay) — null
+   * for a replay while no single active Department exists, so the list
+   * cannot be shown; read it afresh. */
+  entries: HotListEntry[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +167,7 @@ interface HotListChangeResultWire {
     previous_rank: number | null;
     new_rank: number | null;
   }[];
-  entries: HotListEntryWire[];
+  entries: HotListEntryWire[] | null;
 }
 
 function toLocation(wire: HotListLocationWire): HotListLocation {
@@ -266,7 +268,7 @@ export async function applyHotListChange(
       previousRank: change.previous_rank,
       newRank: change.new_rank,
     })),
-    entries: wire.entries.map(toEntry),
+    entries: wire.entries === null ? null : wire.entries.map(toEntry),
   };
 }
 

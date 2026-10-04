@@ -283,7 +283,9 @@
   migration `0013_phase12_priority` trước hết chạy **pre-check từ chối** — các giá trị
   `work_order_demands.priority_rank` khác NULL hiện có phải đúng là `1..N`, không rank nào < 1, trùng
   hoặc hở; nếu không migration raise, nêu từng demand id vi phạm cùng rank của nó, không rewrite gì và
-  để database ở `0012_phase11_tracking_index` — rồi thêm
+  để database ở revision mà lần upgrade bắt đầu (`0012_phase11_tracking_index`, hoặc một revision cũ
+  hơn khi có nhiều revision đang chờ, vì `alembic/env.py` chạy mọi revision đang chờ trong một
+  transaction) — rồi thêm
   `ck_work_order_demands_priority_rank_positive`, UNIQUE không deferrable
   `uq_work_order_demands_priority_rank` (NULL vẫn phân biệt) và partial expression index
   `ix_audit_events_hot_list_device_event_id` trên `metadata['hot_list_change'] ->> 'device_event_id'`
@@ -301,8 +303,9 @@
   và không ghi gì; demand được chèn phải **eligible** — tồn tại, chưa có rank, Work Order của nó chưa
   completed và nó **active** theo nghĩa PROJECT_PROFILE §14 (`requested_quantity > allocated_quantity`)
   — được xét trên row đã lock và đọc lại; command idempotent theo `device_event_id` (fingerprint của
-  action, expected order và new order: cùng id và fingerprint thì replay với 200 và `created: false`,
-  fingerprint khác là 409; audit row chính là idempotency record, tra trước và tra lại sau advisory
+  action, expected order và new order: cùng id và fingerprint thì replay với 200 và `created: false`
+  — kể cả sau khi cấu hình Department đã đổi, với `entries: null` khi không còn đúng một Department
+  active — fingerprint khác là 409; audit row chính là idempotency record, tra trước và tra lại sau advisory
   lock). Audit (PROJECT_PROFILE §28): một row `audit_events` `UPDATED` `WorkOrderDemand` cho mỗi demand
   đổi rank, `before_data` / `after_data` giữ rank và `metadata.hot_list_change` giữ `device_event_id`,
   action, fingerprint, sequence cùng **identity snapshot** (demand id, Part Number, Work Order id và
@@ -313,7 +316,8 @@
   state), `GET /api/hot-list/candidates?search=` (match không phân biệt hoa thường trên PN, Work Order
   Number hoặc Job Number, giới hạn 50 kèm cờ `truncated`) hoặc `?barcode=PF:PN:…` (toàn bộ demand
   eligible của PN đó, không giới hạn; copy từ chối riêng của view Priority), cả hai kèm
-  `already_listed_count`, và command. **Department gate**: mọi read và command resolve Department qua
+  `already_listed_count` (ký tự NUL trong một trong hai là 422 trước mọi query, cũng như demand id
+  nằm ngoài miền `integer` của PostgreSQL trong command), và command. **Department gate**: mọi read và command resolve Department qua
   `production_board.resolve_department` — không có Department active là 404, nhiều Department là 409 với
   wording của Hot list, không ghi gì; cố ý không có tham số `department_id` (OD2 bên dưới). **Removal
   guard**: `DELETE /api/work-orders/{id}/demands/{id}` nay từ chối demand line đang có rank bằng 409
@@ -326,11 +330,13 @@
   resolve khi Enter), entry **inactive** (Work Order completed, hoặc line đã allocate đủ) được giữ,
   gắn cờ và vẫn remove / move được, Undo / Redo **session** không giới hạn (PROJECT_PROFILE §21 mục 9)
   là stack phía client của các intent single-entry được rebase lên list hiện tại, mọi write bị chặn khi
-  disconnected, đang chạy hoặc outcome chưa rõ, và outcome chưa rõ cho phép retry tường minh đúng
-  payload và key cũ. Board, Tracking và Scan Station đọc `priority_rank` không đổi. Test: backend gate
-  hoàn tất với 773 test pass (`test_phase12_schema.py`, `test_hot_list_rules.py`,
-  `test_hot_list_api.py` gồm bốn test lock / concurrency) và frontend gate với 789 pass; Phase 12 chưa
-  qua audit đóng phase.
+  disconnected, đang chạy, outcome chưa rõ hoặc khi một lần reload đã yêu cầu chưa trả lời, và outcome
+  chưa rõ cho phép retry tường minh đúng payload và key cũ, hoặc Reload list (bị vô hiệu hóa khi
+  disconnected, nên retry cùng key không bao giờ bị mất vì một lần đọc không thể thành công). Board,
+  Tracking và Scan Station đọc `priority_rank` không đổi. Test: backend gate hoàn tất với 777 test pass
+  (`test_phase12_schema.py`, `test_hot_list_rules.py`, `test_hot_list_api.py` gồm bốn test lock /
+  concurrency) và frontend gate với 796 pass, sau các bản sửa của audit trước khi đóng phase; Phase 12
+  chưa qua audit đóng phase.
 
 ## Nguyên tắc triển khai
 
@@ -1519,7 +1525,9 @@ một trong hai). `app/application/hot_list.py` resolve Department, dựng read 
 `apply_hot_list_change`: input shape, cách đọc thay đổi và khớp action, fingerprint, idempotency lookup
 trước và sau Hot advisory lock, precondition `expected_order`, row lock, eligibility trên row đã lock,
 ghi hai flush, một audit row cho mỗi rank đổi, và entries của response dựng **trước** COMMIT để là list
-như đã commit. Replay trả về `changes` gốc dựng lại từ audit row và một lần đọc mới của list hiện tại.
+như đã commit. Replay trả về `changes` gốc dựng lại từ audit row và một lần đọc mới của list hiện tại;
+replay không bao giờ resolve Department để có `changes`, nên khi không còn đúng một Department active
+nó vẫn trả 200 với `entries: null` và view đọc lại list (lần đọc đó nêu vấn đề Department).
 Body 409 `hot_list_changed` là `{detail, hot_list_changed: true, entries}` và dùng chung wire shape
 thành công của `entries`. `priority_rank` không có writer nào trong `app/` ngoài command này (đã kiểm
 bằng search). **Frontend**: view xem bullet Trạng thái hiện tại; history Undo / Redo nằm ở module scope
@@ -1529,15 +1537,32 @@ thích thay vì chặn các step sau, 409 stale giữ cả hai stack, và Undo /
 chối vì không eligible (409) hoặc không tồn tại (404) thì bỏ step đó kèm message của server. Add dialog
 không bao giờ thêm từ kết quả cũ hoặc debounce: candidate chỉ được thêm bằng lựa chọn tường minh, hoặc
 bằng barcode có đúng một demand eligible; barcode có nhiều demand mở danh sách đã lọc để chọn, và barcode
-không có demand nào hiện từ chối và giữ ô nhập được chọn cho lần scan tiếp. List refresh khi mở view và
+không có demand nào hiện từ chối; mọi lần scan không thêm gì (không có, nhiều, bị từ chối hoặc bị chặn)
+giữ ô nhập được chọn cho lần scan tiếp, danh sách đã lọc thay thế lỗi load candidate trước đó, và một
+lần scan không liệt kê gì khi list mặc định chưa về thì load lại list đó thay vì để nó mãi ở trạng thái
+loading. List refresh khi mở view và
 sau mỗi command; không polling và không nhận push.
 
 Quyết định lấy làm default (mỗi cái chỉ ghi thay đổi đã được manager xác nhận và có audit, không mâu
 thuẫn canonical text; không cái nào chặn triển khai, và owner chọn khác thì không cần undo dữ liệu trừ
 chỗ nói rõ): **OD1 — entry inactive**: entry có Work Order completed hoặc line đã allocate đủ
 (inactive theo PROJECT_PROFILE §14) được **giữ và gắn cờ** cho tới khi manager remove; không ghi gì tự
-động, allocation bỏ qua nó (chỉ duyệt shortage > 0) và board vẫn hiển thị rank **đã lưu**, nên #1 inactive
-nghĩa là không có row mở nào màu đỏ cho tới khi nó bị remove hoặc move. Là ngoại lệ có tài liệu,
+động, và allocation bỏ qua nó (chỉ duyệt shortage > 0). Các row monitoring đọc rank **đã lưu** qua
+open-demand context (`allocations.open_demand_context`: demand của Work Order chưa completed, không xét
+shortage), nên hai trường hợp inactive khác nhau ở đó: line của Work Order **completed** rời context đó,
+nên #1 trên Work Order completed nghĩa là không có row mở nào màu đỏ cho tới khi nó bị remove hoặc move;
+line **đã allocate đủ** của Work Order vẫn **mở** (một line khác còn shortage) vẫn đứng đầu context của
+PN và tiếp tục cung cấp rank của nó — row của Production Board và PN Tracking (kể cả filter Hot-only)
+hiển thị nó là Hot và demand context của Area inventory liệt kê nó đầu tiên — cho tới khi manager remove
+hoặc move nó (được ghim bởi
+`test_a_fully_allocated_hot_line_of_an_open_work_order_keeps_its_rank_on_monitoring_rows`). **Lựa chọn
+của owner đang chờ** cho trường hợp Work Order mở đó, không cái nào chặn việc đóng phase: giữ nguyên
+(hành vi hiện tại), cho rank monitoring lùi về demand đầu tiên của PN còn shortage (chỉ đổi read path,
+không cần undo dữ liệu), hoặc chọn hướng auto-removal bên dưới. Việc remove một entry inactive không bao
+giờ được hứa là undo được: Undo thêm lại qua cùng kiểm tra eligibility của Add, nên confirmation và thông
+báo remove nói rằng Undo không thể thêm nó lại khi Work Order còn completed hoặc line còn được allocate
+đủ (Undo lúc đó bị từ chối và step bị bỏ); GUI_DESIGN §8 nói "Undo can restore it" vô điều kiện, nên sửa
+wording đó cho entry inactive là việc **owner** đang chờ — roadmap này không sửa nó. Là ngoại lệ có tài liệu,
 REMOVE / MOVE / renumber có thể đổi `priority_rank`, và thêm audit row `UPDATED`, trên demand của Work
 Order **completed** — ghi priority không phải sửa Work Order, và bề mặt Work Orders cùng trang Completed
 Work Orders vẫn read-only. Owner có thể chọn auto-removal thay thế (nó đặt Hot lock vào trong allocation

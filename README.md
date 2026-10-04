@@ -210,7 +210,9 @@ real Management → Priority view on it:
   idempotent, audited command that adds, removes, moves, undoes or redoes
   one entry against the order the manager confirmed — the only writer of
   `priority_rank`; Department-gated: 404 with no active Department, 409
-  with several), with the demand-line removal of a Hot line refused,
+  with several — only the replay of an already committed change still
+  answers, with `entries: null`), with the demand-line removal of a Hot
+  line refused,
   all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the

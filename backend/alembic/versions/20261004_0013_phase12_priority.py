@@ -27,11 +27,13 @@ idempotency lookup needs:
 Existing ranks are CHECKED, never rewritten. Ranks written before
 Phase 12 that are not exactly 1..N (a rank below 1, a duplicated rank,
 or a gap) refuse the upgrade with every offending row named, and
-nothing is changed — PostgreSQL's transactional DDL leaves the
-database at 0012. Normalizing them here would be an unaudited priority
-decision: ties are ordered by business dates (PROJECT_PROFILE §18), and
-every priority change must be audited (§28). The owner corrects the
-ranks explicitly, then upgrades.
+nothing is changed — `alembic/env.py` runs every pending revision in
+one transaction, so PostgreSQL's transactional DDL leaves the database
+at the revision the upgrade started from (0012, or an earlier one when
+several revisions were pending). Normalizing them here would be an
+unaudited priority decision: ties are ordered by business dates
+(PROJECT_PROFILE §18), and every priority change must be audited
+(§28). The owner corrects the ranks explicitly, then upgrades.
 
 Deliberate non-changes: no `is_hot` flag, no priority table, no
 Department column on demand, and no audit vocabulary widening (a
@@ -100,8 +102,9 @@ def _refuse_invalid_ranks() -> None:
     raise RuntimeError(
         "Cannot upgrade to 0013_phase12_priority: Hot ranks (work_order_demands.priority_rank)"
         f" must be unique whole numbers 1..N with no gaps, N being the number of ranked"
-        f" demands ({count}). Offending rows: {listed}. Nothing was changed — the database"
-        " stays at 0012_phase11_tracking_index. Ranks are priority decisions that must be"
+        f" demands ({count}). Offending rows: {listed}. Nothing was changed — the upgrade"
+        " runs in one transaction, so the database stays at the revision it started from."
+        " Ranks are priority decisions that must be"
         " audited (PROJECT_PROFILE §28), so they are never renumbered automatically: the"
         " owner must correct these ranks explicitly before upgrading."
     )

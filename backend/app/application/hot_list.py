@@ -13,7 +13,9 @@ Rules owned here:
 - **Department scope** (PROJECT_PROFILE §21 "managed within the
   Department"; GUI_DESIGN §8): every read and the command resolve the
   single active Department (`production_board.resolve_department`) —
-  none is 404, several is 409, nothing is shown or written. The rank is
+  none is 404, several is 409, nothing is shown or written (only the
+  replay of an already committed change answers regardless, see
+  Idempotency). The rank is
   one column per demand and demand carries no Department, so the one
   rank space is the Department's own only while exactly one Department
   is active; the distribution shown per entry is restricted to that
@@ -58,7 +60,11 @@ Rules owned here:
   it is granted, so a concurrent identical retry replays instead of
   applying twice. A replay rebuilds ``changes`` from those audit rows
   alone — the identity snapshot lives in their metadata — so it equals
-  the original even after a demand was renumbered or deleted since.
+  the original even after a demand was renumbered or deleted since, and
+  it never depends on the Department configuration: when no single
+  active Department exists any more, the replay still answers with the
+  committed ``changes`` and ``entries`` is None (the list cannot be
+  shown).
 - **Audit** (PROJECT_PROFILE §28): one ``UPDATED`` ``WorkOrderDemand``
   row per demand whose rank changed, in the same transaction, with
   ``before_data`` / ``after_data`` holding only the rank and the
@@ -121,6 +127,10 @@ _HOT_LIST_LOCK_KEY: Final = "partflow:hot-list"
 #: Candidates a search (or the unfiltered list) returns at most; a PN
 #: barcode returns every eligible demand of its PN.
 CANDIDATE_LIMIT: Final = 50
+
+#: The largest demand id PostgreSQL can bind (``integer`` primary key):
+#: a larger one is refused as malformed input before any query.
+_MAX_DEMAND_ID: Final = 2_147_483_647
 
 _STALE_MESSAGE: Final = (
     "The Hot list was changed elsewhere. The current list is shown; review it and try"
@@ -219,15 +229,16 @@ class HotListChange(NamedTuple):
 
     ``changes`` is the original change — rebuilt from the audit rows on
     a replay; ``entries`` is the list as it stood at COMMIT for a fresh
-    change and the CURRENT list for a replay. ``created`` is False for
-    an idempotent replay.
+    change and the CURRENT list for a replay — None for a replay while
+    no single active Department exists, so the list cannot be shown.
+    ``created`` is False for an idempotent replay.
     """
 
     device_event_id: str
     action: HotListAction
     created: bool
     changes: list[HotListChangeLine]
-    entries: list[HotEntry]
+    entries: list[HotEntry] | None
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +407,11 @@ def hot_list_candidates(
         raise InvalidInputError(
             "Search by text or scan a PN barcode — not both. Nothing was searched."
         )
+    # PostgreSQL text cannot hold a NUL character: refuse it before any query.
+    if any(value is not None and "\x00" in value for value in (search, barcode)):
+        raise InvalidInputError(
+            "The search text or barcode contains a NUL character. Nothing was searched."
+        )
     department = resolve_hot_list_department(session)
     part_number: str | None = None
     limit: int | None = CANDIDATE_LIMIT
@@ -537,9 +553,11 @@ def _validated_action(value: object) -> HotListAction:
 
 
 def _validated_order(value: object, label: str) -> list[int]:
-    # bool is an int subclass — true/false is never a demand id.
+    # bool is an int subclass — true/false is never a demand id; an id
+    # PostgreSQL cannot bind is malformed input, not a missing demand.
     if not isinstance(value, list | tuple) or not all(
-        isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value
+        isinstance(item, int) and not isinstance(item, bool) and 0 < item <= _MAX_DEMAND_ID
+        for item in value
     ):
         raise InvalidInputError(f"{label} must be a list of Work Order Demand ids.")
     return [int(item) for item in value]
@@ -592,8 +610,23 @@ def _replay_or_conflict(
         created=False,
         changes=changes,
         # The CURRENT list, freshly read — not part of the committed result.
-        entries=hot_list(session).entries,
+        entries=_replay_entries(session),
     )
+
+
+def _replay_entries(session: Session) -> list[HotEntry] | None:
+    """The current list for a replay, or None while it cannot be shown.
+
+    The committed change never depends on the Department configuration:
+    with no or several active Departments the replay still returns the
+    original ``changes`` and leaves the list to a fresh read, which
+    states the configuration problem.
+    """
+    try:
+        department = resolve_hot_list_department(session)
+    except (ConflictError, NotFoundError):
+        return None
+    return _entries(session, department, _ranked_rows(session))
 
 
 # ---------------------------------------------------------------------------

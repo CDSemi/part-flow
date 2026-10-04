@@ -555,6 +555,30 @@ def test_add_refusals_write_nothing(client: TestClient, db_engine: Engine) -> No
     assert _rank_of(db_engine, other) is None
 
 
+def test_ids_outside_the_database_integer_range_are_malformed_input(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """An id PostgreSQL cannot bind is a 422 before any query, not a 500."""
+    _clear(client)
+    listed = _demand(client)
+    _added(client, listed)
+    before = _audit_count(db_engine)
+    too_large = 2_147_483_648
+
+    response = _change(client, "ADD", [listed], [listed, too_large])
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "new_order must be a list of Work Order Demand ids."
+    response = _change(client, "REMOVE", [listed, too_large], [listed])
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "expected_order must be a list of Work Order Demand ids."
+    # The largest id the column holds is a well-formed id of no demand.
+    response = _change(client, "ADD", [listed], [listed, too_large - 1])
+    assert response.status_code == 404 and response.json()["detail"] == _MISSING
+
+    assert _audit_count(db_engine) == before
+    assert _order(client) == [listed]
+
+
 def test_add_refuses_a_completed_work_order(
     client: TestClient, shop: _Shop, db_engine: Engine
 ) -> None:
@@ -788,6 +812,45 @@ def test_a_replay_survives_the_deletion_of_the_removed_line(
     assert _change_line(removable, pn, number, 1, None) in replay.json()["changes"]
     # The entries are the CURRENT list.
     assert [entry["work_order_demand_id"] for entry in replay.json()["entries"]] == [kept]
+
+
+def test_a_replay_survives_a_department_configuration_change(
+    client: TestClient, shop: _Shop, db_engine: Engine
+) -> None:
+    """A committed change replays with its original ``changes`` even when
+    no single active Department exists any more; the list itself cannot
+    be shown then, so ``entries`` is null and nothing is written."""
+    _clear(client)
+    added = _demand(client)
+    event_id = str(uuid.uuid4())
+    first = _change(client, "ADD", [], [added], device_event_id=event_id)
+    assert first.status_code == 201, first.text
+    before = _audit_count(db_engine)
+
+    second = _create_department(client)
+    try:
+        replay = _change(client, "ADD", [], [added], device_event_id=event_id)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["created"] is False
+        assert replay.json()["changes"] == first.json()["changes"]
+        assert replay.json()["entries"] is None
+        # A new change is still refused until exactly one is active.
+        assert _change(client, "REMOVE", [added], []).status_code == 409
+    finally:
+        deactivated = client.patch(f"/api/departments/{second}", json={"is_active": False})
+        assert deactivated.status_code == 200, deactivated.text
+
+    _set_department_active(db_engine, shop.department_id, False)
+    try:
+        replay = _change(client, "ADD", [], [added], device_event_id=event_id)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["changes"] == first.json()["changes"]
+        assert replay.json()["entries"] is None
+    finally:
+        _set_department_active(db_engine, shop.department_id, True)
+
+    assert _audit_count(db_engine) == before
+    assert _order(client) == [added]
 
 
 # ---------------------------------------------------------------------------
@@ -1183,6 +1246,13 @@ def test_candidate_refusals(client: TestClient, shop: _Shop) -> None:
     assert empty.json()["detail"] == "Part Number must not be empty."
     both = client.get("/api/hot-list/candidates", params={"barcode": "PF:PN:X", "search": "X"})
     assert both.status_code == 422
+    # PostgreSQL text cannot hold NUL: a 422 before any query, not a 500.
+    for params in ({"search": "a\x00b"}, {"barcode": "PF:PN:A\x00B"}):
+        response = client.get("/api/hot-list/candidates", params=params)
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == (
+            "The search text or barcode contains a NUL character. Nothing was searched."
+        )
 
 
 def test_ranked_completed_and_fully_allocated_demand_is_no_candidate(
@@ -1355,6 +1425,48 @@ def test_the_command_rank_orders_every_consumer(client: TestClient, shop: _Shop)
         (first.demand_id, 2),
         (first_dated.demand_id, None),
     ]
+
+
+def test_a_fully_allocated_hot_line_of_an_open_work_order_keeps_its_rank_on_monitoring_rows(
+    client: TestClient, shop: _Shop
+) -> None:
+    """OD1 as implemented: a ranked line that becomes fully allocated
+    while its Work Order stays open keeps supplying its STORED rank to
+    the Production Board, PN Tracking (Hot only included) and the Area
+    inventory demand context until a manager removes or moves it."""
+    _clear(client)
+    pn = f"FA{uuid.uuid4().hex[:8].upper()}"
+    # The second line keeps the Hot line's Work Order open.
+    hot = _work_order(client, [_line(pn, 4), _line(_unique("PN"), 4)], number=_unique("WO"))
+    later = _work_order(client, [_line(pn, 5, due_date="2031-01-01")], number=_unique("WO"))
+    _added(client, hot.demand_id)
+    _fulfil(client, shop, hot, hot.demand_id, pn, 4)
+    # Quantity still in production gives the PN its monitoring rows.
+    _release(client, shop.material, later, later.demand_id, pn, 2)
+    entry = _entry(client, hot.demand_id)
+    assert (entry["rank"], entry["work_order_completed"], entry["active"]) == (1, False, False)
+
+    def board_rank() -> list[Any]:
+        rows = client.get("/api/production-board").json()["rows"]
+        return [row["hot_rank"] for row in rows if row["part_number"] == pn]
+
+    assert board_rank() == [1]
+    tracking = client.get("/api/tracking", params={"search": pn, "hot_only": "true"})
+    assert tracking.status_code == 200, tracking.text
+    assert [(row["part_number"], row["hot_rank"]) for row in tracking.json()["rows"]] == [(pn, 1)]
+    inventory = client.get(f"/api/areas/{shop.material.area_id}/inventory")
+    assert inventory.status_code == 200, inventory.text
+    [context] = [item for item in inventory.json()["demand_context"] if item["part_number"] == pn]
+    assert [(d["work_order_demand_id"], d["priority_rank"]) for d in context["demands"]] == [
+        (hot.demand_id, 1),
+        (later.demand_id, None),
+    ]
+
+    # Removing the entry hands the rows to the next demand, unranked.
+    assert _remove(client, hot.demand_id).status_code == 201
+    assert board_rank() == [None]
+    tracking = client.get("/api/tracking", params={"search": pn, "hot_only": "true"})
+    assert tracking.status_code == 200 and tracking.json()["rows"] == []
 
 
 def test_work_order_intake_still_rejects_priority_rank(client: TestClient) -> None:

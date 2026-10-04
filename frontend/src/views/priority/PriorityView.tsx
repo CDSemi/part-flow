@@ -233,6 +233,13 @@ export function PriorityView() {
   const [message, setMessage] = useState<ViewMessage | null>(null);
   const [inFlight, setInFlight] = useState(false);
   const [unknownOutcome, setUnknownOutcome] = useState<Submission | null>(null);
+  // The read state a requested reload started from: useApiData keeps it
+  // on screen until the fresh read (or its error) replaces it, and the
+  // view stays frozen until then — a change confirmed against the old
+  // list would be rendered over by the read.
+  const [reloadingFrom, setReloadingFrom] = useState<
+    typeof listData.state | null
+  >(null);
   const submitting = useRef(false);
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<HotListEntry | null>(null);
@@ -265,10 +272,21 @@ export function PriorityView() {
     loaded && override?.base === loaded ? override.entries : loaded?.entries;
   const entries = preview === 'empty' ? [] : (hotList ?? []);
   const order = entries.map(idOf);
+  const reloading = reloadingFrom !== null && reloadingFrom === listData.state;
   // Writes are blocked while disconnected (GUI_DESIGN §3 rule 6), while
-  // a submission is in flight, and while one has an unknown outcome.
+  // a submission is in flight, while one has an unknown outcome, and
+  // while a requested reload has not answered yet.
   const writesFrozen =
-    disconnected || inFlight || unknownOutcome !== null || loaded === null;
+    disconnected ||
+    inFlight ||
+    unknownOutcome !== null ||
+    reloading ||
+    loaded === null;
+
+  function reloadList() {
+    setReloadingFrom(listData.state);
+    listData.reload();
+  }
 
   async function submit(submission: Submission) {
     if (submitting.current || disconnected || loaded === null) return;
@@ -279,7 +297,10 @@ export function PriorityView() {
     try {
       const result = await applyHotListChange(submission.input);
       setUnknownOutcome(null);
-      setOverride({ base, entries: result.entries });
+      // A replay may come without the list (no single active Department
+      // any more): the committed step still counts; read the list afresh.
+      if (result.entries === null) reloadList();
+      else setOverride({ base, entries: result.entries });
       const { effect } = submission;
       if (effect.kind === 'record') recordChange(effect.step);
       else if (effect.kind === 'undo') completeUndo(effect.step);
@@ -344,7 +365,8 @@ export function PriorityView() {
 
   function abandonUnknownOutcome() {
     setUnknownOutcome(null);
-    listData.reload();
+    reloadList();
+    // Shown once the reload has answered (see `reloading`).
     setMessage({
       tone: 'warn',
       text: 'The change may already have been applied. The list was reloaded — check it before making another change.',
@@ -502,7 +524,7 @@ export function PriorityView() {
           redo: { kind: 'remove' },
         },
       },
-      success: `✕ ${entryName(target)} removed from Hot list — remaining ranks close the gap · Undo can restore it`,
+      success: `✕ ${entryName(target)} removed from Hot list — remaining ranks close the gap · ${undoRestoreNote(target)}`,
     });
   }
 
@@ -589,12 +611,18 @@ export function PriorityView() {
             </button>
             <button
               className="btn ghost"
-              disabled={inFlight}
+              // Offline the read cannot succeed, and abandoning would
+              // drop the only same-key Retry.
+              disabled={inFlight || disconnected}
               onClick={abandonUnknownOutcome}
             >
               Reload list
             </button>
           </div>
+        </div>
+      ) : reloading ? (
+        <div className="pr-msg info" role="status">
+          Reloading the Hot list…
         </div>
       ) : message ? (
         <div
@@ -755,8 +783,8 @@ export function PriorityView() {
           <div className="sub">
             Work Order Demand{' '}
             <b className="mono">{woJobLabel(removeTarget, true)}</b> will be
-            removed from the Hot ranking. Remaining ranks close the gap; Undo
-            can restore the entry.
+            removed from the Hot ranking. Remaining ranks close the gap;{' '}
+            {undoRestoreNote(removeTarget)}.
           </div>
           <div className="row">
             <button
@@ -778,6 +806,22 @@ export function PriorityView() {
       {noticeElement}
     </section>
   );
+}
+
+/**
+ * What Undo can do after removing `entry`. Undo re-adds through the same
+ * eligibility check as Add, so an inactive entry (completed Work Order,
+ * or fully allocated line) cannot come back while it stays inactive —
+ * the removal never promises that.
+ */
+function undoRestoreNote(entry: HotListEntry): string {
+  if (entry.workOrderCompleted) {
+    return 'Undo cannot add it back while its Work Order is completed';
+  }
+  if (entry.shortageQuantity === 0) {
+    return 'Undo cannot add it back while the line is fully allocated';
+  }
+  return 'Undo can restore it';
 }
 
 /**
@@ -1211,6 +1255,9 @@ function HotAddDialog({
   }
 
   async function resolveBarcode(barcode: string) {
+    // A scan supersedes a still-pending list read; when nothing had been
+    // listed yet, a scan that lists nothing itself reloads the default.
+    const nothingListed = list === null;
     const requested = ++generation.current;
     setScanFeedback(null);
     let data: HotListCandidates;
@@ -1220,6 +1267,7 @@ function HotAddDialog({
       if (generation.current !== requested) return;
       setScanFeedback({ tone: 'error', text: errorMessage(error) });
       readyForNextScan();
+      if (nothingListed) void runSearch('');
       return;
     }
     if (generation.current !== requested) return;
@@ -1238,6 +1286,7 @@ function HotAddDialog({
         text: `No eligible Work Order Demand for ${pn}${listed}. Nothing was added.`,
       });
       readyForNextScan();
+      if (nothingListed) void runSearch('');
       return;
     }
     if (data.candidates.length === 1) {
@@ -1246,16 +1295,21 @@ function HotAddDialog({
           tone: 'error',
           text: 'Changes are blocked right now, so nothing was added. Try again once the Hot list is ready.',
         });
+        readyForNextScan();
+        if (nothingListed) void runSearch('');
         return;
       }
       onAdd(data.candidates[0]);
       return;
     }
+    // The scan's own list replaces any earlier list or load error.
     setList({ ...data, source: 'barcode', term: pn });
+    setLoadError(null);
     setScanFeedback({
       tone: 'info',
       text: `Multiple eligible Work Order Demands use PN ${pn} — select the Work Order to add.`,
     });
+    readyForNextScan();
   }
 
   const candidates = list?.candidates ?? [];

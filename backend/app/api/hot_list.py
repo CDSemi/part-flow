@@ -23,7 +23,9 @@ Surface:
 - ``POST /hot-list/changes`` — ONE single-entry change (ADD at the
   bottom, REMOVE, MOVE_UP, MOVE_DOWN, DRAG, UNDO, REDO). 201 applied,
   200 on an idempotent replay of the same ``device_event_id`` + same
-  change (the original ``changes``, the CURRENT ``entries``); 409 with
+  change (the original ``changes``, the CURRENT ``entries`` — null when
+  no single active Department exists any more, so a committed change
+  still replays and the list is left to a fresh read); 409 with
   ``hot_list_changed: true`` and the current entries when
   ``expected_order`` is not the current order; 409 on a mismatched id
   reuse or an ineligible demand; 404 for a demand that no longer
@@ -31,7 +33,8 @@ Surface:
   named action. Every refusal writes nothing.
 
 Department contract: every route resolves the single active Department
-— none is 404, several is 409 — and there is deliberately no
+— none is 404, several is 409 (only the replay of an already committed
+change answers regardless, as above) — and there is deliberately no
 ``department_id`` parameter (the rank is one column per demand).
 
 No authorization is enforced or simulated (Phase 14): no request
@@ -141,7 +144,9 @@ class HotListChangeResponse(BaseModel):
     action: HotListAction
     created: bool
     changes: list[HotListChangeLineResponse]
-    entries: list[HotListEntryResponse]
+    # The committed list (201) or the current list (replay); null only for
+    # a replay while no single active Department exists — read the list.
+    entries: list[HotListEntryResponse] | None
 
 
 def _location(location: HotLocation) -> HotListLocationResponse:
@@ -230,5 +235,9 @@ def apply_hot_list_change(
             )
             for line in result.changes
         ],
-        entries=[entry_response(entry) for entry in result.entries],
+        entries=(
+            [entry_response(entry) for entry in result.entries]
+            if result.entries is not None
+            else None
+        ),
     )
