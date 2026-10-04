@@ -75,7 +75,9 @@ _EXPECTED_TABLES = {
 def _alembic_config(database_url: URL) -> Config:
     config = Config(str(_BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
-    config.set_main_option("sqlalchemy.url", database_url.render_as_string(hide_password=False))
+    # ConfigParser interpolation reserves "%": escape the percent-encoded URL.
+    url = database_url.render_as_string(hide_password=False).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", url)
     return config
 
 
