@@ -129,6 +129,11 @@ beforeEach(() => {
           ],
         });
       }
+      if (/\/api\/hot-list$/.test(url)) {
+        // Priority Management is a real view since Phase 12: an empty
+        // Hot list keeps these routing tests focused on navigation.
+        return json({ department: { id: 1, name: 'Machining' }, entries: [] });
+      }
       if (/\/api\/production-board/.test(url)) {
         return json({
           department: { id: 1, name: 'Machining' },

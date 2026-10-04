@@ -128,7 +128,7 @@ không sở hữu Movement; Allocation slice sau vẫn tách cả hai.
   Không unique index; Application layer lock parent WorkOrder rồi re-read PN set để
   serialize concurrent add. Loser nhận duplicate-demand error và zero write. Lock
   order: Demand id tăng dần → WorkOrder, tương thích removal/release.
-- `job_numbers` là list opaque string metadata; `priority_rank` nullable.
+- `job_numbers` là list opaque string metadata; `priority_rank` nullable và là nơi lưu priority duy nhất: demand là **Hot** đúng khi nó khác NULL, rank 1 là cao nhất (không flag, không table riêng). Từ Phase 12 các demand có rank mang đúng các rank `1..N`, **unique và dense** (do §17 enforce), và một Hot-list command duy nhất (IMPLEMENTATION_ROADMAP Phase 12; `POST /api/hot-list/changes`) là **writer duy nhất** — Work Order create và edit vẫn từ chối field này. Eligibility để vào list là rule của Application, xét trên row đã lock và đọc lại: demand tồn tại, chưa có rank, Work Order của nó chưa completed, và nó **active** (PROJECT_PROFILE §14: `requested_quantity > allocated_quantity`). Mỗi demand line được chọn và xếp rank riêng. **Hot demand line không thể bị xóa** (409, không xóa gì) cho tới khi nó rời Hot list, thêm vào các từ chối removal khác; kiểm tra chạy trên row do removal lock và đọc lại nên serialize với Hot command. Command cũng có thể đổi rank, kèm audit row, của demand thuộc Work Order **completed** để entry đó có thể rời list (§16).
 - Admin/Manager edit có audit và không chạm Flow/Movement. Sau release chỉ
   `requested_quantity`, `due_date`, `job_numbers` sửa được; quantity không thấp hơn
   `max(released, allocated)`. `request_type`, `requester`, `reason`, `notes` bị
@@ -193,7 +193,7 @@ từ part thứ hai phải confirm active quantity; không merge.
 - Released line edit chỉ quantity/due/Jobs; quantity floor là max(released,
   allocated). Một invalid `line_edits` làm cả save transaction zero write. Edit và
   release dùng cùng row lock và recompute released quantity, nên bất kể arrival
-  order vẫn không thể `released > requested`. Removal vẫn refused.
+  order vẫn không thể `released > requested`. Removal vẫn refused, và line đang trên Hot list cũng bị từ chối removal (§5).
 - Read model expose released/remaining. Work Order chỉ `RELEASED` khi mọi line
   remaining = 0; partly released vẫn `OPEN`.
 
@@ -321,6 +321,8 @@ canonical PN. Phase 14 có thể migrate actor tới User.
 Mọi audited write phải có audit row cùng transaction. Audit immutable qua revoke +
 trigger; creation có before NULL, update append row mới, không rewrite row cũ.
 
+**Thay đổi priority của Hot list (Phase 12).** Thay đổi priority được audit bằng row `UPDATED` trên `WorkOrderDemand`, một row cho mỗi demand đổi `priority_rank` (gồm cả demand được đánh số lại để lấp chỗ hở), ghi cùng transaction với rank: `before_data = {"priority_rank": old}`, `after_data = {"priority_rank": new}` (NULL nghĩa là ngoài list), và `metadata.hot_list_change` giữ `device_event_id`, `action`, request `fingerprint`, `sequence` của row trong command và một **identity snapshot** lấy lúc chạy command (`work_order_demand_id`, `part_number`, `work_order_id`, `work_order_number`). Snapshot cho phép replay của command dựng lại `changes` chỉ từ audit row, kể cả khi demand đã bị xóa. Audit row cũng là idempotency record của command: khác cơ chế dựa trên UNIQUE của §14, lookup được làm race-free bằng Hot advisory lock. Không thêm audit vocabulary. Ghi rank trên demand của Work Order completed là ngoại lệ được chấp nhận và có tài liệu so với việc Work Order đó read-only (IMPLEMENTATION_ROADMAP Phase 12, OD1): ghi priority không phải sửa Work Order.
+
 ---
 
 ## 17. Database constraint và index
@@ -350,7 +352,7 @@ required received date; nullable due; status/time. `completed_at` không thuộc
 
 **`work_order_demands`** — WorkOrder FK; canonical PN by value/no master FK;
 Request Type CHECK; positive requested; non-negative allocated default 0; nullable
-due/priority; Job Numbers `text[]` default empty; optional context fields/time;
+due; `priority_rank` nullable với `CHECK (priority_rank IS NULL OR priority_rank >= 1)` (`ck_work_order_demands_priority_rank_positive`) và `UNIQUE (priority_rank)` không deferrable (`uq_work_order_demands_priority_rank` — NULL vẫn phân biệt; Hot command ghi bằng hai flush, xóa rồi gán, nên không bao giờ tạo trùng tạm thời; Phase 12, migration `0013_phase12_priority`, có pre-check từ chối để database không đổi khi các rank hiện có không đúng là `1..N`); Job Numbers `text[]` default empty; optional context fields/time;
 indexes WorkOrder và PN. Không Job aggregate/GIN index trong slice.
 
 **`route_templates`** — name, optional description, nullable `archived_at`;
@@ -390,7 +392,7 @@ JSONB subscript expression phải khớp Application exactly; index không tạo
 FK hay stored counter. UPDATE/DELETE bị guard.
 
 **`audit_events`** — BIGSERIAL, constrained event/entity types, polymorphic id,
-actor/time/before/after/metadata, `(entity_type,entity_id,id)` index, append-only.
+actor/time/before/after/metadata, `(entity_type,entity_id,id)` index, append-only; Phase 12 thêm partial expression index `ix_audit_events_hot_list_device_event_id` trên `(metadata['hot_list_change'] ->> 'device_event_id') WHERE entity_type = 'WorkOrderDemand'` cho idempotency lookup của Hot command (dạng lưu là operator `->>` tường minh trên JSONB subscript, và Application lookup phát ra cùng expression).
 
 Slice migration không FK tới table không tạo; deferred Station/Machine columns đến
 phase sau. Cross-row invariant (projection/latest Movement, first RECEIVED,
@@ -412,7 +414,7 @@ protocol, reconciliation và concurrency test enforce.
 | Undo/Repair/Scrap/Adjustment | Phase 9 — implemented, `0010` | reason/reversal columns, types/status; complete-command reversal; addition tạo Flow mới |
 | Stockroom/Allocation | Phase 10 — implemented, `0011` | STOCKED/closed flow, completed projection, append-only allocation/reversal; không FK Movement/Flow |
 | Monitoring read models | Phase 11 | Movement-derived query |
-| Priority/Hot UI | Phase 12 | priority column đã có |
+| Priority/Hot UI | Phase 12 — implemented, `0013_phase12_priority` | không thêm column: `priority_rank` hiện có nhận CHECK dương và UNIQUE (dense `1..N`, §5/§17) sau pre-check từ chối, cùng audit expression index (§17); Hot command là writer duy nhất và audit qua `audit_events` (§16) |
 | Full Administration | Phase 13 | master tables đã có từ Phase 3.5 |
 | Authentication/role | Phase 14 | actor may migrate; không couple Movement |
 | File Work Order import | Phase 15 | reuse validation idempotently |

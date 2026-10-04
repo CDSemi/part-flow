@@ -243,6 +243,16 @@ def _create_work_order(
 def _set_priority(engine: Engine, demand_id: int, rank: int | None) -> None:
     """Hot rank is Phase 12's to manage; the board only reads it."""
     with engine.begin() as connection:
+        # Ranks are unique (Phase 12) and the module database is shared: free the rank first.
+        if rank is not None:
+            connection.execute(
+                sa.update(models.WorkOrderDemand)
+                .where(
+                    models.WorkOrderDemand.priority_rank == rank,
+                    models.WorkOrderDemand.id != demand_id,
+                )
+                .values(priority_rank=None)
+            )
         connection.execute(
             sa.update(models.WorkOrderDemand)
             .where(models.WorkOrderDemand.id == demand_id)
@@ -984,10 +994,10 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
     undated_old = seed(due=None, received="2026-01-05")
     dated_late = seed(due="2026-12-01", received="2026-01-01")
     stocked_hot = seed(due="2026-01-02", received="2026-01-01", rank=1, stocked=True)
-    hot_2 = seed(due="2026-12-31", received="2026-01-01", rank=2)
+    hot_2 = seed(due="2026-12-31", received="2026-01-01", rank=3)
     dated_early = seed(due="2026-06-01", received="2026-03-01")
     undated_new = seed(due=None, received="2026-02-01")
-    hot_1 = seed(due=None, received="2026-01-01", rank=1)
+    hot_1 = seed(due=None, received="2026-01-01", rank=2)
     dated_first = seed(due="2026-01-01", received="2026-01-01")
     # A row without any demand context: its Work Order completed (no
     # longer context), only found quantity remains active.
@@ -998,10 +1008,11 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
     _stock(client, shop.material, shop.stockroom, orphan_flow, orphan, 1)
     _allocate(client, orphan, [(orphan_wo.demand_id, 1)])
 
-    # Exactly the canonical demand ordering: within rank 1 the dated
-    # demand precedes the undated one — the entirely stocked PN is no
-    # tier of its own — and the row without demand context is an
-    # unranked, undated row on its fallback received date (today).
+    # Exactly the canonical demand ordering: the Hot ranks first — the
+    # entirely stocked PN is no tier of its own (ranks are unique since
+    # Phase 12, so dated-before-undated is covered by the unranked
+    # rows) — and the row without demand context is an unranked,
+    # undated row on its fallback received date (today).
     board = _board(client, shop.department_id)
     assert [row["part_number"] for row in board["rows"]] == [
         stocked_hot,
@@ -1014,7 +1025,7 @@ def test_rows_follow_the_canonical_board_order(client: TestClient, db_engine: En
         undated_new,
         orphan,
     ]
-    assert _row(board, hot_1)["hot_rank"] == 1
+    assert _row(board, hot_1)["hot_rank"] == 2
     assert _row(board, stocked_hot)["hot_rank"] == 1
     assert _row(board, dated_early)["due_date"] == "2026-06-01"
     assert _row(board, undated_old)["received_date"] == "2026-01-05"

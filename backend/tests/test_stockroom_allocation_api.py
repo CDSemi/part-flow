@@ -226,6 +226,16 @@ def _create_work_order(
 def _set_priority(engine: Engine, demand_id: int, rank: int | None) -> None:
     """Hot rank is Phase 12's to manage; the ordering it feeds is Phase 10's."""
     with engine.begin() as connection:
+        # Ranks are unique (Phase 12) and the module database is shared: free the rank first.
+        if rank is not None:
+            connection.execute(
+                sa.update(models.WorkOrderDemand)
+                .where(
+                    models.WorkOrderDemand.priority_rank == rank,
+                    models.WorkOrderDemand.id != demand_id,
+                )
+                .values(priority_rank=None)
+            )
         connection.execute(
             sa.update(models.WorkOrderDemand)
             .where(models.WorkOrderDemand.id == demand_id)

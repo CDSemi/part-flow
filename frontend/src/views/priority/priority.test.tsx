@@ -1,27 +1,380 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ConnectivityProvider } from '../../app/connectivity-provider';
+import { clearHotHistory } from './hot-history';
 import { PriorityView } from './PriorityView';
 
-// Priority regressions: every operation that reorders existing Hot
-// entries (drag and drop, Move Up, Move Down, Undo, Redo) requires
-// confirmation before applying; the confirmation summarizes the moved
-// item and compares current versus proposed ranks for every affected
-// entry; cancelling leaves the list, the undo history and the redo
-// history unchanged; the visible list is never renumbered before
-// confirmation.
+// Priority Management regression tests (Phase 12): the view runs against
+// the REAL Hot list API — these tests exercise it against an in-memory
+// fake of `/api/hot-list` with the same wire contract and semantics
+// (one single-entry command against the confirmed `expected_order`, a
+// stale precondition answered 409 with the current entries, eligibility
+// refusals, `device_event_id` replay). Covered: the row presentation,
+// add by search and by PN barcode (0 / 1 / many), the removal and
+// order-change confirmations (nothing is sent on Cancel, the list is
+// never renumbered before the server answers), the intent-based session
+// Undo/Redo re-based on the current list, the unknown-outcome Retry
+// with the SAME idempotency key, Reload list, and the write blocks.
+
+interface FakeDemand {
+  id: number;
+  pn: string;
+  workOrderId: number;
+  workOrderNumber: string | null;
+  received: string;
+  completed: boolean;
+  requestType: 'NEW' | 'MODIFY';
+  jobs: string[];
+  requested: number;
+  allocated: number;
+  released: number;
+  due: string | null;
+  rank: number | null;
+}
+
+type PostFailure =
+  /** Transport loss before the server saw the request. */
+  | { kind: 'drop-before' }
+  /** The server committed, then the response was lost. */
+  | { kind: 'drop-after-commit' }
+  /** A gateway/server error after the commit. */
+  | { kind: 'status-after-commit'; status: number };
+
+interface FakeState {
+  demands: FakeDemand[];
+  /** PN → its ACTIVE distribution (wire `part_number_locations`). */
+  locations: Record<string, unknown[]>;
+  departmentRefusal: { status: number; detail: string } | null;
+  healthDown: boolean;
+  /** Every POST body the client sent, in order. */
+  posts: Record<string, unknown>[];
+  /** Every non-health GET the client sent, in order. */
+  reads: string[];
+  committed: Map<string, { payload: string; changes: unknown[] }>;
+  nextPost: PostFailure | null;
+  /** Hold every POST until the test releases it. */
+  holdPost: Promise<void> | null;
+}
+
+const STALE =
+  'The Hot list was changed elsewhere. The current list is shown; review it and try again. Nothing was changed.';
+const MISSING = 'This Work Order Demand no longer exists. Nothing was changed.';
+const NOT_PN_BARCODE =
+  'This is not a Part Number barcode. Scan a PN barcode (PF:PN:…) or search by PN, Work Order Number or Job Number.';
+
+function demand(
+  id: number,
+  pn: string,
+  workOrderNumber: string | null,
+  extra?: Partial<FakeDemand>,
+): FakeDemand {
+  return {
+    id,
+    pn,
+    workOrderId: id * 10,
+    workOrderNumber,
+    received: '2026-08-01',
+    completed: false,
+    requestType: 'NEW',
+    jobs: [],
+    requested: 10,
+    allocated: 0,
+    released: 0,
+    due: null,
+    rank: null,
+    ...extra,
+  };
+}
+
+function seedState(): FakeState {
+  return {
+    demands: [
+      // The Hot list, rank order.
+      demand(11, 'A-100', '007001', {
+        jobs: ['18112'],
+        released: 10,
+        due: '2026-11-20',
+        rank: 1,
+      }),
+      // Internal Work Order: no external number, nothing released.
+      demand(12, 'B-200', null, {
+        received: '2026-08-05',
+        requestType: 'MODIFY',
+        requested: 5,
+        rank: 2,
+      }),
+      // Completed Work Order: inactive, kept on the list.
+      demand(13, 'C-300', '007003', {
+        completed: true,
+        requested: 8,
+        allocated: 8,
+        released: 8,
+        due: '2026-10-30',
+        rank: 3,
+      }),
+      // Open Work Order, fully allocated from stock — this demand
+      // itself never released anything.
+      demand(14, 'D-400', '007004', {
+        requested: 6,
+        allocated: 6,
+        due: '2026-12-15',
+        rank: 4,
+      }),
+      // Eligible candidates.
+      demand(21, 'E-500', '007010', {
+        jobs: ['18190'],
+        requested: 12,
+        due: '2026-12-01',
+      }),
+      demand(22, 'F-600', '007011', { requested: 3 }),
+      demand(23, 'F-600', '007012', { requested: 4 }),
+      demand(24, 'G-700', '007013', { requested: 2 }),
+    ],
+    locations: {
+      'A-100': [
+        {
+          area: { id: 2, name: 'Lathe', color: '#f2a44a' },
+          machine: { id: 7, name: 'CNC-01' },
+          activity: null,
+          state: 'MACHINE',
+          quantity: 4,
+        },
+        {
+          area: { id: 3, name: 'Mill', color: null },
+          machine: null,
+          activity: null,
+          state: 'QUEUE',
+          quantity: 6,
+        },
+      ],
+      'D-400': [
+        {
+          area: { id: 4, name: 'External', color: null },
+          machine: null,
+          activity: 'Plating',
+          state: 'PROCESSING',
+          quantity: 3,
+        },
+      ],
+    },
+    departmentRefusal: null,
+    healthDown: false,
+    posts: [],
+    reads: [],
+    committed: new Map(),
+    nextPost: null,
+    holdPost: null,
+  };
+}
+
+let state: FakeState;
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+const detail = (message: string, status: number) =>
+  json({ detail: message }, status);
+
+function shortage(d: FakeDemand) {
+  return Math.max(d.requested - d.allocated, 0);
+}
+
+function entryWire(d: FakeDemand) {
+  return {
+    work_order_demand_id: d.id,
+    rank: d.rank,
+    part_number: d.pn,
+    work_order_id: d.workOrderId,
+    work_order_number: d.workOrderNumber,
+    work_order_received_date: d.received,
+    work_order_completed: d.completed,
+    request_type: d.requestType,
+    job_numbers: d.jobs,
+    requested_quantity: d.requested,
+    allocated_quantity: d.allocated,
+    shortage_quantity: shortage(d),
+    active: !d.completed && shortage(d) > 0,
+    released_quantity: d.released,
+    due_date: d.due,
+    part_number_locations: state.locations[d.pn] ?? [],
+  };
+}
+
+function ranked(): FakeDemand[] {
+  return state.demands
+    .filter((d) => d.rank !== null)
+    .sort((a, b) => (a.rank as number) - (b.rank as number));
+}
+
+const rankedOrder = () => ranked().map((d) => d.id);
+const currentEntries = () => ranked().map(entryWire);
+
+const eligible = (d: FakeDemand) =>
+  d.rank === null && !d.completed && shortage(d) > 0;
+
+/** Set the server-side order directly — a change made elsewhere. */
+function setServerOrder(ids: number[]) {
+  for (const d of state.demands) d.rank = null;
+  ids.forEach((id, index) => {
+    state.demands.find((d) => d.id === id)!.rank = index + 1;
+  });
+}
+
+function candidates(url: URL): Response {
+  const search = url.searchParams.get('search');
+  const barcode = url.searchParams.get('barcode');
+  let matches: FakeDemand[];
+  let partNumber: string | null = null;
+  if (barcode !== null) {
+    const value = barcode.trim();
+    if (!value.startsWith('PF:PN:')) return detail(NOT_PN_BARCODE, 422);
+    partNumber = value.slice('PF:PN:'.length).toUpperCase();
+    matches = state.demands.filter((d) => d.pn === partNumber);
+  } else if (search !== null) {
+    const term = search.trim().toLowerCase();
+    matches = state.demands.filter((d) =>
+      [d.pn, d.workOrderNumber ?? '', ...d.jobs].some((value) =>
+        value.toLowerCase().includes(term),
+      ),
+    );
+  } else {
+    matches = state.demands;
+  }
+  return json({
+    part_number: partNumber,
+    candidates: matches.filter(eligible).map(entryWire),
+    already_listed_count: matches.filter((d) => d.rank !== null).length,
+    truncated: false,
+  });
+}
+
+async function change(body: Record<string, unknown>): Promise<Response> {
+  state.posts.push(body);
+  if (state.holdPost) await state.holdPost;
+  const failure = state.nextPost;
+  state.nextPost = null;
+  if (failure?.kind === 'drop-before') throw new TypeError('Failed to fetch');
+
+  const key = String(body.device_event_id);
+  const expected = body.expected_order as number[];
+  const next = body.new_order as number[];
+  const payload = JSON.stringify([body.action, expected, next]);
+  const prior = state.committed.get(key);
+  if (prior) {
+    if (prior.payload !== payload) {
+      return detail('This device event was already used.', 409);
+    }
+    return json(
+      {
+        device_event_id: key,
+        action: body.action,
+        created: false,
+        changes: prior.changes,
+        entries: currentEntries(),
+      },
+      200,
+    );
+  }
+  const current = rankedOrder();
+  if (JSON.stringify(current) !== JSON.stringify(expected)) {
+    return json(
+      { detail: STALE, hot_list_changed: true, entries: currentEntries() },
+      409,
+    );
+  }
+  for (const id of next.filter((value) => !current.includes(value))) {
+    const target = state.demands.find((d) => d.id === id);
+    if (!target) return detail(MISSING, 404);
+    if (target.completed) {
+      return detail(
+        `Work Order ${target.workOrderNumber ?? '— (internal)'} is completed, so its demand cannot be added to the Hot list. Nothing was changed.`,
+        409,
+      );
+    }
+    if (shortage(target) === 0) {
+      return detail(`${target.pn} is fully allocated.`, 409);
+    }
+  }
+  const before = new Map(state.demands.map((d) => [d.id, d.rank]));
+  setServerOrder(next);
+  const changes = state.demands
+    .filter((d) => before.get(d.id) !== d.rank)
+    .map((d) => ({
+      work_order_demand_id: d.id,
+      part_number: d.pn,
+      work_order_number: d.workOrderNumber,
+      previous_rank: before.get(d.id) ?? null,
+      new_rank: d.rank,
+    }));
+  state.committed.set(key, { payload, changes });
+  if (failure?.kind === 'drop-after-commit') {
+    throw new TypeError('Failed to fetch');
+  }
+  if (failure?.kind === 'status-after-commit') {
+    return detail('Bad gateway.', failure.status);
+  }
+  return json(
+    {
+      device_event_id: key,
+      action: body.action,
+      created: true,
+      changes,
+      entries: currentEntries(),
+    },
+    201,
+  );
+}
+
+async function handle(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const url = new URL(String(input), 'http://partflow.test');
+  const method = init?.method ?? 'GET';
+  if (url.pathname === '/api/health') {
+    return state.healthDown
+      ? detail('Service unavailable.', 503)
+      : json({ status: 'ok' });
+  }
+  if (method === 'GET') state.reads.push(`${url.pathname}${url.search}`);
+  if (state.departmentRefusal && url.pathname.startsWith('/api/hot-list')) {
+    return detail(
+      state.departmentRefusal.detail,
+      state.departmentRefusal.status,
+    );
+  }
+  if (url.pathname === '/api/hot-list') {
+    return json({
+      department: { id: 1, name: 'Machining' },
+      entries: currentEntries(),
+    });
+  }
+  if (url.pathname === '/api/hot-list/candidates') return candidates(url);
+  if (url.pathname === '/api/hot-list/changes' && method === 'POST') {
+    return change(JSON.parse(String(init?.body)) as Record<string, unknown>);
+  }
+  return detail('Not found.', 404);
+}
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/management/priority');
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() =>
-      Promise.resolve(
-        new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
-      ),
-    ),
-  );
+  state = seedState();
+  // The session history is module-scoped (it survives sub-view
+  // switches); every test starts a fresh session.
+  clearHotHistory();
+  vi.stubGlobal('fetch', vi.fn(handle));
 });
 
 afterEach(() => {
@@ -29,19 +382,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const INITIAL = ['A-100', 'B-200', 'C-300', 'D-400'];
+
 async function renderPriority() {
   render(
     <ConnectivityProvider>
       <PriorityView />
     </ConnectivityProvider>,
   );
-  // Wait for the connectivity check so reorder controls enable.
+  // Wait for the list and the connectivity check so writes enable.
   await screen.findByRole('button', { name: '⟲ Undo' });
-  await vi.waitFor(() =>
+  await waitFor(() =>
     expect(
-      screen.getByRole('button', {
-        name: 'Move 2027-60-8114-00 down',
-      }),
+      screen.getByRole('button', { name: 'Move A-100 down' }),
     ).toBeEnabled(),
   );
 }
@@ -53,123 +406,255 @@ function listedPns(): (string | null)[] {
   );
 }
 
-const INITIAL = ['2027-60-8114-00', '142-260', '309-127'];
+function rowOf(pn: string): HTMLElement {
+  return Array.from(document.querySelectorAll<HTMLElement>('.pr-item')).find(
+    (row) => row.querySelector('.pn')?.textContent === pn,
+  ) as HTMLElement;
+}
 
-test('Move Down asks for confirmation; Cancel and Escape change nothing', async () => {
+const undoButton = () => screen.getByRole('button', { name: '⟲ Undo' });
+const redoButton = () => screen.getByRole('button', { name: '⟳ Redo' });
+
+/** Confirm the open order-change dialog and wait for the answer. */
+async function applyRanking() {
+  const posts = state.posts.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
+  await waitFor(() => expect(state.posts).toHaveLength(posts + 1));
+  await waitFor(() =>
+    expect(screen.queryByText('Applying the change…')).toBeNull(),
+  );
+}
+
+/* ============ Rows ============ */
+
+test('rows render the live Hot list with its flags, labels and distribution', async () => {
   await renderPriority();
   expect(listedPns()).toEqual(INITIAL);
 
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
+  // `🔥#rank` immediately before the PN; WO + Job from explicit fields.
+  const first = rowOf('A-100');
+  expect(first.querySelector('.l1')?.textContent).toContain('🔥#1 A-100');
+  expect(first.querySelector('.wjchip')?.textContent).toBe(
+    'WO 007001 · Job 18112',
+  );
+  expect(first).toHaveTextContent('requested 10');
+  expect(first).toHaveTextContent('allocated 0');
+  expect(first).toHaveTextContent('shortage 10');
+  // The PN's distribution, labeled as the PN's.
+  const distribution = first.querySelector('.l3') as HTMLElement;
+  expect(distribution).toHaveTextContent('A-100 in production');
+  expect(distribution).toHaveTextContent('Lathe · CNC-01 4 on machine');
+  expect(distribution).toHaveTextContent('Mill 6 queue');
+
+  // Internal Work Order: `—` with the quiet label; nothing released and
+  // no active quantity; no due date.
+  const internal = rowOf('B-200');
+  expect(internal.querySelector('.wjchip')?.textContent).toBe('WO —');
+  expect(internal).toHaveTextContent(
+    'internal Work Order · received Aug 05, 2026',
+  );
+  expect(internal.querySelector('.l3')).toHaveTextContent('Not yet released');
+  expect(internal.querySelector('.due')).toHaveTextContent('No due date');
+
+  // Completed Work Order: the status chip; released quantity no longer
+  // active.
+  const completed = rowOf('C-300');
+  expect(completed.querySelector('.wostat.completed')).toHaveTextContent(
+    'Completed',
+  );
+  expect(completed).not.toHaveTextContent('Fully allocated');
+  expect(completed.querySelector('.l3')).toHaveTextContent(
+    'No active quantity — released quantity is stocked, scrapped or awaiting allocation',
   );
 
+  // Open Work Order, fully allocated: the quiet note; the PN's
+  // locations exist but this demand released nothing.
+  const allocated = rowOf('D-400');
+  expect(allocated).toHaveTextContent(
+    'Fully allocated — nothing left to expedite',
+  );
+  expect(allocated.querySelector('.wostat')).toBeNull();
+  expect(allocated.querySelector('.l3')).toHaveTextContent(
+    'External 3 Plating',
+  );
+  expect(allocated.querySelector('.l3')).toHaveTextContent(
+    'not yet released for this demand',
+  );
+
+  // Inactive entries keep Remove / Move.
+  expect(
+    screen.getByRole('button', { name: 'Remove C-300 from Hot list' }),
+  ).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Move C-300 up' })).toBeEnabled();
+  expect(document.body).not.toHaveTextContent('priority_rank');
+});
+
+test('an empty Hot list says how to add an entry', async () => {
+  setServerOrder([]);
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  expect(await screen.findByText(/No Hot WO Demand/)).toBeInTheDocument();
+});
+
+test('a Department refusal renders the error state with the server detail and Retry', async () => {
+  state.departmentRefusal = {
+    status: 409,
+    detail:
+      'Several active Departments exist (Machining, Assembly). The Hot list is managed within one Department, so nothing can be shown or changed until exactly one Department is active.',
+  };
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent('The Hot list could not be loaded.');
+  expect(alert).toHaveTextContent('Several active Departments exist');
+
+  state.departmentRefusal = null;
+  fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(listedPns()).toEqual(INITIAL));
+});
+
+/* ============ Order changes ============ */
+
+test('Move Down asks for confirmation; Cancel and Escape send nothing', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
-  // Primary summary of the moved item, plus the action as detail.
-  expect(dialog).toHaveTextContent(
-    'Move 2027-60-8114-00 · WO 007001 from #1 to #2',
-  );
+  expect(dialog).toHaveTextContent('Move A-100 · WO 007001 from #1 to #2');
   expect(dialog).toHaveTextContent('1 other demand will shift up.');
   expect(dialog).toHaveTextContent('Move Down');
-  // New Position rows read as complete `#old → #new` transitions.
   const newSide = dialog.querySelectorAll('.pr-snapshot')[1];
-  const transitions = Array.from(
-    newSide.querySelectorAll('.pr-snaprow .prr'),
-    (el) => el.textContent,
-  );
-  expect(transitions).toEqual(['#2 → #1', '#1 → #2']);
-  // The visible list is not renumbered before confirmation.
-  expect(listedPns()).toEqual(INITIAL);
-
-  // Escape closes without applying — matching the "Cancel (Esc)" label.
-  fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(
-    screen.queryByRole('dialog', { name: 'Confirm Hot ranking change' }),
-  ).toBeNull();
-  expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟲ Undo' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeDisabled();
-
-  // The Cancel button behaves the same: list and both histories unchanged.
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
+    Array.from(
+      newSide.querySelectorAll('.pr-snaprow .prr'),
+      (el) => el.textContent,
+    ),
+  ).toEqual(['#2 → #1', '#1 → #2']);
+  // The internal Work Order line names itself and its quantity.
+  expect(newSide).toHaveTextContent(
+    'WO — · internal Work Order · received Aug 05, 2026 · 5 pcs',
   );
+
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
   expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟲ Undo' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeDisabled();
+  expect(state.posts).toEqual([]);
+  expect(undoButton()).toBeDisabled();
+  expect(redoButton()).toBeDisabled();
 });
 
-test('Move Down applies only after confirmation', async () => {
+test('Move Down sends the exact command and renders the committed list', async () => {
   await renderPriority();
-
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
-  );
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-
-  expect(listedPns()).toEqual(['142-260', '2027-60-8114-00', '309-127']);
-  expect(screen.getByRole('button', { name: '⟲ Undo' })).toBeEnabled();
-});
-
-test('Move Up asks for confirmation and applies on confirm', async () => {
-  await renderPriority();
-
-  fireEvent.click(screen.getByRole('button', { name: 'Move 309-127 up' }));
-  const dialog = screen.getByRole('dialog', {
-    name: 'Confirm Hot ranking change',
+  let release!: () => void;
+  state.holdPost = new Promise((resolve) => {
+    release = resolve;
   });
-  expect(dialog).toHaveTextContent('Move Up');
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
 
-  expect(listedPns()).toEqual(['2027-60-8114-00', '309-127', '142-260']);
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
+  await waitFor(() => expect(state.posts).toHaveLength(1));
+  expect(state.posts[0]).toEqual({
+    device_event_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    action: 'MOVE_DOWN',
+    expected_order: [11, 12, 13, 14],
+    new_order: [12, 11, 13, 14],
+  });
+
+  // In flight: never renumbered before the server answers, and every
+  // write control is frozen — no double submit.
+  expect(screen.getByText('Applying the change…')).toBeInTheDocument();
+  expect(listedPns()).toEqual(INITIAL);
+  expect(
+    screen.getByRole('button', { name: 'Move B-200 down' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Move B-200 down' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(state.posts).toHaveLength(1);
+
+  state.holdPost = null;
+  release();
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(rowOf('A-100').querySelector('.l1')?.textContent).toContain('🔥#2');
+  expect(undoButton()).toBeEnabled();
+  expect(redoButton()).toBeDisabled();
 });
 
-test('drag and drop asks for confirmation; cancel changes nothing', async () => {
+test('Move Up sends MOVE_UP by exactly one position', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Move D-400 up' }));
+  expect(
+    screen.getByRole('dialog', { name: 'Confirm Hot ranking change' }),
+  ).toHaveTextContent('Move Up');
+  await applyRanking();
+
+  expect(state.posts[0]).toMatchObject({
+    action: 'MOVE_UP',
+    expected_order: [11, 12, 13, 14],
+    new_order: [11, 12, 14, 13],
+  });
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['A-100', 'B-200', 'D-400', 'C-300']),
+  );
+});
+
+test('drag and drop asks for confirmation and sends DRAG', async () => {
   await renderPriority();
   const items = document.querySelectorAll('.pr-item');
 
   fireEvent.dragStart(items[0]);
   fireEvent.dragOver(items[2]);
   fireEvent.drop(items[2]);
-
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
   expect(dialog).toHaveTextContent('Drag and drop');
-  expect(listedPns()).toEqual(INITIAL);
-
+  expect(dialog).toHaveTextContent('Move A-100 · WO 007001 from #1 to #3');
+  expect(dialog).toHaveTextContent('2 other demands will shift up.');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟲ Undo' })).toBeDisabled();
+  expect(state.posts).toEqual([]);
 
-  // The same drop applies after confirmation.
-  const itemsAgain = document.querySelectorAll('.pr-item');
-  fireEvent.dragStart(itemsAgain[0]);
-  fireEvent.drop(itemsAgain[2]);
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-  expect(listedPns()).toEqual(['142-260', '309-127', '2027-60-8114-00']);
+  const again = document.querySelectorAll('.pr-item');
+  fireEvent.dragStart(again[0]);
+  fireEvent.drop(again[2]);
+  await applyRanking();
+  expect(state.posts[0]).toMatchObject({
+    action: 'DRAG',
+    expected_order: [11, 12, 13, 14],
+    new_order: [12, 13, 11, 14],
+  });
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'C-300', 'A-100', 'D-400']),
+  );
 });
 
 test('confirmation shows Current Position and New Position snapshots', async () => {
   await renderPriority();
   const items = document.querySelectorAll('.pr-item');
 
-  // Drop the first entry at the bottom: #1 → #3, two entries shift up.
+  // Drop the first entry on the third: #1 → #3, two entries shift up.
   fireEvent.dragStart(items[0]);
-  fireEvent.dragOver(items[2]);
   fireEvent.drop(items[2]);
-
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
-  expect(dialog).toHaveTextContent(
-    'Move 2027-60-8114-00 · WO 007001 from #1 to #3',
-  );
-  expect(dialog).toHaveTextContent('2 other demands will shift up.');
 
-  // Two snapshot sections with exactly one transition arrow between.
   const sections = dialog.querySelectorAll('.pr-snapshot');
   expect(sections).toHaveLength(2);
   const [current, proposed] = Array.from(sections);
@@ -181,251 +666,519 @@ test('confirmation shows Current Position and New Position snapshots', async () 
   );
   expect(dialog.querySelectorAll('.pr-transition')).toHaveLength(1);
 
-  // Current Position: rows in current rank order, rank first, per-row
-  // direction arrows, the moved item highlighted.
+  // Current Position: current rank order, per-row direction arrows, the
+  // moved entry highlighted; the affected range only (#1..#3).
   const curRows = Array.from(current.querySelectorAll('.pr-snaprow'));
   expect(curRows).toHaveLength(3);
-  expect(curRows[0].querySelector('.prr')?.textContent).toContain('#1');
-  expect(curRows[0].querySelector('.prpn')?.textContent).toBe(
-    '2027-60-8114-00',
-  );
+  expect(curRows[0].querySelector('.prpn')?.textContent).toBe('A-100');
   expect(curRows[0].className).toContain('moved');
   expect(curRows[0].querySelector('.dir.down')?.textContent).toBe('↓');
   expect(curRows[1].querySelector('.dir.up')?.textContent).toBe('↑');
-  expect(curRows[2].querySelector('.dir.up')?.textContent).toBe('↑');
-  // Rank renders before the PN inside the row.
-  const rowChildren = Array.from(curRows[0].children).map((el) => el.className);
-  expect(rowChildren[0]).toContain('prr');
-  expect(rowChildren[1]).toContain('prpn');
-
-  // PN and WO/Job metadata are visually separate: the chip carries the
-  // explicit Work Order and Job Number fields, the PN element does not.
   expect(curRows[0].querySelector('.wjchip')?.textContent).toBe(
     'WO 007001 · Job 18112',
   );
   expect(curRows[0].querySelector('.prpn')?.textContent).not.toContain('WO');
 
-  // New Position: proposed rank order, no per-row direction arrows —
-  // every row shows its complete rank transition `#old → #new`.
+  // New Position: proposed order, complete `#old → #new` transitions.
   const newRows = Array.from(proposed.querySelectorAll('.pr-snaprow'));
-  expect(newRows).toHaveLength(3);
-  expect(newRows[0].querySelector('.prpn')?.textContent).toBe('142-260');
-  expect(newRows[0].querySelector('.prr')?.textContent).toBe('#2 → #1');
-  expect(newRows[1].querySelector('.prr')?.textContent).toBe('#3 → #2');
-  expect(newRows[2].querySelector('.prpn')?.textContent).toBe(
-    '2027-60-8114-00',
-  );
-  expect(newRows[2].querySelector('.prr')?.textContent).toBe('#1 → #3');
+  expect(newRows.map((row) => row.querySelector('.prr')?.textContent)).toEqual([
+    '#2 → #1',
+    '#3 → #2',
+    '#1 → #3',
+  ]);
   expect(proposed.querySelector('.dir')).toBeNull();
-  // The Current Position side keeps plain ranks (no transitions).
-  expect(curRows[0].querySelector('.prr')?.textContent).not.toContain('→');
-
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+});
+
+/* ============ Remove ============ */
+
+test('removal asks for confirmation; Cancel sends nothing, confirm sends REMOVE', async () => {
+  await renderPriority();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Remove from Hot list?' });
+  // The internal Work Order Demand is identified, not just `WO —`.
+  expect(dialog).toHaveTextContent('B-200');
+  expect(dialog).toHaveTextContent(
+    'WO — · internal Work Order · received Aug 05, 2026 · 5 pcs',
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(state.posts).toEqual([]);
+  expect(listedPns()).toEqual(INITIAL);
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'C-300', 'D-400']));
+  expect(state.posts[0]).toMatchObject({
+    action: 'REMOVE',
+    expected_order: [11, 12, 13, 14],
+    new_order: [11, 13, 14],
+  });
+  expect(undoButton()).toBeEnabled();
+});
+
+/* ============ Add ============ */
+
+test('adding by search applies directly at the bottom — no order-change confirmation', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const dialog = screen.getByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  // Every eligible demand is listed; ranked, completed and fully
+  // allocated demand never is (the server decides eligibility).
+  await within(dialog).findByRole('button', { name: /WO 007010/ });
+  expect(within(dialog).queryByRole('button', { name: /A-100/ })).toBeNull();
+
+  fireEvent.change(
+    within(dialog).getByLabelText(
+      'Search PN, WO, Job Number or scan PN barcode',
+    ),
+    { target: { value: '18190' } },
+  );
+  await waitFor(() =>
+    expect(state.reads).toContain('/api/hot-list/candidates?search=18190'),
+  );
+  await waitFor(() =>
+    expect(within(dialog).queryByRole('button', { name: /G-700/ })).toBeNull(),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: /WO 007010/ }));
+
+  expect(
+    screen.queryByRole('dialog', { name: 'Confirm Hot ranking change' }),
+  ).toBeNull();
+  await waitFor(() => expect(listedPns()).toEqual([...INITIAL, 'E-500']));
+  expect(state.posts[0]).toMatchObject({
+    action: 'ADD',
+    expected_order: [11, 12, 13, 14],
+    new_order: [11, 12, 13, 14, 21],
+  });
+});
+
+test('a PN barcode with exactly one eligible WO Demand adds directly', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const search = screen.getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: 'PF:PN:G-700' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+
+  await waitFor(() => expect(listedPns()).toEqual([...INITIAL, 'G-700']));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(state.reads).toContain(
+    '/api/hot-list/candidates?barcode=PF%3APN%3AG-700',
+  );
+  expect(state.posts[0]).toMatchObject({
+    action: 'ADD',
+    new_order: [11, 12, 13, 14, 24],
+  });
+});
+
+test('an ambiguous PN barcode never adds by guess — it requires an explicit selection', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const dialog = screen.getByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: 'PF:PN:F-600' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+
+  expect(
+    await within(dialog).findByText(
+      'Multiple eligible Work Order Demands use PN F-600 — select the Work Order to add.',
+    ),
+  ).toBeInTheDocument();
+  const options = within(dialog).getAllByRole('button', { name: /F-600/ });
+  expect(options).toHaveLength(2);
+  expect(within(dialog).queryByRole('button', { name: /E-500/ })).toBeNull();
+  expect(state.posts).toEqual([]);
+
+  fireEvent.click(within(dialog).getByRole('button', { name: /WO 007012/ }));
+  await waitFor(() => expect(listedPns()).toEqual([...INITIAL, 'F-600']));
+  expect(state.posts[0]).toMatchObject({
+    action: 'ADD',
+    new_order: [11, 12, 13, 14, 23],
+  });
+});
+
+test('a PN barcode with no eligible WO Demand adds nothing and says why', async () => {
+  await renderPriority();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  const dialog = screen.getByRole('dialog', {
+    name: 'Add WO Demand to Hot list',
+  });
+  const search = within(dialog).getByLabelText(
+    'Search PN, WO, Job Number or scan PN barcode',
+  );
+  fireEvent.change(search, { target: { value: 'PF:PN:A-100' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+  expect(
+    await within(dialog).findByText(
+      'No eligible Work Order Demand for A-100 — 1 already on the Hot list. Nothing was added.',
+    ),
+  ).toBeInTheDocument();
+  // Ready for the next scan.
+  expect(search).toHaveFocus();
+
+  // A barcode that is not a PN barcode: the server's Priority copy.
+  fireEvent.change(search, { target: { value: 'PF:MACHINE:7' } });
+  fireEvent.keyDown(search, { key: 'Enter' });
+  expect(await within(dialog).findByText(NOT_PN_BARCODE)).toBeInTheDocument();
+
+  expect(state.posts).toEqual([]);
   expect(listedPns()).toEqual(INITIAL);
 });
 
-test('Undo and Redo confirm with user-facing titles; cancel preserves both histories', async () => {
+/* ============ Session Undo / Redo ============ */
+
+test('Undo and Redo confirm with user-facing titles; Cancel keeps both histories', async () => {
   await renderPriority();
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  const reordered = ['B-200', 'A-100', 'C-300', 'D-400'];
+  await waitFor(() => expect(listedPns()).toEqual(reordered));
 
-  // Create one confirmed change so Undo becomes available.
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
-  );
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-  const reordered = ['142-260', '2027-60-8114-00', '309-127'];
-  expect(listedPns()).toEqual(reordered);
-
-  // Undo: cancel first — list, undo history and redo history unchanged.
-  fireEvent.click(screen.getByRole('button', { name: '⟲ Undo' }));
-  let dialog = screen.getByRole('dialog', {
-    name: 'Restore previous ranking',
-  });
-  // The restore is the primary message; the action name is detail only,
-  // and the same rank comparison is shown for the restore.
+  fireEvent.click(undoButton());
+  let dialog = screen.getByRole('dialog', { name: 'Restore previous ranking' });
   expect(dialog).toHaveTextContent('previous confirmed order');
   expect(dialog).toHaveTextContent('Undo');
   expect(dialog.querySelector('.pr-snaprow.moved')).toBeNull();
-  // Both entries appear in both snapshots, all as indirect shifts.
-  expect(dialog.querySelectorAll('.pr-snaprow.shifted')).toHaveLength(4);
-  expect(dialog).toHaveTextContent('#1');
-  expect(dialog).toHaveTextContent('#2');
-  expect(dialog).toHaveTextContent('↑');
-  expect(dialog).toHaveTextContent('↓');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(listedPns()).toEqual(reordered);
-  expect(screen.getByRole('button', { name: '⟲ Undo' })).toBeEnabled();
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeDisabled();
+  expect(state.posts).toHaveLength(1);
+  expect(undoButton()).toBeEnabled();
+  expect(redoButton()).toBeDisabled();
 
-  // Undo: confirm — the previous ranking is restored.
-  fireEvent.click(screen.getByRole('button', { name: '⟲ Undo' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-  expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeEnabled();
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(state.posts[1]).toMatchObject({
+    action: 'UNDO',
+    expected_order: [12, 11, 13, 14],
+    new_order: [11, 12, 13, 14],
+  });
+  await waitFor(() => expect(listedPns()).toEqual(INITIAL));
+  expect(undoButton()).toBeDisabled();
+  expect(redoButton()).toBeEnabled();
 
-  // Redo: cancel keeps everything; confirm re-applies.
-  fireEvent.click(screen.getByRole('button', { name: '⟳ Redo' }));
+  fireEvent.click(redoButton());
   dialog = screen.getByRole('dialog', { name: 'Reapply ranking' });
   expect(dialog).toHaveTextContent('applied again');
-  expect(dialog).toHaveTextContent('Redo');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeEnabled();
+  expect(redoButton()).toBeEnabled();
 
-  fireEvent.click(screen.getByRole('button', { name: '⟳ Redo' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-  expect(listedPns()).toEqual(reordered);
+  fireEvent.click(redoButton());
+  await applyRanking();
+  expect(state.posts[2]).toMatchObject({
+    action: 'REDO',
+    expected_order: [11, 12, 13, 14],
+    new_order: [12, 11, 13, 14],
+  });
+  await waitFor(() => expect(listedPns()).toEqual(reordered));
+  expect(undoButton()).toBeEnabled();
+  expect(redoButton()).toBeDisabled();
 });
 
-test('removing an entry still requires its own confirmation', async () => {
+test('Undo restores a removed entry, shown as `Not listed → #n`', async () => {
   await renderPriority();
-
   fireEvent.click(
-    screen.getByRole('button', { name: 'Remove 309-127 from Hot list' }),
-  );
-  expect(
-    screen.getByRole('dialog', { name: 'Remove from Hot list?' }),
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(listedPns()).toEqual(INITIAL);
-
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Remove 309-127 from Hot list' }),
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
   );
   fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
-  expect(listedPns()).toEqual(['2027-60-8114-00', '142-260']);
-});
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'C-300', 'D-400']));
 
-test('Undo restores an entry removed from the bottom of the list', async () => {
-  await renderPriority();
-
-  // Removing the last entry shifts no surviving rank — the Undo restore
-  // must still be offered and show the entry re-entering at its rank.
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Remove 309-127 from Hot list' }),
-  );
-  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
-  expect(listedPns()).toEqual(['2027-60-8114-00', '142-260']);
-
-  fireEvent.click(screen.getByRole('button', { name: '⟲ Undo' }));
+  fireEvent.click(undoButton());
   const dialog = screen.getByRole('dialog', {
     name: 'Restore previous ranking',
   });
-  // The entry does not exist on the current side: a clear `Not listed`
-  // placeholder — never a silent omission; the new side shows #3.
   const [current, proposed] = Array.from(
     dialog.querySelectorAll('.pr-snapshot'),
   );
   const absent = current.querySelector('.pr-snaprow.absent');
   expect(absent).toHaveTextContent('Not listed');
-  expect(absent).toHaveTextContent('309-127');
-  // The restored entry's transition names both sides explicitly.
+  expect(absent).toHaveTextContent('B-200');
   const restored = Array.from(proposed.querySelectorAll('.pr-snaprow')).find(
-    (row) => row.textContent?.includes('309-127'),
+    (row) => row.textContent?.includes('B-200'),
   );
-  expect(restored?.querySelector('.prr')?.textContent).toBe('Not listed → #3');
-  expect(proposed.querySelector('.pr-snaprow.absent')).toBeNull();
+  expect(restored?.querySelector('.prr')?.textContent).toBe('Not listed → #2');
 
-  fireEvent.click(screen.getByRole('button', { name: 'Apply ranking' }));
-  expect(listedPns()).toEqual(INITIAL);
-  expect(screen.getByRole('button', { name: '⟳ Redo' })).toBeEnabled();
-
-  // Redo (remove again): the entry leaves the list — the new side shows
-  // the `Not listed` placeholder instead.
-  fireEvent.click(screen.getByRole('button', { name: '⟳ Redo' }));
-  const redoDialog = screen.getByRole('dialog', { name: 'Reapply ranking' });
-  const [redoCurrent, redoProposed] = Array.from(
-    redoDialog.querySelectorAll('.pr-snapshot'),
-  );
-  expect(redoCurrent).toHaveTextContent('#3');
-  expect(redoCurrent.querySelector('.pr-snaprow.absent')).toBeNull();
-  // The removed entry keeps its origin rank: `#3 → Not listed`.
-  expect(
-    redoProposed.querySelector('.pr-snaprow.absent .prr')?.textContent,
-  ).toBe('#3 → Not listed');
-  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
-  expect(listedPns()).toEqual(INITIAL);
-});
-
-test('adding a new Hot entry at the bottom needs no reorder confirmation', async () => {
-  await renderPriority();
-
-  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
-  // PN 0455-20-0118-03 has TWO active WO Demands — each is its own
-  // candidate row, selected explicitly by its Work Order.
-  fireEvent.click(screen.getByRole('button', { name: /WO 007003/ }));
-
-  // Applied directly — existing ranks did not change.
-  expect(
-    screen.queryByRole('dialog', { name: 'Confirm Hot ranking change' }),
-  ).toBeNull();
-  expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
-});
-
-/* ============ Hot-add PN barcode resolution (post-v18) ============ */
-
-test('a scanned PN barcode with exactly one eligible WO Demand adds directly', async () => {
-  await renderPriority();
-
-  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
-  const search = screen.getByLabelText(
-    'Search PN, WO, Job Number or scan PN barcode',
-  );
-  fireEvent.change(search, { target: { value: 'PF:PN:78-04-0031' } });
-  fireEvent.keyDown(search, { key: 'Enter' });
-
-  // Added directly at the bottom — no extra selection step.
-  expect(
-    screen.queryByRole('dialog', { name: 'Add WO Demand to Hot list' }),
-  ).toBeNull();
-  expect(listedPns()).toEqual([...INITIAL, '78-04-0031']);
-});
-
-test('an ambiguous PN barcode never adds by guess — it filters for an explicit selection', async () => {
-  await renderPriority();
-
-  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
-  const search = screen.getByLabelText(
-    'Search PN, WO, Job Number or scan PN barcode',
-  );
-  // Two active WO Demands share this PN (WO 007003 and WO 007014).
-  fireEvent.change(search, { target: { value: 'PF:PN:0455-20-0118-03' } });
-  fireEvent.keyDown(search, { key: 'Enter' });
-
-  // Nothing was added; the dialog stays open, filtered to the PN, and
-  // asks for the explicit Work Order selection.
-  expect(listedPns()).toEqual(INITIAL);
-  const dialog = screen.getByRole('dialog', {
-    name: 'Add WO Demand to Hot list',
+  await applyRanking();
+  expect(state.posts[1]).toMatchObject({
+    action: 'UNDO',
+    expected_order: [11, 13, 14],
+    new_order: [11, 12, 13, 14],
   });
-  expect(dialog).toHaveTextContent(
-    'Multiple active WO Demands use PN 0455-20-0118-03',
-  );
-  expect(screen.getByRole('button', { name: /WO 007003/ })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /WO 007014/ })).toBeInTheDocument();
-
-  // A repeated Enter on the ambiguous value still adds nothing.
-  fireEvent.keyDown(search, { key: 'Enter' });
-  expect(listedPns()).toEqual(INITIAL);
-
-  // The explicit selection completes the add at the bottom.
-  fireEvent.click(screen.getByRole('button', { name: /WO 007014/ }));
-  expect(listedPns()).toEqual([...INITIAL, '0455-20-0118-03']);
+  await waitFor(() => expect(listedPns()).toEqual(INITIAL));
+  expect(redoButton()).toBeEnabled();
 });
 
-test('a scanned PN barcode with no eligible WO Demand adds nothing', async () => {
+test('an Undo that would re-add a no longer eligible demand is refused and drops the step', async () => {
   await renderPriority();
-
-  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
-  const search = screen.getByLabelText(
-    'Search PN, WO, Job Number or scan PN barcode',
+  // D-400 is fully allocated: it may leave the list, but the server
+  // refuses to add it back.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove D-400 from Hot list' }),
   );
-  fireEvent.change(search, { target: { value: 'PF:PN:NOT-A-CANDIDATE' } });
-  fireEvent.keyDown(search, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'B-200', 'C-300']));
 
-  expect(listedPns()).toEqual(INITIAL);
+  fireEvent.click(undoButton());
+  await applyRanking();
   expect(
-    screen.getByRole('dialog', { name: 'Add WO Demand to Hot list' }),
-  ).toHaveTextContent('No matching active WO Demand');
+    await screen.findByText(
+      'D-400 is fully allocated. This step was removed from the history.',
+    ),
+  ).toBeInTheDocument();
+  expect(listedPns()).toEqual(['A-100', 'B-200', 'C-300']);
+  expect(undoButton()).toBeDisabled();
+  expect(redoButton()).toBeDisabled();
+});
+
+test('a new confirmed change clears Redo', async () => {
+  await renderPriority();
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  fireEvent.click(undoButton());
+  await applyRanking();
+  await waitFor(() => expect(redoButton()).toBeEnabled());
+
+  fireEvent.click(screen.getByRole('button', { name: 'Move D-400 up' }));
+  await applyRanking();
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['A-100', 'B-200', 'D-400', 'C-300']),
+  );
+  expect(redoButton()).toBeDisabled();
+  expect(undoButton()).toBeEnabled();
+});
+
+test('a change made elsewhere: the stale refusal replaces the list, keeps the history, and Undo re-bases on it', async () => {
+  await renderPriority();
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+
+  // Elsewhere: D-400 leaves the list and C-300 moves to the top.
+  setServerOrder([13, 12, 11]);
+
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(state.posts[1]).toMatchObject({
+    action: 'UNDO',
+    expected_order: [12, 11, 13, 14],
+    new_order: [11, 12, 13, 14],
+  });
+  // Refused as stale: the current list is shown with the warning, and
+  // nothing was written — both histories stay.
+  expect(await screen.findByText(STALE)).toBeInTheDocument();
+  expect(listedPns()).toEqual(['C-300', 'B-200', 'A-100']);
+  expect(undoButton()).toBeEnabled();
+
+  // Undo again: the SAME step re-based on the new list (A-100 back to
+  // the top), confirmed against the real current order.
+  fireEvent.click(undoButton());
+  const dialog = screen.getByRole('dialog', {
+    name: 'Restore previous ranking',
+  });
+  expect(
+    dialog.querySelectorAll('.pr-snapshot')[0].querySelector('.prpn')
+      ?.textContent,
+  ).toBe('C-300');
+  await applyRanking();
+  expect(state.posts[2]).toMatchObject({
+    action: 'UNDO',
+    expected_order: [13, 12, 11],
+    new_order: [11, 13, 12],
+  });
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'C-300', 'B-200']));
+  expect(undoButton()).toBeDisabled();
+  expect(redoButton()).toBeEnabled();
+});
+
+test('a step that no longer applies is dropped with a notice and nothing is sent', async () => {
+  await renderPriority();
+  fireEvent.click(screen.getByRole('button', { name: '+ Add to Hot list' }));
+  fireEvent.click(await screen.findByRole('button', { name: /WO 007010/ }));
+  await waitFor(() => expect(listedPns()).toEqual([...INITIAL, 'E-500']));
+
+  // Elsewhere: E-500 leaves the Hot list. The next change is refused as
+  // stale and shows the list without it.
+  setServerOrder([11, 12, 13, 14]);
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  expect(await screen.findByText(STALE)).toBeInTheDocument();
+  expect(listedPns()).toEqual(INITIAL);
+  const posts = state.posts.length;
+
+  // Undo of the ADD would remove E-500 — it is no longer listed.
+  fireEvent.click(undoButton());
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(
+    screen.getByText(
+      'E-500 · WO 007010: this entry is no longer on the Hot list, so this step was removed from the history.',
+    ),
+  ).toBeInTheDocument();
+  expect(state.posts).toHaveLength(posts);
+  expect(undoButton()).toBeDisabled();
+});
+
+test('an Undo refused because the demand is gone drops that step', async () => {
+  await renderPriority();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove B-200 from Hot list' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'C-300', 'D-400']));
+
+  // Elsewhere: the demand line itself is deleted.
+  state.demands = state.demands.filter((d) => d.id !== 12);
+
+  fireEvent.click(undoButton());
+  await applyRanking();
+  expect(state.posts[1]).toMatchObject({
+    action: 'UNDO',
+    expected_order: [11, 13, 14],
+    new_order: [11, 12, 13, 14],
+  });
+  expect(
+    await screen.findByText(
+      `${MISSING} This step was removed from the history.`,
+    ),
+  ).toBeInTheDocument();
+  expect(listedPns()).toEqual(['A-100', 'C-300', 'D-400']);
+  expect(undoButton()).toBeDisabled();
+  expect(redoButton()).toBeDisabled();
+});
+
+/* ============ Unknown outcome ============ */
+
+test('a 5xx leaves the outcome unknown; Retry resends the same key and the replay completes the step', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'status-after-commit', status: 502 };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  const pending = await screen.findByText(/may already have been applied/);
+  expect(pending).not.toHaveTextContent('Nothing was changed');
+  // Focus lands on the one useful next step.
+  expect(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  ).toHaveFocus();
+  // Every write is frozen while the outcome is unknown.
+  expect(
+    screen.getByRole('button', { name: 'Move B-200 down' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: '+ Add to Hot list' }),
+  ).toBeDisabled();
+  expect(undoButton()).toBeDisabled();
+  expect(listedPns()).toEqual(INITIAL);
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(state.posts).toHaveLength(2);
+  expect(state.posts[1]).toEqual(state.posts[0]);
+  expect(
+    await screen.findByText(
+      /Hot ranking updated — it had already been applied/,
+    ),
+  ).toBeInTheDocument();
+  // The step was recorded exactly as for a normal success.
+  expect(undoButton()).toBeEnabled();
+  expect(screen.queryByText(/may already have been applied/)).toBeNull();
+});
+
+test('a network failure leaves the outcome unknown; Retry with the same key applies it once', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'drop-before' };
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove C-300 from Hot list' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Remove entry' }));
+  await screen.findByText(/may already have been applied/);
+  expect(listedPns()).toEqual(INITIAL);
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Retry the same change' }),
+  );
+  await waitFor(() => expect(listedPns()).toEqual(['A-100', 'B-200', 'D-400']));
+  expect(state.posts[1].device_event_id).toBe(state.posts[0].device_event_id);
+  expect(undoButton()).toBeEnabled();
+});
+
+test('Reload list abandons the unknown submission and re-reads the list', async () => {
+  await renderPriority();
+  state.nextPost = { kind: 'drop-after-commit' };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
+  await applyRanking();
+  await screen.findByText(/may already have been applied/);
+  const reads = state.reads.filter((read) => read === '/api/hot-list').length;
+
+  fireEvent.click(screen.getByRole('button', { name: 'Reload list' }));
+  await waitFor(() =>
+    expect(listedPns()).toEqual(['B-200', 'A-100', 'C-300', 'D-400']),
+  );
+  expect(state.reads.filter((read) => read === '/api/hot-list')).toHaveLength(
+    reads + 1,
+  );
+  expect(
+    screen.getByText(
+      'The change may already have been applied. The list was reloaded — check it before making another change.',
+    ),
+  ).toBeInTheDocument();
+  // Abandoned: no Retry, writes available again, the history unchanged.
+  expect(
+    screen.queryByRole('button', { name: 'Retry the same change' }),
+  ).toBeNull();
+  expect(screen.getByRole('button', { name: 'Move B-200 down' })).toBeEnabled();
+  expect(undoButton()).toBeDisabled();
+  expect(state.posts).toHaveLength(1);
+});
+
+/* ============ Write blocks ============ */
+
+test('disconnected: the list stays readable and every write control is disabled', async () => {
+  state.healthDown = true;
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  await waitFor(() => expect(listedPns()).toEqual(INITIAL));
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: '+ Add to Hot list' }),
+    ).toBeDisabled(),
+  );
+  expect(
+    screen.getByRole('button', { name: 'Move A-100 down' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Remove A-100 from Hot list' }),
+  ).toBeDisabled();
+  expect(undoButton()).toBeDisabled();
+  expect(document.querySelector('.pr-item')).toHaveAttribute(
+    'draggable',
+    'false',
+  );
+  expect(state.posts).toEqual([]);
 });
 
 /* ============ Snapshot alignment and impact/action block (GUI v14) ============ */
@@ -468,9 +1221,7 @@ test('the snapshot position track sizes from content — no wide fixed label col
 test('both snapshot sections share one wrapper grid for the common position track', async () => {
   await renderPriority();
 
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
-  );
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
@@ -486,9 +1237,7 @@ test('both snapshot sections share one wrapper grid for the common position trac
 test('the snapshot divider spans every row and rows pin to explicit grid lines', async () => {
   await renderPriority();
 
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
-  );
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
@@ -501,9 +1250,6 @@ test('the snapshot divider spans every row and rows pin to explicit grid lines',
     const divider = list.firstElementChild as HTMLElement;
     expect(divider.className).toContain('pr-snapdivider');
     expect(divider).toHaveAttribute('aria-hidden', 'true');
-    // The invariant is structural, not a fixed count: the divider spans
-    // EXACTLY the rows the change produces (the affected-row count is
-    // mock-data-derived and changed with the v16 mock rework).
     const rows = Array.from(
       list.querySelectorAll<HTMLElement>(':scope > li.pr-snaprow'),
     );
@@ -546,20 +1292,14 @@ test('the snapshot divider enables only with subgrid and hides in the fallbacks'
 test('the impact/action block separates the Action label from its emphasized value', async () => {
   await renderPriority();
 
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Move 2027-60-8114-00 down' }),
-  );
+  fireEvent.click(screen.getByRole('button', { name: 'Move A-100 down' }));
   const dialog = screen.getByRole('dialog', {
     name: 'Confirm Hot ranking change',
   });
   const impact = dialog.querySelector('.pr-impact');
-  expect(impact).not.toBeNull();
-  // Readable shift sentence…
   expect(impact?.querySelector('.pr-shifts')?.textContent).toBe(
     '1 other demand will shift up.',
   );
-  // …and a separated Action label + value; the value is emphasized
-  // text only — no pill markup.
   expect(impact?.querySelector('.pr-actionlbl')?.textContent).toBe('Action');
   expect(impact?.querySelector('.pr-actionval')?.textContent).toBe('Move Down');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));

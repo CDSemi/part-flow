@@ -19,8 +19,9 @@ quantity lineage (the `SPLIT` / `MERGED` types, the QuantityFlow
 lifecycle closure, and the append-only `quantity_flow_lineage` edge
 table); plus the Phase 10 Stockroom and allocation persistence (the
 `STOCKED` type, the `STOCKED` flow closure, `work_orders.completed_at`
-and the append-only `work_order_allocations` table). Business rules
-stay in the
+and the append-only `work_order_allocations` table); plus the Phase 12
+Hot rank constraints (positive, unique `priority_rank`) and the Hot
+list idempotency index on `audit_events`. Business rules stay in the
 Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -719,6 +720,14 @@ class WorkOrderDemand(Base):
             "allocated_quantity >= 0",
             name=conv("ck_work_order_demands_allocated_quantity_non_negative"),
         ),
+        # Phase 12 Hot list (invariant H1): ranks are positive and
+        # unique — NULL (unranked) any number of times. The Hot list
+        # command renumbers to exactly 1..N and is the only writer.
+        CheckConstraint(
+            "priority_rank IS NULL OR priority_rank >= 1",
+            name=conv("ck_work_order_demands_priority_rank_positive"),
+        ),
+        UniqueConstraint("priority_rank", name="uq_work_order_demands_priority_rank"),
         Index("ix_work_order_demands_work_order_id", "work_order_id"),
         Index("ix_work_order_demands_part_number", "part_number"),
     )
@@ -1291,3 +1300,23 @@ class AuditEvent(Base):
         # Per-entity history in write order.
         Index("ix_audit_events_entity_type_entity_id_id", "entity_type", "entity_id", "id"),
     )
+
+
+# The idempotency lookup of the Hot list command (Phase 12): its audit
+# rows ARE the idempotency record, found by the `device_event_id` in
+# their `hot_list_change` metadata block. Declared after the class so
+# the lookup (`app.application.hot_list`) emits literally this expression
+# — the JSONB SUBSCRIPT form the planner matches, written with an
+# explicit `->>` so it renders exactly as PostgreSQL stores it (the
+# `.astext` spelling adds parentheses Alembic's compare reads as a
+# different expression; the planner sees the same tree). Partial on
+# WorkOrderDemand rows, the only entity the command audits. Created by
+# migration `0013_phase12_priority`.
+HOT_LIST_DEVICE_EVENT_ID = AuditEvent.metadata_["hot_list_change"].op("->>", return_type=Text)(
+    "device_event_id"
+)
+Index(
+    "ix_audit_events_hot_list_device_event_id",
+    HOT_LIST_DEVICE_EVENT_ID,
+    postgresql_where=AuditEvent.entity_type == AuditEntityType.WORK_ORDER_DEMAND,
+)

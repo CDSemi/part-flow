@@ -73,3 +73,19 @@ class RouteDeviationConfirmationRequiredError(ConflictError):
     def __init__(self, message: str, route_deviation: dict[str, Any]) -> None:
         super().__init__(message)
         self.route_deviation = route_deviation
+
+
+class HotListChangedError(ConflictError):
+    """The Hot list changed since the manager confirmed (Phase 12).
+
+    Every Hot list change carries the full ranked order the manager
+    confirmed against as an optimistic precondition; when it no longer
+    equals the current order nothing is written, and the response
+    carries the CURRENT entries (``app.application.hot_list.HotEntry``,
+    rendered exactly like a Hot list read) so the view can show them
+    and the manager can decide again.
+    """
+
+    def __init__(self, message: str, entries: list[Any]) -> None:
+        super().__init__(message)
+        self.entries = entries

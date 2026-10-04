@@ -65,35 +65,6 @@
   cursor: grab;
 }
 
-.pr-item .rank {
-  width: 44px;
-  height: 44px;
-  border-radius: 11px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 900;
-  font-size: 17px;
-  flex: none;
-  background: var(--chip);
-  color: var(--muted);
-}
-
-.pr-item .rank.r1 {
-  background: var(--hot1-chip-surface);
-  color: var(--err-t);
-}
-
-.pr-item .rank.r2 {
-  background: var(--hot2-chip-surface);
-  color: var(--dev-t);
-}
-
-.pr-item .rank.r3 {
-  background: var(--hot3-chip-surface);
-  color: var(--warn-t);
-}
-
 .pr-item .body {
   flex: 1;
   min-width: 0;
@@ -113,12 +84,6 @@
   white-space: nowrap;
 }
 
-.pr-item .l1 .wo {
-  font-family: var(--mono), monospace;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .pr-item .l2 {
   font-size: 12.5px;
   color: var(--muted);
@@ -126,6 +91,63 @@
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* The PN's current distribution: labeled as the PN's, since every
+   demand of the PN shares the same quantity. */
+.pr-item .l3 {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  flex-wrap: wrap;
+}
+
+.pr-item .l3 .dlbl {
+  font-weight: 700;
+  color: var(--faint);
+}
+
+.pr-item .l3 .dloc {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.pr-item .l3 .dloc b {
+  font-family: var(--mono), monospace;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.pr-item .l3 .dstate {
+  color: var(--faint);
+}
+
+/* Quiet secondary notes: the internal Work Order label and the
+   fully-allocated and not-yet-released notes. */
+.pr-quiet {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--faint);
+}
+
+/* The Work Order status chip, as on the Work Orders surfaces. */
+.pr-item .wostat {
+  font-size: 11.5px;
+  font-weight: 750;
+  padding: 3px 10px;
+  border-radius: 20px;
+  display: inline-block;
+}
+
+.pr-item .wostat.completed {
+  background: var(--chip);
+  color: var(--muted);
 }
 
 .pr-item .due {
@@ -198,8 +220,47 @@
 
 .pr-bar {
   display: flex;
+  align-items: center;
   gap: 10px;
   max-width: 860px;
+}
+
+.pr-busy {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Persistent inline feedback above the list: a refusal, a change made
+   elsewhere, a history step that can no longer apply, or a change
+   whose outcome is unknown (with its Retry / Reload actions). */
+.pr-msg {
+  max-width: 860px;
+  border: 1px solid var(--info-border);
+  background: var(--info-surface-weak);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin-bottom: 14px;
+}
+
+.pr-msg.warn {
+  border-color: var(--warning-border);
+  background: var(--warning-surface-weak);
+  color: var(--warn-t);
+}
+
+.pr-msg.error {
+  border-color: var(--error-border);
+  background: var(--error-surface-weak);
+  color: var(--err-t);
+}
+
+.pr-msgbtns {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 
 /* The page note renders through the shared PageNote component
@@ -501,19 +562,15 @@
   box-shadow: 0 0 0 3px var(--info-ring);
 }
 
-.hotadd-hint {
-  font-size: 12px;
-  color: var(--faint);
-  margin: 8px 2px 14px;
-  line-height: 1.6;
+/* Feedback of the last barcode scan in the add dialog. */
+.hotadd-feedback.error {
+  color: var(--err-t);
+  font-weight: 650;
 }
 
-.hotadd-hint code {
-  font-family: var(--mono), monospace;
-  background: var(--chip);
-  border-radius: 5px;
-  padding: 1px 6px;
-  color: var(--muted);
+.hotadd-feedback.info {
+  color: var(--info-t);
+  font-weight: 650;
 }
 
 .hotaddlist {
@@ -536,8 +593,12 @@
   transition: border-color 0.12s;
 }
 
-.hotadd-item:hover {
+.hotadd-item:hover:not(:disabled) {
   border-color: var(--info-t);
+}
+
+.hotadd-item:disabled {
+  opacity: 0.5;
 }
 
 .hotadd-item .hpn {

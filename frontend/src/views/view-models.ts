@@ -381,30 +381,6 @@ export interface MockWorkOrder {
   lines: MockWorkOrderLine[];
 }
 
-export interface MockHotEntry {
-  pn: string;
-  /** Work Order Demand label, e.g. `WO 007001 · Job 18112`. */
-  workOrder: string;
-  /**
-   * External Work Order Number, or null for an internal Work Order
-   * without an external number (displays `—`). Explicit field — the
-   * confirmation dialogs never parse it out of the display label.
-   */
-  workOrderNumber: string | null;
-  /** External Job Number, or null when the demand has none. */
-  jobNumber: string | null;
-  type: RequestType;
-  figures: string[];
-  /**
-   * ISO `YYYY-MM-DD`, or null when the demand has no due date. The
-   * countdown text and urgency class are DERIVED at render
-   * (views/dates `dueCountdown` + the shared UI clock), never stored.
-   */
-  due: string | null;
-  /** PN barcode accepted by the add-to-Hot search field (mock only). */
-  barcode?: string;
-}
-
 /**
  * One completed PN operation eligible for Undo. The Scan Station keeps
  * a session-local stack of these; Undo always shows this summary before

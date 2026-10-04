@@ -201,6 +201,16 @@ def _line(pn: str, quantity: int, **extra: Any) -> dict[str, Any]:
 
 def _set_priority(engine: Engine, demand_id: int, rank: int | None) -> None:
     with engine.begin() as connection:
+        # Ranks are unique (Phase 12) and the module database is shared: free the rank first.
+        if rank is not None:
+            connection.execute(
+                sa.update(models.WorkOrderDemand)
+                .where(
+                    models.WorkOrderDemand.priority_rank == rank,
+                    models.WorkOrderDemand.id != demand_id,
+                )
+                .values(priority_rank=None)
+            )
         connection.execute(
             sa.update(models.WorkOrderDemand)
             .where(models.WorkOrderDemand.id == demand_id)

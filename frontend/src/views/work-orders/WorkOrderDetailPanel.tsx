@@ -33,6 +33,7 @@ import {
   createDraftLine,
   draftFromDemand,
   draftToNewLine,
+  hotRemoveExplanation,
   isPositiveInteger,
   lineRemoveRule,
   processScan,
@@ -369,7 +370,7 @@ export function WorkOrderDetailPanel({
 
   function requestRemove(line: DemandLineDraft) {
     const rule = lineRemoveRule(line);
-    if (rule === 'blocked') return;
+    if (rule === 'blocked' || rule === 'hot') return;
     if (rule === 'draft') {
       // An unsaved draft line is local state only — removing it stays
       // available while the draft is dirty (it IS the draft).
@@ -908,6 +909,7 @@ export function WorkOrderDetailPanel({
                               className="pr-x"
                               disabled={
                                 removeRule === 'blocked' ||
+                                removeRule === 'hot' ||
                                 busy ||
                                 (removeRule === 'confirm' &&
                                   // A saved-line removal commits on the
@@ -918,11 +920,14 @@ export function WorkOrderDetailPanel({
                               title={
                                 removeRule === 'blocked'
                                   ? RELEASED_REMOVE_EXPLANATION
-                                  : removeRule === 'confirm'
-                                    ? dirty
-                                      ? REMOVE_WHILE_DIRTY_EXPLANATION
-                                      : 'Remove line (asks for confirmation)'
-                                    : 'Remove draft line'
+                                  : removeRule === 'hot' &&
+                                      line.hotRank !== null
+                                    ? hotRemoveExplanation(line.hotRank)
+                                    : removeRule === 'confirm'
+                                      ? dirty
+                                        ? REMOVE_WHILE_DIRTY_EXPLANATION
+                                        : 'Remove line (asks for confirmation)'
+                                      : 'Remove draft line'
                               }
                               aria-label={
                                 line.pn
@@ -937,6 +942,10 @@ export function WorkOrderDetailPanel({
                           {removeRule === 'blocked' ? (
                             <div className="bc">
                               {RELEASED_REMOVE_EXPLANATION}
+                            </div>
+                          ) : removeRule === 'hot' && line.hotRank !== null ? (
+                            <div className="bc">
+                              {hotRemoveExplanation(line.hotRank)}
                             </div>
                           ) : null}
                         </td>

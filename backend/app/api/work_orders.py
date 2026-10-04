@@ -46,15 +46,16 @@ Deliberate surface decisions:
   of a Work Order is never removable (a Work Order contains one or
   more demand records; nothing auto-deletes the Work Order) — either
   violation is a 409 that removes nothing; so is removing a line that
-  stocked quantity has ever been allocated to (Phase 10).
+  stocked quantity has ever been allocated to (Phase 10), and a line on
+  the Hot list (Phase 12 — it leaves the Hot list first).
 - ``GET /work-orders/completed`` is the read-only completed history
   (Phase 10, GUI_DESIGN §11.5): server-side search, the Done range and
   the due outcome in the site calendar (``SITE_TIMEZONE`` — the one
   rule behind every row's ``done_date`` / ``due_outcome`` too), the
   chosen sort and keyset paging bound to it.
 - ``priority_rank`` and ``allocated_quantity`` appear only in
-  responses: Hot ranking (Phase 12) and allocation (Phase 10) own
-  those values.
+  responses: the Hot list command (``POST /api/hot-list/changes``,
+  Phase 12) and allocation (Phase 10) own those values.
 - The audit ``actor_reference`` is never client-writable: no request
   carries an actor, so audit rows from this surface stay NULL until an
   authenticated (or server-configured) identity exists (Phase 14).

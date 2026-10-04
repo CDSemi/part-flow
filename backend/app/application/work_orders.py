@@ -71,7 +71,8 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
   the immutable ``RECEIVED`` metadata context
-  (``production_release.demand_has_released_quantity``). Removal never
+  (``production_release.demand_has_released_quantity``) — and, since
+  Phase 12, only while the demand is not on the Hot list. Removal never
   touches the PartNumber master, QuantityFlows, PartMovements, release
   history, or other demand lines; an unsaved draft is a frontend
   concern and never reaches this layer. Release itself and every
@@ -923,7 +924,12 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     - the LAST demand line of a Work Order is never removable: a Work
       Order contains one or more Work Order Demand records
       (PROJECT_PROFILE §8.2), and removal never auto-deletes the Work
-      Order.
+      Order;
+    - a demand line on the Hot list (``priority_rank`` set, Phase 12)
+      is refused: it leaves the Hot list first, through the audited Hot
+      list command (``app.application.hot_list``), so no ranked entry
+      disappears without a manager-confirmed priority change and the
+      remaining ranks stay dense.
 
     Removal deletes exactly the one demand row: the PartNumber master,
     QuantityFlows, PartMovements, release history, the demand's own
@@ -936,13 +942,16 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     released-quantity evidence cannot appear between the check and the
     DELETE; the parent Work Order row lock serializes sibling
     deletions, so two concurrent removals can never both pass the
-    last-line check and leave a zero-demand Work Order. No audit row
+    last-line check and leave a zero-demand Work Order. The demand row
+    is re-read under its lock (``populate_existing``): the Hot list
+    command locks a demand it ranks the same way, so the rank check
+    and a concurrent Hot add of the line serialize. No audit row
     is appended: the Slice 1 audit vocabulary records creations and
     edits only (SLICE1_DATA_MODEL §16) and the demand's existing
     CREATED/UPDATED history remains — historical records never
     disappear.
     """
-    demand = session.get(WorkOrderDemand, demand_id, with_for_update=True)
+    demand = session.get(WorkOrderDemand, demand_id, with_for_update=True, populate_existing=True)
     if demand is None or demand.work_order_id != work_order_id:
         raise NotFoundError(
             f"Demand line {demand_id} does not exist on Work Order {work_order_id}."
@@ -951,6 +960,11 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     if work_order is None:  # pragma: no cover - the demand's FK guarantees the row
         raise NotFoundError(f"Work Order {work_order_id} does not exist.")
     _require_active(work_order, "Nothing was removed.")
+    if demand.priority_rank is not None:
+        raise ConflictError(
+            "Cannot remove: this demand line is on the Hot list. Remove it from the Hot list"
+            " in Management → Priority first."
+        )
     if demand.allocated_quantity > 0:
         raise ConflictError(
             "Cannot remove: stocked quantity has already been allocated to this demand line."

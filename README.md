@@ -62,7 +62,10 @@ the Scan Station reads — and the PN-centric Management Tracking on
 `GET /api/tracking` (the searchable, filterable PN list) and
 `GET /api/tracking/detail` (one PN's demand, current quantity by Area
 / Machine, Quantity Flows with lineage and routes, and its paged
-immutable Movement history):
+immutable Movement history) — and the **Phase 12 Priority Management**:
+the Hot list of Work Order Demands (`GET /api/hot-list`,
+`GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
+real Management → Priority view on it:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -71,7 +74,8 @@ immutable Movement history):
   sections and Management → Machines from Phase 3.5, Management →
   Work Orders from Phase 4 with the Completed Work Orders page from
   Phase 10, the Scan Station from Phases 5–10.5, and the Production
-  Board, Area Board and PN Tracking from Phase 11) read and
+  Board, Area Board and PN Tracking from Phase 11, and Priority from
+  Phase 12) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -197,7 +201,16 @@ immutable Movement history):
   and the Area inventory carry each flow's derived processing state,
   Machine and valid actions, the inventory split into queued / per
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
-  carry the derived `operational_state` and `assigned_quantity`),
+  carry the derived `operational_state` and `assigned_quantity`), and the
+  Phase 12 Hot list API — `GET /api/hot-list` (the ranked Work Order
+  Demands, inactive entries included, each with the PN's current quantity
+  per Area / Machine), `GET /api/hot-list/candidates` (`?search=` over PN /
+  Work Order Number / Job Number, or `?barcode=PF:PN:…`; only demand
+  eligible to join the list) and `POST /api/hot-list/changes` (the one
+  idempotent, audited command that adds, removes, moves, undoes or redoes
+  one entry against the order the manager confirmed — the only writer of
+  `priority_rank`; Department-gated: 404 with no active Department, 409
+  with several), with the demand-line removal of a Hot line refused,
   all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
@@ -239,7 +252,10 @@ immutable Movement history):
   Phase 11 read-path index (`0012_phase11_tracking_index` — one
   composite index `(part_number, occurred_at, id)` on `part_movements`
   for PN Tracking's reverse-chronological history read; no column, table
-  or constraint)
+  or constraint) and the Phase 12 Hot list persistence
+  (`0013_phase12_priority` — a pre-check that refuses non-dense ranks, the
+  positive-rank CHECK, the UNIQUE `priority_rank` and the audit expression
+  index for the command's idempotency lookup)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -367,9 +383,12 @@ originals kept visible beside their `REVERSED` rows — Quantity Flows
 and allocation entries page too, so nothing is truncated out of reach; the
 derived status counts stock only while it is still unallocated
 (`Stocked`), an open demand with nothing in production and no
-available stock reading `Open`. Every
-other view (Priority, Planned Routes, Part Numbers) renders
-development-only mock data; Phase 11 also lists the server's per-PN
+available stock reading `Open`. Phase 12 makes Management → Priority
+real: the Hot list reads and writes `/api/hot-list` (confirmation before
+every order change, session Undo / Redo, drag-and-drop and Move Up /
+Move Down, add by search or `PF:PN:` scan), and Management → Work Orders
+disables removing a Hot demand line. Every other view (Planned Routes,
+Part Numbers) renders development-only mock data; Phase 11 also lists the server's per-PN
 breakdown of each Machine's assigned quantity in Management →
 Machines (`assigned_lines` on `/api/machines`), was audited on
 2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11), and closes with the
@@ -435,7 +454,8 @@ Frontend structure:
   (Phase 5, `scan-station.ts`), the ONE shared Area monitoring model
   both the Scan Station and the Area Board render
   (`area-inventory.ts`) and the two Phase 11 monitoring reads
-  (`production-board.ts`, `area-board.ts`) with snake_case ↔ camelCase
+  (`production-board.ts`, `area-board.ts`), the Phase 12 Hot list (`hot-list.ts`)
+  with snake_case ↔ camelCase
   mapping, the ISO 8601 duration helpers, and
   the `useApiData` loading/error/reload hook. Production-safe — never
   imports from `src/mocks/`.
@@ -448,7 +468,8 @@ Frontend structure:
   entirely: the real views (`src/app/real-views.ts` — Administration
   and Machines from Phase 3.5, Work Orders with the Completed Work
   Orders page from Phases 4 and 10, the Scan Station from Phase 5,
-  the Production Board and the Area Board from Phase 11)
+  the Production Board and the Area Board from Phase 11, Priority from
+  Phase 12)
   ship in every
   build against the live `/api` surface, and every other route renders
   an explicit "not connected to a production data source yet" state. `npm run build`

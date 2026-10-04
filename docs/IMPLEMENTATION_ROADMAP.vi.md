@@ -277,6 +277,60 @@
   (overlay detail modeless giữ nguyên) với polling / stale-feed chung, các state
   loading / error / empty và paging long-data có bound. Mục Phase 11 bên dưới
   ghi chi tiết trạng thái và ranh giới.
+- **Phase 12**: đã triển khai end to end (backend và frontend) **Priority Management**, nhưng **chưa
+  đóng**: việc đóng phase chờ hai quyết định của owner, OD5 (priority tại Work Order intake) và OD7
+  (báo cáo "Hot and priority demand" của PROJECT_PROFILE §27); xem mục Phase 12. Persistence:
+  migration `0013_phase12_priority` trước hết chạy **pre-check từ chối** — các giá trị
+  `work_order_demands.priority_rank` khác NULL hiện có phải đúng là `1..N`, không rank nào < 1, trùng
+  hoặc hở; nếu không migration raise, nêu từng demand id vi phạm cùng rank của nó, không rewrite gì và
+  để database ở `0012_phase11_tracking_index` — rồi thêm
+  `ck_work_order_demands_priority_rank_positive`, UNIQUE không deferrable
+  `uq_work_order_demands_priority_rank` (NULL vẫn phân biệt) và partial expression index
+  `ix_audit_events_hot_list_device_event_id` trên `metadata['hot_list_change'] ->> 'device_event_id'`
+  (`entity_type = 'WorkOrderDemand'`) phục vụ idempotency lookup. Hot list là tập Work Order Demand có
+  rank (`priority_rank IS NOT NULL`; không flag, không table); invariant H1 luôn đúng — các rank đúng là
+  `1..N`, unique và dense — và một command duy nhất là **writer duy nhất** của `priority_rank` (Work
+  Order create/PATCH vẫn từ chối). Application (`app/application/hot_list.py`, rule thuần trong
+  `app/domain/hot_list.py`): `POST /api/hot-list/changes` áp dụng một thay đổi single-entry (`ADD` ở
+  bottom — áp dụng trực tiếp, `REMOVE`, `MOVE_UP` / `MOVE_DOWN`, `DRAG`, `UNDO` / `REDO`) đối chiếu
+  `expected_order` mà manager đã xác nhận, và đánh số lại `1..N` trong một transaction dưới Hot advisory
+  lock, rồi `FOR UPDATE` chỉ các row thay đổi cộng row được chèn theo id tăng dần (không có lock Work
+  Order hay Part Number; mọi demand writer khác lấy demand row theo id tăng dần và không writer nào lấy
+  Hot lock, nên wait graph không có chu trình); rank được ghi bằng hai flush (xóa rồi gán) nên UNIQUE
+  không bao giờ thấy trùng tạm thời; `expected_order` cũ là 409 `hot_list_changed` kèm entries hiện tại
+  và không ghi gì; demand được chèn phải **eligible** — tồn tại, chưa có rank, Work Order của nó chưa
+  completed và nó **active** theo nghĩa PROJECT_PROFILE §14 (`requested_quantity > allocated_quantity`)
+  — được xét trên row đã lock và đọc lại; command idempotent theo `device_event_id` (fingerprint của
+  action, expected order và new order: cùng id và fingerprint thì replay với 200 và `created: false`,
+  fingerprint khác là 409; audit row chính là idempotency record, tra trước và tra lại sau advisory
+  lock). Audit (PROJECT_PROFILE §28): một row `audit_events` `UPDATED` `WorkOrderDemand` cho mỗi demand
+  đổi rank, `before_data` / `after_data` giữ rank và `metadata.hot_list_change` giữ `device_event_id`,
+  action, fingerprint, sequence cùng **identity snapshot** (demand id, Part Number, Work Order id và
+  number), nên replay dựng lại `changes` chỉ từ audit row kể cả khi demand đã bị xóa; `actor_reference`
+  vẫn NULL tới Phase 14. Read và API (`app/api/hot_list.py`): `GET /api/hot-list` (entries theo rank,
+  gồm cả entry inactive, mỗi entry có Work Order, request type, Job Number, requested / allocated /
+  shortage / released quantity, due date, cờ `active` và quantity hiện tại của PN theo Area / Machine /
+  state), `GET /api/hot-list/candidates?search=` (match không phân biệt hoa thường trên PN, Work Order
+  Number hoặc Job Number, giới hạn 50 kèm cờ `truncated`) hoặc `?barcode=PF:PN:…` (toàn bộ demand
+  eligible của PN đó, không giới hạn; copy từ chối riêng của view Priority), cả hai kèm
+  `already_listed_count`, và command. **Department gate**: mọi read và command resolve Department qua
+  `production_board.resolve_department` — không có Department active là 404, nhiều Department là 409 với
+  wording của Hot list, không ghi gì; cố ý không có tham số `department_id` (OD2 bên dưới). **Removal
+  guard**: `DELETE /api/work-orders/{id}/demands/{id}` nay từ chối demand line đang có rank bằng 409
+  (kiểm tra trên row do removal lock và đọc lại, nên serialize với Hot command), và Management → Work
+  Orders vô hiệu hóa ✕ của Hot line với cùng giải thích. Frontend: view Management → Priority thật
+  (`src/api/hot-list.ts`, `views/priority/PriorityView.tsx`, `hot-history.ts`) thay mock Phase 2
+  (`src/mocks/priority.ts` đã xóa; view ship từ `src/app/real-views.ts`) — list chỉ render từ response
+  của server, confirmation đổi order hiển thị snapshot trước / sau, Remove có confirmation riêng,
+  drag-and-drop và Move Up / Move Down, Add dialog một ô (search phía server, hoặc scan `PF:PN:` được
+  resolve khi Enter), entry **inactive** (Work Order completed, hoặc line đã allocate đủ) được giữ,
+  gắn cờ và vẫn remove / move được, Undo / Redo **session** không giới hạn (PROJECT_PROFILE §21 mục 9)
+  là stack phía client của các intent single-entry được rebase lên list hiện tại, mọi write bị chặn khi
+  disconnected, đang chạy hoặc outcome chưa rõ, và outcome chưa rõ cho phép retry tường minh đúng
+  payload và key cũ. Board, Tracking và Scan Station đọc `priority_rank` không đổi. Test: backend gate
+  hoàn tất với 773 test pass (`test_phase12_schema.py`, `test_hot_list_rules.py`,
+  `test_hot_list_api.py` gồm bốn test lock / concurrency) và frontend gate với 789 pass; Phase 12 chưa
+  qua audit đóng phase.
 
 ## Nguyên tắc triển khai
 
@@ -1448,6 +1502,70 @@ các trường hợp biên của helper.
   Redo;
 - apply có audit sau explicit confirmation;
 - Undo/Redo.
+
+Trạng thái triển khai (backend và frontend đã triển khai end to end; **Phase 12 chưa đóng** — audit đóng
+phase đối chiếu PROJECT_PROFILE §21 Priority Management mục 1–10 và GUI_DESIGN §8 chưa chạy, và theo
+quy tắc nó thất bại cho tới khi OD5 và OD7 bên dưới có owner): **Backend**. Persistence là migration
+`0013_phase12_priority` (pre-check từ chối, CHECK rank dương, UNIQUE và audit expression index;
+downgrade drop cả ba; `models.py` khai báo cùng các object và `compare_metadata` rỗng tại head).
+Pre-check từ chối thay vì normalize có chủ đích: PROJECT_PROFILE §18 xếp tie theo ngày nghiệp vụ và §28
+yêu cầu mọi thay đổi priority đều được audit, nên renumber âm thầm sẽ không đạt cái nào. Expression của
+index được lưu ở dạng operator `->>` tường minh trên subscript `metadata['hot_list_change']` — cách
+render `.astext` có thêm dấu ngoặc mà Alembic đọc thành expression khác — và Application lookup dùng
+cùng expression (test `EXPLAIN` chứng minh index được dùng). Rule thuần nằm trong
+`app/domain/hot_list.py` (`interpret_change` trả về **mọi** cách đọc của một thay đổi, vì hoán đổi hai
+phần tử kề nhau là thay đổi duy nhất có hai cách đọc: "B lên" hoặc "A xuống"; action gửi lên phải khớp
+một trong hai). `app/application/hot_list.py` resolve Department, dựng read model và chạy
+`apply_hot_list_change`: input shape, cách đọc thay đổi và khớp action, fingerprint, idempotency lookup
+trước và sau Hot advisory lock, precondition `expected_order`, row lock, eligibility trên row đã lock,
+ghi hai flush, một audit row cho mỗi rank đổi, và entries của response dựng **trước** COMMIT để là list
+như đã commit. Replay trả về `changes` gốc dựng lại từ audit row và một lần đọc mới của list hiện tại.
+Body 409 `hot_list_changed` là `{detail, hot_list_changed: true, entries}` và dùng chung wire shape
+thành công của `entries`. `priority_rank` không có writer nào trong `app/` ngoài command này (đã kiểm
+bằng search). **Frontend**: view xem bullet Trạng thái hiện tại; history Undo / Redo nằm ở module scope
+(giữ qua việc đổi sub-view Management và kết thúc khi reload trang, không giới hạn độ sâu), step không
+còn áp dụng được lên list hiện tại (entry đã có trong list, hoặc không còn) bị bỏ kèm thông báo giải
+thích thay vì chặn các step sau, 409 stale giữ cả hai stack, và Undo / Redo chèn lại entry mà server từ
+chối vì không eligible (409) hoặc không tồn tại (404) thì bỏ step đó kèm message của server. Add dialog
+không bao giờ thêm từ kết quả cũ hoặc debounce: candidate chỉ được thêm bằng lựa chọn tường minh, hoặc
+bằng barcode có đúng một demand eligible; barcode có nhiều demand mở danh sách đã lọc để chọn, và barcode
+không có demand nào hiện từ chối và giữ ô nhập được chọn cho lần scan tiếp. List refresh khi mở view và
+sau mỗi command; không polling và không nhận push.
+
+Quyết định lấy làm default (mỗi cái chỉ ghi thay đổi đã được manager xác nhận và có audit, không mâu
+thuẫn canonical text; không cái nào chặn triển khai, và owner chọn khác thì không cần undo dữ liệu trừ
+chỗ nói rõ): **OD1 — entry inactive**: entry có Work Order completed hoặc line đã allocate đủ
+(inactive theo PROJECT_PROFILE §14) được **giữ và gắn cờ** cho tới khi manager remove; không ghi gì tự
+động, allocation bỏ qua nó (chỉ duyệt shortage > 0) và board vẫn hiển thị rank **đã lưu**, nên #1 inactive
+nghĩa là không có row mở nào màu đỏ cho tới khi nó bị remove hoặc move. Là ngoại lệ có tài liệu,
+REMOVE / MOVE / renumber có thể đổi `priority_rank`, và thêm audit row `UPDATED`, trên demand của Work
+Order **completed** — ghi priority không phải sửa Work Order, và bề mặt Work Orders cùng trang Completed
+Work Orders vẫn read-only. Owner có thể chọn auto-removal thay thế (nó đặt Hot lock vào trong allocation
+và reversal và tạo write priority không xác nhận); khi đó các entry stale hiện có rời list qua command
+có audit. **OD2 — phạm vi Department**: một rank space bị gate về đúng một Department active (404 / 409
+nếu khác), vì demand không mang Department và rank là một cột cho mỗi demand, được allocation dùng theo
+PN; rank space theo Department cần Department trên demand hoặc suy ra theo Area cộng migration renumber,
+nên cái này **không thể đảo ngược nếu không sửa dữ liệu**. Đây là **quyết định owner** được ghi nhận,
+không phải hoãn sang phase nào và không phải closure gate: deployment được hỗ trợ có một Department
+active (PROJECT_PROFILE §22), và gate từ chối tường minh sự mơ hồ cho tới khi owner quyết khác. **OD3 —
+xóa Hot line**: từ chối xóa Hot demand line thu hẹp wording "chỉ được xóa sau khi…" của PROJECT_PROFILE
+§13 / GUI_DESIGN §11.2 (điều kiện cần, như các từ chối allocated, allocation-history và last-line hiện
+có đã cho thấy), và giữ invariant H1 cùng quy tắc confirmation của §21 mục 6; sửa wording ở hai tài liệu
+đó là việc **owner** đang chờ — roadmap này không sửa chúng.
+
+Cố ý chưa có, kèm quyết định sở hữu: role enforcement (chỉ Manager / Admin) → **Phase 14** (bullet
+authorization cho mọi Management write; `actor_reference` là NULL tới lúc đó, như mọi surface có audit
+khác); **OD5 — priority tại Work Order intake** (PROJECT_PROFILE §21 Work Orders mục 5, GUI_DESIGN §11.2
+"priority when applicable"): chưa build — GUI_DESIGN không định nghĩa control nào cho nó và rank gõ tay
+lúc intake sẽ là writer thứ hai của dense list; khuyến nghị là entry point "add to Hot list" về sau qua
+cùng command (append ở bottom, không gõ rank) — **quyết định owner đang chờ**: gán cho một phase (Phase
+12 hoặc phase sau) hoặc duyệt trong `Deferred`; **OD7 — báo cáo "Hot and priority demand" của
+PROJECT_PROFILE §27**: không roadmap phase nào sở hữu reporting §27; phần phủ tạm thời là view Priority
+và filter Hot-only của PN Tracking — **quyết định owner đang chờ**: gán một reporting phase hoặc duyệt
+trong `Deferred`; auto-removal Hot (OD1) và rank space theo Department (OD2) như trên; history
+Undo / Redo phía server (history session chỉ ở client, theo PROJECT_PROFILE §21 mục 9); push hoặc
+polling của Hot list; flag `is_hot`; hợp nhất các cài đặt canonical-order. **Phase 12 chỉ đóng khi OD5 và
+OD7 đều có owner hoặc được liệt kê trong `Deferred`.**
 
 ## Phase 13 — Full Administration and Production Identity Configuration
 

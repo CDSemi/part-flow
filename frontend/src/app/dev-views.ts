@@ -12,10 +12,11 @@
 // values as part of `npm run build`.
 //
 // The Phase 3.5 views (Management → Machines and Administration), the
-// Phase 4 view (Management → Work Orders), the Phase 5 Scan Station and
-// the Phase 11 Production Board, Area Board and PN Tracking are REAL
-// views against the /api surface — they live in real-views.ts and ship
-// in every build, so they are deliberately absent here. The
+// Phase 4 view (Management → Work Orders), the Phase 5 Scan Station,
+// the Phase 11 Production Board, Area Board and PN Tracking and the
+// Phase 12 Priority Management are REAL views against the /api surface
+// — they live in real-views.ts and ship in every build, so they are
+// deliberately absent here. The
 // mock Scan Station (the approved Phase 6+ workflows) survives as a
 // development-only preview behind the real view's own DEV boundary.
 //
@@ -38,6 +39,7 @@ export type DevMockViewKey = Exclude<
   | 'production-board'
   | 'area-board'
   | 'tracking'
+  | 'priority'
 >;
 
 type ViewRegistry = Readonly<
@@ -54,11 +56,6 @@ export const DEV_MOCK_VIEWS: ViewRegistry | null = import.meta.env.DEV
       'part-numbers': lazy(() =>
         import('../views/part-numbers/PartNumbersView').then((m) => ({
           default: m.PartNumbersView,
-        })),
-      ),
-      priority: lazy(() =>
-        import('../views/priority/PriorityView').then((m) => ({
-          default: m.PriorityView,
         })),
       ),
     }

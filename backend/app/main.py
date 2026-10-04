@@ -11,6 +11,7 @@ from app.api.area_board import router as area_board_router
 from app.api.environment import router as environment_router
 from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
+from app.api.hot_list import router as hot_list_router
 from app.api.machines import router as machines_router
 from app.api.part_numbers import router as part_numbers_router
 from app.api.production_board import router as production_board_router
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(production_board_router)
     app.include_router(area_board_router)
     app.include_router(tracking_router)
+    app.include_router(hot_list_router)
     register_exception_handlers(app)
     return app
 

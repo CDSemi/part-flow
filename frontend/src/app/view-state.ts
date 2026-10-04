@@ -8,7 +8,7 @@
 // long-data fixture only on the data-heavy views that define one
 // (e.g. Tracking, Work Orders, Machines, the Production Board) — a
 // view without such a fixture (e.g. Administration, Priority) simply
-// renders its normal sample data. The check is behind
+// renders its normal data. The check is behind
 // `import.meta.env.DEV`, so production builds compile the override
 // away and never expose it.
 

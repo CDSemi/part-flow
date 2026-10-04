@@ -61,6 +61,10 @@ export interface DemandLineDraft {
    * released quantity it is what production has already committed —
    * the floor a saved Qty can never fall below. */
   allocatedQuantity: number;
+  /** Server-owned Hot rank of the saved demand (Phase 12), or null
+   * when it is not on the Hot list. A Hot demand line cannot be
+   * removed until it leaves the Hot list (Management → Priority). */
+  hotRank: number | null;
   statusLabel: string;
 }
 
@@ -80,6 +84,11 @@ export function workOrderStatusLabel(status: string): string {
 
 export const RELEASED_REMOVE_EXPLANATION =
   'Cannot remove: production quantity has already been released.';
+
+/** Why a Hot demand line offers no removal (the server refuses it too). */
+export function hotRemoveExplanation(hotRank: number): string {
+  return `Cannot remove: this demand line is on the Hot list (🔥#${hotRank}). Remove it from the Hot list in Management → Priority first.`;
+}
 
 /**
  * The quantity a saved demand line can never fall below: what
@@ -138,6 +147,7 @@ export function createDraftLine(
     releasedQuantity: 0,
     remainingQuantity: 0,
     allocatedQuantity: 0,
+    hotRank: null,
     statusLabel: 'Draft (unsaved)',
     ...init,
   };
@@ -167,6 +177,7 @@ export function draftFromDemand(
     releasedQuantity: demand.releasedQuantity,
     remainingQuantity: demand.remainingQuantity,
     allocatedQuantity: demand.allocatedQuantity,
+    hotRank: demand.priorityRank,
     demandId: demand.id,
     pn: demand.partNumber,
     isNewPn: false,
@@ -328,18 +339,21 @@ export function collectMissingDemandInfo(
     : null;
 }
 
-export type RemoveRule = 'draft' | 'confirm' | 'blocked';
+export type RemoveRule = 'draft' | 'confirm' | 'blocked' | 'hot';
 
 /**
  * Presentation mirror of the canonical WorkOrderDemand removal rule
  * (PROJECT_PROFILE §13): an unsaved draft is removed immediately, a
  * saved line needs explicit confirmation (the backend enforces the
- * released-quantity and last-line rules transactionally and answers
- * 409 removing nothing), and a line whose released quantity is known
- * to this session never offers removal at all.
+ * released-quantity, Hot-list and last-line rules transactionally and
+ * answers 409 removing nothing), and a line whose released quantity is
+ * known to this session never offers removal at all. A Hot line
+ * (Phase 12) offers none either until it leaves the Hot list; released
+ * takes precedence, being the permanent reason.
  */
 export function lineRemoveRule(line: DemandLineDraft): RemoveRule {
   if (line.released) return 'blocked';
+  if (line.hotRank !== null) return 'hot';
   return line.saved ? 'confirm' : 'draft';
 }
 

@@ -14,7 +14,10 @@ confirmation (PROJECT_PROFILE §17) carries the deviation itself, and
 the receipt also carries the internal blank-number MODIFY Work Orders
 it refuses to choose between (§14), because the UI must show them
 before the user can confirm the intent — still no internal detail,
-only the data the confirmation dialog presents.
+only the data the confirmation dialog presents. The Phase 12 stale
+Hot list change likewise carries the CURRENT Hot entries, rendered
+exactly like a Hot list read, so the Priority view can show the list
+the manager must review again.
 """
 
 from typing import cast
@@ -22,10 +25,12 @@ from typing import cast
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.hot_list import entry_response
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
     ApplicationError,
     ConflictError,
+    HotListChangedError,
     InvalidInputError,
     NotFoundError,
     RouteDeviationConfirmationRequiredError,
@@ -102,3 +107,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(WorkOrderSelectionRequiredError, work_order_selection_handler)
+
+    async def hot_list_changed_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Phase 12: the optimistic precondition failed — nothing was
+        # written; the body carries the current list to review.
+        error = cast(HotListChangedError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": error.message,
+                "hot_list_changed": True,
+                "entries": [
+                    entry_response(entry).model_dump(mode="json") for entry in error.entries
+                ],
+            },
+        )
+
+    app.add_exception_handler(HotListChangedError, hot_list_changed_handler)

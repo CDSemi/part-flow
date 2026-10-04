@@ -1,38 +1,93 @@
 import './priority.css';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 
+import { areaRefColor } from '../../api/area-inventory';
+import { ApiError, errorMessage } from '../../api/client';
+import {
+  applyHotListChange,
+  getHotList,
+  getHotListCandidates,
+  hotListChanged,
+} from '../../api/hot-list';
+import type {
+  HotList,
+  HotListAction,
+  HotListCandidates,
+  HotListChangeInput,
+  HotListEntry,
+  HotListLocation,
+} from '../../api/hot-list';
+import { newDeviceEventId } from '../../api/production-release';
+import { writeOutcomeUnknown } from '../../api/scan-station';
+import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { DevNotice } from '../../components/DevNotice';
-import { TypeChip } from '../../components/indicators';
+import { AreaDot, HotPn, TypeChip } from '../../components/indicators';
 import { useToastNotice } from '../../components/toast-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { MOCK_HOT_CANDIDATES, MOCK_HOT_LIST } from '../../mocks/priority';
 import { useUiClock } from '../../components/ui-clock';
 import {
   DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
+  formatIsoDate,
   formatIsoDateShort,
 } from '../dates';
-import type { MockHotEntry } from '../view-models';
+import {
+  completeRedo,
+  completeUndo,
+  dropStep,
+  rebaseOp,
+  recordChange,
+  useHotHistory,
+} from './hot-history';
+import type { HistoryOp, HistoryStep } from './hot-history';
 
-// Hot entries carry no parent-WO received date, so the derived due
-// countdown has no lead time — the shared Due Soon policy (the future
-// Administration configuration) then applies its minimum-window
-// fallback (views/dates `dueSoonWindowDays`).
-const DUE_SOON = { received: null, policy: DEFAULT_DUE_SOON_POLICY };
+/** The derived due countdown of one demand: its own due date against
+ * its Work Order's received date (the lead time of the Due Soon
+ * window) under the shared Due Soon policy. */
+function dueInfo(entry: HotListEntry, now: number) {
+  return dueCountdown(entry.dueDate, now, {
+    received: entry.workOrderReceivedDate,
+    policy: DEFAULT_DUE_SOON_POLICY,
+  });
+}
 
-const hotKey = (h: MockHotEntry) => `${h.pn}|${h.workOrder}`;
+/** `WO 007001`, or `WO —` for an internal Work Order (display-only). */
+const workOrderText = (entry: HotListEntry) =>
+  `WO ${entry.workOrderNumber ?? '—'}`;
 
-/** "WO 007001 · Job 18112" → "WO 007001" for compact one-line summaries. */
-const shortWorkOrder = (workOrder: string) => workOrder.split(' ·')[0];
+/** The quiet label that keeps an internal Work Order recognizable. */
+const internalLabel = (entry: HotListEntry) =>
+  `internal Work Order · received ${formatIsoDate(entry.workOrderReceivedDate)}`;
+
+/**
+ * One demand named in notices and confirmations: PN + Work Order, and
+ * for an internal Work Order its label and quantity, so several
+ * internal demands of one PN stay distinguishable.
+ */
+function entryName(entry: HotListEntry): string {
+  const internal =
+    entry.workOrderNumber === null
+      ? ` (${internalLabel(entry)} · ${entry.requestedQuantity} pcs)`
+      : '';
+  return `${entry.partNumber} · ${workOrderText(entry)}${internal}`;
+}
 
 type ReorderAction =
   'Drag and drop' | 'Move Up' | 'Move Down' | 'Undo' | 'Redo';
+
+/** The Hot list command each confirmed order change travels as. */
+const REORDER_COMMANDS: Record<ReorderAction, HotListAction> = {
+  'Drag and drop': 'DRAG',
+  'Move Up': 'MOVE_UP',
+  'Move Down': 'MOVE_DOWN',
+  Undo: 'UNDO',
+  Redo: 'REDO',
+};
 
 // Undo/Redo confirmations lead with what the confirmation does, not with
 // the implementation action name (GUI change §9.1); the action name stays
@@ -50,12 +105,43 @@ const RESTORE_SUMMARIES: Partial<Record<ReorderAction, string>> = {
   Redo: 'The last undone ranking change is applied again.',
 };
 
+const REORDER_NOTICES: Record<ReorderAction, string> = {
+  'Drag and drop': '🔥 Hot ranking updated',
+  'Move Up': '🔥 Hot ranking updated',
+  'Move Down': '🔥 Hot ranking updated',
+  Undo: '⟲ Previous Hot ranking restored',
+  Redo: '⟳ Ranking change reapplied',
+};
+
+/** What a successful submission does to the session history. */
+type HistoryEffect =
+  | { kind: 'record'; step: HistoryStep }
+  | { kind: 'undo'; step: HistoryStep }
+  | { kind: 'redo'; step: HistoryStep };
+
+/**
+ * One submitted Hot list change. It keeps its `deviceEventId` until it
+ * resolves: a Retry after an unknown outcome resends exactly this
+ * request, so the server replays a committed change instead of applying
+ * it twice.
+ */
+interface Submission {
+  input: HotListChangeInput;
+  effect: HistoryEffect;
+  /** Toast shown once the change is applied. */
+  success: string;
+}
+
+/** Persistent inline feedback (the toast carries successes only). */
+interface ViewMessage {
+  tone: 'info' | 'warn' | 'error';
+  text: string;
+}
+
 interface RankChange {
-  key: string;
-  pn: string;
-  workOrder: string;
+  id: number;
   /** The full demand entry (PN + explicit WO/Job metadata fields). */
-  entry: MockHotEntry;
+  entry: HotListEntry;
   /** Current rank; null when the entry is not currently listed. */
   from: number | null;
   /** Proposed rank; null when the entry leaves the list. */
@@ -65,31 +151,33 @@ interface RankChange {
 interface PendingReorder {
   action: ReorderAction;
   /** List order before the pending change (Current Position snapshot). */
-  current: MockHotEntry[];
-  next: MockHotEntry[];
+  current: HotListEntry[];
+  next: HotListEntry[];
   changes: RankChange[];
   /** Entry the user acted on directly; null for Undo/Redo restores. */
-  movedKey: string | null;
+  movedId: number | null;
+  effect: HistoryEffect;
 }
 
+const idOf = (entry: HotListEntry) => entry.workOrderDemandId;
+
 /**
- * Every entry whose rank would change, current → proposed. Entries that
- * would join or leave the list (an Undo/Redo may restore a removed entry
- * or take back an added one) are included with a null rank on the absent
- * side, so those restores are real changes rather than silent no-ops.
+ * Every entry whose rank would change, current → proposed, keyed by the
+ * Work Order Demand id. Entries that would join or leave the list (an
+ * Undo/Redo may restore a removed entry or take back an added one) are
+ * included with a null rank on the absent side, so those restores are
+ * real changes rather than silent no-ops.
  */
 function diffRanks(
-  current: readonly MockHotEntry[],
-  next: readonly MockHotEntry[],
+  current: readonly HotListEntry[],
+  next: readonly HotListEntry[],
 ): RankChange[] {
   const changes: RankChange[] = [];
   next.forEach((entry, index) => {
-    const from = current.findIndex((h) => hotKey(h) === hotKey(entry));
+    const from = current.findIndex((h) => idOf(h) === idOf(entry));
     if (from !== index) {
       changes.push({
-        key: hotKey(entry),
-        pn: entry.pn,
-        workOrder: entry.workOrder,
+        id: idOf(entry),
         entry,
         from: from === -1 ? null : from + 1,
         to: index + 1,
@@ -97,15 +185,8 @@ function diffRanks(
     }
   });
   current.forEach((entry, index) => {
-    if (!next.some((h) => hotKey(h) === hotKey(entry))) {
-      changes.push({
-        key: hotKey(entry),
-        pn: entry.pn,
-        workOrder: entry.workOrder,
-        entry,
-        from: index + 1,
-        to: null,
-      });
+    if (!next.some((h) => idOf(h) === idOf(entry))) {
+      changes.push({ id: idOf(entry), entry, from: index + 1, to: null });
     }
   });
   // Proposed order keeps the comparison scannable; departures go last.
@@ -129,139 +210,315 @@ function shiftSummary(others: readonly RankChange[]): string | null {
   return parts.length ? `${parts.join('; ')}.` : null;
 }
 
-// Hot WO Demand ranking. All interactions are local presentation state:
-// reorder / add / remove change the mock list only — the intro carries the
-// single development-only note saying so. Every operation that changes the
-// order of existing Hot entries (drag, Move Up/Down, Undo, Redo) requires
-// explicit confirmation before it is applied; the visible list is never
-// renumbered before confirmation.
+// Hot WO Demand ranking on the live Hot list (Phase 12). Every change is
+// ONE server command: adding at the bottom applies directly; removal and
+// every change to the order of existing entries (drag, Move Up/Down,
+// Undo, Redo) are confirmed first. The visible list is never renumbered
+// before the server answers — it then renders the committed entries.
+// A change whose outcome is unknown freezes every write until it is
+// retried with the same idempotency key or abandoned by reloading.
 export function PriorityView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
-  const writeBlocked = status !== 'connected';
+  const disconnected = status !== 'connected';
   const { showNotice, noticeElement } = useToastNotice();
-
-  const [hotList, setHotList] = useState<MockHotEntry[]>(MOCK_HOT_LIST);
-  // Undo/Redo depth is unlimited within the current application
-  // session (PROJECT_PROFILE §21, decided post-v18): no numeric cap is
-  // ever applied, and the histories simply end with the session.
-  const [undoHistory, setUndoHistory] = useState<MockHotEntry[][]>([]);
-  const [redoHistory, setRedoHistory] = useState<MockHotEntry[][]>([]);
+  // Loaded on view activation (mount); every command answers with the
+  // committed list, which then replaces the loaded one.
+  const listData = useApiData(getHotList);
+  const history = useHotHistory();
+  const [override, setOverride] = useState<{
+    base: HotList;
+    entries: HotListEntry[];
+  } | null>(null);
+  const [message, setMessage] = useState<ViewMessage | null>(null);
+  const [inFlight, setInFlight] = useState(false);
+  const [unknownOutcome, setUnknownOutcome] = useState<Submission | null>(null);
+  const submitting = useRef(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [removeIndex, setRemoveIndex] = useState<number | null>(null);
-  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<HotListEntry | null>(null);
+  const [dragId, setDragId] = useState<number | null>(null);
   const [pending, setPending] = useState<PendingReorder | null>(null);
   // Shared minute clock: due countdowns are derived at render from the
   // fixed due dates and keep updating while the view stays open.
   const now = useUiClock('minute');
+  const addButton = useRef<HTMLButtonElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
 
-  if (preview === 'loading') {
-    return (
-      <section className="pr-view" aria-label="Priority Management">
-        <LoadingState label="Loading Priority Management" />
-      </section>
-    );
+  // Focus discipline: the control that opened a confirmation is frozen
+  // while the change is in flight, so focus would be lost. Once the
+  // submission settles, an unknown outcome takes focus to its Retry;
+  // otherwise lost focus returns to "+ Add to Hot list".
+  useEffect(() => {
+    if (inFlight) return;
+    if (unknownOutcome) {
+      retryButton.current?.focus();
+      return;
+    }
+    const active = document.activeElement;
+    if (!active || active === document.body) addButton.current?.focus();
+  }, [inFlight, unknownOutcome]);
+
+  const loaded = listData.state.status === 'ready' ? listData.state.data : null;
+  // A command's committed entries apply to the read they were made
+  // against; a fresh read (reload) supersedes them.
+  const hotList =
+    loaded && override?.base === loaded ? override.entries : loaded?.entries;
+  const entries = preview === 'empty' ? [] : (hotList ?? []);
+  const order = entries.map(idOf);
+  // Writes are blocked while disconnected (GUI_DESIGN §3 rule 6), while
+  // a submission is in flight, and while one has an unknown outcome.
+  const writesFrozen =
+    disconnected || inFlight || unknownOutcome !== null || loaded === null;
+
+  async function submit(submission: Submission) {
+    if (submitting.current || disconnected || loaded === null) return;
+    submitting.current = true;
+    const base = loaded;
+    setInFlight(true);
+    setMessage(null);
+    try {
+      const result = await applyHotListChange(submission.input);
+      setUnknownOutcome(null);
+      setOverride({ base, entries: result.entries });
+      const { effect } = submission;
+      if (effect.kind === 'record') recordChange(effect.step);
+      else if (effect.kind === 'undo') completeUndo(effect.step);
+      else completeRedo(effect.step);
+      showNotice(
+        result.created
+          ? submission.success
+          : `${submission.success} — it had already been applied`,
+      );
+    } catch (error) {
+      if (writeOutcomeUnknown(error)) {
+        // The intent is frozen: the exact same request replays the
+        // committed change or applies it once.
+        setUnknownOutcome(submission);
+      } else {
+        setUnknownOutcome(null);
+        handleRefusal(error, submission, base);
+      }
+    } finally {
+      submitting.current = false;
+      setInFlight(false);
+    }
   }
-  if (preview === 'error') {
-    return (
-      <section className="pr-view" aria-label="Priority Management">
-        <ErrorState
-          message="The Hot list could not be loaded."
-          detail="Check the backend connection and try again."
-        />
-      </section>
-    );
+
+  /** An explicit server refusal — nothing was written. */
+  function handleRefusal(
+    error: unknown,
+    submission: Submission,
+    base: HotList,
+  ) {
+    const current = hotListChanged(error);
+    if (current) {
+      // Changed elsewhere: show the current list; both histories stay,
+      // and a later Undo/Redo re-bases on this list.
+      setOverride({ base, entries: current });
+      setMessage({ tone: 'warn', text: errorMessage(error) });
+      return;
+    }
+    const { effect } = submission;
+    const op =
+      effect.kind === 'undo'
+        ? effect.step.undo
+        : effect.kind === 'redo'
+          ? effect.step.redo
+          : null;
+    if (
+      op?.kind === 'insert' &&
+      error instanceof ApiError &&
+      (error.status === 404 || error.status === 409)
+    ) {
+      // The demand is gone or no longer eligible: this step can never
+      // be applied again.
+      dropStep(effect.step);
+      setMessage({
+        tone: 'warn',
+        text: `${errorMessage(error)} This step was removed from the history.`,
+      });
+      return;
+    }
+    setMessage({ tone: 'error', text: errorMessage(error) });
   }
 
-  const shownList = preview === 'empty' ? [] : hotList;
-
-  function applyChange(next: MockHotEntry[], message: string) {
-    setUndoHistory((h) => [...h, hotList]);
-    setRedoHistory([]);
-    setHotList(next);
-    showNotice(message);
+  function abandonUnknownOutcome() {
+    setUnknownOutcome(null);
+    listData.reload();
+    setMessage({
+      tone: 'warn',
+      text: 'The change may already have been applied. The list was reloaded — check it before making another change.',
+    });
   }
 
-  /** Ask for confirmation before any reorder of existing entries. */
+  function entriesFor(ids: readonly number[], extra?: HotListEntry) {
+    const byId = new Map(entries.map((entry) => [idOf(entry), entry]));
+    if (extra && !byId.has(idOf(extra))) byId.set(idOf(extra), extra);
+    return ids.flatMap((id) => {
+      const entry = byId.get(id);
+      return entry ? [entry] : [];
+    });
+  }
+
+  /** Ask for confirmation before any change to the order. */
   function requestReorder(
     action: ReorderAction,
-    next: MockHotEntry[],
-    movedKey: string | null = null,
+    newOrder: number[],
+    movedId: number | null,
+    effect: HistoryEffect,
   ) {
-    const changes = diffRanks(hotList, next);
+    const next = entriesFor(newOrder, effect.step.entrySnapshot);
+    const changes = diffRanks(entries, next);
     if (!changes.length) return;
-    setPending({ action, current: hotList, next, changes, movedKey });
+    setMessage(null);
+    setPending({ action, current: entries, next, changes, movedId, effect });
   }
 
   function confirmPending() {
-    if (!pending) return;
-    const { action, next } = pending;
+    if (!pending || writesFrozen) return;
+    const { action, current, next, effect } = pending;
     setPending(null);
-    if (action === 'Undo') {
-      setUndoHistory((h) => h.slice(0, -1));
-      setRedoHistory((h) => [...h, hotList]);
-      setHotList(next);
-      showNotice('⟲ Previous Hot ranking restored');
+    void submit({
+      input: {
+        deviceEventId: newDeviceEventId(),
+        action: REORDER_COMMANDS[action],
+        expectedOrder: current.map(idOf),
+        newOrder: next.map(idOf),
+      },
+      effect,
+      success: REORDER_NOTICES[action],
+    });
+  }
+
+  /** Re-base one history step on the current list (Undo/Redo). */
+  function stepHistory(action: 'Undo' | 'Redo', step: HistoryStep) {
+    const op: HistoryOp = action === 'Undo' ? step.undo : step.redo;
+    const rebased = rebaseOp(op, step.demandId, order);
+    const name = entryName(step.entrySnapshot);
+    if (rebased.kind === 'inapplicable') {
+      dropStep(step);
+      setMessage({
+        tone: 'warn',
+        text:
+          op.kind === 'insert'
+            ? `${name}: this entry is already on the Hot list, so this step was removed from the history.`
+            : `${name}: this entry is no longer on the Hot list, so this step was removed from the history.`,
+      });
       return;
     }
-    if (action === 'Redo') {
-      setRedoHistory((h) => h.slice(0, -1));
-      setUndoHistory((h) => [...h, hotList]);
-      setHotList(next);
-      showNotice('⟳ Ranking change reapplied');
+    if (rebased.kind === 'noop') {
+      if (action === 'Undo') completeUndo(step);
+      else completeRedo(step);
+      setMessage({
+        tone: 'info',
+        text: `${name} is already at #${order.indexOf(step.demandId) + 1}, so nothing needs to change. The step moved to ${action === 'Undo' ? 'Redo' : 'Undo'}.`,
+      });
       return;
     }
-    applyChange(next, '🔥 Hot ranking updated');
+    requestReorder(action, rebased.newOrder, null, {
+      kind: action === 'Undo' ? 'undo' : 'redo',
+      step,
+    });
   }
 
   function undo() {
-    if (!undoHistory.length) return;
-    requestReorder('Undo', undoHistory[undoHistory.length - 1]);
+    const step = history.undo[history.undo.length - 1];
+    if (step && !writesFrozen) stepHistory('Undo', step);
   }
 
   function redo() {
-    if (!redoHistory.length) return;
-    requestReorder('Redo', redoHistory[redoHistory.length - 1]);
+    const step = history.redo[history.redo.length - 1];
+    if (step && !writesFrozen) stepHistory('Redo', step);
   }
 
-  function move(index: number, delta: number) {
-    const target = index + delta;
-    if (target < 0 || target >= hotList.length) return;
-    const next = [...hotList];
-    [next[index], next[target]] = [next[target], next[index]];
-    requestReorder(
-      delta < 0 ? 'Move Up' : 'Move Down',
-      next,
-      hotKey(hotList[index]),
-    );
+  function moveTo(action: ReorderAction, fromIndex: number, toIndex: number) {
+    if (writesFrozen || fromIndex === toIndex) return;
+    if (toIndex < 0 || toIndex >= entries.length) return;
+    const moved = entries[fromIndex];
+    const newOrder = order.filter((id) => id !== idOf(moved));
+    newOrder.splice(toIndex, 0, idOf(moved));
+    requestReorder(action, newOrder, idOf(moved), {
+      kind: 'record',
+      step: {
+        demandId: idOf(moved),
+        entrySnapshot: moved,
+        undo: { kind: 'move', toIndex: fromIndex },
+        redo: { kind: 'move', toIndex },
+      },
+    });
   }
 
   function handleDrop(event: DragEvent, targetIndex: number) {
     event.preventDefault();
-    if (!dragKey) return;
-    const movedKey = dragKey;
-    const fromIndex = hotList.findIndex((h) => hotKey(h) === movedKey);
-    setDragKey(null);
-    if (fromIndex < 0 || fromIndex === targetIndex) return;
-    const next = [...hotList];
-    const [moved] = next.splice(fromIndex, 1);
-    next.splice(targetIndex, 0, moved);
-    requestReorder('Drag and drop', next, movedKey);
+    if (dragId === null) return;
+    const fromIndex = order.indexOf(dragId);
+    setDragId(null);
+    if (fromIndex < 0) return;
+    moveTo('Drag and drop', fromIndex, targetIndex);
   }
 
-  const candidates = MOCK_HOT_CANDIDATES.filter(
-    (c) => !hotList.some((h) => hotKey(h) === hotKey(c)),
-  );
+  function addCandidate(candidate: HotListEntry) {
+    setAddOpen(false);
+    if (writesFrozen) return;
+    // Adding appends at the bottom — existing ranks are not reordered,
+    // so no order-change confirmation is required.
+    void submit({
+      input: {
+        deviceEventId: newDeviceEventId(),
+        action: 'ADD',
+        expectedOrder: order,
+        newOrder: [...order, idOf(candidate)],
+      },
+      effect: {
+        kind: 'record',
+        step: {
+          demandId: idOf(candidate),
+          entrySnapshot: candidate,
+          undo: { kind: 'remove' },
+          redo: { kind: 'insert', index: order.length },
+        },
+      },
+      success: `🔥 ${entryName(candidate)} added at the bottom — rank #${order.length + 1}`,
+    });
+  }
 
-  return (
-    <section className="pr-view" aria-label="Priority Management">
+  function confirmRemove(target: HotListEntry) {
+    setRemoveTarget(null);
+    const index = order.indexOf(idOf(target));
+    if (writesFrozen || index < 0) return;
+    void submit({
+      input: {
+        deviceEventId: newDeviceEventId(),
+        action: 'REMOVE',
+        expectedOrder: order,
+        newOrder: order.filter((id) => id !== idOf(target)),
+      },
+      effect: {
+        kind: 'record',
+        step: {
+          demandId: idOf(target),
+          entrySnapshot: target,
+          undo: { kind: 'insert', index },
+          redo: { kind: 'remove' },
+        },
+      },
+      success: `✕ ${entryName(target)} removed from Hot list — remaining ranks close the gap · Undo can restore it`,
+    });
+  }
+
+  const header = (
+    <>
       <div className="pr-head">
         <h1>Priority Management — Hot WO Demand</h1>
         <span className="spacer" />
         <button
+          ref={addButton}
           className="btn primary"
-          disabled={writeBlocked}
-          onClick={() => setAddOpen(true)}
+          disabled={writesFrozen}
+          onClick={() => {
+            setMessage(null);
+            setAddOpen(true);
+          }}
         >
           + Add to Hot list
         </button>
@@ -274,110 +531,194 @@ export function PriorityView() {
         with Undo/Redo. New Hot entries are added at the bottom. Multiple Work
         Orders for the same PN may hold different priorities.
       </p>
-      <DevNotice>
-        Development preview — confirmed changes update sample data in this
-        browser session only.
-      </DevNotice>
+    </>
+  );
 
-      {shownList.length === 0 ? (
+  if (preview === 'loading' || listData.state.status === 'loading') {
+    return (
+      <section className="pr-view" aria-label="Priority Management">
+        {header}
+        <LoadingState label="Loading Priority Management" />
+      </section>
+    );
+  }
+  if (preview === 'error') {
+    return (
+      <section className="pr-view" aria-label="Priority Management">
+        {header}
+        <ErrorState
+          message="The Hot list could not be loaded."
+          detail="Check the backend connection and try again."
+        />
+      </section>
+    );
+  }
+  if (listData.state.status === 'error') {
+    return (
+      <section className="pr-view" aria-label="Priority Management">
+        {header}
+        <ErrorState
+          message="The Hot list could not be loaded."
+          detail={listData.state.message}
+          onRetry={listData.reload}
+        />
+      </section>
+    );
+  }
+
+  return (
+    <section className="pr-view" aria-label="Priority Management">
+      {header}
+
+      {unknownOutcome ? (
+        <div className="pr-msg warn" role="alert">
+          <div>
+            The server did not answer — this Hot list change may already have
+            been applied. Retry the same change to find out: the server answers
+            with the recorded result, or applies it once. Or reload the list and
+            check it. Nothing else can be changed until then.
+          </div>
+          <div className="pr-msgbtns">
+            <button
+              ref={retryButton}
+              className="btn primary"
+              disabled={inFlight || disconnected}
+              onClick={() => void submit(unknownOutcome)}
+            >
+              Retry the same change
+            </button>
+            <button
+              className="btn ghost"
+              disabled={inFlight}
+              onClick={abandonUnknownOutcome}
+            >
+              Reload list
+            </button>
+          </div>
+        </div>
+      ) : message ? (
+        <div
+          className={`pr-msg ${message.tone}`}
+          role={message.tone === 'info' ? 'status' : 'alert'}
+        >
+          {message.text}
+        </div>
+      ) : null}
+
+      {entries.length === 0 ? (
         <div className="pr-empty">
           No Hot WO Demand — add one with “+ Add to Hot list”, or scan a PN
           barcode in the add dialog.
         </div>
       ) : (
         <ol className="pr-list" style={{ listStyle: 'none' }}>
-          {shownList.map((entry, index) => (
-            <li
-              key={hotKey(entry)}
-              className={`pr-item ${dragKey === hotKey(entry) ? 'dragging' : ''}`}
-              draggable={!writeBlocked}
-              onDragStart={() => setDragKey(hotKey(entry))}
-              onDragEnd={() => setDragKey(null)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => handleDrop(e, index)}
-            >
-              <span className="grip" aria-hidden="true">
-                ⠿
-              </span>
-              <span
-                className={`rank ${index < 3 ? `r${index + 1}` : ''}`}
-                aria-label={`Rank ${index + 1}`}
+          {entries.map((entry, index) => {
+            const due = dueInfo(entry, now);
+            return (
+              <li
+                key={idOf(entry)}
+                className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}`}
+                draggable={!writesFrozen}
+                onDragStart={() => setDragId(idOf(entry))}
+                onDragEnd={() => setDragId(null)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => handleDrop(e, index)}
               >
-                {index + 1}
-              </span>
-              <span className="body">
-                <span className="l1">
-                  <span className="pn" title={entry.pn}>
-                    {entry.pn}
+                <span className="grip" aria-hidden="true">
+                  ⠿
+                </span>
+                <span className="body">
+                  <span className="l1">
+                    <HotPn
+                      rank={entry.rank ?? index + 1}
+                      pn={entry.partNumber}
+                      pnClassName="pn"
+                    />
+                    <WoJobChip entry={entry} />
+                    {entry.workOrderNumber === null ? (
+                      <span className="pr-quiet">{internalLabel(entry)}</span>
+                    ) : null}
+                    <TypeChip type={entry.requestType} />
+                    {entry.workOrderCompleted ? (
+                      <span className="wostat completed">Completed</span>
+                    ) : null}
                   </span>
-                  <span className="wo">{entry.workOrder}</span>
-                  <TypeChip type={entry.type} />
+                  <span className="l2">
+                    <span>requested {entry.requestedQuantity}</span>
+                    <span>allocated {entry.allocatedQuantity}</span>
+                    <span>shortage {entry.shortageQuantity}</span>
+                    {!entry.workOrderCompleted &&
+                    entry.shortageQuantity === 0 ? (
+                      <span className="pr-quiet">
+                        Fully allocated — nothing left to expedite
+                      </span>
+                    ) : null}
+                  </span>
+                  <Distribution entry={entry} />
                 </span>
-                <span className="l2">
-                  {entry.figures.map((f) => (
-                    <span key={f}>{f}</span>
-                  ))}
+                <span className="due">
+                  <span>{formatIsoDateShort(entry.dueDate)}</span>
+                  <span
+                    className={`d2 ${due.dueClass}`}
+                    style={{ display: 'block' }}
+                  >
+                    {due.note}
+                  </span>
                 </span>
-              </span>
-              <span className="due">
-                <span>{formatIsoDateShort(entry.due)}</span>
-                {(() => {
-                  const dueInfo = dueCountdown(entry.due, now, DUE_SOON);
-                  return (
-                    <span
-                      className={`d2 ${dueInfo.dueClass}`}
-                      style={{ display: 'block' }}
-                    >
-                      {dueInfo.note}
-                    </span>
-                  );
-                })()}
-              </span>
-              <span className="movebtns">
+                <span className="movebtns">
+                  <button
+                    aria-label={`Move ${entry.partNumber} up`}
+                    disabled={writesFrozen || index === 0}
+                    onClick={() => moveTo('Move Up', index, index - 1)}
+                  >
+                    ▲
+                  </button>
+                  <button
+                    aria-label={`Move ${entry.partNumber} down`}
+                    disabled={writesFrozen || index === entries.length - 1}
+                    onClick={() => moveTo('Move Down', index, index + 1)}
+                  >
+                    ▼
+                  </button>
+                </span>
                 <button
-                  aria-label={`Move ${entry.pn} up`}
-                  disabled={writeBlocked || index === 0}
-                  onClick={() => move(index, -1)}
+                  className="pr-x"
+                  title="Remove from Hot list"
+                  aria-label={`Remove ${entry.partNumber} from Hot list`}
+                  disabled={writesFrozen}
+                  onClick={() => {
+                    setMessage(null);
+                    setRemoveTarget(entry);
+                  }}
                 >
-                  ▲
+                  ✕
                 </button>
-                <button
-                  aria-label={`Move ${entry.pn} down`}
-                  disabled={writeBlocked || index === shownList.length - 1}
-                  onClick={() => move(index, 1)}
-                >
-                  ▼
-                </button>
-              </span>
-              <button
-                className="pr-x"
-                title="Remove from Hot list"
-                aria-label={`Remove ${entry.pn} from Hot list`}
-                disabled={writeBlocked}
-                onClick={() => setRemoveIndex(index)}
-              >
-                ✕
-              </button>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
       )}
 
       <div className="pr-bar">
         <button
           className="btn ghost"
-          disabled={writeBlocked || !undoHistory.length}
+          disabled={writesFrozen || !history.undo.length}
           onClick={undo}
         >
           ⟲ Undo
         </button>
         <button
           className="btn ghost"
-          disabled={writeBlocked || !redoHistory.length}
+          disabled={writesFrozen || !history.redo.length}
           onClick={redo}
         >
           ⟳ Redo
         </button>
+        {inFlight ? (
+          <span className="pr-busy" role="status">
+            Applying the change…
+          </span>
+        ) : null}
       </div>
 
       <PageNote>
@@ -390,6 +731,7 @@ export function PriorityView() {
       {pending ? (
         <ReorderConfirmDialog
           pending={pending}
+          disabled={writesFrozen}
           onCancel={() => setPending(null)}
           onConfirm={confirmPending}
         />
@@ -397,50 +739,36 @@ export function PriorityView() {
 
       {addOpen && (
         <HotAddDialog
-          candidates={candidates}
+          disabled={writesFrozen}
           onCancel={() => setAddOpen(false)}
-          onAdd={(candidate) => {
-            setAddOpen(false);
-            // Adding appends at the bottom — existing ranks are not
-            // reordered, so no reorder confirmation is required.
-            applyChange(
-              [...hotList, candidate],
-              `🔥 ${candidate.pn} · ${shortWorkOrder(candidate.workOrder)} added at the bottom — rank #${hotList.length + 1}`,
-            );
-          }}
+          onAdd={addCandidate}
         />
       )}
 
-      {removeIndex !== null && hotList[removeIndex] && (
+      {removeTarget !== null && (
         <ModalDialog
           label="Remove from Hot list?"
-          onClose={() => setRemoveIndex(null)}
+          onClose={() => setRemoveTarget(null)}
         >
           <h3>Remove from Hot list?</h3>
-          <div className="big mono">{hotList[removeIndex].pn}</div>
+          <div className="big mono">{removeTarget.partNumber}</div>
           <div className="sub">
             Work Order Demand{' '}
-            <b className="mono">{hotList[removeIndex].workOrder}</b> will be
+            <b className="mono">{woJobLabel(removeTarget, true)}</b> will be
             removed from the Hot ranking. Remaining ranks close the gap; Undo
             can restore the entry.
           </div>
           <div className="row">
             <button
               className="bigbtn ghost"
-              onClick={() => setRemoveIndex(null)}
+              onClick={() => setRemoveTarget(null)}
             >
               Cancel (Esc)
             </button>
             <button
               className="bigbtn danger"
-              onClick={() => {
-                const removed = hotList[removeIndex];
-                setRemoveIndex(null);
-                applyChange(
-                  hotList.filter((_, i) => i !== removeIndex),
-                  `✕ ${removed.pn} · ${shortWorkOrder(removed.workOrder)} removed from Hot list — remaining ranks close the gap · Undo can restore it`,
-                );
-              }}
+              disabled={writesFrozen}
+              onClick={() => confirmRemove(removeTarget)}
             >
               Remove entry
             </button>
@@ -453,26 +781,95 @@ export function PriorityView() {
 }
 
 /**
- * WO + Job Number metadata as one light informational chip, visually
- * separate from the PN. Built from the explicit `workOrderNumber` /
- * `jobNumber` fields — never parsed out of a display string. The full
- * demand label stays available as a tooltip.
+ * The WO + Job Number label, built from the explicit `workOrderNumber`
+ * / `jobNumbers` fields — never parsed out of a display string.
+ * `detailed` adds the internal Work Order label and the quantity, so
+ * several internal demands of one PN stay distinguishable.
  */
-function WoJobChip({ entry }: { entry: MockHotEntry }) {
-  const label = `WO ${entry.workOrderNumber ?? '—'}${
-    entry.jobNumber ? ` · Job ${entry.jobNumber}` : ''
-  }`;
+function woJobLabel(entry: HotListEntry, detailed = false): string {
+  const jobs = entry.jobNumbers.length
+    ? ` · Job ${entry.jobNumbers.join(', ')}`
+    : '';
+  const internal =
+    detailed && entry.workOrderNumber === null
+      ? ` · ${internalLabel(entry)} · ${entry.requestedQuantity} pcs`
+      : '';
+  return `${workOrderText(entry)}${jobs}${internal}`;
+}
+
+/**
+ * WO + Job Number metadata as one light informational chip, visually
+ * separate from the PN. The full demand label stays available as a
+ * tooltip.
+ */
+function WoJobChip({
+  entry,
+  detailed = false,
+}: {
+  entry: HotListEntry;
+  detailed?: boolean;
+}) {
   return (
-    <span className="wjchip" title={entry.workOrder}>
-      {label}
+    <span className="wjchip" title={woJobLabel(entry, true)}>
+      {woJobLabel(entry, detailed)}
+    </span>
+  );
+}
+
+const LOCATION_STATES: Record<HotListLocation['state'], string> = {
+  MACHINE: 'on machine',
+  QUEUE: 'queue',
+  PROCESSING: 'processing',
+  DONE: 'done',
+};
+
+/**
+ * The PN's current distribution in the Department — labeled as the
+ * PN's, since every demand of the PN shares the same quantity and none
+ * of it is attributed to this one demand.
+ */
+function Distribution({ entry }: { entry: HotListEntry }) {
+  const locations = entry.partNumberLocations;
+  return (
+    <span className="l3">
+      <span className="dlbl">{entry.partNumber} in production</span>
+      {locations.length === 0 ? (
+        <span className="pr-quiet">
+          {entry.releasedQuantity === 0
+            ? 'Not yet released'
+            : 'No active quantity — released quantity is stocked, scrapped or awaiting allocation'}
+        </span>
+      ) : (
+        <>
+          {locations.map((location, index) => (
+            <span
+              key={`${location.area.id}-${location.machine?.id ?? ''}-${location.state}-${index}`}
+              className="dloc"
+            >
+              <AreaDot colorVar={areaRefColor(location.area)} size={9} />
+              {location.area.name}
+              {location.machine ? ` · ${location.machine.name}` : ''}{' '}
+              <b>{location.quantity}</b>{' '}
+              <span className="dstate">
+                {location.state === 'PROCESSING' && location.activity
+                  ? location.activity
+                  : LOCATION_STATES[location.state]}
+              </span>
+            </span>
+          ))}
+          {entry.releasedQuantity === 0 ? (
+            <span className="pr-quiet">not yet released for this demand</span>
+          ) : null}
+        </>
+      )}
     </span>
   );
 }
 
 /** One entry line inside a Current/New Position snapshot. */
 interface SnapshotRow {
-  key: string;
-  entry: MockHotEntry;
+  id: number;
+  entry: HotListEntry;
   /** Rank in this snapshot; null renders the `Not listed` placeholder. */
   rank: number | null;
   /**
@@ -497,19 +894,19 @@ interface SnapshotRow {
  * `#n → Not listed` for a removed one.
  */
 function snapshotRows(
-  list: readonly MockHotEntry[],
+  list: readonly HotListEntry[],
   changes: readonly RankChange[],
-  movedKey: string | null,
+  movedId: number | null,
   lo: number,
   hi: number,
   withDirections: boolean,
-  currentRanks?: ReadonlyMap<string, number>,
+  currentRanks?: ReadonlyMap<number, number>,
 ): SnapshotRow[] {
   const rows: SnapshotRow[] = list
     .map((entry, index) => ({ entry, rank: index + 1 }))
     .filter(({ rank }) => rank >= lo && rank <= hi)
     .map(({ entry, rank }) => {
-      const change = changes.find((c) => c.key === hotKey(entry));
+      const change = changes.find((c) => c.id === idOf(entry));
       const direction =
         withDirections && change && change.from !== null && change.to !== null
           ? change.to < change.from
@@ -517,24 +914,24 @@ function snapshotRows(
             : ('down' as const)
           : undefined;
       return {
-        key: hotKey(entry),
+        id: idOf(entry),
         entry,
         rank,
         fromRank: currentRanks
-          ? (currentRanks.get(hotKey(entry)) ?? null)
+          ? (currentRanks.get(idOf(entry)) ?? null)
           : undefined,
         direction,
-        moved: hotKey(entry) === movedKey,
+        moved: idOf(entry) === movedId,
       };
     });
   for (const change of changes) {
-    if (!list.some((entry) => hotKey(entry) === change.key)) {
+    if (!list.some((entry) => idOf(entry) === change.id)) {
       rows.push({
-        key: change.key,
+        id: change.id,
         entry: change.entry,
         rank: null,
         fromRank: currentRanks ? change.from : undefined,
-        moved: change.key === movedKey,
+        moved: change.id === movedId,
       });
     }
   }
@@ -577,7 +974,7 @@ function SnapshotSection({
           // pinning each row to its own line keeps the deliberate
           // overlap and the original order.
           <li
-            key={row.key}
+            key={row.id}
             style={{ gridRow: index + 1 }}
             className={`pr-snaprow ${row.moved ? 'moved' : 'shifted'}${
               row.rank === null ? ' absent' : ''
@@ -619,10 +1016,10 @@ function SnapshotSection({
                 </>
               )}
             </span>
-            <span className="prpn mono" title={row.entry.pn}>
-              {row.entry.pn}
+            <span className="prpn mono" title={row.entry.partNumber}>
+              {row.entry.partNumber}
             </span>
-            <WoJobChip entry={row.entry} />
+            <WoJobChip entry={row.entry} detailed />
           </li>
         ))}
       </ul>
@@ -641,17 +1038,20 @@ function SnapshotSection({
  */
 function ReorderConfirmDialog({
   pending,
+  disabled,
   onCancel,
   onConfirm,
 }: {
   pending: PendingReorder;
+  disabled: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const title = REORDER_TITLES[pending.action];
-  const moved = pending.movedKey
-    ? pending.changes.find((c) => c.key === pending.movedKey)
-    : undefined;
+  const moved =
+    pending.movedId !== null
+      ? pending.changes.find((c) => c.id === pending.movedId)
+      : undefined;
   const others = pending.changes.filter((c) => c !== moved);
   const shifts = moved ? shiftSummary(others) : null;
   const affectedRanks = pending.changes
@@ -662,15 +1062,15 @@ function ReorderConfirmDialog({
   // Pre-change rank per entry: the New Position side renders every row
   // as its complete `#current → #new` transition.
   const currentRanks = new Map(
-    pending.current.map((entry, index) => [hotKey(entry), index + 1]),
+    pending.current.map((entry, index) => [idOf(entry), index + 1]),
   );
   return (
     <ModalDialog label={title} onClose={onCancel}>
       <h3>{title}</h3>
       {moved ? (
         <div className="pr-move-summary">
-          Move <span className="mono">{moved.pn}</span> ·{' '}
-          <span className="mono">{shortWorkOrder(moved.workOrder)}</span> from{' '}
+          Move <span className="mono">{moved.entry.partNumber}</span> ·{' '}
+          <span className="mono">{workOrderText(moved.entry)}</span> from{' '}
           <b>{moved.from === null ? 'unlisted' : `#${moved.from}`}</b> to{' '}
           <b>{moved.to === null ? 'unlisted' : `#${moved.to}`}</b>
         </div>
@@ -703,7 +1103,7 @@ function ReorderConfirmDialog({
           rows={snapshotRows(
             pending.current,
             pending.changes,
-            pending.movedKey,
+            pending.movedId,
             lo,
             hi,
             true,
@@ -720,7 +1120,7 @@ function ReorderConfirmDialog({
           rows={snapshotRows(
             pending.next,
             pending.changes,
-            pending.movedKey,
+            pending.movedId,
             lo,
             hi,
             false,
@@ -733,7 +1133,11 @@ function ReorderConfirmDialog({
         <button className="bigbtn ghost" onClick={onCancel}>
           Cancel (Esc)
         </button>
-        <button className="bigbtn primary" onClick={onConfirm}>
+        <button
+          className="bigbtn primary"
+          disabled={disabled}
+          onClick={onConfirm}
+        >
           Apply ranking
         </button>
       </div>
@@ -741,28 +1145,124 @@ function ReorderConfirmDialog({
   );
 }
 
+/** A free-text search waits for a short typing pause before it runs. */
+const SEARCH_DEBOUNCE_MS = 200;
+
+/** A scanned (or typed) barcode — resolved on Enter, never searched. */
+const isBarcodeInput = (text: string) => text.toUpperCase().startsWith('PF:');
+
+type CandidateList = HotListCandidates & {
+  /** What produced the list: everything eligible, a search, or a scan. */
+  source: 'all' | 'search' | 'barcode';
+  term: string;
+};
+
 function HotAddDialog({
-  candidates,
+  disabled,
   onCancel,
   onAdd,
 }: {
-  candidates: MockHotEntry[];
+  disabled: boolean;
   onCancel: () => void;
-  onAdd: (candidate: MockHotEntry) => void;
+  onAdd: (candidate: HotListEntry) => void;
 }) {
   const [query, setQuery] = useState('');
-  // PN of the last ambiguous barcode scan (several active WO Demands
-  // share the scanned PN): the list is filtered to it and an explicit
-  // selection is required — cleared as soon as the user edits the
-  // search text.
-  const [ambiguousPn, setAmbiguousPn] = useState<string | null>(null);
+  const [list, setList] = useState<CandidateList | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Feedback of the last barcode scan: nothing eligible, rejected, or
+  // ambiguous (several eligible WO Demands share the scanned PN — the
+  // list then shows exactly those and an explicit selection is
+  // required). Cleared as soon as the user edits the search text.
+  const [scanFeedback, setScanFeedback] = useState<ViewMessage | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Only the latest candidate request may present its answer.
+  const generation = useRef(0);
   const now = useUiClock('minute');
-  const q = query.trim().toLowerCase();
-  const list = candidates.filter(
-    (c) =>
-      !q ||
-      `${c.pn} ${c.workOrder} ${c.barcode ?? ''}`.toLowerCase().includes(q),
-  );
+
+  const runSearch = useCallback(async (term: string) => {
+    const requested = ++generation.current;
+    try {
+      const data = await getHotListCandidates(term ? { search: term } : {});
+      if (generation.current !== requested) return;
+      setList({ ...data, source: term ? 'search' : 'all', term });
+      setLoadError(null);
+    } catch (error) {
+      if (generation.current !== requested) return;
+      setLoadError(errorMessage(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    const term = query.trim();
+    // A barcode is resolved on Enter only — never searched as text.
+    if (isBarcodeInput(term)) return;
+    const timer = setTimeout(
+      () => void runSearch(term),
+      term ? SEARCH_DEBOUNCE_MS : 0,
+    );
+    return () => clearTimeout(timer);
+  }, [query, runSearch]);
+
+  /** Keep the dialog ready for the next scan: the rejected value stays
+   * visible, selected, so the next scan replaces it. */
+  function readyForNextScan() {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }
+
+  async function resolveBarcode(barcode: string) {
+    const requested = ++generation.current;
+    setScanFeedback(null);
+    let data: HotListCandidates;
+    try {
+      data = await getHotListCandidates({ barcode });
+    } catch (error) {
+      if (generation.current !== requested) return;
+      setScanFeedback({ tone: 'error', text: errorMessage(error) });
+      readyForNextScan();
+      return;
+    }
+    if (generation.current !== requested) return;
+    const pn = data.partNumber ?? barcode;
+    // Deterministic barcode resolution (PROJECT_PROFILE §21): no
+    // eligible WO Demand adds nothing; exactly one adds directly;
+    // several NEVER add by guess — the list shows exactly those and an
+    // explicit selection is required.
+    if (data.candidates.length === 0) {
+      const listed =
+        data.alreadyListedCount > 0
+          ? ` — ${data.alreadyListedCount} already on the Hot list`
+          : '';
+      setScanFeedback({
+        tone: 'error',
+        text: `No eligible Work Order Demand for ${pn}${listed}. Nothing was added.`,
+      });
+      readyForNextScan();
+      return;
+    }
+    if (data.candidates.length === 1) {
+      if (disabled) {
+        setScanFeedback({
+          tone: 'error',
+          text: 'Changes are blocked right now, so nothing was added. Try again once the Hot list is ready.',
+        });
+        return;
+      }
+      onAdd(data.candidates[0]);
+      return;
+    }
+    setList({ ...data, source: 'barcode', term: pn });
+    setScanFeedback({
+      tone: 'info',
+      text: `Multiple eligible Work Order Demands use PN ${pn} — select the Work Order to add.`,
+    });
+  }
+
+  const candidates = list?.candidates ?? [];
+  const listedNote =
+    list && list.alreadyListedCount > 0
+      ? ` — ${list.alreadyListedCount} already on the Hot list`
+      : '';
   return (
     <ModalDialog label="Add WO Demand to Hot list" onClose={onCancel}>
       <h3>Add WO Demand to Hot list</h3>
@@ -771,6 +1271,7 @@ function HotAddDialog({
         <b>scan the PN barcode</b> with this dialog open.
       </div>
       <input
+        ref={inputRef}
         className="hotsearch"
         placeholder="Search PN, WO, Job Number… or scan PN barcode"
         aria-label="Search PN, WO, Job Number or scan PN barcode"
@@ -779,77 +1280,75 @@ function HotAddDialog({
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
-          setAmbiguousPn(null);
+          setScanFeedback(null);
         }}
         onKeyDown={(e) => {
           if (e.key !== 'Enter') return;
-          const value = e.currentTarget.value.trim().toUpperCase();
-          // Deterministic barcode resolution (PROJECT_PROFILE §21):
-          // no eligible WO Demand adds nothing; exactly one adds
-          // directly; several NEVER add by guess — the list filters to
-          // the PN and an explicit selection is required.
-          const byBarcode = candidates.filter((c) => c.barcode === value);
-          if (byBarcode.length === 1) {
-            onAdd(byBarcode[0]);
-            return;
-          }
-          if (byBarcode.length > 1) {
-            setQuery(byBarcode[0].pn);
-            setAmbiguousPn(byBarcode[0].pn);
-            return;
-          }
-          if (list.length === 1) onAdd(list[0]);
+          const value = e.currentTarget.value.trim();
+          if (!value) return;
+          if (isBarcodeInput(value)) void resolveBarcode(value);
+          else void runSearch(value);
         }}
       />
-      {ambiguousPn ? (
-        <div className="sub" role="status">
-          Multiple active WO Demands use PN <b>{ambiguousPn}</b> — select the
-          Work Order to add.
+      {scanFeedback ? (
+        <div
+          className={`sub hotadd-feedback ${scanFeedback.tone}`}
+          role={scanFeedback.tone === 'info' ? 'status' : 'alert'}
+        >
+          {scanFeedback.text}
         </div>
       ) : (
         <div className="sub">
           If a PN has multiple active WO Demands, each is listed separately.
         </div>
       )}
-      {import.meta.env.DEV ? (
-        <div className="hotadd-hint">
-          Demo barcodes (development build only): <code>PF:PN:78-04-0031</code>{' '}
-          — Enter adds its one WO Demand directly;{' '}
-          <code>PF:PN:0455-20-0118-03</code> — two active WO Demands, Enter
-          filters the list for an explicit selection.
-        </div>
-      ) : null}
       <div className="hotaddlist">
-        {list.length ? (
-          list.map((c) => (
-            <button
-              key={hotKey(c)}
-              className="hotadd-item"
-              onClick={() => onAdd(c)}
-            >
-              <span className="hpn">{c.pn}</span>
-              <span className="hwo">{c.workOrder}</span>
-              <TypeChip type={c.type} />
-              {(() => {
-                const dueInfo = dueCountdown(c.due, now, DUE_SOON);
-                return (
-                  <span
-                    className={`hdue ${dueInfo.dueClass === 'late' ? 'late' : ''}`}
-                  >
-                    {c.due
-                      ? `${formatIsoDateShort(c.due)} · ${dueInfo.note}`
-                      : dueInfo.note}
-                  </span>
-                );
-              })()}
-            </button>
-          ))
+        {loadError !== null ? (
+          <div className="hotadd-empty" role="alert">
+            {loadError}
+          </div>
+        ) : list === null ? (
+          <div className="hotadd-empty" role="status">
+            Loading eligible Work Order Demand…
+          </div>
+        ) : candidates.length ? (
+          candidates.map((c) => {
+            const due = dueInfo(c, now);
+            return (
+              <button
+                key={idOf(c)}
+                className="hotadd-item"
+                disabled={disabled}
+                onClick={() => onAdd(c)}
+              >
+                <span className="hpn">{c.partNumber}</span>
+                <span className="hwo" title={woJobLabel(c, true)}>
+                  {woJobLabel(c, true)} · shortage {c.shortageQuantity}
+                </span>
+                <TypeChip type={c.requestType} />
+                <span
+                  className={`hdue ${due.dueClass === 'late' ? 'late' : ''}`}
+                >
+                  {c.dueDate
+                    ? `${formatIsoDateShort(c.dueDate)} · ${due.note}`
+                    : due.note}
+                </span>
+              </button>
+            );
+          })
         ) : (
           <div className="hotadd-empty">
-            No matching active WO Demand
-            {q ? ` for “${query.trim()}”` : ' — everything is already Hot'}
+            {list.source === 'search'
+              ? `No eligible Work Order Demand matches “${list.term}”${listedNote}`
+              : `No eligible Work Order Demand${listedNote}`}
           </div>
         )}
+        {list?.truncated ? (
+          <div className="hotadd-empty">
+            Showing the first {candidates.length} — refine the search to find
+            the Work Order Demand.
+          </div>
+        ) : null}
       </div>
       <div className="row">
         <button className="bigbtn ghost" onClick={onCancel}>

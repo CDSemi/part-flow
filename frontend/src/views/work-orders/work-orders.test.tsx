@@ -488,6 +488,15 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         409,
       );
     }
+    // Mirror of the Phase 12 guard: a Hot demand leaves the Hot list
+    // first.
+    const removed = wo.demands.find((d) => d.id === demandId);
+    if (removed && removed.priority_rank !== null) {
+      return detailResponse(
+        'Cannot remove: this demand line is on the Hot list. Remove it from the Hot list in Management → Priority first.',
+        409,
+      );
+    }
     if (wo.demands.length <= 1) {
       return detailResponse(
         'Cannot remove the last demand line — a Work Order contains one or more demand records.',
@@ -1706,6 +1715,29 @@ test('removing a saved unreleased line requires confirmation and commits on the 
       call.startsWith('DELETE /api/work-orders/1/demands/101'),
     ),
   ).toHaveLength(1);
+});
+
+test('a Hot demand line offers no removal and says where to take it off the Hot list', async () => {
+  // E-500 (demand 103) is unreleased but ranked #2 on the Hot list
+  // (Phase 12): the server refuses its removal, so the dialog disables
+  // ✕ with the explanation instead of offering a doomed confirmation.
+  state.workOrders[0].demands[2].priority_rank = 2;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  const explanation =
+    'Cannot remove: this demand line is on the Hot list (🔥#2). Remove it from the Hot list in Management → Priority first.';
+  const remove = within(dialog).getByRole('button', {
+    name: 'Remove line E-500',
+  });
+  expect(remove).toBeDisabled();
+  expect(remove).toHaveAttribute('title', explanation);
+  expect(within(dialog).getByText(explanation)).toBeInTheDocument();
+  // A line that is not Hot keeps its confirmed removal.
+  expect(
+    within(dialog).getByRole('button', { name: 'Remove line A-100' }),
+  ).toBeEnabled();
+  expect(state.calls.some((call) => call.startsWith('DELETE'))).toBe(false);
 });
 
 test('a release committed after the view loaded still blocks removal — server 409 with the explanation', async () => {

@@ -13,7 +13,7 @@ nhận việc di chuyển số lượng chi tiết qua nhà máy.
 ## Trạng thái hiện tại
 
 Repository hiện có nền tảng từ Phase 1 đến Phase 10.5 triển khai end to end và
-Production Board + Area Board + PN Tracking của Phase 11:
+Production Board + Area Board + PN Tracking của Phase 11 và Priority Management của Phase 12:
 
 - **Phase 1:** React + TypeScript, FastAPI, PostgreSQL, Alembic, Docker Compose,
   health check, formatter/linter/typecheck/test và CI.
@@ -107,6 +107,7 @@ Production Board + Area Board + PN Tracking của Phase 11:
   monitoring theo PROJECT_PROFILE §17 (thời điểm cố định `expected_by` trên mọi
   monitoring position — giá trị snapshot của Assigned Route Step hiện tại, nếu
   không thì Operation default — do UI clock chung đánh giá; chỉ advisory).
+- **Phase 12 (Priority Management):** Hot list của Work Order Demand — `GET /api/hot-list` (các entry theo rank, gồm cả entry inactive, mỗi entry có quantity hiện tại của PN theo Area / Machine), `GET /api/hot-list/candidates` (`?search=` theo PN / Work Order Number / Job Number, hoặc `?barcode=PF:PN:…`; chỉ demand eligible để vào list) và `POST /api/hot-list/changes` (command idempotent, có audit, thêm / xóa / di chuyển / undo / redo một entry đối chiếu order mà manager đã xác nhận — writer duy nhất của `priority_rank`; Department-gated: 404 khi không có Department active, 409 khi có nhiều) — và view Management → Priority thật trên đó (confirmation trước mọi thay đổi order, Undo / Redo trong session, drag-and-drop và Move Up / Move Down, add bằng search hoặc scan `PF:PN:`). Management → Work Orders vô hiệu hóa việc xóa một Hot demand line (server cũng từ chối bằng 409). Migration `0013_phase12_priority` có pre-check từ chối nếu rank hiện có không dense, rồi thêm CHECK rank dương, UNIQUE `priority_rank` và audit expression index cho idempotency lookup của command. Phase 12 chưa đóng: việc đóng chờ owner quyết OD5 (priority tại Work Order intake) và OD7 (báo cáo Hot/priority của PROJECT_PROFILE §27); xem IMPLEMENTATION_ROADMAP Phase 12.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
@@ -116,7 +117,7 @@ chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát tri�
 
 - `frontend/` — Vite + React + TypeScript. Các view có backend (Administration
   Phase 3.5, Machines, Work Orders và Completed Work Orders, Scan Station gồm
-  cả `Receive Quantity`, Production Board, Area Board, PN Tracking) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
+  cả `Receive Quantity`, Production Board, Area Board, PN Tracking, Priority) đã kết nối API thật; view còn lại dùng mock chỉ trong development và bị chặn
   khỏi production bundle.
 - `backend/` — FastAPI. Application service sở hữu business rule và transaction;
   domain vocabulary độc lập framework; SQLAlchemy mapping khớp schema chuẩn.
