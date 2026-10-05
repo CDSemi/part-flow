@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -118,6 +119,12 @@ const FIXED_NGUYEN = {
   mode: 'FIXED',
   fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
 };
+const FIXED_TRAN = {
+  mode: 'FIXED',
+  fixed_worker: { id: 8, name: 'T. Tran', avatar_updated_at: null },
+};
+/** While set, the station context read fails (a transient 502/503). */
+let contextFailure: boolean;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -313,6 +320,9 @@ function handle(url: string, method: string, body: unknown): Response {
   }
   if (url === '/api/machines') return json([]);
   if (/\/context$/.test(url)) {
+    if (contextFailure) {
+      return json({ detail: 'The server is restarting.' }, 503);
+    }
     const station = stationOf(url);
     return json({
       station_id: station.station_id,
@@ -603,6 +613,7 @@ beforeEach(() => {
   requests = [];
   nextMovementId = 500;
   workerIdentification = { mode: 'DISABLED', fixed_worker: null };
+  contextFailure = false;
   writeFailure = null;
   healthDown = false;
   vi.stubGlobal(
@@ -1686,4 +1697,92 @@ test('in a Fixed Worker Area the assignment and DONE summaries name the Fixed Wo
   fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
   expectWorkerBeforeStation(done, 'H. Nguyen');
   expect(writes()).toHaveLength(0);
+});
+
+/** Context reads (GET …/context) so far. */
+function contextReads() {
+  return reads(/\/context$/).length;
+}
+
+test('opening a Machine-card DONE or QUEUE re-reads the context: the summary names the Worker configured meanwhile', async () => {
+  await renderStation();
+  expect(document.querySelector('.ss-pill')).toBeNull();
+  const initialReads = contextReads();
+
+  // Administration makes Lathe Fixed Worker while the kiosk is idle —
+  // no scan and no command at this station.
+  workerIdentification = FIXED_NGUYEN;
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const done = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  await waitFor(() => expect(contextReads()).toBe(initialReads + 1));
+  fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
+  await waitFor(() => expectWorkerBeforeStation(done, 'H. Nguyen'));
+  expect(document.querySelector('.ss-pill')).toHaveTextContent('H. Nguyen');
+  fireEvent.keyDown(done, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // The Fixed Worker is changed meanwhile: QUEUE names the new one.
+  workerIdentification = FIXED_TRAN;
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Return to Area queue',
+    }),
+  );
+  const queue = await screen.findByRole('dialog', {
+    name: 'Return unfinished quantity to queue',
+  });
+  await waitFor(() => expect(contextReads()).toBe(initialReads + 2));
+  fireEvent.click(within(queue).getByRole('button', { name: 'Next' }));
+  await waitFor(() => expectWorkerBeforeStation(queue, 'T. Tran'));
+  expect(writes()).toHaveLength(0);
+});
+
+test('opening the direct-processing DONE re-reads the context: the summary names the Worker configured meanwhile', async () => {
+  await renderStation('CUT-ST-01');
+  const initialReads = contextReads();
+
+  workerIdentification = FIXED_NGUYEN;
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Complete Area processing' }),
+  );
+  const done = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  await waitFor(() => expect(contextReads()).toBe(initialReads + 1));
+  fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
+  await waitFor(() => expectWorkerBeforeStation(done, 'H. Nguyen'));
+  expect(writes()).toHaveLength(0);
+});
+
+test('a failed context re-read when a row action opens keeps the station and the open wizard as last read', async () => {
+  workerIdentification = FIXED_NGUYEN;
+  await renderStation();
+  const initialReads = contextReads();
+  contextFailure = true;
+
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const done = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  await waitFor(() => expect(contextReads()).toBe(initialReads + 1));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(screen.queryByText(/^Scan Station .* is unavailable$/)).toBeNull();
+  expect(screen.getByRole('dialog', { name: 'Complete Area processing' })).toBe(
+    done,
+  );
+  fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
+  expectWorkerBeforeStation(done, 'H. Nguyen');
+  expect(document.querySelector('.ss-pill')).toHaveTextContent('H. Nguyen');
 });

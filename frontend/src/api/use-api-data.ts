@@ -3,8 +3,10 @@
 // One deliberately small pattern instead of a data library: load once
 // per loader identity, expose loading / error / ready, and offer an
 // explicit reload (after a completed write, or as the user-facing
-// Retry of an error state). A generation counter discards stale
-// results, so an unmounted view or a superseded reload never applies.
+// Retry of an error state), plus a background revalidation for a
+// freshness re-read that must never replace loaded data with an error.
+// A generation counter discards stale results, so an unmounted view or
+// a superseded reload never applies.
 //
 // Pass a stable loader: a module-level function for parameterless
 // lists, or a `useCallback` wrapping the parameters.
@@ -23,6 +25,12 @@ export interface ApiData<T> {
   /** Re-run the loader (keeps showing the current data while
    * refreshing; a failed refresh becomes the error state). */
   reload: () => void;
+  /** Re-run the loader in the background: a success replaces the data;
+   * a failure keeps the last ready data (nothing to show otherwise, so
+   * it then becomes the error state). For freshness re-reads that must
+   * not tear down a view the user is working in — the next reload or
+   * revalidation recovers. */
+  revalidate: () => void;
 }
 
 export function useApiData<T>(load: () => Promise<T>): ApiData<T> {
@@ -51,5 +59,24 @@ export function useApiData<T>(load: () => Promise<T>): ApiData<T> {
   }, [load, generation]);
 
   const reload = useCallback(() => setGeneration((value) => value + 1), []);
-  return { state, reload };
+  const revalidate = useCallback(() => {
+    const requested = ++liveGeneration.current;
+    void load().then(
+      (data) => {
+        if (liveGeneration.current === requested) {
+          setState({ status: 'ready', data });
+        }
+      },
+      (error: unknown) => {
+        if (liveGeneration.current === requested) {
+          setState((current) =>
+            current.status === 'ready'
+              ? current
+              : { status: 'error', message: errorMessage(error) },
+          );
+        }
+      },
+    );
+  }, [load]);
+  return { state, reload, revalidate };
 }

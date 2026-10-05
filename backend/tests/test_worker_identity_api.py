@@ -21,8 +21,9 @@ temporary database migrated to head by the real Alembic chain
 - refusals with zero writes: an inactive Fixed Worker (409) and a
   fixture-built Scanned session Area (409);
 - concurrency: the resolver's FOR KEY SHARE serialises with a Worker
-  deactivation's FOR UPDATE, Area saves and deactivations have one
-  serial outcome;
+  deactivation's FOR UPDATE, Area saves (update and create) and
+  deactivations have one serial outcome, and the Area saves take the
+  Fixed Worker lock in the S2c-F1 addendum order;
 - the station context, the read-only badge scan, the Undo preview and
   PN Tracking expose the identity;
 - no request carries identity; a static guard keeps identity out of
@@ -39,7 +40,7 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 import sqlalchemy as sa
@@ -50,6 +51,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
+from app.application import audit
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -1191,6 +1193,265 @@ def test_deactivation_waits_for_a_command_recording_the_worker(
             {"id": str(worker["id"])},
         ).scalar_one()
     assert audits == 1
+
+
+def _gate(
+    monkeypatch: pytest.MonkeyPatch, entity_type: str, event_type: str
+) -> tuple[threading.Event, threading.Event]:
+    """Park the request that appends a matching audit row — inside its
+    transaction, after its judgments and with its locks held — until
+    ``release`` is set. A gate never released raises instead, so the
+    parked request rolls back and never commits into a later test."""
+    entered = threading.Event()
+    release = threading.Event()
+    append = audit.append_audit_event
+
+    def gated(session: Session, **fields: Any) -> None:
+        if fields["entity_type"] == entity_type and fields["event_type"] == event_type:
+            entered.set()
+            if not release.wait(timeout=30):
+                raise RuntimeError("The audit gate was never released.")
+        append(session, **fields)
+
+    monkeypatch.setattr("app.application.audit.append_audit_event", gated)
+    return entered, release
+
+
+def _join(threads: list[threading.Thread]) -> None:
+    for thread in threads:
+        thread.join(timeout=30)
+
+
+def _fixed_area_body(department_id: int, worker_id: int, name: str) -> dict[str, Any]:
+    return {
+        "department_id": department_id,
+        "name": name,
+        "worker_identification_mode": "FIXED",
+        "fixed_worker_id": worker_id,
+    }
+
+
+def test_area_create_waiting_on_a_deactivation_is_refused(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create twin of T-11: the real deactivation is in flight with its
+    Worker FOR UPDATE; the real Fixed Worker create waits on its own
+    Worker FOR SHARE, re-reads the Worker and is refused. Fails if the
+    create path stops locking and re-reading the Worker before its
+    INSERT (the INSERT's FK check alone passes on the inactive row)."""
+    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    worker = _worker(client)
+    name = _unique("AREA")
+    before = _counts(db_engine)
+    entered, release = _gate(monkeypatch, "Worker", "UPDATED")
+    threads: list[threading.Thread] = []
+    deactivate, deactivated = _start(
+        lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+    )
+    threads.append(deactivate)
+    try:
+        assert entered.wait(timeout=20)
+        create, created = _start(
+            lambda: client.post(
+                "/api/areas", json=_fixed_area_body(int(department["id"]), worker["id"], name)
+            )
+        )
+        threads.append(create)
+        _assert_blocked(create)
+    finally:
+        release.set()
+        _join(threads)
+
+    assert _finish(deactivate, deactivated).status_code == 200
+    response = _finish(create, created)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        f"Worker '{worker['name']}' is inactive and cannot be the Fixed Worker of an Area."
+        " Choose an active Worker."
+    )
+    with db_engine.connect() as connection:
+        rows = connection.execute(
+            sa.text("SELECT count(*) FROM areas WHERE name = :name"), {"name": name}
+        ).scalar_one()
+    assert rows == 0
+    after = _counts(db_engine)
+    assert after["areas"] == before["areas"]
+    # Only the deactivation's Worker UPDATED row: no Area CREATED row.
+    assert after["audit_events"] == before["audit_events"] + 1
+
+
+def test_deactivation_waiting_on_an_area_create_is_refused(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create twin of T-10 on the real route: the Fixed Worker create is
+    in flight (Department, then Worker FOR SHARE, then its INSERT); the
+    deactivation waits on it and then names the new Area."""
+    department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+    worker = _worker(client)
+    name = _unique("AREA")
+    entered, release = _gate(monkeypatch, "Area", "CREATED")
+    threads: list[threading.Thread] = []
+    create, created = _start(
+        lambda: client.post(
+            "/api/areas", json=_fixed_area_body(int(department["id"]), worker["id"], name)
+        )
+    )
+    threads.append(create)
+    try:
+        assert entered.wait(timeout=20)
+        deactivate, deactivated = _start(
+            lambda: client.patch(f"/api/workers/{worker['id']}", json={"is_active": False})
+        )
+        threads.append(deactivate)
+        _assert_blocked(deactivate)
+    finally:
+        release.set()
+        _join(threads)
+
+    assert _finish(create, created).status_code == 201
+    response = _finish(deactivate, deactivated)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        f"Worker '{worker['name']}' is the Fixed Worker of Area '{name}'. Choose"
+        " another Fixed Worker or Worker ID mode for that Area in Administration → Areas"
+        " before deactivating this Worker."
+    )
+    with db_engine.connect() as connection:
+        active = connection.execute(
+            sa.text("SELECT is_active FROM workers WHERE id = :id"), {"id": worker["id"]}
+        ).scalar_one()
+    assert active is True
+
+
+_LOCK_PROBE_TABLES = frozenset({"areas", "departments", "workers"})
+
+
+def _row_unlocked(engine: Engine, table: str, row_id: int) -> bool:
+    """Whether no other transaction holds any lock on the row (a
+    FOR UPDATE NOWAIT probe, rolled back at once)."""
+    assert table in _LOCK_PROBE_TABLES
+    with engine.connect() as observer:
+        try:
+            observer.execute(
+                sa.text(f"SELECT 1 FROM {table} WHERE id = :id FOR UPDATE NOWAIT"), {"id": row_id}
+            )
+        except sa.exc.OperationalError as error:
+            if getattr(error.orig, "sqlstate", None) != "55P03":
+                raise
+            return False
+        finally:
+            observer.rollback()
+    return True
+
+
+class _LockCase(NamedTuple):
+    """An Area save that judges a Fixed Worker, with its expected lock order."""
+
+    send: Callable[[], Any]
+    status: int
+    worker_id: int
+    # The row the save locks first.
+    first: tuple[str, int]
+    # Rows already locked while the save waits on the Worker.
+    locked_before_worker: tuple[tuple[str, int], ...]
+    # Rows the save locks only after the Worker.
+    locked_after_worker: tuple[tuple[str, int], ...]
+
+
+def _lock_case(client: TestClient, case: str) -> _LockCase:
+    worker_id = int(_worker(client)["id"])
+    if case == "create":
+        department = _ok(client.post("/api/departments", json={"name": _unique("DEPT")}), 201)
+        body = _fixed_area_body(int(department["id"]), worker_id, _unique("AREA"))
+        department_row = ("departments", int(department["id"]))
+        return _LockCase(
+            send=lambda: client.post("/api/areas", json=body),
+            status=201,
+            worker_id=worker_id,
+            first=department_row,
+            locked_before_worker=(department_row,),
+            locked_after_worker=(),
+        )
+    cell = _Cell(client)
+    area_row = ("areas", cell.area_id)
+    if case == "update":
+        return _LockCase(
+            send=lambda: client.patch(
+                f"/api/areas/{cell.area_id}",
+                json={"worker_identification_mode": "FIXED", "fixed_worker_id": worker_id},
+            ),
+            status=200,
+            worker_id=worker_id,
+            first=area_row,
+            locked_before_worker=(area_row,),
+            locked_after_worker=(),
+        )
+    assert case == "activation"
+    _set_mode(client, cell.area_id, "FIXED", worker_id)
+    _ok(client.patch(f"/api/areas/{cell.area_id}", json={"is_active": False}))
+    return _LockCase(
+        send=lambda: client.patch(f"/api/areas/{cell.area_id}", json={"is_active": True}),
+        status=200,
+        worker_id=worker_id,
+        first=area_row,
+        locked_before_worker=(area_row,),
+        locked_after_worker=(("departments", int(cell.area["department_id"])),),
+    )
+
+
+_LOCK_CASES = ("create", "update", "activation")
+
+
+@pytest.mark.parametrize("case", _LOCK_CASES)
+def test_the_fixed_worker_is_not_locked_before_the_first_row(
+    client: TestClient, db_engine: Engine, case: str
+) -> None:
+    """S2c-F1 addendum lock order, first step: an Area create waits on the
+    Department row, an Area update or activation on the Area row, while
+    the Worker (and, for an activation, the Department) is still unlocked."""
+    probe = _lock_case(client, case)
+    table, row_id = probe.first
+    assert table in _LOCK_PROBE_TABLES
+    with db_engine.connect() as holder:
+        holder.execute(sa.text(f"SELECT 1 FROM {table} WHERE id = :id FOR UPDATE"), {"id": row_id})
+        thread, results = _start(probe.send)
+        try:
+            _assert_blocked(thread)
+            assert _row_unlocked(db_engine, "workers", probe.worker_id)
+            for later in probe.locked_after_worker:
+                assert _row_unlocked(db_engine, *later), later
+        finally:
+            holder.rollback()
+            _join([thread])
+    response = _finish(thread, results)
+    assert response.status_code == probe.status, response.text
+
+
+@pytest.mark.parametrize("case", _LOCK_CASES)
+def test_the_fixed_worker_is_locked_in_order(
+    client: TestClient, db_engine: Engine, case: str
+) -> None:
+    """S2c-F1 addendum lock order, Worker step: while the save waits on the
+    Worker, a create already holds the Department and an update or
+    activation the Area; an activation locks its Department only after
+    the Worker (the Department lock itself is pinned by the S2c suite)."""
+    probe = _lock_case(client, case)
+    with db_engine.connect() as holder:
+        holder.execute(
+            sa.text("SELECT 1 FROM workers WHERE id = :id FOR UPDATE"), {"id": probe.worker_id}
+        )
+        thread, results = _start(probe.send)
+        try:
+            _assert_blocked(thread)
+            for earlier in probe.locked_before_worker:
+                assert not _row_unlocked(db_engine, *earlier), earlier
+            for later in probe.locked_after_worker:
+                assert _row_unlocked(db_engine, *later), later
+        finally:
+            holder.rollback()
+            _join([thread])
+    response = _finish(thread, results)
+    assert response.status_code == probe.status, response.text
 
 
 # ---------------------------------------------------------------------------

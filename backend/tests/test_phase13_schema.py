@@ -1103,6 +1103,48 @@ def test_downgrade_refuses_while_identity_history_exists(refused_database: URL) 
         engine.dispose()
 
 
+def test_downgrade_refuses_while_allocation_identity_exists(refused_database: URL) -> None:
+    """The allocation branch of the refusal alone: every Movement carries
+    no Worker and every Area is Disabled (an Area switched back after
+    Fixed-mode Stockroom allocations were recorded)."""
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            seeded = _seed_production(connection)
+            _insert_worker(connection, "ALLOC-W")
+            worker = _scalar_id(
+                connection, "SELECT id FROM workers WHERE badge_barcode = 'ALLOC-W'"
+            )
+            allocation = _scalar_id(
+                connection,
+                "INSERT INTO work_order_allocations (part_number, work_order_demand_id,"
+                " quantity, source, station_id, allocated_by_worker_id, allocated_at,"
+                " device_event_id) SELECT part_number, work_order_demand_id, 1, source,"
+                " station_id, :worker, now(), 'HIST-ALLOC' FROM work_order_allocations"
+                " WHERE id = :id RETURNING id",
+                worker=worker,
+                id=seeded["allocation"],
+            )
+            movements = connection.execute(
+                sa.text("SELECT count(*) FROM part_movements WHERE worker_id IS NOT NULL")
+            ).scalar_one()
+            configured = connection.execute(
+                sa.text("SELECT count(*) FROM areas WHERE worker_identification_mode <> 'DISABLED'")
+            ).scalar_one()
+        assert (movements, configured) == (0, 0)
+        with pytest.raises(ProgrammingError, match="production records carry Worker identity"):
+            command.downgrade(_alembic_config(refused_database), _PN_CHECK_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            kept = connection.execute(
+                sa.text("SELECT allocated_by_worker_id FROM work_order_allocations WHERE id = :id"),
+                {"id": allocation},
+            ).scalar_one()
+        assert kept == worker
+    finally:
+        engine.dispose()
+
+
 def test_downgrade_refuses_while_area_mode_configuration_exists(refused_database: URL) -> None:
     engine = create_engine(refused_database)
     try:

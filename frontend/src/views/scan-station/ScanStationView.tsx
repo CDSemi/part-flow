@@ -795,8 +795,10 @@ function StationView({
         }
         // Re-read the station context on every resolved scan (non-
         // blocking) so the Worker pill and the summary Worker row show
-        // the Area's Worker ID mode current at the scan.
-        context.reload();
+        // the Area's Worker ID mode current at the scan. A background
+        // revalidation: a failed re-read keeps the station as last read
+        // and never tears down the dialog this scan opens.
+        context.revalidate();
         openResolution(resolution, parent);
       } catch (error) {
         focusScan();
@@ -831,7 +833,7 @@ function StationView({
           focusScan();
           return;
         }
-        context.reload();
+        context.revalidate();
         const known = inventoryReady?.machines.map((card) => card.machine);
         const machines = known?.some(
           (machine) => machine.id === resolution.machine.id,
@@ -888,7 +890,7 @@ function StationView({
       setCheckingBadge(true);
       try {
         const result = await scanBadge(stationId, badge);
-        if (result.mode !== renderedWorkerMode) context.reload();
+        if (result.mode !== renderedWorkerMode) context.revalidate();
         if (result.outcome === 'NOT_USED_IN_AREA') {
           setNotice({
             kind: 'warn',
@@ -1540,22 +1542,27 @@ function StationView({
    * Machine-card row actions (GUI_DESIGN §4.6): DONE and QUEUE — two
    * distinct one-shot actions, never merged. Each opens its wizard for
    * exactly the Quantity Flow of that row; while writes are blocked
-   * they stay disabled in place.
+   * they stay disabled in place. Opening one is an entry point with no
+   * scan before it, so it re-reads the station context in the
+   * background (as a resolved scan does) — the pill and the summary
+   * Worker row then show the Area's Worker ID mode current at the open.
    */
+  const openMachineAction = (
+    action: 'DONE' | 'QUEUE',
+    flowOfRow: FlowInArea,
+    machine: MachineRef | null,
+  ) => {
+    context.revalidate();
+    setFlow({ kind: 'machine-action', action, flow: flowOfRow, machine });
+  };
+
   const doneRowAction = (flowOfRow: FlowInArea, machine: MachineRef | null) => (
     <button
       className="rowact done"
       aria-label="Complete Area processing"
       title="Complete processing — move this quantity to the finished rack, ready to transfer"
       disabled={writeBlocked}
-      onClick={() =>
-        setFlow({
-          kind: 'machine-action',
-          action: 'DONE',
-          flow: flowOfRow,
-          machine,
-        })
-      }
+      onClick={() => openMachineAction('DONE', flowOfRow, machine)}
     >
       <span className="ric" aria-hidden="true">
         ✓
@@ -1568,13 +1575,6 @@ function StationView({
     const flowOfRow = presented.flowOf.get(entry.card);
     const machineOfRow = presented.machineByName.get(entry.context);
     if (!flowOfRow || !machineOfRow) return null;
-    const open = (action: 'DONE' | 'QUEUE') =>
-      setFlow({
-        kind: 'machine-action',
-        action,
-        flow: flowOfRow,
-        machine: machineOfRow,
-      });
     return (
       <>
         {doneRowAction(flowOfRow, machineOfRow)}
@@ -1583,7 +1583,7 @@ function StationView({
           aria-label="Return to Area queue"
           title="Return unfinished or paused quantity to the Area queue"
           disabled={writeBlocked}
-          onClick={() => open('QUEUE')}
+          onClick={() => openMachineAction('QUEUE', flowOfRow, machineOfRow)}
         >
           <span className="ric" aria-hidden="true">
             ⟲

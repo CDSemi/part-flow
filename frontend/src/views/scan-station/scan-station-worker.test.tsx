@@ -23,7 +23,9 @@ import { App } from '../../App';
 // notices without touching the Last Scanned PN, the Undo target or the
 // station, the local rejection of unknown `PF:` values, the offline
 // guard, and the context freshness — re-read after a command, on every
-// resolved scan and on a badge answer naming a different mode.
+// resolved scan and on a badge answer naming a different mode — where
+// a failed re-read keeps the station, the open dialog and the pill as
+// last read.
 
 type Identification =
   | { mode: 'DISABLED'; fixed_worker: null }
@@ -69,6 +71,8 @@ let badgeFailure: boolean;
 let badgeHold: Promise<void> | null;
 /** Applied when the server commits a transfer (a concurrent Admin edit). */
 let onTransferCommitted: (() => void) | null;
+/** While set, the station context read fails (a transient 502/503). */
+let contextFailure: boolean;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -121,6 +125,9 @@ function handle(url: string, method: string, body: unknown): Response {
   }
   if (url === '/api/machines') return json([]);
   if (url === '/api/scan-stations/DEBURR-ST-01/context') {
+    if (contextFailure) {
+      return json({ detail: 'The server is restarting.' }, 503);
+    }
     return json({
       station_id: 'DEBURR-ST-01',
       department: { id: 1, name: 'Finishing' },
@@ -262,6 +269,7 @@ beforeEach(() => {
   badgeFailure = false;
   badgeHold = null;
   onTransferCommitted = null;
+  contextFailure = false;
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -571,6 +579,30 @@ test('every resolved scan re-reads the context: the pill and the summary Worker 
   await waitFor(() => expect(summaryValue(box, 'Worker')).toBe('H. Nguyen'));
   const terms = summaryTerms(box);
   expect(terms.indexOf('Worker')).toBe(terms.indexOf('Scan Station') - 1);
+});
+
+test('a failed context re-read after a resolved scan keeps the station, the open dialog and the pill as last read', async () => {
+  identification = FIXED_NGUYEN;
+  await renderStation();
+  expect(pill()).toHaveTextContent('H. Nguyen');
+  const initialReads = contextReads();
+  // The freshness re-read fails (a 502, a restart) while the resolve
+  // itself succeeded: the opened workflow must survive it.
+  contextFailure = true;
+
+  const box = await openTransferSummary();
+  await waitFor(() => expect(contextReads()).toBe(initialReads + 1));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(screen.queryByText(/^Scan Station .* is unavailable$/)).toBeNull();
+  expect(box).toBeInTheDocument();
+  expect(
+    screen.getByRole('dialog', { name: 'Receive from another Area' }),
+  ).toBe(box);
+  expect(summaryValue(box, 'Worker')).toBe('H. Nguyen');
+  expect(pill()).toHaveTextContent('H. Nguyen');
+  expect(screen.getByLabelText('Scan barcode')).toBeInTheDocument();
 });
 
 test('a badge answer naming a different mode re-reads the context once', async () => {
