@@ -61,7 +61,11 @@ IMPLEMENTATION_ROADMAP Phase 3.5):
   serial number has meanwhile been reissued to another active Machine
   (a data problem to resolve first — Asset Tag reissue is structurally
   impossible through ``uq_machines_asset_tag``), and when the display
-  name would collide with an active Machine of the target Area.
+  name would collide with an active Machine of the target Area. The
+  target Area, current or new, is judged under the parent-activity
+  lock (``require_active_area``, FOR SHARE until COMMIT); creation
+  judges its Area the same way, before the Asset Tag counter is
+  touched.
 
 Each mutating service commits its own transaction: a 2xx response
 always reflects committed state, and a concurrent uniqueness race lost

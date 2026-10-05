@@ -33,7 +33,11 @@ IMPLEMENTATION_ROADMAP Phase 3.5, GUI_DESIGN §9):
   active Area, and creating or rebinding a Scan Station requires an
   active Area. Rebinding a Scan Station is deliberately allowed — the
   binding is Application-controlled configuration, not frozen in the
-  database.
+  database. Each of these judgments, and the Department check of an
+  Area activation, is made on a parent row locked FOR SHARE and
+  re-read under it, held until COMMIT, so a concurrent deactivation of
+  the parent and the child write have one serial outcome (Phase 13
+  slice 2c).
 - The Machine Asset Tag format is a single prefix + zero-padded
   numeric sequence (never a template engine). ``next_sequence`` is the
   persisted never-reuse counter owned by Machine creation (Phase 3.5
@@ -114,6 +118,16 @@ _ASSET_TAG_FORMAT_CONFLICTS: Final = {
 # code, still takes FOR UPDATE itself, as it always did.)
 _EDIT_LOCK: Final = {"key_share": True}
 
+# Parent-activity lock: FOR SHARE on a parent row (Department of an
+# Area; Area of an Operation, Scan Station or Machine), taken and
+# re-read BEFORE its active flag is judged and held until COMMIT. It
+# conflicts with every UPDATE of that row — the implicit FOR NO KEY
+# UPDATE of a plain UPDATE included, so any deactivation path
+# serializes with it whatever lock it takes — while FK checks (FOR KEY
+# SHARE) and concurrent child writes under the same parent (FOR SHARE)
+# never wait on it.
+_PARENT_LOCK: Final = {"read": True}
+
 
 # ---------------------------------------------------------------------------
 # Audit snapshots: explicit field lists. A column a later slice adds is
@@ -174,7 +188,12 @@ def list_departments(session: Session) -> list[Department]:
 
 
 def _get_department(session: Session, department_id: int) -> Department:
-    department = session.get(Department, department_id)
+    """The parent-activity read of an Area activation: the Department
+    under the parent-activity lock (FOR SHARE until COMMIT), re-read
+    under it."""
+    department = session.get(
+        Department, department_id, with_for_update=_PARENT_LOCK, populate_existing=True
+    )
     if department is None:
         raise NotFoundError(f"Department {department_id} does not exist.")
     return department
@@ -291,7 +310,9 @@ def list_areas(session: Session) -> list[Area]:
 
 
 def require_active_area(session: Session, area_id: int, purpose: str) -> Area:
-    area = session.get(Area, area_id)
+    """The Area under the parent-activity lock (FOR SHARE until COMMIT),
+    re-read under it; for write paths only."""
+    area = session.get(Area, area_id, with_for_update=_PARENT_LOCK, populate_existing=True)
     if area is None:
         raise InvalidInputError(f"Area {area_id} does not exist.")
     if not area.is_active:
@@ -315,7 +336,10 @@ def create_area(
     is_terminal: bool = False,
 ) -> Area:
     clean_name = required_text(name, "Area name")
-    department = session.get(Department, department_id)
+    # Parent-activity read: the Department is judged under FOR SHARE.
+    department = session.get(
+        Department, department_id, with_for_update=_PARENT_LOCK, populate_existing=True
+    )
     if department is None:
         raise InvalidInputError(f"Department {department_id} does not exist.")
     if not department.is_active:
@@ -368,7 +392,11 @@ def update_area(
     # KEY SHARE of concurrent child inserts); any other edit takes the
     # FOR NO KEY UPDATE its own UPDATE takes. Both conflict with the
     # FOR UPDATE production release holds on the Area, which is the
-    # serialization the deactivation check below relies on. The mode
+    # serialization the deactivation check below relies on, and with
+    # the parent-activity FOR SHARE that child writes (Operation and
+    # Scan Station create, Scan Station rebind, Machine create and
+    # reactivation) take on this Area before they judge it, so an
+    # in-flight child write and this edit serialize. The mode
     # follows the raw value (only a bool passes required_flag), so an
     # unknown Area is still a 404 before a malformed flag's 422.
     area = session.get(

@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2 and 2b): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b):
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b and 2c): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -710,7 +710,8 @@ integration):
   `tests/test_production_release_api.py`,
   `tests/test_scan_station_transfer_api.py`,
   `tests/test_workers_api.py`,
-  `tests/test_environment_audit_api.py`, and
+  `tests/test_environment_audit_api.py`,
+  `tests/test_environment_parent_activity_api.py`, and
   `tests/test_machine_audit_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
