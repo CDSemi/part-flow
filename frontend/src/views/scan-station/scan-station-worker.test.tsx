@@ -28,7 +28,7 @@ import { App } from '../../App';
 // last read.
 
 type Identification =
-  | { mode: 'DISABLED'; fixed_worker: null }
+  | { mode: 'DISABLED'; fixed_worker: null; session: null }
   | {
       mode: 'FIXED';
       fixed_worker: {
@@ -36,6 +36,7 @@ type Identification =
         name: string;
         avatar_updated_at: string | null;
       };
+      session: null;
     };
 
 interface Flow {
@@ -45,10 +46,15 @@ interface Flow {
   areaId: number;
 }
 
-const DISABLED: Identification = { mode: 'DISABLED', fixed_worker: null };
+const DISABLED: Identification = {
+  mode: 'DISABLED',
+  fixed_worker: null,
+  session: null,
+};
 const FIXED_NGUYEN: Identification = {
   mode: 'FIXED',
   fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+  session: null,
 };
 
 const AREAS = [
@@ -197,6 +203,7 @@ function handle(url: string, method: string, body: unknown): Response {
       available_stocked_quantity: 0,
       stock_available: false,
       scanned_at: new Date().toISOString(),
+      worker_session: null,
     });
   }
   if (url === '/api/scan-stations/DEBURR-ST-01/badge-scans') {
@@ -215,6 +222,8 @@ function handle(url: string, method: string, body: unknown): Response {
     return json({
       outcome: ACTIVE_BADGES.has(badge) ? 'NOT_USED_IN_AREA' : 'UNKNOWN',
       mode: identification.mode,
+      worker_session: null,
+      previous_worker: null,
     });
   }
   if (
@@ -381,6 +390,7 @@ test('the Fixed Worker avatar image renders when the Worker has one; production 
       name: 'H. Nguyen',
       avatar_updated_at: '2026-10-01T08:00:00+00:00',
     },
+    session: null,
   };
   await renderStation('/production');
 

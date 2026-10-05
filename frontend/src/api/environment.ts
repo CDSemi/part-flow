@@ -81,6 +81,9 @@ export interface Area {
   workerIdentificationMode: WorkerIdentificationMode;
   /** The configured Fixed Worker; set exactly in `FIXED` mode. */
   fixedWorkerId: number | null;
+  /** Per-Area Worker session timeout override in whole minutes; null
+   * uses the default of Administration → Worker sessions. */
+  workerSessionTimeoutMinutes: number | null;
 }
 
 interface AreaWire {
@@ -95,6 +98,7 @@ interface AreaWire {
   is_active: boolean;
   worker_identification_mode: WorkerIdentificationMode;
   fixed_worker_id: number | null;
+  worker_session_timeout_minutes: number | null;
 }
 
 function toArea(wire: AreaWire): Area {
@@ -109,6 +113,7 @@ function toArea(wire: AreaWire): Area {
     isActive: wire.is_active,
     workerIdentificationMode: wire.worker_identification_mode,
     fixedWorkerId: wire.fixed_worker_id,
+    workerSessionTimeoutMinutes: wire.worker_session_timeout_minutes,
   };
 }
 
@@ -170,6 +175,8 @@ export async function updateArea(
     isActive?: boolean;
     workerIdentificationMode?: WorkerIdentificationMode;
     fixedWorkerId?: number | null;
+    /** null clears the override (the default applies again). */
+    workerSessionTimeoutMinutes?: number | null;
   },
 ): Promise<Area> {
   const wire = await apiRequest<AreaWire>(`/api/areas/${id}`, {
@@ -185,6 +192,9 @@ export async function updateArea(
         : {}),
       ...(patch.isActive !== undefined ? { is_active: patch.isActive } : {}),
       ...workerIdentificationBody(patch),
+      ...(patch.workerSessionTimeoutMinutes !== undefined
+        ? { worker_session_timeout_minutes: patch.workerSessionTimeoutMinutes }
+        : {}),
     },
   });
   return toArea(wire);

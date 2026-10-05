@@ -18,8 +18,9 @@ temporary database migrated to head by the real Alembic chain
   after any configuration change; a refused first attempt retried
   under the same key records the identity judged at its first
   successful recording; identity never causes a fingerprint conflict;
-- refusals with zero writes: an inactive Fixed Worker (409) and a
-  fixture-built Scanned session Area (409);
+- refusals with zero writes: an inactive Fixed Worker (409) — the
+  Scanned session mode (Phase 13 slice 4) is covered by
+  `test_worker_sessions_api.py`;
 - concurrency: the resolver's FOR KEY SHARE serialises with a Worker
   deactivation's FOR UPDATE, Area saves (update and create) and
   deactivations have one serial outcome, and the Area saves take the
@@ -62,8 +63,6 @@ _TEST_DATABASE = "partflow_test_worker_identity_api"
 _DB_URL_ENV = "DATABASE_URL"
 
 _E9_FRAGMENT = "is inactive, so this action cannot record its Worker"
-_E10_FRAGMENT = "identifies Workers by badge sessions, which are not available yet"
-_E11 = "Worker sign-in is not available yet. Nothing was recorded."
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -207,18 +206,6 @@ def _force_inactive(engine: Engine, worker_id: int) -> None:
     with engine.begin() as connection:
         connection.execute(
             sa.text("UPDATE workers SET is_active = false WHERE id = :id"), {"id": worker_id}
-        )
-
-
-def _force_scanned(engine: Engine, area_id: int) -> None:
-    """Scanned session mode the Area service refuses until S4/S5 (fixture only)."""
-    with engine.begin() as connection:
-        connection.execute(
-            sa.text(
-                "UPDATE areas SET worker_identification_mode = 'SCANNED', fixed_worker_id = NULL"
-                " WHERE id = :id"
-            ),
-            {"id": area_id},
         )
 
 
@@ -945,7 +932,7 @@ def test_identity_never_causes_a_fingerprint_conflict(
 
 
 # ---------------------------------------------------------------------------
-# T-7 / T-8 — refusals with zero writes
+# T-7 — refusals with zero writes
 # ---------------------------------------------------------------------------
 
 
@@ -983,32 +970,6 @@ def test_an_inactive_fixed_worker_refuses_every_command_with_zero_writes(
         ), name
     assert _counts(db_engine) == before
     assert {flow: _flow_projection(db_engine, flow) for flow in projections} == projections
-
-
-def test_a_scanned_session_area_refuses_commands_and_badge_scans(
-    client: TestClient, db_engine: Engine
-) -> None:
-    cell = _Cell(client)
-    worker = _worker(client)
-    flow_id, pn = _release(client, cell)
-    _force_scanned(db_engine, cell.area_id)
-
-    before = _counts(db_engine)
-    refused = _done(client, cell, flow_id, pn, 10, machine=False)
-    assert refused.status_code == 409
-    assert refused.json()["detail"] == (
-        f"Area '{cell.area_name}' identifies Workers by badge sessions, which are not"
-        " available yet. Nothing was recorded."
-    )
-    badge = client.post(
-        f"/api/scan-stations/{cell.station_id}/badge-scans",
-        json={"badge": worker["badge_barcode"]},
-    )
-    assert badge.status_code == 409
-    assert badge.json()["detail"] == _E11
-    assert _counts(db_engine) == before
-    context = _ok(client.get(f"/api/scan-stations/{cell.station_id}/context"))
-    assert context["worker_identification"] == {"mode": "SCANNED", "fixed_worker": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1465,12 +1426,14 @@ def test_station_context_reports_the_worker_identification(client: TestClient) -
     assert _ok(client.get(path))["worker_identification"] == {
         "mode": "DISABLED",
         "fixed_worker": None,
+        "session": None,
     }
     worker = _worker(client)
     _set_mode(client, cell.area_id, "FIXED", int(worker["id"]))
     assert _ok(client.get(path))["worker_identification"] == {
         "mode": "FIXED",
         "fixed_worker": {"id": worker["id"], "name": worker["name"], "avatar_updated_at": None},
+        "session": None,
     }
 
 
@@ -1491,6 +1454,8 @@ def test_badge_scans_are_a_read_that_answers_not_used_or_unknown(
             assert _ok(client.post(path, json={"badge": variant})) == {
                 "outcome": "NOT_USED_IN_AREA",
                 "mode": mode,
+                "worker_session": None,
+                "previous_worker": None,
             }
         for unknown in (
             _unique("NOBODY"),
@@ -1502,6 +1467,8 @@ def test_badge_scans_are_a_read_that_answers_not_used_or_unknown(
             assert _ok(client.post(path, json={"badge": unknown})) == {
                 "outcome": "UNKNOWN",
                 "mode": mode,
+                "worker_session": None,
+                "previous_worker": None,
             }
         assert _counts(db_engine) == before
 
@@ -1784,6 +1751,7 @@ _IDENTITY_TOKENS = re.compile(
 )
 _IDENTITY_MODULES = {
     "station_identity.py",
+    "worker_sessions.py",
     "environment.py",
     "workers.py",
     "scan_station.py",

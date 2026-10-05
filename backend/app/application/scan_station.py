@@ -27,7 +27,10 @@ current-position projection:
   PN for. Nothing is remembered server-side — no Machine session, no
   sticky Machine state; the next scan starts fresh.
 
-Nothing here writes. Only ACTIVE flows are inventory: a flow consumed
+Nothing here writes — except the server-side Worker Session refresh
+of a Scanned-session station (PROJECT_PROFILE §19): the one timestamp
+update, committed only when a valid session was refreshed. Only ACTIVE
+flows are inventory: a flow consumed
 by a SPLIT or a MERGED (Phase 8) is closed and never listed again —
 its children or its merge result are. Every flow is reported with its
 DERIVED processing state (from the flow's effective latest
@@ -51,11 +54,14 @@ quantity (Areas without Machines — no placeholder cards, no
 queued/on-Machine figures) and finished quantity (READY_TO_TRANSFER —
 Area summary, never a Machine card).
 
-Worker identity (Phase 13 slice 3): the station context carries the
-Area's Worker ID mode and, in Fixed Worker mode, the Fixed Worker
+Worker identity (Phase 13 slices 3-4): the station context carries
+the Area's Worker ID mode and, in Fixed Worker mode, the Fixed Worker,
+in Scanned session mode the station's valid Worker Session
 (`station_identity.worker_identification`). Worker badges are answered
-by :func:`badge_scan` (a read — nothing is recorded or refreshed);
-Worker sessions arrive later.
+by :func:`badge_scan`, which in a Scanned-session Area signs in,
+switches or refreshes the station's Worker Session; a successful PN or
+Machine resolve refreshes a valid session server-side
+(`worker_sessions.refresh_on_resolve`).
 
 Receive Quantity (Phase 10.5, PROJECT_PROFILE §14): the resolution
 also reports whether the station may INTRODUCE this PN here — no
@@ -84,7 +90,7 @@ from typing import Final, Literal, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application import allocations, intake, work_orders, workers
+from app.application import allocations, intake, work_orders, worker_sessions, workers
 from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
@@ -115,6 +121,7 @@ from app.application.transfers import (
     require_production_station,
     suggested_operation_id,
 )
+from app.application.worker_sessions import OpenSession
 from app.domain.enums import (
     MachineOperationalState,
     MovementType,
@@ -132,6 +139,7 @@ from app.infrastructure.models import (
     PartMovement,
     QuantityFlow,
     ScanStation,
+    Worker,
     WorkOrder,
     WorkOrderDemand,
 )
@@ -149,8 +157,9 @@ class StationContext(NamedTuple):
     department: Department
     operations: list[Operation]
     has_machines: bool
-    # The Area's Worker ID mode and Fixed Worker (Phase 13) — the
-    # configuration as read now; every command judges it again.
+    # The Area's Worker ID mode and Fixed Worker, or the station's valid
+    # Worker Session (Phase 13) — as read now, never refreshed or closed
+    # here; every command judges it again.
     worker_identification: WorkerIdentification
 
 
@@ -168,7 +177,7 @@ def station_context(session: Session, station_id: str) -> StationContext:
         # The Area mode (PROJECT_PROFILE §12): follows from its active
         # Machines — the same judgement every command and derivation uses.
         has_machines=area_has_machines(session, area.id),
-        worker_identification=worker_identification(session, area),
+        worker_identification=worker_identification(session, area, station.station_id),
     )
 
 
@@ -178,34 +187,65 @@ def station_context(session: Session, station_id: str) -> StationContext:
 
 
 class BadgeScanOutcome(StrEnum):
-    """How a station answers a scanned Worker badge; widens with sessions."""
+    """How a station answers a scanned Worker badge."""
 
     # A registered ACTIVE Worker's badge in an Area that does not
     # identify Workers by badge (Disabled or Fixed Worker).
     NOT_USED_IN_AREA = "NOT_USED_IN_AREA"
     # Not a badge of any active Worker.
     UNKNOWN = "UNKNOWN"
+    # Scanned session mode (`worker_sessions.SignInOutcome`): a session
+    # opened, another Worker's session switched, or the same Worker's
+    # session refreshed.
+    SIGNED_IN = "SIGNED_IN"
+    SWITCHED = "SWITCHED"
+    REFRESHED = "REFRESHED"
 
 
 class BadgeScanResult(NamedTuple):
     outcome: BadgeScanOutcome
     # The Area's Worker ID mode, so the station can tell a stale context.
     mode: WorkerIdentificationMode
+    # Scanned session mode: the station's valid session after the scan.
+    session: OpenSession | None = None
+    # Set exactly for SWITCHED: the Worker whose session was closed.
+    previous_worker: Worker | None = None
 
 
 def badge_scan(session: Session, station_id: str, badge: object) -> BadgeScanResult:
-    """A read — nothing is recorded, nothing is refreshed (GUI_DESIGN §4.12).
+    """Answer a scanned Worker badge (PROJECT_PROFILE §19, GUI_DESIGN §4.12).
 
     The station must be fit for production use (404 / 409 as every
-    station read). In a Disabled or Fixed Worker Area an active
-    Worker's badge (matched by the one badge rule, any letter case) is
-    answered as not used here and anything else as unknown; a Scanned
-    session Area is refused until Worker sign-in exists.
+    station read). Disabled / Fixed Worker: a read — nothing is
+    recorded; an active Worker's badge (matched by the one badge rule,
+    any letter case) is answered as not used here and anything else as
+    unknown. Scanned session: a valid active badge signs in, switches or
+    refreshes the station's Worker Session (one transaction,
+    `worker_sessions.sign_in`); an unknown or inactive badge records and
+    refreshes nothing. A badge scan never touches production state.
     """
     _, area = require_production_station(session, station_id)
+    if area.worker_identification_mode == WorkerIdentificationMode.SCANNED:
+        worker = workers.resolve_badge(session, badge)
+        if worker is not None:
+            signed = worker_sessions.sign_in(session, station_id, worker.id)
+            if signed is not None:
+                return BadgeScanResult(
+                    outcome=BadgeScanOutcome(signed.outcome.value),
+                    mode=WorkerIdentificationMode.SCANNED,
+                    session=signed.session,
+                    previous_worker=signed.previous_worker,
+                )
+            # Nothing was written: under the sign-in's locks the Area
+            # (re-read into ``area``) left Scanned session mode, or the
+            # Worker was deactivated — answered as a read of that state.
     mode = WorkerIdentificationMode(area.worker_identification_mode)
     if mode is WorkerIdentificationMode.SCANNED:
-        raise ConflictError("Worker sign-in is not available yet. Nothing was recorded.")
+        return BadgeScanResult(
+            outcome=BadgeScanOutcome.UNKNOWN,
+            mode=mode,
+            session=worker_sessions.open_session(session, station_id),
+        )
     outcome = (
         BadgeScanOutcome.NOT_USED_IN_AREA
         if workers.resolve_badge(session, badge) is not None
@@ -427,6 +467,10 @@ class ScanResolution(NamedTuple):
     # and not to the confirmation (PROJECT_PROFILE §14) — a wizard that
     # crosses site midnight still records the day it was scanned.
     scanned_at: datetime.datetime
+    # Phase 13: the station's valid Worker Session after the resolve's
+    # server-side refresh — None outside Scanned session mode or without
+    # a valid session.
+    worker_session: OpenSession | None
 
 
 def scrapped_quantity_of(session: Session, part_number: str) -> int:
@@ -565,7 +609,12 @@ def _flow_in_area(
 def resolve_part_number_scan(
     session: Session, station_id: str, *, barcode: object | None, part_number: object | None
 ) -> ScanResolution:
-    """Resolve a PN at a station into in-Area quantity and explicit transfer sources."""
+    """Resolve a PN at a station into in-Area quantity and explicit transfer sources.
+
+    A successful resolve refreshes the station's valid Worker Session
+    (Scanned session mode) as its last step; every refusal is raised
+    before, so it refreshes nothing.
+    """
     station, area = require_production_station(session, station_id)
     pn = part_number_from_scan(barcode, part_number)
     flows = list(
@@ -675,6 +724,7 @@ def resolve_part_number_scan(
         available_stocked_quantity=position.available_stocked_quantity,
         stock_available=area.is_terminal and bool(candidates),
         scanned_at=work_orders.now(),
+        worker_session=worker_sessions.refresh_on_resolve(session, station, area),
     )
 
 
@@ -731,6 +781,8 @@ class MachineScanResolution(NamedTuple):
     assigned_quantity: int
     queued: list[FlowInArea]
     requires_selection: bool
+    # Phase 13: the station's valid Worker Session after the refresh.
+    worker_session: OpenSession | None
 
 
 def resolve_machine_scan(
@@ -743,7 +795,11 @@ def resolve_machine_scan(
     Machine of another Area (invalid Area/Machine combination) and a
     Machine under maintenance (accepts no new assignment). The
     assignment command re-validates all of this under the Machine row
-    lock — this read only prepares the dialog.
+    lock — this read only prepares the dialog. A read: it records
+    nothing — except the server-side Worker Session refresh of a
+    Scanned-session station (PROJECT_PROFILE §19), its last step, the
+    one timestamp update, committed only when a valid session was
+    refreshed.
     """
     station, area = require_production_station(session, station_id)
     tag = asset_tag_from_scan(barcode, asset_tag)
@@ -802,6 +858,7 @@ def resolve_machine_scan(
         assigned_quantity=assigned,
         queued=queued,
         requires_selection=len(queued) > 1,
+        worker_session=worker_sessions.refresh_on_resolve(session, station, area),
     )
 
 

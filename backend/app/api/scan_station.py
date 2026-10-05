@@ -175,19 +175,28 @@ resolution reports ``scanned_at``, ``intake_available``,
 
 Phase 13 — Worker identity. Every row of a command records the Worker
 the station's Area mode identifies (Disabled → none, Fixed Worker → the
-configured Worker; scanned sessions arrive later); no request carries
-identity. A Fixed Worker who is inactive at confirmation refuses the
-command with nothing recorded (409). The context reports
-``worker_identification`` (mode and Fixed Worker), and the Undo preview
-the original command's ``worker`` and the ``reversed_by`` Worker the
-reversal would record now. No role authorization exists yet (Phase 14).
+configured Worker; Scanned session → the Worker of the station's valid
+Worker Session, refreshed by the command; without one the command is
+409 ``worker_session_required`` with nothing recorded); no request
+carries identity or a session. A Fixed Worker who is inactive at
+confirmation refuses the command with nothing recorded (409). The
+context reports ``worker_identification`` (mode, Fixed Worker and, in
+Scanned session mode, the valid ``session``), and the Undo preview the
+original command's ``worker`` and the ``reversed_by`` Worker the
+reversal would record now. A successful PN or Machine resolve refreshes
+a valid session server-side and reports it as ``worker_session``. No
+role authorization exists yet (Phase 14).
 
 - ``POST /scan-stations/{station_id}/badge-scans`` — a scanned Worker
-  badge (in the body, never in the URL) answered as ``NOT_USED_IN_AREA``
-  (an active Worker's badge in a Disabled or Fixed Worker Area) or
-  ``UNKNOWN``, with the Area's ``mode``. A read: it records and
-  refreshes nothing; 409 for a Scanned session Area until Worker
-  sign-in exists.
+  badge (in the body, never in the URL) answered with the Area's
+  ``mode``: in a Disabled or Fixed Worker Area a read —
+  ``NOT_USED_IN_AREA`` (an active Worker's badge) or ``UNKNOWN``; in a
+  Scanned session Area an active badge ``SIGNED_IN`` (a new session),
+  ``SWITCHED`` (another Worker's session ended; ``previous_worker``) or
+  ``REFRESHED`` (the same Worker), and anything else ``UNKNOWN`` with
+  nothing recorded or refreshed. ``worker_session`` is the station's
+  valid session after the scan. 409 for an inactive station or Area, or
+  for two badges scanned at the same moment (scan again).
 """
 
 import datetime
@@ -224,6 +233,7 @@ from app.application import (
     transfers,
     undo,
 )
+from app.application.worker_sessions import OpenSession
 from app.infrastructure.models import Worker
 
 router = APIRouter(prefix="/api")
@@ -261,10 +271,36 @@ def worker_ref(worker: Worker | None) -> WorkerRef | None:
     )
 
 
+class WorkerSessionResponse(BaseModel):
+    """A valid scanned Worker Session (Phase 13). Its id never leaves the server."""
+
+    worker: WorkerRef
+    started_at: datetime.datetime
+    expires_at: datetime.datetime
+    # The server clock the answer was judged at (client clock correction).
+    server_now: datetime.datetime
+
+
+def worker_session_response(open_session: OpenSession | None) -> WorkerSessionResponse | None:
+    if open_session is None:
+        return None
+    worker = open_session.worker
+    return WorkerSessionResponse(
+        worker=WorkerRef(
+            id=worker.id, name=worker.name, avatar_updated_at=worker.avatar_image_updated_at
+        ),
+        started_at=open_session.started_at,
+        expires_at=open_session.expires_at,
+        server_now=open_session.server_now,
+    )
+
+
 class WorkerIdentificationResponse(BaseModel):
     mode: WorkerIdentificationModeLiteral
     # Set exactly when mode is FIXED.
     fixed_worker: WorkerRef | None
+    # Set only in SCANNED mode with a valid Worker Session.
+    session: WorkerSessionResponse | None
 
 
 class StationContextResponse(BaseModel):
@@ -292,6 +328,7 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
         worker_identification=WorkerIdentificationResponse(
             mode=context.worker_identification.mode.value,
             fixed_worker=worker_ref(context.worker_identification.fixed_worker),
+            session=worker_session_response(context.worker_identification.session),
         ),
     )
 
@@ -310,14 +347,23 @@ class BadgeScanRequest(BaseModel):
 
 
 class BadgeScanResponse(BaseModel):
-    outcome: Literal["NOT_USED_IN_AREA", "UNKNOWN"]
+    outcome: Literal["NOT_USED_IN_AREA", "UNKNOWN", "SIGNED_IN", "SWITCHED", "REFRESHED"]
     mode: WorkerIdentificationModeLiteral
+    # Scanned session mode: the station's valid session after the scan.
+    worker_session: WorkerSessionResponse | None
+    # Set exactly for SWITCHED: the Worker whose session ended.
+    previous_worker: WorkerRef | None
 
 
 @router.post("/scan-stations/{station_id}/badge-scans")
 def scan_badge(station_id: str, body: BadgeScanRequest, session: SessionDep) -> BadgeScanResponse:
     result = scan_station.badge_scan(session, station_id, body.badge)
-    return BadgeScanResponse(outcome=result.outcome.value, mode=result.mode.value)
+    return BadgeScanResponse(
+        outcome=result.outcome.value,
+        mode=result.mode.value,
+        worker_session=worker_session_response(result.session),
+        previous_worker=worker_ref(result.previous_worker),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +496,9 @@ class ScanResolveResponse(BaseModel):
     # sends it back with the confirmed receipt — `received_date`
     # defaults to the SCAN, never to the confirmation (§14).
     scanned_at: datetime.datetime
+    # Phase 13: the station's valid Worker Session after the resolve's
+    # server-side refresh (null outside Scanned session mode or without one).
+    worker_session: WorkerSessionResponse | None
 
 
 @router.post("/scan-stations/{station_id}/scans/resolve")
@@ -511,6 +560,7 @@ def resolve_scan(
         available_stocked_quantity=result.available_stocked_quantity,
         stock_available=result.stock_available,
         scanned_at=result.scanned_at,
+        worker_session=worker_session_response(result.worker_session),
     )
 
 
@@ -539,6 +589,8 @@ class MachineScanResolveResponse(BaseModel):
     # picked; more than one means the operator selects or scans a PN.
     queued: list[FlowInAreaResponse]
     requires_selection: bool
+    # Phase 13: the station's valid Worker Session after the refresh.
+    worker_session: WorkerSessionResponse | None
 
 
 @router.post("/scan-stations/{station_id}/machine-scans/resolve")
@@ -555,6 +607,7 @@ def resolve_machine_scan(
         assigned_quantity=result.assigned_quantity,
         queued=[flow_response(item) for item in result.queued],
         requires_selection=result.requires_selection,
+        worker_session=worker_session_response(result.worker_session),
     )
 
 

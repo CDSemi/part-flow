@@ -100,6 +100,39 @@ export interface StationWorkerIdentification {
   mode: WorkerIdentificationMode;
   /** Set exactly in `FIXED` mode. */
   fixedWorker: WorkerRef | null;
+  /** The station's valid Worker Session; set only in `SCANNED` mode. */
+  session: WorkerSession | null;
+}
+
+/**
+ * A valid scanned Worker Session as the server judged it (PROJECT_PROFILE
+ * §19). `serverNow` is the server clock the answer was judged at, so the
+ * station corrects its own clock offset before counting down; the
+ * server alone decides validity, refresh and expiry. No session id ever
+ * reaches the client.
+ */
+export interface WorkerSession {
+  worker: WorkerRef;
+  startedAt: string;
+  expiresAt: string;
+  serverNow: string;
+}
+
+interface WorkerSessionWire {
+  worker: WorkerRefWire;
+  started_at: string;
+  expires_at: string;
+  server_now: string;
+}
+
+function toWorkerSession(wire: WorkerSessionWire | null): WorkerSession | null {
+  if (wire === null) return null;
+  return {
+    worker: toWorkerRef(wire.worker),
+    startedAt: wire.started_at,
+    expiresAt: wire.expires_at,
+    serverNow: wire.server_now,
+  };
 }
 
 interface StationContextWire {
@@ -111,6 +144,7 @@ interface StationContextWire {
   worker_identification: {
     mode: WorkerIdentificationMode;
     fixed_worker: WorkerRefWire | null;
+    session: WorkerSessionWire | null;
   };
 }
 
@@ -131,6 +165,7 @@ export async function getStationContext(
       fixedWorker: wire.worker_identification.fixed_worker
         ? toWorkerRef(wire.worker_identification.fixed_worker)
         : null,
+      session: toWorkerSession(wire.worker_identification.session),
     },
   };
 }
@@ -294,6 +329,10 @@ export interface ScanResolution {
    * §14) — a wizard open across midnight still records the scan day.
    * The station never reads its own clock for it. */
   scannedAt: string;
+  /** Phase 13: the station's valid Worker Session after the server-side
+   * refresh this resolve made; null outside Scanned session mode or
+   * without a valid session. */
+  workerSession: WorkerSession | null;
 }
 
 interface TransferCandidateWire {
@@ -332,11 +371,14 @@ interface ScanResolutionWire {
   available_stocked_quantity: number;
   stock_available: boolean;
   scanned_at: string;
+  worker_session: WorkerSessionWire | null;
 }
 
 /**
  * Resolve a scanned PN barcode (`PF:PN:…`, verbatim scanner value) or a
- * manually entered PN at a station. A read — nothing is recorded.
+ * manually entered PN at a station. A read — nothing is recorded,
+ * except that at a Scanned-session station the server refreshes a valid
+ * Worker Session (`workerSession` in the answer).
  */
 export async function resolveScan(
   stationId: string,
@@ -388,6 +430,7 @@ export async function resolveScan(
     availableStockedQuantity: wire.available_stocked_quantity,
     stockAvailable: wire.stock_available,
     scannedAt: wire.scanned_at,
+    workerSession: toWorkerSession(wire.worker_session),
   };
 }
 
@@ -404,6 +447,9 @@ export interface MachineScanResolution {
   /** Every QUEUED flow of the station's Area — never picked. */
   queued: FlowInArea[];
   requiresSelection: boolean;
+  /** Phase 13: the station's valid Worker Session after the server-side
+   * refresh; null outside Scanned session mode or without one. */
+  workerSession: WorkerSession | null;
 }
 
 interface MachineScanResolutionWire {
@@ -413,14 +459,17 @@ interface MachineScanResolutionWire {
   assigned_quantity: number;
   queued: FlowInAreaWire[];
   requires_selection: boolean;
+  worker_session: WorkerSessionWire | null;
 }
 
 /**
  * Resolve a scanned Machine barcode (`PF:MACHINE:<asset-tag>`, verbatim
  * scanner value) or a manually entered Asset Tag at a station into the
  * one-shot Assign to Machine context. A read — nothing is recorded and
- * nothing is remembered server-side: an unknown Asset Tag is 404, a
- * retired, other-Area or maintenance Machine a 409 `ApiError`.
+ * nothing is remembered server-side, except that at a Scanned-session
+ * station the server refreshes a valid Worker Session (`workerSession`
+ * in the answer). An unknown Asset Tag is 404, a retired, other-Area or
+ * maintenance Machine a 409 `ApiError`; a refusal never refreshes.
  */
 export async function resolveMachineScan(
   stationId: string,
@@ -443,6 +492,7 @@ export async function resolveMachineScan(
     assignedQuantity: wire.assigned_quantity,
     queued: wire.queued.map(toFlowInArea),
     requiresSelection: wire.requires_selection,
+    workerSession: toWorkerSession(wire.worker_session),
   };
 }
 
@@ -452,24 +502,66 @@ export async function resolveMachineScan(
 
 export interface BadgeScanResult {
   /** NOT_USED_IN_AREA: an active Worker's badge, but this Area's mode
-   * does not take badge scans. UNKNOWN: no active Worker has it. */
-  outcome: 'NOT_USED_IN_AREA' | 'UNKNOWN';
+   * does not take badge scans. UNKNOWN: no active Worker has it.
+   * SIGNED_IN / SWITCHED / REFRESHED (Scanned session mode): the badge
+   * opened, switched or refreshed the station's Worker Session. */
+  outcome:
+    'NOT_USED_IN_AREA' | 'UNKNOWN' | 'SIGNED_IN' | 'SWITCHED' | 'REFRESHED';
   /** The Area's Worker ID mode at the time of the check. */
   mode: WorkerIdentificationMode;
+  /** Scanned session mode: the valid session after the scan; else null. */
+  workerSession: WorkerSession | null;
+  /** The Worker the switch signed out; set exactly for SWITCHED. */
+  previousWorker: WorkerRef | null;
+}
+
+interface BadgeScanResultWire {
+  outcome: BadgeScanResult['outcome'];
+  mode: WorkerIdentificationMode;
+  worker_session: WorkerSessionWire | null;
+  previous_worker: WorkerRefWire | null;
 }
 
 /**
- * Check a scanned non-PartFlow value as a Worker badge at a station. A
- * read — nothing is recorded and nothing is refreshed. The badge
- * travels in the body, never in the URL.
+ * Scan a non-PartFlow value as a Worker badge at a station. In Disabled
+ * and Fixed Worker mode a read — nothing is recorded. In Scanned session
+ * mode a valid active badge signs in, switches or refreshes the
+ * station's Worker Session on the server; an unknown or inactive badge
+ * records and refreshes nothing. The badge travels in the body, never
+ * in the URL.
  */
 export async function scanBadge(
   stationId: string,
   badge: string,
 ): Promise<BadgeScanResult> {
-  return apiRequest<BadgeScanResult>(
+  const wire = await apiRequest<BadgeScanResultWire>(
     `/api/scan-stations/${encodeURIComponent(stationId)}/badge-scans`,
     { method: 'POST', body: { badge } },
+  );
+  return {
+    outcome: wire.outcome,
+    mode: wire.mode,
+    workerSession: toWorkerSession(wire.worker_session),
+    previousWorker: wire.previous_worker
+      ? toWorkerRef(wire.previous_worker)
+      : null,
+  };
+}
+
+/**
+ * True for the 409 the server answers a production command with at a
+ * Scanned-session station without a valid Worker Session
+ * (`worker_session_required`). Nothing was recorded: after a badge
+ * sign-in the operator confirms the UNCHANGED request again.
+ */
+export function workerSessionRequired(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    (error.body as { worker_session_required?: unknown })
+      .worker_session_required === true
   );
 }
 

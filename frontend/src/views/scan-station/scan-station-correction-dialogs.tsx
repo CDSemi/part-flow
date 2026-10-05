@@ -625,6 +625,7 @@ function restoredStateText(
 export function UndoDialog({
   station,
   preview,
+  previewRefreshing = false,
   machines,
   writeBlocked,
   onCancel,
@@ -635,6 +636,10 @@ export function UndoDialog({
   station: StationContext;
   /** The server's summary of the command the reversal would undo. */
   preview: UndoPreview;
+  /** The owner is re-reading the preview because the signed-in Worker
+   * changed (Scanned session): `Reversed by` must name the Worker the
+   * reversal will record before anything can be confirmed. */
+  previewRefreshing?: boolean;
   /** The active Machines of the station's Area (to name Machines). */
   machines: MachineRef[];
   onCancel: () => void;
@@ -649,7 +654,7 @@ export function UndoDialog({
   // Final-confirmation gate (GUI_DESIGN §4.5/§4.6, post-v18): the
   // summary's `Confirm reversal` opens the warning-toned final
   // question before anything is reversed. The Worker badge variant
-  // arrives with the Worker-session workflows.
+  // arrives with the badge-confirmation gates.
   const [gate, setGate] = useState(false);
 
   const write = useOneShotWrite<UndoResult>({
@@ -666,7 +671,7 @@ export function UndoDialog({
   });
 
   function requestConfirm() {
-    if (write.busy || writeBlocked) return;
+    if (write.busy || writeBlocked || previewRefreshing) return;
     if (write.outcomeUnknown || write.serverError) {
       // The intent was already confirmed through the gate: a retry
       // resends the SAME request without asking the question again.
@@ -824,7 +829,7 @@ export function UndoDialog({
                       ? 'Recording…'
                       : 'Confirm reversal',
                 onClick: requestConfirm,
-                disabled: write.busy || writeBlocked,
+                disabled: write.busy || writeBlocked || previewRefreshing,
                 danger: true,
               }}
             />
@@ -846,7 +851,7 @@ export function UndoDialog({
           tone="warning"
           confirmLabel="Yes — reverse it"
           cancelLabel="Cancel (Esc)"
-          confirmDisabled={writeBlocked}
+          confirmDisabled={writeBlocked || previewRefreshing}
           onConfirm={() => {
             setGate(false);
             void write.submit();

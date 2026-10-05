@@ -26,7 +26,10 @@ registry (`workers`, with the `DELETED` audit event and the `Worker`
 audit entity); plus the Phase 13 Worker identification
 (`areas.worker_identification_mode`, `areas.fixed_worker_id`) and the
 production audit identity (`part_movements.worker_id`,
-`work_order_allocations.allocated_by_worker_id`). Business rules stay
+`work_order_allocations.allocated_by_worker_id`); plus the Worker
+Session runtime (`worker_sessions`, `part_movements.scan_session_id`)
+and the global policy singleton (`application_policy`,
+`areas.worker_session_timeout_minutes`). Business rules stay
 in the Domain/Application layers; this module owns table shape and the
 invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
@@ -90,6 +93,7 @@ from app.domain.enums import (
     RequestType,
     RouteMode,
     WorkerIdentificationMode,
+    WorkerSessionEndReason,
 )
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, and free
@@ -275,6 +279,42 @@ AREA_FIXED_WORKER_SQL = "(worker_identification_mode = 'FIXED') = (fixed_worker_
 MOVEMENT_WORKER_STATION_SQL = "worker_id IS NULL OR station_id IS NOT NULL"
 ALLOCATION_WORKER_STATION_SQL = "allocated_by_worker_id IS NULL OR station_id IS NOT NULL"
 
+# Worker Session timeout policy (Phase 13 slice 4; owner decision OD-2):
+# whole minutes, 1-720 for the global default and for every per-Area
+# override (NULL = use the default), default 15. Repeated verbatim by
+# migration `0020_phase13_worker_sessions`.
+WORKER_SESSION_TIMEOUT_MIN = 1
+WORKER_SESSION_TIMEOUT_MAX = 720
+WORKER_SESSION_TIMEOUT_DEFAULT = 15
+POLICY_WORKER_SESSION_TIMEOUT_SQL = "worker_session_timeout_minutes BETWEEN 1 AND 720"
+AREA_WORKER_SESSION_TIMEOUT_SQL = (
+    "worker_session_timeout_minutes IS NULL OR worker_session_timeout_minutes BETWEEN 1 AND 720"
+)
+
+# Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
+# closed end-reason vocabulary, an end time exactly with an end reason,
+# an expiry after the start, an end inside the session's window, and an
+# already-expired session closed EXPIRED at its expiry — never with a
+# configuration reason. Repeated verbatim by migration
+# `0020_phase13_worker_sessions`.
+WORKER_SESSION_END_REASON_SQL = (
+    "end_reason IN (" + ", ".join(f"'{reason}'" for reason in WorkerSessionEndReason) + ")"
+)
+WORKER_SESSION_END_SHAPE_SQL = "(ended_at IS NULL) = (end_reason IS NULL)"
+WORKER_SESSION_EXPIRY_AFTER_START_SQL = "expires_at > started_at"
+WORKER_SESSION_END_WITHIN_WINDOW_SQL = (
+    "ended_at IS NULL OR (ended_at >= started_at AND ended_at <= expires_at)"
+)
+WORKER_SESSION_EXPIRED_AT_EXPIRY_SQL = (
+    "end_reason IS DISTINCT FROM 'EXPIRED' OR ended_at = expires_at"
+)
+
+# A Movement names a Worker Session only together with its Worker
+# (PLAN CD4). With the Worker ⇒ station CHECK above, all three columns
+# of the composite session FK are then set, so MATCH SIMPLE always
+# checks it. Repeated verbatim by migration `0020_phase13_worker_sessions`.
+MOVEMENT_SESSION_WORKER_SQL = "scan_session_id IS NULL OR worker_id IS NOT NULL"
+
 # Row-level idempotency guarantee of the application-command model
 # (Phase 6): one `device_event_id` identifies one command, which may
 # append several Movements numbered by `command_sequence`. Referenced
@@ -351,6 +391,10 @@ class Area(Base):
     fixed_worker_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("workers.id", name="fk_areas_fixed_worker_id_workers")
     )
+    # The Area's Worker Session timeout override in whole minutes
+    # (Phase 13 slice 4, PROJECT_PROFILE §19 "optional per-Area
+    # overrides"); NULL uses the `application_policy` default.
+    worker_session_timeout_minutes: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -371,6 +415,9 @@ class Area(Base):
             WORKER_IDENTIFICATION_MODE_SQL, name=conv("ck_areas_worker_identification_mode")
         ),
         CheckConstraint(AREA_FIXED_WORKER_SQL, name=conv("ck_areas_fixed_worker_shape")),
+        CheckConstraint(
+            AREA_WORKER_SESSION_TIMEOUT_SQL, name=conv("ck_areas_worker_session_timeout_range")
+        ),
     )
 
 
@@ -490,6 +537,88 @@ class Worker(Base):
         CheckConstraint(
             "avatar_image IS NULL OR octet_length(avatar_image) BETWEEN 1 AND 2097152",
             name=conv("ck_workers_avatar_image_size"),
+        ),
+    )
+
+
+class WorkerSession(Base):
+    """One scanned Worker Session at one Scan Station (PROJECT_PROFILE §9, §19, §28).
+
+    The PROFILE's `ScanSession`, stored as `worker_sessions`. A row is
+    the audit trail of one session: who signed in at which station (and
+    the station's Area at sign-in), when, until when it is valid
+    (`expires_at`, the sliding inactivity deadline), and when and why it
+    ended. It is accountability metadata — never production truth.
+
+    A mutation-guard trigger owned by migration
+    `0020_phase13_worker_sessions` forbids DELETE and TRUNCATE and lets
+    only an OPEN session's `expires_at`, `ended_at` and `end_reason`
+    change. At most one session per station is open (partial UNIQUE).
+    An open row past its expiry is an expired, not yet closed session
+    every reader ignores; the next sign-in or configuration close at the
+    station closes it EXPIRED at its expiry.
+
+    `part_movements.scan_session_id` is the authoritative link from a
+    Movement to its session — a Movement's `occurred_at` (transaction
+    start) may precede its session's `started_at` by the command's lock
+    wait, so time windows must never be used to place a Movement in a
+    session.
+    """
+
+    __tablename__ = "worker_sessions"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    station_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("scan_stations.station_id", name="fk_worker_sessions_station_id_scan_stations"),
+        nullable=False,
+    )
+    # The station's Area at sign-in (reporting); a rebind closes the session.
+    area_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("areas.id", name="fk_worker_sessions_area_id_areas"), nullable=False
+    )
+    worker_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("workers.id", name="fk_worker_sessions_worker_id_workers"),
+        nullable=False,
+    )
+    # Written by the Application from the session clock — no server default.
+    started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    end_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(WORKER_SESSION_END_REASON_SQL, name=conv("ck_worker_sessions_end_reason")),
+        CheckConstraint(WORKER_SESSION_END_SHAPE_SQL, name=conv("ck_worker_sessions_end_shape")),
+        CheckConstraint(
+            WORKER_SESSION_EXPIRY_AFTER_START_SQL,
+            name=conv("ck_worker_sessions_expiry_after_start"),
+        ),
+        CheckConstraint(
+            WORKER_SESSION_END_WITHIN_WINDOW_SQL,
+            name=conv("ck_worker_sessions_end_within_window"),
+        ),
+        CheckConstraint(
+            WORKER_SESSION_EXPIRED_AT_EXPIRY_SQL,
+            name=conv("ck_worker_sessions_expired_at_expiry"),
+        ),
+        # Target of the Movement's composite session FK (PLAN CD4).
+        UniqueConstraint(
+            "id", "worker_id", "station_id", name="uq_worker_sessions_id_worker_id_station_id"
+        ),
+        # At most one open session per station (CD5).
+        Index(
+            "uq_worker_sessions_open_station",
+            "station_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+        # A Worker deactivation closes that Worker's open sessions.
+        Index(
+            "ix_worker_sessions_open_worker",
+            "worker_id",
+            postgresql_where=text("ended_at IS NULL"),
         ),
     )
 
@@ -700,6 +829,40 @@ class MachineAssetTagConfig(Base):
         ),
         CheckConstraint(
             "next_sequence >= 1", name=conv("ck_machine_asset_tag_config_next_sequence_positive")
+        ),
+    )
+
+
+class ApplicationPolicy(Base):
+    """The global application policy singleton (Phase 13 slice 4, PLAN CD3).
+
+    One row (CHECK id = 1), seeded by migration
+    `0020_phase13_worker_sessions` with the approved defaults, so it
+    always exists. Each global policy is a typed column with a server
+    default — a later slice adds its policy the same way; there is no
+    key/value store. Per-record overrides live on their owner (the
+    Area's `worker_session_timeout_minutes`).
+    """
+
+    __tablename__ = "application_policy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    # The sliding Worker Session inactivity timeout (OD-2), whole minutes.
+    worker_session_timeout_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name=conv("ck_application_policy_singleton")),
+        CheckConstraint(
+            POLICY_WORKER_SESSION_TIMEOUT_SQL,
+            name=conv("ck_application_policy_worker_session_timeout_range"),
         ),
     )
 
@@ -1077,8 +1240,12 @@ class PartMovement(Base):
     twice. `worker_id` (Phase 13) is the Worker the station's Area mode
     identified when the command was recorded — accountability metadata
     only, NULL for Management Movements and for history recorded before
-    Phase 13 (never backfilled); `scan_session_id` arrives with Worker
-    Sessions.
+    Phase 13 (never backfilled); `scan_session_id` (Phase 13) is the
+    scanned Worker Session the command was recorded under (table
+    `worker_sessions`; NULL outside Scanned session mode and for history
+    before it — never backfilled); the composite FK pins it to the same
+    Worker and station. It is the only link to the session:
+    `occurred_at` may precede the session's `started_at`.
     """
 
     __tablename__ = "part_movements"
@@ -1140,6 +1307,9 @@ class PartMovement(Base):
     worker_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("workers.id", name="fk_part_movements_worker_id_workers")
     )
+    # The scanned Worker Session the command was recorded under (Phase 13
+    # slice 4) — pinned to the same Worker and station by the composite FK.
+    scan_session_id: Mapped[int | None] = mapped_column(BigInteger)
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     server_received_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -1200,6 +1370,16 @@ class PartMovement(Base):
         CheckConstraint(MOVEMENT_REVERSES_SQL, name=conv("ck_part_movements_reverses_shape")),
         CheckConstraint(
             MOVEMENT_WORKER_STATION_SQL, name=conv("ck_part_movements_worker_requires_station")
+        ),
+        CheckConstraint(
+            MOVEMENT_SESSION_WORKER_SQL, name=conv("ck_part_movements_session_requires_worker")
+        ),
+        # A Movement can never name another Worker's or another
+        # station's session (PLAN CD4).
+        ForeignKeyConstraint(
+            ["scan_session_id", "worker_id", "station_id"],
+            ["worker_sessions.id", "worker_sessions.worker_id", "worker_sessions.station_id"],
+            name="fk_part_movements_scan_session_worker_sessions",
         ),
         UniqueConstraint("device_event_id", "command_sequence", name=DEVICE_EVENT_ID_CONSTRAINT),
         # At most one reversal per original Movement (PROJECT_PROFILE
@@ -1406,16 +1586,17 @@ class AuditEvent(Base):
     only — WorkOrder, WorkOrderDemand, PartNumber, and (Phase 13)
     Worker, the environment configuration entities Department, Area,
     Operation, ScanStation and MachineAssetTagConfig (the Asset Tag
-    format), and Machine configuration (lifecycle transitions stay in
-    `machine_lifecycle_events`). Rows are descriptive history for
+    format), Machine configuration (lifecycle transitions stay in
+    `machine_lifecycle_events`) and the global ApplicationPolicy. Rows are descriptive history for
     display and accountability: never replayed to build state, never
     describing production actions (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
     framework. `entity_id` is polymorphic text with no FK — the
     internal PK for WorkOrder/WorkOrderDemand/Worker/Department/Area/
     Operation/Machine, the canonical PN string for PartNumber, the
-    stable Station ID for ScanStation and `"1"` for the singleton
-    MachineAssetTagConfig;
+    stable Station ID for ScanStation, `"1"` for the singleton
+    MachineAssetTagConfig and the Administration section
+    (`worker-sessions`) for ApplicationPolicy;
     integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_reference` stays a
@@ -1452,7 +1633,7 @@ class AuditEvent(Base):
             f" '{AuditEntityType.WORKER}', '{AuditEntityType.DEPARTMENT}',"
             f" '{AuditEntityType.AREA}', '{AuditEntityType.OPERATION}',"
             f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
-            f" '{AuditEntityType.MACHINE}')",
+            f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.

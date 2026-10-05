@@ -4,19 +4,21 @@ Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
-`0018_phase13_pn_check_collation` and `0019_phase13_worker_identity` add
-(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.4, §8.11,
-§8.12, §8.13, §10, §28; owner decisions OD-3, OD-10, S2-F6). Later
-Phase 13 slices extend this module:
+`0018_phase13_pn_check_collation`, `0019_phase13_worker_identity` and
+`0020_phase13_worker_sessions` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §7, §8.4, §8.11, §8.12, §8.13, §10, §19, §28; owner
+decisions OD-2, OD-3, OD-10, S2-F6). Later Phase 13 slices extend this
+module:
 
-- exact head boundary: `0019_phase13_worker_identity` is the single
+- exact head boundary: `0020_phase13_worker_sessions` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
   (`areas.fixed_worker_id`, `part_movements.worker_id`,
-  `work_order_allocations.allocated_by_worker_id`);
+  `work_order_allocations.allocated_by_worker_id`) and the session's
+  Worker (`worker_sessions.worker_id`);
 - the identity columns (0019): exact types, nullability and defaults,
-  no index, no `scan_session_id`, the four CHECKs with their exact
+  no index, the four CHECKs with their exact
   names and literals; the upgrade leaves every existing row without
   identity (never backfilled); the downgrade restores the 0018 boundary
   and refuses while identity history or Area mode configuration exists;
@@ -47,7 +49,15 @@ Phase 13 slices extend this module:
   while environment audit history exists; the 0017 downgrade restores
   the environment vocabulary and refuses while Machine audit history
   exists; the 0018 downgrade restores the libc PN CHECK and refuses
-  while a PN only 0018 admits exists.
+  while a PN only 0018 admits exists;
+- Worker Sessions (0020): the `worker_sessions`, `application_policy`,
+  `areas.worker_session_timeout_minutes` and
+  `part_movements.scan_session_id` shapes with their exact names and
+  literals, the seeded policy row, the CHECKs, the open-session partial
+  UNIQUE, the composite session FK and the mutation-guard trigger; the
+  upgrade preserves every existing row (never backfilled); the downgrade
+  restores the 0019 boundary and refuses while session history, timeout
+  configuration or a policy audit row exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -69,10 +79,10 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 
 from alembic import command
-from app.domain.enums import AuditEntityType, WorkerIdentificationMode
+from app.domain.enums import AuditEntityType, WorkerIdentificationMode, WorkerSessionEndReason
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -82,7 +92,8 @@ _BADGE_CHECK_REVISION = "0015_phase13_badge_check"
 _ENVIRONMENT_AUDIT_REVISION = "0016_phase13_environment_audit"
 _MACHINE_AUDIT_REVISION = "0017_phase13_machine_audit"
 _PN_CHECK_REVISION = "0018_phase13_pn_check_collation"
-_HEAD_REVISION = "0019_phase13_worker_identity"
+_WORKER_IDENTITY_REVISION = "0019_phase13_worker_identity"
+_HEAD_REVISION = "0020_phase13_worker_sessions"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -90,6 +101,7 @@ _ENVIRONMENT_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0016_phase13_envir
 _MACHINE_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0017_phase13_machine_audit.py"
 _PN_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0018_phase13_pn_check_collation.py"
 _WORKER_IDENTITY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0019_phase13_worker_identity.py"
+_WORKER_SESSIONS_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0020_phase13_worker_sessions.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -275,6 +287,7 @@ def test_worker_foreign_keys_are_exactly_the_identity_references(
             ["allocated_by_worker_id"],
             ["id"],
         ),
+        "fk_worker_sessions_worker_id_workers": ("worker_sessions", ["worker_id"], ["id"]),
     }
 
 
@@ -313,8 +326,6 @@ def test_identity_columns_shape(migrated_engine: Engine) -> None:
         # No index on any identity column: no reader filters by Worker.
         for index in inspector.get_indexes(table):
             assert name not in index["column_names"], (table, index["name"])
-    movement_columns = {str(column["name"]) for column in inspector.get_columns("part_movements")}
-    assert "scan_session_id" not in movement_columns
 
 
 def test_identity_checks_have_exact_names_and_literals(migrated_engine: Engine) -> None:
@@ -443,9 +454,9 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
 
 
 def test_audit_admits_the_environment_entities(connection: Connection) -> None:
-    for entity in (*_ENVIRONMENT_ENTITIES, "Machine"):
+    for entity in (*_ENVIRONMENT_ENTITIES, "Machine", "ApplicationPolicy"):
         _insert_audit(connection, "CREATED", entity)
-    for refused in ("MachineLifecycleEvent", "User", "ApplicationPolicy"):
+    for refused in ("MachineLifecycleEvent", "User", "WorkerSession"):
 
         def insert(entity: str = refused) -> None:
             _insert_audit(connection, "CREATED", entity)
@@ -1163,3 +1174,566 @@ def test_downgrade_refuses_while_area_mode_configuration_exists(refused_database
         assert mode == "FIXED"
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Worker Sessions and the timeout policy (0020)
+# ---------------------------------------------------------------------------
+
+_SESSION_COLUMNS = {
+    "id": (sa.BigInteger, False),
+    "station_id": (sa.Text, False),
+    "area_id": (sa.Integer, False),
+    "worker_id": (sa.Integer, False),
+    "started_at": (sa.DateTime, False),
+    "expires_at": (sa.DateTime, False),
+    "ended_at": (sa.DateTime, True),
+    "end_reason": (sa.Text, True),
+}
+_SESSION_CHECKS = {
+    "ck_worker_sessions_end_reason",
+    "ck_worker_sessions_end_shape",
+    "ck_worker_sessions_expiry_after_start",
+    "ck_worker_sessions_end_within_window",
+    "ck_worker_sessions_expired_at_expiry",
+}
+_SESSION_FOREIGN_KEYS = {
+    "fk_worker_sessions_station_id_scan_stations": (
+        ["station_id"],
+        "scan_stations",
+        ["station_id"],
+    ),
+    "fk_worker_sessions_area_id_areas": (["area_id"], "areas", ["id"]),
+    "fk_worker_sessions_worker_id_workers": (["worker_id"], "workers", ["id"]),
+}
+_POLICY_CHECKS = {
+    "ck_application_policy_singleton",
+    "ck_application_policy_worker_session_timeout_range",
+}
+_SESSION_FK = "fk_part_movements_scan_session_worker_sessions"
+# What 0020 adds outside its own tables: (table, constraint).
+_SESSION_CONSTRAINTS = {
+    ("areas", "ck_areas_worker_session_timeout_range"),
+    ("part_movements", "ck_part_movements_session_requires_worker"),
+}
+
+
+def _execute(connection: Connection, statement: str, **params: object) -> None:
+    connection.execute(sa.text(statement), params)
+
+
+def _insert_session(
+    connection: Connection,
+    *,
+    station_id: str,
+    area_id: int,
+    worker_id: int,
+    started: str = "now() - interval '1 minute'",
+    expires: str = "now() + interval '10 minutes'",
+    ended: str = "NULL",
+    reason: str | None = None,
+) -> int:
+    return _scalar_id(
+        connection,
+        "INSERT INTO worker_sessions (station_id, area_id, worker_id, started_at, expires_at,"
+        f" ended_at, end_reason) VALUES (:station, :area, :worker, {started}, {expires},"
+        f" {ended}, :reason) RETURNING id",
+        station=station_id,
+        area=area_id,
+        worker=worker_id,
+        reason=reason,
+    )
+
+
+def _seed_session(connection: Connection, badge: str) -> tuple[dict[str, int], int, int]:
+    """Seeded production rows, a Worker and one open session at SEED-1."""
+    seeded = _seed_production(connection)
+    _insert_worker(connection, badge)
+    worker = _scalar_id(connection, "SELECT id FROM workers WHERE badge_barcode = :b", b=badge)
+    session_id = _insert_session(
+        connection, station_id="SEED-1", area_id=seeded["area"], worker_id=worker
+    )
+    return seeded, worker, session_id
+
+
+def test_worker_sessions_table_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    columns = {str(column["name"]): column for column in inspector.get_columns("worker_sessions")}
+    assert set(columns) == set(_SESSION_COLUMNS)
+    for name, (type_, nullable) in _SESSION_COLUMNS.items():
+        assert isinstance(columns[name]["type"], type_), name
+        assert columns[name]["nullable"] is nullable, name
+    for name in ("started_at", "expires_at", "ended_at"):
+        assert getattr(columns[name]["type"], "timezone", None) is True, name
+        # Written by the Application from the session clock.
+        assert columns[name]["default"] is None, name
+
+    policy = {str(column["name"]): column for column in inspector.get_columns("application_policy")}
+    assert set(policy) == {"id", "worker_session_timeout_minutes", "created_at", "updated_at"}
+    timeout = policy["worker_session_timeout_minutes"]
+    assert isinstance(timeout["type"], sa.Integer) and timeout["nullable"] is False
+    assert str(timeout["default"]) == "15"
+    assert policy["id"]["default"] is None
+
+    area = {str(column["name"]): column for column in inspector.get_columns("areas")}
+    override = area["worker_session_timeout_minutes"]
+    assert isinstance(override["type"], sa.Integer)
+    assert (override["nullable"], override["default"]) == (True, None)
+
+    movement = {str(column["name"]): column for column in inspector.get_columns("part_movements")}
+    scan_session = movement["scan_session_id"]
+    assert isinstance(scan_session["type"], sa.BigInteger)
+    assert (scan_session["nullable"], scan_session["default"]) == (True, None)
+    # No reader filters by session: no index on the Movement column.
+    for index in inspector.get_indexes("part_movements"):
+        assert "scan_session_id" not in index["column_names"], index["name"]
+
+
+def test_worker_sessions_constraints_have_exact_names(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    assert inspector.get_pk_constraint("worker_sessions")["name"] == "pk_worker_sessions"
+    checks = {str(check["name"]) for check in inspector.get_check_constraints("worker_sessions")}
+    assert checks == _SESSION_CHECKS
+    uniques = {
+        str(unique["name"]): unique["column_names"]
+        for unique in inspector.get_unique_constraints("worker_sessions")
+    }
+    assert uniques == {
+        "uq_worker_sessions_id_worker_id_station_id": ["id", "worker_id", "station_id"]
+    }
+    foreign_keys = {
+        str(fk["name"]): (fk["constrained_columns"], fk["referred_table"], fk["referred_columns"])
+        for fk in inspector.get_foreign_keys("worker_sessions")
+    }
+    assert foreign_keys == _SESSION_FOREIGN_KEYS
+    indexes = {
+        str(index["name"]): (
+            index["column_names"],
+            index["unique"],
+            str(index.get("dialect_options", {}).get("postgresql_where")),
+        )
+        for index in inspector.get_indexes("worker_sessions")
+        if not index.get("duplicates_constraint")
+    }
+    assert indexes == {
+        "uq_worker_sessions_open_station": (["station_id"], True, "(ended_at IS NULL)"),
+        "ix_worker_sessions_open_worker": (["worker_id"], False, "(ended_at IS NULL)"),
+    }
+    incoming = {
+        str(fk["name"]): (table, fk["constrained_columns"], fk["referred_columns"])
+        for table in inspector.get_table_names()
+        for fk in inspector.get_foreign_keys(table)
+        if fk["referred_table"] == "worker_sessions"
+    }
+    assert incoming == {
+        _SESSION_FK: (
+            "part_movements",
+            ["scan_session_id", "worker_id", "station_id"],
+            ["id", "worker_id", "station_id"],
+        )
+    }
+    assert inspector.get_pk_constraint("application_policy")["name"] == "pk_application_policy"
+    policy_checks = {
+        str(check["name"]) for check in inspector.get_check_constraints("application_policy")
+    }
+    assert policy_checks == _POLICY_CHECKS
+    for table, name in _SESSION_CONSTRAINTS:
+        assert name in {str(check["name"]) for check in inspector.get_check_constraints(table)}
+
+
+def test_worker_sessions_migration_repeats_the_model_literals() -> None:
+    migration = _load_migration(_WORKER_SESSIONS_MIGRATION_FILE)
+    assert (migration._TIMEOUT_MIN, migration._TIMEOUT_MAX, migration._TIMEOUT_DEFAULT) == (
+        models.WORKER_SESSION_TIMEOUT_MIN,
+        models.WORKER_SESSION_TIMEOUT_MAX,
+        models.WORKER_SESSION_TIMEOUT_DEFAULT,
+    )
+    assert migration._POLICY_TIMEOUT_SQL == models.POLICY_WORKER_SESSION_TIMEOUT_SQL
+    assert migration._AREA_TIMEOUT_SQL == models.AREA_WORKER_SESSION_TIMEOUT_SQL
+    assert migration._END_REASON_SQL == models.WORKER_SESSION_END_REASON_SQL
+    assert migration._END_SHAPE_SQL == models.WORKER_SESSION_END_SHAPE_SQL
+    assert migration._EXPIRY_AFTER_START_SQL == models.WORKER_SESSION_EXPIRY_AFTER_START_SQL
+    assert migration._END_WITHIN_WINDOW_SQL == models.WORKER_SESSION_END_WITHIN_WINDOW_SQL
+    assert migration._EXPIRED_AT_EXPIRY_SQL == models.WORKER_SESSION_EXPIRED_AT_EXPIRY_SQL
+    assert migration._MOVEMENT_SESSION_WORKER_SQL == models.MOVEMENT_SESSION_WORKER_SQL
+    machine_audit = _load_migration(_MACHINE_AUDIT_MIGRATION_FILE)
+    assert migration._MACHINE_ENTITY_TYPES == machine_audit._MACHINE_ENTITY_TYPES
+    assert set(re.findall(r"'([^']*)'", models.WORKER_SESSION_END_REASON_SQL)) == {
+        reason.value for reason in WorkerSessionEndReason
+    }
+    assert set(re.findall(r"'([^']*)'", migration._POLICY_ENTITY_TYPES)) == {
+        entity.value for entity in AuditEntityType
+    }
+
+
+def test_application_policy_is_one_seeded_row(connection: Connection) -> None:
+    rows = connection.execute(
+        sa.text("SELECT id, worker_session_timeout_minutes FROM application_policy")
+    ).all()
+    assert [tuple(row) for row in rows] == [(1, 15)]
+    _refused_by(
+        connection,
+        "ck_application_policy_singleton",
+        lambda: _execute(connection, "INSERT INTO application_policy (id) VALUES (2)"),
+    )
+    _seed_production(connection)
+    for value in (0, 721):
+
+        def set_policy(value: int = value) -> None:
+            _execute(
+                connection,
+                "UPDATE application_policy SET worker_session_timeout_minutes = :value",
+                value=value,
+            )
+
+        _refused_by(connection, "ck_application_policy_worker_session_timeout_range", set_policy)
+
+        def set_override(value: int = value) -> None:
+            _execute(
+                connection, "UPDATE areas SET worker_session_timeout_minutes = :value", value=value
+            )
+
+        _refused_by(connection, "ck_areas_worker_session_timeout_range", set_override)
+    for value in (1, 720):
+        _execute(
+            connection,
+            "UPDATE application_policy SET worker_session_timeout_minutes = :value",
+            value=value,
+        )
+        _execute(
+            connection, "UPDATE areas SET worker_session_timeout_minutes = :value", value=value
+        )
+    _execute(connection, "UPDATE areas SET worker_session_timeout_minutes = NULL")
+
+
+def _guard_refuses(connection: Connection, statement: str, message: str, **params: object) -> None:
+    savepoint = connection.begin_nested()
+    with pytest.raises(DBAPIError, match=message):
+        connection.execute(sa.text(statement), params)
+    savepoint.rollback()
+
+
+def test_worker_sessions_guard_lets_only_an_open_session_end_or_slide(
+    connection: Connection,
+) -> None:
+    seeded, worker, session_id = _seed_session(connection, "GUARD-W")
+    _insert_worker(connection, "GUARD-OTHER")
+    other = _scalar_id(connection, "SELECT id FROM workers WHERE badge_barcode = 'GUARD-OTHER'")
+    history = "worker_sessions rows are audit history"
+    frozen = "only an open session's expiry and end may change"
+    _guard_refuses(connection, "DELETE FROM worker_sessions WHERE id = :id", history, id=session_id)
+    # Listed first, so its BEFORE TRUNCATE trigger fires first.
+    _guard_refuses(connection, "TRUNCATE worker_sessions, part_movements", history)
+    for assignment in (
+        "worker_id = :other",
+        "area_id = area_id + 1",
+        "station_id = 'OTHER'",
+        "started_at = started_at - interval '1 second'",
+    ):
+        _guard_refuses(
+            connection,
+            f"UPDATE worker_sessions SET {assignment} WHERE id = :id",
+            frozen,
+            id=session_id,
+            other=other,
+        )
+    # An open session may slide and end.
+    _execute(
+        connection,
+        "UPDATE worker_sessions SET expires_at = expires_at + interval '5 minutes' WHERE id = :id",
+        id=session_id,
+    )
+    _execute(
+        connection,
+        "UPDATE worker_sessions SET ended_at = now(), end_reason = 'SWITCHED' WHERE id = :id",
+        id=session_id,
+    )
+    # A closed session is history: nothing changes any more.
+    for assignment in ("expires_at = expires_at + interval '1 minute'", "end_reason = 'EXPIRED'"):
+        _guard_refuses(
+            connection,
+            f"UPDATE worker_sessions SET {assignment} WHERE id = :id",
+            frozen,
+            id=session_id,
+        )
+    assert worker != other and seeded["area"] > 0
+
+
+def test_worker_sessions_checks_refuse_invalid_rows(connection: Connection) -> None:
+    seeded, worker, _ = _seed_session(connection, "CHECK-S")
+    past = "now() - interval '1 hour'"
+    cases: list[tuple[str, dict[str, str]]] = [
+        ("ck_worker_sessions_end_reason", {"ended": "now()", "reason": "SIGNED_OUT"}),
+        ("ck_worker_sessions_end_shape", {"ended": "now()"}),
+        ("ck_worker_sessions_end_shape", {"reason": "SWITCHED"}),
+        (
+            "ck_worker_sessions_expired_at_expiry",
+            {
+                "started": past,
+                "expires": "now() - interval '10 minutes'",
+                "ended": "now() - interval '20 minutes'",
+                "reason": "EXPIRED",
+            },
+        ),
+        (
+            "ck_worker_sessions_end_within_window",
+            {"expires": "now()", "ended": "now() + interval '1 minute'", "reason": "SWITCHED"},
+        ),
+        ("ck_worker_sessions_expiry_after_start", {"started": "now()", "expires": "now()"}),
+        # A second open session at the station.
+        ("uq_worker_sessions_open_station", {}),
+    ]
+    for constraint, values in cases:
+
+        def insert(values: dict[str, str] = values) -> None:
+            _insert_session(
+                connection, station_id="SEED-1", area_id=seeded["area"], worker_id=worker, **values
+            )
+
+        _refused_by(connection, constraint, insert)
+    # The admitted shapes: a closed SWITCHED row and an EXPIRED row at its expiry.
+    _insert_session(
+        connection,
+        station_id="SEED-1",
+        area_id=seeded["area"],
+        worker_id=worker,
+        started=past,
+        expires="now() - interval '10 minutes'",
+        ended="now() - interval '10 minutes'",
+        reason="EXPIRED",
+    )
+
+
+def test_movement_session_must_match_its_worker_and_station(connection: Connection) -> None:
+    seeded, worker, session_id = _seed_session(connection, "FK-S")
+    _insert_worker(connection, "FK-OTHER")
+    other = _scalar_id(connection, "SELECT id FROM workers WHERE badge_barcode = 'FK-OTHER'")
+    _execute(
+        connection,
+        "INSERT INTO scan_stations (station_id, area_id) VALUES ('SEED-2', :area)",
+        area=seeded["area"],
+    )
+
+    def movement(event: str, worker_id: int | None, station: str) -> Callable[[], None]:
+        def insert() -> None:
+            _execute(
+                connection,
+                "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type,"
+                " quantity, to_area_id, operation_id, station_id, worker_id, scan_session_id,"
+                " occurred_at, server_received_at, device_event_id) SELECT quantity_flow_id,"
+                " part_number, 'RECEIVED', 1, to_area_id, operation_id, :station, :worker,"
+                " :session, now(), now(), :event FROM part_movements WHERE id = :id",
+                station=station,
+                worker=worker_id,
+                session=session_id,
+                event=event,
+                id=seeded["station_movement"],
+            )
+
+        return insert
+
+    _refused_by(connection, _SESSION_FK, movement("FK-1", other, "SEED-1"))
+    _refused_by(connection, _SESSION_FK, movement("FK-2", worker, "SEED-2"))
+    _refused_by(
+        connection, "ck_part_movements_session_requires_worker", movement("FK-3", None, "SEED-1")
+    )
+    movement("FK-4", worker, "SEED-1")()
+
+
+def test_downgrade_to_worker_identity_revision_restores_the_boundary(
+    admin_engine: Engine,
+) -> None:
+    name = "partflow_test_phase13_downgrade_s4"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _WORKER_IDENTITY_REVISION)
+        engine = create_engine(url)
+        try:
+            inspector = inspect(engine)
+            tables = set(inspector.get_table_names())
+            assert {"worker_sessions", "application_policy"}.isdisjoint(tables)
+            area_columns = {str(column["name"]) for column in inspector.get_columns("areas")}
+            assert "worker_session_timeout_minutes" not in area_columns
+            movement_columns = {
+                str(column["name"]) for column in inspector.get_columns("part_movements")
+            }
+            assert "scan_session_id" not in movement_columns
+            for table, check in _SESSION_CONSTRAINTS:
+                names = {str(item["name"]) for item in inspector.get_check_constraints(table)}
+                assert check not in names, (table, check)
+            fks = {str(item["name"]) for item in inspector.get_foreign_keys("part_movements")}
+            assert _SESSION_FK not in fks
+            machine_audit = _load_migration(_MACHINE_AUDIT_MIGRATION_FILE)
+            entity_check = _audit_checks(engine)["ck_audit_events_entity_type"]
+            assert set(re.findall(r"'([^']*)'", entity_check)) == set(
+                re.findall(r"'([^']*)'", machine_audit._MACHINE_ENTITY_TYPES)
+            )
+            with engine.connect() as connection:
+                assert _version(connection) == _WORKER_IDENTITY_REVISION
+                leftovers = connection.execute(
+                    sa.text(
+                        "SELECT count(*) FROM pg_proc"
+                        " WHERE proname = 'partflow_worker_sessions_guard_mutation'"
+                    )
+                ).scalar_one()
+            assert leftovers == 0
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                policy = connection.execute(
+                    sa.text("SELECT id, worker_session_timeout_minutes FROM application_policy")
+                ).all()
+            assert [tuple(row) for row in policy] == [(1, 15)]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_downgrade(url: URL, error: type[Exception], message: str) -> None:
+    with pytest.raises(error, match=message):
+        command.downgrade(_alembic_config(url), _WORKER_IDENTITY_REVISION)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_session_history_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _seed_session(connection, "DOWN-S")
+        _refused_downgrade(refused_database, ProgrammingError, "holds Worker Session history")
+        with engine.connect() as connection:
+            kept = connection.execute(sa.text("SELECT count(*) FROM worker_sessions")).scalar_one()
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "configure",
+    [
+        "UPDATE areas SET worker_session_timeout_minutes = 5",
+        "UPDATE application_policy SET worker_session_timeout_minutes = 30",
+    ],
+)
+def test_downgrade_refuses_while_timeout_configuration_exists(
+    refused_database: URL, configure: str
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _seed_production(connection)
+            _execute(connection, configure)
+        _refused_downgrade(refused_database, ProgrammingError, "timeout configuration exists")
+        with engine.connect() as connection:
+            policy = connection.execute(
+                sa.text("SELECT worker_session_timeout_minutes FROM application_policy")
+            ).scalar_one()
+            override = connection.execute(
+                sa.text("SELECT max(worker_session_timeout_minutes) FROM areas")
+            ).scalar_one()
+        assert (policy, override) in {(15, 5), (30, None)}
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_policy_audit_history_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_audit(connection, "UPDATED", "ApplicationPolicy")
+        # The re-created 0017 entity CHECK refuses the ApplicationPolicy row.
+        _refused_downgrade(refused_database, IntegrityError, "ck_audit_events_entity_type")
+        with engine.connect() as connection:
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'ApplicationPolicy'")
+            ).scalar_one()
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+def _rows(connection: Connection, table: str) -> list[dict[str, object]]:
+    return [
+        dict(row._mapping)
+        for row in connection.execute(sa.text(f"SELECT * FROM {table} ORDER BY id"))
+    ]
+
+
+def test_upgrade_preserves_existing_rows_without_sessions(admin_engine: Engine) -> None:
+    """0019 → head keeps every row and backfills nothing (CD4)."""
+    name = "partflow_test_phase13_sessions_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _WORKER_IDENTITY_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                seeded = _seed_production(connection)
+                _insert_worker(connection, "UP-W")
+                worker = _scalar_id(
+                    connection, "SELECT id FROM workers WHERE badge_barcode = 'UP-W'"
+                )
+                # A station Movement that recorded a Worker (slice 3).
+                _execute(
+                    connection,
+                    "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type,"
+                    " quantity, to_area_id, operation_id, station_id, worker_id, occurred_at,"
+                    " server_received_at, device_event_id) SELECT quantity_flow_id,"
+                    " part_number, 'RECEIVED', 1, to_area_id, operation_id, station_id,"
+                    " :worker, now(), now(), 'UP-1' FROM part_movements WHERE id = :id",
+                    worker=worker,
+                    id=seeded["station_movement"],
+                )
+                _insert_audit(connection, "CREATED", "Area")
+                movements = _rows(connection, "part_movements")
+                areas = _rows(connection, "areas")
+                before = _table_counts(connection)
+            command.upgrade(config, "head")
+            with engine.begin() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _table_counts(connection) == before
+                assert _rows(connection, "part_movements") == [
+                    {**row, "scan_session_id": None} for row in movements
+                ]
+                assert _rows(connection, "areas") == [
+                    {**row, "worker_session_timeout_minutes": None} for row in areas
+                ]
+                validated = {
+                    str(row.conname): bool(row.convalidated)
+                    for row in connection.execute(
+                        sa.text(
+                            "SELECT conname, convalidated FROM pg_constraint WHERE conname IN"
+                            " (:fk, 'ck_part_movements_session_requires_worker',"
+                            " 'ck_areas_worker_session_timeout_range')"
+                        ),
+                        {"fk": _SESSION_FK},
+                    )
+                }
+                assert validated == {
+                    _SESSION_FK: True,
+                    "ck_part_movements_session_requires_worker": True,
+                    "ck_areas_worker_session_timeout_range": True,
+                }
+                policy = connection.execute(
+                    sa.text("SELECT id, worker_session_timeout_minutes FROM application_policy")
+                ).all()
+                assert [tuple(row) for row in policy] == [(1, 15)]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)

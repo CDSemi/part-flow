@@ -6,13 +6,21 @@
 // treated as an UNKNOWN outcome — the intent is frozen and the only
 // way forward is the exact same request under the same
 // `device_event_id`, which replays the committed write or records it
-// once. Production-safe: no mock data, no JSX.
+// once. A `worker_session_required` refusal (Phase 13) is neither: the
+// server recorded nothing because the station has no valid Worker
+// Session, so the sign-in modal is raised and, after the badge, the
+// operator confirms the IDENTICAL request again. Production-safe: no
+// mock data, no JSX.
 
 import { useCallback, useRef, useState } from 'react';
 
 import { errorMessage } from '../../api/client';
 import { newDeviceEventId } from '../../api/production-release';
-import { writeOutcomeUnknown } from '../../api/scan-station';
+import {
+  workerSessionRequired,
+  writeOutcomeUnknown,
+} from '../../api/scan-station';
+import { useRequireWorkerSession } from './scan-station-session';
 
 export interface OneShotWrite<T> {
   /** A request is in flight. */
@@ -64,6 +72,7 @@ export function useOneShotWrite<T>({
    */
   onRejected?: () => void;
 }): OneShotWrite<T> {
+  const requireSession = useRequireWorkerSession();
   const deviceEventId = useRef(newDeviceEventId());
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -88,6 +97,14 @@ export function useOneShotWrite<T>({
     try {
       confirmed = await send(deviceEventId.current);
     } catch (error) {
+      if (workerSessionRequired(error)) {
+        // Nothing recorded and nothing wrong with the intent: no error,
+        // no rejection, the same `device_event_id` — the sign-in modal
+        // opens above this dialog and Confirm resends the same request.
+        requireSession();
+        setBusy(false);
+        return;
+      }
       if (writeOutcomeUnknown(error)) {
         setOutcomeUnknown(true);
         setServerError(null);
@@ -102,7 +119,7 @@ export function useOneShotWrite<T>({
     setBusy(false);
     setResult(confirmed);
     onDone(confirmed);
-  }, [busy, writeBlocked, send, onDone, onRejected]);
+  }, [busy, writeBlocked, send, onDone, onRejected, requireSession]);
 
   const clearError = useCallback(() => setServerError(null), []);
 

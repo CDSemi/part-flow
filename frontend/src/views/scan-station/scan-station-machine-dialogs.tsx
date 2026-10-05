@@ -28,6 +28,7 @@ import {
   StepButtons,
   StepRecap,
 } from './scan-station-presentation';
+import { useWorkerSessionSource } from './scan-station-session';
 import { useOneShotWrite } from './scan-station-write';
 import {
   enterKeyHandler,
@@ -194,6 +195,7 @@ export function AssignToMachineDialog({
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const scanRef = useRef<HTMLInputElement>(null);
+  const sessionSource = useWorkerSessionSource();
   const machine = machineList.find((item) => item.id === machineId) ?? null;
   const flow =
     queuedList.find((item) => item.quantityFlowId === flowId) ?? null;
@@ -252,11 +254,15 @@ export function AssignToMachineDialog({
     if (parsed.kind === 'empty') return;
     if (parsed.kind === 'machine') {
       setScanning(true);
+      const sent = sessionSource.ticket();
       try {
         const resolution: MachineScanResolution = await resolveMachineScan(
           station.stationId,
           { barcode: raw.trim() },
         );
+        // A resolved Machine scan refreshed the Worker Session on the
+        // server (Scanned session mode): the countdown follows it.
+        sessionSource.applyWorkerSession(resolution.workerSession, sent);
         setScanError(null);
         setMachineList((list) =>
           list.some((item) => item.id === resolution.machine.id)
@@ -594,7 +600,7 @@ export function MachineActionDialog({
   // Final-confirmation gate (GUI_DESIGN §4.6, post-v18): the summary's
   // primary opens ONE more question — DONE in the information tone,
   // QUEUE in the warning tone — before anything is recorded. Worker
-  // badge gates arrive with the Worker-session workflows.
+  // badge gates arrive with the badge-confirmation slice.
   const [gate, setGate] = useState(false);
 
   const write = useOneShotWrite<MachineActionResult>({

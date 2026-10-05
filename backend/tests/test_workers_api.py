@@ -938,6 +938,10 @@ _REGISTRY_OWNERS = {
     "app/application/undo.py",
     "app/application/tracking.py",
     "app/api/scan_station.py",
+    # Phase 13 S4: the Worker Sessions and the badge sign-in answer
+    # naming the signed-in and the previous Worker.
+    "app/application/worker_sessions.py",
+    "app/application/scan_station.py",
 }
 _RAW_SQL_ON_WORKERS = re.compile(r"(?i)\b(from|join|update|into)\s+workers\b")
 _MODELS_MODULE = "app.infrastructure.models"

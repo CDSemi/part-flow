@@ -1491,8 +1491,8 @@ def test_queued_quantity_transfers_with_transferred_alone(
     assert response.json()["completed_machine_id"] is None
     columns = {column.name for column in models.PartMovement.__table__.columns}
     # movement_reason / reverses_movement_id arrived with Phase 9;
-    # `worker_id` arrived with Phase 13 S3; `scan_session_id` follows with S4.
-    assert "scan_session_id" not in columns
+    # `worker_id` arrived with Phase 13 S3; `scan_session_id` with Phase 13 S4.
+    assert "scan_session_id" in columns
     assert "worker_id" in columns
     assert "parent_flow_id" not in {c.name for c in models.QuantityFlow.__table__.columns}
 

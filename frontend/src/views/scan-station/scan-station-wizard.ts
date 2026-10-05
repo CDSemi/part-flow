@@ -180,13 +180,18 @@ export { operationLabel };
 
 /**
  * The `Worker` value of a production confirmation summary: the Fixed
- * Worker the station context reports in a Fixed Worker Area, null
- * otherwise (the row is then omitted). Presentation of the server's
- * configuration only — the command judges the recorded Worker again at
- * confirmation.
+ * Worker the station context reports in a Fixed Worker Area, the Worker
+ * of the valid Worker Session in a Scanned-session Area, null otherwise
+ * (the row is then omitted). Presentation of the server's answers only
+ * — the command judges the recorded Worker again at confirmation.
  */
 export function stationWorkerName(station: StationContext): string | null {
-  return station.workerIdentification.mode === 'FIXED'
-    ? (station.workerIdentification.fixedWorker?.name ?? null)
-    : null;
+  const identification = station.workerIdentification;
+  if (identification.mode === 'FIXED') {
+    return identification.fixedWorker?.name ?? null;
+  }
+  if (identification.mode === 'SCANNED') {
+    return identification.session?.worker.name ?? null;
+  }
+  return null;
 }

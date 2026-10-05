@@ -10,19 +10,14 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { prepareImageUpload } from '../../components/image-upload';
-import {
-  MOCK_BADGE_CONFIRM_POLICY,
-  setBadgeConfirmRequirement,
-} from '../../mocks/scan-station';
 import { AdministrationView } from './AdministrationView';
 
 // Administration (GUI_DESIGN §9): the minimum environment setup
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
-// configuration — and Workers read and write the real /api surface
-// (faked in-memory here with the same routes and semantics). Every
-// other section presents itself honestly as not available yet; the
-// Worker sessions policy preview stays a development-only panel behind
-// the DEV build boundary.
+// configuration — Workers and Worker sessions read and write the real
+// /api surface (faked in-memory here with the same routes and
+// semantics). Every other section presents itself honestly as not
+// available yet.
 
 // Image preparation (sniff, decode, downscale) has its own suite; here
 // it passes the chosen file through, or refuses it when a test says so.
@@ -71,6 +66,7 @@ interface AreaRow {
   is_active: boolean;
   worker_identification_mode: WorkerIdMode;
   fixed_worker_id: number | null;
+  worker_session_timeout_minutes: number | null;
 }
 
 interface FakeState {
@@ -95,6 +91,8 @@ interface FakeState {
     retired_on: string | null;
   }[];
   workers: WorkerRow[];
+  /** `application_policy` default Worker session timeout (minutes). */
+  sessionTimeout: number;
   nextId: number;
 }
 
@@ -117,6 +115,7 @@ function seedState(): FakeState {
         is_active: true,
         worker_identification_mode: 'DISABLED',
         fixed_worker_id: null,
+        worker_session_timeout_minutes: null,
       },
       {
         id: 2,
@@ -130,6 +129,7 @@ function seedState(): FakeState {
         is_active: true,
         worker_identification_mode: 'DISABLED',
         fixed_worker_id: null,
+        worker_session_timeout_minutes: null,
       },
     ],
     operations: [
@@ -166,6 +166,7 @@ function seedState(): FakeState {
         avatar_updated_at: null,
       },
     ],
+    sessionTimeout: 15,
     nextId: 100,
   };
 }
@@ -179,6 +180,11 @@ let writes: { method: string; url: string; body: unknown }[];
 let workerFailures: Partial<Record<WorkerRoute, FakeFailure>>;
 let workerListReads: number;
 let avatarVersion: number;
+/** A refusal of every `/api/policies/worker-sessions` call, if set. */
+let policyFailure: { status: number; detail: string } | null;
+
+const AREA_TIMEOUT_REFUSAL =
+  "An Area's Worker session timeout must be a whole number of minutes from 1 to 720, or empty to use the default.";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -294,6 +300,8 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         (body.worker_identification_mode as WorkerIdMode | undefined) ??
         'DISABLED',
       fixed_worker_id: (body.fixed_worker_id as number | null) ?? null,
+      worker_session_timeout_minutes:
+        (body.worker_session_timeout_minutes as number | null) ?? null,
     };
     area.barcode_value = `PF:AREA:${area.id}`;
     state.areas.push(area);
@@ -322,7 +330,29 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     if (typeof body.is_terminal === 'boolean')
       area.is_terminal = body.is_terminal;
     if (typeof body.is_active === 'boolean') area.is_active = body.is_active;
+    if ('worker_session_timeout_minutes' in body) {
+      const minutes = body.worker_session_timeout_minutes;
+      if (
+        minutes !== null &&
+        (typeof minutes !== 'number' || minutes < 1 || minutes > 720)
+      ) {
+        return json({ detail: AREA_TIMEOUT_REFUSAL }, 422);
+      }
+      area.worker_session_timeout_minutes = minutes;
+    }
     return json(stamp(area));
+  }
+  if (url === '/api/policies/worker-sessions') {
+    if (policyFailure) {
+      return json({ detail: policyFailure.detail }, policyFailure.status);
+    }
+    if (method === 'PUT') {
+      state.sessionTimeout = Number(body.worker_session_timeout_minutes);
+    }
+    return json({
+      worker_session_timeout_minutes: state.sessionTimeout,
+      updated_at: T0,
+    });
   }
   if (url === '/api/operations' && method === 'GET') {
     return json(state.operations.map(stamp));
@@ -557,6 +587,7 @@ beforeEach(() => {
   workerFailures = {};
   workerListReads = 0;
   avatarVersion = 0;
+  policyFailure = null;
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -572,9 +603,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  setBadgeConfirmRequirement('done', true);
-  setBadgeConfirmRequirement('queue', true);
-  setBadgeConfirmRequirement('undo', true);
 });
 
 function renderAdmin(status: 'connected' | 'unavailable' = 'connected') {
@@ -1735,57 +1763,208 @@ test('offline disables the configuration entry actions; reading stays available'
   ).toBeDisabled();
 });
 
-/* ====== Worker sessions (development-only preview) ====== */
+/* ============ Worker sessions (Phase 13 — real timeout policy) ============ */
 
-async function openWorkerSessions() {
-  renderAdmin();
+async function openWorkerSessions(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  renderAdmin(status);
   openSection('Worker sessions');
-  // The preview is a development-only lazy module — wait for it.
-  await screen.findByText('Default timeout');
+  return (await screen.findByLabelText(
+    'Default timeout (minutes)',
+  )) as HTMLInputElement;
 }
 
-test('Worker sessions shows the timeout values and the three badge-confirmation switches', async () => {
-  await openWorkerSessions();
+function sessionTimeoutCell(areaName: string): string | null | undefined {
+  return screen
+    .getByRole('button', { name: `Edit session timeout — ${areaName}` })
+    .closest('tr')
+    ?.querySelector('td[data-label="Session timeout"]')?.textContent;
+}
 
-  // Timeout preview: the default plus the per-Area override.
-  expect(screen.getByText('Default timeout')).toBeInTheDocument();
-  expect(screen.getByText('15 minutes')).toBeInTheDocument();
-  expect(screen.getByText('Lathe override')).toBeInTheDocument();
-  expect(screen.getByText('20 minutes')).toBeInTheDocument();
+test('Worker sessions loads the policy and the Areas, with an honest badge-confirmation panel', async () => {
+  const field = await openWorkerSessions();
 
-  // Three slide switches — one per sensitive action, default ON.
-  const switches = screen.getAllByRole('switch');
-  expect(switches).toHaveLength(3);
-  for (const sw of switches) {
-    expect(sw.getAttribute('aria-checked')).toBe('true');
-    expect(sw.textContent).toContain('On');
-  }
-  for (const name of [
-    'Require badge scan — DONE — Complete Area processing',
-    'Require badge scan — QUEUE — Return unfinished quantity to queue',
-    'Require badge scan — UNDO — Reverse the last action',
-  ]) {
-    expect(screen.getByRole('switch', { name })).toBeInTheDocument();
-  }
-  // A settings panel, not an entry table — no entry action renders.
+  expect(field).toHaveValue(15);
+  expect(screen.getByText('Sliding inactivity timeout')).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      'Badge confirmation of DONE, QUEUE return and Undo is not available yet.',
+    ),
+  ).toBeInTheDocument();
+  // No development notice, no switches, no entry action.
+  expect(screen.queryByRole('note')).toBeNull();
+  expect(screen.queryByRole('switch')).toBeNull();
   expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+  // Unchanged → Save disabled.
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
 });
 
-test('toggling a badge-confirmation switch updates the shared policy per action', async () => {
+test('Worker sessions saves a whole-minute default and refuses anything else in place', async () => {
+  const field = await openWorkerSessions();
+  const save = screen.getByRole('button', { name: 'Save' });
+
+  for (const value of ['0', '721', '', '1.5']) {
+    fireEvent.change(field, { target: { value } });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Enter a whole number of minutes from 1 to 720.',
+    );
+    expect(save).toBeDisabled();
+  }
+  expect(writes).toEqual([]);
+
+  fireEvent.change(field, { target: { value: '30' } });
+  expect(screen.queryByRole('alert')).toBeNull();
+  fireEvent.click(save);
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    'Default timeout saved.',
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/worker-sessions',
+      body: { worker_session_timeout_minutes: 30 },
+    },
+  ]);
+  // The re-read shows the stored default in the overrides table.
+  await waitFor(() =>
+    expect(sessionTimeoutCell('Lathe')).toBe('Default · 30 min'),
+  );
+});
+
+test('the per-Area overrides table edits, clears and cancels an Area override', async () => {
+  state.areas[1].worker_session_timeout_minutes = 5;
+  state.areas[1].is_active = false;
   await openWorkerSessions();
 
-  const undoSwitch = screen.getByRole('switch', {
-    name: 'Require badge scan — UNDO — Reverse the last action',
-  });
-  fireEvent.click(undoSwitch);
-  expect(undoSwitch.getAttribute('aria-checked')).toBe('false');
-  expect(undoSwitch.textContent).toContain('Off');
-  expect(MOCK_BADGE_CONFIRM_POLICY.undo).toBe(false);
-  // The other actions stay independent.
-  expect(MOCK_BADGE_CONFIRM_POLICY.done).toBe(true);
-  expect(MOCK_BADGE_CONFIRM_POLICY.queue).toBe(true);
+  expect(sessionTimeoutCell('Lathe')).toBe('Default · 15 min');
+  expect(sessionTimeoutCell('Stockroom')).toBe('5 min');
+  const stockroomRow = screen
+    .getByRole('button', { name: 'Edit session timeout — Stockroom' })
+    .closest('tr')!;
+  expect(stockroomRow.textContent).toContain('Stockroom (inactive)');
+  expect(stockroomRow.textContent).toContain('Disabled');
 
-  fireEvent.click(undoSwitch);
-  expect(undoSwitch.getAttribute('aria-checked')).toBe('true');
-  expect(MOCK_BADGE_CONFIRM_POLICY.undo).toBe(true);
+  // Override Lathe with 20 minutes.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit session timeout — Lathe' }),
+  );
+  let dialog = screen.getByRole('dialog', { name: 'Session timeout — Lathe' });
+  expect(
+    within(dialog).getByRole('radio', {
+      name: 'Use the default (15 minutes)',
+    }),
+  ).toBeChecked();
+  fireEvent.click(within(dialog).getByRole('radio', { name: 'Override' }));
+  const minutes = within(dialog).getByLabelText('Timeout (minutes)');
+  fireEvent.change(minutes, { target: { value: '0' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Enter a whole number of minutes from 1 to 720.',
+  );
+  expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+  fireEvent.change(minutes, { target: { value: '20' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[0]).toEqual({
+    method: 'PATCH',
+    url: '/api/areas/1',
+    body: { worker_session_timeout_minutes: 20 },
+  });
+  await waitFor(() => expect(sessionTimeoutCell('Lathe')).toBe('20 min'));
+
+  // Back to the default: null clears the override.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit session timeout — Stockroom' }),
+  );
+  dialog = screen.getByRole('dialog', { name: 'Session timeout — Stockroom' });
+  expect(within(dialog).getByRole('radio', { name: 'Override' })).toBeChecked();
+  expect(within(dialog).getByLabelText('Timeout (minutes)')).toHaveValue(5);
+  fireEvent.click(
+    within(dialog).getByRole('radio', { name: 'Use the default (15 minutes)' }),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1]).toEqual({
+    method: 'PATCH',
+    url: '/api/areas/2',
+    body: { worker_session_timeout_minutes: null },
+  });
+  await waitFor(() =>
+    expect(sessionTimeoutCell('Stockroom')).toBe('Default · 15 min'),
+  );
+
+  // Cancel (Esc) sends nothing.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit session timeout — Lathe' }),
+  );
+  dialog = screen.getByRole('dialog', { name: 'Session timeout — Lathe' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(writes).toHaveLength(2);
+});
+
+test('Worker sessions renders server refusals in place, a failed load with Retry, and blocks saving offline', async () => {
+  // A server refusal of an override keeps the dialog and the draft.
+  const field = await openWorkerSessions();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit session timeout — Lathe' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Session timeout — Lathe',
+  });
+  fireEvent.click(within(dialog).getByRole('radio', { name: 'Override' }));
+  fireEvent.change(within(dialog).getByLabelText('Timeout (minutes)'), {
+    target: { value: '45' },
+  });
+  vi.mocked(fetch).mockImplementationOnce(async () =>
+    json({ detail: AREA_TIMEOUT_REFUSAL }, 422),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    AREA_TIMEOUT_REFUSAL,
+  );
+  expect(within(dialog).getByLabelText('Timeout (minutes)')).toHaveValue(45);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  // A server refusal of the default keeps the panel and the draft.
+  policyFailure = {
+    status: 422,
+    detail:
+      'The Worker session timeout must be a whole number of minutes from 1 to 720.',
+  };
+  fireEvent.change(field, { target: { value: '60' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'The Worker session timeout must be a whole number of minutes from 1 to 720.',
+  );
+  expect(field).toHaveValue(60);
+  cleanup();
+
+  // Load failure → error state with Retry, which recovers.
+  policyFailure = { status: 500, detail: 'Database unavailable.' };
+  renderAdmin();
+  openSection('Worker sessions');
+  expect(
+    await screen.findByText('Worker session settings could not be loaded.'),
+  ).toBeInTheDocument();
+  policyFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByLabelText('Default timeout (minutes)')).toHaveValue(
+    15,
+  );
+  cleanup();
+
+  // Offline: reading works, every Save is disabled.
+  const offlineField = await openWorkerSessions('unavailable');
+  fireEvent.change(offlineField, { target: { value: '30' } });
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit session timeout — Lathe' }),
+  );
+  expect(
+    within(
+      screen.getByRole('dialog', { name: 'Session timeout — Lathe' }),
+    ).getByRole('button', { name: 'Save' }),
+  ).toBeDisabled();
 });

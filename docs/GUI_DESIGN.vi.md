@@ -399,14 +399,14 @@ Loading skeleton giữ layout; empty giải thích next action; unknown Station 
 error; disconnected giữ loaded data nhưng block write; validation inline; long-data
 preview kiểm tra PN/row wrapping. Không optimistic completion.
 
-**Implementation boundary (Phase 13 — Worker ID modes).** Area Disabled không render Worker pill; Area Fixed Worker render pill với avatar, tên và `Fixed Worker` của Fixed Worker; mọi production action ghi Worker của Area, và mọi production confirmation summary hiện nó thành row `Worker` trước `Scan Station` (bỏ ở Area Disabled). Station đọc lại context ngầm ở mỗi lần scan được resolve và mỗi khi `DONE` / `QUEUE` của Machine card hoặc `DONE` của direct processing mở wizard — một lần đọc lại ngầm thất bại giữ nguyên station, dialog đang mở và pill như lần đọc cuối, không bao giờ chuyển sang trang lỗi — và ô scan mang placeholder §4.4. Badge scan được trả lời bằng `Worker badge scans are not used in this Area` và không đổi gì (không bao giờ đổi Last Scanned PN). Summary Undo hiện `Worker` gốc và `Reversed by` đúng như server preview. Vẫn chưa có: Scanned session, badge modal và các badge gate (IMPLEMENTATION_ROADMAP Phase 13).
+**Implementation boundary (Phase 13 — Worker ID modes).** Area Disabled không render Worker pill; Area Fixed Worker render pill với avatar, tên và `Fixed Worker` của Fixed Worker; mọi production action ghi Worker của Area, và mọi production confirmation summary hiện nó thành row `Worker` trước `Scan Station` (bỏ ở Area Disabled). Station đọc lại context ngầm ở mỗi lần scan được resolve và mỗi khi `DONE` / `QUEUE` của Machine card hoặc `DONE` của direct processing mở wizard — một lần đọc lại ngầm thất bại giữ nguyên station, dialog đang mở và pill như lần đọc cuối, không bao giờ chuyển sang trang lỗi — và ô scan mang placeholder §4.4. Badge scan được trả lời bằng `Worker badge scans are not used in this Area` và không đổi gì (không bao giờ đổi Last Scanned PN). Summary Undo hiện `Worker` gốc và `Reversed by` đúng như server preview. Vẫn chưa có: chọn mode Scanned session trong Administration và các badge gate (IMPLEMENTATION_ROADMAP Phase 13).
 
 ## 4.12 Worker identification và session
 
 Worker khác User. Worker là Scan-Station audit identity, profile stable id/name/
 existing badge/avatar/active, không employee number; non-`PF:` badge khớp chính xác sau khi chuẩn hóa (trim, uppercase) với
 active Workers, nên hoa/thường không bao giờ quan trọng. Mode: Disabled, Fixed, Scanned session. Badge ở Disabled/Fixed chỉ
-trả explanatory notice, không sign in. Ghi chú triển khai (Phase 13): Disabled và Fixed Worker là thật; Scanned session đi cùng các workflow Worker-session.
+trả explanatory notice, không sign in. Ghi chú triển khai (Phase 13): Disabled và Fixed Worker là thật; runtime Scanned-session — đăng nhập và chuyển badge, sliding timeout phía server, modal chặn sign-in / `Worker session expired` phía trên các dialog đang mở, đếm ngược trên pill và demo badge chỉ-development — là thật; Scanned session sẽ chọn được trong Administration → Areas cùng với badge confirmation.
 
 Scanned session dùng configurable sliding inactivity timeout; valid production
 interaction refresh, invalid không; badge khác switch ngay. Station không session
@@ -722,7 +722,7 @@ Tách production, sidebar:
 
 Worker sessions sở hữu default/per-Area sliding timeout và ba independent default-On
 badge-gate options cho DONE/QUEUE/Undo; option chỉ đổi form của always-present final
-gate. Phase 2 preview only; timeout read-only, toggles session-only. Department
+gate. Từ Phase 13, section Worker sessions là thật cho timeout — giá trị default và override theo Area là cấu hình được lưu (số phút nguyên, 1–720, default 15); ba badge-confirmation option nói rõ rằng chưa có cho đến khi các badge-confirmation gate tồn tại. Department
 display config per Department. Due Soon settings default 2d/15%/7d.
 
 Không có Machine, RouteTemplate hay PartNumber registry trong Admin; chúng ở
@@ -737,7 +737,7 @@ profile tách Users. Ghi chú triển khai (Phase 13): editor Workers lưu badge
 in hoa và hiện preview `Saved as:` khi khác với giá trị đã gõ hoặc scan, upload avatar
 (PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar, hiện
 initials khi không có avatar, và deactivate Worker mà không có delete nào. Areas table trình bày Operations, derived assignment mode,
-Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị block. Từ Phase 13, bảng và editor Areas cấu hình Worker ID mode — Disabled hoặc Fixed Worker kèm Fixed Worker của nó; Scanned session được hiển thị nhưng không chọn được cho đến khi có Worker sessions và badge confirmation.
+Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị block. Từ Phase 13, bảng và editor Areas cấu hình Worker ID mode — Disabled hoặc Fixed Worker kèm Fixed Worker của nó; Scanned session được hiển thị nhưng không chọn được cho đến khi có badge confirmation.
 
 History maintenance: lossless export → verify → purge exactly archived rows qua
 privileged Admin path, preserve related Movement chains, preview scope, reason và

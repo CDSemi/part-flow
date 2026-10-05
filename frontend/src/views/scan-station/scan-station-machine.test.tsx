@@ -118,10 +118,12 @@ let workerIdentification: unknown;
 const FIXED_NGUYEN = {
   mode: 'FIXED',
   fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+  session: null,
 };
 const FIXED_TRAN = {
   mode: 'FIXED',
   fixed_worker: { id: 8, name: 'T. Tran', avatar_updated_at: null },
+  session: null,
 };
 /** While set, the station context read fails (a transient 502/503). */
 let contextFailure: boolean;
@@ -389,6 +391,7 @@ function handle(url: string, method: string, body: unknown): Response {
       available_stocked_quantity: 0,
       stock_available: false,
       scanned_at: new Date().toISOString(),
+      worker_session: null,
     });
   }
 
@@ -432,6 +435,7 @@ function handle(url: string, method: string, body: unknown): Response {
       assigned_quantity: assignedTo(machine.id),
       queued: queued.map(flowWire),
       requires_selection: queued.length > 1,
+      worker_session: null,
     });
   }
 
@@ -612,7 +616,11 @@ beforeEach(() => {
   committed = new Map();
   requests = [];
   nextMovementId = 500;
-  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
+  workerIdentification = {
+    mode: 'DISABLED',
+    fixed_worker: null,
+    session: null,
+  };
   contextFailure = false;
   writeFailure = null;
   healthDown = false;

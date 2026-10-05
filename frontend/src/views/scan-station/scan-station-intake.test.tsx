@@ -130,6 +130,7 @@ let workerIdentification: unknown;
 const FIXED_NGUYEN = {
   mode: 'FIXED',
   fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+  session: null,
 };
 
 function areaRef(areaId: number) {
@@ -326,6 +327,7 @@ function handle(url: string, method: string, body: unknown): Response {
       available_stocked_quantity: 0,
       stock_available: false,
       scanned_at: scannedAt,
+      worker_session: null,
     });
   }
 
@@ -474,7 +476,11 @@ beforeEach(() => {
   committed = new Map();
   requests = [];
   nextMovementId = 700;
-  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
+  workerIdentification = {
+    mode: 'DISABLED',
+    fixed_worker: null,
+    session: null,
+  };
   nextFlowId = 300;
   writeFailure = null;
   areaHasMachines = true;

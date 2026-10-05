@@ -192,7 +192,7 @@ function devOnlyRanges(source: string): [number, number][] {
  *
  * Static imports are always followed. A dynamic import is followed too
  * — unless it sits inside a DEV-only range, which is how the mock
- * views, the Worker sessions preview and the Completed Work Orders
+ * views, the Scan Station demo badges and the Completed Work Orders
  * preview leave the graph. Walking instead of listing folders is the
  * point: shared helpers that started life in the mock views (dates,
  * barcode parsing, the toast hook) are production modules today, and a
@@ -453,18 +453,35 @@ test('a mock reached through a shared transitive module is caught', () => {
   );
 });
 
-test('the dev-only Worker sessions preview stays behind the DEV boundary', () => {
-  // The preview module itself is allowed to import mock data, but the
-  // real Administration view may reach it only through the guarded
-  // lazy import — never through a static import that would pull the
-  // mock datasets into the production module graph.
+test('Worker sessions is a real section and the demo badges stay behind the DEV boundary', () => {
+  // Phase 13 replaced the development-only Worker sessions preview with
+  // the real section: the preview module is gone and Administration
+  // reaches no mock data at all.
+  const adminDir = join(srcDir, 'views', 'administration');
+  expect(existsSync(join(adminDir, 'WorkerSessionsPreview.tsx'))).toBe(false);
   const adminView = readFileSync(
-    join(srcDir, 'views', 'administration', 'AdministrationView.tsx'),
+    join(adminDir, 'AdministrationView.tsx'),
     'utf8',
   );
-  expect(adminView).not.toMatch(/^import .*WorkerSessionsPreview/m);
-  expect(adminView).toContain('import.meta.env.DEV');
-  expect(adminView).toContain("import('./WorkerSessionsPreview')");
+  expect(adminView).not.toContain('WorkerSessionsPreview');
+  expect(adminView).not.toContain('mocks/');
+  // The sign-in modal reaches the development-only demo badges ONLY
+  // through the import.meta.env.DEV-guarded lazy import — never a
+  // static import that would put them into the production graph.
+  const signIn = readFileSync(
+    join(srcDir, 'views', 'scan-station', 'scan-station-sign-in-dialog.tsx'),
+    'utf8',
+  );
+  expect(signIn).not.toMatch(/^import .*scan-station-dev-badges/m);
+  expect(signIn).toMatch(
+    /import\.meta\.env\.DEV\s*\?\s*lazy\(\(\) =>\s*import\('\.\/scan-station-dev-badges'\)/,
+  );
+  expect(
+    readFileSync(
+      join(srcDir, 'views', 'scan-station', 'scan-station-dev-badges.tsx'),
+      'utf8',
+    ),
+  ).toContain('Demo badges');
 });
 
 test('the Completed Work Orders page is a real view with no mock history', () => {

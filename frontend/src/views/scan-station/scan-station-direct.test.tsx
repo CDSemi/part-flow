@@ -290,7 +290,11 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
       has_machines: (contextHasMachines ?? hasMachines)(station.area_id),
-      worker_identification: { mode: 'DISABLED', fixed_worker: null },
+      worker_identification: {
+        mode: 'DISABLED',
+        fixed_worker: null,
+        session: null,
+      },
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -340,6 +344,7 @@ function handle(url: string, method: string, body: unknown): Response {
       available_stocked_quantity: 0,
       stock_available: false,
       scanned_at: new Date().toISOString(),
+      worker_session: null,
     });
   }
 

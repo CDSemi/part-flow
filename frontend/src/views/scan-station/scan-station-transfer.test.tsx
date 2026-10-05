@@ -351,7 +351,11 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: areaHasMachines(areaId),
-      worker_identification: { mode: 'DISABLED', fixed_worker: null },
+      worker_identification: {
+        mode: 'DISABLED',
+        fixed_worker: null,
+        session: null,
+      },
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -475,6 +479,7 @@ function handle(url: string, method: string, body: unknown): Response {
       // sources the operator stocks from.
       stock_available: terminal === true && candidates.length > 0,
       scanned_at: new Date().toISOString(),
+      worker_session: null,
     });
   }
   const transfer = /^\/api\/scan-stations\/([^/]+)\/transfers$/.exec(url);

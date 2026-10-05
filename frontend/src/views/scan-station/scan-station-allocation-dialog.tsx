@@ -11,7 +11,11 @@ import type {
 } from '../../api/allocations';
 import { errorMessage } from '../../api/client';
 import { newDeviceEventId } from '../../api/production-release';
-import { areaRefColor, writeOutcomeUnknown } from '../../api/scan-station';
+import {
+  areaRefColor,
+  workerSessionRequired,
+  writeOutcomeUnknown,
+} from '../../api/scan-station';
 import type {
   AreaRef,
   StationContext,
@@ -24,6 +28,7 @@ import { formatIsoDate } from '../dates';
 import { EntityChip, Guidance, StepButtons } from './scan-station-presentation';
 import { enterKeyHandler } from './scan-station-wizard';
 import { WriteGuidance } from './scan-station-machine-dialogs';
+import { useRequireWorkerSession } from './scan-station-session';
 
 /**
  * The receiving allocation of the Stockroom station (GUI_DESIGN §10;
@@ -127,6 +132,7 @@ export function AllocationDialog({
   // NEW intent, so it takes a new key — a retry after an unknown
   // outcome keeps the frozen one.
   const deviceEventId = useRef(newDeviceEventId());
+  const requireSession = useRequireWorkerSession();
 
   const total = [...quantities.values()].reduce((sum, value) => sum + value, 0);
   const totalMatches = total === allocationQuantity;
@@ -180,6 +186,14 @@ export function AllocationDialog({
         deviceEventId: deviceEventId.current,
       });
     } catch (error) {
+      if (workerSessionRequired(error)) {
+        // No valid Worker Session (Phase 13): nothing recorded. The
+        // draft and the `device_event_id` stay — after the badge the
+        // operator confirms the identical request again.
+        requireSession();
+        setBusy(false);
+        return;
+      }
       if (writeOutcomeUnknown(error)) {
         // The intent is frozen: the exact same request replays the
         // committed allocation or records it once.

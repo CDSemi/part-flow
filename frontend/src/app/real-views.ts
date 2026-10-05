@@ -5,7 +5,7 @@
 // /api surface and ship in EVERY build — development and production
 // alike. They must never import from src/mocks/ (verified by
 // src/production-boundary.test.ts); their development-only extras
-// (state previews, the Worker sessions policy preview) sit behind
+// (state previews, the Scan Station demo badges) sit behind
 // their own `import.meta.env.DEV` boundaries inside the modules.
 //
 // Every other view remains a development-only mock view in

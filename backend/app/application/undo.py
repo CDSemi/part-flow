@@ -70,12 +70,14 @@ mismatch an explicit conflict, a race lost at COMMIT replays the
 winner.
 
 Worker identity: the reversal records the Worker the station Area's
-mode identifies when it is confirmed (never the original's); the
+mode identifies when it is confirmed (never the original's) — in a
+Scanned-session Area that Worker is the station's valid Worker Session
+at confirmation, whose session the reversal records and refreshes; the
 preview names the original command's recorded Worker and the Worker
 the reversal would record now.
 
-Deliberate boundaries (no simulation of later phases): Worker sessions
-and the badge / final gate arrive in later Phase 13 slices, no
+Deliberate boundaries (no simulation of later phases): the badge /
+final gate arrives in a later Phase 13 slice, no
 reason-when-configured
 (the configuration does not exist before Phase 13), and no role
 authorization — Operators/Managers/Admins arrive with Users/RBAC
@@ -418,7 +420,9 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
         raise NotFoundError(f"No production event was recorded under '{event_id}'.")
     recorded_worker_id = rows[-1].worker_id
     worker = session.get(Worker, recorded_worker_id) if recorded_worker_id is not None else None
-    reversed_by = station_identity.worker_identification(session, station_area).fixed_worker
+    reversed_by = station_identity.worker_identification(
+        session, station_area, station.station_id
+    ).current_worker
     reason = _ineligibility(session, station, rows)
     areas: dict[int, Area] = {}
 

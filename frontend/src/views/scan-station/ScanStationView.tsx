@@ -38,10 +38,12 @@ import {
   stockAtStationArea,
   transferOutcomeUnknown,
   transferToStationArea,
+  workerSessionRequired,
 } from '../../api/scan-station';
 import type {
   AreaInventory,
   AreaRef,
+  BadgeScanResult,
   CombineResult,
   FlowInArea,
   MachineActionResult,
@@ -92,6 +94,13 @@ import {
   AssignToMachineDialog,
   MachineActionDialog,
 } from './scan-station-machine-dialogs';
+import {
+  StationSessionContext,
+  useRequireWorkerSession,
+  useWorkerSessionClock,
+} from './scan-station-session';
+import type { StationSession } from './scan-station-session';
+import { WorkerSignInDialog } from './scan-station-sign-in-dialog';
 import {
   ConfirmationSummary,
   EntityChip,
@@ -154,12 +163,17 @@ import type { Notice } from './scan-station-presentation';
  * the Area Worker ID mode: the header Worker pill and the summaries'
  * `Worker` row follow the station context (re-read on every resolved
  * scan; the server judges the recorded Worker at confirmation), and a
- * non-PartFlow value is checked as a Worker badge (a read). Worker
- * sessions and their badge gates (later Phase 13 slices) remain the
- * one approved workflow NOT implemented
- * here — it stays an honest placeholder, and the mock preview of it
- * survives only behind the development-only boundary below
- * (`?preview=mock`).
+ * non-PartFlow value is checked as a Worker badge. In a Scanned-session
+ * Area the badge signs in, switches or refreshes the station's Worker
+ * Session on the server; the pill counts the session down, and without
+ * a valid session the blocking sign-in modal renders above any open
+ * dialog (drafts kept underneath) until a badge the server accepts —
+ * a command the server refuses with `worker_session_required` raises it
+ * too, and the operator then confirms the unchanged request again. The
+ * badge-confirmation gates (Phase 13) remain the one approved workflow
+ * not implemented here — it stays an honest placeholder, and the mock
+ * preview of it survives only behind the development-only boundary
+ * below (`?preview=mock`).
  */
 
 // Development-only preview of the mock Scan Station (Phase 6+
@@ -507,12 +521,52 @@ function StationView({
   const disconnected = status === 'unavailable';
   const writeBlocked = status !== 'connected';
 
-  const loadContext = useCallback(
-    () => getStationContext(stationId),
-    [stationId],
-  );
+  // The scanned Worker Session as the server last answered it (Phase 13,
+  // PROJECT_PROFILE §19). Every session-bearing read — this context
+  // load, the PN and Machine resolves, the badge scans — takes a
+  // send-order ticket right before it is sent and applies the session
+  // of its answer; an answer older than one already applied is ignored.
+  const sessionClock = useWorkerSessionClock();
+  const {
+    ticket: sessionTicket,
+    apply: applySession,
+    markRequired,
+  } = sessionClock;
+  const loadContext = useCallback(async () => {
+    const sent = sessionTicket();
+    const loaded = await getStationContext(stationId);
+    applySession(loaded.workerIdentification.session, sent);
+    return loaded;
+  }, [stationId, sessionTicket, applySession]);
   const context = useApiData(loadContext);
+  const { revalidate: revalidateContext } = context;
   const ready = context.state.status === 'ready' ? context.state.data : null;
+  // The station every header element and dialog renders: the context as
+  // read, with the Scanned session replaced by the LIVE one (unexpired,
+  // from the latest applied answer) — the pill and every summary's
+  // `Worker` row follow sign-ins, switches and expiry.
+  const liveSession = sessionClock.live;
+  const liveStation = useMemo(
+    () =>
+      ready === null
+        ? null
+        : {
+            ...ready,
+            workerIdentification: {
+              ...ready.workerIdentification,
+              session:
+                ready.workerIdentification.mode === 'SCANNED'
+                  ? liveSession
+                  : null,
+            },
+          },
+    [ready, liveSession],
+  );
+  const scannedMode = ready?.workerIdentification.mode === 'SCANNED';
+  // A Scanned-session station without a valid session is blocked: the
+  // sign-in modal renders above everything until the server accepts a
+  // badge (GUI_DESIGN §4.12).
+  const sessionBlocked = scannedMode && liveSession === null;
   const areaId = ready?.area.id ?? null;
   const loadInventory = useCallback(
     () =>
@@ -547,6 +601,11 @@ function StationView({
   // verdict is revalidated on the next server sync (below), never
   // cached for good.
   const [undoTarget, setUndoTarget] = useState<LastAction | null>(null);
+  // The Undo preview re-read of a Scanned session (below): the
+  // `<device_event_id>:<Worker id>` last asked for, and the generation
+  // that lets only the newest re-read apply.
+  const undoPreviewAskedFor = useRef<string | null>(null);
+  const undoPreviewGeneration = useRef(0);
   const recordAction = useCallback((entry: LastAction) => {
     setHistory((stack) => [...stack, entry]);
     setUndoTarget(entry);
@@ -774,6 +833,7 @@ function StationView({
       parent?: Flow,
     ) => {
       setResolving(true);
+      const sent = sessionTicket();
       try {
         const resolution = await resolveScan(stationId, input);
         if (ready && resolution.area.id !== ready.area.id) {
@@ -798,6 +858,7 @@ function StationView({
         // the Area's Worker ID mode current at the scan. A background
         // revalidation: a failed re-read keeps the station as last read
         // and never tears down the dialog this scan opens.
+        applySession(resolution.workerSession, sent);
         context.revalidate();
         openResolution(resolution, parent);
       } catch (error) {
@@ -812,12 +873,22 @@ function StationView({
         setResolving(false);
       }
     },
-    [stationId, ready, context, inventory, openResolution, focusScan],
+    [
+      stationId,
+      ready,
+      context,
+      inventory,
+      openResolution,
+      focusScan,
+      sessionTicket,
+      applySession,
+    ],
   );
 
   const resolveMachine = useCallback(
     async (barcode: string) => {
       setResolving(true);
+      const sent = sessionTicket();
       try {
         const resolution = await resolveMachineScan(stationId, { barcode });
         if (ready && resolution.area.id !== ready.area.id) {
@@ -833,6 +904,7 @@ function StationView({
           focusScan();
           return;
         }
+        applySession(resolution.workerSession, sent);
         context.revalidate();
         const known = inventoryReady?.machines.map((card) => card.machine);
         const machines = known?.some(
@@ -865,7 +937,16 @@ function StationView({
         setResolving(false);
       }
     },
-    [stationId, ready, context, inventory, inventoryReady, focusScan],
+    [
+      stationId,
+      ready,
+      context,
+      inventory,
+      inventoryReady,
+      focusScan,
+      sessionTicket,
+      applySession,
+    ],
   );
 
   const blockedNotice = useCallback(() => {
@@ -878,20 +959,53 @@ function StationView({
     });
   }, []);
 
-  // A non-PartFlow value may be a Worker badge: the server checks it (a
-  // read — nothing is recorded or refreshed). Badge scans are not used
-  // in Disabled or Fixed Worker Areas, so a known badge is answered
-  // with the not-used notice and never touches the Last Scanned PN, the
-  // Undo target, the open flow or any draft.
+  /**
+   * Apply a badge answer that signed in, switched or refreshed the
+   * Worker Session, with its notice — ONE helper for the main scan input
+   * and the sign-in modal. The names are the server's: the switched-out
+   * Worker is the server's `previous_worker` (a sign-in after expiry is
+   * a plain sign-in, the expired session was closed, not switched).
+   */
+  const applySignIn = useCallback(
+    (result: BadgeScanResult, sent: number) => {
+      applySession(result.workerSession, sent);
+      const name = result.workerSession?.worker.name;
+      if (name === undefined) return;
+      setNotice({
+        kind: 'ok',
+        icon: '✓',
+        title: `Worker signed in: ${name}`,
+        detail:
+          result.outcome === 'SWITCHED' && result.previousWorker
+            ? `${result.previousWorker.name} was signed out. New actions will be recorded under ${name}.`
+            : `New actions will be recorded under ${name}.`,
+      });
+    },
+    [applySession],
+  );
+
+  // A non-PartFlow value may be a Worker badge: the server checks it.
+  // Badge scans are not used in Disabled or Fixed Worker Areas (a read:
+  // a known badge is answered with the not-used notice); in a
+  // Scanned-session Area a valid active badge signs in, switches or
+  // refreshes the Worker Session. Either way a badge scan never touches
+  // the Last Scanned PN, the Undo target, the open flow or any draft.
   const renderedWorkerMode = ready?.workerIdentification.mode ?? null;
   const checkBadge = useCallback(
     async (badge: string) => {
       setResolving(true);
       setCheckingBadge(true);
+      const sent = sessionTicket();
       try {
         const result = await scanBadge(stationId, badge);
         if (result.mode !== renderedWorkerMode) context.revalidate();
-        if (result.outcome === 'NOT_USED_IN_AREA') {
+        if (
+          result.outcome === 'SIGNED_IN' ||
+          result.outcome === 'SWITCHED' ||
+          result.outcome === 'REFRESHED'
+        ) {
+          applySignIn(result, sent);
+        } else if (result.outcome === 'NOT_USED_IN_AREA') {
           setNotice({
             kind: 'warn',
             icon: '⚠',
@@ -902,6 +1016,9 @@ function StationView({
                 : 'This Area does not record Worker identity. No changes were recorded.',
           });
         } else {
+          // Unknown or inactive: nothing signed in or refreshed; the
+          // answer still carries the station's current session.
+          applySession(result.workerSession, sent);
           setNotice(UNRECOGNIZED_BARCODE_NOTICE);
         }
       } catch (error) {
@@ -917,7 +1034,15 @@ function StationView({
         focusScan();
       }
     },
-    [stationId, renderedWorkerMode, context, focusScan],
+    [
+      stationId,
+      renderedWorkerMode,
+      context,
+      focusScan,
+      sessionTicket,
+      applySession,
+      applySignIn,
+    ],
   );
 
   const handleScan = useCallback(() => {
@@ -994,7 +1119,7 @@ function StationView({
   // Keyboard-wedge capture (§4.4): the main input never loses a scan
   // while no dialog is open — identical to the approved presentation.
   useEffect(() => {
-    if (flow || writeBlocked || resolving) return;
+    if (flow || writeBlocked || resolving || sessionBlocked) return;
     function onKeyDown(event: KeyboardEvent) {
       const input = inputRef.current;
       if (!input || event.defaultPrevented) return;
@@ -1033,7 +1158,7 @@ function StationView({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [flow, writeBlocked, resolving, handleScan]);
+  }, [flow, writeBlocked, resolving, sessionBlocked, handleScan]);
 
   /** A transfer the SERVER confirmed: refresh the Area, note it, refocus.
    * `repair` marks the Phase 9 Repair intent of the same command. */
@@ -1451,6 +1576,7 @@ function StationView({
       const walk = await walkUndoEligibility(history);
       if (walk.found) {
         setUndoTarget(walk.found.entry);
+        undoPreviewAskedFor.current = null;
         setFlow({
           kind: 'undo',
           entry: walk.found.entry,
@@ -1514,6 +1640,68 @@ function StationView({
     },
     [context, inventory, focusScan],
   );
+
+  /**
+   * A command was refused with `worker_session_required` (nothing
+   * recorded): drop the session so the modal blocks — every answer sent
+   * before is ignored from now on — and re-read the station in the
+   * background (the mode may have changed). The open dialog keeps its
+   * draft and its request.
+   */
+  const requireSession = useCallback(() => {
+    markRequired();
+    revalidateContext();
+  }, [markRequired, revalidateContext]);
+  const stationSession = useMemo<StationSession>(
+    () => ({
+      requireSession,
+      ticket: sessionTicket,
+      applyWorkerSession: applySession,
+    }),
+    [requireSession, sessionTicket, applySession],
+  );
+
+  /**
+   * `Reversed by` follows the session while the Undo dialog is open
+   * (Scanned session): when the live Worker differs from the preview's
+   * `reversedBy` — a sign-in or switch in the modal or the main input —
+   * the server preview is read again and replaces the open dialog's
+   * preview; Confirm stays disabled meanwhile. The id comparison only
+   * decides WHEN to ask the server; the name shown is always the
+   * server's. A failed or no-longer-eligible re-read omits `Reversed by`
+   * rather than show a stale name — the command records the Worker
+   * valid at confirmation either way.
+   */
+  const [undoPreviewRefreshing, setUndoPreviewRefreshing] = useState(false);
+  const undoEventId = flow?.kind === 'undo' ? flow.entry.deviceEventId : null;
+  const undoReversedById =
+    flow?.kind === 'undo' ? (flow.preview.reversedBy?.id ?? null) : null;
+  const liveWorkerId = liveSession?.worker.id ?? null;
+  useEffect(() => {
+    if (undoEventId === null || !scannedMode || liveWorkerId === null) return;
+    if (liveWorkerId === undoReversedById) return;
+    const asked = `${undoEventId}:${liveWorkerId}`;
+    if (undoPreviewAskedFor.current === asked) return;
+    undoPreviewAskedFor.current = asked;
+    const generation = ++undoPreviewGeneration.current;
+    setUndoPreviewRefreshing(true);
+    const replace = (fresh: UndoPreview | null) => {
+      if (undoPreviewGeneration.current !== generation) return;
+      setUndoPreviewRefreshing(false);
+      setFlow((current) =>
+        current?.kind === 'undo' && current.entry.deviceEventId === undoEventId
+          ? {
+              ...current,
+              preview: fresh ?? { ...current.preview, reversedBy: null },
+            }
+          : current,
+      );
+    };
+    void getUndoPreview(stationId, undoEventId).then(
+      (preview) => replace(preview.eligible ? preview : null),
+      () => replace(null),
+    );
+  }, [stationId, undoEventId, undoReversedById, scannedMode, liveWorkerId]);
 
   const area = ready ? presentationArea(ready.area, ready.operations) : null;
   // The Area mode is the SERVER's judgement (PROJECT_PROFILE §12 — it
@@ -1641,131 +1829,138 @@ function StationView({
       />
     );
   }
-  const station = ready!;
+  const station = liveStation!;
   const destinationNote = hasMachines
     ? `${station.area.name} queue (awaiting Machine)`
     : `${station.area.name} — direct processing`;
 
   return (
-    <section
-      className={`ss${productionMode ? ' production' : ''}`}
-      aria-label="Scan Station"
-    >
-      <header
-        ref={headRef}
-        className={headWrapped ? 'ss-head wrapped' : 'ss-head'}
+    <StationSessionContext.Provider value={stationSession}>
+      <section
+        className={`ss${productionMode ? ' production' : ''}`}
+        aria-label="Scan Station"
       >
-        <div className="ss-id">
-          <div className="dept">{station.department.name}</div>
-          <div className="area">
-            <AreaDot colorVar={areaRefColor(station.area)} size={16} />
-            {station.area.name}
-          </div>
-          <HeaderOperations
-            operations={station.operations.map(operationLabel)}
-          />
-        </div>
-        {/* The Area totals render only from a server inventory —
-            never a zero row before the first response. */}
-        <div className="ss-stats" aria-label="Area statistics">
-          {(area && inventoryReady
-            ? areaStats(area, cards, hasMachines)
-            : []
-          ).map((s) => (
-            <div className="stat" key={s.label}>
-              <div className={`n ${s.tone ?? ''}`}>{s.value}</div>
-              <div className="l">{s.label}</div>
+        <header
+          ref={headRef}
+          className={headWrapped ? 'ss-head wrapped' : 'ss-head'}
+        >
+          <div className="ss-id">
+            <div className="dept">{station.department.name}</div>
+            <div className="area">
+              <AreaDot colorVar={areaRefColor(station.area)} size={16} />
+              {station.area.name}
             </div>
-          ))}
-        </div>
-        {/* The Worker pill follows the Area's Worker ID mode from the
+            <HeaderOperations
+              operations={station.operations.map(operationLabel)}
+            />
+          </div>
+          {/* The Area totals render only from a server inventory —
+            never a zero row before the first response. */}
+          <div className="ss-stats" aria-label="Area statistics">
+            {(area && inventoryReady
+              ? areaStats(area, cards, hasMachines)
+              : []
+            ).map((s) => (
+              <div className="stat" key={s.label}>
+                <div className={`n ${s.tone ?? ''}`}>{s.value}</div>
+                <div className="l">{s.label}</div>
+              </div>
+            ))}
+          </div>
+          {/* The Worker pill follows the Area's Worker ID mode from the
             station context (none in a Disabled Area). In production
             mode it shares the `.ss-headgroup` with the connectivity
             chip and the theme control (the top navigation is hidden
             there); standard mode renders it as the third header cell. */}
-        {productionMode ? (
-          <div className="ss-headgroup">
-            <WorkerPill identification={station.workerIdentification} />
-            <div className="ss-headactions">
-              <ConnectivityChip />
-              <ThemeToggle compact />
-            </div>
-          </div>
-        ) : (
-          <WorkerPill identification={station.workerIdentification} />
-        )}
-      </header>
-
-      <div className="ss-body">
-        <div className="panel">
-          <div className="ph">
-            Scan barcode
-            <span className="spacer" />
-            <span className="note">
-              {hasMachines
-                ? 'Scan a Part Number to receive or assign its quantity, or a Machine to assign queued quantity to it.'
-                : 'Scan a Part Number to receive its quantity from another Area or to complete its processing here.'}
-            </span>
-          </div>
-          <div className="ss-scanwrap">
-            <div className="ss-scanrow">
-              <input
-                ref={inputRef}
-                className="ss-scaninput"
-                autoComplete="off"
-                inputMode={touchPrimary ? 'none' : undefined}
-                disabled={writeBlocked || resolving}
-                placeholder={
-                  disconnected
-                    ? 'Disconnected — scanning disabled'
-                    : status === 'connecting'
-                      ? 'Connecting…'
-                      : resolving
-                        ? checkingBadge
-                          ? 'Checking barcode…'
-                          : 'Resolving Part Number…'
-                        : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
-                }
-                aria-label="Scan barcode"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleScan();
-                }}
+          {productionMode ? (
+            <div className="ss-headgroup">
+              <WorkerPill
+                identification={station.workerIdentification}
+                sessionExpiresAtClientMs={sessionClock.liveExpiresAtClientMs}
               />
-              <button
-                className="ss-manualbtn"
-                onClick={() => setFlow({ kind: 'manual-pn' })}
-                disabled={writeBlocked || resolving}
-              >
-                ⌨ Enter PN manually
-              </button>
+              <div className="ss-headactions">
+                <ConnectivityChip />
+                <ThemeToggle compact />
+              </div>
             </div>
-            <div className="ss-manualcap">
-              Use manual entry only when the scanner is unavailable. The Part
-              Number will be validated before any action is recorded.
+          ) : (
+            <WorkerPill
+              identification={station.workerIdentification}
+              sessionExpiresAtClientMs={sessionClock.liveExpiresAtClientMs}
+            />
+          )}
+        </header>
+
+        <div className="ss-body">
+          <div className="panel">
+            <div className="ph">
+              Scan barcode
+              <span className="spacer" />
+              <span className="note">
+                {hasMachines
+                  ? 'Scan a Part Number to receive or assign its quantity, or a Machine to assign queued quantity to it.'
+                  : 'Scan a Part Number to receive its quantity from another Area or to complete its processing here.'}
+              </span>
             </div>
-            <DevNotice>
-              Development build — this station records real transfers, Machine
-              actions, completions and the correction workflows (Undo, Repair,
-              Scrap, quantity additions) on the server. The mock preview of the
-              later workflows (Worker sessions) opens with{' '}
-              <code>?preview=mock</code> on this route.
-            </DevNotice>
-            <div className="ss-lastpnlabel">Last Action</div>
-            <div className="ss-lastpn">
-              {/* The block shows the server-derived Undo TARGET — the
+            <div className="ss-scanwrap">
+              <div className="ss-scanrow">
+                <input
+                  ref={inputRef}
+                  className="ss-scaninput"
+                  autoComplete="off"
+                  inputMode={touchPrimary ? 'none' : undefined}
+                  disabled={writeBlocked || resolving || sessionBlocked}
+                  placeholder={
+                    disconnected
+                      ? 'Disconnected — scanning disabled'
+                      : status === 'connecting'
+                        ? 'Connecting…'
+                        : resolving
+                          ? checkingBadge
+                            ? 'Checking barcode…'
+                            : 'Resolving Part Number…'
+                          : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
+                  }
+                  aria-label="Scan barcode"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleScan();
+                  }}
+                />
+                <button
+                  className="ss-manualbtn"
+                  onClick={() => setFlow({ kind: 'manual-pn' })}
+                  disabled={writeBlocked || resolving || sessionBlocked}
+                >
+                  ⌨ Enter PN manually
+                </button>
+              </div>
+              <div className="ss-manualcap">
+                Use manual entry only when the scanner is unavailable. The Part
+                Number will be validated before any action is recorded.
+              </div>
+              <DevNotice>
+                Development build — this station records real transfers, Machine
+                actions, completions and the correction workflows (Undo, Repair,
+                Scrap, quantity additions) on the server. The mock preview of
+                the later workflows (badge confirmation) opens with{' '}
+                <code>?preview=mock</code> on this route.
+              </DevNotice>
+              <div className="ss-lastpnlabel">Last Action</div>
+              <div className="ss-lastpn">
+                {/* The block shows the server-derived Undo TARGET — the
                   most recent eligible completed PN operation — never
                   the raw newest session entry, which may be a command
                   the server already judges ineligible. */}
-              <div className="ss-lastpninfo">
-                <span className="p">{undoTarget?.pn ?? '—'}</span>
-                <span className="d">
-                  {undoTarget?.summary ??
-                    (history.length > 0
-                      ? 'No reversible Part Number action'
-                      : 'No Part Number actions yet')}
-                </span>
-              </div>
-              {/* Undo reverses the most recent ELIGIBLE completed PN
+                <div className="ss-lastpninfo">
+                  <span className="p">{undoTarget?.pn ?? '—'}</span>
+                  <span className="d">
+                    {undoTarget?.summary ??
+                      (history.length > 0
+                        ? 'No reversible Part Number action'
+                        : 'No Part Number actions yet')}
+                  </span>
+                </div>
+                {/* Undo reverses the most recent ELIGIBLE completed PN
                   operation (§4.5): every click re-walks the session's
                   commands newest-first through the server's undo
                   preview — the authority on eligibility — and the
@@ -1773,450 +1968,479 @@ function StationView({
                   With nothing to reverse, nothing currently eligible,
                   or while writes are blocked, the action region stays
                   present and disabled, never a hidden control. */}
-              <button
-                className="ss-undo zone-action"
-                disabled={writeBlocked || resolving || !undoTarget}
-                title={
-                  history.length === 0
-                    ? 'No completed Part Number action to reverse yet'
-                    : !undoTarget
-                      ? 'No completed action of this session can currently be reversed'
-                      : 'Reverse the most recent eligible completed action'
-                }
-                onClick={() => void openUndo()}
-              >
-                ⟲ UNDO
-              </button>
+                <button
+                  className="ss-undo zone-action"
+                  disabled={
+                    writeBlocked || resolving || sessionBlocked || !undoTarget
+                  }
+                  title={
+                    history.length === 0
+                      ? 'No completed Part Number action to reverse yet'
+                      : !undoTarget
+                        ? 'No completed action of this session can currently be reversed'
+                        : 'Reverse the most recent eligible completed action'
+                  }
+                  onClick={() => void openUndo()}
+                >
+                  ⟲ UNDO
+                </button>
+              </div>
             </div>
           </div>
+
+          {inventory.state.status === 'error' ? (
+            <ErrorState
+              message="The Area inventory could not be loaded."
+              detail={inventory.state.message}
+              onRetry={inventory.reload}
+            />
+          ) : inventoryLoading ? (
+            <LoadingState label="Loading Area inventory" />
+          ) : (
+            <AreaMachineLayout
+              summary={
+                area ? (
+                  // In an Area with Machines the summary carries no row
+                  // actions (assignment comes through PN scan, Machine
+                  // scan and the action dialog; DONE / QUEUE live on the
+                  // Machine cards); without Machines its actively
+                  // processing rows carry the single direct DONE.
+                  <AreaSummaryCard
+                    area={area}
+                    cards={cards}
+                    machines={machines}
+                    title="In this Area now"
+                    rowAction={directRowAction}
+                    showStats={false}
+                  />
+                ) : null
+              }
+              machineCards={machines.map((machine) => (
+                <MachineMonitoringCard
+                  key={machine.name}
+                  machine={machine}
+                  entries={machineCardEntries.filter(
+                    (entry) => entry.context === machine.name,
+                  )}
+                  rowAction={machineRowAction}
+                />
+              ))}
+            />
+          )}
         </div>
 
-        {inventory.state.status === 'error' ? (
-          <ErrorState
-            message="The Area inventory could not be loaded."
-            detail={inventory.state.message}
-            onRetry={inventory.reload}
-          />
-        ) : inventoryLoading ? (
-          <LoadingState label="Loading Area inventory" />
-        ) : (
-          <AreaMachineLayout
-            summary={
-              area ? (
-                // In an Area with Machines the summary carries no row
-                // actions (assignment comes through PN scan, Machine
-                // scan and the action dialog; DONE / QUEUE live on the
-                // Machine cards); without Machines its actively
-                // processing rows carry the single direct DONE.
-                <AreaSummaryCard
-                  area={area}
-                  cards={cards}
-                  machines={machines}
-                  title="In this Area now"
-                  rowAction={directRowAction}
-                  showStats={false}
-                />
-              ) : null
+        {notice ? (
+          <FloatingNotice notice={notice} onClose={() => setNotice(null)} />
+        ) : null}
+
+        {flow?.kind === 'source-select' && (
+          <SourceSelectDialog
+            resolution={flow.resolution}
+            title={flow.stock ? 'Select the source to stock' : undefined}
+            sub={
+              flow.stock
+                ? 'This Part Number is available in more than one place. Select exactly one source to stock at the Stockroom — quantities are never combined.'
+                : undefined
             }
-            machineCards={machines.map((machine) => (
-              <MachineMonitoringCard
-                key={machine.name}
-                machine={machine}
-                entries={machineCardEntries.filter(
-                  (entry) => entry.context === machine.name,
-                )}
-                rowAction={machineRowAction}
-              />
-            ))}
+            onPick={(candidate) =>
+              setFlow({
+                kind: flow.stock ? 'stock' : 'transfer',
+                resolution: flow.resolution,
+                candidate,
+                parent: flow,
+              })
+            }
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
           />
         )}
-      </div>
-
-      {notice ? (
-        <FloatingNotice notice={notice} onClose={() => setNotice(null)} />
-      ) : null}
-
-      {flow?.kind === 'source-select' && (
-        <SourceSelectDialog
-          resolution={flow.resolution}
-          title={flow.stock ? 'Select the source to stock' : undefined}
-          sub={
-            flow.stock
-              ? 'This Part Number is available in more than one place. Select exactly one source to stock at the Stockroom — quantities are never combined.'
-              : undefined
-          }
-          onPick={(candidate) =>
-            setFlow({
-              kind: flow.stock ? 'stock' : 'transfer',
-              resolution: flow.resolution,
-              candidate,
-              parent: flow,
-            })
-          }
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'stock' && (
-        <TransferDialog
-          stock
-          station={station}
-          resolution={flow.resolution}
-          candidate={flow.candidate}
-          destinationNote={`${station.area.name} — stocked (manufacturing-complete)`}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onDone={(result) => completeStock(result, flow.candidate)}
-          onCancel={cancelFlow}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Stocking')}
-        />
-      )}
-      {flow?.kind === 'allocate' && (
-        <AllocationDialog
-          station={station}
-          stocked={flow.stocked}
-          sourceArea={flow.candidate.currentArea}
-          writeBlocked={writeBlocked}
-          onDone={completeAllocation}
-          onLeave={() => leaveInStock(flow.stocked)}
-          onAbandonUnknown={() => abandonUnknown('Allocation')}
-        />
-      )}
-      {flow?.kind === 'transfer' && (
-        <TransferDialog
-          station={station}
-          resolution={flow.resolution}
-          candidate={flow.candidate}
-          destinationNote={destinationNote}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onDone={(result) =>
-            completeTransfer(result, flow.candidate, destinationNote)
-          }
-          onCancel={cancelFlow}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Transfer')}
-        />
-      )}
-      {flow?.kind === 'pn-intent' && (
-        <PnIntentDialog
-          resolution={flow.resolution}
-          onReceiveNew={() =>
-            setFlow({
-              kind: 'intake',
-              resolution: flow.resolution,
-              parent: flow,
-            })
-          }
-          onTransfer={() =>
-            flow.resolution.candidates.length === 1
-              ? setFlow({
-                  kind: 'transfer',
+        {flow?.kind === 'stock' && (
+          <TransferDialog
+            stock
+            station={station}
+            resolution={flow.resolution}
+            candidate={flow.candidate}
+            destinationNote={`${station.area.name} — stocked (manufacturing-complete)`}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onDone={(result) => completeStock(result, flow.candidate)}
+            onCancel={cancelFlow}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Stocking')}
+          />
+        )}
+        {flow?.kind === 'allocate' && (
+          <AllocationDialog
+            station={station}
+            stocked={flow.stocked}
+            sourceArea={flow.candidate.currentArea}
+            writeBlocked={writeBlocked}
+            onDone={completeAllocation}
+            onLeave={() => leaveInStock(flow.stocked)}
+            onAbandonUnknown={() => abandonUnknown('Allocation')}
+          />
+        )}
+        {flow?.kind === 'transfer' && (
+          <TransferDialog
+            station={station}
+            resolution={flow.resolution}
+            candidate={flow.candidate}
+            destinationNote={destinationNote}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onDone={(result) =>
+              completeTransfer(result, flow.candidate, destinationNote)
+            }
+            onCancel={cancelFlow}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Transfer')}
+          />
+        )}
+        {flow?.kind === 'pn-intent' && (
+          <PnIntentDialog
+            resolution={flow.resolution}
+            onReceiveNew={() =>
+              setFlow({
+                kind: 'intake',
+                resolution: flow.resolution,
+                parent: flow,
+              })
+            }
+            onTransfer={() =>
+              flow.resolution.candidates.length === 1
+                ? setFlow({
+                    kind: 'transfer',
+                    resolution: flow.resolution,
+                    candidate: flow.resolution.candidates[0],
+                    parent: flow,
+                  })
+                : setFlow({
+                    kind: 'source-select',
+                    resolution: flow.resolution,
+                    parent: flow,
+                  })
+            }
+            onRepair={() => {
+              const repairable = flow.resolution.candidates.filter(
+                (candidate) => candidate.repairAvailable,
+              );
+              if (repairable.length === 1) {
+                setFlow({
+                  kind: 'repair',
                   resolution: flow.resolution,
-                  candidate: flow.resolution.candidates[0],
+                  candidate: repairable[0],
                   parent: flow,
-                })
-              : setFlow({
-                  kind: 'source-select',
+                });
+              } else {
+                setFlow({
+                  kind: 'repair-select',
                   resolution: flow.resolution,
                   parent: flow,
-                })
-          }
-          onRepair={() => {
-            const repairable = flow.resolution.candidates.filter(
+                });
+              }
+            }}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+          />
+        )}
+        {flow?.kind === 'repair-select' && (
+          <SourceSelectDialog
+            resolution={flow.resolution}
+            candidates={flow.resolution.candidates.filter(
               (candidate) => candidate.repairAvailable,
-            );
-            if (repairable.length === 1) {
+            )}
+            title="Select the repair source"
+            sub="This Part Number is available in more than one place that can return quantity here for repair. Select exactly one source to continue — quantities are never combined."
+            onPick={(candidate) =>
               setFlow({
                 kind: 'repair',
                 resolution: flow.resolution,
-                candidate: repairable[0],
+                candidate,
                 parent: flow,
-              });
-            } else {
-              setFlow({
-                kind: 'repair-select',
-                resolution: flow.resolution,
-                parent: flow,
-              });
+              })
             }
-          }}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'repair-select' && (
-        <SourceSelectDialog
-          resolution={flow.resolution}
-          candidates={flow.resolution.candidates.filter(
-            (candidate) => candidate.repairAvailable,
-          )}
-          title="Select the repair source"
-          sub="This Part Number is available in more than one place that can return quantity here for repair. Select exactly one source to continue — quantities are never combined."
-          onPick={(candidate) =>
-            setFlow({
-              kind: 'repair',
-              resolution: flow.resolution,
-              candidate,
-              parent: flow,
-            })
-          }
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'repair' && (
-        <TransferDialog
-          repair
-          station={station}
-          resolution={flow.resolution}
-          candidate={flow.candidate}
-          destinationNote={destinationNote}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onDone={(result) =>
-            completeTransfer(result, flow.candidate, destinationNote, true)
-          }
-          onCancel={cancelFlow}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Repair')}
-        />
-      )}
-      {flow?.kind === 'add-qty' && (
-        <AddQuantityDialog
-          station={station}
-          partNumber={flow.resolution.partNumber}
-          hasMachines={hasMachines}
-          operations={flow.resolution.operations}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={completeAddition}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Addition')}
-        />
-      )}
-      {flow?.kind === 'scrap' && (
-        <ScrapDialog
-          station={station}
-          flow={flow.flow}
-          machine={
-            inventoryReady?.machines
-              .map((card) => card.machine)
-              .find((machine) => machine.id === flow.flow.machineId) ?? null
-          }
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={completeScrap}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Scrap')}
-        />
-      )}
-      {flow?.kind === 'undo' && (
-        <UndoDialog
-          station={station}
-          preview={flow.preview}
-          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
-          writeBlocked={writeBlocked}
-          onCancel={cancelFlow}
-          onDone={(result) => completeUndo(result, flow.entry)}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Reversal')}
-        />
-      )}
-      {flow?.kind === 'assign' && (
-        <AssignToMachineDialog
-          station={station}
-          machines={flow.machines}
-          queued={flow.queued}
-          preselectedMachineId={flow.machineId}
-          preselectedFlow={flow.flow}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={(result, machine) =>
-            completeMachineAction(result, machine.name)
-          }
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Assignment')}
-        />
-      )}
-      {flow?.kind === 'machine-action' && (
-        <MachineActionDialog
-          kind={flow.action}
-          station={station}
-          flow={flow.flow}
-          machine={flow.machine}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={(result) =>
-            completeMachineAction(result, flow.machine?.name ?? null)
-          }
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() =>
-            abandonUnknown(
-              flow.action === 'DONE' ? 'Completion' : 'Queue return',
-            )
-          }
-        />
-      )}
-      {flow?.kind === 'combine' && (
-        <CombineQuantitiesDialog
-          station={station}
-          partNumber={flow.partNumber}
-          portions={flow.portions}
-          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={completeCombine}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Combine')}
-        />
-      )}
-      {flow?.kind === 'in-area' && (
-        <InAreaDialog
-          resolution={flow.resolution}
-          machines={inventoryReady?.machines.map((card) => card.machine) ?? []}
-          onAssign={(queuedFlow) =>
-            setFlow({
-              kind: 'assign',
-              machines:
-                inventoryReady?.machines.map((card) => card.machine) ?? [],
-              queued:
-                inventoryReady?.queued.flatMap((line) => line.flows) ?? [],
-              flow: queuedFlow,
-              parent: flow,
-            })
-          }
-          onComplete={(processingFlow, machine) =>
-            setFlow({
-              kind: 'machine-action',
-              action: 'DONE',
-              flow: processingFlow,
-              machine,
-              parent: flow,
-            })
-          }
-          onCombine={(portions) =>
-            setFlow({
-              kind: 'combine',
-              partNumber: flow.resolution.partNumber,
-              portions,
-              parent: flow,
-            })
-          }
-          onAdd={() =>
-            setFlow({
-              kind: 'add-qty',
-              resolution: flow.resolution,
-              parent: flow,
-            })
-          }
-          onReceiveNew={() =>
-            setFlow({
-              kind: 'intake',
-              resolution: flow.resolution,
-              parent: flow,
-            })
-          }
-          onRepair={() => {
-            const repairable = flow.resolution.candidates.filter(
-              (candidate) => candidate.repairAvailable,
-            );
-            if (repairable.length === 1) {
-              setFlow({
-                kind: 'repair',
-                resolution: flow.resolution,
-                candidate: repairable[0],
-                parent: flow,
-              });
-            } else {
-              setFlow({
-                kind: 'repair-select',
-                resolution: flow.resolution,
-                parent: flow,
-              });
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+          />
+        )}
+        {flow?.kind === 'repair' && (
+          <TransferDialog
+            repair
+            station={station}
+            resolution={flow.resolution}
+            candidate={flow.candidate}
+            destinationNote={destinationNote}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onDone={(result) =>
+              completeTransfer(result, flow.candidate, destinationNote, true)
             }
-          }}
-          onScrap={(scrapFlow) =>
-            setFlow({
-              kind: 'scrap',
-              resolution: flow.resolution,
-              flow: scrapFlow,
-              parent: flow,
-            })
-          }
-          onReceiveMore={() =>
-            flow.resolution.candidates.length === 1
-              ? setFlow({
-                  kind: 'transfer',
+            onCancel={cancelFlow}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Repair')}
+          />
+        )}
+        {flow?.kind === 'add-qty' && (
+          <AddQuantityDialog
+            station={station}
+            partNumber={flow.resolution.partNumber}
+            hasMachines={hasMachines}
+            operations={flow.resolution.operations}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={completeAddition}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Addition')}
+          />
+        )}
+        {flow?.kind === 'scrap' && (
+          <ScrapDialog
+            station={station}
+            flow={flow.flow}
+            machine={
+              inventoryReady?.machines
+                .map((card) => card.machine)
+                .find((machine) => machine.id === flow.flow.machineId) ?? null
+            }
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={completeScrap}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Scrap')}
+          />
+        )}
+        {flow?.kind === 'undo' && (
+          <UndoDialog
+            station={station}
+            preview={flow.preview}
+            previewRefreshing={undoPreviewRefreshing}
+            machines={
+              inventoryReady?.machines.map((card) => card.machine) ?? []
+            }
+            writeBlocked={writeBlocked}
+            onCancel={cancelFlow}
+            onDone={(result) => completeUndo(result, flow.entry)}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Reversal')}
+          />
+        )}
+        {flow?.kind === 'assign' && (
+          <AssignToMachineDialog
+            station={station}
+            machines={flow.machines}
+            queued={flow.queued}
+            preselectedMachineId={flow.machineId}
+            preselectedFlow={flow.flow}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={(result, machine) =>
+              completeMachineAction(result, machine.name)
+            }
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Assignment')}
+          />
+        )}
+        {flow?.kind === 'machine-action' && (
+          <MachineActionDialog
+            kind={flow.action}
+            station={station}
+            flow={flow.flow}
+            machine={flow.machine}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={(result) =>
+              completeMachineAction(result, flow.machine?.name ?? null)
+            }
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() =>
+              abandonUnknown(
+                flow.action === 'DONE' ? 'Completion' : 'Queue return',
+              )
+            }
+          />
+        )}
+        {flow?.kind === 'combine' && (
+          <CombineQuantitiesDialog
+            station={station}
+            partNumber={flow.partNumber}
+            portions={flow.portions}
+            machines={
+              inventoryReady?.machines.map((card) => card.machine) ?? []
+            }
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={completeCombine}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Combine')}
+          />
+        )}
+        {flow?.kind === 'in-area' && (
+          <InAreaDialog
+            resolution={flow.resolution}
+            machines={
+              inventoryReady?.machines.map((card) => card.machine) ?? []
+            }
+            onAssign={(queuedFlow) =>
+              setFlow({
+                kind: 'assign',
+                machines:
+                  inventoryReady?.machines.map((card) => card.machine) ?? [],
+                queued:
+                  inventoryReady?.queued.flatMap((line) => line.flows) ?? [],
+                flow: queuedFlow,
+                parent: flow,
+              })
+            }
+            onComplete={(processingFlow, machine) =>
+              setFlow({
+                kind: 'machine-action',
+                action: 'DONE',
+                flow: processingFlow,
+                machine,
+                parent: flow,
+              })
+            }
+            onCombine={(portions) =>
+              setFlow({
+                kind: 'combine',
+                partNumber: flow.resolution.partNumber,
+                portions,
+                parent: flow,
+              })
+            }
+            onAdd={() =>
+              setFlow({
+                kind: 'add-qty',
+                resolution: flow.resolution,
+                parent: flow,
+              })
+            }
+            onReceiveNew={() =>
+              setFlow({
+                kind: 'intake',
+                resolution: flow.resolution,
+                parent: flow,
+              })
+            }
+            onRepair={() => {
+              const repairable = flow.resolution.candidates.filter(
+                (candidate) => candidate.repairAvailable,
+              );
+              if (repairable.length === 1) {
+                setFlow({
+                  kind: 'repair',
                   resolution: flow.resolution,
-                  candidate: flow.resolution.candidates[0],
+                  candidate: repairable[0],
                   parent: flow,
-                })
-              : setFlow({
-                  kind: 'source-select',
+                });
+              } else {
+                setFlow({
+                  kind: 'repair-select',
                   resolution: flow.resolution,
                   parent: flow,
-                })
-          }
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'intake' && (
-        <IntakeDialog
-          station={station}
-          resolution={flow.resolution}
-          hasMachines={hasMachines}
-          writeBlocked={writeBlocked}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-          onDone={completeReceipt}
-          onRejected={refreshAfterRejection}
-          onAbandonUnknown={() => abandonUnknown('Receipt')}
-        />
-      )}
-      {flow?.kind === 'no-quantity' && (
-        <NoQuantityDialog
-          resolution={flow.resolution}
-          onBack={backTo(flow.parent)}
-          onCancel={cancelFlow}
-        />
-      )}
-      {flow?.kind === 'manual-pn' && (
-        <ManualEntryDialog
-          initialPn={flow.initialPn}
-          examplePn="1234-56-7890-01"
-          onCancel={cancelFlow}
-          onConfirm={(pn) => {
-            setFlow(null);
-            if (!pn) {
+                });
+              }
+            }}
+            onScrap={(scrapFlow) =>
+              setFlow({
+                kind: 'scrap',
+                resolution: flow.resolution,
+                flow: scrapFlow,
+                parent: flow,
+              })
+            }
+            onReceiveMore={() =>
+              flow.resolution.candidates.length === 1
+                ? setFlow({
+                    kind: 'transfer',
+                    resolution: flow.resolution,
+                    candidate: flow.resolution.candidates[0],
+                    parent: flow,
+                  })
+                : setFlow({
+                    kind: 'source-select',
+                    resolution: flow.resolution,
+                    parent: flow,
+                  })
+            }
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+          />
+        )}
+        {flow?.kind === 'intake' && (
+          <IntakeDialog
+            station={station}
+            resolution={flow.resolution}
+            hasMachines={hasMachines}
+            writeBlocked={writeBlocked}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+            onDone={completeReceipt}
+            onRejected={refreshAfterRejection}
+            onAbandonUnknown={() => abandonUnknown('Receipt')}
+          />
+        )}
+        {flow?.kind === 'no-quantity' && (
+          <NoQuantityDialog
+            resolution={flow.resolution}
+            onBack={backTo(flow.parent)}
+            onCancel={cancelFlow}
+          />
+        )}
+        {flow?.kind === 'manual-pn' && (
+          <ManualEntryDialog
+            initialPn={flow.initialPn}
+            examplePn="1234-56-7890-01"
+            onCancel={cancelFlow}
+            onConfirm={(pn) => {
+              setFlow(null);
+              if (!pn) {
+                focusScan();
+                return;
+              }
+              // The resolved dialog can go Back to manual entry with the
+              // entered PN preserved for correction.
+              void resolvePn(
+                { partNumber: pn },
+                { kind: 'manual-pn', initialPn: pn },
+              );
+            }}
+          />
+        )}
+
+        {/* The Scanned-session sign-in modal (§4.12) renders LAST, above
+          any open production dialog: that dialog's draft stays
+          underneath, and confirmation is impossible until the server
+          accepts a badge. On close, focus returns to the element that
+          held it (inside the open dialog), else to the scan input. */}
+        {sessionBlocked ? (
+          <WorkerSignInDialog
+            stationId={stationId}
+            expired={sessionClock.hadSession}
+            writeBlocked={writeBlocked}
+            ticket={sessionTicket}
+            onSignedIn={(result, sent) => {
+              applySignIn(result, sent);
               focusScan();
-              return;
-            }
-            // The resolved dialog can go Back to manual entry with the
-            // entered PN preserved for correction.
-            void resolvePn(
-              { partNumber: pn },
-              { kind: 'manual-pn', initialPn: pn },
-            );
-          }}
-        />
-      )}
+            }}
+            onModeChanged={revalidateContext}
+          />
+        ) : null}
 
-      <footer className="ss-stationfoot">
-        Station <span className="mono">{station.stationId}</span>
-        <span className="ss-modetag">
-          {productionMode ? 'Production mode' : 'Standard mode'}
-        </span>
-        <span className="ss-foothint">Ctrl+Shift+K: switch mode</span>
-      </footer>
-    </section>
+        <footer className="ss-stationfoot">
+          Station <span className="mono">{station.stationId}</span>
+          <span className="ss-modetag">
+            {productionMode ? 'Production mode' : 'Standard mode'}
+          </span>
+          <span className="ss-foothint">Ctrl+Shift+K: switch mode</span>
+        </footer>
+      </section>
+    </StationSessionContext.Provider>
   );
 }
 
@@ -2550,6 +2774,7 @@ function TransferDialog({
   // retry — a retry after an unknown outcome replays the committed
   // transfer instead of recording it twice.
   const deviceEventId = useRef(newDeviceEventId());
+  const requireSession = useRequireWorkerSession();
 
   // Route deviation (PROJECT_PROFILE §17): the station's Area is not
   // the Planned Route's next step, or the chosen Operation is not the
@@ -2630,6 +2855,14 @@ function TransferDialog({
             repairReason: repair ? repairReason.trim() : null,
           });
     } catch (error) {
+      if (workerSessionRequired(error)) {
+        // No valid Worker Session (Phase 13): nothing recorded and the
+        // intent unchanged — the sign-in modal opens above this dialog
+        // and Confirm resends the identical request afterwards.
+        requireSession();
+        setBusy(false);
+        return;
+      }
       if (transferOutcomeUnknown(error)) {
         // Transport failure, timeout or 5xx: the request may or may
         // not have reached and been committed by the server. NEVER

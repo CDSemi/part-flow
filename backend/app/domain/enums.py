@@ -255,7 +255,9 @@ class AuditEntityType(StrEnum):
     and the Machine Asset Tag format — still never production activity.
     Machine configuration (Phase 13 slice 2b) is audited here; Machine
     retirement and reactivation stay recorded in
-    machine_lifecycle_events. Widens additively in later phases.
+    machine_lifecycle_events. Phase 13 (slice 4) adds ApplicationPolicy:
+    the global policy singleton, one `entity_id` per Administration
+    section (`worker-sessions`). Widens additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -268,6 +270,7 @@ class AuditEntityType(StrEnum):
     SCAN_STATION = "ScanStation"
     MACHINE_ASSET_TAG_CONFIG = "MachineAssetTagConfig"
     MACHINE = "Machine"
+    APPLICATION_POLICY = "ApplicationPolicy"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -309,3 +312,22 @@ class MachineLifecycleState(StrEnum):
 
     ACTIVE = "ACTIVE"
     RETIRED = "RETIRED"
+
+
+class WorkerSessionEndReason(StrEnum):
+    """Why a scanned Worker Session ended (PROJECT_PROFILE §19, §28).
+
+    SWITCHED — another active Worker's badge signed in at the station;
+    EXPIRED — the sliding inactivity timeout passed (recorded lazily at
+    expires_at); AREA_MODE_CHANGED — the Area left Scanned session mode;
+    STATION_CHANGED — the station was rebound or deactivated;
+    WORKER_DEACTIVATED — the Worker was deactivated. A session already
+    past its expiry always ends EXPIRED, never with a configuration reason.
+    There is no sign-out reason: no sign-out control exists (PLAN OD-4).
+    """
+
+    SWITCHED = "SWITCHED"
+    EXPIRED = "EXPIRED"
+    AREA_MODE_CHANGED = "AREA_MODE_CHANGED"
+    STATION_CHANGED = "STATION_CHANGED"
+    WORKER_DEACTIVATED = "WORKER_DEACTIVATED"

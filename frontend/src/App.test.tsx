@@ -46,7 +46,11 @@ function stationFixture(url: string): Promise<Response> {
         { id: 50, code: 'DEBURR', name: 'Deburring', is_external: false },
       ],
       has_machines: false,
-      worker_identification: { mode: 'DISABLED', fixed_worker: null },
+      worker_identification: {
+        mode: 'DISABLED',
+        fixed_worker: null,
+        session: null,
+      },
     });
   }
   if (/\/inventory$/.test(url)) {

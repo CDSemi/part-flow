@@ -115,8 +115,10 @@ order of the release (demand → Area → Operation) and the demand save
 (demand → WorkOrder), with no cycle.
 
 Worker identity is recorded per the station Area's Worker ID mode
-(`app.application.station_identity`); deliberately absent: Worker
-sessions and the badge gates (later Phase 13 slices), authorization
+(`app.application.station_identity`) — in a Scanned-session Area the
+receipt records the station's valid Worker Session and refreshes it, or
+is refused with nothing recorded; deliberately absent: the badge gates
+(a later Phase 13 slice), authorization
 (Phase 14), and Undo of a receipt — a receipt also
 creates or raises business demand, which the Movement-level reversal
 of PROJECT_PROFILE §16 does not rewrite, so `app.application.undo`

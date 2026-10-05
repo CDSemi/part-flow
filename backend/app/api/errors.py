@@ -19,7 +19,10 @@ Hot list change likewise carries the CURRENT Hot entries, rendered
 exactly like a Hot list read, so the Priority view can show the list
 the manager must review again, and the refused removal of a Hot demand
 line (Phase 12 follow-up, OD3) carries the entry — PN and current rank —
-the warning and the typed confirmation present.
+the warning and the typed confirmation present. A Scan Station command
+refused for want of a valid Worker Session (Phase 13) carries
+``worker_session_required`` so the station raises the badge sign-in and
+resends the unchanged request.
 """
 
 from typing import cast
@@ -41,6 +44,7 @@ from app.application.errors import (
     UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
+from app.application.station_identity import WorkerSessionRequiredError
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
@@ -147,3 +151,14 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(HotDemandRemovalConfirmationRequiredError, hot_demand_removal_handler)
+
+    async def worker_session_required_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Phase 13: no valid Worker Session at a Scanned-session station —
+        # nothing was recorded; the station asks for a badge sign-in.
+        error = cast(WorkerSessionRequiredError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={"detail": error.message, "worker_session_required": True},
+        )
+
+    app.add_exception_handler(WorkerSessionRequiredError, worker_session_required_handler)

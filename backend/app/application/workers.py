@@ -22,6 +22,10 @@ OD-10, OD-14):
 - The optional avatar is stored on the row (CD1/OD-10) after the shared
   image validation (``app.application.images``); its bytes are loaded
   only where they are compared or served.
+- Deactivating a Worker closes that Worker's open scanned Worker
+  Sessions at every station in the same transaction
+  (``WORKER_DEACTIVATED``, Phase 13 slice 4); the session rows are their
+  own audit record.
 - Every effective write appends exactly one ``audit_events`` row in the
   SAME transaction (entity ``Worker``, ``actor_reference`` NULL until
   Phase 14). Profile rows snapshot ``{name, badge_barcode, is_active}``;
@@ -43,10 +47,10 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, undefer
 
-from app.application import audit, images
+from app.application import audit, images, worker_sessions
 from app.application.common import UNSET, UnsetType, commit, flush, required_flag, required_text
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType
+from app.domain.enums import AuditEntityType, AuditEventType, WorkerSessionEndReason
 from app.domain.worker_badge import InvalidBadgeBarcodeError, normalize_badge_barcode
 from app.infrastructure.models import Area, Worker
 
@@ -189,7 +193,8 @@ def update_worker(
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
     Deactivation is refused while the Worker is the Fixed Worker of any
-    Area (Phase 13 S3); reactivation has no guard.
+    Area (Phase 13 S3) and closes the Worker's open Worker Sessions
+    (Phase 13 S4); reactivation has no guard.
     """
     worker = _lock_worker(session, worker_id)
     before = profile_snapshot(worker)
@@ -220,6 +225,13 @@ def update_worker(
         setattr(worker, field, value)
     worker.updated_at = func.now()
     flush(session, _WORKER_CONFLICTS)
+    if changes.get("is_active") is False:
+        # Under the Worker's FOR UPDATE: a command recording this Worker
+        # holds it FOR KEY SHARE before its session row, so the two
+        # serialize at the Worker row.
+        worker_sessions.close_open_sessions(
+            session, reason=WorkerSessionEndReason.WORKER_DEACTIVATED, worker_id=worker.id
+        )
     audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,

@@ -25,6 +25,7 @@ export const MOCK_SENTINELS = [
   'QF-0161', // mocks/work-orders.ts (released-line status)
   'PF:PN:214-406', // mock PN barcode catalog (PN-carrying barcodes)
   'Demo barcodes', // ScanStationView dev-only demo barcode hint
+  'Demo badges', // scan-station-dev-badges.tsx / ScanStationMockView.tsx dev-only demo badges
 ];
 
 const distDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');

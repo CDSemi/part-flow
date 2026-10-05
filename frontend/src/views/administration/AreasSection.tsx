@@ -36,6 +36,7 @@ import {
   ServerErrorNote,
   StatusPill,
 } from './section-widgets';
+import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 
 // Administration → Areas (Phase 3.5): the reference table of the
 // standard table + editor pattern (GUI_DESIGN §9). Area identity and
@@ -44,15 +45,10 @@ import {
 // column follows from the Area's Machines (Direct processing / Queue
 // → assign), never from a per-count configuration. The Worker ID mode
 // (Phase 13) is Disabled or Fixed Worker with its configured Fixed
-// Worker; Scanned session is shown but not selectable until Worker
-// sessions and badge confirmation exist. The server judges every rule
+// Worker; Scanned session is shown but not selectable until badge
+// confirmation exists. The per-Area Worker session timeout override is
+// edited in Administration → Worker sessions. The server judges every rule
 // (an inactive Fixed Worker, deactivating a Worker who is still fixed).
-
-const WORKER_ID_MODE_LABELS: Record<WorkerIdentificationMode, string> = {
-  DISABLED: 'Disabled',
-  FIXED: 'Fixed Worker',
-  SCANNED: 'Scanned session',
-};
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; area: Area };
 

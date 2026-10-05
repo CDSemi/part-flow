@@ -18,6 +18,7 @@ import type { ReactNode } from 'react';
 import type { StationWorkerIdentification } from '../../api/scan-station';
 import { useRouter } from '../../app/router-context';
 import { TypeChip } from '../../components/indicators';
+import { useUiClock } from '../../components/ui-clock';
 import { ModalDialog } from '../../components/ModalDialog';
 import { WorkerAvatar } from '../../components/WorkerAvatar';
 import { normalizePartNumber } from './barcode';
@@ -228,16 +229,23 @@ export function ConfirmationSummary({ rows }: { rows: SummaryRow[] }) {
  * Worker identification. Disabled Areas render NO pill — Worker
  * identity does not exist there. A Fixed Worker Area shows the Fixed
  * Worker's avatar and name over `Fixed Worker`. A Scanned-session Area
- * shows the unsigned state only (the session workflows arrive later).
+ * shows the signed-in Worker of the valid session with the live session
+ * countdown, or the `?` mark, `No Worker` and `Session · scan badge`
+ * without a session.
  */
 export function WorkerPill({
   identification,
+  sessionExpiresAtClientMs = null,
 }: {
   identification: StationWorkerIdentification;
+  /** Scanned session: the valid session's deadline on the client clock. */
+  sessionExpiresAtClientMs?: number | null;
 }) {
   if (identification.mode === 'DISABLED') return null;
   const worker =
-    identification.mode === 'FIXED' ? identification.fixedWorker : null;
+    identification.mode === 'FIXED'
+      ? identification.fixedWorker
+      : (identification.session?.worker ?? null);
   return (
     <div className="ss-pill">
       {worker ? (
@@ -249,13 +257,42 @@ export function WorkerPill({
       )}
       <span className="ss-pilltext">
         <span className="val">{worker?.name ?? 'No Worker'}</span>
-        <span className="sub">
-          {identification.mode === 'FIXED'
-            ? 'Fixed Worker'
-            : 'Session · scan badge'}
-        </span>
+        {identification.mode === 'FIXED' ? (
+          <span className="sub">Fixed Worker</span>
+        ) : (
+          <SessionCountdown
+            expiresAt={worker !== null ? sessionExpiresAtClientMs : null}
+          />
+        )}
       </span>
     </div>
+  );
+}
+
+/** Near-expiration warning threshold of the session countdown. */
+const SESSION_WARN_MS = 2 * 60_000;
+
+/**
+ * Live remaining-session line of the Worker pill (GUI_DESIGN §4.3),
+ * derived from the session deadline and the ONE shared UI clock — never
+ * a component-owned timer — so only the pill re-renders per tick:
+ * `Session: 10m 23s`, in the warning tone at two minutes or less. The
+ * remaining time reads the wall clock at render too, so a render between
+ * ticks (a refresh, a sign-in) is never one stale tick behind.
+ */
+function SessionCountdown({ expiresAt }: { expiresAt: number | null }) {
+  const tick = useUiClock('second');
+  const now = Math.max(tick, Date.now());
+  const remaining = expiresAt === null ? 0 : expiresAt - now;
+  if (remaining <= 0) {
+    return <span className="sub">Session · scan badge</span>;
+  }
+  const totalSeconds = Math.max(1, Math.ceil(remaining / 1_000));
+  const value = `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+  return (
+    <span className={remaining <= SESSION_WARN_MS ? 'sub warn' : 'sub'}>
+      Session: <span className="num">{value}</span>
+    </span>
   );
 }
 /**

@@ -125,8 +125,10 @@ Rules owned here:
 - Explicitly NOT here (their own modules / later phases): the explicit
   merge (`app.application.merges`), Scrap and quantity additions
   (`app.application.quantity_events`), Undo (`app.application.undo`),
-  Worker sessions (later Phase 13 slices; every row of a command records
-  the Worker identified by the station Area's mode).
+  the badge gates (a later Phase 13 slice). Every row of a command
+  records the Worker identified by the station Area's mode — in Scanned
+  session mode with the valid Worker Session, which the command
+  refreshes.
 """
 
 import datetime

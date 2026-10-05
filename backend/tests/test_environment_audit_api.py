@@ -464,6 +464,7 @@ def test_area_create_is_audited_with_the_derived_barcode(
         "is_active": True,
         "worker_identification_mode": "DISABLED",
         "fixed_worker_id": None,
+        "worker_session_timeout_minutes": None,
     }
     assert rows[0].actor_reference is None
     assert rows[0]._mapping["metadata"] is None

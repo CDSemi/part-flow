@@ -244,7 +244,11 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: false,
-      worker_identification: { mode: 'DISABLED', fixed_worker: null },
+      worker_identification: {
+        mode: 'DISABLED',
+        fixed_worker: null,
+        session: null,
+      },
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -324,6 +328,7 @@ function handle(url: string, method: string, body: unknown): Response {
       available_stocked_quantity: stockedOf(pn) - allocatedOf(pn),
       stock_available: terminal && candidates.length > 0,
       scanned_at: new Date().toISOString(),
+      worker_session: null,
     });
   }
   if (/^\/api\/scan-stations\/[^/]+\/transfers$/.test(url)) {
