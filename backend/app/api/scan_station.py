@@ -171,8 +171,23 @@ resolution reports ``scanned_at``, ``intake_available``,
   ineligible: recorded by Management or at another station, already
   reversed, itself a reversal, no longer the most recent operation of
   its quantity, or restoring onto a retired Machine or into a
-  deactivated Area. No Worker identity and no role authorization
-  exist yet (Phases 13/14) — nothing here pretends otherwise.
+  deactivated Area.
+
+Phase 13 — Worker identity. Every row of a command records the Worker
+the station's Area mode identifies (Disabled → none, Fixed Worker → the
+configured Worker; scanned sessions arrive later); no request carries
+identity. A Fixed Worker who is inactive at confirmation refuses the
+command with nothing recorded (409). The context reports
+``worker_identification`` (mode and Fixed Worker), and the Undo preview
+the original command's ``worker`` and the ``reversed_by`` Worker the
+reversal would record now. No role authorization exists yet (Phase 14).
+
+- ``POST /scan-stations/{station_id}/badge-scans`` — a scanned Worker
+  badge (in the body, never in the URL) answered as ``NOT_USED_IN_AREA``
+  (an active Worker's badge in a Disabled or Fixed Worker Area) or
+  ``UNKNOWN``, with the Area's ``mode``. A read: it records and
+  refreshes nothing; 409 for a Scanned session Area until Worker
+  sign-in exists.
 """
 
 import datetime
@@ -209,6 +224,7 @@ from app.application import (
     transfers,
     undo,
 )
+from app.infrastructure.models import Worker
 
 router = APIRouter(prefix="/api")
 
@@ -227,6 +243,30 @@ class DepartmentRef(BaseModel):
     name: str
 
 
+WorkerIdentificationModeLiteral = Literal["DISABLED", "FIXED", "SCANNED"]
+
+
+class WorkerRef(BaseModel):
+    id: int
+    name: str
+    # The avatar's cache version (null = no avatar), as the Workers API.
+    avatar_updated_at: datetime.datetime | None
+
+
+def worker_ref(worker: Worker | None) -> WorkerRef | None:
+    if worker is None:
+        return None
+    return WorkerRef(
+        id=worker.id, name=worker.name, avatar_updated_at=worker.avatar_image_updated_at
+    )
+
+
+class WorkerIdentificationResponse(BaseModel):
+    mode: WorkerIdentificationModeLiteral
+    # Set exactly when mode is FIXED.
+    fixed_worker: WorkerRef | None
+
+
 class StationContextResponse(BaseModel):
     station_id: str
     department: DepartmentRef
@@ -235,6 +275,9 @@ class StationContextResponse(BaseModel):
     # Header/statistics mode (GUI_DESIGN §4.3): an Area with Machines
     # queues quantity; one without processes it directly.
     has_machines: bool
+    # The Area's Worker ID mode and Fixed Worker (Phase 13, GUI_DESIGN
+    # §4.3 Worker pill) — the configuration as read now.
+    worker_identification: WorkerIdentificationResponse
 
 
 @router.get("/scan-stations/{station_id}/context")
@@ -246,7 +289,35 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
         area=area_ref(context.area),
         operations=[operation_ref(operation) for operation in context.operations],
         has_machines=context.has_machines,
+        worker_identification=WorkerIdentificationResponse(
+            mode=context.worker_identification.mode.value,
+            fixed_worker=worker_ref(context.worker_identification.fixed_worker),
+        ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Worker badge scans (Phase 13 — GUI_DESIGN §4.12)
+# ---------------------------------------------------------------------------
+
+
+class BadgeScanRequest(BaseModel):
+    """The scanned badge value — in the body, never in the URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    badge: str
+
+
+class BadgeScanResponse(BaseModel):
+    outcome: Literal["NOT_USED_IN_AREA", "UNKNOWN"]
+    mode: WorkerIdentificationModeLiteral
+
+
+@router.post("/scan-stations/{station_id}/badge-scans")
+def scan_badge(station_id: str, body: BadgeScanRequest, session: SessionDep) -> BadgeScanResponse:
+    result = scan_station.badge_scan(session, station_id, body.badge)
+    return BadgeScanResponse(outcome=result.outcome.value, mode=result.mode.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1198,6 +1269,11 @@ class UndoPreviewResponse(BaseModel):
     ineligible_reason: str | None
     movements: list[UndoMovementSummaryResponse]
     restored: list[RestoredFlowPreviewResponse]
+    # The Worker the original command recorded (Phase 13).
+    worker: WorkerRef | None
+    # The Worker the reversal would record under the station Area's
+    # current mode — computed by the server, re-judged at confirmation.
+    reversed_by: WorkerRef | None
 
 
 @router.get("/scan-stations/{station_id}/undo-preview/{device_event_id}")
@@ -1240,6 +1316,8 @@ def get_undo_preview(
             )
             for item in result.restored
         ],
+        worker=worker_ref(result.worker),
+        reversed_by=worker_ref(result.reversed_by),
     )
 
 

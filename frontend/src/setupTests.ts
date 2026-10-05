@@ -10,8 +10,11 @@ import { afterEach } from 'vitest';
 // transform of a view chunk take multiple seconds, and the first test
 // of a suite then fails while the loading skeleton is still up. No
 // test relies on these utilities timing out, so a generous ceiling
-// only affects genuinely broken tests (they fail slower).
-configure({ asyncUtilTimeout: 5000 });
+// only affects genuinely broken tests (they fail slower). The full
+// parallel suite pushes the cold transform of the large development
+// mock chunk (ScanStationMockView) to about 5 s — 2.4 s in isolation —
+// so the ceiling sits at 10 s, still under vite.config.ts testTimeout.
+configure({ asyncUtilTimeout: 10_000 });
 
 // Vitest runs without injected globals (vite.config.ts does not set
 // `test.globals`), so testing-library's automatic DOM cleanup never

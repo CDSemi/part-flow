@@ -351,6 +351,7 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: areaHasMachines(areaId),
+      worker_identification: { mode: 'DISABLED', fixed_worker: null },
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -1429,7 +1430,10 @@ test('Area, scrap and unknown barcodes are rejected without a server call', asyn
   for (const [barcode, title] of [
     ['PF:AREA:2', 'Area barcode is not required here'],
     ['PF:SCRAP', 'Scrap barcode cannot be used here'],
-    ['100482', 'Barcode not recognized'],
+    // An unknown PartFlow value is never a Worker badge: rejected
+    // locally (a non-PartFlow value is checked as a badge instead —
+    // scan-station-worker.test.tsx).
+    ['PF:FOO', 'Barcode not recognized'],
   ] as const) {
     scan(barcode);
     expect(await notice()).toHaveTextContent(title);
@@ -1437,6 +1441,9 @@ test('Area, scrap and unknown barcodes are rejected without a server call', asyn
     expect(screen.queryByRole('dialog')).toBeNull();
   }
   expect(requests.filter((r) => r.url.endsWith('/scans/resolve'))).toHaveLength(
+    0,
+  );
+  expect(requests.filter((r) => r.url.endsWith('/badge-scans'))).toHaveLength(
     0,
   );
   await waitFor(() => expect(document.activeElement).toBe(input));

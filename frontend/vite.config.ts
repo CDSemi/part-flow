@@ -28,7 +28,8 @@ export default defineConfig({
     // Docker dev container transforms bind-mounted sources several
     // times slower than a native checkout; setupTests.ts raises the
     // testing-library async-utility timeout to match. Only genuinely
-    // hung tests are affected: they fail slower.
+    // hung tests are affected: they fail slower. Keep it above the
+    // setupTests.ts asyncUtilTimeout (10 s).
     testTimeout: 15_000,
   },
 });

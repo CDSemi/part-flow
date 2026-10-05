@@ -72,6 +72,12 @@ let writeFailure:
 // When set, the resolution reports exactly these groups — a test seam
 // for a stale server judgement naming flows no longer in the Area.
 let combineGroupsOverride: number[][] | null;
+// Phase 13: the station Area's Worker identification (context).
+let workerIdentification: unknown;
+const FIXED_NGUYEN = {
+  mode: 'FIXED',
+  fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+};
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -312,6 +318,7 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
       has_machines: hasMachines(station.area_id),
+      worker_identification: workerIdentification,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -626,6 +633,7 @@ beforeEach(() => {
   committed = new Map();
   requests = [];
   nextMovementId = 500;
+  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
   nextFlowId = 900;
   writeFailure = null;
   combineGroupsOverride = null;
@@ -1223,4 +1231,33 @@ test('a combine whose response was lost retries under the same device_event_id a
       .sort(),
   ).toEqual([10, 2]);
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+/** `Worker` sits right before `Scan Station` with the expected value. */
+function expectWorkerBeforeStation(box: HTMLElement, name: string) {
+  const terms = within(box)
+    .getAllByRole('term')
+    .map((term) => term.textContent);
+  expect(terms.indexOf('Worker')).toBeGreaterThan(-1);
+  expect(terms.indexOf('Worker')).toBe(terms.indexOf('Scan Station') - 1);
+  const dt = within(box).getByText('Worker', { selector: 'dt' });
+  expect(dt.nextElementSibling?.textContent).toBe(name);
+}
+
+test('in a Fixed Worker Area the combine summary names the Fixed Worker before the Scan Station', async () => {
+  workerIdentification = FIXED_NGUYEN;
+  await renderStation('PLATING-ST-01');
+
+  scan('PF:PN:PN-F');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Combine quantities/ }),
+  );
+  const dlg = await screen.findByRole('dialog', { name: 'Combine quantities' });
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  const summary = screen.getByRole('dialog', { name: 'Combine quantities' });
+  expectWorkerBeforeStation(summary, 'H. Nguyen');
+  expect(writes()).toHaveLength(0);
 });

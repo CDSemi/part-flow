@@ -125,7 +125,8 @@ Rules owned here:
 - Explicitly NOT here (their own modules / later phases): the explicit
   merge (`app.application.merges`), Scrap and quantity additions
   (`app.application.quantity_events`), Undo (`app.application.undo`),
-  Worker sessions (Phase 13).
+  Worker sessions (later Phase 13 slices; every row of a command records
+  the Worker identified by the station Area's mode).
 """
 
 import datetime
@@ -137,6 +138,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application import station_identity
 from app.application.common import device_event_id_text, optional_text, required_flag
 from app.application.errors import (
     ConflictError,
@@ -1016,6 +1018,8 @@ def record_arrival(
                 " Planned Route — nothing is recorded until then."
             )
 
+    identity = station_identity.resolve_station_identity(session, station)
+
     # -- Writes — all inside the one open transaction ------------------
     # One application command: the SPLIT prefix when only a part moves
     # (Phase 8), the implicit AREA_COMPLETED (when the quantity was
@@ -1111,6 +1115,7 @@ def record_arrival(
     # Added in command order: the unit of work inserts rows of one
     # table in that order, so the BIGSERIAL ids follow it (the
     # projection replay defines "latest" by id).
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     # Projection update in the same transaction (SLICE1 §15): the Area
     # moves, the Machine — if any — clears, and its derived state is

@@ -74,8 +74,10 @@ Rules owned here:
   is no new Operation choice), the Station is the one the command was
   recorded at. No snapshot step: an in-Area event creates no route
   visit (PROJECT_PROFILE §8.11).
+- Rows record the Worker identified by the station Area's mode
+  (`station_identity`).
 - Explicitly NOT here: the explicit merge (`app.application.merges`),
-  Worker identity, Undo (Phase 9 — the command relationship it needs is
+  Undo (Phase 9 — the command relationship it needs is
   `device_event_id` + `command_sequence`), Repair, Scrap, Stockroom.
 """
 
@@ -88,6 +90,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application import station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import (
     ConflictError,
@@ -619,6 +622,7 @@ def assign_to_machine(
             f"Machine '{machine.name}' is under maintenance and accepts no new"
             " assignment. Nothing was recorded."
         )
+    identity = station_identity.resolve_station_identity(session, context.station)
 
     # -- Writes — all inside the one open transaction ------------------
     # The assigned quantity is read BEFORE any Movement is staged: a
@@ -641,6 +645,7 @@ def assign_to_machine(
     command.append(movement)
     # Added in command order: the unit of work inserts rows of one
     # table in that order, so the BIGSERIAL ids follow it.
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     context.flow.current_machine_id = machine.id
     context.flow.updated_at = func.now()
@@ -692,6 +697,7 @@ def _leave_machine(
         return replay_or_conflict(committed, kind, fingerprint)
 
     machine = _machine_on_flow(session, context, machine_id, action)
+    identity = station_identity.resolve_station_identity(session, context.station)
 
     before = assigned_quantity(session, machine.id)
     metadata = command_metadata(kind, fingerprint, size=command_size(context, 1))
@@ -710,6 +716,7 @@ def _leave_machine(
         metadata=metadata,
     )
     command.append(movement)
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     # The Machine clears from the position either way; the Area stays
     # the location. QUEUED versus READY_TO_TRANSFER is told apart by

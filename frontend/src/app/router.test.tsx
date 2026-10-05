@@ -58,6 +58,7 @@ beforeEach(() => {
           area: { ...area, description: null, is_terminal: false },
           operations: [],
           has_machines: false,
+          worker_identification: { mode: 'DISABLED', fixed_worker: null },
         });
       }
       if (/\/api\/areas\/\d+\/inventory$/.test(url)) {

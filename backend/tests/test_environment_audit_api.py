@@ -462,6 +462,8 @@ def test_area_create_is_audited_with_the_derived_barcode(
         "icon_url": None,
         "is_terminal": False,
         "is_active": True,
+        "worker_identification_mode": "DISABLED",
+        "fixed_worker_id": None,
     }
     assert rows[0].actor_reference is None
     assert rows[0]._mapping["metadata"] is None
@@ -490,6 +492,50 @@ def test_area_display_edit_and_terminal_toggle_are_audited(
         assert row.before_data["barcode_value"] == row.after_data["barcode_value"]
         assert row.after_data["barcode_value"] == area["barcode_value"]
     _assert_chain(rows)
+
+
+def _create_worker(client: TestClient) -> dict[str, Any]:
+    return _created(
+        client.post(
+            "/api/workers",
+            json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE").upper()},
+        )
+    )
+
+
+def test_area_worker_id_mode_changes_are_audited(client: TestClient, db_engine: Engine) -> None:
+    worker = _create_worker(client)
+    inactive = _create_worker(client)
+    deactivated = client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
+    assert deactivated.status_code == 200
+    area = _create_area(client)
+    path = f"/api/areas/{area['id']}"
+    fixed = {"worker_identification_mode": "FIXED", "fixed_worker_id": worker["id"]}
+    assert client.patch(path, json=fixed).status_code == 200
+    assert client.patch(path, json={"worker_identification_mode": "DISABLED"}).status_code == 200
+
+    rows = _audit_rows(db_engine, "Area", area["id"])
+    assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED"]
+    disabled = {"worker_identification_mode": "DISABLED", "fixed_worker_id": None}
+
+    def identity(data: dict[str, Any]) -> dict[str, Any]:
+        return {key: data[key] for key in disabled}
+
+    assert (identity(rows[1].before_data), identity(rows[1].after_data)) == (disabled, fixed)
+    assert (identity(rows[2].before_data), identity(rows[2].after_data)) == (fixed, disabled)
+    _assert_chain(rows)
+
+    # Refusals (E1–E5) append nothing.
+    before = _audit_count(db_engine)
+    for body in (
+        {"worker_identification_mode": "SCANNED"},
+        {"worker_identification_mode": "FIXED"},
+        {"fixed_worker_id": worker["id"]},
+        {"worker_identification_mode": "FIXED", "fixed_worker_id": 999_999_999},
+        {"worker_identification_mode": "FIXED", "fixed_worker_id": inactive["id"]},
+    ):
+        assert client.patch(path, json=body).status_code in (409, 422), body
+    assert _audit_count(db_engine) == before
 
 
 def test_area_deactivation_is_audited_only_once_it_succeeds(

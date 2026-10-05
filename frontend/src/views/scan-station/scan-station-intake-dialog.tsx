@@ -35,6 +35,7 @@ import {
   enterKeyHandler,
   operationLabel,
   quantityKeyHandler,
+  stationWorkerName,
 } from './scan-station-wizard';
 
 /**
@@ -602,6 +603,7 @@ export function IntakeDialog({
                   <span className="mono">{existingQuantityLabel}</span>
                 ) : null,
               ],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'RECEIVED', 'secondary'],
             ]}

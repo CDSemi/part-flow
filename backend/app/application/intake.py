@@ -114,8 +114,10 @@ Operation — the advisory lock always first, then the established row
 order of the release (demand → Area → Operation) and the demand save
 (demand → WorkOrder), with no cycle.
 
-Deliberately absent: Worker identity and the badge gates (Phase 13),
-authorization (Phase 14), and Undo of a receipt — a receipt also
+Worker identity is recorded per the station Area's Worker ID mode
+(`app.application.station_identity`); deliberately absent: Worker
+sessions and the badge gates (later Phase 13 slices), authorization
+(Phase 14), and Undo of a receipt — a receipt also
 creates or raises business demand, which the Movement-level reversal
 of PROJECT_PROFILE §16 does not rewrite, so `app.application.undo`
 refuses it explicitly (the same boundary Phase 10 drew for `STOCKED`)
@@ -131,7 +133,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import audit, work_orders
+from app.application import audit, station_identity, work_orders
 from app.application.common import device_event_id_text, flush, optional_text, required_flag
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -880,6 +882,8 @@ def receive_quantity(
                 " different Operation than the resolved one."
             )
 
+    identity = station_identity.resolve_station_identity(session, station)
+
     # -- Writes — all inside the one open transaction --------------------
     ensure_part_number(session, pn)
     if reused is not None and reused.demand is not None:
@@ -1020,6 +1024,7 @@ def receive_quantity(
         command_sequence=1,
         metadata_=metadata,
     )
+    station_identity.stamp_movements([movement], identity)
     session.add(movement)
     try:
         session.commit()

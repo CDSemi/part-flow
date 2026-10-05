@@ -270,6 +270,22 @@ class AuditEntityType(StrEnum):
     MACHINE = "Machine"
 
 
+class WorkerIdentificationMode(StrEnum):
+    """How an Area identifies the Worker of its production records
+    (PROJECT_PROFILE §8.13, §19; GUI_DESIGN §4.12).
+
+    DISABLED records no Worker; FIXED records the Area's configured
+    Fixed Worker; SCANNED records the Worker of the station's open
+    Worker Session (Phase 13 slices S4/S5 — refused by the Area service
+    until the badge gates exist). Worker identity is accountability
+    metadata and never decides production correctness.
+    """
+
+    DISABLED = "DISABLED"
+    FIXED = "FIXED"
+    SCANNED = "SCANNED"
+
+
 class MachineLifecycleEventType(StrEnum):
     """Append-only Machine lifecycle event types (PROJECT_PROFILE §8.6).
 

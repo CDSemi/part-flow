@@ -1217,7 +1217,8 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
       {flow.deviations.map((deviation) => (
         <div className="devnote deviation" key={deviation.movementId}>
           Route deviation confirmed {timestamp(deviation.occurredAt)}
-          {deviation.stationId ? ` at ${deviation.stationId}` : ''}: expected{' '}
+          {deviation.stationId ? ` at ${deviation.stationId}` : ''}
+          {deviation.worker ? ` by ${deviation.worker.name}` : ''}: expected{' '}
           {deviation.expectedArea?.name ?? 'route end'}
           {deviation.expectedOperation
             ? ` (${deviation.expectedOperation.name ?? deviation.expectedOperation.code})`

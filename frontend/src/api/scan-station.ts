@@ -29,6 +29,9 @@
 // Production-safe: no mock data, no framework imports.
 
 import { ApiError, apiRequest, apiRequestWithStatus } from './client';
+import type { WorkerIdentificationMode } from './environment';
+import type { WorkerRef, WorkerRefWire } from './workers';
+import { toWorkerRef } from './workers';
 // The shared Area monitoring model lives in ./area-inventory — the ONE
 // client model the Scan Station and the Area Board both render. It is
 // re-exported here so the station modules keep importing their whole
@@ -88,6 +91,15 @@ export interface StationContext {
   operations: OperationRef[];
   /** Header/statistics mode: an Area with Machines queues quantity. */
   hasMachines: boolean;
+  /** The Area's Worker ID mode as the server reports it; the server
+   * judges the recorded identity again at every confirmation. */
+  workerIdentification: StationWorkerIdentification;
+}
+
+export interface StationWorkerIdentification {
+  mode: WorkerIdentificationMode;
+  /** Set exactly in `FIXED` mode. */
+  fixedWorker: WorkerRef | null;
 }
 
 interface StationContextWire {
@@ -96,6 +108,10 @@ interface StationContextWire {
   area: AreaRefWire;
   operations: OperationRefWire[];
   has_machines: boolean;
+  worker_identification: {
+    mode: WorkerIdentificationMode;
+    fixed_worker: WorkerRefWire | null;
+  };
 }
 
 export async function getStationContext(
@@ -110,6 +126,12 @@ export async function getStationContext(
     area: toAreaRef(wire.area),
     operations: wire.operations.map(toOperationRef),
     hasMachines: wire.has_machines,
+    workerIdentification: {
+      mode: wire.worker_identification.mode,
+      fixedWorker: wire.worker_identification.fixed_worker
+        ? toWorkerRef(wire.worker_identification.fixed_worker)
+        : null,
+    },
   };
 }
 
@@ -422,6 +444,33 @@ export async function resolveMachineScan(
     queued: wire.queued.map(toFlowInArea),
     requiresSelection: wire.requires_selection,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Worker badge scans (Phase 13)
+// ---------------------------------------------------------------------------
+
+export interface BadgeScanResult {
+  /** NOT_USED_IN_AREA: an active Worker's badge, but this Area's mode
+   * does not take badge scans. UNKNOWN: no active Worker has it. */
+  outcome: 'NOT_USED_IN_AREA' | 'UNKNOWN';
+  /** The Area's Worker ID mode at the time of the check. */
+  mode: WorkerIdentificationMode;
+}
+
+/**
+ * Check a scanned non-PartFlow value as a Worker badge at a station. A
+ * read — nothing is recorded and nothing is refreshed. The badge
+ * travels in the body, never in the URL.
+ */
+export async function scanBadge(
+  stationId: string,
+  badge: string,
+): Promise<BadgeScanResult> {
+  return apiRequest<BadgeScanResult>(
+    `/api/scan-stations/${encodeURIComponent(stationId)}/badge-scans`,
+    { method: 'POST', body: { badge } },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,6 +1381,11 @@ export interface UndoPreview {
   ineligibleReason: string | null;
   movements: UndoMovementSummary[];
   restored: RestoredFlowPreview[];
+  /** The Worker the original command recorded; null when none. */
+  worker: WorkerRef | null;
+  /** The Worker the reversal would record under the station Area's
+   * current mode (server-computed); null when none. */
+  reversedBy: WorkerRef | null;
 }
 
 interface UndoMovementSummaryWire {
@@ -1365,6 +1419,8 @@ interface UndoPreviewWire {
   ineligible_reason: string | null;
   movements: UndoMovementSummaryWire[];
   restored: RestoredFlowPreviewWire[];
+  worker: WorkerRefWire | null;
+  reversed_by: WorkerRefWire | null;
 }
 
 /**
@@ -1407,6 +1463,8 @@ export async function getUndoPreview(
       machineId: item.machine_id,
       processingState: item.processing_state,
     })),
+    worker: wire.worker ? toWorkerRef(wire.worker) : null,
+    reversedBy: wire.reversed_by ? toWorkerRef(wire.reversed_by) : null,
   };
 }
 

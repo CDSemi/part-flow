@@ -23,3 +23,24 @@
   height: 64px;
   font-size: 21px;
 }
+
+/* Scan Station Worker pill size (GUI_DESIGN §4.3): the mark spans both
+   text lines of the pill (name over the sub line) with the approved
+   `.ss-pill .avatar` sizing — stretched to the text column, square, at
+   least 36px. */
+.worker-avatar.pill {
+  align-self: stretch;
+  aspect-ratio: 1;
+  min-height: 36px;
+  width: auto;
+  height: auto;
+  font-size: 12.5px;
+}
+
+/* An uploaded image never sizes the pill by its natural pixels: it
+   takes the pill mark's square at its minimum size. */
+img.worker-avatar.pill {
+  align-self: center;
+  width: 36px;
+  height: 36px;
+}

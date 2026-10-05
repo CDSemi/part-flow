@@ -69,9 +69,14 @@ transaction, idempotent per its own `device_event_id`, fingerprint
 mismatch an explicit conflict, a race lost at COMMIT replays the
 winner.
 
-Deliberate boundaries (no simulation of later phases): no Worker
-identity on the reversal (Worker sessions, Phase 13 — the badge/final
-gate is a frontend gate on the same command), no reason-when-configured
+Worker identity: the reversal records the Worker the station Area's
+mode identifies when it is confirmed (never the original's); the
+preview names the original command's recorded Worker and the Worker
+the reversal would record now.
+
+Deliberate boundaries (no simulation of later phases): Worker sessions
+and the badge / final gate arrive in later Phase 13 slices, no
+reason-when-configured
 (the configuration does not exist before Phase 13), and no role
 authorization — Operators/Managers/Admins arrive with Users/RBAC
 (Phase 14); until then the API surface carries no pretend permission
@@ -87,6 +92,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
+from app.application import station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import (
     ConflictError,
@@ -117,6 +123,7 @@ from app.infrastructure.models import (
     PartMovement,
     QuantityFlow,
     ScanStation,
+    Worker,
 )
 
 # Immutable record of what the reversal did, written on every REVERSED
@@ -388,6 +395,12 @@ class UndoPreview(NamedTuple):
     ineligible_reason: str | None
     movements: list[UndoMovementSummary]
     restored: list[RestoredFlowPreview]
+    # The Worker the original command recorded (all its rows share it;
+    # an inactive Worker is still named — the identity is history).
+    worker: Worker | None
+    # The Worker the reversal would record under the station Area's
+    # current mode — a read; the command judges it again at confirmation.
+    reversed_by: Worker | None
 
 
 def undo_preview(session: Session, station_id: str, device_event_id: object) -> UndoPreview:
@@ -398,11 +411,14 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
     source and destination, Machine, timestamp, and the effect of the
     reversal) and says whether Undo is currently possible and why not.
     """
-    station, _ = require_production_station(session, station_id)
+    station, station_area = require_production_station(session, station_id)
     event_id = device_event_id_text(device_event_id)
     rows = committed_command(session, event_id)
     if not rows:
         raise NotFoundError(f"No production event was recorded under '{event_id}'.")
+    recorded_worker_id = rows[-1].worker_id
+    worker = session.get(Worker, recorded_worker_id) if recorded_worker_id is not None else None
+    reversed_by = station_identity.worker_identification(session, station_area).fixed_worker
     reason = _ineligibility(session, station, rows)
     areas: dict[int, Area] = {}
 
@@ -471,6 +487,8 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
         ineligible_reason=reason,
         movements=movements,
         restored=restored,
+        worker=worker,
+        reversed_by=reversed_by,
     )
 
 
@@ -687,6 +705,7 @@ def undo_command(
                 " quantity to it and cannot proceed. Reactivate the Area first."
                 " Nothing was reversed."
             )
+    identity = station_identity.resolve_station_identity(session, station)
 
     # -- Writes — all inside the one open transaction --------------------
     metadata: dict[str, Any] = {
@@ -734,6 +753,7 @@ def undo_command(
                 metadata_=metadata,
             )
         )
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     # Projection restore in the same transaction, from exactly the
     # derivation the replay uses (SLICE1 §15).

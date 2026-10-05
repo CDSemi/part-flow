@@ -58,13 +58,17 @@ Area later, or the last one retired, changes the Area's mode for the
 quantity it holds from then on — the history stays exactly what was
 recorded.
 
+Rows record the Worker identified by the station Area's mode
+(`station_identity`).
+
 Explicitly NOT here: the explicit merge (`app.application.merges`),
-Worker identity, Undo (Phase 9), Repair, Scrap, Stockroom.
+Undo (Phase 9), Repair, Scrap, Stockroom.
 """
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.application import station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import ConflictError, InvalidInputError
 from app.application.machine_processing import (
@@ -160,6 +164,7 @@ def complete_direct_processing(
             f"Quantity Flow {context.flow.id} references a Machine although Area"
             f" '{context.area.name}' has none. Nothing was recorded."
         )
+    identity = station_identity.resolve_station_identity(session, context.station)
 
     # -- The writes, inside the open transaction ------------------------
     metadata = command_metadata("DONE", fingerprint, size=command_size(context, 1))
@@ -178,6 +183,7 @@ def complete_direct_processing(
         metadata=metadata,
     )
     command.append(movement)
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     # Projection: the Area stays, the Machine was and stays NULL; the
     # finished state is told by the Movement just appended.

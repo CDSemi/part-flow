@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b and 2c): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c):
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c and 3): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -269,7 +269,10 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   and `MachineAssetTagConfig`; the downgrade refuses;
   `0017_phase13_machine_audit` adds `Machine` to the audit entity CHECK;
   the downgrade refuses; `0018_phase13_pn_check_collation` re-creates the
-  canonical PN CHECKs under `"C"`; the downgrade refuses)
+  canonical PN CHECKs under `"C"`; the downgrade refuses;
+  `0019_phase13_worker_identity` adds the Area Worker ID mode and Fixed
+  Worker and the Worker references on `part_movements` and
+  `work_order_allocations`; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -711,8 +714,9 @@ integration):
   `tests/test_scan_station_transfer_api.py`,
   `tests/test_workers_api.py`,
   `tests/test_environment_audit_api.py`,
-  `tests/test_environment_parent_activity_api.py`, and
-  `tests/test_machine_audit_api.py` — **integration** tests that
+  `tests/test_environment_parent_activity_api.py`,
+  `tests/test_machine_audit_api.py`, and
+  `tests/test_worker_identity_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -730,8 +734,8 @@ integration):
   `0013_phase12_priority` for Phase 12 — while
   `tests/test_phase13_schema.py` carries the head-level coverage
   (`0014_phase13_workers`, `0015_phase13_badge_check`,
-  `0016_phase13_environment_audit`, `0017_phase13_machine_audit` and
-  `0018_phase13_pn_check_collation`: the `workers`
+  `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
+  `0018_phase13_pn_check_collation` and `0019_phase13_worker_identity`: the `workers`
   table's constraints, the widened audit vocabulary including the
   environment audit entities, the refusing
   downgrades, and

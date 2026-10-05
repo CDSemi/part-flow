@@ -140,6 +140,7 @@ function movement(overrides: Record<string, unknown>) {
     source_machine: null,
     destination_machine: null,
     station_id: 'LATHE-ST-1',
+    worker: null,
     occurred_at: '2030-07-22T15:05:00Z',
     device_event_id: 'evt',
     command_sequence: 1,
@@ -1073,6 +1074,7 @@ test('a PLANNED flow off its route shows the off-route note and every confirmed 
           actual_operation: null,
           reason: 'Lathe down',
           station_id: 'DEB-ST-01',
+          worker: null,
         },
       ],
     });
@@ -1089,6 +1091,8 @@ test('a PLANNED flow off its route shows the off-route note and every confirmed 
   expect(deviation?.textContent).toContain('expected Lathe (Turning)');
   expect(deviation?.textContent).toContain('actual Deburr');
   expect(deviation?.textContent).toContain('reason: Lathe down');
+  // No recorded Worker: the note names only the station.
+  expect(deviation?.textContent).not.toContain(' by ');
   // The snapshot renders exactly the server's DONE / CURRENT / FUTURE
   // states: off route there is no current step — the progress made
   // reads done, the rest of the route waits.
@@ -1781,6 +1785,57 @@ test('describeMovement states lineage, stocking and additions as recorded', () =
   ).toBe('Added 2 at Lathe · QF-140 · reason: found on rack · LATHE-ST-1');
 });
 
+test('describeMovement names the recorded Worker before the station, omitting an absent one', () => {
+  expect(
+    describeMovement(
+      toModel(
+        movement({
+          from_area: DEBURR,
+          quantity: 4,
+          worker: { id: 7, name: 'H. Nguyen' },
+        }),
+      ),
+    ),
+  ).toBe('Deburr → Lathe · qty 4 · QF-140 · W: H. Nguyen · LATHE-ST-1');
+  expect(
+    describeMovement(
+      toModel(movement({ from_area: DEBURR, quantity: 4, worker: null })),
+    ),
+  ).toBe('Deburr → Lathe · qty 4 · QF-140 · LATHE-ST-1');
+});
+
+test('a route-deviation note names the recorded Worker after the station', async () => {
+  stubFetch((url) => {
+    if (!url.startsWith('/api/tracking/detail')) return defaultAnswer(url);
+    const payload = detailPayload();
+    const planned = payload.flows.flows.find((flow) => flow.id === 140)!;
+    Object.assign(planned, {
+      deviations: [
+        {
+          movement_id: 3,
+          occurred_at: '2030-07-22T11:20:00Z',
+          kind: 'AREA',
+          expected_area: LATHE,
+          expected_operation: OPERATION,
+          actual_area: DEBURR,
+          actual_operation: null,
+          reason: 'Lathe down',
+          station_id: 'DEB-ST-01',
+          worker: { id: 7, name: 'H. Nguyen' },
+        },
+      ],
+    });
+    return jsonResponse(payload);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  const deviation = flowBlock('QF-140').querySelector('.devnote.deviation');
+  expect(deviation?.textContent).toMatch(
+    / at DEB-ST-01 by H\. Nguyen: expected Lathe/,
+  );
+});
+
 /** One wire Movement in the client model (the api module's mapping). */
 function toModel(wire: ReturnType<typeof movement>) {
   return {
@@ -1796,6 +1851,7 @@ function toModel(wire: ReturnType<typeof movement>) {
     sourceMachine: wire.source_machine as null,
     destinationMachine: wire.destination_machine as null,
     stationId: wire.station_id as string | null,
+    worker: wire.worker as { id: number; name: string } | null,
     occurredAt: wire.occurred_at as string,
     deviceEventId: 'evt',
     commandSequence: 1,

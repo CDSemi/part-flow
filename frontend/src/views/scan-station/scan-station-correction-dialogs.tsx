@@ -36,6 +36,7 @@ import {
   enterKeyHandler,
   operationLabel,
   quantityKeyHandler,
+  stationWorkerName,
 } from './scan-station-wizard';
 
 /**
@@ -267,6 +268,7 @@ export function AddQuantityDialog({
                 ) : null,
               ],
               ['Reason', reason.trim(), 'primary'],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'QUANTITY_ADJUSTED · INCREASE', 'secondary'],
             ]}
@@ -551,6 +553,7 @@ export function ScrapDialog({
                 partial ? 'primary' : undefined,
               ],
               ['Reason', reason.trim(), 'primary'],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'SCRAPPED', 'secondary'],
             ]}
@@ -774,6 +777,10 @@ export function UndoDialog({
               ) : null,
               'primary',
             ],
+            // The original command's recorded Worker and the Worker the
+            // reversal would record — both previewed by the server; the
+            // client derives neither (omitted when null).
+            ['Worker', preview.worker?.name ?? null, 'secondary'],
             [
               'Recorded',
               <span className="mono">
@@ -781,6 +788,7 @@ export function UndoDialog({
               </span>,
               'secondary',
             ],
+            ['Reversed by', preview.reversedBy?.name ?? null, 'secondary'],
             ['Scan Station', station.stationId, 'secondary'],
             [
               'Result after reversal',

@@ -112,6 +112,12 @@ let writeFailure:
   null | 'network' | 'lost-response' | { status: number; body: unknown };
 /** The connectivity probe fails (the station goes OFFLINE). */
 let healthDown: boolean;
+// Phase 13: the station Area's Worker identification (context).
+let workerIdentification: unknown;
+const FIXED_NGUYEN = {
+  mode: 'FIXED',
+  fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+};
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -316,6 +322,7 @@ function handle(url: string, method: string, body: unknown): Response {
         (o) => ({ ...o, is_external: false }),
       ),
       has_machines: station.area_id === 2,
+      worker_identification: workerIdentification,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -595,6 +602,7 @@ beforeEach(() => {
   committed = new Map();
   requests = [];
   nextMovementId = 500;
+  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
   writeFailure = null;
   healthDown = false;
   vi.stubGlobal(
@@ -805,7 +813,9 @@ test('Machine-first: a Machine scan opens Assign to Machine with the Machine pre
   await waitFor(() =>
     expect(reads(/\/inventory$/).length).toBe(inventoryReads + 1),
   );
-  expect(reads(/\/context$/).length).toBe(contextReads + 1);
+  // One context re-read on the resolved Machine scan (the Worker ID
+  // mode current at the scan) and one after the confirmed command.
+  expect(reads(/\/context$/).length).toBe(contextReads + 2);
   await waitFor(() =>
     expect(machineCard('Lathe 1')).toHaveTextContent('15 pcs assigned'),
   );
@@ -1635,4 +1645,45 @@ test('transferring ON_MACHINE quantity announces the implicit completion and rep
   expect(plain).not.toHaveTextContent('completes that processing');
   fireEvent.click(within(plain).getByRole('button', { name: 'Next' }));
   expect(dialog()).not.toHaveTextContent('AREA_COMPLETED');
+});
+
+/** `Worker` sits right before `Scan Station` with the expected value. */
+function expectWorkerBeforeStation(box: HTMLElement, name: string) {
+  const terms = within(box)
+    .getAllByRole('term')
+    .map((term) => term.textContent);
+  expect(terms.indexOf('Worker')).toBeGreaterThan(-1);
+  expect(terms.indexOf('Worker')).toBe(terms.indexOf('Scan Station') - 1);
+  const dt = within(box).getByText('Worker', { selector: 'dt' });
+  expect(dt.nextElementSibling?.textContent).toBe(name);
+}
+
+test('in a Fixed Worker Area the assignment and DONE summaries name the Fixed Worker before the Scan Station', async () => {
+  workerIdentification = FIXED_NGUYEN;
+  await renderStation();
+
+  scan('PF:MACHINE:CD-0002');
+  const dlg = await screen.findByRole('dialog', { name: 'Assign to Machine' });
+  const pnGroup = within(dlg).getByRole('group', { name: /PN/ });
+  fireEvent.click(
+    within(pnGroup).getByRole('button', { name: /2027-60-8114-00/ }),
+  );
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(within(dialog()).getByRole('button', { name: 'Next' }));
+  expect(dialog()).toHaveTextContent('Review the assignment');
+  expectWorkerBeforeStation(dialog(), 'H. Nguyen');
+  fireEvent.keyDown(dialog(), { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const done = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
+  expectWorkerBeforeStation(done, 'H. Nguyen');
+  expect(writes()).toHaveLength(0);
 });

@@ -23,9 +23,12 @@ and the append-only `work_order_allocations` table); plus the Phase 12
 Hot rank constraints (positive, unique `priority_rank`) and the Hot
 list idempotency index on `audit_events`; plus the Phase 13 Workers
 registry (`workers`, with the `DELETED` audit event and the `Worker`
-audit entity). Business rules stay in the Domain/Application layers;
-this module owns table shape and the invariants PostgreSQL can enforce
-declaratively (CHECK, UNIQUE, FK).
+audit entity); plus the Phase 13 Worker identification
+(`areas.worker_identification_mode`, `areas.fixed_worker_id`) and the
+production audit identity (`part_movements.worker_id`,
+`work_order_allocations.allocated_by_worker_id`). Business rules stay
+in the Domain/Application layers; this module owns table shape and the
+invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
 
 Deliberate canonical decisions encoded here:
 
@@ -86,6 +89,7 @@ from app.domain.enums import (
     QuantityFlowStatus,
     RequestType,
     RouteMode,
+    WorkerIdentificationMode,
 )
 
 # Canonical PN form (PROJECT_PROFILE §7): uppercase, non-empty, and free
@@ -253,6 +257,24 @@ MOVEMENT_REVERSES_SQL = "(movement_type = 'REVERSED') = (reverses_movement_id IS
 # carry an optional reason.
 ALLOCATION_REVERSAL_REASON_SQL = "reverses_allocation_id IS NULL OR allocation_reason IS NOT NULL"
 
+# Worker identification (Phase 13 slice 3; PROJECT_PROFILE §8.4, §8.13,
+# §19): the Area's Worker ID mode in its full canonical vocabulary, and
+# a Fixed Worker that exists exactly in FIXED mode. Repeated verbatim by
+# migration `0019_phase13_worker_identity`.
+WORKER_IDENTIFICATION_MODE_SQL = (
+    "worker_identification_mode IN ("
+    + ", ".join(f"'{mode}'" for mode in WorkerIdentificationMode)
+    + ")"
+)
+AREA_FIXED_WORKER_SQL = "(worker_identification_mode = 'FIXED') = (fixed_worker_id IS NOT NULL)"
+
+# Production audit identity (Phase 13 slice 3, PLAN CD4): a Worker is
+# only ever recorded by a Scan Station command — a Management Movement
+# or allocation (no station) never carries one. Repeated verbatim by
+# migration `0019_phase13_worker_identity`.
+MOVEMENT_WORKER_STATION_SQL = "worker_id IS NULL OR station_id IS NOT NULL"
+ALLOCATION_WORKER_STATION_SQL = "allocated_by_worker_id IS NULL OR station_id IS NOT NULL"
+
 # Row-level idempotency guarantee of the application-command model
 # (Phase 6): one `device_event_id` identifies one command, which may
 # append several Movements numbered by `command_sequence`. Referenced
@@ -318,6 +340,17 @@ class Area(Base):
     # workflow itself arrives with Phase 10.
     is_terminal: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    # Worker ID mode (Phase 13 slice 3, PROJECT_PROFILE §8.4/§8.13):
+    # how the Area's Scan Station commands identify their Worker. The
+    # server default makes every insert path, fixtures included, Disabled.
+    worker_identification_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'DISABLED'")
+    )
+    # The configured Fixed Worker — set exactly in FIXED mode (CHECK).
+    # Workers are never deleted, so the FK never needs a delete action.
+    fixed_worker_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("workers.id", name="fk_areas_fixed_worker_id_workers")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -334,6 +367,10 @@ class Area(Base):
         # from NULL but never changed or cleared afterwards
         # (raise-on-change trigger owned by the Phase 3.5 migration).
         CheckConstraint(AREA_BARCODE_SQL, name=conv("ck_areas_barcode_value_namespace")),
+        CheckConstraint(
+            WORKER_IDENTIFICATION_MODE_SQL, name=conv("ck_areas_worker_identification_mode")
+        ),
+        CheckConstraint(AREA_FIXED_WORKER_SQL, name=conv("ck_areas_fixed_worker_shape")),
     )
 
 
@@ -1037,8 +1074,11 @@ class PartMovement(Base):
     explanation of Repair/Scrap/quantity adjustments, and the original
     Movement a compensating `REVERSED` row undoes — at most one
     reversal per original (UNIQUE), so a command can never be undone
-    twice. The remaining canonical later-phase columns (`worker_id`,
-    `scan_session_id`) deliberately do not exist yet.
+    twice. `worker_id` (Phase 13) is the Worker the station's Area mode
+    identified when the command was recorded — accountability metadata
+    only, NULL for Management Movements and for history recorded before
+    Phase 13 (never backfilled); `scan_session_id` arrives with Worker
+    Sessions.
     """
 
     __tablename__ = "part_movements"
@@ -1093,6 +1133,12 @@ class PartMovement(Base):
     destination_machine_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("machines.id", name="fk_part_movements_destination_machine_id_machines"),
+    )
+    # The Worker the station's Area mode identified (Phase 13 slice 3,
+    # PROJECT_PROFILE §8.11): accountability metadata only — never read
+    # by any production rule. Recorded only with a station (CHECK).
+    worker_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("workers.id", name="fk_part_movements_worker_id_workers")
     )
     occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     server_received_at: Mapped[datetime.datetime] = mapped_column(
@@ -1152,6 +1198,9 @@ class PartMovement(Base):
             MOVEMENT_REASON_REQUIRED_SQL, name=conv("ck_part_movements_reason_required")
         ),
         CheckConstraint(MOVEMENT_REVERSES_SQL, name=conv("ck_part_movements_reverses_shape")),
+        CheckConstraint(
+            MOVEMENT_WORKER_STATION_SQL, name=conv("ck_part_movements_worker_requires_station")
+        ),
         UniqueConstraint("device_event_id", "command_sequence", name=DEVICE_EVENT_ID_CONSTRAINT),
         # At most one reversal per original Movement (PROJECT_PROFILE
         # §16): the database, not only the eligibility check, refuses a
@@ -1253,8 +1302,9 @@ class WorkOrderAllocation(Base):
     `station_id` names the Stockroom Scan Station of a receiving
     confirmation (NULL for a Management allocation or adjustment);
     `actor_reference` stays a nullable, reference-free value until
-    authentication exists (Phase 14); Workers (`allocated_by_worker_id`)
-    arrive with Worker sessions (Phase 13).
+    authentication exists (Phase 14); `allocated_by_worker_id` (Phase 13)
+    is the Worker identified at the Stockroom station; NULL for
+    Management rows.
     """
 
     __tablename__ = "work_order_allocations"
@@ -1290,6 +1340,12 @@ class WorkOrderAllocation(Base):
         ),
     )
     actor_reference: Mapped[str | None] = mapped_column(Text)
+    # The Worker the Stockroom station's Area mode identified (Phase 13
+    # slice 3, PROJECT_PROFILE §8.12): recorded only with a station (CHECK).
+    allocated_by_worker_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("workers.id", name="fk_work_order_allocations_allocated_by_worker_id_workers"),
+    )
     allocated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
     command_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -1312,6 +1368,10 @@ class WorkOrderAllocation(Base):
         CheckConstraint(
             "command_sequence >= 1",
             name=conv("ck_work_order_allocations_command_sequence_positive"),
+        ),
+        CheckConstraint(
+            ALLOCATION_WORKER_STATION_SQL,
+            name=conv("ck_work_order_allocations_worker_requires_station"),
         ),
         UniqueConstraint(
             "reverses_allocation_id", name="uq_work_order_allocations_reverses_allocation_id"

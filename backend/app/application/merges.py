@@ -62,6 +62,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application import station_identity
 from app.application.common import device_event_id_text
 from app.application.errors import (
     ConflictError,
@@ -336,6 +337,8 @@ def merge_flows(
         # The Machine row lock alone is needed: the assigned total is
         # unchanged by a merge, so the derived Machine state never moves.
 
+    identity = station_identity.resolve_station_identity(session, station)
+
     # -- Writes — all inside the one open transaction ------------------
     operation_id = shared.operation_id
     metadata: dict[str, Any] = {
@@ -350,6 +353,7 @@ def merge_flows(
         event_id=event_id,
         metadata=metadata,
     )
+    station_identity.stamp_movements(staged.movements, identity)
     session.add_all(staged.movements)
     staged.result.updated_at = func.now()
     try:

@@ -34,6 +34,7 @@ import {
   resolveMachineScan,
   resolveScan,
   routeDeviationConfirmation,
+  scanBadge,
   stockAtStationArea,
   transferOutcomeUnknown,
   transferToStationArea,
@@ -102,6 +103,7 @@ import {
   StepButtons,
   StepRecap,
   UnknownStation,
+  WorkerPill,
 } from './scan-station-presentation';
 import {
   enterKeyHandler,
@@ -111,6 +113,7 @@ import {
   quantityValid,
   operationLabel,
   portionLabel,
+  stationWorkerName,
 } from './scan-station-wizard';
 import type { Notice } from './scan-station-presentation';
 
@@ -147,8 +150,13 @@ import type { Notice } from './scan-station-presentation';
  * `scan-station-intake-dialog` — straight from the scan when the PN
  * has no active quantity anywhere, and through the explicit `Receive
  * new quantity` choice of the PN action and intent dialogs when it
- * has, because a receipt never joins existing quantity. Worker sessions and their badge
- * gates (Phase 13) remain the one approved workflow NOT implemented
+ * has, because a receipt never joins existing quantity. Phase 13 added
+ * the Area Worker ID mode: the header Worker pill and the summaries'
+ * `Worker` row follow the station context (re-read on every resolved
+ * scan; the server judges the recorded Worker at confirmation), and a
+ * non-PartFlow value is checked as a Worker badge (a read). Worker
+ * sessions and their badge gates (later Phase 13 slices) remain the
+ * one approved workflow NOT implemented
  * here — it stays an honest placeholder, and the mock preview of it
  * survives only behind the development-only boundary below
  * (`?preview=mock`).
@@ -337,6 +345,16 @@ function StationList({ data }: { data: SelectorData }) {
 /* Station                                                             */
 /* ------------------------------------------------------------------ */
 
+/** The rejection of a value that is neither a PartFlow barcode nor an
+ * active Worker's badge (the approved GUI_DESIGN §4.4 wording). */
+const UNRECOGNIZED_BARCODE_NOTICE: Notice = {
+  kind: 'err',
+  icon: '✕',
+  title: 'Barcode not recognized',
+  detail:
+    'Scan a PartFlow Part Number or Machine barcode, or a registered Worker badge. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
+};
+
 /** One confirmed action of this station session (Last Action block).
  * `deviceEventId` identifies the complete application command, so the
  * Undo of §4.5 reverses exactly it; the station keeps the session's
@@ -510,6 +528,9 @@ function StationView({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [flow, setFlow] = useState<Flow | null>(null);
   const [resolving, setResolving] = useState(false);
+  // A Worker badge check is in flight (set together with `resolving`,
+  // which keeps every busy effect); only the placeholder differs.
+  const [checkingBadge, setCheckingBadge] = useState(false);
   // The session's completed commands, oldest first — the RAW session
   // log (§4.5). The Last Scanned PN block and the Undo action never
   // read its top directly: they follow `undoTarget` below.
@@ -772,6 +793,10 @@ function StationView({
           focusScan();
           return;
         }
+        // Re-read the station context on every resolved scan (non-
+        // blocking) so the Worker pill and the summary Worker row show
+        // the Area's Worker ID mode current at the scan.
+        context.reload();
         openResolution(resolution, parent);
       } catch (error) {
         focusScan();
@@ -806,6 +831,7 @@ function StationView({
           focusScan();
           return;
         }
+        context.reload();
         const known = inventoryReady?.machines.map((card) => card.machine);
         const machines = known?.some(
           (machine) => machine.id === resolution.machine.id,
@@ -849,6 +875,48 @@ function StationView({
         'Reconnect to PartFlow server before continuing. No scans or production updates will be recorded while offline.',
     });
   }, []);
+
+  // A non-PartFlow value may be a Worker badge: the server checks it (a
+  // read — nothing is recorded or refreshed). Badge scans are not used
+  // in Disabled or Fixed Worker Areas, so a known badge is answered
+  // with the not-used notice and never touches the Last Scanned PN, the
+  // Undo target, the open flow or any draft.
+  const renderedWorkerMode = ready?.workerIdentification.mode ?? null;
+  const checkBadge = useCallback(
+    async (badge: string) => {
+      setResolving(true);
+      setCheckingBadge(true);
+      try {
+        const result = await scanBadge(stationId, badge);
+        if (result.mode !== renderedWorkerMode) context.reload();
+        if (result.outcome === 'NOT_USED_IN_AREA') {
+          setNotice({
+            kind: 'warn',
+            icon: '⚠',
+            title: 'Worker badge scans are not used in this Area',
+            detail:
+              result.mode === 'FIXED'
+                ? 'This Area records its configured Worker automatically. No changes were recorded.'
+                : 'This Area does not record Worker identity. No changes were recorded.',
+          });
+        } else {
+          setNotice(UNRECOGNIZED_BARCODE_NOTICE);
+        }
+      } catch (error) {
+        setNotice({
+          kind: 'err',
+          icon: '✕',
+          title: 'Barcode could not be checked',
+          detail: `${errorMessage(error)} No changes were recorded.`,
+        });
+      } finally {
+        setResolving(false);
+        setCheckingBadge(false);
+        focusScan();
+      }
+    },
+    [stationId, renderedWorkerMode, context, focusScan],
+  );
 
   const handleScan = useCallback(() => {
     const input = inputRef.current;
@@ -901,17 +969,25 @@ function StationView({
         });
         return;
       case 'unknown':
-        focusScan();
-        setNotice({
-          kind: 'err',
-          icon: '✕',
-          title: 'Barcode not recognized',
-          detail:
-            'Scan a PartFlow Part Number barcode. To type a Part Number, select “Enter PN manually.” No changes were recorded.',
-        });
+        // An unrecognized `PF:` value is never a Worker badge (badges
+        // are the company's own barcodes, never in the PartFlow
+        // namespace): rejected locally without a request.
+        if (parsed.raw.toUpperCase().startsWith('PF:')) {
+          focusScan();
+          setNotice(UNRECOGNIZED_BARCODE_NOTICE);
+          return;
+        }
+        void checkBadge(parsed.raw);
         return;
     }
-  }, [writeBlocked, blockedNotice, focusScan, resolvePn, resolveMachine]);
+  }, [
+    writeBlocked,
+    blockedNotice,
+    focusScan,
+    resolvePn,
+    resolveMachine,
+    checkBadge,
+  ]);
 
   // Keyboard-wedge capture (§4.4): the main input never loses a scan
   // while no dialog is open — identical to the approved presentation.
@@ -1602,19 +1678,22 @@ function StationView({
             </div>
           ))}
         </div>
-        {/* Worker identity arrives with the Worker-session workflows
-            (the Area's Worker ID mode is not configured before then):
-            no Worker pill renders, exactly like a Disabled Area. In
-            production mode the connectivity chip and the theme control
-            keep their place in the header actions column. */}
+        {/* The Worker pill follows the Area's Worker ID mode from the
+            station context (none in a Disabled Area). In production
+            mode it shares the `.ss-headgroup` with the connectivity
+            chip and the theme control (the top navigation is hidden
+            there); standard mode renders it as the third header cell. */}
         {productionMode ? (
           <div className="ss-headgroup">
+            <WorkerPill identification={station.workerIdentification} />
             <div className="ss-headactions">
               <ConnectivityChip />
               <ThemeToggle compact />
             </div>
           </div>
-        ) : null}
+        ) : (
+          <WorkerPill identification={station.workerIdentification} />
+        )}
       </header>
 
       <div className="ss-body">
@@ -1642,8 +1721,10 @@ function StationView({
                     : status === 'connecting'
                       ? 'Connecting…'
                       : resolving
-                        ? 'Resolving Part Number…'
-                        : 'Scan Part Number or Machine barcode · Press Enter'
+                        ? checkingBadge
+                          ? 'Checking barcode…'
+                          : 'Resolving Part Number…'
+                        : 'Scan Part Number, Worker, or Machine barcode · Press Enter'
                 }
                 aria-label="Scan barcode"
                 onKeyDown={(e) => {
@@ -2827,6 +2908,7 @@ function TransferDialog({
                   : null,
                 'primary',
               ],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               implicitCompletion
                 ? [

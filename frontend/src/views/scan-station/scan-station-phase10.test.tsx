@@ -244,6 +244,7 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: false,
+      worker_identification: { mode: 'DISABLED', fixed_worker: null },
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -432,6 +433,8 @@ function handle(url: string, method: string, body: unknown): Response {
         'This action stocked the quantity at the Stockroom: it is manufacturing-complete and may already be allocated to Work Order Demand. Returning stocked quantity to production is not supported; adjust the allocation instead.',
       movements: [],
       restored: [],
+      worker: null,
+      reversed_by: null,
     });
   }
   const suggest = /^\/api\/allocations\/suggestion\?(.*)$/.exec(url);

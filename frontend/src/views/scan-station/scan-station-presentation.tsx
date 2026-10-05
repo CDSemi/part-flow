@@ -1,8 +1,8 @@
 // Scan Station presentation primitives shared by the real Scan Station
 // view (Phase 5) and the development-only mock preview of the later
 // workflows: notices, the confirmation summary, header Operations,
-// guidance, step recaps, wizard buttons, quantity-step key handling,
-// and the manual PN entry dialog. Production-safe — no mock imports
+// the Worker pill, guidance, step recaps, wizard buttons, quantity-step
+// key handling, and the manual PN entry dialog. Production-safe — no mock imports
 // (verified by src/production-boundary.test.ts).
 
 import {
@@ -15,9 +15,11 @@ import {
 } from 'react';
 import type { ReactNode } from 'react';
 
+import type { StationWorkerIdentification } from '../../api/scan-station';
 import { useRouter } from '../../app/router-context';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
+import { WorkerAvatar } from '../../components/WorkerAvatar';
 import { normalizePartNumber } from './barcode';
 import { GUIDE_MARKERS, parseWorkOrderLabel } from './scan-station-wizard';
 
@@ -219,6 +221,41 @@ export function ConfirmationSummary({ rows }: { rows: SummaryRow[] }) {
           </Fragment>
         ))}
     </dl>
+  );
+}
+/**
+ * The header Worker pill (GUI_DESIGN §4.3) from the station context's
+ * Worker identification. Disabled Areas render NO pill — Worker
+ * identity does not exist there. A Fixed Worker Area shows the Fixed
+ * Worker's avatar and name over `Fixed Worker`. A Scanned-session Area
+ * shows the unsigned state only (the session workflows arrive later).
+ */
+export function WorkerPill({
+  identification,
+}: {
+  identification: StationWorkerIdentification;
+}) {
+  if (identification.mode === 'DISABLED') return null;
+  const worker =
+    identification.mode === 'FIXED' ? identification.fixedWorker : null;
+  return (
+    <div className="ss-pill">
+      {worker ? (
+        <WorkerAvatar worker={worker} size="pill" />
+      ) : (
+        <span className="avatar" aria-hidden="true">
+          ?
+        </span>
+      )}
+      <span className="ss-pilltext">
+        <span className="val">{worker?.name ?? 'No Worker'}</span>
+        <span className="sub">
+          {identification.mode === 'FIXED'
+            ? 'Fixed Worker'
+            : 'Session · scan badge'}
+        </span>
+      </span>
+    </div>
   );
 }
 /**

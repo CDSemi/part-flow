@@ -52,9 +52,9 @@ replay of the same `device_event_id` + same intent returns the
 original committed result; a mismatched reuse is an explicit conflict;
 a race lost at COMMIT replays the winner. Undo of either command is
 `app.application.undo` (they are eligible commands like any other).
-Explicitly NOT here: Worker identity (Phase 13), any Manager approval
-flow (none exists for the operator-allowed addition), `STOCKED`
-(Phase 10).
+Both commands record the Worker identified by the station Area's mode
+(`station_identity`). Explicitly NOT here: any Manager approval flow
+(none exists for the operator-allowed addition), `STOCKED` (Phase 10).
 """
 
 import datetime
@@ -66,6 +66,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application import station_identity
 from app.application.common import device_event_id_text, flush, required_text
 from app.application.errors import (
     ConflictError,
@@ -262,6 +263,7 @@ def scrap_flow(
         machine = lock_machine(session, context.flow.current_machine_id)
         if machine is None:  # pragma: no cover - FK guarantees the row
             raise ConflictError(f"Machine {context.flow.current_machine_id} does not exist.")
+    identity = station_identity.resolve_station_identity(session, context.station)
 
     # -- Writes — all inside the one open transaction ------------------
     assigned_before = assigned_quantity(session, machine.id) if machine is not None else 0
@@ -292,6 +294,7 @@ def scrap_flow(
             metadata_=metadata,
         )
     )
+    station_identity.stamp_movements(command, identity)
     session.add_all(command)
     # The scrapped flow closes and leaves active production; its last
     # position and its history stay (PROJECT_PROFILE §11 Scrap).
@@ -557,6 +560,7 @@ def add_quantity(
         MovementType.QUANTITY_ADJUSTED,
         direct_processing=not area_has_machines(session, area.id),
     )
+    identity = station_identity.resolve_station_identity(session, station)
     flow = QuantityFlow(
         part_number=pn,
         quantity=quantity,
@@ -594,6 +598,7 @@ def add_quantity(
         command_sequence=1,
         metadata_=metadata,
     )
+    station_identity.stamp_movements([movement], identity)
     session.add(movement)
     try:
         session.commit()

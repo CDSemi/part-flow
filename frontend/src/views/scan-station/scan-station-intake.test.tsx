@@ -125,6 +125,12 @@ let healthDown: boolean;
 // What the SERVER stamps on the resolution: the received date follows
 // this instant, never the moment the operator confirms.
 let scannedAt: string;
+// Phase 13: the station Area's Worker identification (context).
+let workerIdentification: unknown;
+const FIXED_NGUYEN = {
+  mode: 'FIXED',
+  fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+};
 
 function areaRef(areaId: number) {
   const area = AREAS.find((item) => item.id === areaId)!;
@@ -263,6 +269,7 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: areaHasMachines,
+      worker_identification: workerIdentification,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -407,6 +414,8 @@ function handle(url: string, method: string, body: unknown): Response {
       eligible: false,
       ineligible_reason:
         'This action received new quantity into production and created the Work Order Demand behind it.',
+      worker: null,
+      reversed_by: null,
     });
   }
   throw new Error(`unexpected request ${method} ${url}`);
@@ -465,6 +474,7 @@ beforeEach(() => {
   committed = new Map();
   requests = [];
   nextMovementId = 700;
+  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
   nextFlowId = 300;
   writeFailure = null;
   areaHasMachines = true;
@@ -1113,4 +1123,24 @@ test('active quantity that appeared after the wizard opened refuses the receipt 
   expect(sent[1].body.device_event_id).toBe(sent[0].body.device_event_id);
   expect(sent[0].body.confirm_active_quantity).toBe(false);
   expect(sent[1].body.confirm_active_quantity).toBe(true);
+});
+
+/** `Worker` sits right before `Scan Station` with the expected value. */
+function expectWorkerBeforeStation(box: HTMLElement, name: string) {
+  const terms = within(box)
+    .getAllByRole('term')
+    .map((term) => term.textContent);
+  expect(terms.indexOf('Worker')).toBeGreaterThan(-1);
+  expect(terms.indexOf('Worker')).toBe(terms.indexOf('Scan Station') - 1);
+  const dt = within(box).getByText('Worker', { selector: 'dt' });
+  expect(dt.nextElementSibling?.textContent).toBe(name);
+}
+
+test('in a Fixed Worker Area the receipt summary names the Fixed Worker before the Scan Station', async () => {
+  workerIdentification = FIXED_NGUYEN;
+  await renderStation();
+
+  const box = await toConfirmation('7');
+  expectWorkerBeforeStation(box, 'H. Nguyen');
+  expect(receiptRequests()).toHaveLength(0);
 });

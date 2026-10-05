@@ -109,6 +109,15 @@ let records: Map<string, CommandRecord>;
 // string = force that ineligible reason); ids not in the map follow
 // the natural "only the newest command is eligible" rule.
 let previewVerdicts: Map<string, string | null>;
+// Phase 13: the station Area's Worker identification (context) and the
+// identity rows the server's undo preview reports.
+let workerIdentification: unknown;
+let previewIdentity: { worker: unknown; reversed_by: unknown };
+
+const FIXED_NGUYEN = {
+  mode: 'FIXED',
+  fixed_worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+};
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -345,6 +354,7 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
       has_machines: hasMachines(station.area_id),
+      worker_identification: workerIdentification,
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);
@@ -762,6 +772,7 @@ function handle(url: string, method: string, body: unknown): Response {
       ineligible_reason: reason,
       movements: record.movements,
       restored: reason === null ? record.restored : [],
+      ...previewIdentity,
     });
   }
 
@@ -893,6 +904,8 @@ beforeEach(() => {
   commandLog = [];
   records = new Map();
   previewVerdicts = new Map();
+  workerIdentification = { mode: 'DISABLED', fixed_worker: null };
+  previewIdentity = { worker: null, reversed_by: null };
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1021,6 +1034,71 @@ async function completeScrapOnPnA(count: number) {
   await notice();
 }
 
+/** The summary terms in order, asserting `Worker` sits right before
+ * `Scan Station` with the expected value. */
+function expectWorkerBeforeStation(box: HTMLElement, name: string) {
+  const terms = within(box)
+    .getAllByRole('term')
+    .map((term) => term.textContent);
+  expect(terms.indexOf('Worker')).toBeGreaterThan(-1);
+  expect(terms.indexOf('Worker')).toBe(terms.indexOf('Scan Station') - 1);
+  expect(summaryValue(box, 'Worker')).toBe(name);
+}
+
+/* ============ Worker identity in the summaries ============ */
+
+test('in a Fixed Worker Area the scrap, addition and DONE summaries name the Fixed Worker before the Scan Station', async () => {
+  workerIdentification = FIXED_NGUYEN;
+  await renderStation('LATHE-ST-01');
+
+  // Scrap.
+  scan('PF:PN:PN-A');
+  let actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Scrap damaged quantity/ }),
+  );
+  let box = await screen.findByRole('dialog', {
+    name: 'Scrap damaged quantity',
+  });
+  scrapScan(box, 'PF:SCRAP');
+  fireEvent.change(within(box).getByLabelText(/Scrap reason/), {
+    target: { value: 'gouged face' },
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  expectWorkerBeforeStation(box, 'H. Nguyen');
+  fireEvent.keyDown(box, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // Quantity addition.
+  scan('PF:PN:PN-A');
+  actions = await screen.findByRole('dialog', { name: 'Select an action' });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Add more quantity/ }),
+  );
+  box = await screen.findByRole('dialog', { name: 'Add more quantity' });
+  fireEvent.change(quantityInput(box), { target: { value: '3' } });
+  fireEvent.change(within(box).getByLabelText(/Reason/), {
+    target: { value: 'found with the lot' },
+  });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  expectWorkerBeforeStation(box, 'H. Nguyen');
+  fireEvent.keyDown(box, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // Machine DONE.
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  box = await screen.findByRole('dialog', { name: 'Complete Area processing' });
+  fireEvent.click(within(box).getByRole('button', { name: 'Next' }));
+  expectWorkerBeforeStation(box, 'H. Nguyen');
+  expect(writes()).toHaveLength(0);
+});
+
 /* ============ Undo ============ */
 
 test('UNDO is disabled with no completed action, opens the server preview summary after one, asks the final warning question, and reverses under its own device_event_id', async () => {
@@ -1078,6 +1156,40 @@ test('UNDO is disabled with no completed action, opens the server preview summar
   expect(lastActionBlock()).toHaveTextContent('No Part Number actions yet');
   expect(undoButton()).toBeDisabled();
   await waitFor(() => expect(document.activeElement).toBe(input));
+});
+
+test('the Undo summary shows the Worker and Reversed by exactly as the server previews them', async () => {
+  // A Disabled station context with a non-null `reversed_by`: the rows
+  // come from the preview — the client derives nothing.
+  previewIdentity = {
+    worker: { id: 7, name: 'H. Nguyen', avatar_updated_at: null },
+    reversed_by: { id: 8, name: 'T. Le', avatar_updated_at: null },
+  };
+  await renderStation('LATHE-ST-01');
+  await completeDoneOnPnB();
+
+  fireEvent.click(undoButton());
+  let box = await screen.findByRole('dialog', {
+    name: 'Reverse this Part Number action?',
+  });
+  expect(summaryValue(box, 'Worker')).toBe('H. Nguyen');
+  expect(summaryValue(box, 'Reversed by')).toBe('T. Le');
+  const terms = within(box)
+    .getAllByRole('term')
+    .map((term) => term.textContent);
+  expect(terms.indexOf('Worker')).toBe(terms.indexOf('Machine') + 1);
+  expect(terms.indexOf('Reversed by')).toBe(terms.indexOf('Recorded') + 1);
+  fireEvent.keyDown(box, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // Both null (a Disabled original, a Disabled station): neither row.
+  previewIdentity = { worker: null, reversed_by: null };
+  fireEvent.click(undoButton());
+  box = await screen.findByRole('dialog', {
+    name: 'Reverse this Part Number action?',
+  });
+  expect(within(box).queryByText('Worker', { selector: 'dt' })).toBeNull();
+  expect(within(box).queryByText('Reversed by', { selector: 'dt' })).toBeNull();
 });
 
 test('after a confirmed Undo the Last Scanned PN advances to the previous completed operation', async () => {

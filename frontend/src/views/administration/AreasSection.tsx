@@ -9,9 +9,16 @@ import {
   listOperations,
   updateArea,
 } from '../../api/environment';
-import type { Area, Department, Operation } from '../../api/environment';
+import type {
+  Area,
+  Department,
+  Operation,
+  WorkerIdentificationMode,
+} from '../../api/environment';
 import { listMachines } from '../../api/machines';
 import type { Machine } from '../../api/machines';
+import { listWorkers } from '../../api/workers';
+import type { Worker } from '../../api/workers';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
@@ -35,8 +42,17 @@ import {
 // barcode are stable — display name, description and color may change
 // without affecting historical Movements. The Machine-assignment mode
 // column follows from the Area's Machines (Direct processing / Queue
-// → assign), never from a per-count configuration; Worker ID modes
-// arrive with the Worker-session workflows of a later phase.
+// → assign), never from a per-count configuration. The Worker ID mode
+// (Phase 13) is Disabled or Fixed Worker with its configured Fixed
+// Worker; Scanned session is shown but not selectable until Worker
+// sessions and badge confirmation exist. The server judges every rule
+// (an inactive Fixed Worker, deactivating a Worker who is still fixed).
+
+const WORKER_ID_MODE_LABELS: Record<WorkerIdentificationMode, string> = {
+  DISABLED: 'Disabled',
+  FIXED: 'Fixed Worker',
+  SCANNED: 'Scanned session',
+};
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; area: Area };
 
@@ -48,6 +64,7 @@ export function AreasSection() {
   const departmentsData = useApiData(listDepartments);
   const operationsData = useApiData(listOperations);
   const machinesData = useApiData(listMachines);
+  const workersData = useApiData(listWorkers);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
   const header = (ready: boolean, canCreate: boolean) => (
@@ -76,13 +93,15 @@ export function AreasSection() {
     departmentsData.reload();
     operationsData.reload();
     machinesData.reload();
+    workersData.reload();
   };
 
   if (
     areasData.state.status === 'loading' ||
     departmentsData.state.status === 'loading' ||
     operationsData.state.status === 'loading' ||
-    machinesData.state.status === 'loading'
+    machinesData.state.status === 'loading' ||
+    workersData.state.status === 'loading'
   ) {
     return (
       <>
@@ -100,13 +119,16 @@ export function AreasSection() {
           ? operationsData.state
           : machinesData.state.status === 'error'
             ? machinesData.state
-            : null;
+            : workersData.state.status === 'error'
+              ? workersData.state
+              : null;
   if (
     failed !== null ||
     areasData.state.status !== 'ready' ||
     departmentsData.state.status !== 'ready' ||
     operationsData.state.status !== 'ready' ||
-    machinesData.state.status !== 'ready'
+    machinesData.state.status !== 'ready' ||
+    workersData.state.status !== 'ready'
   ) {
     return (
       <>
@@ -124,6 +146,7 @@ export function AreasSection() {
   const departments = departmentsData.state.data;
   const operations = operationsData.state.data;
   const machines = machinesData.state.data;
+  const workers = workersData.state.data;
   const activeDepartments = departments.filter((d) => d.isActive);
 
   const completeWrite = () => {
@@ -149,12 +172,14 @@ export function AreasSection() {
         and color may change without affecting historical Movements. An Area
         supporting multiple Operations (e.g. External) requires Operation
         resolution or confirmation at scan time. Deactivating an Area that still
-        holds quantity is blocked with an explanation. Worker ID modes are
-        configured with the Worker-session workflows of a later phase.
+        holds quantity is blocked with an explanation. In Fixed Worker mode
+        every production action at the Area's Scan Stations records the Fixed
+        Worker; a Worker who is an Area's Fixed Worker cannot be deactivated.
       </div>
       {dialog?.kind === 'new' ? (
         <AreaDialog
           departments={activeDepartments}
+          workers={workers}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={async (input) => {
@@ -164,6 +189,8 @@ export function AreasSection() {
               description: input.description,
               color: input.color ?? null,
               isTerminal: input.isTerminal,
+              workerIdentificationMode: input.workerIdentificationMode,
+              fixedWorkerId: input.fixedWorkerId,
             });
             completeWrite();
           }}
@@ -173,6 +200,7 @@ export function AreasSection() {
         <AreaDialog
           area={dialog.area}
           departments={departments}
+          workers={workers}
           writeBlocked={writeBlocked}
           onCancel={() => setDialog(null)}
           onSave={async (input) => {
@@ -182,6 +210,8 @@ export function AreasSection() {
               ...(input.color !== undefined ? { color: input.color } : {}),
               isTerminal: input.isTerminal,
               isActive: input.isActive,
+              workerIdentificationMode: input.workerIdentificationMode,
+              fixedWorkerId: input.fixedWorkerId,
             });
             completeWrite();
           }}
@@ -257,7 +287,7 @@ function AreasTable({
                 {machineNames.length > 0 ? machineNames.join(' · ') : '—'}
               </td>
               <td className="modecell" data-label="Worker ID mode">
-                —
+                {WORKER_ID_MODE_LABELS[area.workerIdentificationMode]}
               </td>
               <td>
                 {area.isTerminal ? (
@@ -278,12 +308,15 @@ function AreasTable({
 function AreaDialog({
   area,
   departments,
+  workers,
   writeBlocked,
   onCancel,
   onSave,
 }: {
   area?: Area;
   departments: Department[];
+  /** Every Worker; only active ones can be chosen as Fixed Worker. */
+  workers: Worker[];
   writeBlocked: boolean;
   onCancel: () => void;
   /** Persist the entry (`color` undefined = untouched, keep as-is).
@@ -295,6 +328,9 @@ function AreaDialog({
     color?: string | null;
     isTerminal: boolean;
     isActive: boolean;
+    workerIdentificationMode: WorkerIdentificationMode;
+    /** The chosen Worker in Fixed Worker mode; null otherwise. */
+    fixedWorkerId: number | null;
   }) => Promise<void>;
 }) {
   const [departmentId, setDepartmentId] = useState(
@@ -306,6 +342,12 @@ function AreaDialog({
   const [colorTouched, setColorTouched] = useState(false);
   const [isTerminal, setIsTerminal] = useState(area?.isTerminal ?? false);
   const [isActive, setIsActive] = useState(area?.isActive ?? true);
+  const [workerIdMode, setWorkerIdMode] = useState<WorkerIdentificationMode>(
+    area?.workerIdentificationMode ?? 'DISABLED',
+  );
+  const [fixedWorkerId, setFixedWorkerId] = useState<number | null>(
+    area?.fixedWorkerId ?? null,
+  );
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -315,8 +357,15 @@ function AreaDialog({
     departments.find(
       (department) => department.id === (area?.departmentId ?? departmentId),
     )?.name ?? '—';
+  const activeWorkers = workers.filter((worker) => worker.isActive);
+  // An inactive current Fixed Worker (impossible through the API, only
+  // from old fixtures) stays visible as a disabled option.
+  const inactiveFixedWorker = workers.find(
+    (worker) => worker.id === fixedWorkerId && !worker.isActive,
+  );
+  const fixedWorkerMissing = workerIdMode === 'FIXED' && fixedWorkerId === null;
   const submit = async () => {
-    if (!trimmedName) {
+    if (!trimmedName || fixedWorkerMissing) {
       setAttempted(true);
       return;
     }
@@ -336,6 +385,8 @@ function AreaDialog({
             : {}),
         isTerminal,
         isActive,
+        workerIdentificationMode: workerIdMode,
+        fixedWorkerId: workerIdMode === 'FIXED' ? fixedWorkerId : null,
       });
     } catch (error) {
       setServerError(errorMessage(error));
@@ -417,6 +468,75 @@ function AreaDialog({
             }}
           />
         </AdminField>
+        <AdminField label="Worker ID mode">
+          <select
+            className="field"
+            value={workerIdMode}
+            onChange={(event) =>
+              setWorkerIdMode(event.target.value as WorkerIdentificationMode)
+            }
+          >
+            <option value="DISABLED">{WORKER_ID_MODE_LABELS.DISABLED}</option>
+            <option value="FIXED">{WORKER_ID_MODE_LABELS.FIXED}</option>
+            <option
+              value="SCANNED"
+              disabled={area?.workerIdentificationMode !== 'SCANNED'}
+            >
+              Scanned session (not available yet)
+            </option>
+          </select>
+        </AdminField>
+        {workerIdMode !== 'SCANNED' ? (
+          <div className="ad-fieldnotes">
+            <p className="ad-fieldhelp">
+              {workerIdMode === 'FIXED'
+                ? "Every production action at this Area's Scan Stations records the Fixed Worker."
+                : "No Worker is recorded for this Area's production activity."}
+            </p>
+          </div>
+        ) : null}
+        {workerIdMode === 'FIXED' ? (
+          <>
+            <AdminField label="Fixed Worker">
+              <select
+                className="field"
+                value={fixedWorkerId === null ? '' : String(fixedWorkerId)}
+                disabled={activeWorkers.length === 0}
+                onChange={(event) =>
+                  setFixedWorkerId(
+                    event.target.value === ''
+                      ? null
+                      : Number(event.target.value),
+                  )
+                }
+              >
+                <option value="">Choose a Worker</option>
+                {inactiveFixedWorker ? (
+                  <option value={String(inactiveFixedWorker.id)} disabled>
+                    {inactiveFixedWorker.name} (inactive)
+                  </option>
+                ) : null}
+                {activeWorkers.map((worker) => (
+                  <option key={worker.id} value={String(worker.id)}>
+                    {worker.name} · {worker.badgeBarcode}
+                  </option>
+                ))}
+              </select>
+            </AdminField>
+            {activeWorkers.length === 0 ? (
+              <div className="ad-fieldnotes">
+                <p className="ad-fieldhelp">
+                  No active Workers — add one in Administration → Workers.
+                </p>
+              </div>
+            ) : null}
+            {fixedWorkerMissing && attempted ? (
+              <div className="err" role="alert">
+                Choose the Fixed Worker.
+              </div>
+            ) : null}
+          </>
+        ) : null}
         <ActiveField
           label="Terminal Area — holds completed quantity (e.g. Stockroom)"
           checked={isTerminal}

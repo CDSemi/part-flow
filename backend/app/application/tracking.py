@@ -113,6 +113,7 @@ from app.infrastructure.models import (
     QuantityFlow,
     QuantityFlowLineage,
     RouteTemplate,
+    Worker,
     WorkOrder,
     WorkOrderAllocation,
     WorkOrderDemand,
@@ -248,6 +249,9 @@ class RouteDeviationView(NamedTuple):
     actual_area: Area
     actual_operation: Operation | None
     reason: str | None
+    # The Worker the deviation Movement recorded (Phase 13) — the "who"
+    # of GUI_DESIGN §7.2 item 4; None when none was recorded.
+    worker: Worker | None
 
 
 class LineageLink(NamedTuple):
@@ -311,6 +315,8 @@ class HistoryReferences(NamedTuple):
     areas: Mapping[int, Area]
     operations: Mapping[int, Operation]
     machines: Mapping[int, Machine]
+    # The Workers the page's Movements recorded (Phase 13), by current name.
+    workers: Mapping[int, Worker]
 
 
 class MovementPage(NamedTuple):
@@ -769,6 +775,11 @@ def _deviations(
                     operations.get(actual_operation_id) if actual_operation_id else None
                 ),
                 reason=recorded.get("reason"),
+                worker=(
+                    session.get(Worker, movement.worker_id)
+                    if movement.worker_id is not None
+                    else None
+                ),
             )
         )
     return found
@@ -1117,6 +1128,15 @@ def movement_history(
         else {}
     )
     operations = _operations(session, {movement.operation_id for movement in page})
+    worker_ids = {movement.worker_id for movement in page if movement.worker_id is not None}
+    workers = (
+        {
+            worker.id: worker
+            for worker in session.scalars(select(Worker).where(Worker.id.in_(worker_ids)))
+        }
+        if worker_ids
+        else {}
+    )
     movements = [
         HistoryMovement(
             movement=movement,
@@ -1144,7 +1164,7 @@ def movement_history(
         total=total,
         has_more=has_more,
         references=HistoryReferences(
-            areas=_all_areas(session), operations=operations, machines=machines
+            areas=_all_areas(session), operations=operations, machines=machines, workers=workers
         ),
     )
 

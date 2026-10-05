@@ -34,6 +34,7 @@ import {
   operationLabel,
   quantityKeyHandler,
   quantityValid,
+  stationWorkerName,
 } from './scan-station-wizard';
 
 /**
@@ -500,6 +501,7 @@ export function AssignToMachineDialog({
                 remaining(flow.quantity, confirmed),
                 partial ? 'primary' : undefined,
               ],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', RECORDED_EVENT.ASSIGN, 'secondary'],
             ]}
@@ -791,6 +793,7 @@ export function MachineActionDialog({
                   partial ? remaining(max, confirmed) : null,
                   'primary',
                 ],
+                ['Worker', stationWorkerName(station), 'secondary'],
                 ['Scan Station', station.stationId, 'secondary'],
                 ['Recorded event', RECORDED_EVENT[kind], 'secondary'],
               ]}

@@ -49,7 +49,13 @@ quantity on each Machine (the Machine cards — ON_MACHINE quantity only,
 with the derived Machine operational state), directly processing
 quantity (Areas without Machines — no placeholder cards, no
 queued/on-Machine figures) and finished quantity (READY_TO_TRANSFER —
-Area summary, never a Machine card). Boundaries: no Worker barcodes.
+Area summary, never a Machine card).
+
+Worker identity (Phase 13 slice 3): the station context carries the
+Area's Worker ID mode and, in Fixed Worker mode, the Fixed Worker
+(`station_identity.worker_identification`). Worker badges are answered
+by :func:`badge_scan` (a read — nothing is recorded or refreshed);
+Worker sessions arrive later.
 
 Receive Quantity (Phase 10.5, PROJECT_PROFILE §14): the resolution
 also reports whether the station may INTRODUCE this PN here — no
@@ -72,12 +78,13 @@ quantity. Stocked flows are closed and never inventory.
 """
 
 import datetime
+from enum import StrEnum
 from typing import Final, Literal, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
-from app.application import allocations, intake, work_orders
+from app.application import allocations, intake, work_orders, workers
 from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.machines import (
@@ -100,6 +107,7 @@ from app.application.projections import (
     processing_state_of,
     visited_area_ids,
 )
+from app.application.station_identity import WorkerIdentification, worker_identification
 from app.application.transfers import (
     RouteStatus,
     active_area_operations,
@@ -112,6 +120,7 @@ from app.domain.enums import (
     MovementType,
     ProcessingState,
     QuantityFlowStatus,
+    WorkerIdentificationMode,
 )
 from app.infrastructure.models import (
     MACHINE_BARCODE_PREFIX,
@@ -140,6 +149,9 @@ class StationContext(NamedTuple):
     department: Department
     operations: list[Operation]
     has_machines: bool
+    # The Area's Worker ID mode and Fixed Worker (Phase 13) — the
+    # configuration as read now; every command judges it again.
+    worker_identification: WorkerIdentification
 
 
 def station_context(session: Session, station_id: str) -> StationContext:
@@ -156,7 +168,50 @@ def station_context(session: Session, station_id: str) -> StationContext:
         # The Area mode (PROJECT_PROFILE §12): follows from its active
         # Machines — the same judgement every command and derivation uses.
         has_machines=area_has_machines(session, area.id),
+        worker_identification=worker_identification(session, area),
     )
+
+
+# ---------------------------------------------------------------------------
+# Worker badge scans (Phase 13 slice 3 — GUI_DESIGN §4.12)
+# ---------------------------------------------------------------------------
+
+
+class BadgeScanOutcome(StrEnum):
+    """How a station answers a scanned Worker badge; widens with sessions."""
+
+    # A registered ACTIVE Worker's badge in an Area that does not
+    # identify Workers by badge (Disabled or Fixed Worker).
+    NOT_USED_IN_AREA = "NOT_USED_IN_AREA"
+    # Not a badge of any active Worker.
+    UNKNOWN = "UNKNOWN"
+
+
+class BadgeScanResult(NamedTuple):
+    outcome: BadgeScanOutcome
+    # The Area's Worker ID mode, so the station can tell a stale context.
+    mode: WorkerIdentificationMode
+
+
+def badge_scan(session: Session, station_id: str, badge: object) -> BadgeScanResult:
+    """A read — nothing is recorded, nothing is refreshed (GUI_DESIGN §4.12).
+
+    The station must be fit for production use (404 / 409 as every
+    station read). In a Disabled or Fixed Worker Area an active
+    Worker's badge (matched by the one badge rule, any letter case) is
+    answered as not used here and anything else as unknown; a Scanned
+    session Area is refused until Worker sign-in exists.
+    """
+    _, area = require_production_station(session, station_id)
+    mode = WorkerIdentificationMode(area.worker_identification_mode)
+    if mode is WorkerIdentificationMode.SCANNED:
+        raise ConflictError("Worker sign-in is not available yet. Nothing was recorded.")
+    outcome = (
+        BadgeScanOutcome.NOT_USED_IN_AREA
+        if workers.resolve_badge(session, badge) is not None
+        else BadgeScanOutcome.UNKNOWN
+    )
+    return BadgeScanResult(outcome=outcome, mode=mode)
 
 
 # ---------------------------------------------------------------------------

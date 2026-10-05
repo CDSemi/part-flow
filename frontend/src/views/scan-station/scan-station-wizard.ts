@@ -1,11 +1,15 @@
 // Scan Station wizard helpers (Phase 5) — non-component logic shared by
 // the real Scan Station view and the development-only mock preview:
 // notice timing, guidance markers, Work Order label parsing,
-// quantity-step key handling, and quantity validation. Production-safe
-// — no mock imports.
+// quantity-step key handling, quantity validation, and the Worker name
+// of the confirmation summaries. Production-safe — no mock imports.
 
 import { operationLabel } from '../area-presentation';
-import type { FlowInArea, MachineRef } from '../../api/scan-station';
+import type {
+  FlowInArea,
+  MachineRef,
+  StationContext,
+} from '../../api/scan-station';
 import { applyQuantityKey } from '../../components/quantity-input';
 
 export const NOTICE_OK_MS = 4000;
@@ -173,3 +177,16 @@ export function portionLabel(
 // The operator-facing Operation label is shared with the Area Board
 // (views/area-presentation) so both name an Operation identically.
 export { operationLabel };
+
+/**
+ * The `Worker` value of a production confirmation summary: the Fixed
+ * Worker the station context reports in a Fixed Worker Area, null
+ * otherwise (the row is then omitted). Presentation of the server's
+ * configuration only — the command judges the recorded Worker again at
+ * confirmation.
+ */
+export function stationWorkerName(station: StationContext): string | null {
+  return station.workerIdentification.mode === 'FIXED'
+    ? (station.workerIdentification.fixedWorker?.name ?? null)
+    : null;
+}

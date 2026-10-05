@@ -38,6 +38,15 @@ IMPLEMENTATION_ROADMAP Phase 3.5, GUI_DESIGN §9):
   re-read under it, held until COMMIT, so a concurrent deactivation of
   the parent and the child write have one serial outcome (Phase 13
   slice 2c).
+- An Area's Worker ID mode (Phase 13 slice 3, PROJECT_PROFILE §8.13,
+  §19) is Disabled or Fixed Worker; Scanned session is refused until
+  Worker sessions and the badge gates exist. A Fixed Worker exists
+  exactly in Fixed Worker mode — leaving the mode clears it — and must
+  be an active Worker whenever a request makes or changes it or
+  activates the Area, judged on the Worker row locked FOR SHARE (taken
+  after the Area row), so a concurrent Worker deactivation and the save
+  have one serial outcome. The mode and the Fixed Worker join the Area
+  audit snapshot.
 - The Machine Asset Tag format is a single prefix + zero-padded
   numeric sequence (never a template engine). ``next_sequence`` is the
   persisted never-reuse counter owned by Machine creation (Phase 3.5
@@ -78,7 +87,12 @@ from app.application.common import (
     required_text,
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType, QuantityFlowStatus
+from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
+    QuantityFlowStatus,
+    WorkerIdentificationMode,
+)
 from app.infrastructure.models import (
     Area,
     Department,
@@ -86,6 +100,7 @@ from app.infrastructure.models import (
     Operation,
     QuantityFlow,
     ScanStation,
+    Worker,
 )
 
 # PF:AREA namespace (PROJECT_PROFILE §10): the barcode is derived from
@@ -150,6 +165,8 @@ def _area_snapshot(area: Area) -> dict[str, Any]:
         "icon_url": area.icon_url,
         "is_terminal": area.is_terminal,
         "is_active": area.is_active,
+        "worker_identification_mode": area.worker_identification_mode,
+        "fixed_worker_id": area.fixed_worker_id,
     }
 
 
@@ -325,6 +342,81 @@ _AREA_CONFLICTS: Final = {
 }
 
 
+def _worker_identification(
+    session: Session,
+    *,
+    current_mode: str,
+    current_fixed_worker_id: int | None,
+    mode: object,
+    fixed_worker_id: int | None | UnsetType,
+    is_new: bool,
+    activating: bool,
+) -> tuple[WorkerIdentificationMode, int | None]:
+    """The Area's target Worker ID mode and Fixed Worker, validated.
+
+    Reads only — the caller assigns. Leaving Fixed Worker mode clears
+    the Fixed Worker without the client sending ``null``. Scanned
+    session mode is refused until Worker sessions and the badge gates
+    exist (an Area already in it through a fixture may be saved
+    unchanged). The Fixed Worker is judged — locked FOR SHARE and
+    re-read, so a concurrent deactivation and this save have one serial
+    outcome — only when this request makes or changes it, or activates
+    the Area: an unrelated edit never re-judges a Fixed Worker.
+    """
+    current = WorkerIdentificationMode(current_mode)
+    requested: WorkerIdentificationMode | None = None
+    if not isinstance(mode, UnsetType):
+        modes = {item.value for item in WorkerIdentificationMode}
+        if not isinstance(mode, str) or mode not in modes:
+            raise InvalidInputError("Worker ID mode must be DISABLED, FIXED or SCANNED.")
+        requested = WorkerIdentificationMode(mode)
+    if isinstance(fixed_worker_id, bool):
+        raise InvalidInputError("Fixed Worker reference must be a Worker id.")
+
+    target_mode = requested if requested is not None else current
+    target_fixed: int | None
+    if not isinstance(fixed_worker_id, UnsetType):
+        target_fixed = fixed_worker_id
+    elif target_mode is WorkerIdentificationMode.FIXED:
+        target_fixed = current_fixed_worker_id
+    else:
+        target_fixed = None
+
+    if (
+        requested is WorkerIdentificationMode.SCANNED
+        and current is not WorkerIdentificationMode.SCANNED
+    ):
+        raise InvalidInputError(
+            "Scanned session mode is not available yet. Choose Disabled or Fixed Worker."
+        )
+    if target_mode is WorkerIdentificationMode.FIXED and target_fixed is None:
+        raise InvalidInputError("Choose the Fixed Worker for Fixed Worker mode.")
+    if target_mode is not WorkerIdentificationMode.FIXED and target_fixed is not None:
+        raise InvalidInputError("A Fixed Worker can be set only in Fixed Worker mode.")
+
+    if target_mode is WorkerIdentificationMode.FIXED and target_fixed is not None:
+        configuration_changes = (
+            is_new or target_mode is not current or target_fixed != current_fixed_worker_id
+        )
+        if configuration_changes or activating:
+            worker = session.get(
+                Worker, target_fixed, with_for_update=_PARENT_LOCK, populate_existing=True
+            )
+            if worker is None:
+                raise InvalidInputError(f"Worker {target_fixed} does not exist.")
+            if not worker.is_active:
+                if configuration_changes:
+                    raise ConflictError(
+                        f"Worker '{worker.name}' is inactive and cannot be the Fixed Worker"
+                        " of an Area. Choose an active Worker."
+                    )
+                raise ConflictError(
+                    f"The Fixed Worker '{worker.name}' is inactive. Choose an active Fixed"
+                    " Worker before activating this Area."
+                )
+    return target_mode, target_fixed
+
+
 def create_area(
     session: Session,
     *,
@@ -334,6 +426,8 @@ def create_area(
     color: str | None = None,
     icon_url: str | None = None,
     is_terminal: bool = False,
+    worker_identification_mode: object = UNSET,
+    fixed_worker_id: int | None | UnsetType = UNSET,
 ) -> Area:
     clean_name = required_text(name, "Area name")
     # Parent-activity read: the Department is judged under FOR SHARE.
@@ -346,6 +440,17 @@ def create_area(
         raise ConflictError(
             f"Department '{department.name}' is inactive and cannot receive new Areas."
         )
+    # A new Area starts Disabled unless the request configures it; a
+    # Fixed Worker is locked FOR SHARE after the Department.
+    mode, fixed_worker = _worker_identification(
+        session,
+        current_mode=WorkerIdentificationMode.DISABLED,
+        current_fixed_worker_id=None,
+        mode=worker_identification_mode,
+        fixed_worker_id=fixed_worker_id,
+        is_new=True,
+        activating=False,
+    )
 
     area = Area(
         department_id=department.id,
@@ -354,6 +459,8 @@ def create_area(
         color=optional_text(color),
         icon_url=optional_text(icon_url),
         is_terminal=is_terminal,
+        worker_identification_mode=mode.value,
+        fixed_worker_id=fixed_worker,
     )
     session.add(area)
     # Two steps, one transaction: the INSERT assigns the stable id, the
@@ -383,6 +490,8 @@ def update_area(
     icon_url: str | None | UnsetType = UNSET,
     is_terminal: object = UNSET,
     is_active: object = UNSET,
+    worker_identification_mode: object = UNSET,
+    fixed_worker_id: int | None | UnsetType = UNSET,
 ) -> Area:
     # Every edit loads the Area row under its lock FIRST — before the
     # audit snapshot and any field mutation — and re-reads the latest
@@ -414,6 +523,19 @@ def update_area(
     if not isinstance(is_active, UnsetType):
         requested_active = required_flag(is_active, "Area active status")
 
+    # Worker ID mode and Fixed Worker (Phase 13): judged before the
+    # first assignment — the Fixed Worker lock (FOR SHARE) is the second
+    # lock, after this Area row, and no read follows a write.
+    mode, fixed_worker = _worker_identification(
+        session,
+        current_mode=area.worker_identification_mode,
+        current_fixed_worker_id=area.fixed_worker_id,
+        mode=worker_identification_mode,
+        fixed_worker_id=fixed_worker_id,
+        is_new=False,
+        activating=requested_active is True and not area.is_active,
+    )
+
     if not isinstance(name, UnsetType):
         clean_name = required_text(name, "Area name")
         if clean_name != area.name:
@@ -439,6 +561,12 @@ def update_area(
         if terminal != area.is_terminal:
             area.is_terminal = terminal
             changed = True
+    if mode.value != area.worker_identification_mode:
+        area.worker_identification_mode = mode.value
+        changed = True
+    if fixed_worker != area.fixed_worker_id:
+        area.fixed_worker_id = fixed_worker
+        changed = True
 
     # requested_active was validated, and the row locked and re-read,
     # before any mutation above, so area.is_active is the latest

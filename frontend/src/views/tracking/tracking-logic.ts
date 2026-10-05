@@ -325,8 +325,8 @@ function woText(workOrderNumber: string | null): string {
 
 /**
  * The audit-facing description of one Movement: Areas, quantity,
- * Quantity Flow, Machines, station, reasons and relationships —
- * canonical recorded data, never an interpretation.
+ * Quantity Flow, Machines, recorded Worker, station, reasons and
+ * relationships — canonical recorded data, never an interpretation.
  */
 export function describeMovement(movement: TrackingMovement): string {
   const qf = flowId(movement.quantityFlowId);
@@ -426,6 +426,7 @@ export function describeMovement(movement: TrackingMovement): string {
     default:
       parts.push(`${from ? `${from} → ` : ''}${to}`, qty, qf);
   }
+  if (movement.worker) parts.push(`W: ${movement.worker.name}`);
   if (movement.stationId) parts.push(movement.stationId);
   return parts.join(' · ');
 }

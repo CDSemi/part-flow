@@ -24,6 +24,24 @@ export interface Worker {
   avatarUpdatedAt: string | null;
 }
 
+/** The identity a production read names: who, and the avatar version. */
+export type WorkerRef = Pick<Worker, 'id' | 'name' | 'avatarUpdatedAt'>;
+
+/** Wire shape of a Worker reference embedded in another response. */
+export interface WorkerRefWire {
+  id: number;
+  name: string;
+  avatar_updated_at: string | null;
+}
+
+export function toWorkerRef(wire: WorkerRefWire): WorkerRef {
+  return {
+    id: wire.id,
+    name: wire.name,
+    avatarUpdatedAt: wire.avatar_updated_at,
+  };
+}
+
 interface WorkerWire {
   id: number;
   name: string;

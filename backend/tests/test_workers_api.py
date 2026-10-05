@@ -17,6 +17,7 @@ migrated to head by the real Alembic chain:
 - the avatar: PUT/GET/DELETE, ETag/304, identical-upload no-op, and
   every refusal (413, 415, 422, 404) with nothing stored;
 - the badge resolver used by the later Scan Station slices;
+- Phase 13 S3: the Fixed Worker of any Area cannot be deactivated;
 - registry isolation: only the registry's owners touch the `workers`
   table.
 
@@ -534,6 +535,67 @@ def test_deactivation_and_reactivation_are_two_audited_updates(
     assert (events[2].before_data["is_active"], events[2].after_data["is_active"]) == (False, True)
 
 
+def _fixed_area(client: TestClient, worker_id: int) -> dict[str, Any]:
+    department = client.post("/api/departments", json={"name": _unique("DEPT")})
+    assert department.status_code == 201, department.text
+    response = client.post(
+        "/api/areas",
+        json={
+            "department_id": department.json()["id"],
+            "name": _unique("AREA"),
+            "worker_identification_mode": "FIXED",
+            "fixed_worker_id": worker_id,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return cast(dict[str, Any], response.json())
+
+
+def test_the_fixed_worker_of_an_area_cannot_be_deactivated(
+    client: TestClient, db_engine: Engine
+) -> None:
+    worker = _create_worker(client)
+    path = f"/api/workers/{worker['id']}"
+    first = _fixed_area(client, worker["id"])
+
+    before = _write_counts(db_engine)
+    refused = client.patch(path, json={"is_active": False})
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        f"Worker '{worker['name']}' is the Fixed Worker of Area '{first['name']}'. Choose"
+        " another Fixed Worker or Worker ID mode for that Area in Administration → Areas"
+        " before deactivating this Worker."
+    )
+    assert _write_counts(db_engine) == before
+
+    # Any Area counts, an inactive one included; both are named, by name.
+    second = _fixed_area(client, worker["id"])
+    assert client.patch(f"/api/areas/{second['id']}", json={"is_active": False}).status_code == 200
+    before = _write_counts(db_engine)
+    refused = client.patch(path, json={"is_active": False, "name": _unique("Renamed")})
+    assert refused.status_code == 409
+    names = ", ".join(f"'{name}'" for name in sorted([first["name"], second["name"]]))
+    assert refused.json()["detail"] == (
+        f"Worker '{worker['name']}' is the Fixed Worker of Areas {names}. Choose another"
+        " Fixed Worker or Worker ID mode for those Areas in Administration → Areas before"
+        " deactivating this Worker."
+    )
+    assert _write_counts(db_engine) == before
+    assert _stored(db_engine, worker["id"]).is_active is True
+
+    for area in (first, second):
+        response = client.patch(
+            f"/api/areas/{area['id']}", json={"worker_identification_mode": "DISABLED"}
+        )
+        assert response.status_code == 200, response.text
+    before = _write_counts(db_engine)
+    deactivated = client.patch(path, json={"is_active": False})
+    assert deactivated.status_code == 200, deactivated.text
+    assert _write_counts(db_engine)["audit_events"] == before["audit_events"] + 1
+    # Reactivation has no guard.
+    assert client.patch(path, json={"is_active": True}).status_code == 200
+
+
 def test_no_op_patch_writes_and_audits_nothing(client: TestClient, db_engine: Engine) -> None:
     worker = _create_worker(client, badge=f"ABC{uuid.uuid4().hex[:8].upper()}")
     stored_before = _stored(db_engine, worker["id"])
@@ -869,6 +931,13 @@ _REGISTRY_OWNERS = {
     "app/infrastructure/models.py",
     "app/application/workers.py",
     "app/api/workers.py",
+    # Phase 13 S3: the Fixed Worker of an Area, the identity resolver,
+    # and the read models naming a recorded Worker.
+    "app/application/environment.py",
+    "app/application/station_identity.py",
+    "app/application/undo.py",
+    "app/application/tracking.py",
+    "app/api/scan_station.py",
 }
 _RAW_SQL_ON_WORKERS = re.compile(r"(?i)\b(from|join|update|into)\s+workers\b")
 _MODELS_MODULE = "app.infrastructure.models"
@@ -910,8 +979,9 @@ def _touches_the_registry(tree: ast.Module) -> bool:
 
 
 def test_worker_registry_is_read_only_by_its_owners() -> None:
-    """Nothing outside the registry reads or writes `workers` yet; the
-    later slices extend the allow-list by name."""
+    """Only the named owners read or write `workers`: the registry and,
+    since Phase 13 S3, the Worker identity modules; the later slices
+    extend the allow-list by name."""
     flagged = {
         path.relative_to(_BACKEND_DIR).as_posix()
         for path in sorted((_BACKEND_DIR / "app").rglob("*.py"))

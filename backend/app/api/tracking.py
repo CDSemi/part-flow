@@ -76,6 +76,13 @@ class TrackingOperationRef(BaseModel):
     is_external: bool
 
 
+class TrackingWorkerRef(BaseModel):
+    """The Worker a Movement recorded (Phase 13), by current name."""
+
+    id: int
+    name: str
+
+
 class TrackingWorkOrderRef(BaseModel):
     work_order_id: int
     work_order_number: str | None
@@ -91,6 +98,10 @@ def _area(area: Any) -> TrackingAreaRef:
 
 def _machine(machine: Any) -> TrackingMachineRef | None:
     return TrackingMachineRef(id=machine.id, name=machine.name) if machine is not None else None
+
+
+def _worker(worker: Any) -> TrackingWorkerRef | None:
+    return TrackingWorkerRef(id=worker.id, name=worker.name) if worker is not None else None
 
 
 def _operation(operation: Any) -> TrackingOperationRef | None:
@@ -314,6 +325,8 @@ class RouteDeviationResponse(BaseModel):
     actual_operation: TrackingOperationRef | None
     reason: str | None
     station_id: str | None
+    # Who confirmed it (GUI_DESIGN §7.2 item 4): the recorded Worker, if any.
+    worker: TrackingWorkerRef | None
 
 
 class LineageLinkResponse(BaseModel):
@@ -383,6 +396,9 @@ class MovementResponse(BaseModel):
     source_machine: TrackingMachineRef | None
     destination_machine: TrackingMachineRef | None
     station_id: str | None
+    # The Worker the Movement recorded (Phase 13); null for Management
+    # Movements, Disabled Areas and history recorded before Phase 13.
+    worker: TrackingWorkerRef | None
     occurred_at: datetime.datetime
     device_event_id: str
     command_sequence: int
@@ -554,6 +570,7 @@ def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
                 actual_operation=_operation(deviation.actual_operation),
                 reason=deviation.reason,
                 station_id=deviation.movement.station_id,
+                worker=_worker(deviation.worker),
             )
             for deviation in entry.deviations
         ],
@@ -608,6 +625,9 @@ def _movement(
             else None
         ),
         station_id=movement.station_id,
+        worker=_worker(
+            refs.workers.get(movement.worker_id) if movement.worker_id is not None else None
+        ),
         occurred_at=movement.occurred_at,
         device_event_id=movement.device_event_id,
         command_sequence=movement.command_sequence,

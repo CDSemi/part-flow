@@ -334,6 +334,182 @@ def test_area_deactivation_blocked_while_holding_quantity(
 
 
 # ---------------------------------------------------------------------------
+# Areas — Worker ID mode and Fixed Worker (Phase 13 S3)
+# ---------------------------------------------------------------------------
+
+_E1 = "Scanned session mode is not available yet. Choose Disabled or Fixed Worker."
+_E2 = "Choose the Fixed Worker for Fixed Worker mode."
+_E3 = "A Fixed Worker can be set only in Fixed Worker mode."
+_E7 = "Worker ID mode must be DISABLED, FIXED or SCANNED."
+
+
+def _create_worker(client: TestClient) -> dict[str, Any]:
+    response = client.post(
+        "/api/workers",
+        json={"name": _unique("Worker"), "badge_barcode": _unique("BADGE").upper()},
+    )
+    assert response.status_code == 201, response.text
+    return cast(dict[str, Any], response.json())
+
+
+def _force_worker_inactive(db_engine: Engine, worker_id: int) -> None:
+    """A state the API refuses for a Fixed Worker (fixture only)."""
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.update(models.Worker).where(models.Worker.id == worker_id).values(is_active=False)
+        )
+
+
+def _area_count(db_engine: Engine) -> int:
+    with db_engine.connect() as connection:
+        return int(connection.execute(sa.text("SELECT count(*) FROM areas")).scalar_one())
+
+
+def _identity(body: dict[str, Any]) -> tuple[Any, Any]:
+    return body["worker_identification_mode"], body["fixed_worker_id"]
+
+
+def test_area_create_sets_the_worker_identification_mode(
+    client: TestClient, db_engine: Engine
+) -> None:
+    assert _identity(_create_area(client)) == ("DISABLED", None)
+    worker = _create_worker(client)
+    fixed = _create_area(client, worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
+    assert _identity(fixed) == ("FIXED", worker["id"])
+    listed = {area["id"]: area for area in client.get("/api/areas").json()}
+    assert _identity(listed[fixed["id"]]) == ("FIXED", worker["id"])
+
+    inactive = _create_worker(client)
+    deactivated = client.patch(f"/api/workers/{inactive['id']}", json={"is_active": False})
+    assert deactivated.status_code == 200
+    department_id = int(_create_department(client)["id"])
+    refusals = [
+        ({"worker_identification_mode": "SCANNED"}, 422, _E1),
+        ({"worker_identification_mode": "FIXED"}, 422, _E2),
+        ({"worker_identification_mode": "DISABLED", "fixed_worker_id": worker["id"]}, 422, _E3),
+        ({"fixed_worker_id": worker["id"]}, 422, _E3),
+        (
+            {"worker_identification_mode": "FIXED", "fixed_worker_id": 999_999_999},
+            422,
+            "Worker 999999999 does not exist.",
+        ),
+        (
+            {"worker_identification_mode": "FIXED", "fixed_worker_id": inactive["id"]},
+            409,
+            f"Worker '{inactive['name']}' is inactive and cannot be the Fixed Worker of an"
+            " Area. Choose an active Worker.",
+        ),
+    ]
+    before = _area_count(db_engine)
+    for fields, status, detail in refusals:
+        payload = {"department_id": department_id, "name": _unique("AREA"), **fields}
+        response = client.post("/api/areas", json=payload)
+        assert response.status_code == status, (fields, response.text)
+        assert response.json()["detail"] == detail
+    unknown = client.post(
+        "/api/areas",
+        json={
+            "department_id": department_id,
+            "name": _unique("AREA"),
+            "worker_identification_mode": "MANUAL",
+        },
+    )
+    assert unknown.status_code == 422
+    assert _area_count(db_engine) == before
+
+
+def test_area_update_changes_and_clears_the_fixed_worker(
+    client: TestClient, db_engine: Engine
+) -> None:
+    first, second = _create_worker(client), _create_worker(client)
+    area = _create_area(client)
+    path = f"/api/areas/{area['id']}"
+
+    def patch(**fields: Any) -> Any:
+        return client.patch(path, json=fields)
+
+    def fix(worker: dict[str, Any]) -> tuple[Any, Any]:
+        response = patch(worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
+        assert response.status_code == 200, response.text
+        return _identity(response.json())
+
+    assert fix(first) == ("FIXED", first["id"])
+    assert fix(second) == ("FIXED", second["id"])
+    # The Fixed Worker alone on a Fixed Area changes it.
+    assert _identity(patch(fixed_worker_id=first["id"]).json()) == ("FIXED", first["id"])
+    # Leaving Fixed clears the Worker without the client sending it.
+    assert _identity(patch(worker_identification_mode="DISABLED").json()) == ("DISABLED", None)
+    # A Fixed Worker alone on a Disabled Area is refused.
+    refused = patch(fixed_worker_id=first["id"])
+    assert (refused.status_code, refused.json()["detail"]) == (422, _E3)
+    explicit_null = patch(worker_identification_mode=None)
+    assert (explicit_null.status_code, explicit_null.json()["detail"]) == (422, _E7)
+    scanned = patch(worker_identification_mode="SCANNED")
+    assert (scanned.status_code, scanned.json()["detail"]) == (422, _E1)
+    fixed_without_worker = patch(worker_identification_mode="FIXED")
+    assert (fixed_without_worker.status_code, fixed_without_worker.json()["detail"]) == (422, _E2)
+
+    # An Area already in Scanned session mode (fixture) saves unchanged.
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.update(models.Area)
+            .where(models.Area.id == area["id"])
+            .values(worker_identification_mode="SCANNED", fixed_worker_id=None)
+        )
+    assert patch(name=_unique("AREA")).status_code == 200
+    assert patch(worker_identification_mode="SCANNED").status_code == 200
+
+
+def test_area_activation_rejudges_an_inactive_fixed_worker(
+    client: TestClient, db_engine: Engine
+) -> None:
+    worker = _create_worker(client)
+    area = _create_area(client, worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
+    path = f"/api/areas/{area['id']}"
+    assert client.patch(path, json={"is_active": False}).status_code == 200
+    _force_worker_inactive(db_engine, int(worker["id"]))
+
+    refused = client.patch(path, json={"is_active": True})
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        f"The Fixed Worker '{worker['name']}' is inactive. Choose an active Fixed Worker"
+        " before activating this Area."
+    )
+    # An unrelated edit never re-judges the Fixed Worker.
+    renamed = client.patch(path, json={"name": _unique("AREA")})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["is_active"] is False
+
+
+def test_area_identity_patch_with_identical_values_is_a_no_op(
+    client: TestClient, db_engine: Engine
+) -> None:
+    worker = _create_worker(client)
+    area = _create_area(client, worker_identification_mode="FIXED", fixed_worker_id=worker["id"])
+
+    def audit_count() -> int:
+        with db_engine.connect() as connection:
+            return int(
+                connection.execute(
+                    sa.text(
+                        "SELECT count(*) FROM audit_events WHERE entity_type = 'Area'"
+                        " AND entity_id = :id"
+                    ),
+                    {"id": str(area["id"])},
+                ).scalar_one()
+            )
+
+    before = audit_count()
+    response = client.patch(
+        f"/api/areas/{area['id']}",
+        json={"worker_identification_mode": "FIXED", "fixed_worker_id": worker["id"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["updated_at"] == area["updated_at"]
+    assert audit_count() == before
+
+
+# ---------------------------------------------------------------------------
 # Operations
 # ---------------------------------------------------------------------------
 

@@ -75,6 +75,13 @@ export interface TrackingMachineRef {
   name: string;
 }
 
+/** A recorded Worker as history names it (current name, the Area and
+ * Machine precedent). */
+export interface TrackingWorkerRef {
+  id: number;
+  name: string;
+}
+
 export interface TrackingOperationRef {
   id: number;
   code: string;
@@ -202,6 +209,8 @@ export interface TrackingRouteDeviation {
   actualOperation: TrackingOperationRef | null;
   reason: string | null;
   stationId: string | null;
+  /** The Worker recorded on the deviation Movement; null when none. */
+  worker: TrackingWorkerRef | null;
 }
 
 export interface TrackingLineageLink {
@@ -260,6 +269,9 @@ export interface TrackingMovement {
   sourceMachine: TrackingMachineRef | null;
   destinationMachine: TrackingMachineRef | null;
   stationId: string | null;
+  /** The recorded Worker (Phase 13); null for Management Movements,
+   * Areas that record no Worker and earlier history. */
+  worker: TrackingWorkerRef | null;
   occurredAt: string;
   deviceEventId: string;
   commandSequence: number;
@@ -406,6 +418,7 @@ interface MovementWire {
   source_machine: TrackingMachineRef | null;
   destination_machine: TrackingMachineRef | null;
   station_id: string | null;
+  worker: TrackingWorkerRef | null;
   occurred_at: string;
   device_event_id: string;
   command_sequence: number;
@@ -477,6 +490,7 @@ interface FlowWire {
     actual_operation: OperationRefWire | null;
     reason: string | null;
     station_id: string | null;
+    worker: TrackingWorkerRef | null;
   }[];
 }
 
@@ -618,6 +632,7 @@ function toMovement(wire: MovementWire): TrackingMovement {
     sourceMachine: wire.source_machine,
     destinationMachine: wire.destination_machine,
     stationId: wire.station_id,
+    worker: wire.worker,
     occurredAt: wire.occurred_at,
     deviceEventId: wire.device_event_id,
     commandSequence: wire.command_sequence,
@@ -704,6 +719,7 @@ function toFlow(wire: FlowWire): TrackingFlow {
         : null,
       reason: item.reason,
       stationId: item.station_id,
+      worker: item.worker,
     })),
   };
 }

@@ -26,8 +26,9 @@ export function WorkerAvatar({
   src,
 }: {
   worker: Pick<Worker, 'id' | 'name' | 'avatarUpdatedAt'>;
-  /** `sm` = 32px table size; `md` = 64px editor size. */
-  size?: 'sm' | 'md';
+  /** `sm` = 32px table size; `md` = 64px editor size; `pill` = the
+   * Scan Station Worker pill mark spanning the pill's two text lines. */
+  size?: 'sm' | 'md' | 'pill';
   /**
    * Explicit image source (an editor's staged local preview) shown
    * instead of the stored avatar.

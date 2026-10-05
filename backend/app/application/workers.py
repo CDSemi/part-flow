@@ -48,7 +48,7 @@ from app.application.common import UNSET, UnsetType, commit, flush, required_fla
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType
 from app.domain.worker_badge import InvalidBadgeBarcodeError, normalize_badge_barcode
-from app.infrastructure.models import Worker
+from app.infrastructure.models import Area, Worker
 
 _WORKER_CONFLICTS: Final = {
     "uq_workers_badge_barcode": "This badge barcode is already assigned to another Worker.",
@@ -102,6 +102,11 @@ def _lock_worker(session: Session, worker_id: int, *, with_avatar: bool = False)
     """Load one Worker under its row lock (``SELECT … FOR UPDATE``).
 
     The avatar bytes are loaded only when the caller compares them.
+    Worker writes must keep ``FOR UPDATE`` (never the ``FOR NO KEY
+    UPDATE`` of the environment edits): the station identity resolver's
+    ``FOR KEY SHARE`` relies on conflicting with it, so a deactivation
+    serialises with every command that is recording this Worker
+    (Phase 13 S3).
     """
     worker = session.get(
         Worker,
@@ -113,6 +118,32 @@ def _lock_worker(session: Session, worker_id: int, *, with_avatar: bool = False)
     if worker is None:
         raise NotFoundError(f"Worker {worker_id} does not exist.")
     return worker
+
+
+def _reject_fixed_worker_deactivation(session: Session, worker: Worker) -> None:
+    """Refuse deactivating the Fixed Worker of any Area, active or not.
+
+    A plain read under the Worker's FOR UPDATE lock: an Area save that
+    makes this Worker fixed locks the row FOR SHARE first, so the two
+    have one serial outcome — whichever commits first, an inactive
+    Fixed Worker never results.
+    """
+    names = list(
+        session.scalars(
+            select(Area.name).where(Area.fixed_worker_id == worker.id).order_by(Area.name, Area.id)
+        )
+    )
+    if not names:
+        return
+    if len(names) == 1:
+        areas, those = f"Area '{names[0]}'", "that Area"
+    else:
+        areas, those = "Areas " + ", ".join(f"'{name}'" for name in names), "those Areas"
+    raise ConflictError(
+        f"Worker '{worker.name}' is the Fixed Worker of {areas}. Choose another Fixed Worker"
+        f" or Worker ID mode for {those} in Administration → Areas before deactivating"
+        " this Worker."
+    )
 
 
 def _avatar_digest(worker: Worker) -> dict[str, str | int] | None:
@@ -157,9 +188,8 @@ def update_worker(
 ) -> Worker:
     """Apply the provided profile fields; a no-op writes and audits nothing.
 
-    Deactivation and reactivation carry no extra guard yet; the slices
-    that make Workers operational add theirs here, before any
-    assignment.
+    Deactivation is refused while the Worker is the Fixed Worker of any
+    Area (Phase 13 S3); reactivation has no guard.
     """
     worker = _lock_worker(session, worker_id)
     before = profile_snapshot(worker)
@@ -180,6 +210,8 @@ def update_worker(
             changes["is_active"] = active
     if not changes:
         return worker
+    if changes.get("is_active") is False:
+        _reject_fixed_worker_deactivation(session, worker)
     if "badge_barcode" in changes:
         _reject_duplicate_badge(session, changes["badge_barcode"], exclude_id=worker.id)
 

@@ -92,9 +92,10 @@ Rules owned here:
   writes nothing.
 - Deliberately absent: authorization for Management adjustments
   (Phase 14 — the `source` and the reference-free `actor_reference`
-  record who/where without pretending to authorize), Worker identity
-  (Phase 13), and any return of stocked quantity to production
-  (PROJECT_PROFILE §32 open decision 1).
+  record who/where without pretending to authorize) and any return of
+  stocked quantity to production (PROJECT_PROFILE §32 open decision 1).
+  A station allocation or reversal records `allocated_by_worker_id`
+  from the station Area's mode; a Management one records none.
 """
 
 import datetime
@@ -107,7 +108,7 @@ from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import hot_ranks
+from app.application import hot_ranks, station_identity
 from app.application.common import device_event_id_text, optional_text, required_text
 from app.application.errors import (
     ConflictError,
@@ -838,6 +839,11 @@ def confirm_allocation(
         line.demand.id: line.proposed_quantity
         for line in _propose(outstanding_demands(session, pn), total)
     }
+    identity = (
+        station_identity.resolve_station_identity(session, station)
+        if station is not None
+        else station_identity.NO_IDENTITY
+    )
 
     # -- Writes — all inside the one open transaction --------------------
     # The completion effect is judged first (append-only rows carry it
@@ -894,6 +900,7 @@ def confirm_allocation(
             reverses_allocation_id=None,
             station_id=station.station_id if station is not None else None,
             actor_reference=actor,
+            allocated_by_worker_id=identity.worker_id,
             allocated_at=func.now(),
             device_event_id=event_id,
             command_sequence=sequence,
@@ -986,6 +993,11 @@ def reverse_allocation(
         raise ConflictError(
             f"Allocation {allocation_id} has already been reversed. Nothing was recorded."
         )
+    identity = (
+        station_identity.resolve_station_identity(session, station)
+        if station is not None
+        else station_identity.NO_IDENTITY
+    )
     allocated_before = active_allocations_by_demand(session, [demand.id]).get(demand.id, 0)
     completed, reopened = _apply_completion(
         session, {work_order.id: work_order}, {demand.id: -original.quantity}
@@ -1010,6 +1022,7 @@ def reverse_allocation(
         reverses_allocation_id=original.id,
         station_id=station.station_id if station is not None else None,
         actor_reference=actor,
+        allocated_by_worker_id=identity.worker_id,
         allocated_at=func.now(),
         device_event_id=event_id,
         command_sequence=1,

@@ -23,6 +23,7 @@ import {
   operationLabel,
   portionLabel,
   portionState,
+  stationWorkerName,
 } from './scan-station-wizard';
 
 /**
@@ -227,6 +228,7 @@ export function CombineQuantitiesDialog({
                 <EntityChip>{operationLabel(context.operation)}</EntityChip>,
                 'primary',
               ],
+              ['Worker', stationWorkerName(station), 'secondary'],
               ['Scan Station', station.stationId, 'secondary'],
               ['Recorded event', 'MERGED', 'secondary'],
             ]}

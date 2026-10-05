@@ -290,6 +290,7 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(station.area_id),
       operations: operationsOf(station.area_id),
       has_machines: (contextHasMachines ?? hasMachines)(station.area_id),
+      worker_identification: { mode: 'DISABLED', fixed_worker: null },
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

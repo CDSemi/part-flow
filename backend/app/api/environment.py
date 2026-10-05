@@ -27,6 +27,7 @@ Deliberate surface decisions:
 """
 
 import datetime
+from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
@@ -35,6 +36,10 @@ from app.api.dependencies import SessionDep
 from app.application import environment
 
 router = APIRouter(prefix="/api")
+
+# The canonical Worker ID mode vocabulary (PROJECT_PROFILE §8.13); the
+# Application layer refuses SCANNED until Worker sessions exist.
+WorkerIdentificationModeLiteral = Literal["DISABLED", "FIXED", "SCANNED"]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +113,9 @@ class AreaResponse(BaseModel):
     icon_url: str | None
     is_terminal: bool
     is_active: bool
+    # Worker ID mode (Phase 13); the Fixed Worker is set exactly in FIXED.
+    worker_identification_mode: WorkerIdentificationModeLiteral
+    fixed_worker_id: int | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -121,6 +129,8 @@ class AreaCreateRequest(BaseModel):
     color: str | None = None
     icon_url: str | None = None
     is_terminal: bool = False
+    worker_identification_mode: WorkerIdentificationModeLiteral = "DISABLED"
+    fixed_worker_id: int | None = None
 
 
 class AreaUpdateRequest(BaseModel):
@@ -132,6 +142,10 @@ class AreaUpdateRequest(BaseModel):
     icon_url: str | None = None
     is_terminal: bool | None = None
     is_active: bool | None = None
+    # Leaving FIXED clears the Fixed Worker server-side; an explicit
+    # null reaches the service (exclude_unset) and is judged there.
+    worker_identification_mode: WorkerIdentificationModeLiteral | None = None
+    fixed_worker_id: int | None = None
 
 
 @router.get("/areas")
@@ -149,6 +163,8 @@ def create_area(body: AreaCreateRequest, session: SessionDep) -> AreaResponse:
         color=body.color,
         icon_url=body.icon_url,
         is_terminal=body.is_terminal,
+        worker_identification_mode=body.worker_identification_mode,
+        fixed_worker_id=body.fixed_worker_id,
     )
     return AreaResponse.model_validate(area)
 

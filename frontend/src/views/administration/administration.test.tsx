@@ -57,19 +57,25 @@ type WorkerRoute =
 /** A server answer (`ApiError`) or no answer at all (network failure). */
 type FakeFailure = { status: number; detail: string } | 'network';
 
+type WorkerIdMode = 'DISABLED' | 'FIXED' | 'SCANNED';
+
+interface AreaRow {
+  id: number;
+  department_id: number;
+  name: string;
+  barcode_value: string | null;
+  description: string | null;
+  color: string | null;
+  icon_url: null;
+  is_terminal: boolean;
+  is_active: boolean;
+  worker_identification_mode: WorkerIdMode;
+  fixed_worker_id: number | null;
+}
+
 interface FakeState {
   departments: { id: number; name: string; is_active: boolean }[];
-  areas: {
-    id: number;
-    department_id: number;
-    name: string;
-    barcode_value: string | null;
-    description: string | null;
-    color: string | null;
-    icon_url: null;
-    is_terminal: boolean;
-    is_active: boolean;
-  }[];
+  areas: AreaRow[];
   operations: {
     id: number;
     area_id: number;
@@ -109,6 +115,8 @@ function seedState(): FakeState {
         icon_url: null,
         is_terminal: false,
         is_active: true,
+        worker_identification_mode: 'DISABLED',
+        fixed_worker_id: null,
       },
       {
         id: 2,
@@ -120,6 +128,8 @@ function seedState(): FakeState {
         icon_url: null,
         is_terminal: true,
         is_active: true,
+        worker_identification_mode: 'DISABLED',
+        fixed_worker_id: null,
       },
     ],
     operations: [
@@ -265,7 +275,12 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     return json(state.areas.map(stamp));
   }
   if (url === '/api/areas' && method === 'POST') {
-    const area = {
+    const refusal = areaIdentityRefusal(body, {
+      worker_identification_mode: 'DISABLED',
+      fixed_worker_id: null,
+    });
+    if (refusal) return refusal;
+    const area: AreaRow = {
       id: state.nextId++,
       department_id: Number(body.department_id),
       name: String(body.name).trim(),
@@ -275,6 +290,10 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       icon_url: null,
       is_terminal: Boolean(body.is_terminal),
       is_active: true,
+      worker_identification_mode:
+        (body.worker_identification_mode as WorkerIdMode | undefined) ??
+        'DISABLED',
+      fixed_worker_id: (body.fixed_worker_id as number | null) ?? null,
     };
     area.barcode_value = `PF:AREA:${area.id}`;
     state.areas.push(area);
@@ -283,6 +302,19 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   const areaMatch = /^\/api\/areas\/(\d+)$/.exec(url);
   if (areaMatch && method === 'PATCH') {
     const area = state.areas.find((a) => a.id === Number(areaMatch[1]))!;
+    const refusal = areaIdentityRefusal(body, area);
+    if (refusal) return refusal;
+    if (typeof body.worker_identification_mode === 'string') {
+      area.worker_identification_mode =
+        body.worker_identification_mode as WorkerIdMode;
+      // Leaving Fixed Worker mode clears the Fixed Worker server-side.
+      if (area.worker_identification_mode !== 'FIXED') {
+        area.fixed_worker_id = null;
+      }
+    }
+    if ('fixed_worker_id' in body) {
+      area.fixed_worker_id = (body.fixed_worker_id as number | null) ?? null;
+    }
     if (typeof body.name === 'string') area.name = body.name.trim();
     if ('description' in body)
       area.description = (body.description as string | null) ?? null;
@@ -408,6 +440,45 @@ function duplicateBadge(badge: string, exceptId?: number): Response | null {
   );
 }
 
+/** The server's Worker ID mode refusals the editor renders in place:
+ * Scanned session not available yet, and a newly chosen Fixed Worker
+ * that is inactive (an unchanged configuration is never re-judged). */
+function areaIdentityRefusal(
+  body: Record<string, unknown>,
+  current: Pick<AreaRow, 'worker_identification_mode' | 'fixed_worker_id'>,
+): Response | null {
+  if (
+    body.worker_identification_mode === 'SCANNED' &&
+    current.worker_identification_mode !== 'SCANNED'
+  ) {
+    return json(
+      {
+        detail:
+          'Scanned session mode is not available yet. Choose Disabled or Fixed Worker.',
+      },
+      422,
+    );
+  }
+  const worker = state.workers.find((w) => w.id === body.fixed_worker_id);
+  const changed =
+    body.worker_identification_mode !== current.worker_identification_mode ||
+    body.fixed_worker_id !== current.fixed_worker_id;
+  if (
+    body.worker_identification_mode === 'FIXED' &&
+    changed &&
+    worker &&
+    !worker.is_active
+  ) {
+    return json(
+      {
+        detail: `Worker '${worker.name}' is inactive and cannot be the Fixed Worker of an Area. Choose an active Worker.`,
+      },
+      409,
+    );
+  }
+  return null;
+}
+
 function handleWorkers(
   url: string,
   method: string,
@@ -449,6 +520,15 @@ function handleWorkers(
       const duplicate = duplicateBadge(badge, worker.id);
       if (duplicate) return duplicate;
       worker.badge_barcode = badge;
+    }
+    const fixedIn = state.areas.filter((a) => a.fixed_worker_id === worker.id);
+    if (body.is_active === false && worker.is_active && fixedIn.length > 0) {
+      return json(
+        {
+          detail: `Worker '${worker.name}' is the Fixed Worker of Area '${fixedIn[0].name}'. Choose another Fixed Worker or Worker ID mode for that Area in Administration → Areas before deactivating this Worker.`,
+        },
+        409,
+      );
     }
     if (typeof body.name === 'string') worker.name = body.name.trim();
     if (typeof body.is_active === 'boolean') worker.is_active = body.is_active;
@@ -572,6 +652,8 @@ test('editing an Area shows its stable identity and saves through the API', asyn
     description: 'Turning cell',
     is_terminal: false,
     is_active: true,
+    worker_identification_mode: 'DISABLED',
+    fixed_worker_id: null,
   });
 });
 
@@ -600,7 +682,227 @@ test('a new Area posts the entered values to the API', async () => {
     description: 'Milling cell',
     color: null,
     is_terminal: false,
+    // A new Area defaults to Disabled (no Worker recorded).
+    worker_identification_mode: 'DISABLED',
+    fixed_worker_id: null,
   });
+});
+
+/* ============ Areas — Worker ID mode ============ */
+
+function workerIdModeCell(areaName: string): string | null | undefined {
+  return screen
+    .getByRole('button', { name: `Edit ${areaName}` })
+    .closest('tr')
+    ?.querySelector('td[data-label="Worker ID mode"]')?.textContent;
+}
+
+test('the Worker ID mode column renders the configured mode of every Area', async () => {
+  state.areas[0].worker_identification_mode = 'FIXED';
+  state.areas[0].fixed_worker_id = 1;
+  state.areas.push({
+    ...state.areas[1],
+    id: 3,
+    name: 'Plating',
+    barcode_value: 'PF:AREA:3',
+    is_terminal: false,
+    worker_identification_mode: 'SCANNED',
+  });
+  renderAdmin();
+
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  expect(workerIdModeCell('Lathe')).toBe('Fixed Worker');
+  expect(workerIdModeCell('Stockroom')).toBe('Disabled');
+  expect(workerIdModeCell('Plating')).toBe('Scanned session');
+});
+
+test('Fixed Worker mode lists active Workers only, requires a choice and sends the mode with the Worker', async () => {
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  const mode = within(dialog).getByLabelText('Worker ID mode');
+  expect(mode).toHaveValue('DISABLED');
+  expect(dialog.textContent).toContain(
+    "No Worker is recorded for this Area's production activity.",
+  );
+  expect(within(dialog).queryByLabelText('Fixed Worker')).toBeNull();
+
+  fireEvent.change(mode, { target: { value: 'FIXED' } });
+  expect(dialog.textContent).toContain(
+    "Every production action at this Area's Scan Stations records the Fixed Worker.",
+  );
+  const worker = within(dialog).getByLabelText(
+    'Fixed Worker',
+  ) as HTMLSelectElement;
+  // Active Workers only, named with their badge (names are not unique).
+  expect(Array.from(worker.options, (option) => option.textContent)).toEqual([
+    'Choose a Worker',
+    'Alex Tran · 100482',
+  ]);
+
+  // Saving without a chosen Worker is refused in place; nothing is sent.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Choose the Fixed Worker.',
+  );
+  expect(writes).toEqual([]);
+
+  fireEvent.change(worker, { target: { value: '1' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[0].body).toMatchObject({
+    worker_identification_mode: 'FIXED',
+    fixed_worker_id: 1,
+  });
+  await waitFor(() => expect(workerIdModeCell('Lathe')).toBe('Fixed Worker'));
+
+  // Back to Disabled: the Worker select disappears and null is sent.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Lathe' }));
+  const edit = screen.getByRole('dialog', { name: 'Edit Area' });
+  expect(within(edit).getByLabelText('Fixed Worker')).toHaveValue('1');
+  fireEvent.change(within(edit).getByLabelText('Worker ID mode'), {
+    target: { value: 'DISABLED' },
+  });
+  expect(within(edit).queryByLabelText('Fixed Worker')).toBeNull();
+  fireEvent.click(within(edit).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1].body).toMatchObject({
+    worker_identification_mode: 'DISABLED',
+    fixed_worker_id: null,
+  });
+  await waitFor(() => expect(workerIdModeCell('Lathe')).toBe('Disabled'));
+});
+
+test('Scanned session is shown but not selectable; without active Workers the Fixed Worker select is disabled with guidance', async () => {
+  state.workers = state.workers.map((w) => ({ ...w, is_active: false }));
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: '+ New Area' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Area' });
+  const mode = within(dialog).getByLabelText(
+    'Worker ID mode',
+  ) as HTMLSelectElement;
+  expect(mode).toHaveValue('DISABLED');
+  const scanned = Array.from(mode.options).find((o) => o.value === 'SCANNED')!;
+  expect(scanned.textContent).toBe('Scanned session (not available yet)');
+  expect(scanned.disabled).toBe(true);
+
+  fireEvent.change(mode, { target: { value: 'FIXED' } });
+  expect(within(dialog).getByLabelText('Fixed Worker')).toBeDisabled();
+  expect(dialog.textContent).toContain(
+    'No active Workers — add one in Administration → Workers.',
+  );
+});
+
+test('an Area already in Scanned session keeps that option and saves it unchanged', async () => {
+  state.areas[0].worker_identification_mode = 'SCANNED';
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  const mode = within(dialog).getByLabelText(
+    'Worker ID mode',
+  ) as HTMLSelectElement;
+  expect(mode).toHaveValue('SCANNED');
+  expect(
+    Array.from(mode.options).find((o) => o.value === 'SCANNED')!.disabled,
+  ).toBe(false);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[0].body).toMatchObject({
+    worker_identification_mode: 'SCANNED',
+    fixed_worker_id: null,
+  });
+});
+
+test('an inactive current Fixed Worker stays visible as a disabled option', async () => {
+  // An inactive current Fixed Worker exists only from old fixtures.
+  state.areas[0].worker_identification_mode = 'FIXED';
+  state.areas[0].fixed_worker_id = 2; // Mai — inactive
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  const worker = within(dialog).getByLabelText(
+    'Fixed Worker',
+  ) as HTMLSelectElement;
+  const mai = Array.from(worker.options).find((o) => o.value === '2')!;
+  expect(mai.textContent).toBe('Mai (inactive)');
+  expect(mai.disabled).toBe(true);
+  expect(worker).toHaveValue('2');
+});
+
+test('a Fixed Worker the server finds inactive is refused in place with the draft kept', async () => {
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  fireEvent.change(within(dialog).getByLabelText('Worker ID mode'), {
+    target: { value: 'FIXED' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Fixed Worker'), {
+    target: { value: '1' },
+  });
+  // Deactivated elsewhere after the editor loaded its Worker list.
+  state.workers[0].is_active = false;
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    "Worker 'Alex Tran' is inactive and cannot be the Fixed Worker of an Area. Choose an active Worker.",
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit Area' })).toBe(dialog);
+  expect(within(dialog).getByLabelText('Worker ID mode')).toHaveValue('FIXED');
+  expect(within(dialog).getByLabelText('Fixed Worker')).toHaveValue('1');
+  expect(state.areas[0].worker_identification_mode).toBe('DISABLED');
+});
+
+test('a refused Scanned session save renders the server reason in place', async () => {
+  renderAdmin();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  // The editor never offers the option; a forced selection still meets
+  // the server's refusal — the server stays authoritative.
+  const mode = within(dialog).getByLabelText(
+    'Worker ID mode',
+  ) as HTMLSelectElement;
+  Array.from(mode.options).find((o) => o.value === 'SCANNED')!.disabled = false;
+  fireEvent.change(mode, { target: { value: 'SCANNED' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'Scanned session mode is not available yet. Choose Disabled or Fixed Worker.',
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit Area' })).toBe(dialog);
+  expect(state.areas[0].worker_identification_mode).toBe('DISABLED');
+});
+
+test('a Workers load failure is the Area data error with Retry; offline keeps Save disabled', async () => {
+  workerFailures['GET list'] = { status: 500, detail: 'Workers unavailable' };
+  renderAdmin();
+
+  expect(
+    await screen.findByText('Area data could not be loaded.'),
+  ).toBeInTheDocument();
+  workerFailures = {};
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('button', { name: 'Edit Lathe' }),
+  ).toBeInTheDocument();
+  cleanup();
+
+  renderAdmin('unavailable');
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
+  fireEvent.change(within(dialog).getByLabelText('Worker ID mode'), {
+    target: { value: 'FIXED' },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Fixed Worker'), {
+    target: { value: '1' },
+  });
+  expect(
+    within(dialog).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  expect(writes).toEqual([]);
 });
 
 /* ============ Departments ============ */
@@ -912,6 +1214,10 @@ const UNKNOWN_OUTCOME =
 
 async function openWorkers(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
+  // The initial Areas section also reads the Workers (its Fixed Worker
+  // select); count only the Workers section's own reads.
+  await screen.findByRole('button', { name: 'Edit Lathe' });
+  workerListReads = 0;
   openSection('Workers');
   await screen.findByRole('button', { name: 'Edit Alex Tran' });
 }
@@ -1094,6 +1400,22 @@ test('editing a Worker sends the full profile with the canonical badge', async (
   await waitFor(() =>
     expect(within(row).getByText('Inactive')).toBeInTheDocument(),
   );
+});
+
+test('deactivating a Worker who is an Area Fixed Worker is refused in place', async () => {
+  state.areas[0].worker_identification_mode = 'FIXED';
+  state.areas[0].fixed_worker_id = 1;
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Active' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    "Worker 'Alex Tran' is the Fixed Worker of Area 'Lathe'. Choose another Fixed Worker or Worker ID mode for that Area in Administration → Areas before deactivating this Worker.",
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit Worker' })).toBe(dialog);
+  expect(state.workers[0].is_active).toBe(true);
 });
 
 test('a chosen avatar is uploaded after the profile, labelled with its type', async () => {

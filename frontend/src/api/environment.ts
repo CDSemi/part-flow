@@ -65,6 +65,9 @@ export async function updateDepartment(
 // Areas
 // ---------------------------------------------------------------------------
 
+/** How an Area identifies the Worker of its production records. */
+export type WorkerIdentificationMode = 'DISABLED' | 'FIXED' | 'SCANNED';
+
 export interface Area {
   id: number;
   departmentId: number;
@@ -75,6 +78,9 @@ export interface Area {
   color: string | null;
   isTerminal: boolean;
   isActive: boolean;
+  workerIdentificationMode: WorkerIdentificationMode;
+  /** The configured Fixed Worker; set exactly in `FIXED` mode. */
+  fixedWorkerId: number | null;
 }
 
 interface AreaWire {
@@ -87,6 +93,8 @@ interface AreaWire {
   icon_url: string | null;
   is_terminal: boolean;
   is_active: boolean;
+  worker_identification_mode: WorkerIdentificationMode;
+  fixed_worker_id: number | null;
 }
 
 function toArea(wire: AreaWire): Area {
@@ -99,6 +107,23 @@ function toArea(wire: AreaWire): Area {
     color: wire.color,
     isTerminal: wire.is_terminal,
     isActive: wire.is_active,
+    workerIdentificationMode: wire.worker_identification_mode,
+    fixedWorkerId: wire.fixed_worker_id,
+  };
+}
+
+/** Wire body fields of the Worker ID mode; each sent only when defined. */
+function workerIdentificationBody(input: {
+  workerIdentificationMode?: WorkerIdentificationMode;
+  fixedWorkerId?: number | null;
+}): Record<string, unknown> {
+  return {
+    ...(input.workerIdentificationMode !== undefined
+      ? { worker_identification_mode: input.workerIdentificationMode }
+      : {}),
+    ...(input.fixedWorkerId !== undefined
+      ? { fixed_worker_id: input.fixedWorkerId }
+      : {}),
   };
 }
 
@@ -118,6 +143,8 @@ export async function createArea(input: {
   description: string | null;
   color: string | null;
   isTerminal: boolean;
+  workerIdentificationMode?: WorkerIdentificationMode;
+  fixedWorkerId?: number | null;
 }): Promise<Area> {
   const wire = await apiRequest<AreaWire>('/api/areas', {
     method: 'POST',
@@ -127,6 +154,7 @@ export async function createArea(input: {
       description: input.description,
       color: input.color,
       is_terminal: input.isTerminal,
+      ...workerIdentificationBody(input),
     },
   });
   return toArea(wire);
@@ -140,6 +168,8 @@ export async function updateArea(
     color?: string | null;
     isTerminal?: boolean;
     isActive?: boolean;
+    workerIdentificationMode?: WorkerIdentificationMode;
+    fixedWorkerId?: number | null;
   },
 ): Promise<Area> {
   const wire = await apiRequest<AreaWire>(`/api/areas/${id}`, {
@@ -154,6 +184,7 @@ export async function updateArea(
         ? { is_terminal: patch.isTerminal }
         : {}),
       ...(patch.isActive !== undefined ? { is_active: patch.isActive } : {}),
+      ...workerIdentificationBody(patch),
     },
   });
   return toArea(wire);

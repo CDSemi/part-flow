@@ -3,15 +3,23 @@
 Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
-`0016_phase13_environment_audit`, `0017_phase13_machine_audit` and
-`0018_phase13_pn_check_collation` add (IMPLEMENTATION_ROADMAP Phase 13;
-PROJECT_PROFILE §7, §8.13, §10, §28; owner decisions OD-3, OD-10,
-S2-F6). Later Phase 13 slices extend this module:
+`0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
+`0018_phase13_pn_check_collation` and `0019_phase13_worker_identity` add
+(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.4, §8.11,
+§8.12, §8.13, §10, §28; owner decisions OD-3, OD-10, S2-F6). Later
+Phase 13 slices extend this module:
 
-- exact head boundary: `0018_phase13_pn_check_collation` is the single
+- exact head boundary: `0019_phase13_worker_identity` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
-  or to it;
+  it, and the only FKs to it are the three identity references
+  (`areas.fixed_worker_id`, `part_movements.worker_id`,
+  `work_order_allocations.allocated_by_worker_id`);
+- the identity columns (0019): exact types, nullability and defaults,
+  no index, no `scan_session_id`, the four CHECKs with their exact
+  names and literals; the upgrade leaves every existing row without
+  identity (never backfilled); the downgrade restores the 0018 boundary
+  and refuses while identity history or Area mode configuration exists;
 - the database CHECKs refuse every non-canonical badge (empty, padded,
   lowercase, `PF:` in any case, over 128 characters), a partial avatar,
   a non-image type and an avatar above 2 MiB, while the UNIQUE refuses a
@@ -64,7 +72,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from alembic import command
-from app.domain.enums import AuditEntityType
+from app.domain.enums import AuditEntityType, WorkerIdentificationMode
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -73,13 +81,15 @@ _PHASE13_REVISION = "0014_phase13_workers"
 _BADGE_CHECK_REVISION = "0015_phase13_badge_check"
 _ENVIRONMENT_AUDIT_REVISION = "0016_phase13_environment_audit"
 _MACHINE_AUDIT_REVISION = "0017_phase13_machine_audit"
-_HEAD_REVISION = "0018_phase13_pn_check_collation"
+_PN_CHECK_REVISION = "0018_phase13_pn_check_collation"
+_HEAD_REVISION = "0019_phase13_worker_identity"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
 _ENVIRONMENT_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0016_phase13_environment_audit.py"
 _MACHINE_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0017_phase13_machine_audit.py"
 _PN_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0018_phase13_pn_check_collation.py"
+_WORKER_IDENTITY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0019_phase13_worker_identity.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -242,12 +252,83 @@ def test_workers_constraints_have_exact_names(migrated_engine: Engine) -> None:
     }
 
 
-def test_no_foreign_key_points_from_or_to_workers(migrated_engine: Engine) -> None:
+def test_worker_foreign_keys_are_exactly_the_identity_references(
+    migrated_engine: Engine,
+) -> None:
     inspector = inspect(migrated_engine)
     assert inspector.get_foreign_keys("workers") == []
-    for table in inspector.get_table_names():
-        for foreign_key in inspector.get_foreign_keys(table):
-            assert foreign_key["referred_table"] != "workers", table
+    incoming = {
+        str(foreign_key["name"]): (
+            table,
+            foreign_key["constrained_columns"],
+            foreign_key["referred_columns"],
+        )
+        for table in inspector.get_table_names()
+        for foreign_key in inspector.get_foreign_keys(table)
+        if foreign_key["referred_table"] == "workers"
+    }
+    assert incoming == {
+        "fk_areas_fixed_worker_id_workers": ("areas", ["fixed_worker_id"], ["id"]),
+        "fk_part_movements_worker_id_workers": ("part_movements", ["worker_id"], ["id"]),
+        "fk_work_order_allocations_allocated_by_worker_id_workers": (
+            "work_order_allocations",
+            ["allocated_by_worker_id"],
+            ["id"],
+        ),
+    }
+
+
+# The identity columns 0019 adds: (table, column) → nullable.
+_IDENTITY_COLUMNS = {
+    ("areas", "worker_identification_mode"): False,
+    ("areas", "fixed_worker_id"): True,
+    ("part_movements", "worker_id"): True,
+    ("work_order_allocations", "allocated_by_worker_id"): True,
+}
+_IDENTITY_CHECKS = {
+    ("areas", "ck_areas_worker_identification_mode"),
+    ("areas", "ck_areas_fixed_worker_shape"),
+    ("part_movements", "ck_part_movements_worker_requires_station"),
+    ("work_order_allocations", "ck_work_order_allocations_worker_requires_station"),
+}
+_IDENTITY_FOREIGN_KEYS = {
+    ("areas", "fk_areas_fixed_worker_id_workers"),
+    ("part_movements", "fk_part_movements_worker_id_workers"),
+    ("work_order_allocations", "fk_work_order_allocations_allocated_by_worker_id_workers"),
+}
+
+
+def test_identity_columns_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    for (table, name), nullable in _IDENTITY_COLUMNS.items():
+        columns = {str(column["name"]): column for column in inspector.get_columns(table)}
+        column = columns[name]
+        assert column["nullable"] is nullable, name
+        if name == "worker_identification_mode":
+            assert isinstance(column["type"], sa.Text)
+            assert "'DISABLED'" in str(column["default"])
+        else:
+            assert isinstance(column["type"], sa.Integer), name
+            assert column["default"] is None, name
+        # No index on any identity column: no reader filters by Worker.
+        for index in inspector.get_indexes(table):
+            assert name not in index["column_names"], (table, index["name"])
+    movement_columns = {str(column["name"]) for column in inspector.get_columns("part_movements")}
+    assert "scan_session_id" not in movement_columns
+
+
+def test_identity_checks_have_exact_names_and_literals(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    for table, name in _IDENTITY_CHECKS:
+        assert name in {str(check["name"]) for check in inspector.get_check_constraints(table)}
+    migration = _load_migration(_WORKER_IDENTITY_MIGRATION_FILE)
+    assert migration._WORKER_IDENTIFICATION_MODE_SQL == models.WORKER_IDENTIFICATION_MODE_SQL
+    assert migration._AREA_FIXED_WORKER_SQL == models.AREA_FIXED_WORKER_SQL
+    assert migration._MOVEMENT_WORKER_STATION_SQL == models.MOVEMENT_WORKER_STATION_SQL
+    assert migration._ALLOCATION_WORKER_STATION_SQL == models.ALLOCATION_WORKER_STATION_SQL
+    assert set(re.findall(r"'([^']*)'", models.WORKER_IDENTIFICATION_MODE_SQL)) == {
+        mode.value for mode in WorkerIdentificationMode
+    }
 
 
 def test_migration_repeats_the_model_badge_check_verbatim() -> None:
@@ -741,5 +822,302 @@ def test_pn_check_downgrade_refuses_a_pn_only_0018_admits(refused_database: URL)
                 {"pn": _LIBC_UPPERCASED_PN},
             ).scalar_one()
         assert stored == 1
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Worker identity (0019)
+# ---------------------------------------------------------------------------
+
+
+def _scalar_id(connection: Connection, statement: str, **params: object) -> int:
+    return int(connection.execute(sa.text(statement), params).scalar_one())
+
+
+def _seed_production(connection: Connection) -> dict[str, int]:
+    """Raw-SQL production rows valid at 0018 and at head: a station
+    Movement, a Management RECEIVED and a station allocation row."""
+    department = _scalar_id(
+        connection, "INSERT INTO departments (name) VALUES ('Seed') RETURNING id"
+    )
+    area = _scalar_id(
+        connection,
+        "INSERT INTO areas (department_id, name) VALUES (:department, 'Seed Area') RETURNING id",
+        department=department,
+    )
+    operation = _scalar_id(
+        connection,
+        "INSERT INTO operations (area_id, code) VALUES (:area, 'OP') RETURNING id",
+        area=area,
+    )
+    connection.execute(
+        sa.text("INSERT INTO scan_stations (station_id, area_id) VALUES ('SEED-1', :area)"),
+        {"area": area},
+    )
+    flow = _scalar_id(
+        connection,
+        "INSERT INTO quantity_flows (part_number, quantity, current_area_id)"
+        " VALUES ('PN-SEED', 5, :area) RETURNING id",
+        area=area,
+    )
+    movement_ids = []
+    for device_event_id, station_id in (("SEED-MGMT", None), ("SEED-STATION", "SEED-1")):
+        movement_ids.append(
+            _scalar_id(
+                connection,
+                "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type,"
+                " quantity, to_area_id, operation_id, station_id, occurred_at,"
+                " server_received_at, device_event_id) VALUES (:flow, 'PN-SEED', 'RECEIVED',"
+                " 5, :area, :operation, :station, now(), now(), :event) RETURNING id",
+                flow=flow,
+                area=area,
+                operation=operation,
+                station=station_id,
+                event=device_event_id,
+            )
+        )
+    work_order = _scalar_id(
+        connection, "INSERT INTO work_orders (received_date) VALUES (current_date) RETURNING id"
+    )
+    demand = _scalar_id(
+        connection,
+        "INSERT INTO work_order_demands (work_order_id, part_number, request_type,"
+        " requested_quantity) VALUES (:work_order, 'PN-SEED', 'NEW', 5) RETURNING id",
+        work_order=work_order,
+    )
+    allocation = _scalar_id(
+        connection,
+        "INSERT INTO work_order_allocations (part_number, work_order_demand_id, quantity,"
+        " source, station_id, allocated_at, device_event_id)"
+        " VALUES ('PN-SEED', :demand, 2, 'STOCKROOM', 'SEED-1', now(), 'SEED-ALLOC')"
+        " RETURNING id",
+        demand=demand,
+    )
+    return {
+        "area": area,
+        "management_movement": movement_ids[0],
+        "station_movement": movement_ids[1],
+        "allocation": allocation,
+    }
+
+
+_COUNTED_TABLES = (
+    "areas",
+    "part_movements",
+    "work_order_allocations",
+    "quantity_flows",
+    "audit_events",
+)
+
+
+def _table_counts(connection: Connection) -> dict[str, int]:
+    return {
+        table: int(connection.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar_one())
+        for table in _COUNTED_TABLES
+    }
+
+
+def _assert_seed_without_identity(connection: Connection, seeded: dict[str, int]) -> None:
+    movement_workers = connection.execute(
+        sa.text("SELECT worker_id FROM part_movements WHERE id IN (:management, :station)"),
+        {"management": seeded["management_movement"], "station": seeded["station_movement"]},
+    ).scalars()
+    assert list(movement_workers) == [None, None]
+    allocated_by = connection.execute(
+        sa.text("SELECT allocated_by_worker_id FROM work_order_allocations WHERE id = :id"),
+        {"id": seeded["allocation"]},
+    ).scalar_one()
+    assert allocated_by is None
+
+
+def _set_area_fixed(connection: Connection, area_id: int, badge: str) -> None:
+    connection.execute(
+        sa.text(
+            "UPDATE areas SET worker_identification_mode = 'FIXED', fixed_worker_id ="
+            " (SELECT id FROM workers WHERE badge_barcode = :badge) WHERE id = :id"
+        ),
+        {"badge": badge, "id": area_id},
+    )
+
+
+def test_upgrade_leaves_existing_rows_without_identity(admin_engine: Engine) -> None:
+    """Pre-existing production rows stay NULL — never backfilled (CD4)."""
+    name = "partflow_test_phase13_identity_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _PN_CHECK_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                seeded = _seed_production(connection)
+                before = _table_counts(connection)
+            command.upgrade(config, "head")
+            with engine.begin() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _table_counts(connection) == before
+                _assert_seed_without_identity(connection, seeded)
+                mode, fixed = connection.execute(
+                    sa.text(
+                        "SELECT worker_identification_mode, fixed_worker_id FROM areas"
+                        " WHERE id = :id"
+                    ),
+                    {"id": seeded["area"]},
+                ).one()
+                assert (mode, fixed) == ("DISABLED", None)
+                # A later Fixed Worker configuration never rewrites history.
+                _insert_worker(connection, "SEED-W")
+                _set_area_fixed(connection, seeded["area"], "SEED-W")
+                _assert_seed_without_identity(connection, seeded)
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_identity_checks_refuse_non_canonical_rows(connection: Connection) -> None:
+    seeded = _seed_production(connection)
+    _insert_worker(connection, "CHECK-W")
+    worker = _scalar_id(connection, "SELECT id FROM workers WHERE badge_barcode = 'CHECK-W'")
+
+    def movement_without_station() -> None:
+        connection.execute(
+            sa.text(
+                "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type,"
+                " quantity, to_area_id, operation_id, worker_id, occurred_at,"
+                " server_received_at, device_event_id) SELECT quantity_flow_id, part_number,"
+                " 'RECEIVED', 1, to_area_id, operation_id, :worker, now(), now(), 'CK-1'"
+                " FROM part_movements WHERE id = :id"
+            ),
+            {"worker": worker, "id": seeded["management_movement"]},
+        )
+
+    def allocation_without_station() -> None:
+        connection.execute(
+            sa.text(
+                "INSERT INTO work_order_allocations (part_number, work_order_demand_id,"
+                " quantity, source, allocated_by_worker_id, allocated_at, device_event_id)"
+                " SELECT part_number, work_order_demand_id, 1, 'MANAGEMENT', :worker, now(),"
+                " 'CK-2' FROM work_order_allocations WHERE id = :id"
+            ),
+            {"worker": worker, "id": seeded["allocation"]},
+        )
+
+    def area_update(assignments: str) -> Callable[[], None]:
+        def update() -> None:
+            connection.execute(
+                sa.text(f"UPDATE areas SET {assignments} WHERE id = :id"),
+                {"id": seeded["area"], "worker": worker},
+            )
+
+        return update
+
+    _refused_by(connection, "ck_part_movements_worker_requires_station", movement_without_station)
+    _refused_by(
+        connection,
+        "ck_work_order_allocations_worker_requires_station",
+        allocation_without_station,
+    )
+    _refused_by(
+        connection,
+        "ck_areas_fixed_worker_shape",
+        area_update("worker_identification_mode = 'FIXED'"),
+    )
+    _refused_by(connection, "ck_areas_fixed_worker_shape", area_update("fixed_worker_id = :worker"))
+    _refused_by(
+        connection,
+        "ck_areas_worker_identification_mode",
+        area_update("worker_identification_mode = 'MANUAL'"),
+    )
+    # The canonical shapes are admitted.
+    area_update("worker_identification_mode = 'FIXED', fixed_worker_id = :worker")()
+    area_update("worker_identification_mode = 'SCANNED', fixed_worker_id = NULL")()
+
+
+def test_downgrade_to_pn_check_revision_restores_the_boundary(admin_engine: Engine) -> None:
+    name = "partflow_test_phase13_downgrade_s3"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _PN_CHECK_REVISION)
+        engine = create_engine(url)
+        try:
+            inspector = inspect(engine)
+            for table, column in _IDENTITY_COLUMNS:
+                names = {str(item["name"]) for item in inspector.get_columns(table)}
+                assert column not in names, (table, column)
+            for table, check in _IDENTITY_CHECKS:
+                names = {str(item["name"]) for item in inspector.get_check_constraints(table)}
+                assert check not in names, (table, check)
+            for table, foreign_key in _IDENTITY_FOREIGN_KEYS:
+                names = {str(item["name"]) for item in inspector.get_foreign_keys(table)}
+                assert foreign_key not in names, (table, foreign_key)
+            with engine.connect() as connection:
+                assert _version(connection) == _PN_CHECK_REVISION
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+            columns = {str(item["name"]) for item in inspect(engine).get_columns("part_movements")}
+            assert "worker_id" in columns
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_refuses_while_identity_history_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            seeded = _seed_production(connection)
+            _insert_worker(connection, "HIST-W")
+            worker = _scalar_id(connection, "SELECT id FROM workers WHERE badge_barcode = 'HIST-W'")
+            connection.execute(
+                sa.text(
+                    "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type,"
+                    " quantity, to_area_id, operation_id, station_id, worker_id, occurred_at,"
+                    " server_received_at, device_event_id) SELECT quantity_flow_id,"
+                    " part_number, 'RECEIVED', 1, to_area_id, operation_id, station_id,"
+                    " :worker, now(), now(), 'HIST-1' FROM part_movements WHERE id = :id"
+                ),
+                {"worker": worker, "id": seeded["station_movement"]},
+            )
+        with pytest.raises(ProgrammingError, match="production records carry Worker identity"):
+            command.downgrade(_alembic_config(refused_database), _PN_CHECK_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM part_movements WHERE worker_id = :worker"),
+                {"worker": worker},
+            ).scalar_one()
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_area_mode_configuration_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            seeded = _seed_production(connection)
+            _insert_worker(connection, "MODE-W")
+            _set_area_fixed(connection, seeded["area"], "MODE-W")
+        with pytest.raises(ProgrammingError, match="areas hold Worker ID mode configuration"):
+            command.downgrade(_alembic_config(refused_database), _PN_CHECK_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            mode = connection.execute(
+                sa.text("SELECT worker_identification_mode FROM areas WHERE id = :id"),
+                {"id": seeded["area"]},
+            ).scalar_one()
+        assert mode == "FIXED"
     finally:
         engine.dispose()
