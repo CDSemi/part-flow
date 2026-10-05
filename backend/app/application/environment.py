@@ -94,11 +94,14 @@ _ASSET_TAG_DIGITS_MAX: Final = 8
 
 # A concurrent first configuration wins the singleton primary key at
 # COMMIT; the loser writes nothing. The loaded Barcode configuration
-# panel has no reload control, so the recovery step is a page refresh.
+# panel has no reload control and the Administration section is not part
+# of the route, so the recovery step is a page refresh followed by
+# reopening Barcode configuration, which re-runs the section load.
 _ASSET_TAG_FORMAT_CONFLICTS: Final = {
     "pk_machine_asset_tag_config": (
         "The Machine Asset Tag format was just saved by someone else."
-        " Refresh the page to see the saved format, then apply your change again."
+        " Refresh the page and open Barcode configuration again to see the saved format,"
+        " then apply your change again."
     ),
 }
 

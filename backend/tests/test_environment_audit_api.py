@@ -1016,7 +1016,8 @@ def test_concurrent_first_asset_tag_format_save_is_a_conflict(
     assert response.status_code == 409, response.text
     assert response.json()["detail"] == (
         "The Machine Asset Tag format was just saved by someone else."
-        " Refresh the page to see the saved format, then apply your change again."
+        " Refresh the page and open Barcode configuration again to see the saved format,"
+        " then apply your change again."
     )
     stored = _stored(engine, models.MachineAssetTagConfig, 1)
     assert (stored.prefix, stored.digits) == ("HD-", 4)

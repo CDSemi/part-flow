@@ -911,7 +911,11 @@ _AUDITED = {
 _NON_AUDITED_MACHINE_WRITERS = {
     "note_assignment_change": "derived state age only, production commands",
 }
-_MACHINE_LOADERS = {"lock_machine", "get_machine", "_lock_machine_for_edit"}
+_MACHINE_LOADERS = {"lock_machine", "get_machine", "_lock_machine_for_edit", "list_machines"}
+# Calls whose first argument ``Machine`` yields Machine rows: a session
+# lookup, or a query any session call (scalar, scalars, execute) runs.
+_MACHINE_ROW_CALLS = {"get", "get_one", "select"}
+_MACHINE_BULK_WRITES = {"update", "insert", "delete"}
 
 
 def _functions(tree: ast.Module) -> list[ast.FunctionDef]:
@@ -926,45 +930,74 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
+def _first_arg_is_machine(call: ast.Call) -> bool:
+    return bool(call.args) and isinstance(call.args[0], ast.Name) and call.args[0].id == "Machine"
+
+
 def _is_machine_load(value: ast.expr | None) -> bool:
-    """A call that yields a Machine row: a loader, ``Machine(...)`` or
-    ``<session>.get(Machine, ...)``."""
-    if not isinstance(value, ast.Call):
+    """An expression that yields Machine rows: it contains a loader call
+    (``lock_machine``, ``list_machines`` ...), ``Machine(...)``,
+    ``<session>.get(Machine, ...)`` / ``get_one(Machine, ...)``, or a
+    ``select(Machine)`` query, however the session runs it
+    (``session.scalar(select(Machine)...)``,
+    ``session.execute(select(Machine)).scalar_one()``). ``refresh`` binds
+    no new name, so the row it re-reads is tracked by its own binding."""
+    if value is None:
         return False
-    name = _call_name(value)
-    if name in _MACHINE_LOADERS or name == "Machine":
-        return True
-    return (
-        name == "get"
-        and bool(value.args)
-        and isinstance(value.args[0], ast.Name)
-        and value.args[0].id == "Machine"
-    )
+    for node in ast.walk(value):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name in _MACHINE_LOADERS or name == "Machine":
+            return True
+        if name in _MACHINE_ROW_CALLS and _first_arg_is_machine(node):
+            return True
+    return False
+
+
+def _bound_names(target: ast.expr) -> set[str]:
+    return {node.id for node in ast.walk(target) if isinstance(node, ast.Name)}
 
 
 def _machine_names(function: ast.FunctionDef) -> set[str]:
-    """Parameters annotated as a Machine and locals bound from a Machine load."""
+    """Parameters annotated as a Machine, locals bound from a Machine load,
+    and loop or comprehension targets iterating Machine rows."""
     names = {
         arg.arg
         for arg in (*function.args.args, *function.args.kwonlyargs)
         if arg.annotation is not None and "Machine" in ast.unparse(arg.annotation).split(" | ")
     }
-    for node in ast.walk(function):
-        if isinstance(node, ast.Assign) and _is_machine_load(node.value):
-            names |= {target.id for target in node.targets if isinstance(target, ast.Name)}
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and _is_machine_load(node.value)
-        ):
-            names.add(node.target.id)
-    return names
+
+    def yields_machines(value: ast.expr | None) -> bool:
+        return _is_machine_load(value) or (isinstance(value, ast.Name) and value.id in names)
+
+    # Repeat until stable: a loop over ``listed`` is a Machine loop only
+    # once ``listed = list_machines(...)`` has been seen.
+    while True:
+        found = set(names)
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign) and yields_machines(node.value):
+                found |= {target.id for target in node.targets if isinstance(target, ast.Name)}
+            elif isinstance(node, ast.AnnAssign | ast.NamedExpr) and yields_machines(node.value):
+                if isinstance(node.target, ast.Name):
+                    found.add(node.target.id)
+            elif isinstance(node, ast.For | ast.comprehension) and yields_machines(node.iter):
+                found |= _bound_names(node.target)
+        if found == names:
+            return names
+        names = found
 
 
 def _writes_machine(function: ast.FunctionDef) -> bool:
+    """Constructs a Machine, bulk-writes the Machine table
+    (``update``/``insert``/``delete(Machine)``) or assigns an attribute of
+    a Machine row ``_machine_names`` tracks."""
     names = _machine_names(function)
     for node in ast.walk(function):
-        if isinstance(node, ast.Call) and _call_name(node) == "Machine":
+        if isinstance(node, ast.Call) and (
+            _call_name(node) == "Machine"
+            or (_call_name(node) in _MACHINE_BULK_WRITES and _first_arg_is_machine(node))
+        ):
             return True
         targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
@@ -1009,12 +1042,69 @@ def _other_modules() -> list[Path]:
     ]
 
 
+# Function bodies, one statement per item, for the detector tests below.
+_WRITER_SHAPES: dict[str, tuple[str, ...]] = {
+    "get_one": ("m = session.get_one(Machine, 1)", "m.notes = 'x'"),
+    "get": ("m = session.get(Machine, 1)", "m.notes = 'x'"),
+    "scalar_select": (
+        "m = session.scalar(select(Machine).where(Machine.id == 1))",
+        "m.notes = 'x'",
+    ),
+    "execute_scalar_one": (
+        "m = session.execute(select(Machine).where(Machine.id == 1)).scalar_one()",
+        "m.notes = 'x'",
+    ),
+    "annotated_local": ("m: Machine = session.get_one(Machine, 1)", "m.notes = 'x'"),
+    "loop_over_loader": ("for m in list_machines(session):", "    m.notes = 'x'"),
+    "loop_over_bound_rows": (
+        "listed = machines.list_machines(session)",
+        "for m in listed:",
+        "    m.notes = 'x'",
+    ),
+    "loop_over_scalars": ("for m in session.scalars(select(Machine)):", "    m.notes += 'x'"),
+    "bulk_update": ("session.execute(update(Machine).where(Machine.id == 1).values(notes='x'))",),
+    "bulk_insert": ("session.execute(insert(Machine).values(name='x'))",),
+    "bulk_delete": ("session.execute(delete(Machine).where(Machine.id == 1))",),
+    "construction": ("session.add(Machine(name='x'))",),
+}
+_READ_ONLY_SHAPES: dict[str, tuple[str, ...]] = {
+    "read_attribute": ("m = session.get_one(Machine, 1)", "return m.notes"),
+    "other_entity": ("area = session.get_one(Area, 1)", "area.name = 'x'"),
+    "column_query": ("ids = session.scalars(select(Machine.id))", "total = len(list(ids))"),
+    "session_delete_of_other": ("session.delete(area)",),
+}
+
+
+def _function_of(body: tuple[str, ...]) -> ast.FunctionDef:
+    source = "\n".join(("def writer(session):", *(f"    {line}" for line in body)))
+    function = ast.parse(source).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    return function
+
+
+@pytest.mark.parametrize("shape", sorted(_WRITER_SHAPES))
+def test_machine_writer_detection_flags_every_load_and_bulk_write_shape(shape: str) -> None:
+    """The M-15 guard's detector recognizes each way a function can load
+    and write a Machine, so an unaudited writer cannot pass it by using a
+    session lookup, a ``select(Machine)`` query, a loop or a bulk write."""
+    assert _writes_machine(_function_of(_WRITER_SHAPES[shape]))
+
+
+@pytest.mark.parametrize("shape", sorted(_READ_ONLY_SHAPES))
+def test_machine_writer_detection_ignores_reads_and_other_entities(shape: str) -> None:
+    assert not _writes_machine(_function_of(_READ_ONLY_SHAPES[shape]))
+
+
 def test_every_machine_writer_appends_an_audit_row() -> None:
     """(a) Every audited service calls ``audit.append_audit_event``; any
     other function that writes a Machine is either named with a reason
     or a private helper called only from audited services. (b) No other
     module constructs, bulk-writes or assigns to a Machine. (c) The
-    snapshot keys are exactly the audited twelve."""
+    snapshot keys are exactly the audited twelve. "Writes" is what
+    ``_writes_machine`` detects: construction, ``update``/``insert``/
+    ``delete(Machine)``, and attribute assignment on a row bound from a
+    Machine parameter, loader, session lookup, ``select(Machine)`` query
+    or a loop over those (the ``test_machine_writer_detection_*`` tests pin each)."""
     tree = ast.parse(_MACHINE_SERVICE.read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     by_name = {function.name: function for function in functions}
@@ -1046,17 +1136,6 @@ def test_every_machine_writer_appends_an_audit_row() -> None:
     foreign = []
     for path, source in other_sources.items():
         for function in _functions(ast.parse(source)):
-            for node in ast.walk(function):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = _call_name(node)
-                if name == "Machine" or (
-                    name in {"update", "insert", "delete"}
-                    and node.args
-                    and isinstance(node.args[0], ast.Name)
-                    and node.args[0].id == "Machine"
-                ):
-                    foreign.append(f"{path.name}:{function.name}")
             if _writes_machine(function):
                 foreign.append(f"{path.name}:{function.name}")
     assert foreign == []
