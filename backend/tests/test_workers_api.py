@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session
 from alembic import command
 from app.application import workers as workers_service
 from app.core.config import get_settings
+from app.domain.worker_badge import normalize_badge_barcode
 from app.infrastructure import models
 from app.main import create_app
 
@@ -237,15 +238,25 @@ def test_list_includes_inactive_workers_ordered_by_name_then_id(client: TestClie
         assert set(worker) == _RESPONSE_KEYS
 
 
-@pytest.mark.parametrize(
-    ("raw", "canonical"),
-    [("straße", "STRASSE"), ("é1", "É1"), ("ǆ9", "Ǆ9")],
-)
+# `ɤ` (U+0264): Python 3.12 (Unicode 15) has no uppercase for it, while
+# the glibc `upper()` of the database collation maps it to U+A7CB — the
+# canonical form comes from the one domain rule, whatever its Unicode
+# version.
+_NON_ASCII_BADGES = [
+    ("straße", "STRASSE"),
+    ("é1", "É1"),
+    ("ǆ9", "Ǆ9"),
+    ("ɤ1", normalize_badge_barcode("ɤ1")),
+]
+
+
+@pytest.mark.parametrize(("raw", "canonical"), _NON_ASCII_BADGES)
 def test_non_ascii_canonical_badges_pass_the_database_check(
     client: TestClient, db_engine: Engine, raw: str, canonical: str
 ) -> None:
-    """Python str.upper() and PostgreSQL upper() agree: an accepted badge
-    never fails the canonical-form CHECK with a 500."""
+    """Every badge the domain rule accepts passes the canonical-form
+    CHECK, even where Python and the OS libc case tables disagree: the
+    CHECK compares under the "C" collation, so it never fails with a 500."""
     suffix = uuid.uuid4().hex[:8].upper()
     response = client.post(
         "/api/workers", json={"name": _unique("Unicode"), "badge_barcode": f"{raw}-{suffix}"}
@@ -253,6 +264,20 @@ def test_non_ascii_canonical_badges_pass_the_database_check(
     assert response.status_code == 201, response.text
     assert response.json()["badge_barcode"] == f"{canonical}-{suffix}"
     assert _stored(db_engine, response.json()["id"]).badge_barcode == f"{canonical}-{suffix}"
+
+
+@pytest.mark.parametrize(("raw", "canonical"), _NON_ASCII_BADGES)
+def test_non_ascii_canonical_badges_pass_the_database_check_on_edit(
+    client: TestClient, db_engine: Engine, raw: str, canonical: str
+) -> None:
+    worker = _create_worker(client)
+    suffix = uuid.uuid4().hex[:8].upper()
+    response = client.patch(
+        f"/api/workers/{worker['id']}", json={"badge_barcode": f"{raw}-{suffix}"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["badge_barcode"] == f"{canonical}-{suffix}"
+    assert _stored(db_engine, worker["id"]).badge_barcode == f"{canonical}-{suffix}"
 
 
 def test_badges_are_unique_regardless_of_letter_case(client: TestClient, db_engine: Engine) -> None:

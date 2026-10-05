@@ -261,7 +261,9 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   index for the command's idempotency lookup) and the Phase 13 Workers
   registry (`0014_phase13_workers` — the `workers` table with the badge
   UNIQUE and canonical-form CHECK and the avatar on the row, plus the
-  `DELETED` audit event and `Worker` audit entity; the downgrade refuses)
+  `DELETED` audit event and `Worker` audit entity; the downgrade refuses;
+  `0015_phase13_badge_check` re-creates that CHECK under the `"C"`
+  collation so it never depends on the OS libc case tables)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -718,8 +720,9 @@ integration):
   `0012_phase11_tracking_index` for Phase 11 and
   `0013_phase12_priority` for Phase 12 — while
   `tests/test_phase13_schema.py` carries the head-level coverage
-  (`0014_phase13_workers`: the `workers` table's constraints, the
-  widened audit vocabulary, the refusing downgrade, and
+  (`0014_phase13_workers` and `0015_phase13_badge_check`: the `workers`
+  table's constraints, the widened audit vocabulary, the refusing
+  downgrades, and
   models↔migration parity; the Phase 10 module keeps the `STOCKED` type
   and its shape branch, the widened flow lifecycle,
   `work_orders.completed_at` and its index, the allocation table's

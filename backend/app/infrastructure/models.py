@@ -136,12 +136,17 @@ PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
 # so the plain UNIQUE is case-insensitive, at most 128 characters
 # (`app.domain.worker_badge.MAX_BADGE_BARCODE_LENGTH`), and outside the
 # `PF:` namespace — badges are the one non-PF scanned value. The `PF:`
-# test needs no upper(): the uppercase clause already holds. Repeated
-# verbatim by migration `0014_phase13_workers`.
+# test needs no upper(): the uppercase clause already holds. The trim
+# and uppercase clauses run under the "C" collation, so they check ASCII
+# only and never depend on the OS libc case tables, which disagree with
+# Python `str.upper()` on some code points (`ɤ`); the full Unicode
+# uppercase is owned by `app.domain.worker_badge`, whose every result
+# passes this CHECK. Repeated verbatim by migration
+# `0015_phase13_badge_check`.
 WORKER_BADGE_BARCODE_SQL = (
-    r"badge_barcode <> '' AND badge_barcode !~ '^\s|\s$'"
-    " AND badge_barcode = upper(badge_barcode) AND char_length(badge_barcode) <= 128"
-    " AND left(badge_barcode, 3) <> 'PF:'"
+    r"""badge_barcode <> '' AND badge_barcode COLLATE "C" !~ '^\s|\s$'"""
+    """ AND badge_barcode = upper(badge_barcode COLLATE "C")"""
+    " AND char_length(badge_barcode) <= 128 AND left(badge_barcode, 3) <> 'PF:'"
 )
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5

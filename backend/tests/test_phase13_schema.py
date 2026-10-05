@@ -2,28 +2,33 @@
 
 Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
-verifies what `0014_phase13_workers` adds (IMPLEMENTATION_ROADMAP
-Phase 13; PROJECT_PROFILE §8.13, §10; owner decisions OD-3, OD-10):
+verifies what `0014_phase13_workers` and `0015_phase13_badge_check`
+add (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §8.13, §10; owner
+decisions OD-3, OD-10):
 
-- exact head boundary: `0014_phase13_workers` is head;
+- exact head boundary: `0015_phase13_badge_check` is head;
 - the `workers` table shape and its exact constraint names; no FK from
   or to it;
 - the database CHECKs refuse every non-canonical badge (empty, padded,
   lowercase, `PF:` in any case, over 128 characters), a partial avatar,
   a non-image type and an avatar above 2 MiB, while the UNIQUE refuses a
   duplicate canonical badge — so case-insensitive uniqueness holds in
-  PostgreSQL itself;
+  PostgreSQL itself; the badge CHECK compares under the "C" collation,
+  so it admits a badge the OS libc case tables would uppercase (`ɤ`)
+  where the 0014 CHECK refused it;
 - the widened audit vocabulary: entity `Worker` and event `DELETED`
   are admitted, other values still refused;
 - models↔migration metadata parity at head (moved here from the
   Phase 12 schema test, which is now pinned to 0013);
 - clean downgrade back to the Phase 12 boundary with a successful
   re-upgrade, and the refusing downgrade while Worker configuration or
-  Worker audit history exists (never deleted).
+  Worker audit history exists (never deleted); the 0015 downgrade
+  restores the 0014 CHECK and refuses while a row only 0015 admits
+  exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to
-`0014_phase13_workers` and move the head-level coverage into that
+`0015_phase13_badge_check` and move the head-level coverage into that
 phase's schema test.
 """
 
@@ -47,7 +52,13 @@ from app.infrastructure import models
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PHASE12_REVISION = "0013_phase12_priority"
 _PHASE13_REVISION = "0014_phase13_workers"
-_MIGRATION_FILE = _BACKEND_DIR / "alembic" / "versions" / "20261004_0014_phase13_workers.py"
+_HEAD_REVISION = "0015_phase13_badge_check"
+_VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
+_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
+_BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
+# Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
+# `upper()` of the database collation maps it to U+A7CB.
+_LIBC_UPPERCASED_BADGE = "ɤ1"
 _WORKER_CHECKS = {
     "ck_workers_badge_barcode_canonical",
     "ck_workers_avatar_image_shape",
@@ -76,8 +87,8 @@ def _drop_temp_database(admin_engine: Engine, name: str) -> None:
         connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 
-def _load_migration() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("phase13_migration", _MIGRATION_FILE)
+def _load_migration(path: Path = _MIGRATION_FILE) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"phase13_migration_{path.stem}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -155,7 +166,7 @@ def _refused_by(connection: Connection, constraint: str, statement: Callable[[],
 
 def test_head_is_the_phase13_revision(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
-        assert _version(connection) == _PHASE13_REVISION
+        assert _version(connection) == _HEAD_REVISION
 
 
 def test_workers_table_shape(migrated_engine: Engine) -> None:
@@ -205,8 +216,11 @@ def test_no_foreign_key_points_from_or_to_workers(migrated_engine: Engine) -> No
 
 
 def test_migration_repeats_the_model_badge_check_verbatim() -> None:
-    migration = _load_migration()
+    migration = _load_migration(_BADGE_CHECK_MIGRATION_FILE)
     assert migration._WORKER_BADGE_BARCODE_SQL == models.WORKER_BADGE_BARCODE_SQL
+    # Its downgrade restores exactly the CHECK 0014 created.
+    original = _load_migration()
+    assert migration._PHASE13_S1_BADGE_BARCODE_SQL == original._WORKER_BADGE_BARCODE_SQL
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +275,9 @@ def test_database_refuses_an_avatar_above_2_mib(connection: Connection) -> None:
 def test_database_admits_valid_workers(connection: Connection) -> None:
     _insert_worker(connection, "A" * 128)
     _insert_worker(connection, "STRASSE")
+    # Domain-canonical, though the OS libc would uppercase it: the CHECK
+    # never depends on the libc case tables.
+    _insert_worker(connection, _LIBC_UPPERCASED_BADGE)
     connection.execute(
         sa.text(
             "INSERT INTO workers (name, badge_barcode, avatar_image, avatar_image_type,"
@@ -269,7 +286,7 @@ def test_database_admits_valid_workers(connection: Connection) -> None:
         )
     )
     count = connection.execute(sa.text("SELECT count(*) FROM workers")).scalar_one()
-    assert count == 3
+    assert count == 4
 
 
 def test_database_refuses_a_duplicate_canonical_badge(connection: Connection) -> None:
@@ -390,7 +407,7 @@ def test_downgrade_refuses_while_worker_history_exists(refused_database: URL) ->
         with pytest.raises(IntegrityError, match="ck_audit_events_entity_type"):
             command.downgrade(_alembic_config(refused_database), _PHASE12_REVISION)
         with engine.connect() as connection:
-            assert _version(connection) == _PHASE13_REVISION
+            assert _version(connection) == _HEAD_REVISION
         assert _row_counts(engine) == (1, 1)
     finally:
         engine.dispose()
@@ -404,7 +421,44 @@ def test_downgrade_refuses_while_worker_configuration_exists(refused_database: U
         with pytest.raises(ProgrammingError, match="workers holds Worker configuration"):
             command.downgrade(_alembic_config(refused_database), _PHASE12_REVISION)
         with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+        assert _row_counts(engine) == (1, 0)
+    finally:
+        engine.dispose()
+
+
+def test_badge_check_downgrade_restores_the_libc_check(refused_database: URL) -> None:
+    """Without 0015 the CHECK refuses a domain-canonical badge (the 500
+    0015 removes); re-upgrading admits it again."""
+    config = _alembic_config(refused_database)
+    command.downgrade(config, _PHASE13_REVISION)
+    engine = create_engine(refused_database)
+    try:
+        with engine.connect() as connection:
             assert _version(connection) == _PHASE13_REVISION
+            _refused_by(
+                connection,
+                "ck_workers_badge_barcode_canonical",
+                lambda: _insert_worker(connection, _LIBC_UPPERCASED_BADGE),
+            )
+            connection.rollback()
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            _insert_worker(connection, _LIBC_UPPERCASED_BADGE)
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_badge_check_downgrade_refuses_a_badge_only_0015_admits(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_worker(connection, _LIBC_UPPERCASED_BADGE)
+        with pytest.raises(IntegrityError, match="ck_workers_badge_barcode_canonical"):
+            command.downgrade(_alembic_config(refused_database), _PHASE13_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
         assert _row_counts(engine) == (1, 0)
     finally:
         engine.dispose()

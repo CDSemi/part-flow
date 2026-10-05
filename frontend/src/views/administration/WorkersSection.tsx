@@ -222,6 +222,15 @@ function WorkerDialog({
     onClose(wroteAny.current);
   };
 
+  // Cancel, Escape and the backdrop are ignored while a save is in
+  // flight: its writes cannot be recalled, so the editor stays open
+  // until they settle — success closes it (reloading the list after
+  // the commits), a failure keeps it open with the error.
+  const requestClose = () => {
+    if (busy) return;
+    close();
+  };
+
   const trimmedName = name.trim();
   const canonical = canonicalBadge(badge);
   const nameInvalid = !trimmedName;
@@ -326,7 +335,7 @@ function WorkerDialog({
   };
 
   return (
-    <ModalDialog label={title} onClose={close}>
+    <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
       <div className="ad-form">
         <AdminField label="Name">
@@ -432,7 +441,7 @@ function WorkerDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={close}>
+        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
           Cancel (Esc)
         </button>
         <button

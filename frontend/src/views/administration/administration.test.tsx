@@ -1158,6 +1158,67 @@ test('removing the avatar sends DELETE after the profile', async () => {
   expect(row.querySelector('.worker-avatar')?.textContent).toBe('AT');
 });
 
+test('Cancel, Escape and the backdrop are ignored while a save is in flight', async () => {
+  await openWorkers();
+  // Hold the PATCH before the fake server applies it: the profile write
+  // is in flight and not committed yet.
+  let releasePatch = () => {};
+  const patchHeld = new Promise<void>((resolve) => {
+    releasePatch = resolve;
+  });
+  let patchRequested = false;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        patchRequested = true;
+        await patchHeld;
+      }
+      return handle(String(input), init);
+    }),
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: 'Alex T. Tran' },
+  });
+  chooseAvatar(dialog);
+  await waitFor(() =>
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+      'blob:staged-avatar',
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(patchRequested).toBe(true));
+
+  const cancel = within(dialog).getByRole('button', { name: 'Cancel (Esc)' });
+  expect((cancel as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(cancel);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  // The editor stays open and the list is not reloaded under the write.
+  expect(screen.getByRole('dialog', { name: 'Edit Worker' })).toBe(dialog);
+  expect(workerListReads).toBe(1);
+
+  releasePatch();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual([
+    'PATCH /api/workers/1',
+    'PUT /api/workers/1/avatar',
+  ]);
+  // The list reloads once, after both writes committed.
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Alex T. Tran' })
+  ).closest('tr') as HTMLElement;
+  expect(workerListReads).toBe(2);
+  await waitFor(() =>
+    expect(row.querySelector('img')?.getAttribute('src')).toBe(
+      `/api/workers/1/avatar?v=${encodeURIComponent('2026-10-04T10:00:00.000001+00:00')}`,
+    ),
+  );
+});
+
 test('a refused image file shows its reason inline and stages nothing', async () => {
   await openWorkers();
   imagePreparation.rejectWith = 'Choose a PNG, JPEG or WebP image.';
