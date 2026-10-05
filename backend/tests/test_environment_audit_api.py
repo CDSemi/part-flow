@@ -13,7 +13,8 @@ format appends exactly one ``audit_events`` row in its own transaction
   for a no-op, a refusal or a lost race, at flush or at COMMIT;
 - lock-first: an edit waits for a concurrent writer and audits its
   committed predecessor, in the lock mode its own UPDATE takes (it never
-  waits on FOR KEY SHARE, except a requested Area deactivation);
+  waits on FOR KEY SHARE, except a requested Area deactivation and an
+  UPDATE of a unique-key column), Asset Tag format edits included;
 - atomicity on all ten write paths, the audit chain property, and
   isolation from production commands and from Machine creation's
   ``next_sequence``;
@@ -819,18 +820,27 @@ class _KeyShareCase(NamedTuple):
         _KeyShareCase("station-toggle", "ScanStation", {"is_active": False}, blocks=False),
         _KeyShareCase("area-display-edit", "Area", {"description": "edited"}, blocks=False),
         _KeyShareCase("area-deactivation", "Area", {"is_active": False}, blocks=True),
+        _KeyShareCase("department-deactivation", "Department", {"is_active": False}, blocks=False),
+        _KeyShareCase("department-rename", "Department", {"name": _unique("REN")}, blocks=True),
+        _KeyShareCase("operation-display-edit", "Operation", {"description": "e"}, blocks=False),
     ],
     ids=lambda case: case.name,
 )
 def test_lock_mode_never_waits_on_key_share_except_area_deactivation(
     client: TestClient, db_engine: Engine, case: _KeyShareCase
 ) -> None:
-    """FK checks and the allocation path hold FOR KEY SHARE; only an
-    Area deactivation (today's FOR UPDATE) waits for them."""
+    """FK checks and the allocation path hold FOR KEY SHARE; the
+    lock-first lock never waits for them. Only an Area deactivation
+    (today's FOR UPDATE) waits, and an UPDATE that changes a unique-key
+    column (a Department name) waits because PostgreSQL itself takes
+    FOR UPDATE for it, as before the audit."""
     path, entity = _create_entity(client, case.entity_type)
-    table, column = (
-        ("scan_stations", "station_id") if case.entity_type == "ScanStation" else ("areas", "id")
-    )
+    table, column = {
+        "Department": ("departments", "id"),
+        "Area": ("areas", "id"),
+        "Operation": ("operations", "id"),
+        "ScanStation": ("scan_stations", "station_id"),
+    }[case.entity_type]
     key = entity[column]
     count = len(_audit_rows(db_engine, case.entity_type, key))
     with db_engine.connect() as holder:
@@ -891,6 +901,46 @@ def test_asset_tag_format_lifecycle_is_audited_without_next_sequence(
     for row in _audit_rows(engine, "MachineAssetTagConfig", 1):
         for snapshot in (row.before_data, row.after_data):
             assert snapshot is None or "next_sequence" not in snapshot
+
+
+@pytest.mark.parametrize("holder", ["format-edit", "machine-counter"])
+def test_asset_tag_format_edit_waits_and_audits_the_committed_predecessor(
+    unconfigured_client: _Deployment, holder: str
+) -> None:
+    """Lock-first on the singleton: a format PUT waits for a concurrent
+    format edit or Machine creation's counter UPDATE, then audits the
+    committed row and never overwrites ``next_sequence``."""
+    client, engine = unconfigured_client
+    assert client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 4}).status_code == 200
+    expected_before = {"prefix": "CD-", "digits": 4}
+    sequence = _stored(engine, models.MachineAssetTagConfig, 1).next_sequence
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("SELECT 1 FROM machine_asset_tag_config WHERE id = 1 FOR UPDATE")
+        )
+        if holder == "format-edit":
+            connection.execute(
+                sa.text("UPDATE machine_asset_tag_config SET prefix = 'MS-', digits = 6")
+            )
+            expected_before = {"prefix": "MS-", "digits": 6}
+        else:
+            connection.execute(
+                sa.text("UPDATE machine_asset_tag_config SET next_sequence = next_sequence + 1")
+            )
+        thread, results = _start(
+            lambda: client.put(_ASSET_TAG_PATH, json={"prefix": "AB-", "digits": 5})
+        )
+        _assert_blocked(thread)
+        connection.commit()
+    response = _finish(thread, results)
+
+    assert response.status_code == 200, response.text
+    rows = _audit_rows(engine, "MachineAssetTagConfig", 1)
+    assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
+    assert rows[-1].before_data == expected_before
+    assert rows[-1].after_data == {"prefix": "AB-", "digits": 5}
+    stored = _stored(engine, models.MachineAssetTagConfig, 1)
+    assert stored.next_sequence == sequence + (1 if holder == "machine-counter" else 0)
 
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,9 @@ _ASSET_TAG_DIGITS_MAX: Final = 8
 # edit's own UPDATE takes anyway — acquired before the snapshot, so
 # concurrent edits serialize and each audit row's before_data is the
 # committed predecessor, while FK checks and the allocation path's
-# FOR KEY SHARE on these rows are never blocked by it.
+# FOR KEY SHARE on these rows are never blocked by it. (An UPDATE that
+# changes a unique-key column, such as a Department name or an Operation
+# code, still takes FOR UPDATE itself, as it always did.)
 _EDIT_LOCK: Final = {"key_share": True}
 
 
