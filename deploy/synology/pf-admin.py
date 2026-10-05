@@ -1866,7 +1866,7 @@ class Controller:
         self.phase("opening-frontend")
         self.compose("up", "-d", "--no-deps", "--no-build", "--force-recreate", "frontend")
         self.wait_health("frontend")
-        response = self.compose("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://localhost:5173/api/health")
+        response = self.compose("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://127.0.0.1:5173/api/health")
         data = json.loads(response)
         if data.get("status") != "ok" or data.get("database") != "connected":
             raise Failure("Frontend/API/database health check failed.")

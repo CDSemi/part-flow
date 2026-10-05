@@ -1040,7 +1040,7 @@ class TimeoutAndCancellation(Base):
                           ("exec", "-T", "db", "pg_dump", "-U", "u", "-d", "d"),
                           ("exec", "-T", "db", "pg_dumpall", "-U", "u", "--globals-only"),
                           ("exec", "-T", "db", "pg_restore", "--list"),
-                          ("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://localhost:5173/api/health")):
+                          ("exec", "-T", "frontend", "wget", "-q", "-O", "-", "http://127.0.0.1:5173/api/health")):
             self.assertIsNone(pf.compose_effect(project, read_only), read_only)
         for mutation, verb in ((("up", "-d", "--no-deps", "--no-build", "--force-recreate", "backend"), "up"),
                                (("down", "--volumes", "--remove-orphans"), "down"),

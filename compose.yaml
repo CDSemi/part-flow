@@ -76,7 +76,9 @@ services:
                 condition: service_healthy
         healthcheck:
             # Confirms both the Vite dev server and the proxied backend
-            # health route are reachable from inside the container.
+            # health route are reachable from inside the container. The
+            # probe uses 127.0.0.1: busybox wget resolves localhost to ::1,
+            # where the IPv4-only Vite listener refuses the connection.
             test:
                 [
                     "CMD",
@@ -84,7 +86,7 @@ services:
                     "-q",
                     "-O",
                     "/dev/null",
-                    "http://localhost:5173/api/health",
+                    "http://127.0.0.1:5173/api/health",
                 ]
             interval: 10s
             timeout: 5s
