@@ -43,25 +43,38 @@ Each mutating service commits its own transaction: a 2xx response
 always reflects committed state, and a concurrent uniqueness race lost
 at COMMIT surfaces as the same ``ConflictError`` as a pre-checked
 duplicate.
+
+Every effective write appends exactly one ``audit_events`` row in the
+SAME transaction (Phase 13, PROJECT_PROFILE §28 "administrative
+configuration changes"): ``CREATED`` or ``UPDATED``, entity
+``Department``/``Area``/``Operation`` (``entity_id`` the internal id),
+``ScanStation`` (the Station ID) or ``MachineAssetTagConfig`` (``"1"``,
+the singleton), with the explicit-field snapshots below and
+``actor_reference`` NULL until Phase 14. An update locks its row first,
+in the mode its own UPDATE takes, so every ``before_data`` is the
+committed predecessor. Rejected writes, lost races and no-ops append
+nothing, and ``next_sequence`` is never audited.
 """
 
 import datetime
 import re
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.application import audit
 from app.application.common import (
     UNSET,
     UnsetType,
     commit,
+    flush,
     optional_text,
     required_flag,
     required_text,
 )
 from app.application.errors import ConflictError, InvalidInputError, NotFoundError
-from app.domain.enums import QuantityFlowStatus
+from app.domain.enums import AuditEntityType, AuditEventType, QuantityFlowStatus
 from app.infrastructure.models import (
     Area,
     Department,
@@ -78,6 +91,62 @@ AREA_BARCODE_PREFIX: Final = "PF:AREA:"
 _MACHINE_ASSET_TAG_CONFIG_ID: Final = 1
 _ASSET_TAG_DIGITS_MIN: Final = 1
 _ASSET_TAG_DIGITS_MAX: Final = 8
+
+# Lock-first mode of every update: FOR NO KEY UPDATE, the lock the
+# edit's own UPDATE takes anyway — acquired before the snapshot, so
+# concurrent edits serialize and each audit row's before_data is the
+# committed predecessor, while FK checks and the allocation path's
+# FOR KEY SHARE on these rows are never blocked by it.
+_EDIT_LOCK: Final = {"key_share": True}
+
+
+# ---------------------------------------------------------------------------
+# Audit snapshots: explicit field lists. A column a later slice adds is
+# audited only if that slice adds it here; timestamps, the id (it is the
+# audit entity_id) and the Asset Tag ``next_sequence`` never belong.
+# ---------------------------------------------------------------------------
+
+
+def _department_snapshot(department: Department) -> dict[str, Any]:
+    return {"name": department.name, "is_active": department.is_active}
+
+
+def _area_snapshot(area: Area) -> dict[str, Any]:
+    return {
+        "department_id": area.department_id,
+        "name": area.name,
+        "barcode_value": area.barcode_value,
+        "description": area.description,
+        "color": area.color,
+        "icon_url": area.icon_url,
+        "is_terminal": area.is_terminal,
+        "is_active": area.is_active,
+    }
+
+
+def _operation_snapshot(operation: Operation) -> dict[str, Any]:
+    duration = operation.default_expected_duration
+    return {
+        "area_id": operation.area_id,
+        "code": operation.code,
+        "name": operation.name,
+        "description": operation.description,
+        # Seconds as a JSON number (timedelta is not JSON); None = not set.
+        "default_expected_duration_seconds": (
+            duration.total_seconds() if duration is not None else None
+        ),
+        "is_external": operation.is_external,
+        "is_active": operation.is_active,
+    }
+
+
+def _scan_station_snapshot(station: ScanStation) -> dict[str, Any]:
+    return {"area_id": station.area_id, "is_active": station.is_active}
+
+
+def _asset_tag_format_snapshot(config: MachineAssetTagConfig) -> dict[str, Any]:
+    # next_sequence is Machine creation's never-reuse counter, not configuration.
+    return {"prefix": config.prefix, "digits": config.digits}
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +185,17 @@ def create_department(session: Session, *, name: object) -> Department:
     _reject_duplicate_department_name(session, clean_name)
     department = Department(name=clean_name)
     session.add(department)
+    # The id is the audit entity id; a name race lost here surfaces as
+    # the same conflict as one lost at COMMIT.
+    flush(session, _DEPARTMENT_CONFLICTS)
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.CREATED,
+        entity_type=AuditEntityType.DEPARTMENT,
+        entity_id=str(department.id),
+        before_data=None,
+        after_data=_department_snapshot(department),
+    )
     commit(session, _DEPARTMENT_CONFLICTS)
     return department
 
@@ -127,7 +207,12 @@ def update_department(
     name: object = UNSET,
     is_active: object = UNSET,
 ) -> Department:
-    department = _get_department(session, department_id)
+    department = session.get(
+        Department, department_id, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if department is None:
+        raise NotFoundError(f"Department {department_id} does not exist.")
+    before = _department_snapshot(department)
     changed = False
 
     if not isinstance(name, UnsetType):
@@ -156,6 +241,16 @@ def update_department(
 
     if changed:
         department.updated_at = func.now()
+        after = _department_snapshot(department)
+        if after != before:
+            audit.append_audit_event(
+                session,
+                event_type=AuditEventType.UPDATED,
+                entity_type=AuditEntityType.DEPARTMENT,
+                entity_id=str(department.id),
+                before_data=before,
+                after_data=after,
+            )
         commit(session, _DEPARTMENT_CONFLICTS)
     return department
 
@@ -167,13 +262,6 @@ def update_department(
 
 def list_areas(session: Session) -> list[Area]:
     return list(session.scalars(select(Area).order_by(Area.name, Area.id)))
-
-
-def _get_area(session: Session, area_id: int) -> Area:
-    area = session.get(Area, area_id)
-    if area is None:
-        raise NotFoundError(f"Area {area_id} does not exist.")
-    return area
 
 
 def require_active_area(session: Session, area_id: int, purpose: str) -> Area:
@@ -221,8 +309,16 @@ def create_area(
     # Two steps, one transaction: the INSERT assigns the stable id, the
     # UPDATE assigns the derived barcode from it — the assign-once
     # trigger permits exactly this NULL → value transition.
-    session.flush()
+    flush(session, _AREA_CONFLICTS)
     area.barcode_value = f"{AREA_BARCODE_PREFIX}{area.id}"
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.CREATED,
+        entity_type=AuditEntityType.AREA,
+        entity_id=str(area.id),
+        before_data=None,
+        after_data=_area_snapshot(area),
+    )
     commit(session, _AREA_CONFLICTS)
     return area
 
@@ -238,21 +334,31 @@ def update_area(
     is_terminal: object = UNSET,
     is_active: object = UNSET,
 ) -> Area:
-    area = _get_area(session, area_id)
+    # Every edit loads the Area row under its lock FIRST — before the
+    # audit snapshot and any field mutation — and re-reads the latest
+    # committed state (populate_existing), so every edit applies on the
+    # latest row and its before_data is the committed predecessor. A
+    # requested deactivation takes FOR UPDATE (it also excludes the FK
+    # KEY SHARE of concurrent child inserts); any other edit takes the
+    # FOR NO KEY UPDATE its own UPDATE takes. Both conflict with the
+    # FOR UPDATE production release holds on the Area, which is the
+    # serialization the deactivation check below relies on. The mode
+    # follows the raw value (only a bool passes required_flag), so an
+    # unknown Area is still a 404 before a malformed flag's 422.
+    area = session.get(
+        Area,
+        area_id,
+        with_for_update=True if is_active is False else _EDIT_LOCK,
+        populate_existing=True,
+    )
+    if area is None:
+        raise NotFoundError(f"Area {area_id} does not exist.")
+    before = _area_snapshot(area)
     changed = False
 
-    # An explicit deactivation locks the Area row FIRST — before any
-    # field mutation. Serialization with production release requires
-    # the lock plus a re-read of the latest committed state, and
-    # Session.refresh() reloads every attribute, so taking it after
-    # edits were applied would silently discard them. With the lock
-    # (and refresh) up front, the metadata edits below always apply on
-    # the latest row and survive to COMMIT.
     requested_active: bool | None = None
     if not isinstance(is_active, UnsetType):
         requested_active = required_flag(is_active, "Area active status")
-        if not requested_active:
-            session.refresh(area, with_for_update=True)
 
     if not isinstance(name, UnsetType):
         clean_name = required_text(name, "Area name")
@@ -280,9 +386,9 @@ def update_area(
             area.is_terminal = terminal
             changed = True
 
-    # requested_active was validated (and, for a deactivation, the row
-    # was locked and re-read) before any mutation above, so
-    # area.is_active is the latest committed state here.
+    # requested_active was validated, and the row locked and re-read,
+    # before any mutation above, so area.is_active is the latest
+    # committed state here.
     if requested_active is not None and requested_active != area.is_active:
         if requested_active:
             department = _get_department(session, area.department_id)
@@ -322,6 +428,16 @@ def update_area(
 
     if changed:
         area.updated_at = func.now()
+        after = _area_snapshot(area)
+        if after != before:
+            audit.append_audit_event(
+                session,
+                event_type=AuditEventType.UPDATED,
+                entity_type=AuditEntityType.AREA,
+                entity_id=str(area.id),
+                before_data=before,
+                after_data=after,
+            )
         commit(session, _AREA_CONFLICTS)
     return area
 
@@ -333,13 +449,6 @@ def update_area(
 
 def list_operations(session: Session) -> list[Operation]:
     return list(session.scalars(select(Operation).order_by(Operation.area_id, Operation.code)))
-
-
-def _get_operation(session: Session, operation_id: int) -> Operation:
-    operation = session.get(Operation, operation_id)
-    if operation is None:
-        raise NotFoundError(f"Operation {operation_id} does not exist.")
-    return operation
 
 
 def _require_positive_duration(value: datetime.timedelta | None) -> datetime.timedelta | None:
@@ -387,6 +496,17 @@ def create_operation(
         is_external=is_external,
     )
     session.add(operation)
+    # The id is the audit entity id; a code race lost here surfaces as
+    # the same conflict as one lost at COMMIT.
+    flush(session, _OPERATION_CONFLICTS)
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.CREATED,
+        entity_type=AuditEntityType.OPERATION,
+        entity_id=str(operation.id),
+        before_data=None,
+        after_data=_operation_snapshot(operation),
+    )
     commit(session, _OPERATION_CONFLICTS)
     return operation
 
@@ -405,7 +525,12 @@ def update_operation(
     # The Area binding is deliberately not updatable: Movement history
     # will reference Operations in their Area context, and moving an
     # Operation between Areas would make that history ambiguous.
-    operation = _get_operation(session, operation_id)
+    operation = session.get(
+        Operation, operation_id, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if operation is None:
+        raise NotFoundError(f"Operation {operation_id} does not exist.")
+    before = _operation_snapshot(operation)
     changed = False
 
     if not isinstance(code, UnsetType):
@@ -444,6 +569,16 @@ def update_operation(
 
     if changed:
         operation.updated_at = func.now()
+        after = _operation_snapshot(operation)
+        if after != before:
+            audit.append_audit_event(
+                session,
+                event_type=AuditEventType.UPDATED,
+                entity_type=AuditEntityType.OPERATION,
+                entity_id=str(operation.id),
+                before_data=before,
+                after_data=after,
+            )
         commit(session, _OPERATION_CONFLICTS)
     return operation
 
@@ -494,6 +629,16 @@ def create_scan_station(
     area = require_active_area(session, area_id, "receive new Scan Stations")
     station = ScanStation(station_id=clean_station_id, area_id=area.id, is_active=is_active)
     session.add(station)
+    # The Station ID is the audit entity id, so no flush is needed: a
+    # race lost at COMMIT rolls back the station and its audit row together.
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.CREATED,
+        entity_type=AuditEntityType.SCAN_STATION,
+        entity_id=station.station_id,
+        before_data=None,
+        after_data=_scan_station_snapshot(station),
+    )
     commit(session, _SCAN_STATION_CONFLICTS)
     return station
 
@@ -508,7 +653,12 @@ def update_scan_station(
     # The Station ID itself is the stable identity (PROJECT_PROFILE
     # §15) and is never renamed; rebinding to another active Area is
     # the Application-controlled configuration workflow.
-    station = get_scan_station(session, station_id)
+    station = session.get(
+        ScanStation, station_id, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if station is None:
+        raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
+    before = _scan_station_snapshot(station)
     changed = False
 
     if not isinstance(area_id, UnsetType):
@@ -526,6 +676,16 @@ def update_scan_station(
 
     if changed:
         station.updated_at = func.now()
+        after = _scan_station_snapshot(station)
+        if after != before:
+            audit.append_audit_event(
+                session,
+                event_type=AuditEventType.UPDATED,
+                entity_type=AuditEntityType.SCAN_STATION,
+                entity_id=station.station_id,
+                before_data=before,
+                after_data=after,
+            )
         commit(session, _SCAN_STATION_CONFLICTS)
     return station
 
@@ -556,7 +716,16 @@ def upsert_machine_asset_tag_format(
             f" and {_ASSET_TAG_DIGITS_MAX} digits."
         )
 
-    config = session.get(MachineAssetTagConfig, _MACHINE_ASSET_TAG_CONFIG_ID)
+    # Lock-first on the singleton (FOR NO KEY UPDATE, the mode of Machine
+    # creation's counter UPDATE): an update serializes with it and with
+    # other format edits. No row yet means first configuration, which
+    # takes the create path unlocked, as before.
+    config = session.get(
+        MachineAssetTagConfig,
+        _MACHINE_ASSET_TAG_CONFIG_ID,
+        with_for_update=_EDIT_LOCK,
+        populate_existing=True,
+    )
     if config is None:
         # First configuration: the sequence counter starts at 1 through
         # its server default and is owned by Machine creation from then
@@ -565,13 +734,30 @@ def upsert_machine_asset_tag_format(
             id=_MACHINE_ASSET_TAG_CONFIG_ID, prefix=prefix, digits=digits
         )
         session.add(config)
+        audit.append_audit_event(
+            session,
+            event_type=AuditEventType.CREATED,
+            entity_type=AuditEntityType.MACHINE_ASSET_TAG_CONFIG,
+            entity_id=str(_MACHINE_ASSET_TAG_CONFIG_ID),
+            before_data=None,
+            after_data=_asset_tag_format_snapshot(config),
+        )
         commit(session, {})
     elif prefix != config.prefix or digits != config.digits:
         # A format change applies to Machines created afterwards only —
         # existing Asset Tags are never renamed or regenerated, and the
         # never-reuse counter keeps counting.
+        before = _asset_tag_format_snapshot(config)
         config.prefix = prefix
         config.digits = digits
         config.updated_at = func.now()
+        audit.append_audit_event(
+            session,
+            event_type=AuditEventType.UPDATED,
+            entity_type=AuditEntityType.MACHINE_ASSET_TAG_CONFIG,
+            entity_id=str(_MACHINE_ASSET_TAG_CONFIG_ID),
+            before_data=before,
+            after_data=_asset_tag_format_snapshot(config),
+        )
         commit(session, {})
     return config

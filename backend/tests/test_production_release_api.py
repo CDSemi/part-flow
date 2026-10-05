@@ -219,12 +219,29 @@ _PRODUCTION_MODELS = (
 )
 
 
+# Environment configuration edits a test makes between two counts are
+# audited too (Phase 13); these counts guard production and business
+# writes, so they leave the configuration audit entities out.
+_CONFIGURATION_AUDIT_ENTITIES = (
+    "Department",
+    "Area",
+    "Operation",
+    "ScanStation",
+    "MachineAssetTagConfig",
+)
+
+
+def _count_query(model: type[models.Base]) -> sa.Select[tuple[int]]:
+    query = sa.select(sa.func.count()).select_from(model.__table__)
+    if model is models.AuditEvent:
+        query = query.where(models.AuditEvent.entity_type.not_in(_CONFIGURATION_AUDIT_ENTITIES))
+    return query
+
+
 def _counts(engine: Engine) -> dict[str, int]:
     with engine.connect() as connection:
         return {
-            model.__tablename__: connection.execute(
-                sa.select(sa.func.count()).select_from(model.__table__)
-            ).scalar_one()
+            model.__tablename__: connection.execute(_count_query(model)).scalar_one()
             for model in _PRODUCTION_MODELS
         }
 

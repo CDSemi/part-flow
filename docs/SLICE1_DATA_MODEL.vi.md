@@ -51,7 +51,7 @@ authentication/role, ERP và mọi offline behavior. Xem §18.
 | 10 | `QuantityFlow` | Traceable physical quantity tạo bởi release, route mode/snapshot và current-position projection |
 | 11 | `PartMovement` | Immutable production event; slice này chỉ tạo `RECEIVED`, là production source of truth |
 | 12 | Current-position projection | Rebuildable field `current_area_id`; `current_machine_id` đến Phase 6 |
-| 13 | Audit event | Generic append-only history cho master/business demand; infrastructure, không domain aggregate |
+| 13 | Audit event | Generic append-only history cho master/business demand/cấu hình; infrastructure, không domain aggregate |
 
 `scan_stations` là stable app/infrastructure config, không core aggregate. Release
 từ Management không có Station nên slice này không tạo `scan_stations` hoặc
@@ -309,8 +309,8 @@ Hai mechanism tách trách nhiệm:
 
 1. `PartMovement` là production audit/source of truth và replay projection; không
    duplicate generic audit cho production action.
-2. `audit_events` append-only chỉ cho master/business demand: WorkOrder,
-   WorkOrderDemand, PartNumber. Không replay để build state và không phải generic
+2. `audit_events` append-only chỉ cho master, business demand và thay đổi cấu hình: WorkOrder,
+   WorkOrderDemand và PartNumber (Phase 4), Worker (Phase 13) và các entity cấu hình môi trường (Phase 13, bên dưới). Không replay để build state và không phải generic
    event-sourcing framework.
 
 `audit_events`: BIGSERIAL id, `CREATED|UPDATED`, entity type/key, nullable actor,
@@ -324,6 +324,8 @@ trigger; creation có before NULL, update append row mới, không rewrite row c
 **Thay đổi priority của Hot list (Phase 12).** Thay đổi priority được audit bằng row `UPDATED` trên `WorkOrderDemand`, một row cho mỗi demand đổi `priority_rank` (gồm cả demand được đánh số lại để lấp chỗ hở), ghi cùng transaction với rank: `before_data = {"priority_rank": old}`, `after_data = {"priority_rank": new}` (NULL nghĩa là ngoài list), và `metadata.hot_list_change` giữ `device_event_id`, `action`, request `fingerprint`, `sequence` của row trong command và một **identity snapshot** lấy lúc chạy command (`work_order_demand_id`, `part_number`, `work_order_id`, `work_order_number`). Snapshot cho phép replay của command dựng lại `changes` chỉ từ audit row, kể cả khi demand đã bị xóa. Audit row cũng là idempotency record của command: khác cơ chế dựa trên UNIQUE của §14, lookup được làm race-free bằng Hot advisory lock. Thay đổi rank thực hiện ngoài command ghi cùng loại row: `metadata.hot_list_change` khi đó mang `action` `AUTO_REMOVE` (một allocation hoặc một Work Order save hạ quantity làm demand inactive) hoặc `LINE_DELETE` (việc xóa Hot line đã confirm), `sequence`, identity snapshot và một block `cause` (`trigger`, `reference`, và list `removed` kèm từng `reason`), và **không** có `device_event_id` hay `fingerprint` ở level đó, nên idempotency lookup của command không bao giờ thấy chúng. Không thêm audit vocabulary. Ghi rank trên demand của Work Order completed là ngoại lệ được chấp nhận và có tài liệu so với việc Work Order đó read-only (IMPLEMENTATION_ROADMAP Phase 12, OD1): ghi priority không phải sửa Work Order. Có hai writer làm việc đó — automatic removal bên trong allocation làm completed, và REMOVE / MOVE của manager trên entry tồn đọng từ trước thay đổi qua command.
 
 **Cấu hình Worker và vocabulary được mở rộng (Phase 13, `0014_phase13_workers`).** Vocabulary `event_type` mở rộng thêm `DELETED` (hard delete record master/configuration; chưa có writer) và vocabulary `entity_type` thêm `Worker` (cấu hình audit identity của Scan Station, không bao giờ là hoạt động production). Mỗi write Worker có hiệu lực append đúng một row trong cùng transaction với write; `entity_id` là internal id của Worker dạng text, `actor_reference` NULL và `metadata` NULL. Row profile snapshot `{name, badge_barcode, is_active}` (`before_data` NULL với `CREATED`); row avatar snapshot `{"avatar": null | {content_type, byte_size, sha256}}` — digest, không bao giờ là byte ảnh. Row Worker được lock trước, nên trong từng facet (profile, avatar) `before_data` của một row là `after_data` của row liền trước; hai facet đan xen và không nối chuỗi với nhau. Write bị từ chối và no-op không append gì.
+
+**Cấu hình môi trường (Phase 13, `0016_phase13_environment_audit`).** Các write môi trường Phase 3.5 được audit với năm giá trị `entity_type` bổ sung: `Department`, `Area`, `Operation`, `ScanStation` và `MachineAssetTagConfig` (định dạng Asset Tag). `entity_id` là internal id dạng text cho Department, Area và Operation, Station ID cho `ScanStation`, và `'1'` cho singleton `MachineAssetTagConfig`. Mỗi create hoặc update có hiệu lực append đúng một row `CREATED` hoặc `UPDATED` trong cùng transaction (một PATCH nhiều field là một row; no-op, write bị từ chối hoặc race thua không append gì). Snapshot là danh sách field tường minh: Department `{name, is_active}`; Area `{department_id, name, barcode_value, description, color, icon_url, is_terminal, is_active}`; Operation `{area_id, code, name, description, default_expected_duration_seconds, is_external, is_active}` (thời lượng tính bằng giây dạng JSON number, `null` khi chưa đặt); ScanStation `{area_id, is_active}`; MachineAssetTagConfig `{prefix, digits}` — `next_sequence` (bộ đếm never-reuse của việc tạo Machine) không phải cấu hình và không bao giờ được audit, và cột slice sau thêm chỉ được audit khi slice đó thêm nó vào snapshot. Mỗi update khóa row của mình trước, theo mode mà UPDATE của chính nó dùng, và snapshot dưới lock, nên các row liên tiếp của một entity nối chuỗi: mỗi `before_data` bằng `after_data` liền trước trên mọi key có ở cả hai. Không backfill: row audit đầu tiên của cấu hình có trước revision là `UPDATED` có `before_data` giữ trạng thái tìm thấy. `actor_reference` và `metadata` NULL cho đến Phase 14. Machine không bao giờ là entity của `audit_events`.
 
 ---
 
@@ -393,7 +395,7 @@ WHERE movement_type = 'RECEIVED'
 JSONB subscript expression phải khớp Application exactly; index không tạo column,
 FK hay stored counter. UPDATE/DELETE bị guard.
 
-**`audit_events`** — BIGSERIAL, constrained event/entity types (`0014_phase13_workers` mở rộng `event_type` thành `('CREATED','UPDATED','DELETED')` và thêm `'Worker'` vào `entity_type`), polymorphic id,
+**`audit_events`** — BIGSERIAL, constrained event/entity types (`0014_phase13_workers` mở rộng `event_type` thành `('CREATED','UPDATED','DELETED')` và thêm `'Worker'` vào `entity_type`; `0016_phase13_environment_audit` thêm `'Department'`, `'Area'`, `'Operation'`, `'ScanStation'`, `'MachineAssetTagConfig'`), polymorphic id,
 actor/time/before/after/metadata, `(entity_type,entity_id,id)` index, append-only; Phase 12 thêm partial expression index `ix_audit_events_hot_list_device_event_id` trên `(metadata['hot_list_change'] ->> 'device_event_id') WHERE entity_type = 'WorkOrderDemand'` cho idempotency lookup của Hot command (dạng lưu là operator `->>` tường minh trên JSONB subscript, và Application lookup phát ra cùng expression).
 
 Slice migration không FK tới table không tạo; deferred Station/Machine columns đến

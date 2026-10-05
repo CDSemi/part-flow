@@ -1,12 +1,14 @@
-"""Integration tests for the Phase 13 Workers registry migration.
+"""Integration tests for the Phase 13 migrations.
 
 Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
-verifies what `0014_phase13_workers` and `0015_phase13_badge_check`
-add (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §8.13, §10; owner
-decisions OD-3, OD-10):
+verifies what `0014_phase13_workers`, `0015_phase13_badge_check` and
+`0016_phase13_environment_audit` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §8.13, §10, §28; owner decisions OD-3, OD-10). Later
+Phase 13 slices extend this module:
 
-- exact head boundary: `0015_phase13_badge_check` is head;
+- exact head boundary: `0016_phase13_environment_audit` is the single
+  head;
 - the `workers` table shape and its exact constraint names; no FK from
   or to it;
 - the database CHECKs refuse every non-canonical badge (empty, padded,
@@ -16,25 +18,30 @@ decisions OD-3, OD-10):
   PostgreSQL itself; the badge CHECK compares under the "C" collation,
   so it admits a badge the OS libc case tables would uppercase (`ɤ`)
   where the 0014 CHECK refused it;
-- the widened audit vocabulary: entity `Worker` and event `DELETED`
-  are admitted, other values still refused;
+- the widened audit vocabulary: entity `Worker`, the environment
+  configuration entities (`Department`, `Area`, `Operation`,
+  `ScanStation`, `MachineAssetTagConfig`) and event `DELETED` are
+  admitted, other values still refused, and the database entity CHECK
+  names exactly the `AuditEntityType` members;
 - models↔migration metadata parity at head (moved here from the
   Phase 12 schema test, which is now pinned to 0013);
 - clean downgrade back to the Phase 12 boundary with a successful
   re-upgrade, and the refusing downgrade while Worker configuration or
   Worker audit history exists (never deleted); the 0015 downgrade
   restores the 0014 CHECK and refuses while a row only 0015 admits
-  exists.
+  exists; the 0016 downgrade restores the Worker vocabulary and refuses
+  while environment audit history exists.
 
 Phase 13 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to
-`0015_phase13_badge_check` and move the head-level coverage into that
+coverage. When a later phase adds its migration, pin this module to the
+last Phase 13 revision and move the head-level coverage into that
 phase's schema test.
 """
 
 import datetime
 import importlib.util
 import os
+import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
@@ -42,23 +49,27 @@ from types import ModuleType
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 from alembic import command
+from app.domain.enums import AuditEntityType
 from app.infrastructure import models
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PHASE12_REVISION = "0013_phase12_priority"
 _PHASE13_REVISION = "0014_phase13_workers"
-_HEAD_REVISION = "0015_phase13_badge_check"
+_BADGE_CHECK_REVISION = "0015_phase13_badge_check"
+_HEAD_REVISION = "0016_phase13_environment_audit"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
 # `upper()` of the database collation maps it to U+A7CB.
 _LIBC_UPPERCASED_BADGE = "ɤ1"
+_ENVIRONMENT_ENTITIES = ("Department", "Area", "Operation", "ScanStation", "MachineAssetTagConfig")
 _WORKER_CHECKS = {
     "ck_workers_badge_barcode_canonical",
     "ck_workers_avatar_image_shape",
@@ -167,6 +178,11 @@ def _refused_by(connection: Connection, constraint: str, statement: Callable[[],
 def test_head_is_the_phase13_revision(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         assert _version(connection) == _HEAD_REVISION
+
+
+def test_alembic_has_a_single_head() -> None:
+    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
+    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
 
 
 def test_workers_table_shape(migrated_engine: Engine) -> None:
@@ -321,6 +337,22 @@ def test_audit_admits_the_worker_entity_and_the_deleted_event(connection: Connec
     )
 
 
+def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> None:
+    entity_check = _audit_checks(migrated_engine)["ck_audit_events_entity_type"]
+    assert set(re.findall(r"'([^']*)'", entity_check)) == {e.value for e in AuditEntityType}
+
+
+def test_audit_admits_the_environment_entities(connection: Connection) -> None:
+    for entity in _ENVIRONMENT_ENTITIES:
+        _insert_audit(connection, "CREATED", entity)
+    for refused in ("Machine", "MachineLifecycleEvent", "User", "ApplicationPolicy"):
+
+        def insert(entity: str = refused) -> None:
+            _insert_audit(connection, "CREATED", entity)
+
+        _refused_by(connection, "ck_audit_events_entity_type", insert)
+
+
 # ---------------------------------------------------------------------------
 # Parity and downgrade
 # ---------------------------------------------------------------------------
@@ -371,6 +403,37 @@ def test_downgrade_restores_the_phase12_boundary(admin_engine: Engine) -> None:
         try:
             assert "workers" in inspect(engine).get_table_names()
             assert "'Worker'" in _audit_checks(engine)["ck_audit_events_entity_type"]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_to_badge_check_revision_restores_the_s1_vocabulary(
+    admin_engine: Engine,
+) -> None:
+    name = "partflow_test_phase13_downgrade_s2"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _BADGE_CHECK_REVISION)
+        engine = create_engine(url)
+        try:
+            entity_check = _audit_checks(engine)["ck_audit_events_entity_type"]
+            assert "'Worker'" in entity_check
+            for entity in _ENVIRONMENT_ENTITIES:
+                assert f"'{entity}'" not in entity_check
+            with engine.connect() as connection:
+                assert _version(connection) == _BADGE_CHECK_REVISION
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
         finally:
             engine.dispose()
     finally:
@@ -460,5 +523,22 @@ def test_badge_check_downgrade_refuses_a_badge_only_0015_admits(refused_database
         with engine.connect() as connection:
             assert _version(connection) == _HEAD_REVISION
         assert _row_counts(engine) == (1, 0)
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_environment_audit_history_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_audit(connection, "CREATED", "Area")
+        with pytest.raises(IntegrityError, match="ck_audit_events_entity_type"):
+            command.downgrade(_alembic_config(refused_database), _BADGE_CHECK_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            areas = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Area'")
+            ).scalar_one()
+        assert areas == 1
     finally:
         engine.dispose()

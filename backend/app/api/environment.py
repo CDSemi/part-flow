@@ -10,6 +10,8 @@ as an Area ``barcode_value`` or the ``next_sequence`` counter is
 rejected instead of silently ignored), the Application layer owns
 every business rule and the transaction, and the central handlers in
 ``app.api.errors`` translate typed failures into HTTP responses.
+Every effective write is audited in ``audit_events`` (Phase 13);
+nothing about the HTTP surface changes.
 
 Deliberate surface decisions:
 

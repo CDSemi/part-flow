@@ -641,11 +641,25 @@ def _demand_exists(engine: Engine, demand_id: int) -> bool:
     return found is not None
 
 
+# Environment configuration edits a test makes between two counts are
+# audited too (Phase 13); these counts guard production and business
+# writes, so they leave the configuration audit entities out.
+_CONFIGURATION_AUDIT_ENTITIES = (
+    "Department",
+    "Area",
+    "Operation",
+    "ScanStation",
+    "MachineAssetTagConfig",
+)
+
+
 def _audit_count(engine: Engine) -> int:
     with engine.connect() as connection:
         return int(
             connection.execute(
-                sa.select(sa.func.count()).select_from(models.AuditEvent)
+                sa.select(sa.func.count())
+                .select_from(models.AuditEvent)
+                .where(models.AuditEvent.entity_type.not_in(_CONFIGURATION_AUDIT_ENTITIES))
             ).scalar_one()
         )
 

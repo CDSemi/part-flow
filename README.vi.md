@@ -108,7 +108,7 @@ Production Board + Area Board + PN Tracking của Phase 11 và Priority Manageme
   monitoring position — giá trị snapshot của Assigned Route Step hiện tại, nếu
   không thì Operation default — do UI clock chung đánh giá; chỉ advisory).
 - **Phase 12 (Priority Management):** Hot list của Work Order Demand — `GET /api/hot-list` (các entry theo rank, mỗi entry có quantity hiện tại của PN theo Area / Machine), `GET /api/hot-list/candidates` (`?search=` theo PN / Work Order Number / Job Number, hoặc `?barcode=PF:PN:…`; chỉ demand eligible để vào list) và `POST /api/hot-list/changes` (command idempotent, có audit, thêm / xóa / di chuyển / undo / redo một entry đối chiếu order mà manager đã xác nhận — cùng với automatic removal entry có line trở thành allocate đủ, là các writer duy nhất của `priority_rank`; Department-gated: 404 khi không có Department active, 409 khi có nhiều — chỉ replay của một thay đổi đã commit vẫn trả lời, với `entries: null`) — và view Management → Priority thật trên đó (confirmation trước mọi thay đổi order, Undo / Redo trong session, drag-and-drop và Move Up / Move Down, add bằng search hoặc scan `PF:PN:`). Management → Work Orders chỉ remove một Hot demand line sau typed confirmation (server từ chối bằng 409 khi thiếu cờ confirmation). Migration `0013_phase12_priority` có pre-check từ chối nếu rank hiện có không dense, rồi thêm CHECK rank dương, UNIQUE `priority_rank` và audit expression index cho idempotency lookup của command.
-- **Phase 13 (Workers registry — đang triển khai, slice 1):** `GET` / `POST /api/workers`, `PATCH /api/workers/{id}` và `PUT` / `DELETE` / `GET /api/workers/{id}/avatar` (avatar lưu trong PostgreSQL, PNG / JPEG / WebP tối đa 2 MiB), migration `0014_phase13_workers` (bảng `workers` với badge UNIQUE và CHECK dạng chuẩn hóa — trim, uppercase — cùng audit event `DELETED` và entity `Worker`; downgrade từ chối; `0015_phase13_badge_check` tạo lại CHECK đó dưới collation `"C"` để không bao giờ phụ thuộc bảng case của libc trong OS) và section Administration → Workers thật; mọi write Worker được audit.
+- **Phase 13 (Workers registry và audit cấu hình môi trường — đang triển khai, slice 1–2):** `GET` / `POST /api/workers`, `PATCH /api/workers/{id}` và `PUT` / `DELETE` / `GET /api/workers/{id}/avatar` (avatar lưu trong PostgreSQL, PNG / JPEG / WebP tối đa 2 MiB), migration `0014_phase13_workers` (bảng `workers` với badge UNIQUE và CHECK dạng chuẩn hóa — trim, uppercase — cùng audit event `DELETED` và entity `Worker`; downgrade từ chối; `0015_phase13_badge_check` tạo lại CHECK đó dưới collation `"C"` để không bao giờ phụ thuộc bảng case của libc trong OS; `0016_phase13_environment_audit` mở rộng CHECK entity của audit với các entity môi trường `Department`, `Area`, `Operation`, `ScanStation` và `MachineAssetTagConfig`; downgrade từ chối) và section Administration → Workers thật; mọi write Worker được audit, và (slice 2) mọi write cấu hình môi trường (Department, Area, Operation, Scan Station, định dạng Asset Tag) cũng được audit.
 
 Các phase tiếp theo, gồm authentication/authorization và production deployment,
 chưa hoàn tất. Vì vậy Compose hiện tại là môi trường phát triển; xem
@@ -325,11 +325,12 @@ Test backend gồm:
 - integration test dùng PostgreSQL thật cho migration/schema, environment API,
   Machine lifecycle, Work Order intake/release, transfer, Machine/direct Area
   processing, split/merge lineage, correction/Undo, Stockroom/allocation và
-  Workers API (`tests/test_workers_api.py`). Module schema của mỗi phase dừng ở
+  Workers API (`tests/test_workers_api.py`) và audit cấu hình môi trường
+  (`tests/test_environment_audit_api.py`). Module schema của mỗi phase dừng ở
   revision biên của chính nó (đến `0013_phase12_priority` cho Phase 12);
-  `tests/test_phase13_schema.py` giữ phần coverage ở head (`0014_phase13_workers`
-  và `0015_phase13_badge_check`: constraint của bảng `workers`, vocabulary audit
-  mở rộng, các downgrade từ chối và
+  `tests/test_phase13_schema.py` giữ phần coverage ở head (`0014_phase13_workers`,
+  `0015_phase13_badge_check` và `0016_phase13_environment_audit`: constraint của bảng `workers`, vocabulary audit
+  mở rộng gồm các entity audit môi trường, các downgrade từ chối và
   models↔migration parity).
 
 Integration test tạo database tạm `partflow_test_*`; role cấu hình phải có quyền

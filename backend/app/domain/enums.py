@@ -251,13 +251,21 @@ class AuditEntityType(StrEnum):
     and never Machine (machine_lifecycle_events owns that history).
     Phase 13 adds Worker: configuration of the Scan Station audit
     identity (PROJECT_PROFILE §8.13), never production activity.
-    Widens additively in later phases.
+    Phase 13 (slice 2) also covers the Phase 3.5 environment
+    configuration entities — Department, Area, Operation, ScanStation
+    and the Machine Asset Tag format — still never production activity
+    and never Machine. Widens additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
     WORK_ORDER_DEMAND = "WorkOrderDemand"
     PART_NUMBER = "PartNumber"
     WORKER = "Worker"
+    DEPARTMENT = "Department"
+    AREA = "Area"
+    OPERATION = "Operation"
+    SCAN_STATION = "ScanStation"
+    MACHINE_ASSET_TAG_CONFIG = "MachineAssetTagConfig"
 
 
 class MachineLifecycleEventType(StrEnum):

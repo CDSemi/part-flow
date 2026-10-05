@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slice 1): `/api/workers` with its avatar endpoints and the real Administration → Workers section:
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slice 1): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every environment configuration write (slice 2):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -263,7 +263,10 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   UNIQUE and canonical-form CHECK and the avatar on the row, plus the
   `DELETED` audit event and `Worker` audit entity; the downgrade refuses;
   `0015_phase13_badge_check` re-creates that CHECK under the `"C"`
-  collation so it never depends on the OS libc case tables)
+  collation so it never depends on the OS libc case tables;
+  `0016_phase13_environment_audit` widens the audit entity CHECK with the
+  environment entities `Department`, `Area`, `Operation`, `ScanStation`
+  and `MachineAssetTagConfig`; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -702,8 +705,9 @@ integration):
   `tests/test_machines_api.py`, `tests/test_work_orders_api.py`,
   `tests/test_part_numbers_api.py`, `tests/test_route_templates_api.py`,
   `tests/test_production_release_api.py`,
-  `tests/test_scan_station_transfer_api.py`, and
-  `tests/test_workers_api.py` — **integration** tests that
+  `tests/test_scan_station_transfer_api.py`,
+  `tests/test_workers_api.py`, and
+  `tests/test_environment_audit_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -720,8 +724,10 @@ integration):
   `0012_phase11_tracking_index` for Phase 11 and
   `0013_phase12_priority` for Phase 12 — while
   `tests/test_phase13_schema.py` carries the head-level coverage
-  (`0014_phase13_workers` and `0015_phase13_badge_check`: the `workers`
-  table's constraints, the widened audit vocabulary, the refusing
+  (`0014_phase13_workers`, `0015_phase13_badge_check` and
+  `0016_phase13_environment_audit`: the `workers`
+  table's constraints, the widened audit vocabulary including the
+  environment audit entities, the refusing
   downgrades, and
   models↔migration parity; the Phase 10 module keeps the `STOCKED` type
   and its shape branch, the widened flow lifecycle,

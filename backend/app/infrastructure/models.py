@@ -1334,13 +1334,17 @@ class AuditEvent(Base):
 
     Records master-data, business-demand and configuration changes
     only — WorkOrder, WorkOrderDemand, PartNumber, and (Phase 13)
-    Worker. Rows are descriptive history for display and
+    Worker and the environment configuration entities Department,
+    Area, Operation, ScanStation and MachineAssetTagConfig (the Asset
+    Tag format). Rows are descriptive history for display and
     accountability: never replayed to build state, never describing
     production actions (the `RECEIVED` PartMovement is the production
     audit record), and deliberately not an event-sourcing framework.
     `entity_id` is polymorphic text with no FK — the internal PK for
-    WorkOrder/WorkOrderDemand/Worker, the canonical PN string for
-    PartNumber; integrity is guaranteed by writing the audit row in
+    WorkOrder/WorkOrderDemand/Worker/Department/Area/Operation, the
+    canonical PN string for PartNumber, the stable Station ID for
+    ScanStation and `"1"` for the singleton MachineAssetTagConfig;
+    integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_reference` stays a
     nullable, reference-free value until authentication exists
@@ -1373,7 +1377,9 @@ class AuditEvent(Base):
         CheckConstraint(
             f"entity_type IN ('{AuditEntityType.WORK_ORDER}',"
             f" '{AuditEntityType.WORK_ORDER_DEMAND}', '{AuditEntityType.PART_NUMBER}',"
-            f" '{AuditEntityType.WORKER}')",
+            f" '{AuditEntityType.WORKER}', '{AuditEntityType.DEPARTMENT}',"
+            f" '{AuditEntityType.AREA}', '{AuditEntityType.OPERATION}',"
+            f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
