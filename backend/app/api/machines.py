@@ -4,7 +4,9 @@ HTTP surface for the Machines management view (GUI_DESIGN §12):
 listing active/retired Machines, creation with the automatically
 assigned Asset Tag, metadata editing, the explicit maintenance
 override, retirement, reactivation of the same physical machine, and
-the append-only lifecycle history.
+the append-only lifecycle history. Every effective configuration write
+is audited in ``audit_events`` (Phase 13); lifecycle transitions stay
+in the lifecycle history.
 
 Routes stay thin orchestration: request schemas validate shape only
 (``extra="forbid"`` — a client that submits a server-owned field such

@@ -18,6 +18,8 @@ format appends exactly one ``audit_events`` row in its own transaction
 - atomicity on all ten write paths, the audit chain property, and
   isolation from production commands and from Machine creation's
   ``next_sequence``;
+- the slice 2b lost races: a Department rename race and a concurrent
+  first Asset Tag format save are 409s with nothing written, never 500s;
 - a static guard that every environment setter keeps its audit call.
 
 ``tests/test_environment_api.py`` stays unchanged: that it passes is the
@@ -352,6 +354,48 @@ def test_department_create_race_lost_at_flush_audits_nothing(
             .where(models.Department.name == name)
         ).scalar_one()
     assert same_name == 1
+
+
+@pytest.mark.parametrize("holder_outcome", ["commit", "rollback"])
+def test_department_rename_race_maps_to_conflict_not_autoflush_500(
+    client: TestClient, db_engine: Engine, holder_outcome: str
+) -> None:
+    """S2-F4: every read runs before the first assignment, so the rename
+    UPDATE is emitted inside commit() — never autoflushed by the
+    active-Area query — and a uq_departments_name race lost there is the
+    duplicate-name 409, with nothing written."""
+    department = _create_department(client)
+    stored = _stored(db_engine, models.Department, department["id"])
+    new_name = _unique("DEPT")
+    count = _audit_count(db_engine)
+    with db_engine.connect() as holder:
+        holder.execute(sa.text("INSERT INTO departments (name) VALUES (:name)"), {"name": new_name})
+        thread, results = _start(
+            lambda: client.patch(
+                f"/api/departments/{department['id']}",
+                json={"name": new_name, "is_active": False},
+            )
+        )
+        # Waits on the holder's uncommitted duplicate.
+        _assert_blocked(thread)
+        if holder_outcome == "commit":
+            holder.commit()
+        else:
+            holder.rollback()
+    response = _finish(thread, results)
+
+    if holder_outcome == "commit":
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == "A Department with this name already exists."
+        assert _stored(db_engine, models.Department, department["id"]) == stored
+        assert _audit_count(db_engine) == count
+    else:
+        assert response.status_code == 200, response.text
+        rows = _audit_rows(db_engine, "Department", department["id"])
+        assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
+        assert rows[-1].before_data == {"name": department["name"], "is_active": True}
+        assert rows[-1].after_data == {"name": new_name, "is_active": False}
+        assert _audit_count(db_engine) == count + 1
 
 
 # ---------------------------------------------------------------------------
@@ -890,14 +934,20 @@ def test_asset_tag_format_lifecycle_is_audited_without_next_sequence(
     )
     _assert_chain(rows)
 
-    # Machine creation advances the never-reuse counter and audits nothing.
+    # Machine creation advances the never-reuse counter and appends
+    # exactly one Machine CREATED row (slice 2b) — never a format row.
     area = _create_area(client)
     sequence = _stored(engine, models.MachineAssetTagConfig, 1).next_sequence
     count = _audit_count(engine)
+    format_count = _audit_count(engine, ("MachineAssetTagConfig",))
     machine = client.post("/api/machines", json={"area_id": area["id"], "name": _unique("M")})
     assert machine.status_code == 201, machine.text
     assert _stored(engine, models.MachineAssetTagConfig, 1).next_sequence == sequence + 1
-    assert _audit_count(engine) == count
+    assert _audit_count(engine) == count + 1
+    assert _audit_count(engine, ("MachineAssetTagConfig",)) == format_count
+    assert [row.event_type for row in _audit_rows(engine, "Machine", machine.json()["id"])] == [
+        "CREATED"
+    ]
     for row in _audit_rows(engine, "MachineAssetTagConfig", 1):
         for snapshot in (row.before_data, row.after_data):
             assert snapshot is None or "next_sequence" not in snapshot
@@ -941,6 +991,36 @@ def test_asset_tag_format_edit_waits_and_audits_the_committed_predecessor(
     assert rows[-1].after_data == {"prefix": "AB-", "digits": 5}
     stored = _stored(engine, models.MachineAssetTagConfig, 1)
     assert stored.next_sequence == sequence + (1 if holder == "machine-counter" else 0)
+
+
+def test_concurrent_first_asset_tag_format_save_is_a_conflict(
+    unconfigured_client: _Deployment,
+) -> None:
+    """S2-F5: the loser of two concurrent first configurations is a 409
+    on the singleton primary key, writes nothing and audits nothing."""
+    client, engine = unconfigured_client
+    with engine.connect() as holder:
+        holder.execute(
+            sa.text(
+                "INSERT INTO machine_asset_tag_config (id, prefix, digits) VALUES (1, 'HD-', 4)"
+            )
+        )
+        thread, results = _start(
+            lambda: client.put(_ASSET_TAG_PATH, json={"prefix": "CD-", "digits": 5})
+        )
+        # The INSERT waits on the holder's uncommitted singleton row.
+        _assert_blocked(thread)
+        holder.commit()
+    response = _finish(thread, results)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        "The Machine Asset Tag format was just saved by someone else."
+        " Refresh the page to see the saved format, then apply your change again."
+    )
+    stored = _stored(engine, models.MachineAssetTagConfig, 1)
+    assert (stored.prefix, stored.digits) == ("HD-", 4)
+    assert _audit_count(engine, ("MachineAssetTagConfig",)) == 0
 
 
 # ---------------------------------------------------------------------------

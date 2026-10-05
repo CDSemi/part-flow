@@ -247,14 +247,15 @@ class AuditEntityType(StrEnum):
     """Entity types the generic audit table records (SLICE1_DATA_MODEL §16).
 
     Exactly the master-data and business-demand entities — never
-    production activity (PartMovement is the production audit record)
-    and never Machine (machine_lifecycle_events owns that history).
+    production activity (PartMovement is the production audit record).
     Phase 13 adds Worker: configuration of the Scan Station audit
     identity (PROJECT_PROFILE §8.13), never production activity.
     Phase 13 (slice 2) also covers the Phase 3.5 environment
     configuration entities — Department, Area, Operation, ScanStation
-    and the Machine Asset Tag format — still never production activity
-    and never Machine. Widens additively in later phases.
+    and the Machine Asset Tag format — still never production activity.
+    Machine configuration (Phase 13 slice 2b) is audited here; Machine
+    retirement and reactivation stay recorded in
+    machine_lifecycle_events. Widens additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -266,6 +267,7 @@ class AuditEntityType(StrEnum):
     OPERATION = "Operation"
     SCAN_STATION = "ScanStation"
     MACHINE_ASSET_TAG_CONFIG = "MachineAssetTagConfig"
+    MACHINE = "Machine"
 
 
 class MachineLifecycleEventType(StrEnum):

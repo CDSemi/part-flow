@@ -2,12 +2,13 @@
 
 Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
-verifies what `0014_phase13_workers`, `0015_phase13_badge_check` and
-`0016_phase13_environment_audit` add (IMPLEMENTATION_ROADMAP Phase 13;
-PROJECT_PROFILE §8.13, §10, §28; owner decisions OD-3, OD-10). Later
-Phase 13 slices extend this module:
+verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
+`0016_phase13_environment_audit`, `0017_phase13_machine_audit` and
+`0018_phase13_pn_check_collation` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §7, §8.13, §10, §28; owner decisions OD-3, OD-10,
+S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0016_phase13_environment_audit` is the single
+- exact head boundary: `0018_phase13_pn_check_collation` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   or to it;
@@ -20,9 +21,14 @@ Phase 13 slices extend this module:
   where the 0014 CHECK refused it;
 - the widened audit vocabulary: entity `Worker`, the environment
   configuration entities (`Department`, `Area`, `Operation`,
-  `ScanStation`, `MachineAssetTagConfig`) and event `DELETED` are
-  admitted, other values still refused, and the database entity CHECK
-  names exactly the `AuditEntityType` members;
+  `ScanStation`, `MachineAssetTagConfig`), `Machine` and event `DELETED`
+  are admitted, other values (`MachineLifecycleEvent` included) still
+  refused, and the database entity CHECK names exactly the
+  `AuditEntityType` members;
+- the canonical PN CHECK of all four PN tables compares under the "C"
+  collation, so it admits a PN the OS libc case tables would uppercase
+  (`ɤ`) and still refuses ASCII lowercase, ASCII whitespace and the
+  empty string;
 - models↔migration metadata parity at head (moved here from the
   Phase 12 schema test, which is now pinned to 0013);
 - clean downgrade back to the Phase 12 boundary with a successful
@@ -30,7 +36,10 @@ Phase 13 slices extend this module:
   Worker audit history exists (never deleted); the 0015 downgrade
   restores the 0014 CHECK and refuses while a row only 0015 admits
   exists; the 0016 downgrade restores the Worker vocabulary and refuses
-  while environment audit history exists.
+  while environment audit history exists; the 0017 downgrade restores
+  the environment vocabulary and refuses while Machine audit history
+  exists; the 0018 downgrade restores the libc PN CHECK and refuses
+  while a PN only 0018 admits exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -62,13 +71,23 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PHASE12_REVISION = "0013_phase12_priority"
 _PHASE13_REVISION = "0014_phase13_workers"
 _BADGE_CHECK_REVISION = "0015_phase13_badge_check"
-_HEAD_REVISION = "0016_phase13_environment_audit"
+_ENVIRONMENT_AUDIT_REVISION = "0016_phase13_environment_audit"
+_MACHINE_AUDIT_REVISION = "0017_phase13_machine_audit"
+_HEAD_REVISION = "0018_phase13_pn_check_collation"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
+_ENVIRONMENT_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0016_phase13_environment_audit.py"
+_MACHINE_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0017_phase13_machine_audit.py"
+_PN_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0018_phase13_pn_check_collation.py"
+_PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
+_PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
 # `upper()` of the database collation maps it to U+A7CB.
 _LIBC_UPPERCASED_BADGE = "ɤ1"
+_LIBC_UPPERCASED_PN = "PNɤ1"
+# Every table that keeps a PN by value under the canonical PN CHECK.
+_PN_TABLES = ("part_numbers", "work_order_demands", "quantity_flows", "work_order_allocations")
 _ENVIRONMENT_ENTITIES = ("Department", "Area", "Operation", "ScanStation", "MachineAssetTagConfig")
 _WORKER_CHECKS = {
     "ck_workers_badge_barcode_canonical",
@@ -328,7 +347,7 @@ def test_audit_admits_the_worker_entity_and_the_deleted_event(connection: Connec
     _refused_by(
         connection,
         "ck_audit_events_entity_type",
-        lambda: _insert_audit(connection, "CREATED", "Machine"),
+        lambda: _insert_audit(connection, "CREATED", "MachineLifecycleEvent"),
     )
     _refused_by(
         connection,
@@ -343,14 +362,106 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
 
 
 def test_audit_admits_the_environment_entities(connection: Connection) -> None:
-    for entity in _ENVIRONMENT_ENTITIES:
+    for entity in (*_ENVIRONMENT_ENTITIES, "Machine"):
         _insert_audit(connection, "CREATED", entity)
-    for refused in ("Machine", "MachineLifecycleEvent", "User", "ApplicationPolicy"):
+    for refused in ("MachineLifecycleEvent", "User", "ApplicationPolicy"):
 
         def insert(entity: str = refused) -> None:
             _insert_audit(connection, "CREATED", entity)
 
         _refused_by(connection, "ck_audit_events_entity_type", insert)
+
+
+def test_machine_audit_migration_restores_the_0016_literal() -> None:
+    machine_audit = _load_migration(_MACHINE_AUDIT_MIGRATION_FILE)
+    environment_audit = _load_migration(_ENVIRONMENT_AUDIT_MIGRATION_FILE)
+    assert machine_audit._ENVIRONMENT_ENTITY_TYPES == environment_audit._ENVIRONMENT_ENTITY_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Canonical PN CHECK under the "C" collation
+# ---------------------------------------------------------------------------
+
+
+def test_pn_check_migration_repeats_the_model_literal() -> None:
+    pn_check = _load_migration(_PN_CHECK_MIGRATION_FILE)
+    assert pn_check._CANONICAL_PART_NUMBER_SQL == models.CANONICAL_PART_NUMBER_SQL
+    # Its downgrade restores exactly the CHECK 0002 and 0011 created.
+    phase3 = _load_migration(_PHASE3_MIGRATION_FILE)
+    phase10 = _load_migration(_PHASE10_MIGRATION_FILE)
+    assert (
+        pn_check._PHASE3_CANONICAL_PART_NUMBER_SQL
+        == phase3._CANONICAL_PN
+        == phase10._CANONICAL_PART_NUMBER_SQL
+    )
+    assert [table for table, _ in pn_check._CHECKS] == list(_PN_TABLES)
+
+
+def _pn_check_texts(engine: Engine) -> dict[str, str]:
+    inspector = inspect(engine)
+    return {
+        table: str(check["sqltext"])
+        for table in _PN_TABLES
+        for check in inspector.get_check_constraints(table)
+        if check["name"] == f"ck_{table}_part_number_canonical"
+    }
+
+
+def test_pn_checks_compare_under_the_c_collation(migrated_engine: Engine) -> None:
+    checks = _pn_check_texts(migrated_engine)
+    assert set(checks) == set(_PN_TABLES)
+    for table, sqltext in checks.items():
+        assert sqltext.count('COLLATE "C"') == 2, table
+
+
+def _insert_part_number(connection: Connection, part_number: str) -> None:
+    connection.execute(
+        sa.text("INSERT INTO part_numbers (part_number) VALUES (:pn)"), {"pn": part_number}
+    )
+
+
+def _stored_pn_check(connection: Connection, table: str) -> str:
+    """The table's own CHECK expression as PostgreSQL stores it."""
+    definition = str(
+        connection.execute(
+            sa.text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                " WHERE conname = :name AND conrelid = CAST(:table AS regclass)"
+            ),
+            {"name": f"ck_{table}_part_number_canonical", "table": table},
+        ).scalar_one()
+    )
+    assert definition.startswith("CHECK ")
+    return definition.removeprefix("CHECK ")
+
+
+_ADMITTED_PNS = ("PNɤ1", "PNƛ1", "PN-001", "PNꟋ1")
+_REFUSED_PNS = ("pn1", "P N", "P\tN", "")
+
+
+def test_database_pn_check_admits_libc_uppercased_and_refuses_non_canonical(
+    connection: Connection,
+) -> None:
+    _insert_part_number(connection, _LIBC_UPPERCASED_PN)
+    for refused in _REFUSED_PNS:
+
+        def insert(part_number: str = refused) -> None:
+            _insert_part_number(connection, part_number)
+
+        _refused_by(connection, "ck_part_numbers_part_number_canonical", insert)
+
+
+@pytest.mark.parametrize("table", _PN_TABLES)
+def test_each_pn_table_check_evaluates_the_canonical_rule(
+    connection: Connection, table: str
+) -> None:
+    """Evaluates each table's own stored CHECK without building parent rows."""
+    expression = _stored_pn_check(connection, table)
+    query = sa.text(f"SELECT {expression} FROM (VALUES (CAST(:pn AS text))) AS t(part_number)")
+    for admitted in _ADMITTED_PNS:
+        assert connection.execute(query, {"pn": admitted}).scalar_one() is True, admitted
+    for refused in _REFUSED_PNS:
+        assert connection.execute(query, {"pn": refused}).scalar_one() is False, refused
 
 
 # ---------------------------------------------------------------------------
@@ -540,5 +651,95 @@ def test_downgrade_refuses_while_environment_audit_history_exists(refused_databa
                 sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Area'")
             ).scalar_one()
         assert areas == 1
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_to_environment_audit_revision_drops_machine(admin_engine: Engine) -> None:
+    name = "partflow_test_phase13_downgrade_s2b"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _ENVIRONMENT_AUDIT_REVISION)
+        engine = create_engine(url)
+        try:
+            entity_check = _audit_checks(engine)["ck_audit_events_entity_type"]
+            assert "'Machine'" not in entity_check
+            for entity in _ENVIRONMENT_ENTITIES:
+                assert f"'{entity}'" in entity_check
+            for table, sqltext in _pn_check_texts(engine).items():
+                assert "COLLATE" not in sqltext, table
+            with engine.connect() as connection:
+                assert _version(connection) == _ENVIRONMENT_AUDIT_REVISION
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+            assert "'Machine'" in _audit_checks(engine)["ck_audit_events_entity_type"]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_refuses_while_machine_audit_history_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_audit(connection, "CREATED", "Machine")
+        with pytest.raises(IntegrityError, match="ck_audit_events_entity_type"):
+            command.downgrade(_alembic_config(refused_database), _ENVIRONMENT_AUDIT_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            machines = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Machine'")
+            ).scalar_one()
+        assert machines == 1
+    finally:
+        engine.dispose()
+
+
+def test_pn_check_downgrade_restores_the_libc_check(refused_database: URL) -> None:
+    """Without 0018 the CHECK refuses a domain-canonical PN (the 500 0018
+    removes); re-upgrading admits it again."""
+    config = _alembic_config(refused_database)
+    command.downgrade(config, _MACHINE_AUDIT_REVISION)
+    engine = create_engine(refused_database)
+    try:
+        with engine.connect() as connection:
+            assert _version(connection) == _MACHINE_AUDIT_REVISION
+            _refused_by(
+                connection,
+                "ck_part_numbers_part_number_canonical",
+                lambda: _insert_part_number(connection, _LIBC_UPPERCASED_PN),
+            )
+            connection.rollback()
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            _insert_part_number(connection, _LIBC_UPPERCASED_PN)
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_pn_check_downgrade_refuses_a_pn_only_0018_admits(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_part_number(connection, _LIBC_UPPERCASED_PN)
+        with pytest.raises(IntegrityError, match="ck_part_numbers_part_number_canonical"):
+            command.downgrade(_alembic_config(refused_database), _MACHINE_AUDIT_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            stored = connection.execute(
+                sa.text("SELECT count(*) FROM part_numbers WHERE part_number = :pn"),
+                {"pn": _LIBC_UPPERCASED_PN},
+            ).scalar_one()
+        assert stored == 1
     finally:
         engine.dispose()

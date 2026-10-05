@@ -92,6 +92,16 @@ _MACHINE_ASSET_TAG_CONFIG_ID: Final = 1
 _ASSET_TAG_DIGITS_MIN: Final = 1
 _ASSET_TAG_DIGITS_MAX: Final = 8
 
+# A concurrent first configuration wins the singleton primary key at
+# COMMIT; the loser writes nothing. The loaded Barcode configuration
+# panel has no reload control, so the recovery step is a page refresh.
+_ASSET_TAG_FORMAT_CONFLICTS: Final = {
+    "pk_machine_asset_tag_config": (
+        "The Machine Asset Tag format was just saved by someone else."
+        " Refresh the page to see the saved format, then apply your change again."
+    ),
+}
+
 # Lock-first mode of every update: FOR NO KEY UPDATE, the lock the
 # edit's own UPDATE takes anyway — acquired before the snapshot, so
 # concurrent edits serialize and each audit row's before_data is the
@@ -215,15 +225,15 @@ def update_department(
     if department is None:
         raise NotFoundError(f"Department {department_id} does not exist.")
     before = _department_snapshot(department)
-    changed = False
 
+    new_name: str | None = None
     if not isinstance(name, UnsetType):
         clean_name = required_text(name, "Department name")
         if clean_name != department.name:
             _reject_duplicate_department_name(session, clean_name, exclude_id=department.id)
-            department.name = clean_name
-            changed = True
+            new_name = clean_name
 
+    new_active: bool | None = None
     if not isinstance(is_active, UnsetType):
         active = required_flag(is_active, "Department active status")
         if active != department.is_active:
@@ -238,8 +248,19 @@ def update_department(
                         "This Department still has active Areas."
                         " Deactivate its Areas first, then deactivate the Department."
                     )
-            department.is_active = active
-            changed = True
+            new_active = active
+
+    # Every read is done before the first assignment: assigning the name
+    # first would let the active-Area query autoflush the rename UPDATE
+    # outside commit(), so a uq_departments_name race lost there would
+    # escape as a raw IntegrityError instead of the duplicate-name 409.
+    # Assigned last, the UPDATE is emitted inside commit(), which
+    # translates it.
+    if new_name is not None:
+        department.name = new_name
+    if new_active is not None:
+        department.is_active = new_active
+    changed = new_name is not None or new_active is not None
 
     if changed:
         department.updated_at = func.now()
@@ -744,7 +765,7 @@ def upsert_machine_asset_tag_format(
             before_data=None,
             after_data=_asset_tag_format_snapshot(config),
         )
-        commit(session, {})
+        commit(session, _ASSET_TAG_FORMAT_CONFLICTS)
     elif prefix != config.prefix or digits != config.digits:
         # A format change applies to Machines created afterwards only —
         # existing Asset Tags are never renamed or regenerated, and the
@@ -761,5 +782,5 @@ def upsert_machine_asset_tag_format(
             before_data=before,
             after_data=_asset_tag_format_snapshot(config),
         )
-        commit(session, {})
+        commit(session, _ASSET_TAG_FORMAT_CONFLICTS)
     return config

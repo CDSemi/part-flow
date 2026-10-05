@@ -641,15 +641,16 @@ def _demand_exists(engine: Engine, demand_id: int) -> bool:
     return found is not None
 
 
-# Environment configuration edits a test makes between two counts are
-# audited too (Phase 13); these counts guard production and business
-# writes, so they leave the configuration audit entities out.
+# Environment and Machine configuration edits a test makes between two
+# counts are audited too (Phase 13); these counts guard production and
+# business writes, so they leave the configuration audit entities out.
 _CONFIGURATION_AUDIT_ENTITIES = (
     "Department",
     "Area",
     "Operation",
     "ScanStation",
     "MachineAssetTagConfig",
+    "Machine",
 )
 
 

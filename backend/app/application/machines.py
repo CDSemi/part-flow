@@ -67,6 +67,23 @@ Each mutating service commits its own transaction: a 2xx response
 always reflects committed state, and a concurrent uniqueness race lost
 at COMMIT surfaces as the same ``ConflictError`` as a pre-checked
 duplicate.
+
+Every effective configuration write appends exactly one
+``audit_events`` row (entity ``Machine``, ``entity_id`` the internal
+id) in the SAME transaction (Phase 13 slice 2b, PROJECT_PROFILE §28
+"administrative configuration changes"): creation, metadata and
+maintenance-context edits, maintenance start and clear, the Save draft
+a retirement applies, and the rename, Area move or maintenance clear a
+reactivation carries. Retirement and reactivation themselves are
+recorded only by their lifecycle event; an audit row written inside
+them is the configuration side of that event and links to it through
+``metadata.machine_lifecycle_event_id``, and a retirement or
+reactivation without a configuration delta appends no audit row. Every
+write locks its Machine row first, so each ``before_data`` is the
+committed predecessor. Production commands (``note_assignment_change``)
+never write audit rows — the state age is derived runtime state, not
+configuration — and rejected writes, lost races and no-ops append
+nothing.
 """
 
 import datetime
@@ -76,16 +93,20 @@ from typing import Any, Final, Literal, NamedTuple
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.application import audit
 from app.application.common import (
     UNSET,
     UnsetType,
     commit,
+    flush,
     optional_text,
     required_text,
 )
 from app.application.environment import require_active_area
 from app.application.errors import ConflictError, NotFoundError
 from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
     MachineLifecycleEventType,
     MachineLifecycleState,
     MachineOperationalState,
@@ -114,6 +135,51 @@ _MACHINE_CONFLICTS: Final = {
         " Barcode configuration before creating Machines."
     ),
 }
+
+# Lock-first mode of every Machine admin write except retirement:
+# FOR NO KEY UPDATE, the lock the edit's own UPDATE takes anyway (no
+# Machine edit writes a column of a non-partial unique index —
+# uq_machines_asset_tag is never written, uq_machines_area_id_name_active
+# is partial). Acquired before the audit snapshot, so concurrent admin
+# writes serialize and each before_data is the committed predecessor;
+# the FK KEY SHARE of Movement, flow and lifecycle-event inserts is
+# never blocked by it. Retirement keeps its FOR UPDATE (lock_machine).
+_EDIT_LOCK: Final = {"key_share": True}
+
+
+# ---------------------------------------------------------------------------
+# Audit snapshot: an explicit field list. ``id`` is the audit entity_id;
+# ``retired_on`` is lifecycle (machine_lifecycle_events owns it, so no
+# transition is recorded twice); ``state_changed_at`` is derived runtime
+# state age moved by production commands; timestamps never belong.
+# ---------------------------------------------------------------------------
+
+
+def _iso_date(value: datetime.date | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _iso_instant(value: datetime.datetime | None) -> str | None:
+    # UTC, so the text never depends on the connection TimeZone and
+    # consecutive rows compare equal.
+    return value.astimezone(datetime.UTC).isoformat() if value is not None else None
+
+
+def _machine_snapshot(machine: Machine) -> dict[str, Any]:
+    return {
+        "area_id": machine.area_id,
+        "name": machine.name,
+        "asset_tag": machine.asset_tag,
+        "description": machine.description,
+        "manufacturer": machine.manufacturer,
+        "model": machine.model,
+        "serial_number": machine.serial_number,
+        "installed_on": _iso_date(machine.installed_on),
+        "notes": machine.notes,
+        "maintenance_since": _iso_instant(machine.maintenance_since),
+        "maintenance_note": machine.maintenance_note,
+        "maintenance_expected_return": _iso_date(machine.maintenance_expected_return),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +212,21 @@ def lock_machine(session: Session, machine_id: int) -> Machine | None:
     go unseen behind the lock that was meant to see it.
     """
     return session.get(Machine, machine_id, with_for_update=True, populate_existing=True)
+
+
+def _lock_machine_for_edit(session: Session, machine_id: int) -> Machine:
+    """The Machine row under the admin edit lock, RE-READ under it.
+
+    ``FOR NO KEY UPDATE`` (``_EDIT_LOCK``) is taken before the audit
+    snapshot and before any check: a concurrent admin write, retirement
+    or production command that committed first is seen here, so the
+    existing checks judge the committed row and ``before_data`` is the
+    committed predecessor.
+    """
+    machine = session.get(Machine, machine_id, with_for_update=_EDIT_LOCK, populate_existing=True)
+    if machine is None:
+        raise NotFoundError(f"Machine {machine_id} does not exist.")
+    return machine
 
 
 def areas_with_machines(session: Session, area_ids: Iterable[int] | None = None) -> set[int]:
@@ -377,6 +458,18 @@ def create_machine(
         notes=optional_text(notes),
     )
     session.add(machine)
+    # The id is the audit entity id; a name race lost at this flush
+    # surfaces as the same conflict as one lost at COMMIT, and the
+    # rollback returns the allocated sequence number with it.
+    flush(session, _MACHINE_CONFLICTS)
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.CREATED,
+        entity_type=AuditEntityType.MACHINE,
+        entity_id=str(machine.id),
+        before_data=None,
+        after_data=_machine_snapshot(machine),
+    )
     commit(session, _MACHINE_CONFLICTS)
     return machine
 
@@ -507,7 +600,8 @@ def update_machine(
     Asset Tags are immutable forever. ``maintenance_since``,
     ``state_changed_at`` and the lifecycle fields stay server-owned.
     """
-    machine = get_machine(session, machine_id)
+    machine = _lock_machine_for_edit(session, machine_id)
+    before = _machine_snapshot(machine)
     _require_not_retired(machine, "be edited")
     changed = _apply_edits(
         session,
@@ -525,6 +619,16 @@ def update_machine(
 
     if changed:
         machine.updated_at = func.now()
+        after = _machine_snapshot(machine)
+        if after != before:
+            audit.append_audit_event(
+                session,
+                event_type=AuditEventType.UPDATED,
+                entity_type=AuditEntityType.MACHINE,
+                entity_id=str(machine.id),
+                before_data=before,
+                after_data=after,
+            )
         commit(session, _MACHINE_CONFLICTS)
     return machine
 
@@ -541,7 +645,8 @@ def start_maintenance(
     note: str | None = None,
     expected_return: datetime.date | None = None,
 ) -> Machine:
-    machine = get_machine(session, machine_id)
+    machine = _lock_machine_for_edit(session, machine_id)
+    before = _machine_snapshot(machine)
     _require_not_retired(machine, "start maintenance")
     if machine.maintenance_since is not None:
         raise ConflictError(f"Machine '{machine.name}' is already under maintenance.")
@@ -553,12 +658,26 @@ def start_maintenance(
     machine.maintenance_expected_return = expected_return
     machine.state_changed_at = func.now()
     machine.updated_at = func.now()
+    # maintenance_since is the transaction timestamp, known only after
+    # the flush: the snapshot reloads the expired attribute, so the
+    # audited start time equals the stored one (and the audit row's
+    # occurred_at — both are now() of one transaction).
+    flush(session, _MACHINE_CONFLICTS)
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.MACHINE,
+        entity_id=str(machine.id),
+        before_data=before,
+        after_data=_machine_snapshot(machine),
+    )
     commit(session, _MACHINE_CONFLICTS)
     return machine
 
 
 def clear_maintenance(session: Session, machine_id: int) -> Machine:
-    machine = get_machine(session, machine_id)
+    machine = _lock_machine_for_edit(session, machine_id)
+    before = _machine_snapshot(machine)
     _require_not_retired(machine, "clear maintenance")
     if machine.maintenance_since is None:
         raise ConflictError(f"Machine '{machine.name}' is not under maintenance.")
@@ -570,6 +689,14 @@ def clear_maintenance(session: Session, machine_id: int) -> Machine:
     machine.maintenance_expected_return = None
     machine.state_changed_at = func.now()
     machine.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.MACHINE,
+        entity_id=str(machine.id),
+        before_data=before,
+        after_data=_machine_snapshot(machine),
+    )
     commit(session, _MACHINE_CONFLICTS)
     return machine
 
@@ -604,6 +731,7 @@ def retire_machine(
     machine = lock_machine(session, machine_id)
     if machine is None:
         raise NotFoundError(f"Machine {machine_id} does not exist.")
+    before = _machine_snapshot(machine)
     if machine.retired_on is not None:
         raise ConflictError(f"Machine '{machine.name}' is already retired.")
     assigned = assigned_quantity(session, machine.id)
@@ -617,19 +745,33 @@ def retire_machine(
         _apply_edits(session, machine, **edits)
     machine.retired_on = func.current_date()
     machine.updated_at = func.now()
-    session.add(
-        MachineLifecycleEvent(
-            machine_id=machine.id,
-            event_type=MachineLifecycleEventType.RETIRED,
-            occurred_at=func.now(),
-            actor=optional_text(actor),
-            reason=optional_text(reason),
-            before_state=MachineLifecycleState.ACTIVE,
-            after_state=MachineLifecycleState.RETIRED,
-        )
+    event = MachineLifecycleEvent(
+        machine_id=machine.id,
+        event_type=MachineLifecycleEventType.RETIRED,
+        occurred_at=func.now(),
+        actor=optional_text(actor),
+        reason=optional_text(reason),
+        before_state=MachineLifecycleState.ACTIVE,
+        after_state=MachineLifecycleState.RETIRED,
     )
-    # One transaction: the retirement and its lifecycle event commit
-    # together or not at all.
+    session.add(event)
+    # The transition itself is recorded only by the lifecycle event
+    # (the snapshot excludes retired_on); only an effective Save draft
+    # is configuration, audited as the configuration side of the event.
+    after = _machine_snapshot(machine)
+    if after != before:
+        flush(session, _MACHINE_CONFLICTS)
+        audit.append_audit_event(
+            session,
+            event_type=AuditEventType.UPDATED,
+            entity_type=AuditEntityType.MACHINE,
+            entity_id=str(machine.id),
+            before_data=before,
+            after_data=after,
+            metadata={"machine_lifecycle_event_id": event.id},
+        )
+    # One transaction: the retirement, its lifecycle event and any
+    # audit row commit together or not at all.
     commit(session, _MACHINE_CONFLICTS)
     return machine
 
@@ -651,7 +793,8 @@ def reactivate_machine(
     required reason is recorded on the lifecycle event.
     """
     clean_reason = required_text(reason, "Reactivation reason")
-    machine = get_machine(session, machine_id)
+    machine = _lock_machine_for_edit(session, machine_id)
+    before = _machine_snapshot(machine)
     if machine.retired_on is None:
         raise ConflictError(f"Machine '{machine.name}' is not retired.")
 
@@ -702,20 +845,35 @@ def reactivate_machine(
     machine.maintenance_expected_return = None
     machine.state_changed_at = func.now()
     machine.updated_at = func.now()
-    session.add(
-        MachineLifecycleEvent(
-            machine_id=machine.id,
-            event_type=MachineLifecycleEventType.REACTIVATED,
-            occurred_at=func.now(),
-            actor=optional_text(actor),
-            reason=clean_reason,
-            before_state=MachineLifecycleState.RETIRED,
-            after_state=MachineLifecycleState.ACTIVE,
-            from_area_id=from_area_id,
-            to_area_id=target_area.id if moved else None,
-        )
+    event = MachineLifecycleEvent(
+        machine_id=machine.id,
+        event_type=MachineLifecycleEventType.REACTIVATED,
+        occurred_at=func.now(),
+        actor=optional_text(actor),
+        reason=clean_reason,
+        before_state=MachineLifecycleState.RETIRED,
+        after_state=MachineLifecycleState.ACTIVE,
+        from_area_id=from_area_id,
+        to_area_id=target_area.id if moved else None,
     )
-    # One transaction: the reactivation and its lifecycle event commit
-    # together or not at all.
+    session.add(event)
+    # The transition itself is recorded only by the lifecycle event; a
+    # rename, Area move or cleared maintenance context is configuration,
+    # audited as the configuration side of the event (its area_id pair
+    # agrees with the event's from/to Areas).
+    after = _machine_snapshot(machine)
+    if after != before:
+        flush(session, _MACHINE_CONFLICTS)
+        audit.append_audit_event(
+            session,
+            event_type=AuditEventType.UPDATED,
+            entity_type=AuditEntityType.MACHINE,
+            entity_id=str(machine.id),
+            before_data=before,
+            after_data=after,
+            metadata={"machine_lifecycle_event_id": event.id},
+        )
+    # One transaction: the reactivation, its lifecycle event and any
+    # audit row commit together or not at all.
     commit(session, _MACHINE_CONFLICTS)
     return machine

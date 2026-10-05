@@ -668,6 +668,28 @@ def test_receipt_creates_internal_work_order_demand_flow_and_movement(
         assert session.get(models.PartNumber, pn) is not None
 
 
+def test_receipt_of_a_pn_the_os_libc_would_uppercase(client: TestClient, db_engine: Engine) -> None:
+    """A station receipt carrying `ɤ` (U+0264, unchanged by Python 3.12
+    `str.upper()`, mapped by the OS libc) stores the domain-canonical PN
+    on the flow and its RECEIVED Movement (0018 "C"-collation CHECK)."""
+    cell = _Cell(client)
+    raw = f"rcvɤ-{uuid.uuid4().hex[:8]}"
+    canonical = raw.upper()
+
+    response = _receive(client, cell, raw, 3)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["part_number"] == canonical
+    with Session(db_engine) as session:
+        flow = session.get(models.QuantityFlow, int(response.json()["quantity_flow_id"]))
+        assert flow is not None
+        assert flow.part_number == canonical
+        movement = session.scalars(
+            sa.select(models.PartMovement).where(models.PartMovement.part_number == canonical)
+        ).one()
+        assert movement.movement_type == "RECEIVED"
+
+
 def test_receipt_into_area_without_machines_enters_direct_processing(client: TestClient) -> None:
     cell = _Cell(client)
     pn = _unique("PN")

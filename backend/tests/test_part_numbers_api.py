@@ -132,6 +132,22 @@ def test_create_normalizes_and_derives_the_barcode(client: TestClient, db_engine
     assert events[0].after_data == {"part_number": canonical}
 
 
+def test_pn_the_os_libc_would_uppercase_is_created(client: TestClient, db_engine: Engine) -> None:
+    """`ɤ` (U+0264) has no uppercase in the backend's Python (UCD 15.0)
+    but the OS libc maps it: since 0018 the "C"-collation CHECK admits
+    the domain-canonical value instead of failing as an untranslated 500."""
+    raw = f"pnɤ-{uuid.uuid4().hex[:8]}"
+    canonical = raw.upper()
+    assert "ɤ" in canonical
+    created = client.post("/api/part-numbers", json={"part_number": raw})
+    assert created.status_code == 201, created.text
+    assert created.json()["part_number"] == canonical
+
+    events = _audit_rows(db_engine, canonical)
+    assert [event.event_type for event in events] == ["CREATED"]
+    assert events[0].after_data == {"part_number": canonical}
+
+
 def test_existing_canonical_pn_is_reused_not_duplicated(
     client: TestClient, db_engine: Engine
 ) -> None:

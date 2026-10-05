@@ -2,9 +2,11 @@
 
 One helper appends the append-only ``audit_events`` row that records a
 master-data, business-demand or configuration change — WorkOrder,
-WorkOrderDemand, PartNumber, or (Phase 13) Worker and the environment
+WorkOrderDemand, PartNumber, or (Phase 13) Worker, the environment
 configuration entities (Department, Area, Operation, ScanStation and
-the Machine Asset Tag format). The helper only
+the Machine Asset Tag format) and Machine configuration (Machine
+retirement and reactivation stay recorded in
+``machine_lifecycle_events``). The helper only
 stages the row on the caller's session: **the caller owns the
 transaction**, so the audit row and the audited
 change commit together or roll back together — an audited write without

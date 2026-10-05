@@ -342,7 +342,13 @@ class TestMigrationSchema:
         assert phase10._PHASE9_SHAPE == phase9._PHASE9_SHAPE
         assert phase10._PHASE10_SHAPE != phase10._PHASE9_SHAPE
         assert phase10._REVERSAL_REASON_SQL == models.ALLOCATION_REVERSAL_REASON_SQL
-        assert phase10._CANONICAL_PART_NUMBER_SQL == models.CANONICAL_PART_NUMBER_SQL
+        # The 0011 literal is historical: 0018_phase13_pn_check_collation
+        # re-creates the CHECK under "C" and restores exactly this text on
+        # downgrade (the head literal is asserted by the Phase 13 schema test).
+        pn_check = _load_migration(
+            "20261005_0018_phase13_pn_check_collation.py", "phase13_pn_check_migration"
+        )
+        assert phase10._CANONICAL_PART_NUMBER_SQL == pn_check._PHASE3_CANONICAL_PART_NUMBER_SQL
         assert "'STOCKED'" in _constraint(connection, "ck_part_movements_movement_shape")
 
     def test_flow_status_check_admits_exactly_the_phase10_statuses(

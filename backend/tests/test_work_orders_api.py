@@ -262,6 +262,25 @@ def test_line_part_numbers_normalize_and_reuse_one_master(
     assert len(_audit_rows(db_engine, "PartNumber", canonical)) == 1
 
 
+def test_demand_line_of_a_pn_the_os_libc_would_uppercase(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """`ɤ` (U+0264) stays as is under Python 3.12 `str.upper()` while
+    the OS libc maps it: the demand saves with the domain-canonical PN
+    (0018 "C"-collation CHECK) instead of failing as a 500."""
+    raw = f"woɤ-{uuid.uuid4().hex[:8]}"
+    canonical = raw.upper()
+    created = _create_work_order(client, lines=[_line(part_number=raw)])
+    assert created["demands"][0]["part_number"] == canonical
+    with db_engine.connect() as connection:
+        demands = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(models.WorkOrderDemand.__table__)
+            .where(models.WorkOrderDemand.part_number == canonical)
+        ).scalar_one()
+    assert demands == 1
+
+
 def test_internal_whitespace_pn_is_rejected_with_zero_writes(
     client: TestClient, db_engine: Engine
 ) -> None:

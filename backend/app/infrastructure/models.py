@@ -93,9 +93,17 @@ from app.domain.enums import (
 # value, so the database rejects non-canonical values even if a caller
 # bypasses domain normalization. The POSIX class [[:space:]] is used
 # instead of the \s shorthand so the expression contains no backslash
-# and never depends on string-literal escaping semantics.
+# and never depends on string-literal escaping semantics. Both clauses
+# run under the "C" collation, so they check ASCII only (no ASCII
+# lowercase letter, no ASCII whitespace) and never depend on the OS libc
+# case tables, which disagree with Python `str.upper()` on some code
+# points (`ɤ`); the full Unicode uppercase and the refusal of every
+# Unicode whitespace are owned by `app.domain.part_number`, whose every
+# result passes this CHECK. Repeated verbatim by migration
+# `0018_phase13_pn_check_collation`.
 CANONICAL_PART_NUMBER_SQL = (
-    "part_number = upper(part_number) AND part_number !~ '[[:space:]]' AND part_number <> ''"
+    """part_number = upper(part_number COLLATE "C")"""
+    """ AND part_number COLLATE "C" !~ '[[:space:]]' AND part_number <> ''"""
 )
 
 # Area barcode ownership (PROJECT_PROFILE §10): an assigned Area
@@ -557,7 +565,9 @@ class MachineLifecycleEvent(Base):
     record. `actor` stays a nullable, reference-free value: Machine
     lifecycle is a Management action, future authenticated actor
     linkage belongs to Users/authentication (Phase 14), and Workers are
-    never associated with these events.
+    never associated with these events. Machine configuration writes are
+    audited in `audit_events` (Phase 13); lifecycle transitions are
+    recorded only here.
     """
 
     __tablename__ = "machine_lifecycle_events"
@@ -1334,16 +1344,18 @@ class AuditEvent(Base):
 
     Records master-data, business-demand and configuration changes
     only — WorkOrder, WorkOrderDemand, PartNumber, and (Phase 13)
-    Worker and the environment configuration entities Department,
-    Area, Operation, ScanStation and MachineAssetTagConfig (the Asset
-    Tag format). Rows are descriptive history for display and
-    accountability: never replayed to build state, never describing
-    production actions (the `RECEIVED` PartMovement is the production
-    audit record), and deliberately not an event-sourcing framework.
-    `entity_id` is polymorphic text with no FK — the internal PK for
-    WorkOrder/WorkOrderDemand/Worker/Department/Area/Operation, the
-    canonical PN string for PartNumber, the stable Station ID for
-    ScanStation and `"1"` for the singleton MachineAssetTagConfig;
+    Worker, the environment configuration entities Department, Area,
+    Operation, ScanStation and MachineAssetTagConfig (the Asset Tag
+    format), and Machine configuration (lifecycle transitions stay in
+    `machine_lifecycle_events`). Rows are descriptive history for
+    display and accountability: never replayed to build state, never
+    describing production actions (the `RECEIVED` PartMovement is the
+    production audit record), and deliberately not an event-sourcing
+    framework. `entity_id` is polymorphic text with no FK — the
+    internal PK for WorkOrder/WorkOrderDemand/Worker/Department/Area/
+    Operation/Machine, the canonical PN string for PartNumber, the
+    stable Station ID for ScanStation and `"1"` for the singleton
+    MachineAssetTagConfig;
     integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_reference` stays a
@@ -1379,7 +1391,8 @@ class AuditEvent(Base):
             f" '{AuditEntityType.WORK_ORDER_DEMAND}', '{AuditEntityType.PART_NUMBER}',"
             f" '{AuditEntityType.WORKER}', '{AuditEntityType.DEPARTMENT}',"
             f" '{AuditEntityType.AREA}', '{AuditEntityType.OPERATION}',"
-            f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}')",
+            f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
+            f" '{AuditEntityType.MACHINE}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
