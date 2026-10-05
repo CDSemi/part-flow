@@ -21,9 +21,11 @@ table); plus the Phase 10 Stockroom and allocation persistence (the
 `STOCKED` type, the `STOCKED` flow closure, `work_orders.completed_at`
 and the append-only `work_order_allocations` table); plus the Phase 12
 Hot rank constraints (positive, unique `priority_rank`) and the Hot
-list idempotency index on `audit_events`. Business rules stay in the
-Domain/Application layers; this module owns table shape and the
-invariants PostgreSQL can enforce declaratively (CHECK, UNIQUE, FK).
+list idempotency index on `audit_events`; plus the Phase 13 Workers
+registry (`workers`, with the `DELETED` audit event and the `Worker`
+audit entity). Business rules stay in the Domain/Application layers;
+this module owns table shape and the invariants PostgreSQL can enforce
+declaratively (CHECK, UNIQUE, FK).
 
 Deliberate canonical decisions encoded here:
 
@@ -62,6 +64,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Interval,
+    LargeBinary,
     MetaData,
     Text,
     UniqueConstraint,
@@ -127,6 +130,19 @@ MACHINE_BARCODE_PREFIX = "PF:MACHINE:"
 # barcode carries the canonical uppercase PN itself — fully derived,
 # never stored and never separately unique.
 PART_NUMBER_BARCODE_PREFIX = "PF:PN:"
+
+# Canonical Worker badge (PROJECT_PROFILE §10; owner decision OD-3):
+# the badge printed on the employee badge, stored trimmed and UPPERCASE
+# so the plain UNIQUE is case-insensitive, at most 128 characters
+# (`app.domain.worker_badge.MAX_BADGE_BARCODE_LENGTH`), and outside the
+# `PF:` namespace — badges are the one non-PF scanned value. The `PF:`
+# test needs no upper(): the uppercase clause already holds. Repeated
+# verbatim by migration `0014_phase13_workers`.
+WORKER_BADGE_BARCODE_SQL = (
+    r"badge_barcode <> '' AND badge_barcode !~ '^\s|\s$'"
+    " AND badge_barcode = upper(badge_barcode) AND char_length(badge_barcode) <= 128"
+    " AND left(badge_barcode, 3) <> 'PF:'"
+)
 
 # Movement-shape rule per movement type (SLICE1_DATA_MODEL §11; Phase 5
 # transfer; Phase 6 Machine assignment and Area completion; Phase 7
@@ -371,6 +387,60 @@ class ScanStation(Base):
 
     __table_args__ = (
         CheckConstraint(SCAN_STATION_ID_SQL, name=conv("ck_scan_stations_station_id_canonical")),
+    )
+
+
+class Worker(Base):
+    """Scan Station production audit identity (PROJECT_PROFILE §7 Worker, §8.13).
+
+    A person operating the Scan Stations — never a User (an application
+    account): the two identities are never merged. The badge barcode is
+    the company's existing employee badge, stored and matched exactly in
+    its canonical form (trimmed, UPPERCASE; owner decision OD-3), unique
+    among ALL Workers including inactive ones. Workers are deactivated,
+    never deleted (owner-decision default OD-14). The optional avatar is
+    stored on the row (CD1): its bytes are mapped deferred, so no list or
+    lock query loads them; type and timestamp travel with every read.
+    """
+
+    __tablename__ = "workers"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    badge_barcode: Mapped[str] = mapped_column(Text, nullable=False)
+    avatar_image: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    avatar_image_type: Mapped[str | None] = mapped_column(Text)
+    # The avatar's cache version: drives the ETag and the `?v=` URL.
+    avatar_image_updated_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Every stored value is canonical (CHECK below), so this plain
+        # UNIQUE already gives case-insensitive uniqueness.
+        UniqueConstraint("badge_barcode", name="uq_workers_badge_barcode"),
+        CheckConstraint(WORKER_BADGE_BARCODE_SQL, name=conv("ck_workers_badge_barcode_canonical")),
+        # An avatar is all three columns or none.
+        CheckConstraint(
+            "(avatar_image IS NULL) = (avatar_image_type IS NULL)"
+            " AND (avatar_image IS NULL) = (avatar_image_updated_at IS NULL)",
+            name=conv("ck_workers_avatar_image_shape"),
+        ),
+        CheckConstraint(
+            "avatar_image_type IN ('image/png', 'image/jpeg', 'image/webp')",
+            name=conv("ck_workers_avatar_image_type"),
+        ),
+        CheckConstraint(
+            "avatar_image IS NULL OR octet_length(avatar_image) BETWEEN 1 AND 2097152",
+            name=conv("ck_workers_avatar_image_size"),
+        ),
     )
 
 
@@ -1257,14 +1327,15 @@ Index(
 class AuditEvent(Base):
     """Generic append-only audit row (SLICE1_DATA_MODEL §16).
 
-    Records master-data and business-demand changes only — WorkOrder,
-    WorkOrderDemand, and PartNumber. Rows are descriptive history for
-    display and accountability: never replayed to build state, never
-    describing production actions (the `RECEIVED` PartMovement is the
-    production audit record), and deliberately not an event-sourcing
-    framework. `entity_id` is polymorphic text with no FK — the
-    internal PK for WorkOrder/WorkOrderDemand, the canonical PN string
-    for PartNumber; integrity is guaranteed by writing the audit row in
+    Records master-data, business-demand and configuration changes
+    only — WorkOrder, WorkOrderDemand, PartNumber, and (Phase 13)
+    Worker. Rows are descriptive history for display and
+    accountability: never replayed to build state, never describing
+    production actions (the `RECEIVED` PartMovement is the production
+    audit record), and deliberately not an event-sourcing framework.
+    `entity_id` is polymorphic text with no FK — the internal PK for
+    WorkOrder/WorkOrderDemand/Worker, the canonical PN string for
+    PartNumber; integrity is guaranteed by writing the audit row in
     the same transaction as the audited change (an Application-layer
     transaction protocol, Phase 4 workflows). `actor_reference` stays a
     nullable, reference-free value until authentication exists
@@ -1290,12 +1361,14 @@ class AuditEvent(Base):
     __table_args__ = (
         # Both vocabularies widen additively in later phases.
         CheckConstraint(
-            f"event_type IN ('{AuditEventType.CREATED}', '{AuditEventType.UPDATED}')",
+            f"event_type IN ('{AuditEventType.CREATED}', '{AuditEventType.UPDATED}',"
+            f" '{AuditEventType.DELETED}')",
             name=conv("ck_audit_events_event_type"),
         ),
         CheckConstraint(
             f"entity_type IN ('{AuditEntityType.WORK_ORDER}',"
-            f" '{AuditEntityType.WORK_ORDER_DEMAND}', '{AuditEntityType.PART_NUMBER}')",
+            f" '{AuditEntityType.WORK_ORDER_DEMAND}', '{AuditEntityType.PART_NUMBER}',"
+            f" '{AuditEntityType.WORKER}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.

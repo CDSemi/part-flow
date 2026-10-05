@@ -402,8 +402,8 @@ preview kiểm tra PN/row wrapping. Không optimistic completion.
 ## 4.12 Worker identification và session
 
 Worker khác User. Worker là Scan-Station audit identity, profile stable id/name/
-existing badge/avatar/active, không employee number; non-`PF:` badge exact-match
-active Workers. Mode: Disabled, Fixed, Scanned session. Badge ở Disabled/Fixed chỉ
+existing badge/avatar/active, không employee number; non-`PF:` badge khớp chính xác sau khi chuẩn hóa (trim, uppercase) với
+active Workers, nên hoa/thường không bao giờ quan trọng. Mode: Disabled, Fixed, Scanned session. Badge ở Disabled/Fixed chỉ
 trả explanatory notice, không sign in.
 
 Scanned session dùng configurable sliding inactivity timeout; valid production
@@ -729,8 +729,12 @@ minimum width, live Next Tag/scanned barcode; whitespace/colon prefix invalid, k
 trim/clamp; format change không rename old tag hay reset never-reuse sequence.
 
 Phase 3.5 Departments/Areas/Operations/Stations/barcode là real API-backed UI với
-loading/error/retry/offline gate. Later Admin sections honest unavailable. Workers
-profile tách Users. Areas table trình bày Operations, derived assignment mode,
+loading/error/retry/offline gate. Từ Phase 13, Workers cũng là section thật; các Admin section
+sau vẫn honest unavailable. Workers
+profile tách Users. Ghi chú triển khai (Phase 13): editor Workers lưu badge bằng chữ
+in hoa và hiện preview `Saved as:` khi khác với giá trị đã gõ hoặc scan, upload avatar
+(PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar, hiện
+initials khi không có avatar, và deactivate Worker mà không có delete nào. Areas table trình bày Operations, derived assignment mode,
 Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị block.
 
 History maintenance: lossless export → verify → purge exactly archived rows qua

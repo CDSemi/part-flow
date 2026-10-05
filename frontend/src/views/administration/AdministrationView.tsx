@@ -9,6 +9,7 @@ import { BarcodeConfigurationSection } from './BarcodeConfigurationSection';
 import { DepartmentsSection } from './DepartmentsSection';
 import { OperationsSection } from './OperationsSection';
 import { ScanStationsSection } from './ScanStationsSection';
+import { WorkersSection } from './WorkersSection';
 import { SectionHeader } from './section-widgets';
 import { ADMIN_GROUPS, ADMIN_SECTIONS } from './sections';
 import type { AdminSection } from './sections';
@@ -17,10 +18,11 @@ import type { AdminSection } from './sections';
 // panels (GUI_DESIGN §9). The Phase 3.5 minimum environment setup
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
 // configuration — read and write the real configuration through the
-// /api surface. Every other section arrives with the later full
-// Administration phase (Phase 13) and presents itself honestly as not
-// available yet; the Worker sessions policy preview stays behind the
-// development-only build boundary.
+// /api surface, and so does Workers, the first section of the full
+// Administration phase (Phase 13). Every other section arrives later in
+// that phase and presents itself honestly as not available yet; the
+// Worker sessions policy preview stays behind the development-only
+// build boundary.
 
 // Development-only Worker sessions preview: the lazy import sits
 // behind `import.meta.env.DEV`, so production builds drop the module —
@@ -94,6 +96,8 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <AreasSection />;
     case 'operations':
       return <OperationsSection />;
+    case 'workers':
+      return <WorkersSection />;
     case 'scan-stations':
       return <ScanStationsSection />;
     case 'barcode-configuration':
@@ -119,8 +123,8 @@ function SectionBody({ section }: { section: AdminSection }) {
  * One later-phase section, presented honestly: the entry action that
  * does not exist yet is disabled (never made to appear functional) and
  * the panel states when the section becomes real. All Phase 3.5
- * minimum-environment sections are real above — every placeholder here
- * belongs to the later full Administration phase.
+ * minimum-environment sections and Workers are real above — every
+ * placeholder here belongs to the later full Administration phase.
  */
 function PlaceholderSection({
   section,

@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it:
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slice 1): `/api/workers` with its avatar endpoints and the real Administration → Workers section:
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -258,7 +258,10 @@ real Management → Priority view on it:
   or constraint) and the Phase 12 Hot list persistence
   (`0013_phase12_priority` — a pre-check that refuses non-dense ranks, the
   positive-rank CHECK, the UNIQUE `priority_rank` and the audit expression
-  index for the command's idempotency lookup)
+  index for the command's idempotency lookup) and the Phase 13 Workers
+  registry (`0014_phase13_workers` — the `workers` table with the badge
+  UNIQUE and canonical-form CHECK and the avatar on the row, plus the
+  `DELETED` audit event and `Worker` audit entity; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -688,13 +691,17 @@ integration):
   `ping_database` (success and safe 503 responses; no database needed).
 - `tests/test_part_number_normalization.py` — **unit** tests for the
   canonical Part Number normalization rules (no database needed).
+- `tests/test_worker_badge_normalization.py` — **unit** tests for the
+  canonical Worker badge rule (trim, uppercase, `PF:` and length
+  refusals; no database needed).
 - `tests/test_database_connectivity.py`, `tests/test_phase3_schema.py`,
   `tests/test_phase35_schema.py`, `tests/test_phase4_schema.py`,
   `tests/test_phase5_schema.py`, `tests/test_environment_api.py`,
   `tests/test_machines_api.py`, `tests/test_work_orders_api.py`,
   `tests/test_part_numbers_api.py`, `tests/test_route_templates_api.py`,
-  `tests/test_production_release_api.py`, and
-  `tests/test_scan_station_transfer_api.py` — **integration** tests that
+  `tests/test_production_release_api.py`,
+  `tests/test_scan_station_transfer_api.py`, and
+  `tests/test_workers_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -706,12 +713,18 @@ integration):
   `0007_phase6_machine_assignment` for Phase 6,
   `0008_phase7_direct_processing` for Phase 7,
   `0009_phase8_split_merge` for Phase 8,
-  `0010_phase9_undo_corrections` for Phase 9 — while the Phase 10
-  module carries the head-level coverage: the `STOCKED` type and its
-  shape branch, the widened flow lifecycle, `work_orders.completed_at`
-  and its index, the allocation table's constraints and append-only
-  trigger, the downgrade that refuses to drop Phase 10 history, and
-  models↔migration parity); and the API tests exercise the endpoints
+  `0010_phase9_undo_corrections` for Phase 9,
+  `0011_phase10_stock_allocation` for Phase 10,
+  `0012_phase11_tracking_index` for Phase 11 and
+  `0013_phase12_priority` for Phase 12 — while
+  `tests/test_phase13_schema.py` carries the head-level coverage
+  (`0014_phase13_workers`: the `workers` table's constraints, the
+  widened audit vocabulary, the refusing downgrade, and
+  models↔migration parity; the Phase 10 module keeps the `STOCKED` type
+  and its shape branch, the widened flow lifecycle,
+  `work_orders.completed_at` and its index, the allocation table's
+  constraints and append-only trigger, and the downgrade that refuses
+  to drop Phase 10 history); and the API tests exercise the endpoints
   end-to-end — Phase 3.5 configuration and Machine management (Asset
   Tag allocation, maintenance, retirement and reactivation with their
   atomic lifecycle events) and Phase 4 intake and release (one-save

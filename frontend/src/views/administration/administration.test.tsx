@@ -9,19 +9,53 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ConnectivityContext } from '../../app/connectivity-context';
+import { prepareImageUpload } from '../../components/image-upload';
 import {
   MOCK_BADGE_CONFIRM_POLICY,
   setBadgeConfirmRequirement,
 } from '../../mocks/scan-station';
 import { AdministrationView } from './AdministrationView';
 
-// Administration (GUI_DESIGN §9, Phase 3.5): the minimum environment
-// setup sections — Departments, Areas, Operations, Scan Stations,
-// Barcode configuration — read and write the real /api surface (faked
-// in-memory here with the same routes and semantics). Every other
-// section presents itself honestly as not available yet; the Worker
-// sessions policy preview stays a development-only panel behind the
-// DEV build boundary.
+// Administration (GUI_DESIGN §9): the minimum environment setup
+// sections — Departments, Areas, Operations, Scan Stations, Barcode
+// configuration — and Workers read and write the real /api surface
+// (faked in-memory here with the same routes and semantics). Every
+// other section presents itself honestly as not available yet; the
+// Worker sessions policy preview stays a development-only panel behind
+// the DEV build boundary.
+
+// Image preparation (sniff, decode, downscale) has its own suite; here
+// it passes the chosen file through, or refuses it when a test says so.
+const imagePreparation = vi.hoisted(() => ({
+  rejectWith: null as string | null,
+}));
+vi.mock('../../components/image-upload', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../components/image-upload')>();
+  return {
+    ...actual,
+    prepareImageUpload: vi.fn(async (file: File) => {
+      if (imagePreparation.rejectWith) {
+        throw new actual.ImageUploadError(imagePreparation.rejectWith);
+      }
+      return file;
+    }),
+  };
+});
+
+interface WorkerRow {
+  id: number;
+  name: string;
+  badge_barcode: string;
+  is_active: boolean;
+  avatar_updated_at: string | null;
+}
+
+/** The fake Worker routes a test can make fail. */
+type WorkerRoute =
+  'GET list' | 'POST' | 'PATCH' | 'PUT avatar' | 'DELETE avatar';
+/** A server answer (`ApiError`) or no answer at all (network failure). */
+type FakeFailure = { status: number; detail: string } | 'network';
 
 interface FakeState {
   departments: { id: number; name: string; is_active: boolean }[];
@@ -54,10 +88,12 @@ interface FakeState {
     name: string;
     retired_on: string | null;
   }[];
+  workers: WorkerRow[];
   nextId: number;
 }
 
 const T0 = '2026-08-01T00:00:00.000Z';
+const ALEX_AVATAR_AT = '2026-09-01T08:00:00.123456+00:00';
 
 function seedState(): FakeState {
   return {
@@ -104,13 +140,35 @@ function seedState(): FakeState {
       { id: 512, area_id: 1, name: 'Lathe 1', retired_on: null },
       { id: 104, area_id: 1, name: 'Old Lathe 1', retired_on: '2026-02-14' },
     ],
+    workers: [
+      {
+        id: 1,
+        name: 'Alex Tran',
+        badge_barcode: '100482',
+        is_active: true,
+        avatar_updated_at: ALEX_AVATAR_AT,
+      },
+      {
+        id: 2,
+        name: 'Mai',
+        badge_barcode: 'B-77',
+        is_active: false,
+        avatar_updated_at: null,
+      },
+    ],
     nextId: 100,
   };
 }
 
 let state: FakeState;
-/** Bodies of the write requests the fake API received, oldest first. */
+/**
+ * Bodies of the write requests the fake API received, oldest first; a
+ * raw upload records its `Content-Type` header and byte size instead.
+ */
 let writes: { method: string; url: string; body: unknown }[];
+let workerFailures: Partial<Record<WorkerRoute, FakeFailure>>;
+let workerListReads: number;
+let avatarVersion: number;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -129,9 +187,19 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     typeof init?.body === 'string'
       ? (JSON.parse(init.body) as Record<string, unknown>)
       : {};
-  if (method !== 'GET') writes.push({ method, url, body });
+  const upload =
+    init?.body instanceof Blob
+      ? {
+          contentType: (init.headers as Record<string, string>)['Content-Type'],
+          size: init.body.size,
+        }
+      : null;
+  if (method !== 'GET') writes.push({ method, url, body: upload ?? body });
 
   if (url === '/api/health') return json({ status: 'ok' });
+  if (url === '/api/workers' || url.startsWith('/api/workers/')) {
+    return handleWorkers(url, method, body);
+  }
   if (url === '/api/machines') {
     return json(
       state.machines.map((machine) =>
@@ -313,10 +381,106 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
 }
 
+/** The configured failure of one Worker route, if any. */
+function workerFailure(route: WorkerRoute): Response | null {
+  const failure = workerFailures[route];
+  if (!failure) return null;
+  if (failure === 'network') throw new TypeError('Failed to fetch');
+  return json({ detail: failure.detail }, failure.status);
+}
+
+/** Server-side badge canonical form (trim, uppercase). */
+function canonicalBadge(value: unknown): string {
+  return String(value).trim().toUpperCase();
+}
+
+function duplicateBadge(badge: string, exceptId?: number): Response | null {
+  const holder = state.workers.find(
+    (w) => w.badge_barcode === badge && w.id !== exceptId,
+  );
+  if (!holder) return null;
+  const suffix = holder.is_active ? '' : ' (inactive)';
+  return json(
+    {
+      detail: `This badge barcode is already assigned to ${holder.name}${suffix}.`,
+    },
+    409,
+  );
+}
+
+function handleWorkers(
+  url: string,
+  method: string,
+  body: Record<string, unknown>,
+): Response {
+  if (url === '/api/workers' && method === 'GET') {
+    workerListReads += 1;
+    const ordered = [...state.workers].sort(
+      (a, b) => a.name.localeCompare(b.name) || a.id - b.id,
+    );
+    return workerFailure('GET list') ?? json(ordered.map(stamp));
+  }
+  if (url === '/api/workers' && method === 'POST') {
+    const failure = workerFailure('POST');
+    if (failure) return failure;
+    const badge = canonicalBadge(body.badge_barcode);
+    const duplicate = duplicateBadge(badge);
+    if (duplicate) return duplicate;
+    const worker: WorkerRow = {
+      id: state.nextId++,
+      name: String(body.name).trim(),
+      badge_barcode: badge,
+      is_active: true,
+      avatar_updated_at: null,
+    };
+    state.workers.push(worker);
+    return json(stamp(worker), 201);
+  }
+  const match = /^\/api\/workers\/(\d+)(\/avatar)?$/.exec(url);
+  const worker = state.workers.find((w) => w.id === Number(match?.[1]));
+  if (!match || !worker) {
+    return json({ detail: `Worker ${match?.[1]} does not exist.` }, 404);
+  }
+  if (!match[2] && method === 'PATCH') {
+    const failure = workerFailure('PATCH');
+    if (failure) return failure;
+    if (typeof body.badge_barcode === 'string') {
+      const badge = canonicalBadge(body.badge_barcode);
+      const duplicate = duplicateBadge(badge, worker.id);
+      if (duplicate) return duplicate;
+      worker.badge_barcode = badge;
+    }
+    if (typeof body.name === 'string') worker.name = body.name.trim();
+    if (typeof body.is_active === 'boolean') worker.is_active = body.is_active;
+    return json(stamp(worker));
+  }
+  if (match[2] && method === 'PUT') {
+    const failure = workerFailure('PUT avatar');
+    if (failure) return failure;
+    avatarVersion += 1;
+    worker.avatar_updated_at = `2026-10-04T10:00:00.00000${avatarVersion}+00:00`;
+    return json(stamp(worker));
+  }
+  if (match[2] && method === 'DELETE') {
+    const failure = workerFailure('DELETE avatar');
+    if (failure) return failure;
+    worker.avatar_updated_at = null;
+    return json(stamp(worker));
+  }
+  return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
+}
+
 beforeEach(() => {
   window.history.replaceState({}, '', '/administration');
   state = seedState();
   writes = [];
+  workerFailures = {};
+  workerListReads = 0;
+  avatarVersion = 0;
+  imagePreparation.rejectWith = null;
+  // jsdom has no object URLs; the staged avatar preview needs one.
+  URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
+  URL.revokeObjectURL = vi.fn();
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
@@ -739,6 +903,410 @@ test('a prefix containing whitespace is invalid and is never trimmed into validi
   await screen.findByText('✓ Format saved.');
   expect(writes).toHaveLength(1);
   expect(writes[0].body).toEqual({ prefix: '', digits: 4 });
+});
+
+/* ============ Workers ============ */
+
+const UNKNOWN_OUTCOME =
+  'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the Worker before trying again.';
+
+async function openWorkers(status: 'connected' | 'unavailable' = 'connected') {
+  renderAdmin(status);
+  openSection('Workers');
+  await screen.findByRole('button', { name: 'Edit Alex Tran' });
+}
+
+function pngFile(): File {
+  return new File(
+    [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2])],
+    'badge-photo.png',
+    { type: 'image/png' },
+  );
+}
+
+/** Choose an avatar image through the editor's file input. */
+function chooseAvatar(dialog: HTMLElement, file: File = pngFile()) {
+  fireEvent.change(within(dialog).getByLabelText('Avatar image file'), {
+    target: { files: [file] },
+  });
+}
+
+function fillWorker(dialog: HTMLElement, name: string, badge: string) {
+  fireEvent.change(within(dialog).getByLabelText('Name'), {
+    target: { value: name },
+  });
+  fireEvent.change(within(dialog).getByLabelText('Badge barcode'), {
+    target: { value: badge },
+  });
+}
+
+const writeSummary = () => writes.map((w) => `${w.method} ${w.url}`);
+
+test('Workers lists active and inactive Workers with badge, status and avatar', async () => {
+  await openWorkers();
+
+  const alexRow = screen
+    .getByRole('button', { name: 'Edit Alex Tran' })
+    .closest('tr') as HTMLElement;
+  const alexBadge = within(alexRow).getByText('100482');
+  expect(alexBadge).toHaveClass('mono');
+  expect(alexBadge).toHaveAttribute('data-label', 'Badge barcode');
+  expect(within(alexRow).getByText('Active')).toBeInTheDocument();
+  expect(alexRow.querySelector('img')?.getAttribute('src')).toBe(
+    `/api/workers/1/avatar?v=${encodeURIComponent(ALEX_AVATAR_AT)}`,
+  );
+
+  // Inactive Workers stay listed; no avatar → initials.
+  const maiRow = screen
+    .getByRole('button', { name: 'Edit Mai' })
+    .closest('tr') as HTMLElement;
+  expect(within(maiRow).getByText('B-77')).toBeInTheDocument();
+  expect(within(maiRow).getByText('Inactive')).toBeInTheDocument();
+  expect(maiRow.querySelector('img')).toBeNull();
+  expect(maiRow.querySelector('.worker-avatar')?.textContent).toBe('M');
+
+  expect(
+    screen.getByText(/separate from application Users/),
+  ).toBeInTheDocument();
+});
+
+test('a new Worker posts the trimmed name and the canonical badge, previewing the stored form', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Worker' });
+  fillWorker(dialog, '  Linh Pham ', 'ABC1');
+  // Already canonical: no preview line.
+  expect(dialog.textContent).not.toContain('Saved as:');
+  fireEvent.change(within(dialog).getByLabelText('Badge barcode'), {
+    target: { value: 'abc1' },
+  });
+  expect(dialog.textContent).toContain('Saved as: ABC1');
+  fireEvent.change(within(dialog).getByLabelText('Badge barcode'), {
+    target: { value: ' abc1 ' },
+  });
+  // The field keeps what was typed; only the preview is canonical.
+  expect(within(dialog).getByLabelText('Badge barcode')).toHaveValue(' abc1 ');
+  expect(dialog.textContent).toContain('Saved as: ABC1');
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Worker' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/workers',
+      body: { name: 'Linh Pham', badge_barcode: 'ABC1' },
+    },
+  ]);
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Linh Pham' })
+  ).closest('tr') as HTMLElement;
+  expect(within(row).getByText('ABC1')).toBeInTheDocument();
+  expect(workerListReads).toBe(2);
+});
+
+test('invalid Worker input is refused in place and never written', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Worker' });
+  const add = within(dialog).getByRole('button', { name: 'Add Worker' });
+  const alerts = () =>
+    within(dialog)
+      .queryAllByRole('alert')
+      .map((alert) => alert.textContent);
+
+  fireEvent.click(add);
+  expect(alerts()).toEqual([
+    'A name is required.',
+    'A badge barcode is required.',
+  ]);
+
+  // The length counts the canonical form: 127 + "ß" → 129 ("SS").
+  for (const badge of ['b'.repeat(129), 'a'.repeat(127) + 'ß']) {
+    fillWorker(dialog, 'Linh Pham', badge);
+    fireEvent.click(add);
+    expect(alerts()).toEqual([
+      'A badge barcode must be at most 128 characters.',
+    ]);
+  }
+
+  // The PF: namespace is refused in any letter case.
+  fillWorker(dialog, 'Linh Pham', ' pf:worker:7');
+  fireEvent.click(add);
+  expect(alerts()).toEqual([
+    'A badge barcode cannot start with PF: — scan the barcode printed on the employee badge.',
+  ]);
+
+  expect(writes).toEqual([]);
+  expect(screen.getByRole('dialog', { name: 'New Worker' })).toBeTruthy();
+});
+
+test('a duplicate badge is answered by the server in place, with no further write', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Worker' });
+  fillWorker(dialog, 'Linh Pham', ' 100482 ');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Worker' }));
+
+  const alert = await within(dialog).findByRole('alert');
+  expect(alert.textContent).toBe(
+    'This badge barcode is already assigned to Alex Tran.',
+  );
+  expect(screen.getByRole('dialog', { name: 'New Worker' })).toBe(dialog);
+  expect(writeSummary()).toEqual(['POST /api/workers']);
+});
+
+test('editing a Worker sends the full profile with the canonical badge', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  let dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  expect(within(dialog).getByLabelText('Name')).toHaveValue('Alex Tran');
+  fireEvent.change(within(dialog).getByLabelText('Badge barcode'), {
+    target: { value: 'x-100482 ' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[0]).toEqual({
+    method: 'PATCH',
+    url: '/api/workers/1',
+    body: { name: 'Alex Tran', badge_barcode: 'X-100482', is_active: true },
+  });
+  expect(await screen.findByText('X-100482')).toBeInTheDocument();
+
+  // Deactivation travels in the same full-profile body.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Active' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1]).toEqual({
+    method: 'PATCH',
+    url: '/api/workers/1',
+    body: { name: 'Alex Tran', badge_barcode: 'X-100482', is_active: false },
+  });
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Alex Tran' })
+  ).closest('tr') as HTMLElement;
+  await waitFor(() =>
+    expect(within(row).getByText('Inactive')).toBeInTheDocument(),
+  );
+});
+
+test('a chosen avatar is uploaded after the profile, labelled with its type', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Mai' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  const file = pngFile();
+  chooseAvatar(dialog, file);
+  // The staged image previews in the editor before anything is sent.
+  await waitFor(() =>
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+      'blob:staged-avatar',
+    ),
+  );
+  expect(prepareImageUpload).toHaveBeenCalledWith(file);
+  expect(writes).toEqual([]);
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual([
+    'PATCH /api/workers/2',
+    'PUT /api/workers/2/avatar',
+  ]);
+  expect(writes[1].body).toEqual({
+    contentType: 'image/png',
+    size: file.size,
+  });
+  const row = (await screen.findByRole('button', { name: 'Edit Mai' })).closest(
+    'tr',
+  ) as HTMLElement;
+  await waitFor(() =>
+    expect(row.querySelector('img')?.getAttribute('src')).toBe(
+      `/api/workers/2/avatar?v=${encodeURIComponent('2026-10-04T10:00:00.000001+00:00')}`,
+    ),
+  );
+});
+
+test('removing the avatar sends DELETE after the profile', async () => {
+  await openWorkers();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Remove avatar' }),
+  );
+  // Staged removal: initials preview, no Remove action left.
+  expect(dialog.querySelector('img')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Remove avatar' }),
+  ).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual([
+    'PATCH /api/workers/1',
+    'DELETE /api/workers/1/avatar',
+  ]);
+  const row = (
+    await screen.findByRole('button', { name: 'Edit Alex Tran' })
+  ).closest('tr') as HTMLElement;
+  await waitFor(() => expect(row.querySelector('img')).toBeNull());
+  expect(row.querySelector('.worker-avatar')?.textContent).toBe('AT');
+});
+
+test('a refused image file shows its reason inline and stages nothing', async () => {
+  await openWorkers();
+  imagePreparation.rejectWith = 'Choose a PNG, JPEG or WebP image.';
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Mai' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  chooseAvatar(dialog);
+  const alert = await within(dialog).findByRole('alert');
+  expect(alert.textContent).toBe('Choose a PNG, JPEG or WebP image.');
+  expect(dialog.querySelector('img')).toBeNull();
+  expect(
+    within(dialog).queryByRole('button', { name: 'Remove avatar' }),
+  ).toBeNull();
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual(['PATCH /api/workers/2']);
+});
+
+test('a new Worker whose avatar is refused becomes an edit of the saved Worker', async () => {
+  await openWorkers();
+  workerFailures['PUT avatar'] = {
+    status: 415,
+    detail: 'The file is not a PNG, JPEG or WebP image.',
+  };
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  let dialog = screen.getByRole('dialog', { name: 'New Worker' });
+  fillWorker(dialog, 'Linh Pham', 'l-1');
+  chooseAvatar(dialog);
+  await waitFor(() => expect(dialog.querySelector('img')).not.toBeNull());
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Worker' }));
+
+  dialog = await screen.findByRole('dialog', { name: 'Edit Worker' });
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    'The Worker was saved, but the avatar could not be updated: The file is not a PNG, JPEG or WebP image.',
+  );
+  // The staged avatar is kept, and the list is not reloaded while the
+  // editor is open.
+  expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+    'blob:staged-avatar',
+  );
+  expect(workerListReads).toBe(1);
+  expect(writeSummary()).toEqual([
+    'POST /api/workers',
+    'PUT /api/workers/100/avatar',
+  ]);
+
+  // Saving again edits the saved Worker: PATCH, then PUT.
+  delete workerFailures['PUT avatar'];
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual([
+    'POST /api/workers',
+    'PUT /api/workers/100/avatar',
+    'PATCH /api/workers/100',
+    'PUT /api/workers/100/avatar',
+  ]);
+  expect(writes[2].body).toEqual({
+    name: 'Linh Pham',
+    badge_barcode: 'L-1',
+    is_active: true,
+  });
+  // Closing reloads the table.
+  expect(
+    await screen.findByRole('button', { name: 'Edit Linh Pham' }),
+  ).toBeInTheDocument();
+  expect(workerListReads).toBe(2);
+});
+
+test('an avatar-only change that the server refuses names the avatar alone', async () => {
+  await openWorkers();
+  workerFailures['PUT avatar'] = {
+    status: 413,
+    detail: 'The image is larger than 2 MB. Choose a smaller image.',
+  };
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Mai' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  chooseAvatar(dialog);
+  await waitFor(() => expect(dialog.querySelector('img')).not.toBeNull());
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    'The avatar could not be updated: The image is larger than 2 MB. Choose a smaller image.',
+  );
+  expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+    'blob:staged-avatar',
+  );
+});
+
+test('an unanswered avatar upload keeps the editor open with an outcome-neutral note', async () => {
+  await openWorkers();
+  // From now on the server stops answering the upload and the list.
+  workerFailures['PUT avatar'] = 'network';
+  workerFailures['GET list'] = 'network';
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Worker' });
+  fillWorker(dialog, 'Linh Pham', 'L-1');
+  chooseAvatar(dialog);
+  await waitFor(() => expect(dialog.querySelector('img')).not.toBeNull());
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Add Worker' }));
+
+  const alert = await within(dialog).findByRole('alert');
+  expect(alert.textContent).toBe(UNKNOWN_OUTCOME);
+  expect(alert.textContent).not.toContain('Nothing was changed.');
+  // Still mounted, staged avatar kept, Save available, no reload yet.
+  expect(screen.getByRole('dialog', { name: 'Edit Worker' })).toBe(dialog);
+  expect(dialog.querySelector('img')?.getAttribute('src')).toBe(
+    'blob:staged-avatar',
+  );
+  expect(
+    within(dialog).getByRole('button', { name: 'Save changes' }),
+  ).toBeEnabled();
+  expect(workerListReads).toBe(1);
+
+  // Closing refreshes the list — which now fails into the error state.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(
+    await screen.findByText('Worker data could not be loaded.'),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(workerListReads).toBe(2);
+});
+
+test('offline disables every Worker write control; the table still renders', async () => {
+  await openWorkers('unavailable');
+
+  expect(screen.getByRole('button', { name: '+ New Worker' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit Worker' });
+  for (const name of ['Save changes', 'Choose image…', 'Remove avatar']) {
+    expect(within(dialog).getByRole('button', { name })).toBeDisabled();
+  }
+});
+
+test('the Workers section and its editor show no phase numbers', async () => {
+  await openWorkers();
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+
+  fireEvent.click(screen.getByRole('button', { name: '+ New Worker' }));
+  screen.getByRole('dialog', { name: 'New Worker' });
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Alex Tran' }));
+  screen.getByRole('dialog', { name: 'Edit Worker' });
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
 });
 
 /* ============ Later-phase sections stay honest ============ */

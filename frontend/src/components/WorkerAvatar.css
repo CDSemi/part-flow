@@ -1,0 +1,25 @@
+/* The ONE shared Worker avatar (WorkerAvatar.tsx): the uploaded image
+   cropped to a circle, or the Worker's initials on the same borderless
+   tinted circle as the Scan Station Worker pill mark. */
+.worker-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--info-surface);
+  color: var(--info-t);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  object-fit: cover;
+}
+
+/* Editor size. */
+.worker-avatar.md {
+  width: 64px;
+  height: 64px;
+  font-size: 21px;
+}

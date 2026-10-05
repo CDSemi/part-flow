@@ -234,10 +234,13 @@ class AuditEventType(StrEnum):
 
     Slice 1 records exactly creation and edit; the vocabulary widens
     additively in the phases that introduce new auditable actions.
+    Phase 13 adds DELETED for hard deletes of master/configuration
+    records (first writers in later Phase 13 slices).
     """
 
     CREATED = "CREATED"
     UPDATED = "UPDATED"
+    DELETED = "DELETED"
 
 
 class AuditEntityType(StrEnum):
@@ -246,12 +249,15 @@ class AuditEntityType(StrEnum):
     Exactly the master-data and business-demand entities — never
     production activity (PartMovement is the production audit record)
     and never Machine (machine_lifecycle_events owns that history).
+    Phase 13 adds Worker: configuration of the Scan Station audit
+    identity (PROJECT_PROFILE §8.13), never production activity.
     Widens additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
     WORK_ORDER_DEMAND = "WorkOrderDemand"
     PART_NUMBER = "PartNumber"
+    WORKER = "Worker"
 
 
 class MachineLifecycleEventType(StrEnum):

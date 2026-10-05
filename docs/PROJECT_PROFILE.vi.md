@@ -514,8 +514,10 @@ PF:SCRAP
 ```
 
 `PF:` phân biệt barcode của PartFlow với vendor/factory barcode. Worker badge là
-ngoại lệ: dùng chính barcode hiện có trên thẻ nhân viên, exact-match với một active
-Worker; zero/multiple match bị reject. Format `PF:WORKER:` cũ không còn tồn tại.
+ngoại lệ: dùng chính barcode hiện có trên thẻ nhân viên, khớp chính xác sau khi chuẩn hóa
+(trim, uppercase) với một active Worker; zero/multiple match bị reject. Badge barcode
+phải unique giữa các Worker (so sánh theo dạng chuẩn hóa đó, gồm cả Worker inactive;
+quyết định 2026-10-04). Format `PF:WORKER:` cũ không còn tồn tại.
 
 Machine barcode chứa immutable Asset Tag. PN barcode chứa canonical PN. Parser:
 

@@ -5,15 +5,13 @@ PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0013_phase12_priority` adds (IMPLEMENTATION_ROADMAP
 Phase 12 — Priority Management; PROJECT_PROFILE §21; invariant H1):
 
-- exact head boundary: `0013_phase12_priority` is head; the positive
-  CHECK and the UNIQUE on `work_order_demands.priority_rank` exist with
+- exact boundary: the module migrates to `0013_phase12_priority`; the
+  positive CHECK and the UNIQUE on `work_order_demands.priority_rank` exist with
   their exact names, and PostgreSQL refuses a duplicate rank and a rank
   of 0 while admitting any number of unranked demands;
 - the Hot list idempotency index on `audit_events` stores the JSONB
   subscript expression the application emits, partial on
   `WorkOrderDemand` rows;
-- models↔migration metadata parity at head (moved here from the Phase
-  11 schema test, which is now pinned to 0012);
 - the refusing pre-check: existing ranks that are not exactly 1..N (a
   duplicate, a rank of 0, a gap) refuse the upgrade, which leaves the
   database at its starting revision (0012, or 0011 when 0012 was
@@ -21,10 +19,10 @@ Phase 12 — Priority Management; PROJECT_PROFILE §21; invariant H1):
 - clean downgrade back to the Phase 11 boundary with a successful
   re-upgrade.
 
-Phase 12 is the current head, so this module carries the head-level
-coverage. When a later phase adds its migration, pin this module to
-`0013_phase12_priority` and move the head-level coverage into that
-phase's schema test.
+This module is pinned to `0013_phase12_priority` (Phase 13 added the
+Workers migration 0014): every assertion documents the Phase 12
+boundary as it shipped, and the head-level coverage (models↔schema
+parity at head) lives in `test_phase13_schema.py`.
 """
 
 import os
@@ -79,14 +77,14 @@ def admin_engine() -> Iterator[Engine]:
 
 @pytest.fixture(scope="module")
 def migrated_engine(admin_engine: Engine) -> Iterator[Engine]:
-    """Temporary database migrated head → base → head through real Alembic runs."""
+    """Temporary database migrated 0013 → base → 0013 through real Alembic runs."""
     name = "partflow_test_phase12_schema"
     _create_temp_database(admin_engine, name)
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE12_REVISION)
     command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    command.upgrade(config, _PHASE12_REVISION)
     engine = create_engine(url)
     yield engine
     engine.dispose()
@@ -108,7 +106,7 @@ def _version(connection: Connection) -> str:
 
 def _seed_demand(connection: Connection, rank: int | None) -> int:
     """One Work Order with one demand line carrying ``rank`` (raw SQL, so
-    it works at 0012 as well as at head)."""
+    it works at 0012 as well as at 0013)."""
     work_order_id = connection.execute(
         sa.text("INSERT INTO work_orders (received_date) VALUES (CURRENT_DATE) RETURNING id")
     ).scalar_one()
@@ -124,7 +122,7 @@ def _seed_demand(connection: Connection, rank: int | None) -> int:
     )
 
 
-def test_head_is_the_phase12_revision(migrated_engine: Engine) -> None:
+def test_migrated_revision_is_the_phase12_revision(migrated_engine: Engine) -> None:
     with migrated_engine.connect() as connection:
         assert _version(connection) == _PHASE12_REVISION
 
@@ -192,16 +190,6 @@ def test_the_idempotency_lookup_uses_the_index(connection: Connection) -> None:
     assert _INDEX in plan
 
 
-def test_models_metadata_matches_the_migrated_schema(migrated_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with migrated_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 @pytest.fixture(scope="module")
 def phase11_database(admin_engine: Engine) -> Iterator[URL]:
     """A database at the Phase 11 boundary for the pre-check cases."""
@@ -240,7 +228,7 @@ def test_upgrade_refuses_ranks_that_are_not_dense(
     try:
         seeded = _reseed(engine, ranks)
         with pytest.raises(RuntimeError) as refused:
-            command.upgrade(_alembic_config(phase11_database), "head")
+            command.upgrade(_alembic_config(phase11_database), _PHASE12_REVISION)
         message = str(refused.value)
         offending = [demand_id for demand_id, rank in seeded.items() if rank == offending_rank]
         for demand_id in offending:
@@ -272,7 +260,7 @@ def test_a_refused_multi_revision_upgrade_stays_at_its_starting_revision(
         command.upgrade(_alembic_config(url), _PHASE10_REVISION)
         seeded = _reseed(engine, [1, 1])
         with pytest.raises(RuntimeError) as refused:
-            command.upgrade(_alembic_config(url), "head")
+            command.upgrade(_alembic_config(url), _PHASE12_REVISION)
         message = str(refused.value)
         assert "Nothing was changed" in message
         assert "stays at the revision it started from" in message
@@ -292,7 +280,7 @@ def test_upgrade_accepts_dense_ranks(phase11_database: URL) -> None:
     engine = create_engine(phase11_database)
     try:
         seeded = _reseed(engine, [2, None, 1, 3, None])
-        command.upgrade(_alembic_config(phase11_database), "head")
+        command.upgrade(_alembic_config(phase11_database), _PHASE12_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _PHASE12_REVISION
         assert _stored_ranks(engine) == seeded
@@ -306,7 +294,7 @@ def test_downgrade_restores_the_phase11_boundary(admin_engine: Engine) -> None:
     url = make_url(os.environ["DATABASE_URL"]).set(database=name)
     config = _alembic_config(url)
     try:
-        command.upgrade(config, "head")
+        command.upgrade(config, _PHASE12_REVISION)
         command.downgrade(config, _PHASE11_REVISION)
         engine = create_engine(url)
         try:
@@ -323,7 +311,7 @@ def test_downgrade_restores_the_phase11_boundary(admin_engine: Engine) -> None:
             assert "ix_audit_events_entity_type_entity_id_id" in indexes
         finally:
             engine.dispose()
-        command.upgrade(config, "head")
+        command.upgrade(config, _PHASE12_REVISION)
         engine = create_engine(url)
         try:
             inspector = inspect(engine)

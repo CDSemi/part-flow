@@ -36,7 +36,9 @@ from app.application.errors import (
     HotListChangedError,
     InvalidInputError,
     NotFoundError,
+    PayloadTooLargeError,
     RouteDeviationConfirmationRequiredError,
+    UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
 
@@ -44,6 +46,8 @@ _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
     ConflictError: 409,
     InvalidInputError: 422,
+    PayloadTooLargeError: 413,
+    UnsupportedMediaTypeError: 415,
 }
 
 

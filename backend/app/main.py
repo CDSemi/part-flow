@@ -20,6 +20,7 @@ from app.api.route_templates import router as route_templates_router
 from app.api.scan_station import router as scan_station_router
 from app.api.tracking import router as tracking_router
 from app.api.work_orders import router as work_orders_router
+from app.api.workers import router as workers_router
 from app.core.config import get_settings
 from app.infrastructure.database import build_engine
 
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="PartFlow API", lifespan=lifespan)
     app.include_router(health_router)
     app.include_router(environment_router)
+    app.include_router(workers_router)
     app.include_router(machines_router)
     app.include_router(part_numbers_router)
     app.include_router(work_orders_router)

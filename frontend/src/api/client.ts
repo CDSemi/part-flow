@@ -6,7 +6,9 @@
 // `{"detail": ...}` error shape translated into one typed `ApiError`
 // carrying the safe, user-facing message. No caching, no retries, no
 // business rules — validation and transactions live in the backend
-// Application layer.
+// Application layer. The one binary path is `apiUpload`: a raw image
+// body labelled with its own media type (no multipart), answered with
+// JSON like every other call.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -73,6 +75,35 @@ export async function apiRequestWithStatus<T>(
         : undefined,
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
+  return readResponse<T>(response);
+}
+
+/**
+ * Upload one raw binary body (an image) labelled with the blob's own
+ * media type, and parse the JSON response body. The caller makes sure
+ * `blob.type` matches the bytes; the server re-checks both.
+ */
+export async function apiUpload<T>(
+  path: string,
+  blob: Blob,
+  method: 'PUT' = 'PUT',
+): Promise<T> {
+  const response = await fetch(path, {
+    method,
+    headers: { 'Content-Type': blob.type },
+    body: blob,
+  });
+  return (await readResponse<T>(response)).data;
+}
+
+/**
+ * Shared response handling of every call: a non-2xx answer becomes an
+ * `ApiError` carrying the backend's message, a 2xx answer is parsed as
+ * JSON (204 has no body).
+ */
+async function readResponse<T>(
+  response: Response,
+): Promise<{ status: number; data: T }> {
   if (!response.ok) {
     let body: unknown;
     try {

@@ -37,6 +37,14 @@ class InvalidInputError(ApplicationError):
     """
 
 
+class PayloadTooLargeError(ApplicationError):
+    """An uploaded payload exceeds its limit (413)."""
+
+
+class UnsupportedMediaTypeError(ApplicationError):
+    """An upload is not an accepted media type (415)."""
+
+
 class IdempotencyConflictError(ConflictError):
     """A ``device_event_id`` was reused for a different normalized request.
 
