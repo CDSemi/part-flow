@@ -46,8 +46,13 @@ Deliberate surface decisions:
   of a Work Order is never removable (a Work Order contains one or
   more demand records; nothing auto-deletes the Work Order) — either
   violation is a 409 that removes nothing; so is removing a line that
-  stocked quantity has ever been allocated to (Phase 10), and a line on
-  the Hot list (Phase 12 — it leaves the Hot list first).
+  stocked quantity has ever been allocated to (Phase 10). A line on the
+  Hot list that passes every other rule (Phase 12 follow-up, OD3) is a
+  409 with ``confirmation_required: true`` and its ``hot_list_entry``
+  (PN, current rank) that removes nothing, unless the request carries
+  ``?confirm_hot_removal=true``: then the line leaves the Hot list (the
+  remaining ranks close the gap, audited) and is deleted in one
+  transaction.
 - ``GET /work-orders/completed`` is the read-only completed history
   (Phase 10, GUI_DESIGN §11.5): server-side search, the Done range and
   the due outcome in the site calendar (``SITE_TIMEZONE`` — the one
@@ -55,7 +60,11 @@ Deliberate surface decisions:
   chosen sort and keyset paging bound to it.
 - ``priority_rank`` and ``allocated_quantity`` appear only in
   responses: the Hot list command (``POST /api/hot-list/changes``,
-  Phase 12) and allocation (Phase 10) own those values.
+  Phase 12) and allocation (Phase 10) own those values. The rank is
+  otherwise cleared only by the automatic removal of an entry whose
+  demand became inactive (an allocation, or a save lowering the
+  requested quantity to the allocated quantity) and by the confirmed
+  deletion of a Hot line (``app.application.hot_ranks``).
 - The audit ``actor_reference`` is never client-writable: no request
   carries an actor, so audit rows from this surface stay NULL until an
   authenticated (or server-configured) identity exists (Phase 14).
@@ -104,6 +113,11 @@ class WorkOrderDemandResponse(BaseModel):
     # remaining_quantity > 0; the server enforces the same cap.
     released_quantity: int
     remaining_quantity: int
+    # True once any allocation — active or reversed — references this
+    # demand (Phase 10): such a line is never removable, so the UI keeps
+    # it on the plain removal path and never asks the typed Hot
+    # confirmation for it (OD3).
+    has_allocation_history: bool
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -235,7 +249,9 @@ def _summary_response(summary: WorkOrderSummary) -> WorkOrderSummaryResponse:
     )
 
 
-def _demand_response(demand: WorkOrderDemand, released: int) -> WorkOrderDemandResponse:
+def _demand_response(
+    demand: WorkOrderDemand, released: int, *, has_allocation_history: bool
+) -> WorkOrderDemandResponse:
     return WorkOrderDemandResponse(
         id=demand.id,
         work_order_id=demand.work_order_id,
@@ -252,6 +268,7 @@ def _demand_response(demand: WorkOrderDemand, released: int) -> WorkOrderDemandR
         has_released_quantity=released > 0,
         released_quantity=released,
         remaining_quantity=max(demand.requested_quantity - released, 0),
+        has_allocation_history=has_allocation_history,
         created_at=demand.created_at,
         updated_at=demand.updated_at,
     )
@@ -273,7 +290,11 @@ def _detail_response(detail: WorkOrderDetail) -> WorkOrderDetailResponse:
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
         demands=[
-            _demand_response(demand, detail.released_quantities.get(demand.id, 0))
+            _demand_response(
+                demand,
+                detail.released_quantities.get(demand.id, 0),
+                has_allocation_history=demand.id in detail.allocation_history_ids,
+            )
             for demand in detail.demands
         ],
     )
@@ -384,13 +405,24 @@ def update_work_order(
 
 
 @router.delete("/work-orders/{work_order_id}/demands/{demand_id}", status_code=204)
-def delete_work_order_demand(work_order_id: int, demand_id: int, session: SessionDep) -> None:
+def delete_work_order_demand(
+    work_order_id: int,
+    demand_id: int,
+    session: SessionDep,
+    confirm_hot_removal: bool = False,
+) -> None:
     """Remove one saved demand line (PROJECT_PROFILE §13, §8.2).
 
     Blocked with 409 once any quantity for the demand has been
     released, and blocked with 409 for the Work Order's last demand
     line; removal never cascades to the PartNumber master,
     QuantityFlows, PartMovements, release history, or other demand
-    lines for the same PN.
+    lines for the same PN. A line on the Hot list needs
+    ``confirm_hot_removal=true`` (OD3): without it, once every other
+    rule passes, the 409 carries ``confirmation_required`` and the
+    ``hot_list_entry``; with it, the line leaves the Hot list and is
+    deleted in one transaction.
     """
-    work_orders.delete_work_order_demand(session, work_order_id, demand_id)
+    work_orders.delete_work_order_demand(
+        session, work_order_id, demand_id, confirm_hot_removal=confirm_hot_removal
+    )

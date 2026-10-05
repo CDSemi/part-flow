@@ -1325,6 +1325,7 @@ A Work Order Demand line may be removed from its Work Order only while no produc
 - An unsaved draft line may be removed immediately.
 - A saved Work Order Demand with no released production quantity may be removed only after explicit confirmation.
 - Once any quantity for a Work Order Demand has been released to production, that Work Order Demand must not be deleted from Work Orders. Later adjustments go through the correction and production workflows (§16); removal is not a correction mechanism.
+- A saved Work Order Demand that is on the Hot list (and otherwise removable) is removed only after a warning that states its Hot rank and a typed confirmation (decided 2026-10-04); the removal takes it off the Hot list — the remaining ranks close the gap, audited (§21 Priority Management, §28) — and deletes the line in one transaction. Without that confirmation nothing is removed.
 
 Removing a Work Order Demand must never delete the PartNumber master, any Quantity Flow, any Part Movement, release history, or other Work Order Demand records for the same PN.
 
@@ -2004,6 +2005,7 @@ The Hot list is managed within the Department:
 8. Apply every confirmed Hot list change and record it in the audit trail.
 9. Provide Undo and Redo for Hot list changes instead of a separate save-or-cancel step; stepping back or forward is itself an order change and requires the same confirmation. Undo/Redo depth is unlimited within the current application session (v18) — no numeric limit; the history ends with the session.
 10. Use the stored rank as the highest work and allocation priority.
+11. An entry leaves the Hot list automatically when its Work Order Demand becomes inactive (§14) — fully allocated, which includes its Work Order completing (§18) — in the same transaction as the change that made it inactive (an allocation, or a demand edit that lowers the requested quantity to the allocated quantity) (decided 2026-10-04). No confirmation is asked: the triggering action is the confirmed one. The remaining ranks close the gap and every rank change is audited as an automatic removal with its cause (§28). A reversal or quantity increase that makes the demand active again does not re-add it.
 
 Multiple Work Orders requesting the same PN may have different priorities.
 

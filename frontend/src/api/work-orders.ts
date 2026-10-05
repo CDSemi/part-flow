@@ -15,7 +15,7 @@
 //
 // Production-safe: no mock data, no framework imports.
 
-import { apiRequest } from './client';
+import { ApiError, apiRequest } from './client';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,6 +90,13 @@ export interface WorkOrderDemand {
    */
   releasedQuantity: number;
   remainingQuantity: number;
+  /**
+   * Server-derived (Phase 10): true once any allocation — active or
+   * reversed — references this demand. Such a line is never removable,
+   * so a Hot line carrying it never gets the typed Hot confirmation
+   * (OD3): the server's allocation-history refusal answers first.
+   */
+  hasAllocationHistory: boolean;
 }
 
 export interface WorkOrderDetail {
@@ -166,6 +173,7 @@ interface WorkOrderDemandWire {
   has_released_quantity: boolean;
   released_quantity: number;
   remaining_quantity: number;
+  has_allocation_history: boolean;
 }
 
 interface WorkOrderDetailWire {
@@ -214,6 +222,7 @@ function toDemand(wire: WorkOrderDemandWire): WorkOrderDemand {
     hasReleasedQuantity: wire.has_released_quantity,
     releasedQuantity: wire.released_quantity,
     remainingQuantity: wire.remaining_quantity,
+    hasAllocationHistory: wire.has_allocation_history,
   };
 }
 
@@ -447,17 +456,74 @@ export async function updateWorkOrder(
 
 /**
  * Remove one saved demand line. The backend enforces the canonical
- * rules (PROJECT_PROFILE §13, §8.2): released demand and the last
- * demand line of a Work Order answer 409 and remove nothing.
+ * rules (PROJECT_PROFILE §13, §8.2): released or allocated demand and
+ * the last demand line of a Work Order answer 409 and remove nothing.
+ * A line on the Hot list is removed only with `confirmHotRemoval`
+ * (the typed confirmation): the server then takes it off the Hot list
+ * and deletes it in one transaction. Without the flag it answers the
+ * confirmation-required 409 (`hotRemovalConfirmationRequired`) and
+ * removes nothing.
  */
 export async function deleteWorkOrderDemand(
   workOrderId: number,
   demandId: number,
+  options?: { confirmHotRemoval?: boolean },
 ): Promise<void> {
+  const query =
+    options?.confirmHotRemoval === true ? '?confirm_hot_removal=true' : '';
   await apiRequest<void>(
-    `/api/work-orders/${workOrderId}/demands/${demandId}`,
+    `/api/work-orders/${workOrderId}/demands/${demandId}${query}`,
     {
       method: 'DELETE',
     },
   );
+}
+
+/** The Hot list entry a demand-line removal must confirm first. */
+export interface HotRemovalConfirmation {
+  workOrderDemandId: number;
+  partNumber: string;
+  /** The CURRENT Hot rank, read by the server under the row lock. */
+  rank: number;
+  /** The server's explanation (`detail`). */
+  message: string;
+}
+
+/**
+ * The Hot-line confirmation payload of a refused demand-line removal
+ * (the backend's 409 with `confirmation_required` and a well-formed
+ * `hot_list_entry`), or null for any other failure — nothing was
+ * removed either way.
+ */
+export function hotRemovalConfirmationRequired(
+  error: unknown,
+): HotRemovalConfirmation | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const body = error.body;
+  if (!body || typeof body !== 'object') return null;
+  const record = body as {
+    confirmation_required?: unknown;
+    hot_list_entry?: unknown;
+  };
+  if (record.confirmation_required !== true) return null;
+  const entry = record.hot_list_entry;
+  if (!entry || typeof entry !== 'object') return null;
+  const wire = entry as {
+    work_order_demand_id?: unknown;
+    part_number?: unknown;
+    rank?: unknown;
+  };
+  if (
+    typeof wire.work_order_demand_id !== 'number' ||
+    typeof wire.part_number !== 'string' ||
+    typeof wire.rank !== 'number'
+  ) {
+    return null;
+  }
+  return {
+    workOrderDemandId: wire.work_order_demand_id,
+    partNumber: wire.part_number,
+    rank: wire.rank,
+    message: error.message,
+  };
 }

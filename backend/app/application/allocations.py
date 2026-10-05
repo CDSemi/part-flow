@@ -52,7 +52,19 @@ Rules owned here:
   `FOR UPDATE` on every affected demand row
   (serializing against the demand edit's committed-quantity floor and
   against a release) and on every affected Work Order row (the
-  completion projection).
+  completion projection). A confirmation also takes the Hot advisory
+  lock after the PN lock, the Stockroom station FOR KEY SHARE, and
+  locks the ranked demand rows its Hot removal can shift in the same
+  ascending demand pass (lock order: PN → Hot → station → demand rows
+  → Work Orders; a reversal takes PN → station → demand → Work Order
+  and never the Hot lock).
+- **Automatic Hot removal** (Phase 12 follow-up, owner decision OD1;
+  PROJECT_PROFILE §21): a ranked line this confirmation fully allocates
+  — its Work Order completing included — leaves the Hot list in the
+  same transaction, the remaining ranks close the gap and every rank
+  change is audited with the allocation as its cause
+  (`hot_ranks.remove_from_hot_list`). A reversal that makes the demand
+  active again re-adds nothing.
 - **Operator adjustment** (§18 Receiving Confirmation): the confirmed
   lines may differ from the suggestion; the command re-computes the
   canonical suggestion for the confirmed total under the locks and
@@ -95,6 +107,7 @@ from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
+from app.application import hot_ranks
 from app.application.common import device_event_id_text, optional_text, required_text
 from app.application.errors import (
     ConflictError,
@@ -574,11 +587,21 @@ def _lock_work_orders(session: Session, work_order_ids: Collection[int]) -> dict
 def _require_stockroom_station(session: Session, station_id: str) -> ScanStation:
     """The station a receiving confirmation records — active, bound to a terminal Area.
 
-    Read for audit identity only: the allocation itself is PN-level and
-    needs no station lock (the STOCKED Movement was recorded under the
-    station lock already).
+    Read for audit identity. It takes FOR KEY SHARE on the station
+    before the demand pass (lock order of the Phase 12 follow-up: it is
+    the lock the allocation rows' FK would take later anyway, taken
+    early so no demand row holder waits on a station) and re-reads it
+    under that lock. The caller takes its PN lock (and, for a
+    confirmation, the Hot lock) first, so no row lock precedes an
+    advisory lock. FOR KEY SHARE conflicts only with FOR UPDATE and
+    DELETE, so a station edit is not blocked.
     """
-    station = session.get(ScanStation, station_id)
+    station = session.get(
+        ScanStation,
+        station_id,
+        with_for_update={"read": True, "key_share": True},
+        populate_existing=True,
+    )
     if station is None:
         raise NotFoundError(f"Scan Station '{station_id}' does not exist.")
     if not station.is_active:
@@ -704,12 +727,18 @@ def confirm_allocation(
     the lines must sum to exactly it, and the PN's available stocked
     quantity must still cover it when the command is judged under the
     locks. Order: input shape → fingerprint → idempotency fast path →
-    the per-PN advisory lock → the demand row locks (ascending) → the
-    Work Order row locks (ascending) → idempotency re-check →
-    validation under the locks (PN agreement, shortage per line,
-    available stocked quantity for the allocation quantity) → the
-    rows, the projection and the completion → COMMIT (or replay of a
-    race winner).
+    the per-PN advisory lock → the Hot advisory lock → the Stockroom
+    station FOR KEY SHARE (when ``station_id`` is set) → the demand row
+    locks in ONE ascending pass (the lines plus every ranked row a Hot
+    removal of them can shift, ``hot_ranks.hot_rank_scope``) → the Work
+    Order row locks (ascending) → idempotency re-check → validation
+    under the locks (PN agreement, shortage per line, available stocked
+    quantity for the allocation quantity) → the completion → the
+    automatic Hot removal of every ranked line this command fully
+    allocates (OD1 — its Work Order completing included; the remaining
+    ranks close the gap, audited) → the rows and the projection →
+    COMMIT (or replay of a race winner). A replay never touches the Hot
+    list: it returns before any lock.
     """
     pn = canonical_part_number(part_number)
     confirmed = _normalized_lines(lines)
@@ -747,11 +776,19 @@ def confirm_allocation(
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
 
-    station = _require_stockroom_station(session, station_id) if station_id is not None else None
-
-    # -- Serialize per PN, then lock the demand and Work Order rows -----
+    # -- Serialize per PN and on the Hot list, then lock the rows --------
+    # The Hot lock is taken unconditionally: whether a line is ranked is
+    # only known under it, and taking it later — once a demand row is
+    # held — would invert the Hot command's Hot lock → demand row order.
     _acquire_part_number_allocation_lock(session, pn)
-    demands = _lock_demands(session, [line.work_order_demand_id for line in confirmed])
+    hot_ranks.acquire_hot_list_lock(session)
+    station = _require_stockroom_station(session, station_id) if station_id is not None else None
+    line_ids = sorted(line.work_order_demand_id for line in confirmed)
+    scope = hot_ranks.hot_rank_scope(session, line_ids)
+    # ONE ascending pass over the lines and every ranked row a Hot
+    # removal of them can shift; only the lines are this command's own.
+    locked = _lock_demands(session, set(line_ids) | scope.shift_ids)
+    demands = {demand_id: locked[demand_id] for demand_id in line_ids}
     work_orders = _lock_work_orders(session, {demand.work_order_id for demand in demands.values()})
 
     # -- Idempotency RE-CHECK after the blocking locks -------------------
@@ -808,6 +845,34 @@ def confirm_allocation(
     # verbatim, never re-derived from a later state).
     deltas = {line.work_order_demand_id: line.quantity for line in confirmed}
     completed, reopened = _apply_completion(session, work_orders, deltas)
+    # -- Automatic Hot removal (OD1), BEFORE any allocation row is staged:
+    # its flushes must not carry the rows whose idempotency race is
+    # translated only at COMMIT below. Judged on the figure the
+    # projection writes; completion implies a fully allocated line.
+    removals = {
+        demand_id: (
+            hot_ranks.HotRemovalReason.WORK_ORDER_COMPLETED
+            if demands[demand_id].work_order_id in completed
+            else hot_ranks.HotRemovalReason.FULLY_ALLOCATED
+        )
+        for demand_id in sorted(scope.ranked_candidates)
+        if allocated.get(demand_id, 0) + deltas[demand_id] >= demands[demand_id].requested_quantity
+    }
+    if removals:
+        hot_ranks.remove_from_hot_list(
+            session,
+            scope=scope,
+            locked=locked,
+            removals=removals,
+            action=hot_ranks.HotRankEventAction.AUTO_REMOVE,
+            trigger=hot_ranks.HotRankTrigger.ALLOCATION,
+            reference={
+                "device_event_id": event_id,
+                "source": str(source),
+                "station_id": station_id or None,
+            },
+            actor=actor,
+        )
     metadata: dict[str, Any] = {
         FINGERPRINT_KEY: fingerprint,
         COMMAND_KEY: {
@@ -892,7 +957,6 @@ def reverse_allocation(
     if committed:
         return _replay_or_conflict(session, committed, fingerprint)
 
-    station = _require_stockroom_station(session, station_id) if station_id is not None else None
     original = session.get(WorkOrderAllocation, allocation_id)
     if original is None:
         raise NotFoundError(f"Allocation {allocation_id} does not exist.")
@@ -903,6 +967,11 @@ def reverse_allocation(
             " Nothing was recorded."
         )
     _acquire_part_number_allocation_lock(session, original.part_number)
+    # The station (FOR KEY SHARE) after the PN lock and before the demand
+    # row: no row lock precedes the advisory lock, and no demand row is
+    # held while waiting on a station. No Hot lock: a reversal never
+    # removes a Hot entry, and nothing is re-added (OD1).
+    station = _require_stockroom_station(session, station_id) if station_id is not None else None
     demand = _lock_demands(session, [original.work_order_demand_id])[original.work_order_demand_id]
     work_order = _lock_work_orders(session, [demand.work_order_id])[demand.work_order_id]
     committed = committed_allocation_command(session, event_id)

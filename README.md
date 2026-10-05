@@ -203,16 +203,17 @@ real Management → Priority view on it:
   Machine card (ON_MACHINE only) / finished; `/api/machines` responses
   carry the derived `operational_state` and `assigned_quantity`), and the
   Phase 12 Hot list API — `GET /api/hot-list` (the ranked Work Order
-  Demands, inactive entries included, each with the PN's current quantity
+  Demands, each with the PN's current quantity
   per Area / Machine), `GET /api/hot-list/candidates` (`?search=` over PN /
   Work Order Number / Job Number, or `?barcode=PF:PN:…`; only demand
   eligible to join the list) and `POST /api/hot-list/changes` (the one
   idempotent, audited command that adds, removes, moves, undoes or redoes
-  one entry against the order the manager confirmed — the only writer of
+  one entry against the order the manager confirmed — with the automatic
+  removal of an entry whose line becomes fully allocated, the only writers of
   `priority_rank`; Department-gated: 404 with no active Department, 409
   with several — only the replay of an already committed change still
   answers, with `entries: null`), with the demand-line removal of a Hot
-  line refused,
+  line allowed only after a typed confirmation,
   all with Application-layer services in
   `app/application/` owning every rule and transaction, the
   framework-independent domain vocabulary (`app/domain/`), and the
@@ -389,7 +390,7 @@ available stock reading `Open`. Phase 12 makes Management → Priority
 real: the Hot list reads and writes `/api/hot-list` (confirmation before
 every order change, session Undo / Redo, drag-and-drop and Move Up /
 Move Down, add by search or `PF:PN:` scan), and Management → Work Orders
-disables removing a Hot demand line. Every other view (Planned Routes,
+removes a Hot demand line only after a typed confirmation. Every other view (Planned Routes,
 Part Numbers) renders development-only mock data; Phase 11 also lists the server's per-PN
 breakdown of each Machine's assigned quantity in Management →
 Machines (`assigned_lines` on `/api/machines`), was audited on

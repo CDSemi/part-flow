@@ -75,6 +75,21 @@ class RouteDeviationConfirmationRequiredError(ConflictError):
         self.route_deviation = route_deviation
 
 
+class HotDemandRemovalConfirmationRequiredError(ConflictError):
+    """Removing a Hot demand line needs explicit confirmation (OD3).
+
+    The line passes every other removal rule but is on the Hot list:
+    nothing is written, and the response carries the entry as it stands
+    under the demand row lock (``work_order_demand_id``, ``part_number``,
+    the CURRENT ``rank``) so the UI can warn and ask for the typed
+    confirmation before resubmitting with the flag.
+    """
+
+    def __init__(self, message: str, hot_list_entry: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.hot_list_entry = hot_list_entry
+
+
 class HotListChangedError(ConflictError):
     """The Hot list changed since the manager confirmed (Phase 12).
 

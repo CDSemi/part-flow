@@ -5,15 +5,19 @@ shape only (``extra="forbid"``, strict integers), every rule and the
 one-change-one-transaction protocol live in the Application layer, and
 the central handlers in ``app.api.errors`` translate typed failures.
 
-``priority_rank`` is written ONLY through ``POST /hot-list/changes``:
-the Work Order intake rejects the field, and every other surface only
-reads it.
+``priority_rank`` is written through ``POST /hot-list/changes`` and
+otherwise only cleared by ``app.application.hot_ranks``: the automatic
+removal of an entry whose demand became inactive (an allocation, or a
+Work Order save lowering the requested quantity to the allocated
+quantity) and the confirmed deletion of a Hot demand line. The Work
+Order intake rejects the field, and every other surface only reads it.
 
 Surface:
 
 - ``GET  /hot-list`` — the Department and its Hot entries in rank
-  order, inactive entries (completed Work Order, fully allocated line)
-  included and flagged.
+  order. An inactive entry (completed Work Order, fully allocated line)
+  leaves the list automatically; one left over from before that rule
+  is still listed and flagged so a manager can remove it.
 - ``GET  /hot-list/candidates?search=…`` | ``?barcode=…`` — eligible
   demand for the Add dialog (unranked, active demand of an open Work
   Order) in the canonical demand order. The two parameters are

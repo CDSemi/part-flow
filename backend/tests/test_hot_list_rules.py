@@ -1,5 +1,7 @@
 """Unit tests for the Hot list ordering rules (PROJECT_PROFILE §21 Priority Management)."""
 
+import itertools
+
 import pytest
 
 from app.domain.hot_list import (
@@ -8,8 +10,10 @@ from app.domain.hot_list import (
     InvalidHotListChangeError,
     Move,
     Remove,
+    close_gaps,
     fingerprint,
     interpret_change,
+    removal_shift_scope,
     require_action,
     target_ranks,
 )
@@ -111,3 +115,68 @@ class TestRanksAndFingerprint:
         assert base != fingerprint(HotListAction.UNDO, [A, B, C], [C, A, B])
         assert base != fingerprint(HotListAction.DRAG, [A, C, B], [C, A, B])
         assert base != fingerprint(HotListAction.DRAG, [A, B, C], [A, C, B])
+
+
+class TestRemovalOutsideTheCommand:
+    """The rank arithmetic of the automatic removal and the confirmed line
+    deletion (Phase 12 follow-up, OD1 / OD3)."""
+
+    def test_close_gaps_removes_the_middle_entry(self) -> None:
+        assert close_gaps({A: 1, B: 2, C: 3}, [B]) == {B: None, C: 2}
+
+    def test_close_gaps_removes_two_entries(self) -> None:
+        assert close_gaps({A: 1, B: 2, C: 3, D: 4}, [A, C]) == {A: None, C: None, B: 1, D: 2}
+
+    def test_close_gaps_removes_the_last_entry_without_a_shift(self) -> None:
+        assert close_gaps({A: 1, B: 2, C: 3}, [C]) == {C: None}
+
+    def test_close_gaps_is_relative_on_non_dense_ranks(self) -> None:
+        # Nothing above the first removed rank is touched.
+        assert close_gaps({A: 1, B: 3, C: 4}, [B]) == {B: None, C: 3}
+
+    def test_close_gaps_refuses_an_unranked_removal(self) -> None:
+        with pytest.raises(ValueError):
+            close_gaps({A: 1}, [B])
+
+    def test_shift_scope_is_empty_without_a_ranked_candidate(self) -> None:
+        assert removal_shift_scope({A: 1, B: 2}, [C]) == frozenset()
+        assert removal_shift_scope({}, [A]) == frozenset()
+
+    def test_shift_scope_excludes_candidates_and_higher_ranks(self) -> None:
+        ranks = {A: 1, B: 2, C: 3, D: 4}
+        assert removal_shift_scope(ranks, [B]) == frozenset({C, D})
+        assert removal_shift_scope(ranks, [B, D]) == frozenset({C})
+
+    def test_a_ranked_candidate_that_stays_can_shift(self) -> None:
+        # The counterexample of the review: the scope is empty, yet B
+        # shifts when only A is removed — B is a command line, held by
+        # the caller.
+        ranks = {A: 1, B: 2}
+        assert removal_shift_scope(ranks, [A, B]) == frozenset()
+        assert close_gaps(ranks, [A]) == {A: None, B: 1}
+
+    def test_every_change_is_a_ranked_candidate_or_in_the_shift_scope(self) -> None:
+        """Exhaustive on small inputs: up to 5 ranked ids with any strictly
+        increasing ranks from 1..6 (dense and non-dense), one unranked id,
+        every candidate set and every removed subset of the ranked
+        candidates."""
+        unranked = 99
+        for size in range(6):
+            ids = list(range(1, size + 1))
+            for values in itertools.combinations(range(1, 7), size):
+                ranks = dict(zip(ids, values, strict=True))
+                pool = [*ids, unranked]
+                for count in range(len(pool) + 1):
+                    for candidates in itertools.combinations(pool, count):
+                        ranked = [c for c in candidates if c in ranks]
+                        scope = removal_shift_scope(ranks, candidates)
+                        assert not scope & set(candidates)
+                        for removed_count in range(len(ranked) + 1):
+                            for removed in itertools.combinations(ranked, removed_count):
+                                changed = close_gaps(ranks, removed)
+                                assert set(changed) <= set(ranked) | scope
+                                after = {**ranks, **changed}
+                                kept = [r for r in after.values() if r is not None]
+                                assert len(kept) == len(set(kept))
+                                assert all(r >= 1 for r in kept)
+                                assert {i for i, r in changed.items() if r is None} == set(removed)

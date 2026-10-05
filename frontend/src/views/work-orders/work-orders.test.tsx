@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -38,6 +39,8 @@ interface FakeDemand {
   requester: string | null;
   reason: string | null;
   notes: string | null;
+  // Any allocation — active or reversed — ever referenced the line.
+  has_allocation_history: boolean;
 }
 
 interface FakeWorkOrder {
@@ -118,6 +121,7 @@ function demand(
     requester: null,
     reason: null,
     notes: null,
+    has_allocation_history: false,
     ...extra,
   };
 }
@@ -213,6 +217,21 @@ function releasedOf(demandId: number): number {
 
 function remainingOf(demand: FakeDemand): number {
   return Math.max(demand.requested_quantity - releasedOf(demand.id), 0);
+}
+
+/** Take one demand off the Hot list and close the gap densely — the
+ * server's removal (a confirmed line deletion or an automatic one). */
+function leaveHotList(target: FakeDemand) {
+  const rank = target.priority_rank;
+  if (rank === null) return;
+  target.priority_rank = null;
+  for (const wo of state.workOrders) {
+    for (const d of wo.demands) {
+      if (d.priority_rank !== null && d.priority_rank > rank) {
+        d.priority_rank -= 1;
+      }
+    }
+  }
 }
 
 /** Server-derived read status: RELEASED once EVERY current demand is
@@ -477,23 +496,34 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
 
   // ---- Demand removal -------------------------------------------------
-  const demandMatch = /^\/api\/work-orders\/(\d+)\/demands\/(\d+)$/.exec(url);
+  const demandMatch =
+    /^\/api\/work-orders\/(\d+)\/demands\/(\d+)(?:\?(.*))?$/.exec(url);
   if (demandMatch && method === 'DELETE') {
     const wo = state.workOrders.find((w) => w.id === Number(demandMatch[1]));
     if (!wo) return detailResponse('Work Order not found.', 404);
     const demandId = Number(demandMatch[2]);
-    if (releasedOf(demandId) > 0) {
+    const confirmHotRemoval =
+      new URLSearchParams(demandMatch[3] ?? '').get('confirm_hot_removal') ===
+      'true';
+    const removed = wo.demands.find((d) => d.id === demandId);
+    if (!removed) return detailResponse('Work Order Demand not found.', 404);
+    // The backend order: every other rule answers its own 409 BEFORE
+    // the Hot confirmation is asked for.
+    if (removed.allocated_quantity > 0) {
       return detailResponse(
-        'Cannot remove: production quantity has already been released.',
+        'Cannot remove: stocked quantity has already been allocated to this demand line.',
         409,
       );
     }
-    // Mirror of the Phase 12 guard: a Hot demand leaves the Hot list
-    // first.
-    const removed = wo.demands.find((d) => d.id === demandId);
-    if (removed && removed.priority_rank !== null) {
+    if (removed.has_allocation_history) {
       return detailResponse(
-        'Cannot remove: this demand line is on the Hot list. Remove it from the Hot list in Management → Priority first.',
+        'Cannot remove: stocked quantity has been allocated to this demand line before and the allocation history stays with it.',
+        409,
+      );
+    }
+    if (releasedOf(demandId) > 0) {
+      return detailResponse(
+        'Cannot remove: production quantity has already been released.',
         409,
       );
     }
@@ -502,6 +532,24 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         'Cannot remove the last demand line — a Work Order contains one or more demand records.',
         409,
       );
+    }
+    const rank = removed.priority_rank;
+    if (rank !== null) {
+      if (!confirmHotRemoval) {
+        return json(
+          {
+            detail: `${removed.part_number} on Work Order ${wo.work_order_number ?? '— (internal)'} is on the Hot list at #${rank}. Removing this demand line also removes it from the Hot list, and every entry below it moves up one rank. Confirm the removal to continue. Nothing was removed.`,
+            confirmation_required: true,
+            hot_list_entry: {
+              work_order_demand_id: removed.id,
+              part_number: removed.part_number,
+              rank,
+            },
+          },
+          409,
+        );
+      }
+      leaveHotList(removed);
     }
     wo.demands = wo.demands.filter((d) => d.id !== demandId);
     return new Response(null, { status: 204 });
@@ -647,6 +695,11 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         }
         if ('requested_quantity' in edit) {
           target.requested_quantity = Number(edit.requested_quantity);
+          // A ranked line the save leaves fully allocated leaves the
+          // Hot list automatically, in the same save.
+          if (target.requested_quantity <= target.allocated_quantity) {
+            leaveHotList(target);
+          }
         }
         if ('due_date' in edit)
           target.due_date = edit.due_date as string | null;
@@ -1717,27 +1770,291 @@ test('removing a saved unreleased line requires confirmation and commits on the 
   ).toHaveLength(1);
 });
 
-test('a Hot demand line offers no removal and says where to take it off the Hot list', async () => {
-  // E-500 (demand 103) is unreleased but ranked #2 on the Hot list
-  // (Phase 12): the server refuses its removal, so the dialog disables
-  // ✕ with the explanation instead of offering a doomed confirmation.
+/* ---- Removing a demand line on the Hot list (owner decision OD3) ---- */
+
+const HOT_REMOVE_DIALOG = 'Remove a demand line on the Hot list?';
+
+/** Hot list: A-100 #1 and E-500 #2 (WO 007201), C-300 #3 (internal). */
+function rankHotLines() {
+  state.workOrders[0].demands[0].priority_rank = 1;
   state.workOrders[0].demands[2].priority_rank = 2;
+  state.workOrders[1].demands[0].priority_rank = 3;
+}
+
+function deleteCalls(): string[] {
+  return state.calls.filter((call) => call.startsWith('DELETE'));
+}
+
+async function openHotRemoval(dialog: HTMLElement, pn: string) {
+  const remove = within(dialog).getByRole('button', {
+    name: `Remove line ${pn}`,
+  });
+  await waitFor(() => expect(remove).toBeEnabled());
+  fireEvent.click(remove);
+  return screen.getByRole('dialog', { name: HOT_REMOVE_DIALOG });
+}
+
+test('a Hot demand line’s ✕ opens the typed confirmation naming the PN and its rank; Cancel sends nothing', async () => {
+  rankHotLines();
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'E-500');
 
-  const explanation =
-    'Cannot remove: this demand line is on the Hot list (🔥#2). Remove it from the Hot list in Management → Priority first.';
   const remove = within(dialog).getByRole('button', {
     name: 'Remove line E-500',
   });
+  await waitFor(() => expect(remove).toBeEnabled());
+  expect(remove).toHaveAttribute(
+    'title',
+    'Remove line — it is on the Hot list (🔥#2); asks for typed confirmation',
+  );
+  // No standing refusal under the button any more.
+  expect(within(dialog).queryByText(/Cannot remove: this demand line/)).toBe(
+    null,
+  );
+
+  const typed = await openHotRemoval(dialog, 'E-500');
+  expect(typed).toHaveTextContent(
+    '⚠ E-500 · 007201 is on the Hot list at 🔥#2. Removing the line also takes it off the Hot list, and every Hot entry below it moves up one rank. Undo in Priority cannot bring it back — the demand line will no longer exist.',
+  );
+  expect(typed).toHaveTextContent(/never deletes the PartNumber master/);
+  // The plain confirmation is not used for a Hot line.
+  expect(screen.queryByRole('dialog', { name: /Remove E-500 from/ })).toBe(
+    null,
+  );
+
+  // Confirm stays disabled until the PN is typed (trimmed,
+  // case-insensitive).
+  const confirm = within(typed).getByRole('button', {
+    name: 'Remove line and Hot entry',
+  });
+  const input = within(typed).getByRole('textbox');
+  expect(confirm).toBeDisabled();
+  fireEvent.change(input, { target: { value: 'E-50' } });
+  expect(confirm).toBeDisabled();
+  fireEvent.change(input, { target: { value: '  e-500 ' } });
+  expect(confirm).toBeEnabled();
+
+  fireEvent.click(within(typed).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog', { name: HOT_REMOVE_DIALOG })).toBeNull();
+  expect(deleteCalls()).toEqual([]);
+  expect(state.workOrders[0].demands).toHaveLength(3);
+  expect(state.workOrders[0].demands[2].priority_rank).toBe(2);
+});
+
+test('confirming a Hot line removal sends one flagged DELETE and removes the line and its Hot entry', async () => {
+  rankHotLines();
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  const typed = await openHotRemoval(dialog, 'E-500');
+  fireEvent.change(within(typed).getByRole('textbox'), {
+    target: { value: 'E-500' },
+  });
+  fireEvent.click(
+    within(typed).getByRole('button', { name: 'Remove line and Hot entry' }),
+  );
+
+  await screen.findByText(
+    '✕ E-500 removed from 007201; it is no longer on the Hot list.',
+  );
+  expect(deleteCalls()).toEqual([
+    'DELETE /api/work-orders/1/demands/103?confirm_hot_removal=true',
+  ]);
+  expect(within(dialog).queryByText('E-500')).toBeNull();
+  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([101, 102]);
+  // The Hot entry below moved up one rank; the one above is untouched.
+  expect(state.workOrders[0].demands[0].priority_rank).toBe(1);
+  expect(state.workOrders[1].demands[0].priority_rank).toBe(2);
+});
+
+test('unsaved edits disable a Hot line’s ✕, and offline disables the typed Confirm', async () => {
+  rankHotLines();
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+  const remove = within(dialog).getByRole('button', {
+    name: 'Remove line E-500',
+  });
+  await waitFor(() => expect(remove).toBeEnabled());
+
+  const qty = within(dialog).getByLabelText('Quantity for A-100');
+  fireEvent.change(qty, { target: { value: '30' } });
   expect(remove).toBeDisabled();
-  expect(remove).toHaveAttribute('title', explanation);
-  expect(within(dialog).getByText(explanation)).toBeInTheDocument();
-  // A line that is not Hot keeps its confirmed removal.
+  expect(remove).toHaveAttribute(
+    'title',
+    'Save or discard demand changes before removing a saved line.',
+  );
+  fireEvent.change(qty, { target: { value: '25' } });
+  expect(remove).toBeEnabled();
+
+  const typed = await openHotRemoval(dialog, 'E-500');
+  fireEvent.change(within(typed).getByRole('textbox'), {
+    target: { value: 'E-500' },
+  });
+  const confirm = within(typed).getByRole('button', {
+    name: 'Remove line and Hot entry',
+  });
+  expect(confirm).toBeEnabled();
+
+  state.healthDown = true;
+  act(() => {
+    window.dispatchEvent(new Event('offline'));
+  });
+  await waitFor(() => expect(confirm).toBeDisabled());
+  fireEvent.click(confirm);
+  expect(deleteCalls()).toEqual([]);
+});
+
+test('a Hot line with allocated quantity gets the plain confirmation and the allocated refusal', async () => {
+  state.workOrders[0].demands[2].priority_rank = 2;
+  state.workOrders[0].demands[2].allocated_quantity = 3;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  const remove = within(dialog).getByRole('button', {
+    name: 'Remove line E-500',
+  });
+  await waitFor(() => expect(remove).toBeEnabled());
+  expect(remove).toHaveAttribute(
+    'title',
+    'Remove line (asks for confirmation)',
+  );
+  fireEvent.click(remove);
+  const confirm = screen.getByRole('dialog', {
+    name: 'Remove E-500 from 007201?',
+  });
+  fireEvent.click(within(confirm).getByRole('button', { name: 'Remove line' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Cannot remove: stocked quantity has already been allocated to this demand line.',
+  );
+  expect(screen.queryByRole('dialog', { name: HOT_REMOVE_DIALOG })).toBeNull();
+  expect(deleteCalls()).toEqual(['DELETE /api/work-orders/1/demands/103']);
+  expect(within(dialog).getByText('E-500')).toBeInTheDocument();
+  expect(state.workOrders[0].demands).toHaveLength(3);
+});
+
+test('a Hot line with reversed allocation history gets the plain confirmation, never the typed one', async () => {
+  // Allocated 3, then reversed: no allocated quantity left, but the
+  // allocation history keeps the line unremovable.
+  state.workOrders[0].demands[2].priority_rank = 2;
+  state.workOrders[0].demands[2].has_allocation_history = true;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  const remove = within(dialog).getByRole('button', {
+    name: 'Remove line E-500',
+  });
+  await waitFor(() => expect(remove).toBeEnabled());
+  expect(remove).toHaveAttribute(
+    'title',
+    'Remove line (asks for confirmation)',
+  );
+  fireEvent.click(remove);
+  expect(screen.queryByRole('dialog', { name: HOT_REMOVE_DIALOG })).toBeNull();
+  const confirm = screen.getByRole('dialog', {
+    name: 'Remove E-500 from 007201?',
+  });
+  fireEvent.click(within(confirm).getByRole('button', { name: 'Remove line' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Cannot remove: stocked quantity has been allocated to this demand line before and the allocation history stays with it.',
+  );
+  expect(screen.queryByRole('dialog', { name: HOT_REMOVE_DIALOG })).toBeNull();
+  expect(deleteCalls()).toEqual(['DELETE /api/work-orders/1/demands/103']);
+  expect(state.workOrders[0].demands).toHaveLength(3);
+  expect(state.workOrders[0].demands[2].priority_rank).toBe(2);
+});
+
+test('a line ranked after the view loaded upgrades the plain confirmation to the typed one with the server’s rank', async () => {
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  // Elsewhere: E-500 was added to the Hot list at #4 after this
+  // dialog loaded it unranked.
+  state.workOrders[0].demands[2].priority_rank = 4;
+  const remove = within(dialog).getByRole('button', {
+    name: 'Remove line E-500',
+  });
+  await waitFor(() => expect(remove).toBeEnabled());
+  fireEvent.click(remove);
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Remove E-500 from 007201?' }),
+    ).getByRole('button', { name: 'Remove line' }),
+  );
+
+  const typed = await screen.findByRole('dialog', { name: HOT_REMOVE_DIALOG });
+  expect(typed).toHaveTextContent('E-500 · 007201 is on the Hot list at 🔥#4.');
+  // Nothing was removed, so nothing is reported as an error.
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByText(/Confirm the removal to continue/)).toBeNull();
   expect(
-    within(dialog).getByRole('button', { name: 'Remove line A-100' }),
-  ).toBeEnabled();
-  expect(state.calls.some((call) => call.startsWith('DELETE'))).toBe(false);
+    screen.queryByRole('dialog', { name: 'Remove E-500 from 007201?' }),
+  ).toBeNull();
+  expect(state.workOrders[0].demands).toHaveLength(3);
+  expect(deleteCalls()).toEqual(['DELETE /api/work-orders/1/demands/103']);
+
+  fireEvent.change(within(typed).getByRole('textbox'), {
+    target: { value: 'E-500' },
+  });
+  fireEvent.click(
+    within(typed).getByRole('button', { name: 'Remove line and Hot entry' }),
+  );
+  await screen.findByText(
+    '✕ E-500 removed from 007201; it is no longer on the Hot list.',
+  );
+  expect(deleteCalls()).toEqual([
+    'DELETE /api/work-orders/1/demands/103',
+    'DELETE /api/work-orders/1/demands/103?confirm_hot_removal=true',
+  ]);
+  expect(state.workOrders[0].demands.map((d) => d.id)).toEqual([101, 102]);
+});
+
+test('a confirmed Hot line removal refused as released shows the error and keeps the line', async () => {
+  rankHotLines();
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  const typed = await openHotRemoval(dialog, 'E-500');
+  // Elsewhere: E-500 was released after this dialog loaded.
+  state.releasedQuantities.set(103, 7);
+  fireEvent.change(within(typed).getByRole('textbox'), {
+    target: { value: 'E-500' },
+  });
+  fireEvent.click(
+    within(typed).getByRole('button', { name: 'Remove line and Hot entry' }),
+  );
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Cannot remove: production quantity has already been released.',
+  );
+  expect(screen.queryByRole('dialog', { name: HOT_REMOVE_DIALOG })).toBeNull();
+  expect(deleteCalls()).toEqual([
+    'DELETE /api/work-orders/1/demands/103?confirm_hot_removal=true',
+  ]);
+  expect(within(dialog).getByText('E-500')).toBeInTheDocument();
+  expect(state.workOrders[0].demands).toHaveLength(3);
+  expect(state.workOrders[0].demands[2].priority_rank).toBe(2);
+});
+
+test('a save that leaves a Hot line fully allocated says it left the Hot list', async () => {
+  rankHotLines();
+  state.workOrders[0].demands[2].allocated_quantity = 3;
+  await renderWorkOrders();
+  const dialog = await openWorkOrderDetail('007201', 'E-500');
+
+  fireEvent.change(within(dialog).getByLabelText('Quantity for E-500'), {
+    target: { value: '3' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save demand' }));
+
+  expect(
+    await screen.findByText(
+      /007201 demand updated — business demand only\. 🔥 E-500 left the Hot list \(was #2\) — the line is now fully allocated\./,
+    ),
+  ).toBeInTheDocument();
+  expect(state.workOrders[0].demands[2].priority_rank).toBeNull();
+  expect(state.workOrders[1].demands[0].priority_rank).toBe(2);
 });
 
 test('a release committed after the view loaded still blocks removal — server 409 with the explanation', async () => {

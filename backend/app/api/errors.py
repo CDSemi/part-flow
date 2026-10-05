@@ -17,7 +17,9 @@ before the user can confirm the intent — still no internal detail,
 only the data the confirmation dialog presents. The Phase 12 stale
 Hot list change likewise carries the CURRENT Hot entries, rendered
 exactly like a Hot list read, so the Priority view can show the list
-the manager must review again.
+the manager must review again, and the refused removal of a Hot demand
+line (Phase 12 follow-up, OD3) carries the entry — PN and current rank —
+the warning and the typed confirmation present.
 """
 
 from typing import cast
@@ -30,6 +32,7 @@ from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
     ApplicationError,
     ConflictError,
+    HotDemandRemovalConfirmationRequiredError,
     HotListChangedError,
     InvalidInputError,
     NotFoundError,
@@ -124,3 +127,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(HotListChangedError, hot_list_changed_handler)
+
+    async def hot_demand_removal_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Phase 12 follow-up (OD3): the demand line is on the Hot list and
+        # otherwise removable — nothing was removed; the body carries the
+        # entry the warning and the typed confirmation present.
+        error = cast(HotDemandRemovalConfirmationRequiredError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": error.message,
+                "confirmation_required": True,
+                "hot_list_entry": error.hot_list_entry,
+            },
+        )
+
+    app.add_exception_handler(HotDemandRemovalConfirmationRequiredError, hot_demand_removal_handler)

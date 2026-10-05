@@ -5,10 +5,12 @@ import { resolvePartNumber } from '../../api/part-numbers';
 import {
   deleteWorkOrderDemand,
   getWorkOrder,
+  hotRemovalConfirmationRequired,
   updateWorkOrder,
 } from '../../api/work-orders';
 import type { WorkOrderDetail } from '../../api/work-orders';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
@@ -33,7 +35,8 @@ import {
   createDraftLine,
   draftFromDemand,
   draftToNewLine,
-  hotRemoveExplanation,
+  hotListExitNotices,
+  hotRemoveTitle,
   isPositiveInteger,
   lineRemoveRule,
   processScan,
@@ -86,8 +89,10 @@ const REMOVE_WHILE_DIRTY_EXPLANATION =
  * its own explicit, confirmed server action; the backend enforces the
  * canonical rules
  * (PROJECT_PROFILE §13, §8.2 — released demand and the last line
- * answer 409 removing nothing). Every close request (Cancel, Escape,
- * backdrop) on a dirty draft asks for explicit discard confirmation
+ * answer 409 removing nothing). A line on the Hot list is removed only
+ * after a warning naming its Hot rank and a typed confirmation; the
+ * removal also takes it off the Hot list. Every close request (Cancel,
+ * Escape, backdrop) on a dirty draft asks for explicit discard confirmation
  * first. The Add Part and confirmation dialogs render as siblings of
  * this dialog so only the topmost dialog handles Escape, backdrop,
  * and focus.
@@ -130,6 +135,13 @@ export function WorkOrderDetailPanel({
   const [confirmRemove, setConfirmRemove] = useState<DemandLineDraft | null>(
     null,
   );
+  // The typed confirmation of removing a line on the Hot list (OD3).
+  // The rank is the line's loaded rank, or the server's CURRENT rank
+  // when a plain removal turned out to need the Hot confirmation.
+  const [confirmHotRemove, setConfirmHotRemove] = useState<{
+    line: DemandLineDraft;
+    rank: number;
+  } | null>(null);
   // The Save demand omission confirmation, carrying the release that
   // may be waiting on this save (§11.4 requested while dirty).
   const [confirmMissing, setConfirmMissing] = useState<{
@@ -280,6 +292,7 @@ export function WorkOrderDetailPanel({
   // the server release evidence loaded with each line
   // (`draftFromDemand`) — no session-local remapping.
   const display = lines;
+  const savedLineCount = lines.filter((line) => line.saved).length;
   const saveVisible = editable || numberEditVisible || linesRestricted;
 
   const errorFor = (id: number, field: LineField) =>
@@ -369,8 +382,8 @@ export function WorkOrderDetailPanel({
   }
 
   function requestRemove(line: DemandLineDraft) {
-    const rule = lineRemoveRule(line);
-    if (rule === 'blocked' || rule === 'hot') return;
+    const rule = lineRemoveRule(line, savedLineCount);
+    if (rule === 'blocked') return;
     if (rule === 'draft') {
       // An unsaved draft line is local state only — removing it stays
       // available while the draft is dirty (it IS the draft).
@@ -383,16 +396,31 @@ export function WorkOrderDetailPanel({
     // Release, it never runs with unsaved edits in flight (the button
     // is disabled; this guard covers any other path).
     if (dirty) return;
+    if (rule === 'confirm-hot' && line.hotRank !== null) {
+      setConfirmHotRemove({ line, rank: line.hotRank });
+      return;
+    }
     setConfirmRemove(line);
   }
 
-  async function removeSavedLine(line: DemandLineDraft) {
+  /** Remove one saved line on the server. `confirmHotRemoval` is the
+   * typed confirmation of a Hot line: the server then also takes it off
+   * the Hot list, in the same transaction. */
+  async function removeSavedLine(
+    line: DemandLineDraft,
+    confirmHotRemoval: boolean,
+  ) {
     if (line.demandId === null) return;
     setConfirmRemove(null);
+    setConfirmHotRemove(null);
     setBusy(true);
     setServerError(null);
     try {
-      await deleteWorkOrderDemand(workOrderId, line.demandId);
+      await deleteWorkOrderDemand(
+        workOrderId,
+        line.demandId,
+        confirmHotRemoval ? { confirmHotRemoval: true } : undefined,
+      );
       const fresh = await getWorkOrder(workOrderId);
       // Re-apply the still-unsaved draft edits of the OTHER lines on
       // top of the fresh state? No — removal commits alone; the other
@@ -402,9 +430,26 @@ export function WorkOrderDetailPanel({
       setLineErrors((current) => current.filter((e) => e.lineId !== line.id));
       setBusy(false);
       onChanged();
-      showNotice(`✕ ${line.pn} removed from ${woDisplay}.`);
+      // Neutral on purpose: true whether the server removed the Hot
+      // entry or the entry had already left the list meanwhile.
+      showNotice(
+        confirmHotRemoval
+          ? `✕ ${line.pn} removed from ${woDisplay}; it is no longer on the Hot list.`
+          : `✕ ${line.pn} removed from ${woDisplay}.`,
+      );
     } catch (error) {
       setBusy(false);
+      const hot = confirmHotRemoval
+        ? null
+        : hotRemovalConfirmationRequired(error);
+      if (hot) {
+        // The line is on the Hot list after all (ranked since this view
+        // loaded, or the Hot rank is the last gate): nothing was
+        // removed, so no error — ask for the typed confirmation with
+        // the server's CURRENT rank instead.
+        setConfirmHotRemove({ line, rank: hot.rank });
+        return;
+      }
       setServerError(errorMessage(error));
       showNotice(`✕ ${errorMessage(error)}`);
     }
@@ -452,7 +497,10 @@ export function WorkOrderDetailPanel({
       setBusy(false);
       onChanged();
       showNotice(
-        `💾 WO ${fresh.workOrderNumber ?? '—'} demand updated — business demand only.`,
+        [
+          `💾 WO ${fresh.workOrderNumber ?? '—'} demand updated — business demand only.`,
+          ...hotListExitNotices(detail.demands, fresh.demands),
+        ].join(' '),
       );
       // A release that waited for this save now runs against exactly
       // what was just committed. A FAILED save opens nothing.
@@ -626,7 +674,7 @@ export function WorkOrderDetailPanel({
                   // Open and on a Released Work Order alike.
                   const valueEditable =
                     rowEditable || (line.released && !completed);
-                  const removeRule = lineRemoveRule(line);
+                  const removeRule = lineRemoveRule(line, savedLineCount);
                   return (
                     <tr key={line.id}>
                       <td
@@ -909,9 +957,9 @@ export function WorkOrderDetailPanel({
                               className="pr-x"
                               disabled={
                                 removeRule === 'blocked' ||
-                                removeRule === 'hot' ||
                                 busy ||
-                                (removeRule === 'confirm' &&
+                                ((removeRule === 'confirm' ||
+                                  removeRule === 'confirm-hot') &&
                                   // A saved-line removal commits on the
                                   // server — never with unsaved edits
                                   // in flight (same rule as Release).
@@ -920,14 +968,14 @@ export function WorkOrderDetailPanel({
                               title={
                                 removeRule === 'blocked'
                                   ? RELEASED_REMOVE_EXPLANATION
-                                  : removeRule === 'hot' &&
-                                      line.hotRank !== null
-                                    ? hotRemoveExplanation(line.hotRank)
-                                    : removeRule === 'confirm'
-                                      ? dirty
-                                        ? REMOVE_WHILE_DIRTY_EXPLANATION
+                                  : removeRule === 'draft'
+                                    ? 'Remove draft line'
+                                    : dirty
+                                      ? REMOVE_WHILE_DIRTY_EXPLANATION
+                                      : removeRule === 'confirm-hot' &&
+                                          line.hotRank !== null
+                                        ? hotRemoveTitle(line.hotRank)
                                         : 'Remove line (asks for confirmation)'
-                                      : 'Remove draft line'
                               }
                               aria-label={
                                 line.pn
@@ -942,10 +990,6 @@ export function WorkOrderDetailPanel({
                           {removeRule === 'blocked' ? (
                             <div className="bc">
                               {RELEASED_REMOVE_EXPLANATION}
-                            </div>
-                          ) : removeRule === 'hot' && line.hotRank !== null ? (
-                            <div className="bc">
-                              {hotRemoveExplanation(line.hotRank)}
                             </div>
                           ) : null}
                         </td>
@@ -1172,7 +1216,7 @@ export function WorkOrderDetailPanel({
           confirmLabel="Remove line"
           cancelLabel="Cancel — keep the line"
           danger
-          onConfirm={() => void removeSavedLine(confirmRemove)}
+          onConfirm={() => void removeSavedLine(confirmRemove, false)}
           onCancel={() => setConfirmRemove(null)}
         >
           Removing this saved Work Order Demand line (
@@ -1183,6 +1227,32 @@ export function WorkOrderDetailPanel({
           the PartNumber master, production quantity, movement history, release
           history, or other Work Order Demand for the same PN.
         </ConfirmDialog>
+      ) : null}
+
+      {confirmHotRemove ? (
+        <TypedConfirmDialog
+          title="Remove a demand line on the Hot list?"
+          expectedValue={confirmHotRemove.line.pn ?? ''}
+          valueLabel="Part Number"
+          confirmLabel="Remove line and Hot entry"
+          danger
+          confirmDisabled={writeBlocked || busy}
+          onConfirm={() => void removeSavedLine(confirmHotRemove.line, true)}
+          onCancel={() => setConfirmHotRemove(null)}
+        >
+          <p>
+            ⚠ <span className="mono">{confirmHotRemove.line.pn}</span> ·{' '}
+            {woDisplay} is on the Hot list at 🔥#{confirmHotRemove.rank}.
+            Removing the line also takes it off the Hot list, and every Hot
+            entry below it moves up one rank. Undo in Priority cannot bring it
+            back — the demand line will no longer exist.
+          </p>
+          <p>
+            Removal never deletes the PartNumber master, production quantity,
+            movement history, release history, or other Work Order Demand for
+            the same PN.
+          </p>
+        </TypedConfirmDialog>
       ) : null}
 
       {confirmDiscard ? (

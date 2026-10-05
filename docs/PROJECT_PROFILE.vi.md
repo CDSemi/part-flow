@@ -723,6 +723,7 @@ Chỉ có một Work Order aggregate.
 - Draft chưa save: remove ngay.
 - Saved line chưa release: remove sau explicit confirmation.
 - Đã release bất kỳ quantity: không delete; correction dùng workflow khác.
+- Saved line đang trên Hot list (và các điều kiện removal khác đều thỏa) chỉ được remove sau cảnh báo nêu Hot rank của nó cùng typed confirmation (quyết định 2026-10-04); removal đưa nó khỏi Hot list — các rank còn lại đóng khoảng trống, có audit (§21 Priority Management, §28) — và xóa line trong một transaction. Không có confirmation đó thì không remove gì.
 
 Removal không được delete PartNumber master, Flow, Movement, release history hay
 Demand khác cùng PN.
@@ -1208,6 +1209,7 @@ Hot list theo Demand, không chỉ PN:
 5. Chỉ renumber sau confirm; mọi change ghi audit.
 6. Undo/Redo thay save/cancel, cũng phải confirmation, unlimited trong session.
 7. Stored rank là highest work/allocation priority.
+8. (Mục 11 của bản EN.) Entry rời Hot list tự động khi Work Order Demand của nó trở thành inactive (§14) — allocate đủ, gồm cả việc Work Order của nó completed (§18) — trong cùng transaction với thay đổi làm nó inactive (một allocation, hoặc một demand edit hạ requested quantity xuống bằng allocated quantity) (quyết định 2026-10-04). Không hỏi confirmation: hành động kích hoạt chính là hành động đã được xác nhận. Các rank còn lại đóng khoảng trống và mọi thay đổi rank đều được audit như một automatic removal kèm nguyên nhân (§28). Reversal hoặc tăng quantity khiến demand active trở lại không thêm lại entry.
 
 ## Administration
 

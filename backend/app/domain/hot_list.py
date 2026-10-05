@@ -19,11 +19,18 @@ persistence belong to the Application command
 Only an adjacent swap is ambiguous: ``[A, B] → [B, A]`` is both
 "B moves up" and "A moves down", so the classifier returns every
 interpretation and an action matches when ANY of them fits.
+
+It also owns the pure rank arithmetic of a removal made OUTSIDE the
+command — the automatic removal of an entry whose demand became
+inactive and the confirmed deletion of a Hot demand line
+(``app.application.hot_ranks``): which ranked ids such a removal can
+shift (``removal_shift_scope``, the rows the caller must lock) and the
+ranks after it (``close_gaps``).
 """
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -148,6 +155,53 @@ def require_action(
 def target_ranks(new_order: Sequence[int]) -> dict[int, int]:
     """The dense ranks 1..N the new order assigns (H1)."""
     return {demand_id: index + 1 for index, demand_id in enumerate(new_order)}
+
+
+def removal_shift_scope(ranks: Mapping[int, int], candidates: Collection[int]) -> frozenset[int]:
+    """Ranked ids NOT in ``candidates`` whose rank can change if ANY subset
+    of the ranked candidates is removed.
+
+    Every ranked non-candidate id whose rank is greater than the smallest
+    rank among the ranked candidates; empty when no candidate is ranked.
+    Ranked candidates that are not removed can shift too — the caller
+    holds them as its own command lines.
+    """
+    candidate_ids = set(candidates)
+    candidate_ranks = [rank for demand_id, rank in ranks.items() if demand_id in candidate_ids]
+    if not candidate_ranks:
+        return frozenset()
+    lowest = min(candidate_ranks)
+    return frozenset(
+        demand_id
+        for demand_id, rank in ranks.items()
+        if demand_id not in candidate_ids and rank > lowest
+    )
+
+
+def close_gaps(ranks: Mapping[int, int], removed: Collection[int]) -> dict[int, int | None]:
+    """The new rank of every id whose rank changes when ``removed`` leave.
+
+    Each removed id maps to None; every other ranked id maps to its rank
+    minus the number of removed ranks below it. Only changed ids are
+    returned. The gaps close RELATIVE to the stored ranks: while H1
+    holds the result is the dense 1..N, and on non-dense data nothing
+    above the first removed rank is touched (the map is strictly
+    monotonic, so uniqueness and positivity are preserved). Raises
+    ``ValueError`` for a removed id that is not ranked.
+    """
+    removed_ids = set(removed)
+    unranked = sorted(demand_id for demand_id in removed_ids if demand_id not in ranks)
+    if unranked:
+        raise ValueError(f"Removed ids are not ranked: {unranked}.")
+    removed_ranks = sorted(ranks[demand_id] for demand_id in removed_ids)
+    changed: dict[int, int | None] = {demand_id: None for demand_id in removed_ids}
+    for demand_id, rank in ranks.items():
+        if demand_id in removed_ids:
+            continue
+        below = sum(1 for removed_rank in removed_ranks if removed_rank < rank)
+        if below:
+            changed[demand_id] = rank - below
+    return changed
 
 
 def fingerprint(action: HotListAction, expected: Sequence[int], new: Sequence[int]) -> str:

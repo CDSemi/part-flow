@@ -154,6 +154,7 @@ function detailWire(w: FakeWorkOrder) {
       has_released_quantity: line.released > 0,
       released_quantity: line.released,
       remaining_quantity: line.requested - line.released,
+      has_allocation_history: line.allocated > 0,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
     })),

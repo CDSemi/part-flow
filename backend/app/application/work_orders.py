@@ -71,8 +71,11 @@ SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
   a saved demand may be deleted only while no production quantity has
   ever been released for it — the released-quantity evidence lives in
   the immutable ``RECEIVED`` metadata context
-  (``production_release.demand_has_released_quantity``) — and, since
-  Phase 12, only while the demand is not on the Hot list. Removal never
+  (``production_release.demand_has_released_quantity``). A line on the
+  Hot list (Phase 12 follow-up, OD3) is removed only with the explicit
+  confirmation the UI asks for after a warning: the removal then takes
+  it off the Hot list (the remaining ranks close the gap, audited) and
+  deletes the line in one transaction. Removal never
   touches the PartNumber master, QuantityFlows, PartMovements, release
   history, or other demand lines; an unsaved draft is a frontend
   concern and never reaches this layer. Release itself and every
@@ -96,9 +99,14 @@ from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
-from app.application import audit, production_release
+from app.application import audit, hot_ranks, production_release
 from app.application.common import UNSET, UnsetType, commit, flush, optional_text
-from app.application.errors import ConflictError, InvalidInputError, NotFoundError
+from app.application.errors import (
+    ConflictError,
+    HotDemandRemovalConfirmationRequiredError,
+    InvalidInputError,
+    NotFoundError,
+)
 from app.application.part_numbers import (
     PART_NUMBER_CONFLICTS,
     acquire_part_number_locks,
@@ -231,6 +239,10 @@ class WorkOrderDetail(NamedTuple):
     released_quantities: Mapping[int, int]
     # The server-derived read status (see WorkOrderSummary.status).
     status: str
+    # The demand ids any allocation row — active or reversed — references:
+    # such a line is never removable (``delete_work_order_demand``), so
+    # the UI never asks a typed Hot confirmation it would type in vain.
+    allocation_history_ids: frozenset[int]
 
 
 def _derived_status(
@@ -266,8 +278,22 @@ def _require_active(work_order: WorkOrder, action: str) -> None:
 def _build_detail(
     session: Session, work_order: WorkOrder, demands: list[WorkOrderDemand]
 ) -> WorkOrderDetail:
-    """Assemble the detail read model with ONE released-evidence query."""
-    released = production_release.released_quantities(session, [demand.id for demand in demands])
+    """Assemble the detail read model with ONE released-evidence query
+    and ONE allocation-history query."""
+    demand_ids = [demand.id for demand in demands]
+    released = production_release.released_quantities(session, demand_ids)
+    allocation_history_ids = (
+        frozenset(
+            int(demand_id)
+            for demand_id in session.scalars(
+                select(WorkOrderAllocation.work_order_demand_id)
+                .where(WorkOrderAllocation.work_order_demand_id.in_(demand_ids))
+                .distinct()
+            )
+        )
+        if demand_ids
+        else frozenset()
+    )
     return WorkOrderDetail(
         work_order=work_order,
         demands=demands,
@@ -277,6 +303,7 @@ def _build_detail(
             [(demand.id, demand.requested_quantity) for demand in demands],
             released,
         ),
+        allocation_history_ids=allocation_history_ids,
     )
 
 
@@ -715,6 +742,18 @@ def update_work_order(
     the two commands must serialize on the PN, not merely on the rows
     of one Work Order. Advisory locks always precede row locks, and
     ascending PN order keeps two overlapping saves from deadlocking.
+
+    A save that edits any ``requested_quantity`` also takes the Hot
+    advisory lock right after the PN locks, and its one ascending
+    demand pass also holds every ranked row a Hot removal of its
+    quantity-edited lines can shift: lock order PN locks → Hot lock
+    (quantity edit only) → demand rows → Work Order. A ranked line whose
+    requested quantity this save lowers to its allocated quantity is
+    inactive (PROJECT_PROFILE §14) and leaves the Hot list automatically
+    in this transaction — the remaining ranks close the gap, audited
+    with the save as the cause (OD1, ``hot_ranks.remove_from_hot_list``).
+    A ranked line whose quantity the save does not change is never
+    removed by it. Raising the quantity again re-adds nothing.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -778,16 +817,40 @@ def update_work_order(
     # (Phase 10) is read from the row itself, so a partial allocation
     # committed while this save waited would otherwise be judged on the
     # stale figure and a lowered Qty could leave allocated > requested.
+    #
+    # A save that edits any requested quantity may make a ranked line
+    # fully allocated, so it takes the Hot lock right after the PN locks
+    # — decided from the request alone, before any row lock — and locks,
+    # in the SAME ascending pass, every ranked row a Hot removal of its
+    # quantity-edited lines can shift (`hot_ranks.hot_rank_scope`). Only
+    # a line whose edit carries `requested_quantity` is a removal
+    # candidate: a due-date or Job Number edit never makes a line
+    # inactive. A shift row is only held: ranked rows are deleted only
+    # under the Hot lock, so it always exists.
     edited_ids = sorted(edit_id for edit_id in seen_edit_ids if isinstance(edit_id, int))
-    for edited_id in edited_ids:
-        locked = session.get(
-            WorkOrderDemand, edited_id, with_for_update=True, populate_existing=True
+    scope: hot_ranks.HotRankScope | None = None
+    if any("requested_quantity" in edit for edit in line_edits):
+        hot_ranks.acquire_hot_list_lock(session)
+        scope = hot_ranks.hot_rank_scope(
+            session,
+            [
+                edit["id"]
+                for edit in line_edits
+                if "requested_quantity" in edit and isinstance(edit.get("id"), int)
+            ],
         )
-        if locked is None or locked.work_order_id != work_order.id:
-            raise NotFoundError(
-                f"Demand line {edited_id} does not exist on Work Order {work_order.id}."
-            )
-        demands_by_id[edited_id] = locked
+    edited = set(edited_ids)
+    locked: dict[int, WorkOrderDemand] = {}
+    for locked_id in sorted(edited | (scope.shift_ids if scope is not None else set())):
+        row = session.get(WorkOrderDemand, locked_id, with_for_update=True, populate_existing=True)
+        if locked_id in edited:
+            if row is None or row.work_order_id != work_order.id:
+                raise NotFoundError(
+                    f"Demand line {locked_id} does not exist on Work Order {work_order.id}."
+                )
+            demands_by_id[locked_id] = row
+        if row is not None:
+            locked[locked_id] = row
     released = production_release.released_quantities(session, edited_ids)
 
     # The Work Order row is locked for every save (after the demand
@@ -824,6 +887,10 @@ def update_work_order(
         header_changed = True
 
     audited: list[tuple[WorkOrderDemand, dict[str, Any]]] = []
+    # The lines whose requested quantity THIS save changed — the only
+    # ones it can make inactive (OD1: removal happens with the change that
+    # caused it, never as a side effect of an unrelated edit).
+    quantity_changed: set[int] = set()
     for edit in line_edits:
         demand_id = edit.get("id")
         demand = demands_by_id.get(demand_id) if isinstance(demand_id, int) else None
@@ -845,11 +912,40 @@ def update_work_order(
         if _apply_line_edit(demand, {key: value for key, value in edit.items() if key != "id"}):
             demand.updated_at = func.now()
             audited.append((demand, before))
+            if demand.requested_quantity != before["requested_quantity"]:
+                quantity_changed.add(demand.id)
 
     created = [
         _stage_new_line(session, work_order, draft, taken, actor=actor) for draft in new_lines
     ]
     flush(session, _WORK_ORDER_CONFLICTS)
+
+    # Automatic Hot removal (OD1): a ranked line whose requested quantity
+    # this save lowered to its allocated quantity is inactive and leaves
+    # the Hot list in this transaction. A ranked line this save did not
+    # make inactive (its quantity unchanged) is never removed here, so
+    # the audit never names the save as a cause it was not. Runs after
+    # the flush above, so Work Order and PN conflicts keep their own
+    # mapping.
+    hot_changes: list[hot_ranks.HotRankChange] = []
+    if scope is not None:
+        removals = {
+            demand_id: hot_ranks.HotRemovalReason.FULLY_ALLOCATED
+            for demand_id in sorted(scope.ranked_candidates & quantity_changed)
+            if demands_by_id[demand_id].requested_quantity
+            <= demands_by_id[demand_id].allocated_quantity
+        }
+        if removals:
+            hot_changes = hot_ranks.remove_from_hot_list(
+                session,
+                scope=scope,
+                locked=locked,
+                removals=removals,
+                action=hot_ranks.HotRankEventAction.AUTO_REMOVE,
+                trigger=hot_ranks.HotRankTrigger.WORK_ORDER_SAVE,
+                reference={"work_order_id": work_order.id},
+                actor=actor,
+            )
 
     if header_changed:
         work_order.updated_at = func.now()
@@ -883,7 +979,7 @@ def update_work_order(
             actor_reference=actor,
         )
 
-    if header_changed or audited or created:
+    if header_changed or audited or created or hot_changes:
         commit(session, _WORK_ORDER_CONFLICTS)
     else:
         # A save that turns out to change nothing still took row locks
@@ -912,7 +1008,13 @@ def _demand_has_allocation_history(session: Session, demand_id: int) -> bool:
     )
 
 
-def delete_work_order_demand(session: Session, work_order_id: int, demand_id: int) -> None:
+def delete_work_order_demand(
+    session: Session,
+    work_order_id: int,
+    demand_id: int,
+    *,
+    confirm_hot_removal: bool = False,
+) -> None:
     """Delete one saved demand line, blocked once quantity has released.
 
     The backend enforces the rules — never only the UI:
@@ -925,11 +1027,16 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
       Order contains one or more Work Order Demand records
       (PROJECT_PROFILE §8.2), and removal never auto-deletes the Work
       Order;
-    - a demand line on the Hot list (``priority_rank`` set, Phase 12)
-      is refused: it leaves the Hot list first, through the audited Hot
-      list command (``app.application.hot_list``), so no ranked entry
-      disappears without a manager-confirmed priority change and the
-      remaining ranks stay dense.
+    - a demand line on the Hot list (``priority_rank`` set) is removed
+      only with ``confirm_hot_removal`` (OD3 — the UI asks for it after
+      a warning naming the rank and a typed confirmation). That gate is
+      judged LAST, after every other rule: without the flag a Hot line
+      that is otherwise removable is refused with
+      ``HotDemandRemovalConfirmationRequiredError`` (its current rank),
+      writing nothing; with it, the line leaves the Hot list — the
+      remaining ranks close the gap, audited as ``LINE_DELETE``
+      (``hot_ranks.remove_from_hot_list``) — and is deleted in the same
+      transaction. The flag on an unranked line is a plain removal.
 
     Removal deletes exactly the one demand row: the PartNumber master,
     QuantityFlows, PartMovements, release history, the demand's own
@@ -945,13 +1052,32 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     last-line check and leave a zero-demand Work Order. The demand row
     is re-read under its lock (``populate_existing``): the Hot list
     command locks a demand it ranks the same way, so the rank check
-    and a concurrent Hot add of the line serialize. No audit row
-    is appended: the Slice 1 audit vocabulary records creations and
-    edits only (SLICE1_DATA_MODEL §16) and the demand's existing
+    and a concurrent Hot change of the line serialize. With
+    ``confirm_hot_removal`` the Hot advisory lock is taken first, then
+    the target and every ranked row its removal can shift in one
+    ascending pass, then the Work Order. No audit row is appended for
+    the deletion itself: the Slice 1 audit vocabulary records creations
+    and edits only (SLICE1_DATA_MODEL §16) and the demand's existing
     CREATED/UPDATED history remains — historical records never
     disappear.
     """
-    demand = session.get(WorkOrderDemand, demand_id, with_for_update=True, populate_existing=True)
+    scope: hot_ranks.HotRankScope | None = None
+    locked: dict[int, WorkOrderDemand] = {}
+    demand: WorkOrderDemand | None
+    if confirm_hot_removal:
+        hot_ranks.acquire_hot_list_lock(session)
+        scope = hot_ranks.hot_rank_scope(session, [demand_id])
+        for locked_id in sorted({demand_id} | scope.shift_ids):
+            row = session.get(
+                WorkOrderDemand, locked_id, with_for_update=True, populate_existing=True
+            )
+            if row is not None:
+                locked[locked_id] = row
+        demand = locked.get(demand_id)
+    else:
+        demand = session.get(
+            WorkOrderDemand, demand_id, with_for_update=True, populate_existing=True
+        )
     if demand is None or demand.work_order_id != work_order_id:
         raise NotFoundError(
             f"Demand line {demand_id} does not exist on Work Order {work_order_id}."
@@ -960,11 +1086,6 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
     if work_order is None:  # pragma: no cover - the demand's FK guarantees the row
         raise NotFoundError(f"Work Order {work_order_id} does not exist.")
     _require_active(work_order, "Nothing was removed.")
-    if demand.priority_rank is not None:
-        raise ConflictError(
-            "Cannot remove: this demand line is on the Hot list. Remove it from the Hot list"
-            " in Management → Priority first."
-        )
     if demand.allocated_quantity > 0:
         raise ConflictError(
             "Cannot remove: stocked quantity has already been allocated to this demand line."
@@ -995,6 +1116,36 @@ def delete_work_order_demand(session: Session, work_order_id: int, demand_id: in
             "Cannot remove the last demand line: a Work Order always contains"
             " at least one Work Order Demand. Add the replacement line first,"
             " or leave the Work Order as it is."
+        )
+    if demand.priority_rank is not None:
+        # The Hot gate is the LAST one: a refusal by any rule above is
+        # never preceded by a confirmation the user would type in vain.
+        if scope is None:
+            number = (
+                work_order.work_order_number
+                if work_order.work_order_number is not None
+                else "— (internal)"
+            )
+            raise HotDemandRemovalConfirmationRequiredError(
+                f"{demand.part_number} on Work Order {number} is on the Hot list at"
+                f" #{demand.priority_rank}. Removing this demand line also removes it from"
+                " the Hot list, and every entry below it moves up one rank. Confirm the"
+                " removal to continue. Nothing was removed.",
+                {
+                    "work_order_demand_id": demand.id,
+                    "part_number": demand.part_number,
+                    "rank": demand.priority_rank,
+                },
+            )
+        hot_ranks.remove_from_hot_list(
+            session,
+            scope=scope,
+            locked=locked,
+            removals={demand.id: hot_ranks.HotRemovalReason.LINE_DELETED},
+            action=hot_ranks.HotRankEventAction.LINE_DELETE,
+            trigger=hot_ranks.HotRankTrigger.DEMAND_LINE_REMOVAL,
+            reference={"work_order_id": work_order_id},
+            actor=None,
         )
     session.delete(demand)
     commit(session, _WORK_ORDER_CONFLICTS)

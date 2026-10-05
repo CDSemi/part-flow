@@ -4,9 +4,12 @@ The Application side of the Hot Work Order Demand ranking: the ranked
 list read model, the candidate read behind the Add dialog, and the ONE
 command that changes the list. ``work_order_demands.priority_rank`` is
 the only storage of priority — "Hot" means a rank is set, rank 1 is the
-highest priority — and this command is its only writer: the Work Order
-intake rejects the field, and allocation, the boards, PN Tracking and
-the Area inventory only read it (`allocations.canonical_demand_order`).
+highest priority — and it is written only here and in
+``hot_ranks.remove_from_hot_list`` (the automatic removal of an inactive
+entry and the confirmed deletion of a Hot demand line): the Work Order
+intake rejects the field, and the boards, PN Tracking, the Area
+inventory and the allocation suggestion only read it
+(`allocations.canonical_demand_order`).
 
 Rules owned here:
 
@@ -37,21 +40,29 @@ Rules owned here:
   on the demand row locked FOR UPDATE and re-read, the lock allocation
   and reversal hold while they change ``allocated_quantity`` and
   ``completed_at``. Each demand of a PN is ranked separately.
-- **Inactive entries stay** until a manager removes them: a completed
-  Work Order or a fully allocated line keeps its rank (nothing is
-  written automatically) and may still be removed or moved. Such a
-  write changes ``priority_rank`` of a demand of a completed Work Order
-  — an accepted exception: a priority write is not a Work Order edit,
-  and the Work Order itself stays read-only history.
-- **Locking**: the Hot advisory lock first, then the ranked order read
-  without row locks (no other writer exists), then ``FOR UPDATE`` on
-  only the changed rows plus the inserted row, ascending id, re-read.
-  No Work Order or PN lock is ever taken, and the command holds no row
-  while it waits on its advisory lock, so it cannot join a deadlock
-  with allocation, reversal, release, intake, a Work Order save or a
-  demand-line removal — each of which takes demand rows ascending and
-  never the Hot lock. The demand-line removal refuses a ranked demand
-  under the same row lock (`work_orders.delete_work_order_demand`).
+- **No inactive entry (invariant H2)**: an entry whose demand becomes
+  inactive — fully allocated, its Work Order completing included —
+  leaves the list automatically in the same transaction as the
+  allocation confirmation or the quantity-lowering Work Order save
+  that caused it, and a Hot demand line deleted after the manager's
+  typed confirmation leaves it with the deletion
+  (``app.application.hot_ranks``). REMOVE / MOVE / DRAG of an inactive
+  entry stay allowed here: that is how a manager clears a leftover on a
+  database that predates the automatic removal. Such a write may change
+  ``priority_rank`` of a demand of a completed Work Order — an accepted
+  exception: a priority write is not a Work Order edit, and the Work
+  Order itself stays read-only history.
+- **Locking**: the Hot advisory lock first
+  (``hot_ranks.acquire_hot_list_lock``), then the ranked order read
+  without row locks (every rank writer holds the Hot lock), then
+  ``FOR UPDATE`` on only the changed rows plus the inserted row,
+  ascending id, re-read. No Work Order or PN lock is ever taken. The
+  other Hot-lock takers — an allocation confirmation, a Work Order save
+  that edits a requested quantity and a confirmed Hot line deletion —
+  take it after their PN locks and before any row lock, then lock their
+  demand rows in one ascending pass before any Work Order row; that one
+  global order (``app.application.hot_ranks``) keeps the wait graph
+  acyclic.
 - **Idempotency** (SLICE1_DATA_MODEL §14): one ``device_event_id`` per
   submission; the fingerprint is the SHA-256 of the canonical
   ``{action, expected_order, new_order}``. The audit rows of the
@@ -79,7 +90,7 @@ from typing import Any, Final, NamedTuple
 from sqlalchemy import ColumnElement, Select, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.application import audit, production_release
+from app.application import audit, hot_ranks, production_release
 from app.application.allocations import canonical_demand_order
 from app.application.common import commit, device_event_id_text, flush
 from app.application.errors import (
@@ -89,6 +100,7 @@ from app.application.errors import (
     InvalidInputError,
     NotFoundError,
 )
+from app.application.hot_ranks import HOT_LIST_CHANGE_KEY
 from app.application.part_numbers import canonical_part_number
 from app.application.production_board import (
     LocationState,
@@ -116,13 +128,6 @@ from app.infrastructure.models import (
     WorkOrder,
     WorkOrderDemand,
 )
-
-#: The metadata block of every Hot list audit row; its
-#: ``device_event_id`` is indexed (`ix_audit_events_hot_list_device_event_id`).
-HOT_LIST_CHANGE_KEY: Final = "hot_list_change"
-
-#: The ONE advisory lock serializing every Hot list change.
-_HOT_LIST_LOCK_KEY: Final = "partflow:hot-list"
 
 #: Candidates a search (or the unfiltered list) returns at most; a PN
 #: barcode returns every eligible demand of its PN.
@@ -467,23 +472,12 @@ def hot_list_candidates(
 # ---------------------------------------------------------------------------
 
 
-def acquire_hot_list_lock(session: Session) -> None:
-    """Serialize this transaction against every other Hot list change.
-
-    ``pg_advisory_xact_lock`` releases with the transaction. It is taken
-    before any row lock; a hash collision with a PN-level lock key only
-    serializes the two.
-    """
-    session.execute(
-        select(func.pg_advisory_xact_lock(func.hashtextextended(_HOT_LIST_LOCK_KEY, 0)))
-    )
-
-
 def current_ranked_order(session: Session) -> list[int]:
     """The ranked demand ids in rank order — read under the Hot lock.
 
-    No row lock: the Hot command is the only rank writer and it holds
-    the advisory lock, so this reading is the authority until COMMIT.
+    No row lock: every rank writer (this command and
+    ``hot_ranks.remove_from_hot_list``) holds the advisory lock, so this
+    reading is the authority until COMMIT.
     """
     return list(
         session.scalars(
@@ -667,7 +661,7 @@ def apply_hot_list_change(
         return _replay_or_conflict(session, committed, change_fingerprint)
 
     department = resolve_hot_list_department(session)
-    acquire_hot_list_lock(session)
+    hot_ranks.acquire_hot_list_lock(session)
 
     # -- Idempotency RE-CHECK once the lock is granted --------------------
     # A concurrent identical submission may have committed while this

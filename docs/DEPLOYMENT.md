@@ -16,9 +16,9 @@ pilot deployment, and administrative archive/purge maintenance.
 At source commit `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`, the repository has
 Phases 1–10 implemented end to end, plus Phase 10.5 — Scan Station Receive
 Quantity and the Phase 11 Production Board, Area Board, and PN Tracking
-read models and real frontend views. Priority Management (Phase 12) and full
-Administration (Phase 13) remain development-only previews or honest
-unavailable states. Authentication and role enforcement are Phase 14.
+read models and real frontend views, and Priority Management (Phase 12) is
+implemented. Full Administration (Phase 13) remains a development-only
+preview or honest unavailable state. Authentication and role enforcement are Phase 14.
 Production hardening and production deployment artifacts are Phase 16.
 
 Therefore:
@@ -141,6 +141,12 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
 - health, logs, disk use, backup age, database growth, and container restarts
   are monitored;
 - movement/quantity reconciliation checks run and alert without mutating data;
+- a database that ran the unreleased Phase 12 commits (`80f7925` … `b9785d2`)
+  passes this read-only check before the Hot list is relied on — it must return
+  0 rows, otherwise the listed inactive Hot entries are removed in Management →
+  Priority (the automatic removal of `IMPLEMENTATION_ROADMAP.md` Phase 12 only
+  covers changes made after it):
+  `SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);`
 - an incident owner, maintenance window, RPO, and RTO are explicitly approved;
 - pilot entry, pilot exit, and escalation criteria are documented.
 

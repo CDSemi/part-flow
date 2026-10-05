@@ -61,9 +61,14 @@ export interface DemandLineDraft {
    * released quantity it is what production has already committed —
    * the floor a saved Qty can never fall below. */
   allocatedQuantity: number;
+  /** Server-derived (`has_allocation_history`): any allocation — active
+   * or reversed — references the saved demand, so the server never
+   * removes it. Keeps such a Hot line off the typed Hot confirmation. */
+  hasAllocationHistory: boolean;
   /** Server-owned Hot rank of the saved demand (Phase 12), or null
-   * when it is not on the Hot list. A Hot demand line cannot be
-   * removed until it leaves the Hot list (Management → Priority). */
+   * when it is not on the Hot list. Removing a Hot demand line warns
+   * with this rank and asks for a typed confirmation; the removal also
+   * takes it off the Hot list (the server re-checks the current rank). */
   hotRank: number | null;
   statusLabel: string;
 }
@@ -85,9 +90,9 @@ export function workOrderStatusLabel(status: string): string {
 export const RELEASED_REMOVE_EXPLANATION =
   'Cannot remove: production quantity has already been released.';
 
-/** Why a Hot demand line offers no removal (the server refuses it too). */
-export function hotRemoveExplanation(hotRank: number): string {
-  return `Cannot remove: this demand line is on the Hot list (🔥#${hotRank}). Remove it from the Hot list in Management → Priority first.`;
+/** The ✕ title of a removable Hot demand line. */
+export function hotRemoveTitle(rank: number): string {
+  return `Remove line — it is on the Hot list (🔥#${rank}); asks for typed confirmation`;
 }
 
 /**
@@ -147,6 +152,7 @@ export function createDraftLine(
     releasedQuantity: 0,
     remainingQuantity: 0,
     allocatedQuantity: 0,
+    hasAllocationHistory: false,
     hotRank: null,
     statusLabel: 'Draft (unsaved)',
     ...init,
@@ -177,6 +183,7 @@ export function draftFromDemand(
     releasedQuantity: demand.releasedQuantity,
     remainingQuantity: demand.remainingQuantity,
     allocatedQuantity: demand.allocatedQuantity,
+    hasAllocationHistory: demand.hasAllocationHistory,
     hotRank: demand.priorityRank,
     demandId: demand.id,
     pn: demand.partNumber,
@@ -339,22 +346,70 @@ export function collectMissingDemandInfo(
     : null;
 }
 
-export type RemoveRule = 'draft' | 'confirm' | 'blocked' | 'hot';
+export type RemoveRule = 'draft' | 'confirm' | 'confirm-hot' | 'blocked';
 
 /**
  * Presentation mirror of the canonical WorkOrderDemand removal rule
  * (PROJECT_PROFILE §13): an unsaved draft is removed immediately, a
  * saved line needs explicit confirmation (the backend enforces the
- * released-quantity, Hot-list and last-line rules transactionally and
- * answers 409 removing nothing), and a line whose released quantity is
- * known to this session never offers removal at all. A Hot line
- * (Phase 12) offers none either until it leaves the Hot list; released
- * takes precedence, being the permanent reason.
+ * released, allocated, allocation-history and last-line rules
+ * transactionally and answers 409 removing nothing), and a line whose
+ * released quantity is known to this session never offers removal at
+ * all — released takes precedence, being the permanent reason.
+ *
+ * A Hot line (Phase 12) that nothing else visibly blocks — no
+ * allocated quantity, no allocation history (a reversed allocation
+ * leaves allocated quantity 0 but still makes the line unremovable),
+ * and not the only saved line — warns with its rank and asks for a
+ * TYPED confirmation (`'confirm-hot'`): the removal also takes it off
+ * the Hot list. Any other Hot line gets the plain confirmation, because
+ * the server answers its governing 409 before it ever asks for the Hot
+ * confirmation — the typed confirmation is never asked in vain; when
+ * the Hot rank turns out to be the last gate (stale state), the
+ * server's confirmation-required 409 upgrades the plain confirmation to
+ * the typed one.
  */
-export function lineRemoveRule(line: DemandLineDraft): RemoveRule {
+export function lineRemoveRule(
+  line: DemandLineDraft,
+  savedLineCount: number,
+): RemoveRule {
   if (line.released) return 'blocked';
-  if (line.hotRank !== null) return 'hot';
-  return line.saved ? 'confirm' : 'draft';
+  if (!line.saved) return 'draft';
+  if (
+    line.hotRank !== null &&
+    line.allocatedQuantity === 0 &&
+    !line.hasAllocationHistory &&
+    savedLineCount > 1
+  ) {
+    return 'confirm-hot';
+  }
+  return 'confirm';
+}
+
+/**
+ * The notices of a committed Save demand for every line that left the
+ * Hot list with it: the server takes a ranked line off the Hot list
+ * automatically once the save leaves it fully allocated (OD1). A rank
+ * that disappeared for any other reason (a concurrent removal in
+ * Management → Priority) gets no notice.
+ */
+export function hotListExitNotices(
+  previous: readonly WorkOrderDemand[],
+  fresh: readonly WorkOrderDemand[],
+): string[] {
+  const previousRank = new Map(
+    previous.map((demand) => [demand.id, demand.priorityRank]),
+  );
+  return fresh.flatMap((demand) => {
+    const rank = previousRank.get(demand.id) ?? null;
+    return rank !== null &&
+      demand.priorityRank === null &&
+      demand.requestedQuantity <= demand.allocatedQuantity
+      ? [
+          `🔥 ${demand.partNumber} left the Hot list (was #${rank}) — the line is now fully allocated.`,
+        ]
+      : [];
+  });
 }
 
 /** One unsaved draft line as its `new_lines` request entry. */

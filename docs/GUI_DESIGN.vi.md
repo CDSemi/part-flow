@@ -697,13 +697,14 @@ distribution và due tone.
 - Add search/scan: 0 eligible không add; 1 add trực tiếp; nhiều phải chọn exact
   Demand; new entry bottom.
 - Remove confirm PN/Demand; confirm close rank gap + audit; Undo restore.
+- **Automatic removal (quyết định 2026-10-04):** entry có line trở thành allocate đủ (gồm cả Work Order completed) rời list cùng với allocation hoặc demand edit gây ra nó — không confirmation, rank đóng khoảng trống, có audit. List hiển thị lần đọc gần nhất; confirmation thực hiện trên list cũ bị từ chối là stale và hiển thị list hiện tại, còn step Undo/Redo mà entry đã rời list bị bỏ kèm thông báo.
 - Drag/Move Up/Down/Undo/Redo đều confirm **trước** apply. Dialog show moved summary,
   impact và Current Position → New Position snapshots chỉ affected rank range.
   Transition `#old → #new`; added/removed dùng `Not listed`; shared content-sized
   tracks align PN/metadata; mobile stacked fallback.
 - Apply ranking/Cancel; không renumber sớm; Undo/Redo title user-facing, depth
   unlimited trong session; mỗi step audited và cũng cần confirmation.
-- Footer diễn giải Hot first → due-date ordering, không phơi field/tie-breaker.
+- Footer diễn giải Hot first → due-date ordering, không phơi field/tie-breaker; footer cũng nói entry tự rời list khi line của nó được allocate đủ.
 
 ---
 
@@ -790,7 +791,7 @@ Released line: qty/due/Jobs editable, PN/Request Type read-only; qty below commi
 inline error. Raising qty reopens remaining/release. Released WO không add/remove/
 edit header scope. Removal: draft immediate, saved-unreleased confirm, released
 disabled với lý do. Due default chỉ propagate tới line còn giữ inherited default;
-explicit no-date không inherit lại.
+explicit no-date không inherit lại. Saved line đang trên Hot list (không có released quantity và không có allocation, hiện tại hay đã reverse — line có allocation history không bao giờ remove được, nên nó nhận plain confirmation và lời từ chối của server) hiện cảnh báo nêu Hot rank (`🔥#n`) và chỉ remove sau khi gõ PN để xác nhận (dialog typed-confirmation dùng chung); removal cũng đưa nó khỏi Hot list và các Hot rank còn lại đóng khoảng trống (quyết định 2026-10-04).
 
 PN lookup chỉ nói “new” sau exact server response; in-flight shows Searching.
 Validation missing PN/non-positive/duplicate, due null valid; first invalid focused,
@@ -1070,6 +1071,15 @@ session không còn shift end.
   mang cùng đánh giá advisory, mỗi chỗ có chữ hoặc tooltip bên cạnh tone — không
   bao giờ chỉ màu — và không có expected duration thì không cờ. Mockup v18 không
   đổi (highlight đọc dữ liệu của application).
+24. **Automatic removal khỏi Hot list và remove Hot line bằng typed confirmation**
+  (§8, §11.2; PROJECT_PROFILE v22 §13, §21 Priority Management mục 11;
+  IMPLEMENTATION_ROADMAP Phase 12 — quyết định owner 2026-10-04): entry có line trở
+  thành allocate đủ (gồm cả Work Order completed) rời Hot list trong cùng transaction
+  với allocation hoặc demand edit gây ra nó, không confirmation và các rank còn lại
+  đóng khoảng trống (§8 *Automatic removal*; footer nói rõ điều này); saved Work Order
+  Demand line đang trên Hot list chỉ được remove từ Work Order Details sau cảnh báo
+  nêu rank `🔥#n` và typed confirmation PN, việc này cũng đưa nó khỏi Hot list (§11.2
+  *Removing demand lines*).
 
 ## 15.2 Từ GUI Design v16
 

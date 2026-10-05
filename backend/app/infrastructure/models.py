@@ -721,8 +721,9 @@ class WorkOrderDemand(Base):
             name=conv("ck_work_order_demands_allocated_quantity_non_negative"),
         ),
         # Phase 12 Hot list (invariant H1): ranks are positive and
-        # unique — NULL (unranked) any number of times. The Hot list
-        # command renumbers to exactly 1..N and is the only writer.
+        # unique — NULL (unranked) any number of times. The writers are
+        # the Hot list command and hot_ranks.remove_from_hot_list; both
+        # keep exactly 1..N.
         CheckConstraint(
             "priority_rank IS NULL OR priority_rank >= 1",
             name=conv("ck_work_order_demands_priority_rank_positive"),

@@ -17,9 +17,9 @@ reconciliation, pilot deployment và bảo trì archive/purge dành cho Admin.
 Tại source commit `d277f8e53a7ca79e0211c211a344dce60e8c7d7f`, repo đã triển khai
 end to end từ Phase 1 đến Phase 10, cùng Phase 10.5 — Scan Station Receive
 Quantity và các read model cùng frontend view thật của Production Board,
-Area Board và PN Tracking thuộc Phase 11. Priority Management (Phase 12) và
-Administration đầy đủ (Phase 13) vẫn là preview chỉ có ở development hoặc
-trạng thái unavailable được ghi rõ. Authentication và role enforcement thuộc
+Area Board và PN Tracking thuộc Phase 11, và Priority Management (Phase 12) đã
+được triển khai. Administration đầy đủ (Phase 13) vẫn là preview chỉ có ở
+development hoặc trạng thái unavailable được ghi rõ. Authentication và role enforcement thuộc
 Phase 14. Production hardening và artifact triển khai production thuộc Phase 16.
 
 Vì vậy:
@@ -139,6 +139,12 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   restart đều được monitor;
 - reconciliation check cho Movement/quantity chạy và alert nhưng không mutate
   dữ liệu;
+- database đã chạy các commit Phase 12 chưa phát hành (`80f7925` … `b9785d2`)
+  phải qua check chỉ đọc này trước khi dựa vào Hot list — nó phải trả về 0 row,
+  nếu không các inactive Hot entry được liệt kê phải được remove trong Management →
+  Priority (automatic removal trong Phase 12 của `IMPLEMENTATION_ROADMAP.md` chỉ
+  phủ các thay đổi sau nó):
+  `SELECT d.id, d.priority_rank FROM work_order_demands d JOIN work_orders w ON w.id = d.work_order_id WHERE d.priority_rank IS NOT NULL AND (w.completed_at IS NOT NULL OR d.requested_quantity <= d.allocated_quantity);`
 - incident owner, maintenance window, RPO và RTO được phê duyệt rõ;
 - điều kiện bắt đầu pilot, kết thúc pilot và escalation được ghi lại.
 

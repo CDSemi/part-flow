@@ -516,6 +516,13 @@ test('rows render the live Hot list with its flags, labels and distribution', as
   expect(document.body).not.toHaveTextContent('priority_rank');
 });
 
+test('the footer says an entry leaves the list once its line is fully allocated', async () => {
+  await renderPriority();
+  expect(document.body).toHaveTextContent(
+    'An entry leaves the list on its own once its line is fully allocated.',
+  );
+});
+
 test('an empty Hot list says how to add an entry', async () => {
   setServerOrder([]);
   render(
@@ -1185,7 +1192,7 @@ test('a step that no longer applies is dropped with a notice and nothing is sent
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(
     screen.getByText(
-      'E-500 · WO 007010: this entry is no longer on the Hot list, so this step was removed from the history.',
+      'E-500 · WO 007010 is no longer on the Hot list (removed elsewhere, or automatically once its line was fully allocated), so this step was removed from the history.',
     ),
   ).toBeInTheDocument();
   expect(state.posts).toHaveLength(posts);

@@ -424,7 +424,7 @@ export function PriorityView() {
         text:
           op.kind === 'insert'
             ? `${name}: this entry is already on the Hot list, so this step was removed from the history.`
-            : `${name}: this entry is no longer on the Hot list, so this step was removed from the history.`,
+            : `${name} is no longer on the Hot list (removed elsewhere, or automatically once its line was fully allocated), so this step was removed from the history.`,
       });
       return;
     }
@@ -753,7 +753,8 @@ export function PriorityView() {
         <b>Hot</b> demand is always worked first, in rank order. Allocation
         &amp; work ordering: ① Hot rank ② demands with a due date, earliest
         first ③ demands without a due date, by the Work Order received date
-        (oldest first).
+        (oldest first). An entry leaves the list on its own once its line is
+        fully allocated.
       </PageNote>
 
       {pending ? (
