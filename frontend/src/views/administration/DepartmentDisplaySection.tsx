@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { ApiError } from '../../api/client';
 import { listDepartments, updateDepartment } from '../../api/environment';
 import type { Department } from '../../api/environment';
 import { useApiData } from '../../api/use-api-data';
+import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useConnectivity } from '../../app/connectivity-context';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -35,6 +36,8 @@ const SECONDS_PER_ROW_ERROR =
   'Seconds per displayed row must be a whole number from 1 to 60.';
 const MIN_PAGE_SECONDS_ERROR =
   'The minimum page dwell must be a whole number of seconds from 1 to 300.';
+const UNKNOWN_OUTCOME_MESSAGE =
+  'The server did not answer — this change may or may not have been saved. Close this window to refresh the table, then check the timing before trying again.';
 
 /** The whole number the text holds when `isValid` admits it, else null
  * (never rounded or clamped). */
@@ -137,10 +140,9 @@ export function DepartmentDisplaySection() {
         <RotationTimingDialog
           department={editing}
           writeBlocked={writeBlocked}
-          onCancel={() => setEditing(null)}
-          onSaved={() => {
+          onClose={(refresh) => {
             setEditing(null);
-            departmentsData.reload();
+            if (refresh) departmentsData.reload();
           }}
         />
       ) : null}
@@ -151,13 +153,13 @@ export function DepartmentDisplaySection() {
 function RotationTimingDialog({
   department,
   writeBlocked,
-  onCancel,
-  onSaved,
+  onClose,
 }: {
   department: Department;
   writeBlocked: boolean;
-  onCancel: () => void;
-  onSaved: () => void;
+  /** Close; `refresh` = a write committed or may have committed, so
+   * the table re-reads the stored values. */
+  onClose: (refresh: boolean) => void;
 }) {
   const [secondsText, setSecondsText] = useState(
     String(department.boardSecondsPerRow),
@@ -167,6 +169,9 @@ function RotationTimingDialog({
   );
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
+  // A save whose answer was lost may have committed: closing then
+  // re-reads the table instead of trusting the values it shows.
+  const outcomeUnknown = useRef(false);
   // The first field takes focus once the dialog opened. Focused from an
   // effect (after ModalDialog's own), never `autoFocus`: ModalDialog
   // records the opener only while focus is still outside the dialog,
@@ -199,12 +204,26 @@ function RotationTimingDialog({
     setServerError(null);
     try {
       await updateDepartment(department.id, patch);
-      onSaved();
+      onClose(true);
     } catch (error) {
-      setServerError(errorMessage(error));
-    } finally {
+      if (error instanceof ApiError && !writeOutcomeUnknown(error)) {
+        setServerError(error.message);
+      } else {
+        // No answer, a timeout or a 5xx: the PATCH may have committed.
+        outcomeUnknown.current = true;
+        setServerError(UNKNOWN_OUTCOME_MESSAGE);
+      }
       setBusy(false);
     }
+  };
+
+  // Cancel, Escape and the backdrop are ignored while a save is in
+  // flight: the write cannot be recalled, so the editor stays open until
+  // it settles — success closes it (reloading the table after the
+  // commit), a failure keeps it open with the error.
+  const requestClose = () => {
+    if (busy) return;
+    onClose(outcomeUnknown.current);
   };
 
   const title = `Production Board rotation — ${department.name}`;
@@ -213,7 +232,7 @@ function RotationTimingDialog({
       ? { secondsPerRow, minPageSeconds }
       : null;
   return (
-    <ModalDialog label={title} onClose={onCancel}>
+    <ModalDialog label={title} onClose={requestClose}>
       <h3>{title}</h3>
       <div className="ad-form">
         <AdminField label="Seconds per displayed row">
@@ -257,7 +276,7 @@ function RotationTimingDialog({
         <ServerErrorNote message={serverError} />
       </div>
       <div className="row">
-        <button className="bigbtn ghost" onClick={onCancel}>
+        <button className="bigbtn ghost" disabled={busy} onClick={requestClose}>
           Cancel (Esc)
         </button>
         <button

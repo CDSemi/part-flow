@@ -2495,6 +2495,76 @@ test('AD-4: a server refusal stays in place in the rotation editor with the type
   expect(state.departments[0].board_seconds_per_row).toBe(3);
 });
 
+const ROTATION_UNKNOWN_OUTCOME =
+  'The server did not answer — this change may or may not have been saved. Close this window to refresh the table, then check the timing before trying again.';
+
+test('AD-4: Cancel, Escape and the backdrop are ignored while a rotation save is in flight', async () => {
+  const edit = await openDepartmentDisplay();
+  // Hold the PATCH before the fake server applies it.
+  let releasePatch = () => {};
+  const patchHeld = new Promise<void>((resolve) => {
+    releasePatch = resolve;
+  });
+  let patchRequested = false;
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    if (init?.method === 'PATCH') {
+      patchRequested = true;
+      await patchHeld;
+    }
+    return handle(String(input), init);
+  });
+
+  fireEvent.click(edit);
+  const dialog = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Seconds per displayed row'), {
+    target: { value: '5' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(patchRequested).toBe(true));
+
+  const cancel = within(dialog).getByRole('button', { name: 'Cancel (Esc)' });
+  expect(cancel).toBeDisabled();
+  fireEvent.click(cancel);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  fireEvent.mouseDown(dialog.parentElement as HTMLElement);
+  expect(screen.getByRole('dialog')).toBe(dialog);
+
+  releasePatch();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() =>
+    expect(rotationRow('Machine Shop').slice(1, 3)).toEqual(['5 s', '6 s']),
+  );
+});
+
+test('AD-4: a rotation save whose answer is lost is an unknown outcome, and closing re-reads the table', async () => {
+  fireEvent.click(await openDepartmentDisplay());
+  const dialog = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Seconds per displayed row'), {
+    target: { value: '5' },
+  });
+  // The server commits the PATCH; the answer never arrives.
+  vi.mocked(fetch).mockImplementationOnce(async (input, init) => {
+    await handle(String(input), init);
+    throw new TypeError('Failed to fetch');
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    ROTATION_UNKNOWN_OUTCOME,
+  );
+  expect(dialog).not.toHaveTextContent('Nothing was changed');
+  expect(state.departments[0].board_seconds_per_row).toBe(5);
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await waitFor(() =>
+    expect(rotationRow('Machine Shop').slice(1, 3)).toEqual(['5 s', '6 s']),
+  );
+});
+
 test('Department display settings: a failed load offers Retry', async () => {
   vi.mocked(fetch).mockImplementation(async (input, init) =>
     String(input) === '/api/departments'
@@ -2595,6 +2665,31 @@ test('AD-5: the Due Soon warning panel loads, explains, validates and PUTs exact
   ]);
   expect(state.dueSoon).toEqual({ min: 1, percent: 20, max: 5 });
   await waitFor(() => expect(save).toBeDisabled());
+});
+
+test('AD-5: a Due Soon save whose answer is lost is an unknown outcome and re-reads the stored policy', async () => {
+  const min = await openSettings();
+  fireEvent.change(min, { target: { value: '3' } });
+  const save = screen.getByRole('button', { name: 'Save' });
+  // The server commits the PUT; the answer never arrives.
+  vi.mocked(fetch).mockImplementationOnce(async (input, init) => {
+    await handle(String(input), init);
+    throw new TypeError('Failed to fetch');
+  });
+  fireEvent.click(save);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'The server did not answer — this change may or may not have been saved. Check the Due Soon warning before trying again; saving the same values again is safe.',
+  );
+  expect(document.body.textContent).not.toMatch(/Nothing was changed/);
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(state.dueSoon).toEqual({ min: 3, percent: 15, max: 7 });
+  // The re-read stored policy now equals the typed values: nothing left
+  // to save, and the notice stays.
+  await waitFor(() => expect(save).toBeDisabled());
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'may or may not have been saved',
+  );
+  expect(min).toHaveValue(3);
 });
 
 test('AD-5: offline the Due Soon warning cannot be saved; a failed load offers Retry', async () => {

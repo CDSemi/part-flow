@@ -1,7 +1,8 @@
 import { useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { ApiError } from '../../api/client';
 import { getDueSoonPolicy, updateDueSoonPolicy } from '../../api/policies';
+import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { ErrorState, LoadingState } from '../../components/view-states';
@@ -37,6 +38,8 @@ const PERCENT_ERROR =
   'The lead-time warning percentage must be a whole number from 1 to 100.';
 const ORDER_ERROR =
   'Minimum warning days cannot be greater than maximum warning days.';
+const UNKNOWN_OUTCOME_MESSAGE =
+  'The server did not answer — this change may or may not have been saved. Check the Due Soon warning before trying again; saving the same values again is safe.';
 
 const EXAMPLE_LEADS = [10, 30, 90];
 
@@ -96,6 +99,7 @@ export function SettingsSection() {
           saved={policyData.state.data}
           writeBlocked={writeBlocked}
           onSaved={policyData.reload}
+          onOutcomeUnknown={policyData.revalidate}
         />
         <h2>Other settings</h2>
         <p className="ad-confighelp">
@@ -110,10 +114,14 @@ function DueSoonForm({
   saved,
   writeBlocked,
   onSaved,
+  onOutcomeUnknown,
 }: {
   saved: DueSoonPolicy;
   writeBlocked: boolean;
   onSaved: () => void;
+  /** Background re-read of the stored policy after a save whose answer
+   * was lost — never tearing the panel down, so the notice stays. */
+  onOutcomeUnknown: () => void;
 }) {
   const [minText, setMinText] = useState(String(saved.minDays));
   const [percentText, setPercentText] = useState(String(saved.leadTimePercent));
@@ -151,7 +159,14 @@ function DueSoonForm({
       setSavedNote(true);
       onSaved();
     } catch (error) {
-      setServerError(errorMessage(error));
+      if (error instanceof ApiError && !writeOutcomeUnknown(error)) {
+        setServerError(error.message);
+      } else {
+        // No answer, a timeout or a 5xx: the PUT may have committed.
+        // Re-read the stored policy so Save is judged against it.
+        setServerError(UNKNOWN_OUTCOME_MESSAGE);
+        onOutcomeUnknown();
+      }
     } finally {
       setBusy(false);
     }
