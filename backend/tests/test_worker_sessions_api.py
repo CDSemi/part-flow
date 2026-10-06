@@ -722,6 +722,7 @@ def test_unknown_and_inactive_badges_record_and_refresh_nothing(
         f"PF:{worker['badge_barcode']}",
         "",
         "X" * 200,
+        f"{worker['badge_barcode']}\x00",
     ):
         answer = _scan_badge(client, cell, badge)
         assert answer["outcome"] == "UNKNOWN", badge

@@ -1074,6 +1074,44 @@ test('a transport failure in the badge gate closes it; Retry resends the identic
   expect(sent[1].body.confirming_badge).toBe('100482');
 });
 
+test('a typed gate refusal of an unknown-outcome Retry ends the unknown outcome; the same intent is confirmed again', async () => {
+  await renderStation();
+  const summary = await openMachineSummary('DONE');
+  fireEvent.click(confirmButton(summary, 'Confirm completion'));
+  const gate = await gateDialog('Scan badge to confirm completion');
+  writeFailure = 'network';
+  scanGateBadge(gate, '100482');
+  await waitFor(() =>
+    expect(summary).toHaveTextContent('may or may not have been recorded'),
+  );
+
+  // An administrator turns the DONE badge option off meanwhile: the
+  // frozen badge request is refused after the idempotency fast path.
+  serverGates.done = 'QUESTION';
+  fireEvent.click(confirmButton(summary, 'Retry the same completion'));
+
+  expect(await within(summary).findByText(E_G2)).toBeInTheDocument();
+  expect(summary).not.toHaveTextContent('may or may not have been recorded');
+  expect(
+    within(summary).queryByRole('button', { name: 'Leave — check the Area' }),
+  ).toBeNull();
+  expect(confirmButton(summary, 'Cancel (Esc)')).toBeInTheDocument();
+  expect(committed.size).toBe(0);
+
+  fireEvent.click(confirmButton(summary, 'Confirm completion'));
+  const question = await gateDialog('Confirm finished quantity?');
+  fireEvent.click(
+    within(question).getByRole('button', { name: 'Yes — finished' }),
+  );
+  await notice();
+  const sent = commands('/area-completions');
+  expect(sent).toHaveLength(3);
+  expect(sent[1].body.confirming_badge).toBe('100482');
+  expect(sent[2].body).not.toHaveProperty('confirming_badge');
+  expect(sent[2].body.device_event_id).toBe(sent[0].body.device_event_id);
+  expect(committed.size).toBe(1);
+});
+
 test('after a generic refusal of a badge request, Retry asks for a NEW badge under the same device_event_id', async () => {
   await renderStation();
   const summary = await openMachineSummary('DONE');

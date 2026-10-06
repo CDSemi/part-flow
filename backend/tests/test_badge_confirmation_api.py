@@ -833,6 +833,7 @@ def test_an_unrecognized_badge_is_refused_with_zero_writes(
         f"PF:{signed_in['badge_barcode']}",
         "   ",
         "A" * 200,
+        f"{signed_in['badge_barcode']}\x00",
     ):
         _assert_badge_not_recognized(_send(client, _badged(command_.request, badge)))
     assert _row_counts(db_engine) == before

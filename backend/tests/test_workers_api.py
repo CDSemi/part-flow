@@ -918,6 +918,7 @@ def test_resolve_badge(client: TestClient, db_engine: Engine) -> None:
         assert resolved("PF:PN:X") is None
         assert resolved("") is None
         assert resolved("A" * 129) is None
+        assert resolved(f"{badge}\x00") is None
         assert resolved(12345) is None
         assert resolved(None) is None
         assert resolved(_badge()) is None

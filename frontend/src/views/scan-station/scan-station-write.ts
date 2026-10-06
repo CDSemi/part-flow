@@ -11,9 +11,10 @@
 // Session, so the sign-in modal is raised and, after the badge, the
 // operator confirms the IDENTICAL request again. A typed final-gate
 // refusal of DONE / QUEUE / Undo (Phase 13 badge confirmation) is not a
-// rejection either: nothing was recorded under this `device_event_id`,
-// so the owner switches or re-opens its final gate (`useFinalGate`) and
-// the same intent is confirmed again. An `undo_reason_required` refusal
+// rejection either: it is judged after the idempotency fast path, so
+// nothing was recorded under this `device_event_id` — it also ends an
+// unknown outcome — and the owner switches or re-opens its final gate
+// (`useFinalGate`) and the same intent is confirmed again. An `undo_reason_required` refusal
 // (Phase 13 Undo reason policy) is not a rejection either: it is judged
 // after the idempotency fast path, so nothing is recorded under this
 // `device_event_id` — it also ends an unknown outcome — and the owner
@@ -94,10 +95,12 @@ export function useOneShotWrite<T>({
    * A typed refusal of the final gate (409 `badge_confirmation_required`
    * / `badge_confirmation_not_expected`, 422 `badge_not_recognized`):
    * nothing recorded and the intent is still valid — no error, no
-   * rejection, `onRejected` not called, the unknown-outcome state
-   * untouched and the same `device_event_id` kept (the server proved no
-   * commit exists for it, else it would have replayed). Without this
-   * handler such a refusal is an ordinary rejection.
+   * rejection, `onRejected` not called and the same `device_event_id`
+   * kept. The unknown-outcome state is CLEARED: the gate is judged
+   * after the idempotency fast path and the post-lock re-check, so the
+   * server proved no commit exists for this key (else it would have
+   * replayed) — an earlier unknown outcome is now known (not recorded).
+   * Without this handler such a refusal is an ordinary rejection.
    */
   onGateRefusal?: (refusal: BadgeGateRefusal, message: string) => void;
   /**
@@ -147,6 +150,10 @@ export function useOneShotWrite<T>({
       }
       const refusal = badgeGateRefusal(error);
       if (refusal && onGateRefusal) {
+        // Judged after the idempotency fast path and the post-lock
+        // re-check, like the reason refusal below: nothing is recorded
+        // under this device_event_id, so an unknown outcome is resolved.
+        setOutcomeUnknown(false);
         setBusy(false);
         onGateRefusal(refusal, errorMessage(error));
         return;

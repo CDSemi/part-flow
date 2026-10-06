@@ -324,9 +324,11 @@ def resolve_badge(session: Session, raw: object) -> Worker | None:
     stored badge resolves to its Worker (OD-3). Non-text input, a value
     the badge rule rejects, an unknown badge and an inactive Worker's
     badge (PROJECT_PROFILE §10) all resolve to ``None``. At most one
-    Worker matches: the badge is UNIQUE.
+    Worker matches: the badge is UNIQUE. A value holding NUL (U+0000)
+    is never a stored badge — PostgreSQL text cannot hold it — so it
+    resolves to ``None`` before the query instead of failing it.
     """
-    if not isinstance(raw, str):
+    if not isinstance(raw, str) or "\x00" in raw:
         return None
     try:
         badge = normalize_badge_barcode(raw)

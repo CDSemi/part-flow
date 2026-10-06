@@ -750,7 +750,7 @@ profile tách Users. Ghi chú triển khai (Phase 13): editor Workers lưu badge
 in hoa và hiện preview `Saved as:` khi khác với giá trị đã gõ hoặc scan, upload avatar
 (PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar, hiện
 initials khi không có avatar, và deactivate Worker mà không có delete nào. Areas table trình bày Operations, derived assignment mode,
-Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị block. Từ Phase 13, bảng và editor Areas cấu hình Worker ID mode — Disabled hoặc Fixed Worker kèm Fixed Worker của nó; cả ba Worker ID mode đều chọn được (Scanned session từ Phase 13 cùng Worker session và badge confirmation); section Worker sessions là thật cho sliding inactivity timeout và các badge-confirmation option (Phase 13).
+Machines, Worker mode, terminal/active. Active-quantity Area deactivation bị block. Từ Phase 13, bảng và editor Areas cấu hình Worker ID mode — Disabled, Fixed Worker kèm Fixed Worker của nó, hoặc Scanned session (chọn được từ Phase 13 cùng Worker session và badge confirmation); section Worker sessions là thật cho sliding inactivity timeout và các badge-confirmation option (Phase 13).
 
 History maintenance: lossless export → verify → purge exactly archived rows qua
 privileged Admin path, preserve related Movement chains, preview scope, reason và
