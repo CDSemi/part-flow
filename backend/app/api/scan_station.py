@@ -171,7 +171,12 @@ resolution reports ``scanned_at``, ``intake_available``,
   ineligible: recorded by Management or at another station, already
   reversed, itself a reversal, no longer the most recent operation of
   its quantity, or restoring onto a retired Machine or into a
-  deactivated Area.
+  deactivated Area. An optional ``reason`` is recorded on every
+  ``REVERSED`` row (Phase 13 slice 6); while the Undo reason policy is
+  on, a reversal without one is 409 ``undo_reason_required`` with
+  nothing written (judged after the idempotency fast path, so a
+  committed Undo still replays), and the preview reports
+  ``reason_required``.
 
 Phase 13 — Worker identity. Every row of a command records the Worker
 the station's Area mode identifies (Disabled → none, Fixed Worker → the
@@ -1377,6 +1382,9 @@ class UndoPreviewResponse(BaseModel):
     # The Worker the reversal would record under the station Area's
     # current mode — computed by the server, re-judged at confirmation.
     reversed_by: WorkerRef | None
+    # The Undo reason policy now: the summary asks for a reason when true.
+    # A read — the command re-judges it.
+    reason_required: bool
 
 
 @router.get("/scan-stations/{station_id}/undo-preview/{device_event_id}")
@@ -1421,6 +1429,7 @@ def get_undo_preview(
         ],
         worker=worker_ref(result.worker),
         reversed_by=worker_ref(result.reversed_by),
+        reason_required=result.reason_required,
     )
 
 
@@ -1437,6 +1446,9 @@ class UndoRequest(BaseModel):
     # The scanned badge of the final gate (Phase 13 slice 5) — never
     # part of the intent.
     confirming_badge: str | None = Field(default=None, min_length=1)
+    # The operator's explanation of the reversal (PROFILE §16): optional;
+    # required while the Undo reason policy is on. Blank = absent.
+    reason: str | None = None
 
 
 class ReversedMovementResponse(BaseModel):
@@ -1457,6 +1469,8 @@ class UndoResponse(BaseModel):
     flows: list[RestoredFlowResponse]
     device_event_id: str
     occurred_at: datetime.datetime
+    # The recorded reason of the reversal (also on a replay); null when none.
+    reason: str | None
 
 
 @router.post("/scan-stations/{station_id}/undos")
@@ -1469,6 +1483,7 @@ def undo_production_command(
         part_number=body.part_number,
         reverses_device_event_id=body.reverses_device_event_id,
         device_event_id=body.device_event_id,
+        reason=body.reason,
         confirming_badge=body.confirming_badge,
     )
     response.status_code = 201 if result.created else 200
@@ -1497,6 +1512,7 @@ def undo_production_command(
         ],
         device_event_id=result.device_event_id,
         occurred_at=result.occurred_at,
+        reason=result.reason,
     )
 
 

@@ -778,6 +778,7 @@ function handle(url: string, method: string, body: unknown): Response {
       movements: record.movements,
       restored: reason === null ? record.restored : [],
       ...previewIdentity,
+      reason_required: false,
     });
   }
 

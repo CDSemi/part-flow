@@ -421,6 +421,7 @@ function handle(url: string, method: string, body: unknown): Response {
         'This action received new quantity into production and created the Work Order Demand behind it.',
       worker: null,
       reversed_by: null,
+      reason_required: false,
     });
   }
   throw new Error(`unexpected request ${method} ${url}`);

@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
 
 // Small shared presentation pieces of the Administration sections —
-// the section header row, the table + editor form primitives, and the
-// status pill. Components only (React Fast Refresh), no data fetching
+// the section header row, the table + editor form primitives, the
+// status pill and the policy switch. Components only (React Fast Refresh), no data fetching
 // and no business rules.
 
 /**
@@ -82,6 +82,48 @@ export function ActiveField({
       />
       <span>{label}</span>
     </label>
+  );
+}
+
+/**
+ * One On/Off policy switch of a settings section (the `ad-switchlist`
+ * presentation). The owner saves on click and re-reads the stored
+ * value; the switch only renders what it is given.
+ */
+export function PolicySwitch({
+  label,
+  description,
+  ariaLabel,
+  on,
+  disabled,
+  onToggle,
+}: {
+  label: string;
+  description: string;
+  ariaLabel: string;
+  on: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={ariaLabel}
+      className={`ad-switch${on ? ' on' : ''}`}
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <span className="swtext">
+        <span className="swlabel">{label}</span>
+        <span className="swdesc">{description}</span>
+      </span>
+      <span className="track" aria-hidden="true">
+        <span className="knob" />
+      </span>
+      <span className="swstate">{on ? 'On' : 'Off'}</span>
+    </button>
   );
 }
 

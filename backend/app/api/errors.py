@@ -26,7 +26,9 @@ resends the unchanged request. The Phase 13 badge-confirmation gate
 refusals carry ``badge_confirmation_required``,
 ``badge_confirmation_not_expected`` or ``badge_not_recognized``, so the
 Scan Station can switch or re-open the final gate without losing the
-operator's draft.
+operator's draft. The Undo reason refusal carries
+``undo_reason_required``, so the Scan Station shows the required reason
+field without losing the operator's draft.
 """
 
 from typing import cast
@@ -54,6 +56,7 @@ from app.application.station_identity import (
     BadgeNotRecognizedError,
     WorkerSessionRequiredError,
 )
+from app.application.undo import UndoReasonRequiredError
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
@@ -179,6 +182,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         (BadgeConfirmationRequiredError, 409, "badge_confirmation_required"),
         (BadgeConfirmationNotExpectedError, 409, "badge_confirmation_not_expected"),
         (BadgeNotRecognizedError, 422, "badge_not_recognized"),
+        # Phase 13 slice 6: the Undo reason policy is on and the reversal
+        # carries no reason — nothing was reversed.
+        (UndoReasonRequiredError, 409, "undo_reason_required"),
     )
 
     def _register_gate_refusal(

@@ -1,4 +1,5 @@
-// Application policies API (Administration → Worker sessions, Phase 13).
+// Application policies API (Administration → Worker sessions and
+// Correction permissions, Phase 13).
 //
 // The global policy singleton the server seeds and audits. It holds the
 // default sliding inactivity timeout of scanned Worker Sessions in whole
@@ -8,8 +9,11 @@
 // PUT is a partial merge — every field absent from the body keeps its
 // stored value — so each writer here sends ONLY the field it changes and
 // a stale read never overwrites another administrator's change. The
-// server validates and stays authoritative; this module only maps the
-// wire shape.
+// singleton also holds the Correction permissions section's Undo reason
+// policy (PROJECT_PROFILE §16 "require a reason when configured"; one
+// global switch, default off), read and written through its own section
+// endpoint. The server validates and stays authoritative; this module
+// only maps the wire shape.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -92,4 +96,44 @@ export async function updateBadgeConfirmation(
     },
   );
   return toWorkerSessionPolicy(wire);
+}
+
+export interface CorrectionPermissionsPolicy {
+  /** Every Undo requires a reason (enforced by the server). */
+  undoReasonRequired: boolean;
+  /** The policy singleton's timestamp (shared by every section). */
+  updatedAt: string;
+}
+
+interface CorrectionPermissionsPolicyWire {
+  undo_reason_required: boolean;
+  updated_at: string;
+}
+
+function toCorrectionPermissionsPolicy(
+  wire: CorrectionPermissionsPolicyWire,
+): CorrectionPermissionsPolicy {
+  return {
+    undoReasonRequired: wire.undo_reason_required,
+    updatedAt: wire.updated_at,
+  };
+}
+
+export async function getCorrectionPermissionsPolicy(): Promise<CorrectionPermissionsPolicy> {
+  const wire = await apiRequest<CorrectionPermissionsPolicyWire>(
+    '/api/policies/correction-permissions',
+  );
+  return toCorrectionPermissionsPolicy(wire);
+}
+
+/** Turn the Undo reason requirement on or off; an unchanged value is a
+ * server no-op. */
+export async function updateUndoReasonRequired(
+  required: boolean,
+): Promise<CorrectionPermissionsPolicy> {
+  const wire = await apiRequest<CorrectionPermissionsPolicyWire>(
+    '/api/policies/correction-permissions',
+    { method: 'PUT', body: { undo_reason_required: required } },
+  );
+  return toCorrectionPermissionsPolicy(wire);
 }

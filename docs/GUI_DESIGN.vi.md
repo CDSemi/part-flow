@@ -226,6 +226,15 @@ scanned-session + UNDO option ON → active badge scan; otherwise warning questi
 `Reverse this action?`. Expired session đã bị badge modal block. Production Undo
 đảo complete application command, không arbitrary Movement row.
 
+**Undo reason (Phase 13).** Khi Administration → Correction permissions → **Undo
+reason** đang On, summary Undo hiện field `Reason` bắt buộc (label `Reason
+(required)`, hint `This reason will be included in the reversal history.`) bên dưới
+summary và trước final gate; `Confirm reversal` bị disable đến khi field có chữ,
+final gate nhắc lại reason cùng các key fact, và reason được ghi trên reversal và
+hiện trong Tracking. Reversal bị server từ chối vì thiếu reason không ghi gì:
+summary hiện field kèm lời giải thích của server, giữ mọi selection. Khi option Off
+(default) không hiện field reason.
+
 ## 4.6 One-shot workflow — temporary wizard
 
 Một modal lifecycle: open → select/input → structured confirmation → confirm/cancel
@@ -722,7 +731,11 @@ Tách production, sidebar:
 
 Worker sessions sở hữu default/per-Area sliding timeout và ba independent default-On
 badge-gate options cho DONE/QUEUE/Undo; option chỉ đổi form của always-present final
-gate. Từ Phase 13, section Worker sessions là thật cho timeout — giá trị default và override theo Area là cấu hình được lưu (số phút nguyên, 1–720, default 15); ba badge-confirmation option cũng là cấu hình được lưu (default On), mỗi công tắc được lưu ngay khi đổi. Department
+gate. Từ Phase 13, section Worker sessions là thật cho timeout — giá trị default và override theo Area là cấu hình được lưu (số phút nguyên, 1–720, default 15); ba badge-confirmation option cũng là cấu hình được lưu (default On), mỗi công tắc được lưu ngay khi đổi. Policy **Correction permissions** giữ công tắc **Undo
+reason** — một option On/Off toàn cục (default Off) bắt buộc mọi Undo phải có reason
+(§4.5; PROJECT_PROFILE §16 "require a reason when configured"), do server enforce và
+lưu ngay khi đổi; ai được undo hoặc correct (role-based correction permission) chưa
+cấu hình được (Phase 13 Users và roles thêm vào section này; enforcement Phase 14). Department
 display config per Department. Due Soon settings default 2d/15%/7d.
 
 Không có Machine, RouteTemplate hay PartNumber registry trong Admin; chúng ở
@@ -1086,6 +1099,15 @@ session không còn shift end.
   Demand line đang trên Hot list chỉ được remove từ Work Order Details sau cảnh báo
   nêu rank `🔥#n` và typed confirmation PN, việc này cũng đưa nó khỏi Hot list (§11.2
   *Removing demand lines*).
+25. **Field Undo reason và công tắc policy của nó** (§4.5, §9; PROJECT_PROFILE §16
+  "require a reason when configured"; quyết định owner OD-6 ngày 2026-10-04 — bổ
+  sung hành vi, không tăng version): khi option **Undo reason** của Administration →
+  Correction permissions đang On (toàn cục, default Off), summary Undo hiện field
+  `Reason` bắt buộc trước final gate, `Confirm reversal` bị disable đến khi có chữ,
+  gate nhắc lại reason, và reversal bị server từ chối vì thiếu reason không ghi gì và
+  giữ mọi selection; khi option Off summary Undo không đổi. Administration → Correction
+  permissions thật cho riêng công tắc này và nói rõ role-based correction permission
+  chưa cấu hình được.
 
 ## 15.2 Từ GUI Design v16
 

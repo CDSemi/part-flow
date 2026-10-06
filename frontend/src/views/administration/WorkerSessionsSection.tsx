@@ -15,7 +15,12 @@ import { useConnectivity } from '../../app/connectivity-context';
 import { AreaDot } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { AdminField, SectionHeader, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  PolicySwitch,
+  SectionHeader,
+  ServerErrorNote,
+} from './section-widgets';
 import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 
 // Administration → Worker sessions (Phase 13; GUI_DESIGN §9 Policies,
@@ -222,25 +227,15 @@ export function WorkerSessionsSection() {
             ({ action, key, label, description }) => {
               const on = policy.badgeConfirmation[key];
               return (
-                <button
+                <PolicySwitch
                   key={action}
-                  type="button"
-                  role="switch"
-                  aria-checked={on}
-                  aria-label={`Require badge scan — ${label}`}
-                  className={`ad-switch${on ? ' on' : ''}`}
+                  label={label}
+                  description={description}
+                  ariaLabel={`Require badge scan — ${label}`}
+                  on={on}
                   disabled={writeBlocked || switchBusy || timeoutBusy}
-                  onClick={() => void toggle(action, key)}
-                >
-                  <span className="swtext">
-                    <span className="swlabel">{label}</span>
-                    <span className="swdesc">{description}</span>
-                  </span>
-                  <span className="track" aria-hidden="true">
-                    <span className="knob" />
-                  </span>
-                  <span className="swstate">{on ? 'On' : 'Off'}</span>
-                </button>
+                  onToggle={() => void toggle(action, key)}
+                />
               );
             },
           )}

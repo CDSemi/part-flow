@@ -5,12 +5,13 @@ PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
-`0020_phase13_worker_sessions` and `0021_phase13_badge_confirmation` add
-(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.4, §8.11,
-§8.12, §8.13, §10, §16, §19, §28; owner decisions OD-2, OD-3, OD-10,
-S2-F6). Later Phase 13 slices extend this module:
+`0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation` and
+`0022_phase13_undo_reason_policy` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §7, §8.4, §8.11, §8.12, §8.13, §10, §16, §19, §28; owner
+decisions OD-2, OD-3, OD-6, OD-10, S2-F6). Later Phase 13 slices extend
+this module:
 
-- exact head boundary: `0021_phase13_badge_confirmation` is the single
+- exact head boundary: `0022_phase13_undo_reason_policy` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -62,7 +63,13 @@ S2-F6). Later Phase 13 slices extend this module:
   `application_policy` columns (NOT NULL, default `true`), seeded `true`
   on the singleton; the upgrade keeps the existing policy and audit
   rows; the downgrade restores the 0020 boundary and refuses while an
-  option is off or a policy audit row records an option.
+  option is off or a policy audit row records an option;
+- the Undo reason policy (0022): `application_policy.undo_reason_required`
+  (boolean, NOT NULL, default `false`), seeded off; the upgrade keeps the
+  existing policy, audit and Movement rows; the downgrade restores the
+  0021 boundary and refuses while the policy is on or a
+  `correction-permissions` audit row exists, never because of a
+  `REVERSED` row carrying a reason.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -88,6 +95,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 
 from alembic import command
+from app.application import policies
 from app.domain.enums import AuditEntityType, WorkerIdentificationMode, WorkerSessionEndReason
 from app.infrastructure import models
 
@@ -100,7 +108,8 @@ _MACHINE_AUDIT_REVISION = "0017_phase13_machine_audit"
 _PN_CHECK_REVISION = "0018_phase13_pn_check_collation"
 _WORKER_IDENTITY_REVISION = "0019_phase13_worker_identity"
 _WORKER_SESSIONS_REVISION = "0020_phase13_worker_sessions"
-_HEAD_REVISION = "0021_phase13_badge_confirmation"
+_BADGE_CONFIRMATION_REVISION = "0021_phase13_badge_confirmation"
+_HEAD_REVISION = "0022_phase13_undo_reason_policy"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -110,6 +119,7 @@ _PN_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0018_phase13_pn_check_colla
 _WORKER_IDENTITY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0019_phase13_worker_identity.py"
 _WORKER_SESSIONS_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0020_phase13_worker_sessions.py"
 _BADGE_CONFIRMATION_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0021_phase13_badge_confirmation.py"
+_UNDO_REASON_POLICY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0022_phase13_undo_reason_policy.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -1283,7 +1293,11 @@ def test_worker_sessions_table_shape(migrated_engine: Engine) -> None:
         "created_at",
         "updated_at",
         *models.BADGE_CONFIRMATION_OPTIONS,  # 0021
+        "undo_reason_required",  # 0022
     }
+    undo_reason = policy["undo_reason_required"]
+    assert isinstance(undo_reason["type"], sa.Boolean) and undo_reason["nullable"] is False
+    assert str(undo_reason["default"]) == "false"
     timeout = policy["worker_session_timeout_minutes"]
     assert isinstance(timeout["type"], sa.Integer) and timeout["nullable"] is False
     assert str(timeout["default"]) == "15"
@@ -1922,6 +1936,198 @@ def test_upgrade_keeps_the_policy_and_its_audit_rows(admin_engine: Engine) -> No
                 assert _version(connection) == _HEAD_REVISION
                 assert _policy_row(connection) == (1, 30, True, True, True)
                 assert _rows(connection, "audit_events") == audits
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Undo reason policy (0022)
+# ---------------------------------------------------------------------------
+
+
+def _undo_reason_required(connection: Connection) -> object:
+    return connection.execute(
+        sa.text("SELECT undo_reason_required FROM application_policy")
+    ).scalar_one()
+
+
+def _insert_policy_audit(connection: Connection, entity_id: str, snapshot: object) -> None:
+    connection.execute(
+        sa.text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at,"
+            " before_data, after_data) VALUES ('UPDATED', 'ApplicationPolicy', :entity_id,"
+            " now(), CAST(:before AS jsonb), CAST(:after AS jsonb))"
+        ),
+        {"entity_id": entity_id, "before": json.dumps(snapshot), "after": json.dumps(snapshot)},
+    )
+
+
+def _insert_reversal_with_reason(connection: Connection, seeded: dict[str, int]) -> None:
+    """A station REVERSED row carrying a reason, compensating the seeded station RECEIVED."""
+    _execute(
+        connection,
+        "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type, quantity,"
+        " from_area_id, to_area_id, operation_id, station_id, reverses_movement_id, reason,"
+        " occurred_at, server_received_at, device_event_id) SELECT quantity_flow_id,"
+        " part_number, 'REVERSED', quantity, to_area_id, to_area_id, operation_id, station_id,"
+        " id, 'wrong PN', now(), now(), 'SEED-UNDO' FROM part_movements WHERE id = :id",
+        id=seeded["station_movement"],
+    )
+
+
+def test_undo_reason_policy_shape(migrated_engine: Engine) -> None:
+    columns = {
+        str(column["name"]): column
+        for column in inspect(migrated_engine).get_columns("application_policy")
+    }
+    column = columns["undo_reason_required"]
+    assert isinstance(column["type"], sa.Boolean)
+    assert column["nullable"] is False
+    assert str(column["default"]) == "false"
+
+
+def test_undo_reason_policy_migration_repeats_the_application_literals() -> None:
+    migration = _load_migration(_UNDO_REASON_POLICY_MIGRATION_FILE)
+    assert migration.down_revision == _BADGE_CONFIRMATION_REVISION
+    assert migration._SECTION == policies.CORRECTION_PERMISSIONS_SECTION
+    assert models.ApplicationPolicy.undo_reason_required.key == migration._COLUMN
+    source = _UNDO_REASON_POLICY_MIGRATION_FILE.read_text(encoding="utf-8")
+    assert f"entity_id = '{migration._SECTION}'" in source
+    assert f"WHERE {migration._COLUMN})" in source
+
+
+def test_undo_reason_policy_is_seeded_off(connection: Connection) -> None:
+    assert _undo_reason_required(connection) is False
+    savepoint = connection.begin_nested()
+    with pytest.raises(IntegrityError) as raised:
+        _execute(connection, "UPDATE application_policy SET undo_reason_required = NULL")
+    savepoint.rollback()
+    assert 'null value in column "undo_reason_required"' in str(raised.value.orig)
+    # A REVERSED row admits a reason, and none (F1: the CHECK predates 0022).
+    seeded = _seed_production(connection)
+    _insert_reversal_with_reason(connection, seeded)
+
+
+def test_downgrade_to_badge_confirmation_revision_drops_the_column(admin_engine: Engine) -> None:
+    name = "partflow_test_phase13_downgrade_s6"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _BADGE_CONFIRMATION_REVISION)
+        engine = create_engine(url)
+        try:
+            columns = {
+                str(column["name"]) for column in inspect(engine).get_columns("application_policy")
+            }
+            assert "undo_reason_required" not in columns
+            with engine.connect() as connection:
+                assert _version(connection) == _BADGE_CONFIRMATION_REVISION
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _undo_reason_required(connection) is False
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_undo_reason_downgrade(url: URL) -> None:
+    with pytest.raises(ProgrammingError, match="Undo reason policy configuration exists"):
+        command.downgrade(_alembic_config(url), _BADGE_CONFIRMATION_REVISION)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_the_undo_reason_policy_is_on(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _execute(connection, "UPDATE application_policy SET undo_reason_required = true")
+        _refused_undo_reason_downgrade(refused_database)
+        with engine.connect() as connection:
+            assert _undo_reason_required(connection) is True
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_correction_permissions_audit_exists(
+    refused_database: URL,
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_policy_audit(
+                connection, "correction-permissions", {"undo_reason_required": False}
+            )
+        _refused_undo_reason_downgrade(refused_database)
+        with engine.connect() as connection:
+            kept = connection.execute(
+                sa.text(
+                    "SELECT count(*) FROM audit_events WHERE entity_id = 'correction-permissions'"
+                )
+            ).scalar_one()
+            assert _undo_reason_required(connection) is False
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+def test_a_reversal_reason_alone_never_blocks_the_downgrade(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_reversal_with_reason(connection, _seed_production(connection))
+        command.downgrade(_alembic_config(refused_database), _BADGE_CONFIRMATION_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _BADGE_CONFIRMATION_REVISION
+            reasons = connection.execute(
+                sa.text("SELECT reason FROM part_movements WHERE movement_type = 'REVERSED'")
+            ).all()
+        assert [tuple(row) for row in reasons] == [("wrong PN",)]
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_keeps_the_policy_audit_and_reversal_rows(admin_engine: Engine) -> None:
+    """0021 → head keeps the stored policy, its audit rows and the Movements."""
+    name = "partflow_test_phase13_undo_reason_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _BADGE_CONFIRMATION_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(
+                    connection,
+                    "UPDATE application_policy SET worker_session_timeout_minutes = 30,"
+                    " badge_confirm_undo = false",
+                )
+                _insert_policy_audit(connection, "worker-sessions", {"badge_confirm_undo": False})
+                _insert_reversal_with_reason(connection, _seed_production(connection))
+                audits = _rows(connection, "audit_events")
+                movements = _rows(connection, "part_movements")
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _policy_row(connection) == (1, 30, True, True, False)
+                assert _undo_reason_required(connection) is False
+                assert _rows(connection, "audit_events") == audits
+                assert _rows(connection, "part_movements") == movements
         finally:
             engine.dispose()
     finally:

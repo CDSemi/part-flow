@@ -1,4 +1,4 @@
-"""Policy endpoints (Phase 13 slice 4 — Administration → Worker sessions).
+"""Policy endpoints (Phase 13 — Administration → Policies).
 
 HTTP surface of the global ``application_policy`` singleton. Routes
 stay thin: request schemas validate shape only (``extra="forbid"``,
@@ -18,6 +18,13 @@ handlers in ``app.api.errors`` translate typed failures.
   strict booleans; an empty body, a ``null`` or an extra field is 422);
   answers with the full stored policy, also when nothing changed. The
   per-Area overrides are Area fields (``/api/areas``).
+- ``GET /policies/correction-permissions`` — Administration → Correction
+  permissions (Phase 13 slice 6): the Undo reason policy; role-based
+  correction permissions are not configurable yet.
+- ``PUT /policies/correction-permissions`` — exactly
+  ``{"undo_reason_required": bool}`` (a missing field, a non-boolean, a
+  ``null`` or an extra field is 422); answers with the stored policy,
+  also when nothing changed.
 """
 
 import datetime
@@ -65,6 +72,26 @@ def _response(policy: ApplicationPolicy) -> WorkerSessionPolicyResponse:
     )
 
 
+class CorrectionPermissionsPolicyResponse(BaseModel):
+    undo_reason_required: bool
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class CorrectionPermissionsPolicyPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    undo_reason_required: StrictBool
+
+
+def _correction_permissions_response(
+    policy: ApplicationPolicy,
+) -> CorrectionPermissionsPolicyResponse:
+    return CorrectionPermissionsPolicyResponse(
+        undo_reason_required=policy.undo_reason_required, updated_at=policy.updated_at
+    )
+
+
 @router.get("/policies/worker-sessions")
 def get_worker_session_policy(session: SessionDep) -> WorkerSessionPolicyResponse:
     return _response(policies.get_policy(session))
@@ -79,3 +106,18 @@ def put_worker_session_policy(
         fields["timeout_minutes"] = fields.pop("worker_session_timeout_minutes")
     policy = policies.update_worker_session_policy(session, **fields)
     return _response(policy)
+
+
+@router.get("/policies/correction-permissions")
+def get_correction_permissions_policy(session: SessionDep) -> CorrectionPermissionsPolicyResponse:
+    return _correction_permissions_response(policies.get_policy(session))
+
+
+@router.put("/policies/correction-permissions")
+def put_correction_permissions_policy(
+    body: CorrectionPermissionsPolicyPutRequest, session: SessionDep
+) -> CorrectionPermissionsPolicyResponse:
+    policy = policies.update_correction_permissions_policy(
+        session, undo_reason_required=body.undo_reason_required
+    )
+    return _correction_permissions_response(policy)

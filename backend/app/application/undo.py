@@ -80,9 +80,15 @@ is on (Phase 13 slice 5): the confirming badge's Worker is signed in by
 this command and recorded on every REVERSED row; otherwise it is the
 client's final question (not provable here).
 
-Deliberate boundaries (no simulation of later phases): no
-reason-when-configured
-(the configuration does not exist before Phase 13), and no role
+**Reason.** The Undo accepts an optional free-text reason, recorded on
+every `REVERSED` row and part of the request fingerprint when given;
+while the Undo reason policy (Administration → Correction permissions,
+Phase 13 slice 6) is on, an Undo without one is refused (409
+`undo_reason_required`, nothing written) — judged after the idempotency
+fast path, so an Undo committed before the policy changed still
+replays.
+
+Deliberate boundary (no simulation of later phases): no role
 authorization — Operators/Managers/Admins arrive with Users/RBAC
 (Phase 14); until then the API surface carries no pretend permission
 check.
@@ -97,8 +103,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import station_identity
-from app.application.common import device_event_id_text
+from app.application import policies, station_identity
+from app.application.common import device_event_id_text, optional_text
 from app.application.errors import (
     ConflictError,
     IdempotencyConflictError,
@@ -138,6 +144,21 @@ UNDO_KEY: Final = "undo"
 # The database backstop against a double reversal (models.py).
 _REVERSES_UNIQUE_CONSTRAINT: Final = "uq_part_movements_reverses_movement_id"
 
+_REASON_REQUIRED: Final = (
+    "A reason is required to reverse this action. Enter the reason and confirm"
+    " again. Nothing was reversed."
+)
+_REASON_NOT_TEXT: Final = "The Undo reason must be plain text."
+
+
+class UndoReasonRequiredError(ConflictError):
+    """The Undo reason policy is on and the Undo carries no reason — nothing written.
+
+    409 + {"undo_reason_required": true}: the Scan Station shows the required
+    Reason field, keeps the draft and the device_event_id, and the operator
+    confirms again.
+    """
+
 
 class ReversedMovement(NamedTuple):
     """One compensating row and the original it undoes."""
@@ -174,6 +195,8 @@ class UndoResult(NamedTuple):
     device_event_id: str
     occurred_at: datetime.datetime
     created: bool
+    # The recorded reason of the reversal (also on a replay); None when none.
+    reason: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +429,9 @@ class UndoPreview(NamedTuple):
     # The Worker the reversal would record under the station Area's
     # current mode — a read; the command judges it again at confirmation.
     reversed_by: Worker | None
+    # The Undo reason policy now (Phase 13 slice 6) — a read; the
+    # command judges it again at confirmation.
+    reason_required: bool
 
 
 def undo_preview(session: Session, station_id: str, device_event_id: object) -> UndoPreview:
@@ -414,7 +440,9 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
     The Undo command re-judges eligibility under the row locks; this
     read prepares the §16 confirmation (original action, quantity,
     source and destination, Machine, timestamp, and the effect of the
-    reversal) and says whether Undo is currently possible and why not.
+    reversal) and says whether Undo is currently possible and why not,
+    and whether the Undo reason policy currently asks for a reason (the
+    command re-judges that too).
     """
     station, station_area = require_production_station(session, station_id)
     event_id = device_event_id_text(device_event_id)
@@ -496,6 +524,7 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
         restored=restored,
         worker=worker,
         reversed_by=reversed_by,
+        reason_required=policies.is_undo_reason_required(session),
     )
 
 
@@ -504,8 +533,25 @@ def undo_preview(session: Session, station_id: str, device_event_id: object) -> 
 # ---------------------------------------------------------------------------
 
 
+def _undo_reason(value: object) -> str | None:
+    """The operator's optional explanation: stripped; blank is absent (None).
+
+    NUL (U+0000) is refused here: PostgreSQL text cannot hold it, and the
+    driver would otherwise fail at flush with an unhandled DataError.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or "\x00" in value:
+        raise InvalidInputError(_REASON_NOT_TEXT)
+    return optional_text(value)
+
+
 def _request_fingerprint(
-    *, station_id: str, part_number: str, reverses_device_event_id: str
+    *,
+    station_id: str,
+    part_number: str,
+    reverses_device_event_id: str,
+    reason: str | None,
 ) -> str:
     normalized = {
         "command": "UNDO",
@@ -513,6 +559,10 @@ def _request_fingerprint(
         "part_number": part_number,
         "reverses_device_event_id": reverses_device_event_id,
     }
+    if reason is not None:
+        # Absent for a reason-less Undo, so every Undo committed before the
+        # reason existed keeps its stored fingerprint and still replays.
+        normalized["reason"] = reason
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -568,6 +618,7 @@ def _result_from_command(
         device_event_id=last.device_event_id,
         occurred_at=last.occurred_at,
         created=created,
+        reason=last.reason,
     )
 
 
@@ -593,6 +644,7 @@ def undo_command(
     part_number: object,
     reverses_device_event_id: object,
     device_event_id: object,
+    reason: object = None,
     confirming_badge: object = None,
 ) -> UndoResult:
     """Reverse one complete committed command, ONE transaction.
@@ -611,9 +663,13 @@ def undo_command(
             "The Undo needs its own device_event_id — it is a new production"
             " event and never reuses the id of the action it reverses."
         )
+    undo_reason = _undo_reason(reason)
     badge = station_identity.confirming_badge_text(confirming_badge)
     fingerprint = _request_fingerprint(
-        station_id=station_id, part_number=pn, reverses_device_event_id=reverses_id
+        station_id=station_id,
+        part_number=pn,
+        reverses_device_event_id=reverses_id,
+        reason=undo_reason,
     )
 
     # -- Idempotency fast path (SLICE1 §14) ------------------------------
@@ -665,9 +721,9 @@ def undo_command(
         )
 
     # -- Eligibility, authoritative under the locks ----------------------
-    reason = _ineligibility(session, station, rows)
-    if reason is not None:
-        raise ConflictError(f"{reason} Nothing was reversed.")
+    ineligible = _ineligibility(session, station, rows)
+    if ineligible is not None:
+        raise ConflictError(f"{ineligible} Nothing was reversed.")
 
     # -- The restoration plan (reads only, before any write) -------------
     plan = _plan_restoration(session, rows, flows)
@@ -714,6 +770,15 @@ def undo_command(
                 " quantity to it and cannot proceed. Reactivate the Area first."
                 " Nothing was reversed."
             )
+
+    # -- Undo reason policy (PROJECT_PROFILE §16 "reason when configured") --
+    # Configuration-dependent, so after the fast path, the re-check and every
+    # state refusal (CD10): a committed Undo always replays. Before the identity
+    # resolver, whose badge path stages the gate sign-in (slice 5): every
+    # refusal precedes the first staged write.
+    if undo_reason is None and policies.is_undo_reason_required(session):
+        raise UndoReasonRequiredError(_REASON_REQUIRED)
+
     identity = station_identity.resolve_station_identity(
         session, station, gate=station_identity.SensitiveAction.UNDO, confirming_badge=badge
     )
@@ -757,6 +822,7 @@ def undo_command(
                 source_machine_id=None,
                 destination_machine_id=None,
                 reverses_movement_id=original.id,
+                reason=undo_reason,
                 occurred_at=func.now(),
                 server_received_at=func.now(),
                 device_event_id=event_id,

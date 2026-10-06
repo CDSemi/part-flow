@@ -13,8 +13,12 @@
 // refusal of DONE / QUEUE / Undo (Phase 13 badge confirmation) is not a
 // rejection either: nothing was recorded under this `device_event_id`,
 // so the owner switches or re-opens its final gate (`useFinalGate`) and
-// the same intent is confirmed again. Production-safe: no mock data, no
-// JSX.
+// the same intent is confirmed again. An `undo_reason_required` refusal
+// (Phase 13 Undo reason policy) is not a rejection either: it is judged
+// after the idempotency fast path, so nothing is recorded under this
+// `device_event_id` — it also ends an unknown outcome — and the owner
+// asks for the reason before the same key is confirmed again.
+// Production-safe: no mock data, no JSX.
 
 import { useCallback, useRef, useState } from 'react';
 
@@ -23,6 +27,7 @@ import { newDeviceEventId } from '../../api/production-release';
 import {
   badgeGateRefusal,
   finalGateFor,
+  undoReasonRequired,
   workerSessionRequired,
   writeOutcomeUnknown,
 } from '../../api/scan-station';
@@ -71,6 +76,7 @@ export function useOneShotWrite<T>({
   onDone,
   onRejected,
   onGateRefusal,
+  onReasonRequired,
 }: {
   /** The request for THIS intent; called with the frozen key. */
   send: (deviceEventId: string) => Promise<T>;
@@ -94,6 +100,17 @@ export function useOneShotWrite<T>({
    * handler such a refusal is an ordinary rejection.
    */
   onGateRefusal?: (refusal: BadgeGateRefusal, message: string) => void;
+  /**
+   * The Undo reason policy refused a reason-less Undo (409
+   * `undo_reason_required`): no error, no rejection (`rejected` is left
+   * as it was), `onRejected` not called and the same `device_event_id`
+   * kept. The unknown-outcome state is CLEARED: the refusal was judged
+   * after the idempotency fast path and the post-lock re-check, so the
+   * outcome of an earlier unknown attempt is now known — nothing is
+   * recorded under this key. Without this handler such a refusal is an
+   * ordinary rejection.
+   */
+  onReasonRequired?: (message: string) => void;
 }): OneShotWrite<T> {
   const requireSession = useRequireWorkerSession();
   const deviceEventId = useRef(newDeviceEventId());
@@ -134,6 +151,15 @@ export function useOneShotWrite<T>({
         onGateRefusal(refusal, errorMessage(error));
         return;
       }
+      if (undoReasonRequired(error) && onReasonRequired) {
+        // Judged after the idempotency fast path and the post-lock
+        // re-check: nothing is recorded under this device_event_id, so
+        // an earlier unknown outcome is now known (not recorded).
+        setOutcomeUnknown(false);
+        setBusy(false);
+        onReasonRequired(errorMessage(error));
+        return;
+      }
       if (writeOutcomeUnknown(error)) {
         setOutcomeUnknown(true);
         setServerError(null);
@@ -155,6 +181,7 @@ export function useOneShotWrite<T>({
     onDone,
     onRejected,
     onGateRefusal,
+    onReasonRequired,
     requireSession,
   ]);
 
@@ -213,6 +240,13 @@ export interface FinalGateControl {
   scanBadge: (badge: string, write: GateWrite) => void;
   /** Cancel / Escape in either gate form: back to the summary. */
   cancel: () => void;
+  /**
+   * A refusal outside the gate changed the intent (the Undo reason):
+   * close any open gate, forget the last badge and drop a stale gate
+   * notice, so the next request opens the gate again — the changed
+   * intent is confirmed deliberately, a badge only by a new scan.
+   */
+  confirmAgain: () => void;
 }
 
 /**
@@ -336,6 +370,14 @@ export function useFinalGate({
       setForm(null);
       setError(null);
       if (noticeInGate) setNotice(null);
+    },
+    confirmAgain: () => {
+      badgeRef.current = null;
+      setGateRedo(true);
+      setForm(null);
+      setError(null);
+      setNotice(null);
+      setNoticeInGate(false);
     },
   };
 }

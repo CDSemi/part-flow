@@ -14,8 +14,8 @@ import { AdministrationView } from './AdministrationView';
 
 // Administration (GUI_DESIGN §9): the minimum environment setup
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
-// configuration — Workers and Worker sessions read and write the real
-// /api surface (faked in-memory here with the same routes and
+// configuration — Workers, Worker sessions and Correction permissions
+// read and write the real /api surface (faked in-memory here with the same routes and
 // semantics). Every other section presents itself honestly as not
 // available yet.
 
@@ -95,6 +95,8 @@ interface FakeState {
   sessionTimeout: number;
   /** `application_policy` badge-confirmation options. */
   badgeConfirm: { done: boolean; queue: boolean; undo: boolean };
+  /** `application_policy` Undo reason policy. */
+  undoReasonRequired: boolean;
   nextId: number;
 }
 
@@ -170,6 +172,7 @@ function seedState(): FakeState {
     ],
     sessionTimeout: 15,
     badgeConfirm: { done: true, queue: true, undo: true },
+    undoReasonRequired: false,
     nextId: 100,
   };
 }
@@ -187,6 +190,8 @@ let avatarVersion: number;
 let policyFailure: { status: number; detail: string } | null;
 /** While set, a policy PUT stays pending until it resolves. */
 let policyHold: Promise<void> | null;
+/** A refusal of every `/api/policies/correction-permissions` call, if set. */
+let correctionFailure: { status: number; detail: string } | null;
 
 const AREA_TIMEOUT_REFUSAL =
   "An Area's Worker session timeout must be a whole number of minutes from 1 to 720, or empty to use the default.";
@@ -372,6 +377,29 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       badge_confirm_done: state.badgeConfirm.done,
       badge_confirm_queue: state.badgeConfirm.queue,
       badge_confirm_undo: state.badgeConfirm.undo,
+      updated_at: T0,
+    });
+  }
+  if (url === '/api/policies/correction-permissions') {
+    if (correctionFailure) {
+      return json(
+        { detail: correctionFailure.detail },
+        correctionFailure.status,
+      );
+    }
+    if (method === 'PUT') {
+      if (policyHold) await policyHold;
+      // Exactly one required boolean field (no partial merge).
+      if (
+        Object.keys(body).length !== 1 ||
+        typeof body.undo_reason_required !== 'boolean'
+      ) {
+        return json({ detail: 'Invalid request.' }, 422);
+      }
+      state.undoReasonRequired = body.undo_reason_required;
+    }
+    return json({
+      undo_reason_required: state.undoReasonRequired,
       updated_at: T0,
     });
   }
@@ -598,6 +626,7 @@ beforeEach(() => {
   avatarVersion = 0;
   policyFailure = null;
   policyHold = null;
+  correctionFailure = null;
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -1782,6 +1811,16 @@ test('offline disables the configuration entry actions; reading stays available'
   expect(
     within(dialog).getByRole('button', { name: 'Save changes' }),
   ).toBeDisabled();
+
+  // The Undo reason switch reads the stored value but cannot be saved.
+  openSection('Correction permissions');
+  const undoReason = await screen.findByRole('switch', {
+    name: UNDO_REASON_SWITCH,
+  });
+  expect(undoReason).toHaveAttribute('aria-checked', 'false');
+  expect(undoReason).toBeDisabled();
+  fireEvent.click(undoReason);
+  expect(writes).toEqual([]);
 });
 
 /* ============ Worker sessions (Phase 13 — real timeout policy) ============ */
@@ -2093,4 +2132,108 @@ test('Worker sessions renders server refusals in place, a failed load with Retry
       screen.getByRole('dialog', { name: 'Session timeout — Lathe' }),
     ).getByRole('button', { name: 'Save' }),
   ).toBeDisabled();
+});
+
+/* ============ Correction permissions (Phase 13 — Undo reason policy) ============ */
+
+const UNDO_REASON_SWITCH = 'Require a reason for every Undo';
+
+async function openCorrectionPermissions() {
+  renderAdmin();
+  openSection('Correction permissions');
+  return screen.findByRole('switch', { name: UNDO_REASON_SWITCH });
+}
+
+test('Correction permissions shows the real Undo reason switch and states the role-based part honestly', async () => {
+  const toggle = await openCorrectionPermissions();
+
+  expect(toggle).toHaveAttribute('aria-checked', 'false');
+  expect(toggle.querySelector('.swstate')).toHaveTextContent('Off');
+  expect(toggle).toHaveTextContent(
+    'Applies to every Area and every Scan Station.',
+  );
+  expect(screen.getByRole('heading', { name: 'Undo reason' })).toBeVisible();
+  expect(document.body.textContent).toContain(
+    'When On, every Undo at a Scan Station asks for a reason before the reversal can be confirmed, and a reversal without a reason is refused. The reason is recorded with the reversal and shown in Tracking. When Off, Undo asks for no reason.',
+  );
+  expect(
+    screen.getByRole('heading', { name: 'Who may undo or correct' }),
+  ).toBeVisible();
+  expect(
+    screen.getByText(
+      'Role-based correction permissions are not configurable yet.',
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getAllByRole('switch')).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
+  expect(screen.queryByRole('note')).toBeNull();
+  const main = document.querySelector('.ad-main')!;
+  expect(main.textContent).not.toContain('not available yet');
+  expect(main.textContent).not.toContain('Roles & permissions');
+  expect(main.textContent).not.toMatch(/sign-in/i);
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+});
+
+test('the Undo reason switch PUTs exactly its toggled value, is disabled in flight and re-reads', async () => {
+  const toggle = await openCorrectionPermissions();
+
+  let release: () => void = () => undefined;
+  policyHold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toBeDisabled());
+  release();
+  policyHold = null;
+
+  await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+  expect(toggle.querySelector('.swstate')).toHaveTextContent('On');
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/correction-permissions',
+      body: { undo_reason_required: true },
+    },
+  ]);
+  expect(state.undoReasonRequired).toBe(true);
+  await waitFor(() => expect(toggle).toBeEnabled());
+
+  // Back off: again exactly the one field.
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+  expect(writes[1].body).toEqual({ undo_reason_required: false });
+  // The Worker sessions policy is never written by this section.
+  expect(writes.every((item) => !item.url.includes('worker-sessions'))).toBe(
+    true,
+  );
+});
+
+test('a refused Undo reason switch keeps the stored value with the reason; a failed load offers Retry', async () => {
+  const toggle = await openCorrectionPermissions();
+  correctionFailure = {
+    status: 422,
+    detail: 'The Undo reason setting must be On or Off.',
+  };
+  fireEvent.click(toggle);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'The Undo reason setting must be On or Off.',
+  );
+  expect(toggle).toHaveAttribute('aria-checked', 'false');
+  expect(toggle).toBeEnabled();
+  expect(state.undoReasonRequired).toBe(false);
+  cleanup();
+
+  correctionFailure = { status: 500, detail: 'Database unavailable.' };
+  renderAdmin();
+  openSection('Correction permissions');
+  expect(
+    await screen.findByText(
+      'Correction permission settings could not be loaded.',
+    ),
+  ).toBeInTheDocument();
+  correctionFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('switch', { name: UNDO_REASON_SWITCH }),
+  ).toHaveAttribute('aria-checked', 'false');
 });

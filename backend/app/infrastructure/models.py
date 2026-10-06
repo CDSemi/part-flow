@@ -244,8 +244,10 @@ MOVEMENT_REASON_SQL = (
 # The free-text explanation is mandatory exactly where the domain
 # requires one (PROJECT_PROFILE §8.11): Scrap, quantity adjustment, and
 # every Movement carrying a typed movement_reason (Repair). Other
-# Movements may carry none (an Undo reason becomes required only when
-# the Phase 13+ configuration for it exists).
+# Movements may carry none; a `REVERSED` row carries one when the Undo
+# command received it, and the command requires it while the Undo
+# reason policy is on (`application_policy.undo_reason_required`,
+# Phase 13) — configuration-dependent, so never a CHECK.
 MOVEMENT_REASON_REQUIRED_SQL = (
     "reason IS NOT NULL"
     " OR (movement_type NOT IN ('SCRAPPED', 'QUANTITY_ADJUSTED')"
@@ -853,6 +855,10 @@ class ApplicationPolicy(Base):
     Scan Station actions (PROJECT_PROFILE §19; default on) — they decide
     only the FORM of the always-present final gate in Scanned-session
     Areas (`station_identity.final_gate`).
+
+    Slice 6 adds the Undo reason policy of Administration → Correction
+    permissions (PROJECT_PROFILE §16 "require a reason when configured";
+    owner default OD-6: one global switch, default off).
     """
 
     __tablename__ = "application_policy"
@@ -866,6 +872,10 @@ class ApplicationPolicy(Base):
     badge_confirm_done: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     badge_confirm_queue: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     badge_confirm_undo: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    # The Undo reason policy: while on, the Undo command refuses a reversal
+    # without a reason. Enforced by the command — never by a CHECK, which
+    # cannot depend on configuration.
+    undo_reason_required: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

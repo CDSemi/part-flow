@@ -599,6 +599,25 @@ export function workerSessionRequired(error: unknown): boolean {
   );
 }
 
+/**
+ * True for the 409 the server answers an Undo without a reason while
+ * the Undo reason policy is on (`undo_reason_required`). Nothing was
+ * reversed and nothing is recorded under the request's
+ * `device_event_id` (judged after the idempotency fast path): the
+ * summary asks for the reason and the operator confirms again under
+ * the same key.
+ */
+export function undoReasonRequired(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    typeof error.body === 'object' &&
+    error.body !== null &&
+    (error.body as { undo_reason_required?: unknown }).undo_reason_required ===
+      true
+  );
+}
+
 /** A typed refusal of a sensitive action's final gate (nothing was
  * recorded): the gate form changed (`REQUIRED` — the server now wants a
  * badge; `NOT_EXPECTED` — it now wants the question), or the confirming
@@ -1560,6 +1579,9 @@ export interface UndoPreview {
   /** The Worker the reversal would record under the station Area's
    * current mode (server-computed); null when none. */
   reversedBy: WorkerRef | null;
+  /** The Undo reason policy now — the summary asks for a reason when
+   * true; the server re-judges it. */
+  reasonRequired: boolean;
 }
 
 interface UndoMovementSummaryWire {
@@ -1595,6 +1617,7 @@ interface UndoPreviewWire {
   restored: RestoredFlowPreviewWire[];
   worker: WorkerRefWire | null;
   reversed_by: WorkerRefWire | null;
+  reason_required: boolean;
 }
 
 /**
@@ -1639,6 +1662,7 @@ export async function getUndoPreview(
     })),
     worker: wire.worker ? toWorkerRef(wire.worker) : null,
     reversedBy: wire.reversed_by ? toWorkerRef(wire.reversed_by) : null,
+    reasonRequired: wire.reason_required,
   };
 }
 
@@ -1653,6 +1677,10 @@ export interface UndoInput {
   /** The Worker badge scanned in the BADGE-form final gate, sent as
    * typed (the server canonicalizes); never part of the intent. */
   confirmingBadge?: string | null;
+  /** The operator's explanation of the reversal — part of the intent;
+   * sent trimmed and only when non-blank (required by the server while
+   * the Undo reason policy is on). */
+  reason?: string | null;
 }
 
 export interface ReversedMovement {
@@ -1717,11 +1745,16 @@ interface UndoResultWire {
  * server signs that Worker in and records it on every REVERSED row, or
  * refuses with nothing reversed — 409 `badge_confirmation_required`,
  * 409 `badge_confirmation_not_expected`, 422 `badge_not_recognized`
- * (`badgeGateRefusal`).
+ * (`badgeGateRefusal`). An optional `reason` is recorded on every
+ * REVERSED row; while the Undo reason policy is on, an Undo without one
+ * is refused with nothing reversed — 409 `undo_reason_required`
+ * (`undoReasonRequired`).
  */
 export async function undoProductionCommand(
   input: UndoInput,
 ): Promise<UndoResult> {
+  // Absent unless non-blank: a reason-less Undo keeps its exact body.
+  const reason = input.reason?.trim() ?? '';
   const { status, data } = await apiRequestWithStatus<UndoResultWire>(
     `/api/scan-stations/${encodeURIComponent(input.stationId)}/undos`,
     {
@@ -1733,6 +1766,7 @@ export async function undoProductionCommand(
         ...(input.confirmingBadge != null
           ? { confirming_badge: input.confirmingBadge }
           : {}),
+        ...(reason ? { reason } : {}),
       },
     },
   );

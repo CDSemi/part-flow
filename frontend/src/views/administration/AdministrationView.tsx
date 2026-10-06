@@ -6,6 +6,7 @@ import { getViewStatePreview } from '../../app/view-state';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { AreasSection } from './AreasSection';
 import { BarcodeConfigurationSection } from './BarcodeConfigurationSection';
+import { CorrectionPermissionsSection } from './CorrectionPermissionsSection';
 import { DepartmentsSection } from './DepartmentsSection';
 import { OperationsSection } from './OperationsSection';
 import { ScanStationsSection } from './ScanStationsSection';
@@ -20,10 +21,11 @@ import type { AdminSection } from './sections';
 // sections — Departments, Areas, Operations, Scan Stations, Barcode
 // configuration — read and write the real configuration through the
 // /api surface, and so do the full Administration phase (Phase 13)
-// sections built so far: Workers, and Worker sessions (the real
-// sliding inactivity timeout — default and per-Area overrides). Every
-// other section arrives later in that phase and presents itself
-// honestly as not available yet.
+// sections built so far: Workers, Worker sessions (the real sliding
+// inactivity timeout — default and per-Area overrides) and Correction
+// permissions (the real Undo reason policy). Every other section
+// arrives later in that phase and presents itself honestly as not
+// available yet.
 
 export function AdministrationView() {
   const preview = getViewStatePreview();
@@ -94,6 +96,8 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <BarcodeConfigurationSection />;
     case 'worker-sessions':
       return <WorkerSessionsSection />;
+    case 'correction-permissions':
+      return <CorrectionPermissionsSection />;
     default:
       return <PlaceholderSection section={section} entryAction />;
   }
@@ -103,8 +107,8 @@ function SectionBody({ section }: { section: AdminSection }) {
  * One later-phase section, presented honestly: the entry action that
  * does not exist yet is disabled (never made to appear functional) and
  * the panel states when the section becomes real. All Phase 3.5
- * minimum-environment sections, Workers and Worker sessions are real
- * above — every placeholder here belongs to the later full
+ * minimum-environment sections, Workers, Worker sessions and
+ * Correction permissions are real above — every placeholder here belongs to the later full
  * Administration phase.
  */
 function PlaceholderSection({

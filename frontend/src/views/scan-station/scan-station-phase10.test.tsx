@@ -441,6 +441,7 @@ function handle(url: string, method: string, body: unknown): Response {
       restored: [],
       worker: null,
       reversed_by: null,
+      reason_required: false,
     });
   }
   const suggest = /^\/api\/allocations\/suggestion\?(.*)$/.exec(url);

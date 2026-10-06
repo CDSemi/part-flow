@@ -1,4 +1,4 @@
-"""Global application policies (Phase 13 slice 4 — Administration → Worker sessions).
+"""Global application policies (Phase 13 — Administration → Policies).
 
 Application-layer read/write of the ``application_policy`` singleton
 (PLAN CD3): one typed row, seeded by its migration, so it always exists;
@@ -9,7 +9,11 @@ per-Area override lives on the Area and is written through the Area
 service (`environment`), audited as the Area. Slice 5 adds the same
 section's three badge-confirmation options (`badge_confirm_done`,
 `badge_confirm_queue`, `badge_confirm_undo`; PROFILE §19, default on),
-read by `station_identity.final_gate`.
+read by `station_identity.final_gate`. Slice 6 adds the Correction
+permissions section's Undo reason policy (`undo_reason_required`;
+PROFILE §16 "require a reason when configured", owner default OD-6: one
+global switch, default off), read by the Undo command and its preview
+through the column-only `is_undo_reason_required`.
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -17,17 +21,20 @@ writes nothing, and an effective change appends exactly one
 ``audit_events`` row in the same transaction (entity
 ``ApplicationPolicy``, ``entity_id`` the section, ``actor_reference``
 NULL until Phase 14, the full section as the before / after snapshot).
-A section write is a PARTIAL merge: a field not given keeps its stored
-value, and the given fields merge onto the locked row, so two
-administrators changing different fields both keep their change. A
-policy change never touches open Worker Sessions and never rewrites
-history: it applies from each session's next refresh or sign-in, and
-from each command's own read.
+A section write assigns only its own section's columns, so writes of
+two sections serialize on the row lock and never overwrite each other;
+``updated_at`` is the ONE row-level timestamp every section's effective
+write moves. The Worker sessions write is a PARTIAL merge: a field not
+given keeps its stored value, and the given fields merge onto the
+locked row, so two administrators changing different fields both keep
+their change. A policy change never touches open Worker Sessions, open
+dialogs or Movements and never rewrites history: it applies from each
+session's next refresh or sign-in, and from each command's own read.
 """
 
 from typing import Any, Final, TypeGuard
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.application import audit
@@ -43,6 +50,8 @@ from app.infrastructure.models import (
 _POLICY_ID: Final = 1
 # The audit entity_id of the Worker sessions section (CD3).
 WORKER_SESSIONS_SECTION: Final = "worker-sessions"
+# The audit entity_id of the Correction permissions section (CD3).
+CORRECTION_PERMISSIONS_SECTION: Final = "correction-permissions"
 # Lock-first mode of a policy write: the FOR NO KEY UPDATE its own UPDATE takes.
 _EDIT_LOCK: Final = {"key_share": True}
 
@@ -129,3 +138,51 @@ def update_worker_session_policy(
     )
     commit(session, {})
     return policy
+
+
+def _correction_permissions_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {"undo_reason_required": policy.undo_reason_required}
+
+
+def update_correction_permissions_policy(
+    session: Session, *, undo_reason_required: object
+) -> ApplicationPolicy:
+    """Turn the Undo reason requirement on or off; a no-op writes and audits nothing."""
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    if not isinstance(undo_reason_required, bool):
+        raise InvalidInputError("The Undo reason setting must be On or Off.")
+    if policy.undo_reason_required == undo_reason_required:
+        return policy
+    before = _correction_permissions_snapshot(policy)
+    policy.undo_reason_required = undo_reason_required
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=CORRECTION_PERMISSIONS_SECTION,
+        before_data=before,
+        after_data=_correction_permissions_snapshot(policy),
+    )
+    commit(session, {})
+    return policy
+
+
+def is_undo_reason_required(session: Session) -> bool:
+    """The Undo reason policy now, read as one column (unlocked).
+
+    A column select loads no ApplicationPolicy instance into the Session,
+    so the policy reads of the identity resolver later in the same Undo
+    (worker-session timeout, badge-confirmation options — judged after
+    their own locks) still query the committed row themselves.
+    """
+    value = session.scalar(
+        select(ApplicationPolicy.undo_reason_required).where(ApplicationPolicy.id == _POLICY_ID)
+    )
+    if value is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    return value

@@ -576,6 +576,7 @@ function handle(url: string, method: string, body: unknown): Response {
       ],
       worker: record.worker ? workerRef(record.worker) : null,
       reversed_by: reversedBy ? workerRef(reversedBy) : null,
+      reason_required: false,
     });
   }
   if (/\/undos$/.test(url) && method === 'POST') {

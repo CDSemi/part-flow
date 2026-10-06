@@ -50,7 +50,8 @@ import {
  * auditable SCRAPPED operation for the total) and the command-level
  * Undo (the structured reversal summary from the server's undo
  * preview, the final warning question, and the confirmed reversal that
- * keeps the original history). Every dialog is one temporary wizard
+ * keeps the original history; while the Undo reason policy is on, the
+ * summary asks for a required reason). Every dialog is one temporary wizard
  * under the shared one-shot write protocol: nothing is recorded before
  * the final confirmation, success reads only after the server
  * confirmed the write, a lost response freezes the intent behind the
@@ -656,6 +657,36 @@ export function UndoDialog({
   onAbandonUnknown: () => void;
 }) {
   const pn = preview.partNumber;
+  // The Undo reason (PROJECT_PROFILE §16 "require a reason when
+  // configured"): while the server's Undo reason policy is on, the
+  // summary asks for a required reason before the final gate. The
+  // requirement is latched once asked — by the preview or by the
+  // server's typed refusal — so the field never disappears while its
+  // draft would still be sent: what is sent is what the operator sees.
+  const reasonRef = useRef<HTMLInputElement>(null);
+  const [reason, setReason] = useState('');
+  const [reasonAsked, setReasonAsked] = useState(preview.reasonRequired);
+  useEffect(() => {
+    if (preview.reasonRequired) setReasonAsked(true);
+  }, [preview.reasonRequired]);
+  // The server's explanation of its typed refusal, until the next send.
+  const [reasonNotice, setReasonNotice] = useState<string | null>(null);
+  // The last request was refused for its missing reason (cleared by the
+  // next send): the draft is editable again even after a rejection.
+  const [reasonRefused, setReasonRefused] = useState(false);
+  // Bumped by the typed refusal to move focus to the field again.
+  const [reasonFocus, setReasonFocus] = useState(0);
+  const reasonRequired = preview.reasonRequired || reasonAsked;
+  const reasonMissing = reasonRequired && reason.trim() === '';
+  // The reason of this intent — null whenever the field was never shown,
+  // so the request body stays exactly the reason-less one.
+  const sentReason =
+    reasonRequired && reason.trim() !== '' ? reason.trim() : null;
+  const showReason = preview.eligible && reasonRequired;
+  useEffect(() => {
+    if (showReason) reasonRef.current?.focus();
+  }, [showReason, reasonFocus]);
+
   // Final-confirmation gate (GUI_DESIGN §4.5/§4.6, §4.12; PROJECT_PROFILE
   // §16, §19): the summary's `Confirm reversal` opens the warning-toned
   // final question before anything is reversed — or a Worker badge scan
@@ -663,23 +694,56 @@ export function UndoDialog({
   // request and the server records its Worker on every REVERSED row.
   const gate = useFinalGate({ station, action: 'UNDO', onGateChanged });
 
+  /** The server refused the reason-less Undo (nothing recorded): ask
+   * for the reason, keep every selection and the `device_event_id`, and
+   * open the gate again on the next Confirm (a badge only by a new
+   * scan). */
+  function onReasonRequired(message: string) {
+    setReasonAsked(true);
+    setReasonRefused(true);
+    setReasonNotice(message);
+    gate.confirmAgain();
+    setReasonFocus((count) => count + 1);
+  }
+
   const write = useOneShotWrite<UndoResult>({
     writeBlocked,
     onRejected,
     onGateRefusal: gate.onGateRefusal,
-    send: (deviceEventId) =>
-      undoProductionCommand({
+    onReasonRequired,
+    send: (deviceEventId) => {
+      setReasonNotice(null);
+      setReasonRefused(false);
+      return undoProductionCommand({
         stationId: station.stationId,
         partNumber: pn,
         reversesDeviceEventId: preview.reversesDeviceEventId,
         deviceEventId,
         confirmingBadge: gate.badge(),
-      }),
+        reason: sentReason,
+      });
+    },
     onDone,
   });
 
+  // The reason is part of the frozen intent: read-only while in flight,
+  // after an unknown outcome (the retry resends it verbatim) and after a
+  // generic refusal (Retry resends the same request); editable again
+  // after the typed reason refusal.
+  const reasonLocked =
+    write.busy || write.outcomeUnknown || (write.rejected && !reasonRefused);
+  // A missing reason blocks Confirm only while it can still be entered:
+  // a frozen intent (unknown outcome, generic refusal) is resent exactly
+  // as it was first sent, and the server judges it.
+  const reasonBlocks = reasonMissing && !reasonLocked;
+
   function requestConfirm() {
     if (write.busy || writeBlocked || previewRefreshing) return;
+    // A missing required reason sends nothing and opens no gate.
+    if (reasonBlocks) {
+      reasonRef.current?.focus();
+      return;
+    }
     // An unknown outcome — or a refused question-form request — resends
     // the SAME request without asking again; otherwise the gate opens
     // (a badge-form retry asks for a NEW scan). See useFinalGate.
@@ -729,6 +793,7 @@ export function UndoDialog({
       Are you sure you want to reverse <b>{actionText}</b> —{' '}
       <b>{preview.quantity} pcs</b> of <b className="mono">{pn}</b>?{' '}
       {effects.join(' ')} The original history stays recorded for audit.
+      {sentReason !== null ? ` Reason: ${sentReason}.` : null}
     </>
   );
 
@@ -814,6 +879,30 @@ export function UndoDialog({
               The original history stays recorded for audit — the reversal is
               recorded as its own new event.
             </Guidance>
+            {showReason ? (
+              <>
+                {reasonNotice ? (
+                  <Guidance tone="warn">{reasonNotice}</Guidance>
+                ) : null}
+                <label className="ss-reasonlbl" htmlFor="undo-reason">
+                  Reason <span className="field-required">(required)</span>
+                </label>
+                <div className="ss-fieldhint">
+                  This reason will be included in the reversal history.
+                </div>
+                <input
+                  id="undo-reason"
+                  ref={reasonRef}
+                  className="field"
+                  autoComplete="off"
+                  placeholder="e.g. scanned the wrong Part Number"
+                  value={reason}
+                  readOnly={reasonLocked}
+                  aria-readonly={reasonLocked}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              </>
+            ) : null}
             <WriteGuidance
               outcomeUnknown={write.outcomeUnknown}
               serverError={write.serverError}
@@ -837,7 +926,11 @@ export function UndoDialog({
                       ? 'Recording…'
                       : 'Confirm reversal',
                 onClick: requestConfirm,
-                disabled: write.busy || writeBlocked || previewRefreshing,
+                disabled:
+                  write.busy ||
+                  writeBlocked ||
+                  previewRefreshing ||
+                  reasonBlocks,
                 danger: true,
               }}
             />

@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4 and 5): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5):
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5 and 6): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -277,7 +277,9 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   the per-Area timeout override, the append-only `worker_sessions` table
   and `part_movements.scan_session_id`; the downgrade refuses;
   `0021_phase13_badge_confirmation` adds the three badge-confirmation
-  options to `application_policy`; the downgrade refuses)
+  options to `application_policy`; the downgrade refuses;
+  `0022_phase13_undo_reason_policy` adds the Undo reason option to
+  `application_policy`; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -725,8 +727,9 @@ integration):
   `tests/test_environment_parent_activity_api.py`,
   `tests/test_machine_audit_api.py`,
   `tests/test_worker_identity_api.py`,
-  `tests/test_worker_sessions_api.py`, and
-  `tests/test_badge_confirmation_api.py` — **integration** tests that
+  `tests/test_worker_sessions_api.py`,
+  `tests/test_badge_confirmation_api.py`, and
+  `tests/test_undo_reason_policy_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -746,8 +749,9 @@ integration):
   (`0014_phase13_workers`, `0015_phase13_badge_check`,
   `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
   `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
-  `0020_phase13_worker_sessions` and
-  `0021_phase13_badge_confirmation`: the `workers`
+  `0020_phase13_worker_sessions`,
+  `0021_phase13_badge_confirmation` and
+  `0022_phase13_undo_reason_policy`: the `workers`
   table's constraints, the widened audit vocabulary including the
   environment audit entities, the refusing
   downgrades, and
