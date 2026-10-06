@@ -6,13 +6,14 @@ verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
 `0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation`,
-`0022_phase13_undo_reason_policy`, `0023_phase13_part_number_master` and
-`0024_phase13_planned_routes` add (IMPLEMENTATION_ROADMAP Phase 13;
-PROJECT_PROFILE §7, §8.1, §8.4, §8.8–§8.11, §8.12, §8.13, §10, §16, §19,
-§21, §28; owner decisions OD-2, OD-3, OD-6, OD-10, OD-11, S2-F6). Later
-Phase 13 slices extend this module:
+`0022_phase13_undo_reason_policy`, `0023_phase13_part_number_master`,
+`0024_phase13_planned_routes` and `0025_phase13_display_settings` add
+(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.1, §8.4,
+§8.8–§8.11, §8.12, §8.13, §10, §16, §19, §21, §28; owner decisions
+OD-2, OD-3, OD-5, OD-6, OD-10, OD-11, S2-F6). Later Phase 13 slices
+extend this module:
 
-- exact head boundary: `0024_phase13_planned_routes` is the single
+- exact head boundary: `0025_phase13_display_settings` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -86,7 +87,17 @@ Phase 13 slices extend this module:
   the audit entity CHECK — which the hand-written model CHECK names too;
   the upgrade keeps every template, step, snapshot and audit row (the new
   columns NULL); the downgrade restores the 0023 boundary and refuses
-  while a preferred Machine or a `RouteTemplate` audit row exists.
+  while a preferred Machine or a `RouteTemplate` audit row exists;
+- display settings (0025): `departments.board_seconds_per_row` /
+  `board_min_page_seconds` (integer, NOT NULL, defaults 3 / 6) and the
+  Due Soon policy columns `application_policy.due_soon_min_days` /
+  `due_soon_lead_time_percent` / `due_soon_max_days` (defaults 2 / 15 /
+  7) with their exact CHECK names and literals; the upgrade gives every
+  existing Department and the singleton the defaults and keeps the
+  earlier policy values and audit rows; the downgrade restores the 0024
+  boundary and refuses while a value differs from its default, a
+  `due-soon` audit row exists or a Department audit row changed a
+  rotation setting.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -129,7 +140,8 @@ _WORKER_SESSIONS_REVISION = "0020_phase13_worker_sessions"
 _BADGE_CONFIRMATION_REVISION = "0021_phase13_badge_confirmation"
 _UNDO_REASON_POLICY_REVISION = "0022_phase13_undo_reason_policy"
 _PART_NUMBER_MASTER_REVISION = "0023_phase13_part_number_master"
-_HEAD_REVISION = "0024_phase13_planned_routes"
+_PLANNED_ROUTES_REVISION = "0024_phase13_planned_routes"
+_HEAD_REVISION = "0025_phase13_display_settings"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -142,6 +154,7 @@ _BADGE_CONFIRMATION_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0021_phase13_badg
 _UNDO_REASON_POLICY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0022_phase13_undo_reason_policy.py"
 _PART_NUMBER_MASTER_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0023_phase13_part_number_master.py"
 _PLANNED_ROUTES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0024_phase13_planned_routes.py"
+_DISPLAY_SETTINGS_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0025_phase13_display_settings.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -1249,6 +1262,11 @@ _SESSION_FOREIGN_KEYS = {
 _POLICY_CHECKS = {
     "ck_application_policy_singleton",
     "ck_application_policy_worker_session_timeout_range",
+    # 0025
+    "ck_application_policy_due_soon_min_days_range",
+    "ck_application_policy_due_soon_max_days_range",
+    "ck_application_policy_due_soon_lead_time_percent_range",
+    "ck_application_policy_due_soon_window_order",
 }
 _SESSION_FK = "fk_part_movements_scan_session_worker_sessions"
 # What 0020 adds outside its own tables: (table, constraint).
@@ -1316,6 +1334,9 @@ def test_worker_sessions_table_shape(migrated_engine: Engine) -> None:
         "updated_at",
         *models.BADGE_CONFIRMATION_OPTIONS,  # 0021
         "undo_reason_required",  # 0022
+        "due_soon_min_days",  # 0025
+        "due_soon_lead_time_percent",  # 0025
+        "due_soon_max_days",  # 0025
     }
     undo_reason = policy["undo_reason_required"]
     assert isinstance(undo_reason["type"], sa.Boolean) and undo_reason["nullable"] is False
@@ -2657,3 +2678,433 @@ def test_downgrade_refuses_while_route_template_audit_history_exists(
         assert kept == 1
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Department display settings and the Due Soon policy (0025)
+# ---------------------------------------------------------------------------
+
+# (table, column) → server default.
+_DISPLAY_SETTINGS_COLUMNS = {
+    ("departments", "board_seconds_per_row"): "3",
+    ("departments", "board_min_page_seconds"): "6",
+    ("application_policy", "due_soon_min_days"): "2",
+    ("application_policy", "due_soon_lead_time_percent"): "15",
+    ("application_policy", "due_soon_max_days"): "7",
+}
+# Constraint name → (table, model constant).
+_DISPLAY_SETTINGS_CHECKS = {
+    "ck_departments_board_seconds_per_row_range": (
+        "departments",
+        models.DEPARTMENT_BOARD_SECONDS_PER_ROW_SQL,
+    ),
+    "ck_departments_board_min_page_seconds_range": (
+        "departments",
+        models.DEPARTMENT_BOARD_MIN_PAGE_SECONDS_SQL,
+    ),
+    "ck_application_policy_due_soon_min_days_range": (
+        "application_policy",
+        models.POLICY_DUE_SOON_MIN_DAYS_SQL,
+    ),
+    "ck_application_policy_due_soon_max_days_range": (
+        "application_policy",
+        models.POLICY_DUE_SOON_MAX_DAYS_SQL,
+    ),
+    "ck_application_policy_due_soon_lead_time_percent_range": (
+        "application_policy",
+        models.POLICY_DUE_SOON_PERCENT_SQL,
+    ),
+    "ck_application_policy_due_soon_window_order": (
+        "application_policy",
+        models.POLICY_DUE_SOON_ORDER_SQL,
+    ),
+}
+_DEFAULT_DEPARTMENT_SNAPSHOT = {
+    "name": "D",
+    "is_active": True,
+    "board_seconds_per_row": 3,
+    "board_min_page_seconds": 6,
+}
+
+
+def _due_soon_row(connection: Connection) -> tuple[object, ...]:
+    return tuple(
+        connection.execute(
+            sa.text(
+                "SELECT due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days"
+                " FROM application_policy"
+            )
+        ).one()
+    )
+
+
+def _department_settings(connection: Connection) -> list[tuple[object, ...]]:
+    return [
+        tuple(row)
+        for row in connection.execute(
+            sa.text(
+                "SELECT name, board_seconds_per_row, board_min_page_seconds FROM departments"
+                " ORDER BY id"
+            )
+        )
+    ]
+
+
+def _insert_department_audit(
+    connection: Connection, event_type: str, before: object, after: object
+) -> None:
+    connection.execute(
+        sa.text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at,"
+            " before_data, after_data) VALUES (:event_type, 'Department', '1', now(),"
+            " CAST(:before AS jsonb), CAST(:after AS jsonb))"
+        ),
+        {"event_type": event_type, "before": json.dumps(before), "after": json.dumps(after)},
+    )
+
+
+def test_display_settings_columns_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    for (table, name), default in _DISPLAY_SETTINGS_COLUMNS.items():
+        columns = {str(column["name"]): column for column in inspector.get_columns(table)}
+        column = columns[name]
+        assert isinstance(column["type"], sa.Integer), name
+        assert column["nullable"] is False, name
+        assert str(column["default"]) == default, name
+        # No reader filters on a display setting: no index.
+        for index in inspector.get_indexes(table):
+            assert name not in index["column_names"], (table, index["name"])
+
+
+def test_display_settings_checks_have_exact_names_and_literals(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    for name, (table, _literal) in _DISPLAY_SETTINGS_CHECKS.items():
+        assert name in {str(check["name"]) for check in inspector.get_check_constraints(table)}
+    model_checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for model in (models.Department, models.ApplicationPolicy)
+        for constraint in cast(sa.Table, model.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+    for name, (_table, literal) in _DISPLAY_SETTINGS_CHECKS.items():
+        assert model_checks[name] == literal, name
+
+
+def test_display_settings_migration_repeats_the_model_literals() -> None:
+    migration = _load_migration(_DISPLAY_SETTINGS_MIGRATION_FILE)
+    assert migration.down_revision == _PLANNED_ROUTES_REVISION
+    assert migration._SECTION == policies.DUE_SOON_SECTION
+    assert migration._SECONDS_PER_ROW_SQL == models.DEPARTMENT_BOARD_SECONDS_PER_ROW_SQL
+    assert migration._MIN_PAGE_SECONDS_SQL == models.DEPARTMENT_BOARD_MIN_PAGE_SECONDS_SQL
+    assert migration._DUE_SOON_MIN_DAYS_SQL == models.POLICY_DUE_SOON_MIN_DAYS_SQL
+    assert migration._DUE_SOON_MAX_DAYS_SQL == models.POLICY_DUE_SOON_MAX_DAYS_SQL
+    assert migration._DUE_SOON_PERCENT_SQL == models.POLICY_DUE_SOON_PERCENT_SQL
+    assert migration._DUE_SOON_ORDER_SQL == models.POLICY_DUE_SOON_ORDER_SQL
+    assert (
+        migration._SECONDS_PER_ROW_MIN,
+        migration._SECONDS_PER_ROW_MAX,
+        migration._SECONDS_PER_ROW_DEFAULT,
+    ) == (
+        models.BOARD_SECONDS_PER_ROW_MIN,
+        models.BOARD_SECONDS_PER_ROW_MAX,
+        models.BOARD_SECONDS_PER_ROW_DEFAULT,
+    )
+    assert (
+        migration._MIN_PAGE_SECONDS_MIN,
+        migration._MIN_PAGE_SECONDS_MAX,
+        migration._MIN_PAGE_SECONDS_DEFAULT,
+    ) == (
+        models.BOARD_MIN_PAGE_SECONDS_MIN,
+        models.BOARD_MIN_PAGE_SECONDS_MAX,
+        models.BOARD_MIN_PAGE_SECONDS_DEFAULT,
+    )
+    assert (
+        migration._DUE_SOON_MIN_DAYS_DEFAULT,
+        migration._DUE_SOON_PERCENT_DEFAULT,
+        migration._DUE_SOON_MAX_DAYS_DEFAULT,
+    ) == (
+        models.DUE_SOON_MIN_DAYS_DEFAULT,
+        models.DUE_SOON_LEAD_TIME_PERCENT_DEFAULT,
+        models.DUE_SOON_MAX_DAYS_DEFAULT,
+    )
+    # The literal range texts state the named bounds.
+    assert models.DEPARTMENT_BOARD_SECONDS_PER_ROW_SQL.endswith(
+        f"BETWEEN {models.BOARD_SECONDS_PER_ROW_MIN} AND {models.BOARD_SECONDS_PER_ROW_MAX}"
+    )
+    assert models.DEPARTMENT_BOARD_MIN_PAGE_SECONDS_SQL.endswith(
+        f"BETWEEN {models.BOARD_MIN_PAGE_SECONDS_MIN} AND {models.BOARD_MIN_PAGE_SECONDS_MAX}"
+    )
+    for literal in (models.POLICY_DUE_SOON_MIN_DAYS_SQL, models.POLICY_DUE_SOON_MAX_DAYS_SQL):
+        assert literal.endswith(
+            f"BETWEEN {models.DUE_SOON_DAYS_MIN} AND {models.DUE_SOON_DAYS_MAX}"
+        )
+    assert models.POLICY_DUE_SOON_PERCENT_SQL.endswith(
+        f"BETWEEN {models.DUE_SOON_PERCENT_MIN} AND {models.DUE_SOON_PERCENT_MAX}"
+    )
+    # The downgrade guard names the same section and the same defaults.
+    source = _DISPLAY_SETTINGS_MIGRATION_FILE.read_text(encoding="utf-8")
+    assert f"entity_id = '{migration._SECTION}'" in source
+    assert (
+        f"board_seconds_per_row <> {models.BOARD_SECONDS_PER_ROW_DEFAULT}"
+        f" OR board_min_page_seconds <> {models.BOARD_MIN_PAGE_SECONDS_DEFAULT}"
+    ) in source
+    assert f"due_soon_min_days <> {models.DUE_SOON_MIN_DAYS_DEFAULT}" in source
+    assert f"due_soon_lead_time_percent <> {models.DUE_SOON_LEAD_TIME_PERCENT_DEFAULT}" in source
+    assert f"due_soon_max_days <> {models.DUE_SOON_MAX_DAYS_DEFAULT}" in source
+
+
+def test_display_settings_are_seeded_with_the_defaults(connection: Connection) -> None:
+    assert _due_soon_row(connection) == (2, 15, 7)
+    _execute(connection, "INSERT INTO departments (name) VALUES ('Display Seed')")
+    assert _department_settings(connection)[-1] == ("Display Seed", 3, 6)
+
+
+@pytest.mark.parametrize(
+    ("constraint", "statement"),
+    [
+        (
+            "ck_departments_board_seconds_per_row_range",
+            "UPDATE departments SET board_seconds_per_row = 0",
+        ),
+        (
+            "ck_departments_board_seconds_per_row_range",
+            "UPDATE departments SET board_seconds_per_row = 61",
+        ),
+        (
+            "ck_departments_board_min_page_seconds_range",
+            "UPDATE departments SET board_min_page_seconds = 0",
+        ),
+        (
+            "ck_departments_board_min_page_seconds_range",
+            "UPDATE departments SET board_min_page_seconds = 301",
+        ),
+        (
+            "ck_application_policy_due_soon_min_days_range",
+            "UPDATE application_policy SET due_soon_min_days = -1",
+        ),
+        (
+            "ck_application_policy_due_soon_min_days_range",
+            "UPDATE application_policy SET due_soon_min_days = 366, due_soon_max_days = 365",
+        ),
+        (
+            "ck_application_policy_due_soon_max_days_range",
+            "UPDATE application_policy SET due_soon_max_days = 366",
+        ),
+        (
+            "ck_application_policy_due_soon_lead_time_percent_range",
+            "UPDATE application_policy SET due_soon_lead_time_percent = 0",
+        ),
+        (
+            "ck_application_policy_due_soon_lead_time_percent_range",
+            "UPDATE application_policy SET due_soon_lead_time_percent = 101",
+        ),
+        (
+            "ck_application_policy_due_soon_window_order",
+            "UPDATE application_policy SET due_soon_min_days = 5, due_soon_max_days = 3",
+        ),
+    ],
+)
+def test_database_refuses_out_of_range_display_settings(
+    connection: Connection, constraint: str, statement: str
+) -> None:
+    _execute(connection, "INSERT INTO departments (name) VALUES ('Range Seed')")
+    _refused_by(connection, constraint, lambda: _execute(connection, statement))
+
+
+def test_database_admits_the_display_settings_boundaries(connection: Connection) -> None:
+    _execute(connection, "INSERT INTO departments (name) VALUES ('Boundary Seed')")
+    for per_row, dwell in ((1, 1), (60, 300)):
+        _execute(
+            connection,
+            "UPDATE departments SET board_seconds_per_row = :per_row,"
+            " board_min_page_seconds = :dwell",
+            per_row=per_row,
+            dwell=dwell,
+        )
+    for low, percent, high in ((0, 1, 0), (365, 100, 365), (3, 15, 3)):
+        _execute(
+            connection,
+            "UPDATE application_policy SET due_soon_min_days = :low,"
+            " due_soon_lead_time_percent = :percent, due_soon_max_days = :high",
+            low=low,
+            percent=percent,
+            high=high,
+        )
+        assert _due_soon_row(connection) == (low, percent, high)
+
+
+def test_downgrade_to_planned_routes_revision_drops_the_settings(admin_engine: Engine) -> None:
+    """Department CREATED rows and name-only UPDATED rows that merely carry
+    the keys never block the downgrade; the re-upgrade restores the head."""
+    name = "partflow_test_phase13_downgrade_s9"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(connection, "INSERT INTO departments (name) VALUES ('Kept')")
+                created = {**_DEFAULT_DEPARTMENT_SNAPSHOT, "name": "Kept"}
+                _insert_department_audit(connection, "CREATED", None, created)
+                _insert_department_audit(
+                    connection, "UPDATED", created, {**created, "name": "Renamed"}
+                )
+            command.downgrade(config, _PLANNED_ROUTES_REVISION)
+            inspector = inspect(engine)
+            for table, column in _DISPLAY_SETTINGS_COLUMNS:
+                assert column not in {str(c["name"]) for c in inspector.get_columns(table)}
+            for check, (table, _literal) in _DISPLAY_SETTINGS_CHECKS.items():
+                assert check not in {
+                    str(found["name"]) for found in inspector.get_check_constraints(table)
+                }
+            with engine.connect() as connection:
+                assert _version(connection) == _PLANNED_ROUTES_REVISION
+                kept = connection.execute(
+                    sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Department'")
+                ).scalar_one()
+                assert kept == 2
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _department_settings(connection) == [("Kept", 3, 6)]
+                assert _due_soon_row(connection) == (2, 15, 7)
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_display_settings_downgrade(url: URL, message: str) -> None:
+    with pytest.raises(ProgrammingError, match=message):
+        command.downgrade(_alembic_config(url), _PLANNED_ROUTES_REVISION)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE departments SET board_seconds_per_row = 2",
+        "UPDATE departments SET board_min_page_seconds = 10",
+        "UPDATE application_policy SET due_soon_min_days = 1",
+        "UPDATE application_policy SET due_soon_lead_time_percent = 20",
+        "UPDATE application_policy SET due_soon_max_days = 9",
+    ],
+    ids=["seconds-per-row", "min-page-seconds", "min-days", "percent", "max-days"],
+)
+def test_downgrade_refuses_while_a_display_setting_differs_from_its_default(
+    refused_database: URL, statement: str
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _execute(connection, "INSERT INTO departments (name) VALUES ('Configured')")
+            _execute(connection, statement)
+            departments = _department_settings(connection)
+            policy = _due_soon_row(connection)
+        _refused_display_settings_downgrade(
+            refused_database, "Display settings configuration exists"
+        )
+        with engine.connect() as connection:
+            assert _department_settings(connection) == departments
+            assert _due_soon_row(connection) == policy
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_due_soon_audit_exists(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_policy_audit(
+                connection,
+                "due-soon",
+                {"due_soon_min_days": 2, "due_soon_lead_time_percent": 15, "due_soon_max_days": 7},
+            )
+        _refused_display_settings_downgrade(refused_database, "Display settings history exists")
+        with engine.connect() as connection:
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_id = 'due-soon'")
+            ).scalar_one()
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("key", ["board_seconds_per_row", "board_min_page_seconds"])
+def test_downgrade_refuses_while_a_department_audit_changed_a_rotation_setting(
+    refused_database: URL, key: str
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            # The values are back at their defaults; the history remains.
+            _insert_department_audit(
+                connection,
+                "UPDATED",
+                _DEFAULT_DEPARTMENT_SNAPSHOT,
+                {**_DEFAULT_DEPARTMENT_SNAPSHOT, key: 9},
+            )
+        _refused_display_settings_downgrade(refused_database, "Display settings history exists")
+        with engine.connect() as connection:
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'Department'")
+            ).scalar_one()
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_gives_departments_and_the_policy_their_defaults(admin_engine: Engine) -> None:
+    """0024 → head: every existing Department gets 3 / 6 and the singleton
+    2 / 15 / 7; the earlier policy values and every audit row are kept."""
+    name = "partflow_test_phase13_display_settings_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _PLANNED_ROUTES_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(connection, "INSERT INTO departments (name) VALUES ('Machine Shop')")
+                _execute(
+                    connection, "INSERT INTO departments (name, is_active) VALUES ('Old', false)"
+                )
+                _execute(
+                    connection,
+                    "UPDATE application_policy SET worker_session_timeout_minutes = 30,"
+                    " undo_reason_required = true",
+                )
+                _insert_policy_audit(
+                    connection, "worker-sessions", {"worker_session_timeout_minutes": 30}
+                )
+                _insert_policy_audit(
+                    connection, "correction-permissions", {"undo_reason_required": True}
+                )
+                _insert_department_audit(
+                    connection, "CREATED", None, {"name": "Machine Shop", "is_active": True}
+                )
+                audits = _rows(connection, "audit_events")
+                departments = _rows(connection, "departments")
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _rows(connection, "departments") == [
+                    {**row, "board_seconds_per_row": 3, "board_min_page_seconds": 6}
+                    for row in departments
+                ]
+                assert _due_soon_row(connection) == (2, 15, 7)
+                assert _policy_row(connection) == (1, 30, True, True, True)
+                assert _undo_reason_required(connection) is True
+                assert _rows(connection, "audit_events") == audits
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)

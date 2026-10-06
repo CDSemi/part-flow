@@ -8,7 +8,8 @@ from, the stocked and scrapped quantities, the OPEN demand context (Work
 Order Number, Job Numbers, requested / allocated quantity) and the
 Hot rank, the optional PN master's Name / Description and revision
 (Phase 13 — the row's secondary line), plus the Department totals of
-the footer. ``department_id``
+the footer. The Department carries its display settings (the rotation
+timing, PROJECT_PROFILE §21), read with the board. ``department_id``
 selects the Department; omitted, the single active Department is
 used — none is 404, several is 409 naming them (a display is never
 silently pointed at the wrong Department). A read: nothing is
@@ -99,6 +100,9 @@ class BoardRowResponse(BaseModel):
 class BoardDepartmentRef(BaseModel):
     id: int
     name: str
+    # Department display settings (PROJECT_PROFILE §21): the rotation timing.
+    board_seconds_per_row: int
+    board_min_page_seconds: int
 
 
 class ProductionBoardResponse(BaseModel):
@@ -173,7 +177,12 @@ def get_production_board(
 ) -> ProductionBoardResponse:
     board = production_board.production_board(session, department_id)
     return ProductionBoardResponse(
-        department=BoardDepartmentRef(id=board.department.id, name=board.department.name),
+        department=BoardDepartmentRef(
+            id=board.department.id,
+            name=board.department.name,
+            board_seconds_per_row=board.department.board_seconds_per_row,
+            board_min_page_seconds=board.department.board_min_page_seconds,
+        ),
         rows=[_row(row) for row in board.rows],
         active_part_numbers=board.active_part_numbers,
         active_quantity=board.active_quantity,

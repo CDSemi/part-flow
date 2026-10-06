@@ -530,3 +530,82 @@ test('the dev-only mock Scan Station preview stays behind the DEV boundary', () 
   expect(scanStationView).toContain('import.meta.env.DEV');
   expect(scanStationView).toContain("import('./ScanStationMockView')");
 });
+
+/* ============ No hard-coded display settings (Phase 13 slice 9) ============ */
+
+// The Due Soon warning policy and the Production Board rotation timing
+// are server configuration (Administration → Settings, Administration →
+// Department display settings). No production source may restate them:
+// the only non-test sources allowed to hold such literals are the mocks
+// and the DEV-only preview values of the `?state=` previews.
+
+const PREVIEW_MODULE = join(srcDir, 'views', 'display-settings-preview.ts');
+
+/** Every non-test production source under src/ (mocks and the DEV-only
+ * preview module excluded). */
+function productionSources(dir = srcDir): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (path === join(srcDir, 'mocks')) continue;
+      files.push(...productionSources(path));
+    } else if (
+      /\.tsx?$/.test(entry.name) &&
+      !/\.test\.tsx?$/.test(entry.name) &&
+      entry.name !== 'setupTests.ts' &&
+      path !== PREVIEW_MODULE
+    ) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+/** A policy or timing property written with a numeric literal (an
+ * interface member typed `: number` never matches). */
+const SETTING_LITERAL =
+  /\b(minDays|leadTimePercent|maxDays|secondsPerRow|minPageSeconds|ratio)\s*:\s*-?\d/;
+
+test('the setting-literal pattern catches a planted policy value', () => {
+  expect(SETTING_LITERAL.test('const policy = { minDays: 2 };')).toBe(true);
+  expect(SETTING_LITERAL.test('{ secondsPerRow: 3, x: 1 }')).toBe(true);
+  expect(SETTING_LITERAL.test('  minDays: number;')).toBe(false);
+});
+
+test('no production source hard-codes the Due Soon policy or the rotation timing', () => {
+  const sources = productionSources();
+  expect(sources.length).toBeGreaterThan(50);
+  const offenders: string[] = [];
+  for (const file of sources) {
+    const source = readFileSync(file, 'utf8');
+    const name = relative(srcDir, file).split(sep).join('/');
+    for (const banned of [
+      'DEFAULT_DUE_SOON_POLICY',
+      'ROTATE_MS_PER_ROW',
+      'ROTATE_MS_MIN',
+    ]) {
+      if (source.includes(banned)) offenders.push(`${name}: ${banned}`);
+    }
+    if (SETTING_LITERAL.test(source)) offenders.push(`${name}: literal`);
+  }
+  expect(offenders).toEqual([]);
+
+  const boardLogic = readFileSync(
+    join(srcDir, 'views', 'production-board', 'board-logic.ts'),
+    'utf8',
+  );
+  expect(boardLogic).not.toMatch(/\b3_000\b/);
+  expect(boardLogic).not.toMatch(/\b6_000\b/);
+});
+
+test('the display-settings preview module exports only DEV-guarded values', () => {
+  const source = stripComments(readFileSync(PREVIEW_MODULE, 'utf8'));
+  const exports = Array.from(source.matchAll(/^export\b.*$/gm), (m) => m[0]);
+  expect(exports.length).toBeGreaterThan(0);
+  for (const statement of exports) {
+    expect(statement).toMatch(
+      /^export const \w+(:[^=]+)?= import\.meta\.env\.DEV$/,
+    );
+  }
+});

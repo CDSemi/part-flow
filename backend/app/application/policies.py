@@ -13,7 +13,15 @@ read by `station_identity.final_gate`. Slice 6 adds the Correction
 permissions section's Undo reason policy (`undo_reason_required`;
 PROFILE §16 "require a reason when configured", owner default OD-6: one
 global switch, default off), read by the Undo command and its preview
-through the column-only `is_undo_reason_required`.
+through the column-only `is_undo_reason_required`. Slice 9 adds the
+Due Soon warning panel of Administration → Settings (GUI_DESIGN §3 rule
+12, §9; owner default OD-5: one global policy, 2 days / 15 % / 7 days):
+the minimum and maximum warning days (0-365, minimum never above
+maximum) and the whole lead-time warning percentage (1-100), audited
+under its own ``entity_id`` ``due-soon`` and written as a full replace
+of the three fields (one form with a cross-field rule). It is display
+configuration behind every derived due countdown; no production command
+reads it.
 
 A write follows the configuration protocol: the row is locked first
 (``FOR NO KEY UPDATE``) and re-read, the value validated, a no-op
@@ -42,6 +50,10 @@ from app.application.common import UNSET, UnsetType, commit
 from app.application.errors import InvalidInputError, NotFoundError
 from app.domain.enums import AuditEntityType, AuditEventType
 from app.infrastructure.models import (
+    DUE_SOON_DAYS_MAX,
+    DUE_SOON_DAYS_MIN,
+    DUE_SOON_PERCENT_MAX,
+    DUE_SOON_PERCENT_MIN,
     WORKER_SESSION_TIMEOUT_MAX,
     WORKER_SESSION_TIMEOUT_MIN,
     ApplicationPolicy,
@@ -52,6 +64,9 @@ _POLICY_ID: Final = 1
 WORKER_SESSIONS_SECTION: Final = "worker-sessions"
 # The audit entity_id of the Correction permissions section (CD3).
 CORRECTION_PERMISSIONS_SECTION: Final = "correction-permissions"
+# The audit entity_id and API path segment of the Due Soon warning panel
+# (Administration → Settings; CD3, S9-OD1).
+DUE_SOON_SECTION: Final = "due-soon"
 # Lock-first mode of a policy write: the FOR NO KEY UPDATE its own UPDATE takes.
 _EDIT_LOCK: Final = {"key_share": True}
 
@@ -167,6 +182,75 @@ def update_correction_permissions_policy(
         entity_id=CORRECTION_PERMISSIONS_SECTION,
         before_data=before,
         after_data=_correction_permissions_snapshot(policy),
+    )
+    commit(session, {})
+    return policy
+
+
+def _is_due_soon_days(value: object) -> TypeGuard[int]:
+    """Whole warning days, 0-365 (a bool is never a number)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and DUE_SOON_DAYS_MIN <= value <= DUE_SOON_DAYS_MAX
+    )
+
+
+def _is_due_soon_percent(value: object) -> TypeGuard[int]:
+    """A whole lead-time warning percentage, 1-100 (a bool is never a number)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and DUE_SOON_PERCENT_MIN <= value <= DUE_SOON_PERCENT_MAX
+    )
+
+
+def _due_soon_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    return {
+        "due_soon_min_days": policy.due_soon_min_days,
+        "due_soon_lead_time_percent": policy.due_soon_lead_time_percent,
+        "due_soon_max_days": policy.due_soon_max_days,
+    }
+
+
+def update_due_soon_policy(
+    session: Session, *, min_days: object, lead_time_percent: object, max_days: object
+) -> ApplicationPolicy:
+    """Replace the Due Soon warning policy; a no-op writes and audits nothing."""
+    policy = session.get(
+        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
+    )
+    if policy is None:  # pragma: no cover - seeded by its migration
+        raise NotFoundError("The application policy is not configured.")
+    if not _is_due_soon_days(min_days):
+        raise InvalidInputError("Minimum warning days must be a whole number from 0 to 365.")
+    if not _is_due_soon_days(max_days):
+        raise InvalidInputError("Maximum warning days must be a whole number from 0 to 365.")
+    if not _is_due_soon_percent(lead_time_percent):
+        raise InvalidInputError(
+            "The lead-time warning percentage must be a whole number from 1 to 100."
+        )
+    if min_days > max_days:
+        raise InvalidInputError("Minimum warning days cannot be greater than maximum warning days.")
+    before = _due_soon_snapshot(policy)
+    after = {
+        "due_soon_min_days": min_days,
+        "due_soon_lead_time_percent": lead_time_percent,
+        "due_soon_max_days": max_days,
+    }
+    if after == before:
+        return policy
+    policy.due_soon_min_days = min_days
+    policy.due_soon_lead_time_percent = lead_time_percent
+    policy.due_soon_max_days = max_days
+    policy.updated_at = func.now()
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.APPLICATION_POLICY,
+        entity_id=DUE_SOON_SECTION,
+        before_data=before,
+        after_data=_due_soon_snapshot(policy),
     )
     commit(session, {})
     return policy

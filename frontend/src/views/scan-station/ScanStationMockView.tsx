@@ -20,6 +20,7 @@ import {
 } from '../../components/area-monitoring';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ConnectivityChip } from '../../components/ConnectivityChip';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot, RouteModeChip, TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -52,6 +53,7 @@ import { areaStats, splitAssignments } from '../area-monitoring';
 import type { AreaAssignment } from '../area-monitoring';
 import { useUiClock } from '../../components/ui-clock';
 import { formatIsoDate, todayIso } from '../dates';
+import { PREVIEW_DUE_SOON_POLICY } from '../display-settings-preview';
 import type {
   MockAreaCard,
   MockAreaMachine,
@@ -1237,28 +1239,32 @@ function StationView({
           </div>
         </div>
 
-        <AreaMachineLayout
-          summary={
-            area ? (
-              <AreaSummaryCard
-                area={area}
-                cards={areaCards}
-                machines={machines}
-                title="In this Area now"
-                rowAction={directRowAction}
-                showStats={false}
+        {/* DEV-only preview policy (null — the honest "unavailable"
+            rendering — never happens in DEV). */}
+        <DueSoonPolicyProvider policy={PREVIEW_DUE_SOON_POLICY}>
+          <AreaMachineLayout
+            summary={
+              area ? (
+                <AreaSummaryCard
+                  area={area}
+                  cards={areaCards}
+                  machines={machines}
+                  title="In this Area now"
+                  rowAction={directRowAction}
+                  showStats={false}
+                />
+              ) : null
+            }
+            machineCards={machines.map((machine) => (
+              <MachineMonitoringCard
+                key={machine.name}
+                machine={machine}
+                entries={assigned.filter((e) => e.context === machine.name)}
+                rowAction={machineRowAction}
               />
-            ) : null
-          }
-          machineCards={machines.map((machine) => (
-            <MachineMonitoringCard
-              key={machine.name}
-              machine={machine}
-              entries={assigned.filter((e) => e.context === machine.name)}
-              rowAction={machineRowAction}
-            />
-          ))}
-        />
+            ))}
+          />
+        </DueSoonPolicyProvider>
       </div>
 
       {shownNotice ? (

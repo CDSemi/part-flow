@@ -21,6 +21,9 @@ Deliberate surface decisions:
   stable Station ID: the Station Selector and the per-station route
   (``/scan-station/<station-id>``, PROJECT_PROFILE §15) resolve real
   configuration from it.
+- A Department's display settings (Phase 13 slice 9 — the Production
+  Board rotation timing) are edited through the Department PATCH; the
+  create body stays ``{name}`` and a new Department takes the defaults.
 - Durations (``default_expected_duration``) travel as ISO 8601
   duration strings (for example ``PT30M``), Pydantic's canonical
   ``timedelta`` JSON form.
@@ -54,6 +57,10 @@ class DepartmentResponse(BaseModel):
     id: int
     name: str
     is_active: bool
+    # Department display settings (Phase 13): the Production Board
+    # rotation timing in whole seconds.
+    board_seconds_per_row: int
+    board_min_page_seconds: int
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -69,6 +76,9 @@ class DepartmentUpdateRequest(BaseModel):
 
     name: str | None = None
     is_active: bool | None = None
+    # An explicit null reaches the service (exclude_unset) and is refused there.
+    board_seconds_per_row: StrictInt | None = None
+    board_min_page_seconds: StrictInt | None = None
 
 
 @router.get("/departments")

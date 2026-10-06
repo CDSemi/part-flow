@@ -54,6 +54,14 @@ function stationFixture(url: string): Promise<Response> {
       },
     });
   }
+  if (url === '/api/policies/due-soon') {
+    return json({
+      due_soon_min_days: 2,
+      due_soon_lead_time_percent: 15,
+      due_soon_max_days: 7,
+      updated_at: '2026-10-01T08:00:00Z',
+    });
+  }
   if (/\/inventory$/.test(url)) {
     return json({
       area,

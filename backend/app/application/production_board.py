@@ -95,6 +95,9 @@ stored counter:
   averaged and a newer portion never hides an overdue one. The judgement
   itself (`now` past `expected_by`) is the display's, from the shared UI
   clock; the board sends only this fixed instant.
+
+The Department carries its display settings (the rotation timing,
+PROJECT_PROFILE §21), read with the board.
 """
 
 import datetime

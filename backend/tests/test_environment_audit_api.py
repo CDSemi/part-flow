@@ -271,7 +271,12 @@ def test_department_create_is_audited(client: TestClient, db_engine: Engine) -> 
     assert row.event_type == "CREATED"
     assert row.entity_id == str(department["id"])
     assert row.before_data is None
-    assert row.after_data == {"name": name, "is_active": True}
+    assert row.after_data == {
+        "name": name,
+        "is_active": True,
+        "board_seconds_per_row": 3,
+        "board_min_page_seconds": 6,
+    }
     assert row.actor_reference is None
     assert row._mapping["metadata"] is None
 
@@ -286,9 +291,10 @@ def test_department_edits_are_audited_as_a_chain(client: TestClient, db_engine: 
 
     rows = _audit_rows(db_engine, "Department", department["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED", "UPDATED", "UPDATED"]
-    old = {"name": department["name"], "is_active": True}
-    renamed = {"name": new_name, "is_active": True}
-    inactive = {"name": new_name, "is_active": False}
+    settings = {"board_seconds_per_row": 3, "board_min_page_seconds": 6}
+    old = {"name": department["name"], "is_active": True, **settings}
+    renamed = {"name": new_name, "is_active": True, **settings}
+    inactive = {"name": new_name, "is_active": False, **settings}
     assert (rows[1].before_data, rows[1].after_data) == (old, renamed)
     assert (rows[2].before_data, rows[2].after_data) == (renamed, inactive)
     assert (rows[3].before_data, rows[3].after_data) == (inactive, renamed)
@@ -393,8 +399,13 @@ def test_department_rename_race_maps_to_conflict_not_autoflush_500(
         assert response.status_code == 200, response.text
         rows = _audit_rows(db_engine, "Department", department["id"])
         assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
-        assert rows[-1].before_data == {"name": department["name"], "is_active": True}
-        assert rows[-1].after_data == {"name": new_name, "is_active": False}
+        settings = {"board_seconds_per_row": 3, "board_min_page_seconds": 6}
+        assert rows[-1].before_data == {
+            "name": department["name"],
+            "is_active": True,
+            **settings,
+        }
+        assert rows[-1].after_data == {"name": new_name, "is_active": False, **settings}
         assert _audit_count(db_engine) == count + 1
 
 
@@ -1094,8 +1105,9 @@ def test_multi_field_patch_is_one_audit_row(client: TestClient, db_engine: Engin
     assert response.status_code == 200, response.text
     rows = _audit_rows(db_engine, "Department", department["id"])
     assert [row.event_type for row in rows] == ["CREATED", "UPDATED"]
-    assert rows[1].before_data == {"name": department["name"], "is_active": True}
-    assert rows[1].after_data == {"name": new_name, "is_active": False}
+    settings = {"board_seconds_per_row": 3, "board_min_page_seconds": 6}
+    assert rows[1].before_data == {"name": department["name"], "is_active": True, **settings}
+    assert rows[1].after_data == {"name": new_name, "is_active": False, **settings}
 
     area = _create_area(client, description="old")
     response = client.patch(
@@ -1184,6 +1196,10 @@ def test_failed_audit_write_rolls_back_every_department_area_operation_station_p
         lambda: client.post("/api/departments", json={"name": _unique("DEPT")}),
         lambda: client.patch(
             f"/api/departments/{department['id']}", json={"name": _unique("DEPT")}
+        ),
+        lambda: client.patch(
+            f"/api/departments/{department['id']}",
+            json={"board_seconds_per_row": 2, "board_min_page_seconds": 10},
         ),
         lambda: client.post(
             "/api/areas", json={"department_id": department["id"], "name": _unique("AREA")}

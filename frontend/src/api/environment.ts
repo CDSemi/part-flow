@@ -20,16 +20,29 @@ export interface Department {
   id: number;
   name: string;
   isActive: boolean;
+  /** Department display settings (PROJECT_PROFILE §21): the Production
+   * Board rotation timing in whole seconds per displayed row … */
+  boardSecondsPerRow: number;
+  /** … and the minimum page dwell in whole seconds. */
+  boardMinPageSeconds: number;
 }
 
 interface DepartmentWire {
   id: number;
   name: string;
   is_active: boolean;
+  board_seconds_per_row: number;
+  board_min_page_seconds: number;
 }
 
 function toDepartment(wire: DepartmentWire): Department {
-  return { id: wire.id, name: wire.name, isActive: wire.is_active };
+  return {
+    id: wire.id,
+    name: wire.name,
+    isActive: wire.is_active,
+    boardSecondsPerRow: wire.board_seconds_per_row,
+    boardMinPageSeconds: wire.board_min_page_seconds,
+  };
 }
 
 export async function listDepartments(): Promise<Department[]> {
@@ -47,15 +60,28 @@ export async function createDepartment(input: {
   return toDepartment(wire);
 }
 
+/** Partial update: each field is sent only when defined, so the server
+ * keeps every absent field as stored. */
 export async function updateDepartment(
   id: number,
-  patch: { name?: string; isActive?: boolean },
+  patch: {
+    name?: string;
+    isActive?: boolean;
+    boardSecondsPerRow?: number;
+    boardMinPageSeconds?: number;
+  },
 ): Promise<Department> {
   const wire = await apiRequest<DepartmentWire>(`/api/departments/${id}`, {
     method: 'PATCH',
     body: {
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.isActive !== undefined ? { is_active: patch.isActive } : {}),
+      ...(patch.boardSecondsPerRow !== undefined
+        ? { board_seconds_per_row: patch.boardSecondsPerRow }
+        : {}),
+      ...(patch.boardMinPageSeconds !== undefined
+        ? { board_min_page_seconds: patch.boardMinPageSeconds }
+        : {}),
     },
   });
   return toDepartment(wire);

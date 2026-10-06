@@ -418,13 +418,30 @@ function boardPayload() {
   };
 }
 
+/** The Due Soon warning policy on the wire (`GET /api/policies/due-soon`). */
+function policyPayload(minDays = 2, percent = 15, maxDays = 7) {
+  return {
+    due_soon_min_days: minDays,
+    due_soon_lead_time_percent: percent,
+    due_soon_max_days: maxDays,
+    updated_at: '2026-10-01T08:00:00Z',
+  };
+}
+
+/** Every request but the Due Soon policy is answered by `answer`; the
+ * policy by `policy` (the canonical initial values by default). */
 function stubFetch(
   answer: (url: string) => Response | Promise<Response> = () =>
     new Response(JSON.stringify(boardPayload()), { status: 200 }),
+  policy: () => Response | Promise<Response> = () =>
+    new Response(JSON.stringify(policyPayload()), { status: 200 }),
 ) {
-  const fetchMock = vi.fn((input: RequestInfo | URL) =>
-    Promise.resolve(answer(String(input))),
-  );
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    return Promise.resolve(
+      url === '/api/policies/due-soon' ? policy() : answer(url),
+    );
+  });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
@@ -1401,4 +1418,63 @@ test('queued, on-Machine, processing, and finished states stay distinguishable',
   expect(document.querySelector('.abd-summary')?.textContent).toContain(
     'In processing',
   );
+});
+
+// ---------------------------------------------------------------------------
+// The Due Soon warning policy (S9) — read with every board answer
+// ---------------------------------------------------------------------------
+
+/** The due status element of `pn`'s overview row. */
+function overviewDue(pn: string): HTMLElement | null {
+  const row = Array.from(document.querySelectorAll('.mc-list li')).find((li) =>
+    li.textContent?.includes(pn),
+  );
+  return row?.querySelector<HTMLElement>('.r2 .mono:last-child') ?? null;
+}
+
+test('AB-1: due tones follow the served Due Soon policy', async () => {
+  // `81-1042` is due in 7 days: soon under a 7-day minimum window,
+  // never under a 6-day maximum.
+  stubFetch(
+    undefined,
+    () =>
+      new Response(JSON.stringify(policyPayload(7, 15, 7)), { status: 200 }),
+  );
+  const view = await renderBoard();
+  expect(overviewDue('81-1042')?.textContent).toBe('7 days left');
+  expect(overviewDue('81-1042')?.className).toContain('soon');
+  view.unmount();
+
+  stubFetch(
+    undefined,
+    () =>
+      new Response(JSON.stringify(policyPayload(2, 15, 6)), { status: 200 }),
+  );
+  await renderBoard();
+  expect(overviewDue('81-1042')?.textContent).toBe('7 days left');
+  expect(overviewDue('81-1042')?.className).not.toContain('soon');
+});
+
+test('AB-1: a policy failing on the first load is the error state with Retry', async () => {
+  let policyFails = true;
+  const fetchMock = stubFetch(undefined, () =>
+    policyFails
+      ? new Response(JSON.stringify({ detail: 'policy down' }), {
+          status: 500,
+        })
+      : new Response(JSON.stringify(policyPayload()), { status: 200 }),
+  );
+  await renderBoard();
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'Area Board data could not be loaded.',
+  );
+  expect(screen.getByRole('alert')).toHaveTextContent('policy down');
+  expect(document.querySelector('.ab-tabs')).toBeNull();
+  // The board request is issued first.
+  expect(String(fetchMock.mock.calls[0][0])).toMatch(/^\/api\/area-board/);
+
+  policyFails = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await act(async () => {});
+  expect(document.querySelector('.ab-tabs')).not.toBeNull();
 });

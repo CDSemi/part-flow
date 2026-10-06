@@ -21,21 +21,20 @@ import type {
 } from '../../api/hot-list';
 import { newDeviceEventId } from '../../api/production-release';
 import { writeOutcomeUnknown } from '../../api/scan-station';
+import { getDueSoonPolicy } from '../../api/policies';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { AreaDot, HotPn, TypeChip } from '../../components/indicators';
 import { useToastNotice } from '../../components/toast-notice';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { useUiClock } from '../../components/ui-clock';
-import {
-  DEFAULT_DUE_SOON_POLICY,
-  dueCountdown,
-  formatIsoDate,
-  formatIsoDateShort,
-} from '../dates';
+import { dueCountdown, formatIsoDate, formatIsoDateShort } from '../dates';
+import type { DueSoonPolicy } from '../dates';
 import {
   completeRedo,
   completeUndo,
@@ -48,11 +47,11 @@ import type { HistoryOp, HistoryStep } from './hot-history';
 
 /** The derived due countdown of one demand: its own due date against
  * its Work Order's received date (the lead time of the Due Soon
- * window) under the shared Due Soon policy. */
-function dueInfo(entry: HotListEntry, now: number) {
+ * window) under the server's Due Soon policy. */
+function dueInfo(entry: HotListEntry, now: number, policy: DueSoonPolicy) {
   return dueCountdown(entry.dueDate, now, {
     received: entry.workOrderReceivedDate,
-    policy: DEFAULT_DUE_SOON_POLICY,
+    policy,
   });
 }
 
@@ -225,6 +224,10 @@ export function PriorityView() {
   // Loaded on view activation (mount); every command answers with the
   // committed list, which then replaces the loaded one.
   const listData = useApiData(getHotList);
+  // The Due Soon warning policy of the due countdowns: part of the
+  // view's ready state, read on activation (and on Retry) — the view
+  // has no periodic refresh.
+  const dueSoonData = useApiData(getDueSoonPolicy);
   const history = useHotHistory();
   const [override, setOverride] = useState<{
     base: HotList;
@@ -556,7 +559,11 @@ export function PriorityView() {
     </>
   );
 
-  if (preview === 'loading' || listData.state.status === 'loading') {
+  if (
+    preview === 'loading' ||
+    listData.state.status === 'loading' ||
+    dueSoonData.state.status === 'loading'
+  ) {
     return (
       <section className="pr-view" aria-label="Priority Management">
         {header}
@@ -587,224 +594,240 @@ export function PriorityView() {
       </section>
     );
   }
+  if (dueSoonData.state.status === 'error') {
+    return (
+      <section className="pr-view" aria-label="Priority Management">
+        {header}
+        <ErrorState
+          message="The Due Soon warning settings could not be loaded."
+          detail={dueSoonData.state.message}
+          onRetry={dueSoonData.reload}
+        />
+      </section>
+    );
+  }
+  const dueSoon = dueSoonData.state.data;
 
+  // The provider sits INSIDE the section, after the header: the section
+  // and its header keep their identity from the loading state on.
   return (
     <section className="pr-view" aria-label="Priority Management">
       {header}
-
-      {unknownOutcome ? (
-        <div className="pr-msg warn" role="alert">
-          <div>
-            The server did not answer — this Hot list change may already have
-            been applied. Retry the same change to find out: the server answers
-            with the recorded result, or applies it once. Or reload the list and
-            check it. Nothing else can be changed until then.
-          </div>
-          <div className="pr-msgbtns">
-            <button
-              ref={retryButton}
-              className="btn primary"
-              disabled={inFlight || disconnected}
-              onClick={() => void submit(unknownOutcome)}
-            >
-              Retry the same change
-            </button>
-            <button
-              className="btn ghost"
-              // Offline the read cannot succeed, and abandoning would
-              // drop the only same-key Retry.
-              disabled={inFlight || disconnected}
-              onClick={abandonUnknownOutcome}
-            >
-              Reload list
-            </button>
-          </div>
-        </div>
-      ) : reloading ? (
-        <div className="pr-msg info" role="status">
-          Reloading the Hot list…
-        </div>
-      ) : message ? (
-        <div
-          className={`pr-msg ${message.tone}`}
-          role={message.tone === 'info' ? 'status' : 'alert'}
-        >
-          {message.text}
-        </div>
-      ) : null}
-
-      {entries.length === 0 ? (
-        <div className="pr-empty">
-          No Hot WO Demand — add one with “+ Add to Hot list”, or scan a PN
-          barcode in the add dialog.
-        </div>
-      ) : (
-        <ol className="pr-list" style={{ listStyle: 'none' }}>
-          {entries.map((entry, index) => {
-            const due = dueInfo(entry, now);
-            return (
-              <li
-                key={idOf(entry)}
-                className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}`}
-                draggable={!writesFrozen}
-                onDragStart={() => setDragId(idOf(entry))}
-                onDragEnd={() => setDragId(null)}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => handleDrop(e, index)}
+      <DueSoonPolicyProvider policy={dueSoon}>
+        {unknownOutcome ? (
+          <div className="pr-msg warn" role="alert">
+            <div>
+              The server did not answer — this Hot list change may already have
+              been applied. Retry the same change to find out: the server
+              answers with the recorded result, or applies it once. Or reload
+              the list and check it. Nothing else can be changed until then.
+            </div>
+            <div className="pr-msgbtns">
+              <button
+                ref={retryButton}
+                className="btn primary"
+                disabled={inFlight || disconnected}
+                onClick={() => void submit(unknownOutcome)}
               >
-                <span className="grip" aria-hidden="true">
-                  ⠿
-                </span>
-                <span className="body">
-                  <span className="l1">
-                    <HotPn
-                      rank={entry.rank ?? index + 1}
-                      pn={entry.partNumber}
-                      pnClassName="pn"
-                    />
-                    <WoJobChip entry={entry} />
-                    {entry.workOrderNumber === null ? (
-                      <span className="pr-quiet">{internalLabel(entry)}</span>
-                    ) : null}
-                    <TypeChip type={entry.requestType} />
-                    {entry.workOrderCompleted ? (
-                      <span className="wostat completed">Completed</span>
-                    ) : null}
-                  </span>
-                  <span className="l2">
-                    <span>requested {entry.requestedQuantity}</span>
-                    <span>allocated {entry.allocatedQuantity}</span>
-                    <span>shortage {entry.shortageQuantity}</span>
-                    {!entry.workOrderCompleted &&
-                    entry.shortageQuantity === 0 ? (
-                      <span className="pr-quiet">
-                        Fully allocated — nothing left to expedite
-                      </span>
-                    ) : null}
-                  </span>
-                  <Distribution entry={entry} />
-                </span>
-                <span className="due">
-                  <span>{formatIsoDateShort(entry.dueDate)}</span>
-                  <span
-                    className={`d2 ${due.dueClass}`}
-                    style={{ display: 'block' }}
-                  >
-                    {due.note}
-                  </span>
-                </span>
-                <span className="movebtns">
-                  <button
-                    aria-label={`Move ${entry.partNumber} up`}
-                    disabled={writesFrozen || index === 0}
-                    onClick={() => moveTo('Move Up', index, index - 1)}
-                  >
-                    ▲
-                  </button>
-                  <button
-                    aria-label={`Move ${entry.partNumber} down`}
-                    disabled={writesFrozen || index === entries.length - 1}
-                    onClick={() => moveTo('Move Down', index, index + 1)}
-                  >
-                    ▼
-                  </button>
-                </span>
-                <button
-                  className="pr-x"
-                  title="Remove from Hot list"
-                  aria-label={`Remove ${entry.partNumber} from Hot list`}
-                  disabled={writesFrozen}
-                  onClick={() => {
-                    setMessage(null);
-                    setRemoveTarget(entry);
-                  }}
-                >
-                  ✕
-                </button>
-              </li>
-            );
-          })}
-        </ol>
-      )}
-
-      <div className="pr-bar">
-        <button
-          className="btn ghost"
-          disabled={writesFrozen || !history.undo.length}
-          onClick={undo}
-        >
-          ⟲ Undo
-        </button>
-        <button
-          className="btn ghost"
-          disabled={writesFrozen || !history.redo.length}
-          onClick={redo}
-        >
-          ⟳ Redo
-        </button>
-        {inFlight ? (
-          <span className="pr-busy" role="status">
-            Applying the change…
-          </span>
+                Retry the same change
+              </button>
+              <button
+                className="btn ghost"
+                // Offline the read cannot succeed, and abandoning would
+                // drop the only same-key Retry.
+                disabled={inFlight || disconnected}
+                onClick={abandonUnknownOutcome}
+              >
+                Reload list
+              </button>
+            </div>
+          </div>
+        ) : reloading ? (
+          <div className="pr-msg info" role="status">
+            Reloading the Hot list…
+          </div>
+        ) : message ? (
+          <div
+            className={`pr-msg ${message.tone}`}
+            role={message.tone === 'info' ? 'status' : 'alert'}
+          >
+            {message.text}
+          </div>
         ) : null}
-      </div>
 
-      <PageNote>
-        <b>Hot</b> demand is always worked first, in rank order. Allocation
-        &amp; work ordering: ① Hot rank ② demands with a due date, earliest
-        first ③ demands without a due date, by the Work Order received date
-        (oldest first). An entry leaves the list on its own once its line is
-        fully allocated.
-      </PageNote>
-
-      {pending ? (
-        <ReorderConfirmDialog
-          pending={pending}
-          disabled={writesFrozen}
-          onCancel={() => setPending(null)}
-          onConfirm={confirmPending}
-        />
-      ) : null}
-
-      {addOpen && (
-        <HotAddDialog
-          disabled={writesFrozen}
-          onCancel={() => setAddOpen(false)}
-          onAdd={addCandidate}
-        />
-      )}
-
-      {removeTarget !== null && (
-        <ModalDialog
-          label="Remove from Hot list?"
-          onClose={() => setRemoveTarget(null)}
-        >
-          <h3>Remove from Hot list?</h3>
-          <div className="big mono">{removeTarget.partNumber}</div>
-          <div className="sub">
-            Work Order Demand{' '}
-            <b className="mono">{woJobLabel(removeTarget, true)}</b> will be
-            removed from the Hot ranking. Remaining ranks close the gap;{' '}
-            {undoRestoreNote(removeTarget)}.
+        {entries.length === 0 ? (
+          <div className="pr-empty">
+            No Hot WO Demand — add one with “+ Add to Hot list”, or scan a PN
+            barcode in the add dialog.
           </div>
-          <div className="row">
-            <button
-              className="bigbtn ghost"
-              onClick={() => setRemoveTarget(null)}
-            >
-              Cancel (Esc)
-            </button>
-            <button
-              className="bigbtn danger"
-              disabled={writesFrozen}
-              onClick={() => confirmRemove(removeTarget)}
-            >
-              Remove entry
-            </button>
-          </div>
-        </ModalDialog>
-      )}
-      {noticeElement}
+        ) : (
+          <ol className="pr-list" style={{ listStyle: 'none' }}>
+            {entries.map((entry, index) => {
+              const due = dueInfo(entry, now, dueSoon);
+              return (
+                <li
+                  key={idOf(entry)}
+                  className={`pr-item ${dragId === idOf(entry) ? 'dragging' : ''}`}
+                  draggable={!writesFrozen}
+                  onDragStart={() => setDragId(idOf(entry))}
+                  onDragEnd={() => setDragId(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => handleDrop(e, index)}
+                >
+                  <span className="grip" aria-hidden="true">
+                    ⠿
+                  </span>
+                  <span className="body">
+                    <span className="l1">
+                      <HotPn
+                        rank={entry.rank ?? index + 1}
+                        pn={entry.partNumber}
+                        pnClassName="pn"
+                      />
+                      <WoJobChip entry={entry} />
+                      {entry.workOrderNumber === null ? (
+                        <span className="pr-quiet">{internalLabel(entry)}</span>
+                      ) : null}
+                      <TypeChip type={entry.requestType} />
+                      {entry.workOrderCompleted ? (
+                        <span className="wostat completed">Completed</span>
+                      ) : null}
+                    </span>
+                    <span className="l2">
+                      <span>requested {entry.requestedQuantity}</span>
+                      <span>allocated {entry.allocatedQuantity}</span>
+                      <span>shortage {entry.shortageQuantity}</span>
+                      {!entry.workOrderCompleted &&
+                      entry.shortageQuantity === 0 ? (
+                        <span className="pr-quiet">
+                          Fully allocated — nothing left to expedite
+                        </span>
+                      ) : null}
+                    </span>
+                    <Distribution entry={entry} />
+                  </span>
+                  <span className="due">
+                    <span>{formatIsoDateShort(entry.dueDate)}</span>
+                    <span
+                      className={`d2 ${due.dueClass}`}
+                      style={{ display: 'block' }}
+                    >
+                      {due.note}
+                    </span>
+                  </span>
+                  <span className="movebtns">
+                    <button
+                      aria-label={`Move ${entry.partNumber} up`}
+                      disabled={writesFrozen || index === 0}
+                      onClick={() => moveTo('Move Up', index, index - 1)}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      aria-label={`Move ${entry.partNumber} down`}
+                      disabled={writesFrozen || index === entries.length - 1}
+                      onClick={() => moveTo('Move Down', index, index + 1)}
+                    >
+                      ▼
+                    </button>
+                  </span>
+                  <button
+                    className="pr-x"
+                    title="Remove from Hot list"
+                    aria-label={`Remove ${entry.partNumber} from Hot list`}
+                    disabled={writesFrozen}
+                    onClick={() => {
+                      setMessage(null);
+                      setRemoveTarget(entry);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        <div className="pr-bar">
+          <button
+            className="btn ghost"
+            disabled={writesFrozen || !history.undo.length}
+            onClick={undo}
+          >
+            ⟲ Undo
+          </button>
+          <button
+            className="btn ghost"
+            disabled={writesFrozen || !history.redo.length}
+            onClick={redo}
+          >
+            ⟳ Redo
+          </button>
+          {inFlight ? (
+            <span className="pr-busy" role="status">
+              Applying the change…
+            </span>
+          ) : null}
+        </div>
+
+        <PageNote>
+          <b>Hot</b> demand is always worked first, in rank order. Allocation
+          &amp; work ordering: ① Hot rank ② demands with a due date, earliest
+          first ③ demands without a due date, by the Work Order received date
+          (oldest first). An entry leaves the list on its own once its line is
+          fully allocated.
+        </PageNote>
+
+        {pending ? (
+          <ReorderConfirmDialog
+            pending={pending}
+            disabled={writesFrozen}
+            onCancel={() => setPending(null)}
+            onConfirm={confirmPending}
+          />
+        ) : null}
+
+        {addOpen && (
+          <HotAddDialog
+            disabled={writesFrozen}
+            onCancel={() => setAddOpen(false)}
+            onAdd={addCandidate}
+          />
+        )}
+
+        {removeTarget !== null && (
+          <ModalDialog
+            label="Remove from Hot list?"
+            onClose={() => setRemoveTarget(null)}
+          >
+            <h3>Remove from Hot list?</h3>
+            <div className="big mono">{removeTarget.partNumber}</div>
+            <div className="sub">
+              Work Order Demand{' '}
+              <b className="mono">{woJobLabel(removeTarget, true)}</b> will be
+              removed from the Hot ranking. Remaining ranks close the gap;{' '}
+              {undoRestoreNote(removeTarget)}.
+            </div>
+            <div className="row">
+              <button
+                className="bigbtn ghost"
+                onClick={() => setRemoveTarget(null)}
+              >
+                Cancel (Esc)
+              </button>
+              <button
+                className="bigbtn danger"
+                disabled={writesFrozen}
+                onClick={() => confirmRemove(removeTarget)}
+              >
+                Remove entry
+              </button>
+            </div>
+          </ModalDialog>
+        )}
+        {noticeElement}
+      </DueSoonPolicyProvider>
     </section>
   );
 }
@@ -1223,6 +1246,7 @@ function HotAddDialog({
   // Only the latest candidate request may present its answer.
   const generation = useRef(0);
   const now = useUiClock('minute');
+  const policy = useDueSoonPolicy();
 
   const runSearch = useCallback(async (term: string) => {
     const requested = ++generation.current;
@@ -1368,7 +1392,7 @@ function HotAddDialog({
           </div>
         ) : candidates.length ? (
           candidates.map((c) => {
-            const due = dueInfo(c, now);
+            const due = dueInfo(c, now, policy);
             return (
               <button
                 key={idOf(c)}

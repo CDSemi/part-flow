@@ -127,8 +127,16 @@ wedge gửi text + Enter, không custom driver hay scan-mode selector.
 12. **Shared UI clock:** fixed timestamps + shared minute/second subscription;
     không per-component drift. Helper format `<1m`, `18m`, `1h 24m`, `2d 03h`;
     due countdown `N days left`, `due today`, `overdue N days`, `No due date`.
-    Due Soon window = lead-time ratio clamp bởi config; default min 2d, 15%, max
-    7d. Mock dùng relative offset resolved một lần.
+    Due Soon window = lead-time percentage của khoảng received → due (số học số
+    nguyên chính xác), clamp vào [`minDays`, `maxDays`], do `dueSoonWindowDays` derive
+    từ `DueSoonPolicy` do caller cung cấp; policy là cấu hình **Due Soon warning** đã
+    lưu của server (Administration → Settings, §9; giá trị ban đầu Minimum 2 ngày,
+    15 %, Maximum 7 ngày), được tải như một phần ready state của mỗi view — business
+    logic không hard-code số, không có default ở frontend, và lead time không rõ hoặc
+    không hợp lệ thì rơi về window tối thiểu của policy; riêng Scan Station đọc nó
+    cạnh Area inventory và, khi không tải được, giữ mọi production action và chỉ giữ
+    lại phán đoán `soon` sau một thông báo tường minh — display policy không bao giờ
+    chặn production. Mock dùng relative offset resolved một lần.
 
 ---
 
@@ -454,8 +462,11 @@ Read-only full-screen Department-wide display, không per-Area filter.
 - Due countdown derive; Hot sort trước theo rank, rồi canonical due ordering. Chỉ
   urgency text blink; Hot flame pulse riêng; reduced-motion tắt animation.
 - Dynamic pagination đo actual viewport/row; ≥1 row; fallback 10 trong layout-less
-  test. Auto rotate chỉ multi-page, default 3s/displayed row, min 6s, config per
-  Department. Buttons/dots/arrows/swipe không wrap; manual change restart timer.
+  test. Auto rotate chỉ multi-page, dwell theo **seconds per displayed row** và
+  **minimum page dwell** của Department (ban đầu 3 s và 6 s) — Department display
+  settings (§9), cấu hình theo Department, đi cùng board feed và áp dụng ở lần
+  refresh kế tiếp, không bao giờ là hằng số UI hard-code (tooltip rotation indicator
+  nêu giá trị của Department). Buttons/dots/arrows/swipe không wrap; manual change restart timer.
 - Rotation progress dùng cùng deadline, hidden khi one page; reduced motion giữ
   seconds text nhưng ẩn moving track.
 - `Auto scale` default On dùng one uniform zoom, scale up/down để full table width
@@ -486,7 +497,7 @@ chạy hoặc đã lỗi đều mang tone warning kèm ghi chú, không bao gi�
 (Department, tiêu đề với status, đồng hồ), footer hiện khi đã có board hoàn
 chỉnh. Cột Job Numbers nêu mọi demand của row (`<job numbers> · WO <number hoặc —>
 [· MODIFY] · <n> pcs`, hoặc `· allocated a/n` khi đã allocate), dòng tên /
-revision PN (`{name} · rev {revision}`) lấy từ chi tiết Part Number đã lưu (Phase 13) và vắng khi chưa có. Mọi thứ
+revision PN (`{name} · rev {revision}`) lấy từ chi tiết Part Number đã lưu (Phase 13) và vắng khi chưa có. Từ Phase 13, Department của feed mang rotation timing của nó, và board đọc Due Soon policy ở mỗi lần refresh (đọc policy lỗi hành xử đúng như đọc board lỗi). Mọi thứ
 khác ở trên — kiosk, pagination và rotation, auto scale, điều hướng tay, location
 grid, tooltip, legend — giữ nguyên; mock dataset Phase 2 của board đã bỏ, các
 preview `?state=` chỉ development (loading / empty / error / long) render state
@@ -736,7 +747,7 @@ reason** — một option On/Off toàn cục (default Off) bắt buộc mọi Un
 (§4.5; PROJECT_PROFILE §16 "require a reason when configured"), do server enforce và
 lưu ngay khi đổi; ai được undo hoặc correct (role-based correction permission) chưa
 cấu hình được (Phase 13 Users và roles thêm vào section này; enforcement Phase 14). Department
-display config per Department. Due Soon settings default 2d/15%/7d.
+display settings được cấu hình **theo Department, không bao giờ global (quyết định post-v18)** — bảng Department với editor cho Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; default 3 và 6). Panel **Due Soon warning** của **Settings** sở hữu cấu hình đứng sau mọi due countdown derive (§3.12): **Minimum warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ dưới minimum) — giá trị ban đầu 2 ngày, 15 % và 7 ngày; một policy toàn cục; phần còn lại của Settings chưa khả dụng.
 
 Không có Machine, RouteTemplate hay PartNumber registry trong Admin; chúng ở
 Management. Barcode configuration có persisted Asset Tag format prefix + 1–8 digit
@@ -744,8 +755,8 @@ minimum width, live Next Tag/scanned barcode; whitespace/colon prefix invalid, k
 trim/clamp; format change không rename old tag hay reset never-reuse sequence.
 
 Phase 3.5 Departments/Areas/Operations/Stations/barcode là real API-backed UI với
-loading/error/retry/offline gate. Từ Phase 13, Workers cũng là section thật; các Admin section
-sau vẫn honest unavailable. Workers
+loading/error/retry/offline gate. Từ Phase 13, Workers cũng là section thật, cùng Department display settings và panel Due Soon warning của section Settings (Phase 13); các Admin section
+sau (và phần còn lại của general settings) vẫn honest unavailable. Workers
 profile tách Users. Ghi chú triển khai (Phase 13): editor Workers lưu badge bằng chữ
 in hoa và hiện preview `Saved as:` khi khác với giá trị đã gõ hoặc scan, upload avatar
 (PNG, JPEG hoặc WebP; ảnh lớn được resize trước khi upload) hoặc xóa avatar, hiện
@@ -1114,6 +1125,20 @@ session không còn shift end.
   giữ mọi selection; khi option Off summary Undo không đổi. Administration → Correction
   permissions thật cho riêng công tắc này và nói rõ role-based correction permission
   chưa cấu hình được.
+26. **Department display settings và Due Soon policy trở thành cấu hình thật** (§3.12,
+  §5, §9; IMPLEMENTATION_ROADMAP Phase 13; owner default OD-5 — bổ sung hành vi,
+  không tăng version): Production Board rotation timing được cấu hình theo
+  Department (seconds per displayed row 1–60, minimum page dwell 1–300 s; default
+  3 s và 6 s) trong Administration → Department display settings và đi cùng board feed,
+  áp dụng ở lần refresh kế tiếp của board; Due Soon window là một policy server toàn
+  cục sửa ở Administration → Settings → Due Soon warning (Minimum warning days 0–365,
+  Lead-time warning percentage 1–100, Maximum warning days 0–365 và không bao giờ dưới
+  minimum; giá trị ban đầu 2 ngày, 15 %, 7 ngày), tính bằng số học số nguyên chính xác
+  từ khoảng received → due, và được tải như một phần ready state của Production Board,
+  Area Board, Scan Station, Priority và Work Orders; Scan Station giữ mọi production
+  action khi không tải được policy và chỉ giữ lại phán đoán `soon` sau một thông báo
+  tường minh. Các default frontend `DEFAULT_DUE_SOON_POLICY`, `ROTATE_MS_PER_ROW` và
+  `ROTATE_MS_MIN` đã bị gỡ.
 
 ## 15.2 Từ GUI Design v16
 

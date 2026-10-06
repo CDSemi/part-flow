@@ -69,8 +69,17 @@ interface AreaRow {
   worker_session_timeout_minutes: number | null;
 }
 
+interface FakeDepartment {
+  id: number;
+  name: string;
+  is_active: boolean;
+  /** Department display settings (Production Board rotation timing). */
+  board_seconds_per_row: number;
+  board_min_page_seconds: number;
+}
+
 interface FakeState {
-  departments: { id: number; name: string; is_active: boolean }[];
+  departments: FakeDepartment[];
   areas: AreaRow[];
   operations: {
     id: number;
@@ -97,6 +106,8 @@ interface FakeState {
   badgeConfirm: { done: boolean; queue: boolean; undo: boolean };
   /** `application_policy` Undo reason policy. */
   undoReasonRequired: boolean;
+  /** `application_policy` Due Soon warning policy. */
+  dueSoon: { min: number; percent: number; max: number };
   nextId: number;
 }
 
@@ -105,7 +116,15 @@ const ALEX_AVATAR_AT = '2026-09-01T08:00:00.123456+00:00';
 
 function seedState(): FakeState {
   return {
-    departments: [{ id: 1, name: 'Machine Shop', is_active: true }],
+    departments: [
+      {
+        id: 1,
+        name: 'Machine Shop',
+        is_active: true,
+        board_seconds_per_row: 3,
+        board_min_page_seconds: 6,
+      },
+    ],
     areas: [
       {
         id: 1,
@@ -173,6 +192,7 @@ function seedState(): FakeState {
     sessionTimeout: 15,
     badgeConfirm: { done: true, queue: true, undo: true },
     undoReasonRequired: false,
+    dueSoon: { min: 2, percent: 15, max: 7 },
     nextId: 100,
   };
 }
@@ -192,6 +212,24 @@ let policyFailure: { status: number; detail: string } | null;
 let policyHold: Promise<void> | null;
 /** A refusal of every `/api/policies/correction-permissions` call, if set. */
 let correctionFailure: { status: number; detail: string } | null;
+/** A refusal of every `/api/policies/due-soon` call, if set. */
+let dueSoonFailure: { status: number; detail: string } | null;
+
+const E_B1 = 'Seconds per displayed row must be a whole number from 1 to 60.';
+const E_B2 =
+  'The minimum page dwell must be a whole number of seconds from 1 to 300.';
+const E_D1 = 'Minimum warning days must be a whole number from 0 to 365.';
+const E_D2 = 'Maximum warning days must be a whole number from 0 to 365.';
+const E_D3 =
+  'The lead-time warning percentage must be a whole number from 1 to 100.';
+const E_D4 =
+  'Minimum warning days cannot be greater than maximum warning days.';
+
+const wholeIn = (value: unknown, min: number, max: number) =>
+  typeof value === 'number' &&
+  Number.isInteger(value) &&
+  value >= min &&
+  value <= max;
 
 const AREA_TIMEOUT_REFUSAL =
   "An Area's Worker session timeout must be a whole number of minutes from 1 to 720, or empty to use the default.";
@@ -261,7 +299,13 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         409,
       );
     }
-    const department = { id: state.nextId++, name, is_active: true };
+    const department = {
+      id: state.nextId++,
+      name,
+      is_active: true,
+      board_seconds_per_row: 3,
+      board_min_page_seconds: 6,
+    };
     state.departments.push(department);
     return json(stamp(department), 201);
   }
@@ -282,9 +326,27 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
         409,
       );
     }
+    if (
+      'board_seconds_per_row' in body &&
+      !wholeIn(body.board_seconds_per_row, 1, 60)
+    ) {
+      return json({ detail: E_B1 }, 422);
+    }
+    if (
+      'board_min_page_seconds' in body &&
+      !wholeIn(body.board_min_page_seconds, 1, 300)
+    ) {
+      return json({ detail: E_B2 }, 422);
+    }
     if (typeof body.name === 'string') department.name = body.name.trim();
     if (typeof body.is_active === 'boolean')
       department.is_active = body.is_active;
+    if (typeof body.board_seconds_per_row === 'number') {
+      department.board_seconds_per_row = body.board_seconds_per_row;
+    }
+    if (typeof body.board_min_page_seconds === 'number') {
+      department.board_min_page_seconds = body.board_min_page_seconds;
+    }
     return json(stamp(department));
   }
   if (url === '/api/areas' && method === 'GET') {
@@ -377,6 +439,41 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       badge_confirm_done: state.badgeConfirm.done,
       badge_confirm_queue: state.badgeConfirm.queue,
       badge_confirm_undo: state.badgeConfirm.undo,
+      updated_at: T0,
+    });
+  }
+  if (url === '/api/policies/due-soon') {
+    if (dueSoonFailure) {
+      return json({ detail: dueSoonFailure.detail }, dueSoonFailure.status);
+    }
+    if (method === 'PUT') {
+      const keys = [
+        'due_soon_min_days',
+        'due_soon_lead_time_percent',
+        'due_soon_max_days',
+      ];
+      if (Object.keys(body).sort().join() !== [...keys].sort().join()) {
+        return json({ detail: 'Invalid request.' }, 422);
+      }
+      const min = body.due_soon_min_days;
+      const percent = body.due_soon_lead_time_percent;
+      const max = body.due_soon_max_days;
+      if (!wholeIn(min, 0, 365)) return json({ detail: E_D1 }, 422);
+      if (!wholeIn(max, 0, 365)) return json({ detail: E_D2 }, 422);
+      if (!wholeIn(percent, 1, 100)) return json({ detail: E_D3 }, 422);
+      if ((min as number) > (max as number)) {
+        return json({ detail: E_D4 }, 422);
+      }
+      state.dueSoon = {
+        min: min as number,
+        percent: percent as number,
+        max: max as number,
+      };
+    }
+    return json({
+      due_soon_min_days: state.dueSoon.min,
+      due_soon_lead_time_percent: state.dueSoon.percent,
+      due_soon_max_days: state.dueSoon.max,
       updated_at: T0,
     });
   }
@@ -627,6 +724,7 @@ beforeEach(() => {
   policyFailure = null;
   policyHold = null;
   correctionFailure = null;
+  dueSoonFailure = null;
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -2236,4 +2334,282 @@ test('a refused Undo reason switch keeps the stored value with the reason; a fai
   expect(
     await screen.findByRole('switch', { name: UNDO_REASON_SWITCH }),
   ).toHaveAttribute('aria-checked', 'false');
+});
+
+/* ============ Department display settings (Production Board rotation) ============ */
+
+async function openDepartmentDisplay(
+  status: 'connected' | 'unavailable' = 'connected',
+) {
+  renderAdmin(status);
+  openSection('Department display settings');
+  return screen.findByRole('button', {
+    name: 'Edit rotation timing — Machine Shop',
+  });
+}
+
+function rotationRow(name: string): string[] {
+  const row = screen
+    .getByRole('button', { name: `Edit rotation timing — ${name}` })
+    .closest('tr') as HTMLElement;
+  return Array.from(row.querySelectorAll('td'), (td) => td.textContent ?? '');
+}
+
+test('AD-1: Department display settings lists every Department with its rotation timing', async () => {
+  state.departments.push({
+    id: 2,
+    name: 'Finishing',
+    is_active: false,
+    board_seconds_per_row: 4,
+    board_min_page_seconds: 20,
+  });
+  await openDepartmentDisplay();
+
+  expect(
+    screen.getByRole('heading', { name: 'Department display settings' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole('heading', { name: 'Production Board rotation' }),
+  ).toBeInTheDocument();
+  expect(rotationRow('Machine Shop').slice(0, 3)).toEqual([
+    'Machine Shop',
+    '3 s',
+    '6 s',
+  ]);
+  expect(rotationRow('Finishing').slice(0, 3)).toEqual([
+    'Finishing (inactive)',
+    '4 s',
+    '20 s',
+  ]);
+  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+});
+
+test('AD-2: the rotation editor validates in place, previews, and PATCHes only the changed fields', async () => {
+  const edit = await openDepartmentDisplay();
+  edit.focus();
+  fireEvent.click(edit);
+  const dialog = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  const seconds = within(dialog).getByLabelText('Seconds per displayed row');
+  const dwell = within(dialog).getByLabelText('Minimum page dwell (seconds)');
+  await waitFor(() => expect(document.activeElement).toBe(seconds));
+  const save = within(dialog).getByRole('button', { name: 'Save' });
+  // Unchanged: nothing to save.
+  expect(save).toBeDisabled();
+
+  fireEvent.change(seconds, { target: { value: '0' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(E_B1);
+  expect(save).toBeDisabled();
+  fireEvent.change(seconds, { target: { value: '2' } });
+  fireEvent.change(dwell, { target: { value: '301' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(E_B2);
+  expect(save).toBeDisabled();
+  fireEvent.change(dwell, { target: { value: '10' } });
+  expect(within(dialog).queryByRole('alert')).toBeNull();
+  expect(dialog).toHaveTextContent(
+    'A page showing 1 row stays 10 s; a page showing 10 rows stays 20 s.',
+  );
+  expect(save).toBeEnabled();
+  fireEvent.click(save);
+
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toEqual([
+    {
+      method: 'PATCH',
+      url: '/api/departments/1',
+      body: { board_seconds_per_row: 2, board_min_page_seconds: 10 },
+    },
+  ]);
+  await waitFor(() =>
+    expect(rotationRow('Machine Shop').slice(1, 3)).toEqual(['2 s', '10 s']),
+  );
+  expect(document.activeElement).toBe(
+    screen.getByRole('button', { name: 'Edit rotation timing — Machine Shop' }),
+  );
+
+  // Only the dwell changes: only the dwell is sent.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit rotation timing — Machine Shop' }),
+  );
+  const again = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  const againSave = within(again).getByRole('button', { name: 'Save' });
+  const againSeconds = within(again).getByLabelText(
+    'Seconds per displayed row',
+  );
+  // A typed value restored to its opened value is no change.
+  fireEvent.change(againSeconds, { target: { value: '5' } });
+  expect(againSave).toBeEnabled();
+  fireEvent.change(againSeconds, { target: { value: '2' } });
+  expect(againSave).toBeDisabled();
+  fireEvent.change(
+    within(again).getByLabelText('Minimum page dwell (seconds)'),
+    { target: { value: '9' } },
+  );
+  fireEvent.click(againSave);
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes[1]).toEqual({
+    method: 'PATCH',
+    url: '/api/departments/1',
+    body: { board_min_page_seconds: 9 },
+  });
+  expect(state.departments[0]).toMatchObject({
+    board_seconds_per_row: 2,
+    board_min_page_seconds: 9,
+  });
+});
+
+test('AD-3: offline the rotation editor cannot save; the table still reads', async () => {
+  const edit = await openDepartmentDisplay('unavailable');
+  expect(rotationRow('Machine Shop').slice(1, 3)).toEqual(['3 s', '6 s']);
+  fireEvent.click(edit);
+  const dialog = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Seconds per displayed row'), {
+    target: { value: '4' },
+  });
+  expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
+test('AD-4: a server refusal stays in place in the rotation editor with the typed values', async () => {
+  fireEvent.click(await openDepartmentDisplay());
+  const dialog = screen.getByRole('dialog', {
+    name: 'Production Board rotation — Machine Shop',
+  });
+  fireEvent.change(within(dialog).getByLabelText('Seconds per displayed row'), {
+    target: { value: '4' },
+  });
+  vi.mocked(fetch).mockImplementationOnce(async () =>
+    json({ detail: E_B1 }, 422),
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(E_B1);
+  expect(
+    within(dialog).getByLabelText('Seconds per displayed row'),
+  ).toHaveValue(4);
+  expect(screen.getByRole('dialog')).toBe(dialog);
+  expect(state.departments[0].board_seconds_per_row).toBe(3);
+});
+
+test('Department display settings: a failed load offers Retry', async () => {
+  vi.mocked(fetch).mockImplementation(async (input, init) =>
+    String(input) === '/api/departments'
+      ? json({ detail: 'Database unavailable.' }, 500)
+      : handle(String(input), init),
+  );
+  renderAdmin();
+  openSection('Department display settings');
+  expect(
+    await screen.findByText('Department display settings could not be loaded.'),
+  ).toBeInTheDocument();
+  vi.mocked(fetch).mockImplementation(async (input, init) =>
+    handle(String(input), init),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(
+    await screen.findByRole('button', {
+      name: 'Edit rotation timing — Machine Shop',
+    }),
+  ).toBeInTheDocument();
+});
+
+/* ============ Settings (Due Soon warning) ============ */
+
+async function openSettings(status: 'connected' | 'unavailable' = 'connected') {
+  renderAdmin(status);
+  openSection('Settings');
+  return screen.findByLabelText('Minimum warning days');
+}
+
+test('AD-5: the Due Soon warning panel loads, explains, validates and PUTs exactly the three fields', async () => {
+  const min = await openSettings();
+  const percent = screen.getByLabelText('Lead-time warning percentage (%)');
+  const max = screen.getByLabelText('Maximum warning days');
+  expect(min).toHaveValue(2);
+  expect(percent).toHaveValue(15);
+  expect(max).toHaveValue(7);
+  expect(
+    screen.getByRole('heading', { name: 'Due Soon warning' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('10-day lead → warns 2 days ahead'),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('30-day lead → warns 5 days ahead'),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('90-day lead → warns 7 days ahead'),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('Other application settings are not available yet.'),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
+  expect(document.body.textContent).not.toMatch(/Phase \d/);
+  const save = screen.getByRole('button', { name: 'Save' });
+  expect(save).toBeDisabled();
+
+  // Range errors under the failing field; the order rule once both
+  // clamps are valid.
+  fireEvent.change(min, { target: { value: '-1' } });
+  expect(screen.getByRole('alert')).toHaveTextContent(E_D1);
+  fireEvent.change(min, { target: { value: '2' } });
+  fireEvent.change(percent, { target: { value: '0' } });
+  expect(screen.getByRole('alert')).toHaveTextContent(E_D3);
+  fireEvent.change(percent, { target: { value: '15' } });
+  fireEvent.change(max, { target: { value: '366' } });
+  expect(screen.getByRole('alert')).toHaveTextContent(E_D2);
+  fireEvent.change(min, { target: { value: '6' } });
+  fireEvent.change(max, { target: { value: '5' } });
+  expect(screen.getByRole('alert')).toHaveTextContent(E_D4);
+  expect(screen.queryByText(/-day lead → warns/)).toBeNull();
+  expect(save).toBeDisabled();
+
+  fireEvent.change(min, { target: { value: '1' } });
+  fireEvent.change(percent, { target: { value: '20' } });
+  fireEvent.change(max, { target: { value: '5' } });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(
+    screen.getByText('10-day lead → warns 2 days ahead'),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('30-day lead → warns 5 days ahead'),
+  ).toBeInTheDocument();
+  fireEvent.click(save);
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    '✓ Due Soon warning saved.',
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/due-soon',
+      body: {
+        due_soon_min_days: 1,
+        due_soon_lead_time_percent: 20,
+        due_soon_max_days: 5,
+      },
+    },
+  ]);
+  expect(state.dueSoon).toEqual({ min: 1, percent: 20, max: 5 });
+  await waitFor(() => expect(save).toBeDisabled());
+});
+
+test('AD-5: offline the Due Soon warning cannot be saved; a failed load offers Retry', async () => {
+  const min = await openSettings('unavailable');
+  fireEvent.change(min, { target: { value: '3' } });
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  cleanup();
+
+  dueSoonFailure = { status: 500, detail: 'Database unavailable.' };
+  renderAdmin();
+  openSection('Settings');
+  expect(
+    await screen.findByText('Due Soon warning settings could not be loaded.'),
+  ).toBeInTheDocument();
+  dueSoonFailure = null;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByLabelText('Minimum warning days')).toHaveValue(2);
 });

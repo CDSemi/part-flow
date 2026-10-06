@@ -4,11 +4,15 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { WORK_ORDER_LIST_LIMIT, listWorkOrders } from '../../api/work-orders';
 import type { WorkOrderSummary } from '../../api/work-orders';
+import { getDueSoonPolicy } from '../../api/policies';
+import type { ApiDataState } from '../../api/use-api-data';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { Link } from '../../app/link';
 import { useRouter } from '../../app/router-context';
 import { getViewStatePreview } from '../../app/view-state';
+import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { useToastNotice } from '../../components/toast-notice';
 import { PageNote } from '../../components/PageNote';
 import { useUiClock } from '../../components/ui-clock';
@@ -17,7 +21,8 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { DEFAULT_DUE_SOON_POLICY, dueCountdown, formatIsoDate } from '../dates';
+import { dueCountdown, formatIsoDate } from '../dates';
+import type { DueSoonPolicy } from '../dates';
 import { partNumbersPreview, workOrderStatusLabel } from './demand-lines';
 import { CompletedWorkOrdersView } from './CompletedWorkOrdersView';
 import { NewWorkOrderDialog } from './NewWorkOrderDialog';
@@ -126,6 +131,10 @@ function ActiveWorkOrdersView() {
     [settledSearch],
   );
   const workOrdersData = useApiData(loadWorkOrders);
+  // The Due Soon warning policy of the list's due tones, read on view
+  // activation (and on Retry). It gates only the table: the toolbar and
+  // its actions never wait on a display policy.
+  const dueSoonData = useApiData(getDueSoonPolicy);
 
   const answered =
     workOrdersData.state.status === 'ready' ? workOrdersData.state.data : null;
@@ -258,6 +267,8 @@ function ActiveWorkOrdersView() {
         onSearch={setSearch}
         onOpen={openWorkOrder}
         onNew={() => setNewWorkOrderOpen(true)}
+        dueSoon={dueSoonData.state}
+        onRetryDueSoon={dueSoonData.reload}
       />
       {detailId !== null && (
         <WorkOrderDetailPanel
@@ -313,6 +324,8 @@ function WorkOrderListPanel({
   onSearch,
   onOpen,
   onNew,
+  dueSoon,
+  onRetryDueSoon,
 }: {
   /** The server's page — already filtered and already bounded. */
   list: WorkOrderSummary[];
@@ -326,21 +339,10 @@ function WorkOrderListPanel({
   onSearch: (v: string) => void;
   onOpen: (id: number) => void;
   onNew: () => void;
+  /** The Due Soon warning policy read: the table renders only with it. */
+  dueSoon: ApiDataState<DueSoonPolicy>;
+  onRetryDueSoon: () => void;
 }) {
-  // Due-date lateness is DERIVED from the fixed due date and the
-  // shared UI clock — the urgency keeps updating while the view stays
-  // open.
-  const now = useUiClock('minute');
-  const dueTone = (w: WorkOrderSummary): string => {
-    if (!w.dueDate) return 'none';
-    // Colour-ramped like every other due date (GUI_DESIGN §11.1/§3.9):
-    // late → soon → ok, from the shared Due Soon configuration
-    // stand-in.
-    return dueCountdown(w.dueDate, now, {
-      received: w.receivedDate,
-      policy: DEFAULT_DUE_SOON_POLICY,
-    }).dueClass;
-  };
   // The rows come from the server — no second, local filter with its
   // own accidental semantics. While `searching`, they are the PREVIOUS
   // page kept on screen to avoid a flicker, so "there is nothing here"
@@ -393,88 +395,27 @@ function WorkOrderListPanel({
           search to narrow it.
         </div>
       ) : null}
-      {noRows && !hasSearch ? (
-        <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
+      {dueSoon.status === 'loading' ? (
+        <LoadingState label="Loading Due Soon warning settings" />
+      ) : dueSoon.status === 'error' ? (
+        <ErrorState
+          message="The Due Soon warning settings could not be loaded."
+          detail={dueSoon.message}
+          onRetry={onRetryDueSoon}
+        />
       ) : (
-        <table className="wolist">
-          <thead>
-            <tr>
-              <th>WO Number</th>
-              <th>Received</th>
-              <th>Due date</th>
-              <th>Demand lines</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {/* The "nothing matches" row is a claim about the CURRENT
-                search, so it waits for that search's own page: while
-                one is in flight the previous rows stay on screen and
-                this stays out. (Reaching it implies a search — an
-                answered empty page with no search renders the empty
-                state instead of the table.) */}
-            {noRows ? (
-              <tr>
-                <td colSpan={5} className="empty">
-                  No active Work Order matches “{search.trim()}” — search{' '}
-                  <Link to="/management/work-orders/completed">
-                    Completed Work Orders
-                  </Link>
-                  , check the number, or create it with ＋ New Work Order
-                </td>
-              </tr>
-            ) : null}
-            {rows.map((w) => (
-              // The COMPLETE row opens the Work Order Details dialog
-              // (v15): the WO-cell button stays the keyboard
-              // (Enter/Space) and screen-reader entry point — its
-              // activation bubbles to this row handler; no other
-              // interactive control lives inside the row.
-              <tr key={w.id} className="selrow" onClick={() => onOpen(w.id)}>
-                <td>
-                  <button
-                    className="rowbtn"
-                    aria-label={`Open Work Order ${woDisplay(w.workOrderNumber)}`}
-                  >
-                    <span className="wo" title={woDisplay(w.workOrderNumber)}>
-                      {woDisplay(w.workOrderNumber)}
-                    </span>
-                    {w.workOrderNumber === null ? (
-                      <span className="sub" style={{ display: 'block' }}>
-                        internal Work Order — no external number yet
-                      </span>
-                    ) : null}
-                  </button>
-                </td>
-                {/* data-label: inline column captions in the
-                      collapsed stacked layout (GUI_DESIGN §2.5) —
-                      bare dates and a line count are not self-evident
-                      without the header row. */}
-                <td className="mono-sm" data-label="Received">
-                  {formatIsoDate(w.receivedDate)}
-                </td>
-                <td className="mono-sm" data-label="Due date">
-                  <span className={`duetxt ${dueTone(w)}`}>
-                    {formatIsoDate(w.dueDate)}
-                  </span>
-                </td>
-                <td data-label="Demand lines">
-                  {w.demandLineCount}
-                  <div className="sub mono-sm">
-                    {partNumbersPreview(w.partNumbers)}
-                  </div>
-                </td>
-                <td>
-                  <span
-                    className={`wostat ${workOrderStatusLabel(w.status).toLowerCase()}`}
-                  >
-                    {workOrderStatusLabel(w.status)}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <DueSoonPolicyProvider policy={dueSoon.data}>
+          {noRows && !hasSearch ? (
+            <EmptyState message="No Work Orders yet — create the first one with ＋ New Work Order." />
+          ) : (
+            <WorkOrderTable
+              rows={rows}
+              noRows={noRows}
+              search={search}
+              onOpen={onOpen}
+            />
+          )}
+        </DueSoonPolicyProvider>
       )}
       <PageNote>
         Completed Work Orders leave the active list and stay permanently
@@ -487,5 +428,113 @@ function WorkOrderListPanel({
         through an audited edit.
       </PageNote>
     </div>
+  );
+}
+
+/** The active Work Order list rows, under the Due Soon policy provider. */
+function WorkOrderTable({
+  rows,
+  noRows,
+  search,
+  onOpen,
+}: {
+  rows: WorkOrderSummary[];
+  /** The CURRENT search answered with no row. */
+  noRows: boolean;
+  search: string;
+  onOpen: (id: number) => void;
+}) {
+  // Due-date lateness is DERIVED from the fixed due date and the
+  // shared UI clock — the urgency keeps updating while the view stays
+  // open.
+  const now = useUiClock('minute');
+  const policy = useDueSoonPolicy();
+  const dueTone = (w: WorkOrderSummary): string => {
+    if (!w.dueDate) return 'none';
+    // Colour-ramped like every other due date (GUI_DESIGN §11.1/§3.9):
+    // late → soon → ok, under the server's Due Soon warning policy.
+    return dueCountdown(w.dueDate, now, { received: w.receivedDate, policy })
+      .dueClass;
+  };
+  return (
+    <table className="wolist">
+      <thead>
+        <tr>
+          <th>WO Number</th>
+          <th>Received</th>
+          <th>Due date</th>
+          <th>Demand lines</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {/* The "nothing matches" row is a claim about the CURRENT
+                search, so it waits for that search's own page: while
+                one is in flight the previous rows stay on screen and
+                this stays out. (Reaching it implies a search — an
+                answered empty page with no search renders the empty
+                state instead of the table.) */}
+        {noRows ? (
+          <tr>
+            <td colSpan={5} className="empty">
+              No active Work Order matches “{search.trim()}” — search{' '}
+              <Link to="/management/work-orders/completed">
+                Completed Work Orders
+              </Link>
+              , check the number, or create it with ＋ New Work Order
+            </td>
+          </tr>
+        ) : null}
+        {rows.map((w) => (
+          // The COMPLETE row opens the Work Order Details dialog
+          // (v15): the WO-cell button stays the keyboard
+          // (Enter/Space) and screen-reader entry point — its
+          // activation bubbles to this row handler; no other
+          // interactive control lives inside the row.
+          <tr key={w.id} className="selrow" onClick={() => onOpen(w.id)}>
+            <td>
+              <button
+                className="rowbtn"
+                aria-label={`Open Work Order ${woDisplay(w.workOrderNumber)}`}
+              >
+                <span className="wo" title={woDisplay(w.workOrderNumber)}>
+                  {woDisplay(w.workOrderNumber)}
+                </span>
+                {w.workOrderNumber === null ? (
+                  <span className="sub" style={{ display: 'block' }}>
+                    internal Work Order — no external number yet
+                  </span>
+                ) : null}
+              </button>
+            </td>
+            {/* data-label: inline column captions in the
+                      collapsed stacked layout (GUI_DESIGN §2.5) —
+                      bare dates and a line count are not self-evident
+                      without the header row. */}
+            <td className="mono-sm" data-label="Received">
+              {formatIsoDate(w.receivedDate)}
+            </td>
+            <td className="mono-sm" data-label="Due date">
+              <span className={`duetxt ${dueTone(w)}`}>
+                {formatIsoDate(w.dueDate)}
+              </span>
+            </td>
+            <td data-label="Demand lines">
+              {w.demandLineCount}
+              <div className="sub mono-sm">
+                {partNumbersPreview(w.partNumbers)}
+              </div>
+            </td>
+            <td>
+              <span
+                className={`wostat ${workOrderStatusLabel(w.status).toLowerCase()}`}
+              >
+                {workOrderStatusLabel(w.status)}
+              </span>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

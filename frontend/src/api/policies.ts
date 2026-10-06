@@ -1,5 +1,5 @@
-// Application policies API (Administration → Worker sessions and
-// Correction permissions, Phase 13).
+// Application policies API (Administration → Worker sessions,
+// Correction permissions and Settings, Phase 13).
 //
 // The global policy singleton the server seeds and audits. It holds the
 // default sliding inactivity timeout of scanned Worker Sessions in whole
@@ -12,12 +12,18 @@
 // singleton also holds the Correction permissions section's Undo reason
 // policy (PROJECT_PROFILE §16 "require a reason when configured"; one
 // global switch, default off), read and written through its own section
-// endpoint. The server validates and stays authoritative; this module
-// only maps the wire shape.
+// endpoint, and the Settings section's Due Soon warning policy — the
+// window behind every derived due countdown (GUI_DESIGN §3.12 / §9),
+// replaced as a whole (its fields share a cross-field rule). The server
+// validates and stays authoritative; this module only maps the wire
+// shape, and refuses a Due Soon answer outside the server's ranges
+// rather than letting it degrade the countdowns silently.
 //
 // Production-safe: no mock data, no framework imports.
 
-import { apiRequest } from './client';
+import { isDueSoonPolicy } from '../views/dates';
+import type { DueSoonPolicy } from '../views/dates';
+import { ApiError, apiRequest } from './client';
 import type { SensitiveAction } from './scan-station';
 
 export interface WorkerSessionPolicy {
@@ -136,4 +142,52 @@ export async function updateUndoReasonRequired(
     { method: 'PUT', body: { undo_reason_required: required } },
   );
   return toCorrectionPermissionsPolicy(wire);
+}
+
+interface DueSoonPolicyWire {
+  due_soon_min_days: number;
+  due_soon_lead_time_percent: number;
+  due_soon_max_days: number;
+  updated_at: string;
+}
+
+const DUE_SOON_POLICY_PATH = '/api/policies/due-soon';
+
+function toDueSoonPolicy(wire: DueSoonPolicyWire): DueSoonPolicy {
+  const policy = {
+    minDays: wire.due_soon_min_days,
+    leadTimePercent: wire.due_soon_lead_time_percent,
+    maxDays: wire.due_soon_max_days,
+  };
+  if (!isDueSoonPolicy(policy)) {
+    // An ApiError, so the view states this reason (a plain Error reads
+    // as "could not be reached", which a 200 answer was not).
+    throw new ApiError(
+      200,
+      'The server answered an invalid Due Soon warning policy.',
+    );
+  }
+  return policy;
+}
+
+/** The Due Soon warning policy (Administration → Settings). */
+export async function getDueSoonPolicy(): Promise<DueSoonPolicy> {
+  const wire = await apiRequest<DueSoonPolicyWire>(DUE_SOON_POLICY_PATH);
+  return toDueSoonPolicy(wire);
+}
+
+/** Replace the Due Soon warning policy (all three fields); an unchanged
+ * policy is a server no-op. */
+export async function updateDueSoonPolicy(
+  policy: DueSoonPolicy,
+): Promise<DueSoonPolicy> {
+  const wire = await apiRequest<DueSoonPolicyWire>(DUE_SOON_POLICY_PATH, {
+    method: 'PUT',
+    body: {
+      due_soon_min_days: policy.minDays,
+      due_soon_lead_time_percent: policy.leadTimePercent,
+      due_soon_max_days: policy.maxDays,
+    },
+  });
+  return toDueSoonPolicy(wire);
 }

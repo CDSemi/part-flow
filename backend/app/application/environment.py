@@ -52,6 +52,13 @@ IMPLEMENTATION_ROADMAP Phase 3.5, GUI_DESIGN §9):
   PROJECT_PROFILE §19) is a whole number of minutes from 1 to 720, or
   empty to use the global default (`app.application.policies`); it joins
   the Area audit snapshot and never touches open sessions.
+- A Department's display settings (Phase 13 slice 9, PROJECT_PROFILE
+  §21) — the Production Board rotation timing: whole seconds per
+  displayed row (1-60) and the minimum page dwell (1-300 s) — are
+  configured per Department through the Department edit, join the
+  Department audit snapshot, are editable on an inactive Department and
+  are presentation configuration only: no production write path reads
+  them. A new Department takes the server defaults (3 and 6).
 - Configuration that ends a scanned Worker Session closes it in the SAME
   transaction (`worker_sessions.close_open_sessions`, PLAN CD5): an Area
   leaving Scanned session mode closes the sessions of its stations
@@ -83,7 +90,7 @@ nothing, and ``next_sequence`` is never audited.
 
 import datetime
 import re
-from typing import Any, Final
+from typing import Any, Final, TypeGuard
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -107,6 +114,10 @@ from app.domain.enums import (
     WorkerSessionEndReason,
 )
 from app.infrastructure.models import (
+    BOARD_MIN_PAGE_SECONDS_MAX,
+    BOARD_MIN_PAGE_SECONDS_MIN,
+    BOARD_SECONDS_PER_ROW_MAX,
+    BOARD_SECONDS_PER_ROW_MIN,
     Area,
     Department,
     MachineAssetTagConfig,
@@ -165,7 +176,12 @@ _PARENT_LOCK: Final = {"read": True}
 
 
 def _department_snapshot(department: Department) -> dict[str, Any]:
-    return {"name": department.name, "is_active": department.is_active}
+    return {
+        "name": department.name,
+        "is_active": department.is_active,
+        "board_seconds_per_row": department.board_seconds_per_row,
+        "board_min_page_seconds": department.board_min_page_seconds,
+    }
 
 
 def _area_snapshot(area: Area) -> dict[str, Any]:
@@ -245,6 +261,24 @@ _DEPARTMENT_CONFLICTS: Final = {
 }
 
 
+def is_board_seconds_per_row(value: object) -> TypeGuard[int]:
+    """Whole seconds per displayed row, 1-60 (a bool is never a number)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and BOARD_SECONDS_PER_ROW_MIN <= value <= BOARD_SECONDS_PER_ROW_MAX
+    )
+
+
+def is_board_min_page_seconds(value: object) -> TypeGuard[int]:
+    """Whole seconds of minimum page dwell, 1-300 (a bool is never a number)."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and BOARD_MIN_PAGE_SECONDS_MIN <= value <= BOARD_MIN_PAGE_SECONDS_MAX
+    )
+
+
 def create_department(session: Session, *, name: object) -> Department:
     clean_name = required_text(name, "Department name")
     _reject_duplicate_department_name(session, clean_name)
@@ -271,6 +305,8 @@ def update_department(
     *,
     name: object = UNSET,
     is_active: object = UNSET,
+    board_seconds_per_row: object = UNSET,
+    board_min_page_seconds: object = UNSET,
 ) -> Department:
     department = session.get(
         Department, department_id, with_for_update=_EDIT_LOCK, populate_existing=True
@@ -303,6 +339,26 @@ def update_department(
                     )
             new_active = active
 
+    # The display settings (presentation configuration, no production
+    # effect): validated with the rest, before the first assignment.
+    new_seconds_per_row: int | None = None
+    if not isinstance(board_seconds_per_row, UnsetType):
+        if not is_board_seconds_per_row(board_seconds_per_row):
+            raise InvalidInputError(
+                "Seconds per displayed row must be a whole number from 1 to 60."
+            )
+        if board_seconds_per_row != department.board_seconds_per_row:
+            new_seconds_per_row = board_seconds_per_row
+
+    new_min_page_seconds: int | None = None
+    if not isinstance(board_min_page_seconds, UnsetType):
+        if not is_board_min_page_seconds(board_min_page_seconds):
+            raise InvalidInputError(
+                "The minimum page dwell must be a whole number of seconds from 1 to 300."
+            )
+        if board_min_page_seconds != department.board_min_page_seconds:
+            new_min_page_seconds = board_min_page_seconds
+
     # Every read is done before the first assignment: assigning the name
     # first would let the active-Area query autoflush the rename UPDATE
     # outside commit(), so a uq_departments_name race lost there would
@@ -313,7 +369,16 @@ def update_department(
         department.name = new_name
     if new_active is not None:
         department.is_active = new_active
-    changed = new_name is not None or new_active is not None
+    if new_seconds_per_row is not None:
+        department.board_seconds_per_row = new_seconds_per_row
+    if new_min_page_seconds is not None:
+        department.board_min_page_seconds = new_min_page_seconds
+    changed = (
+        new_name is not None
+        or new_active is not None
+        or new_seconds_per_row is not None
+        or new_min_page_seconds is not None
+    )
 
     if changed:
         department.updated_at = func.now()

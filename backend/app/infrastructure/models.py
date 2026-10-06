@@ -309,6 +309,37 @@ AREA_WORKER_SESSION_TIMEOUT_SQL = (
 # `0021_phase13_badge_confirmation`.
 BADGE_CONFIRMATION_OPTIONS = ("badge_confirm_done", "badge_confirm_queue", "badge_confirm_undo")
 
+# Department display settings (Phase 13 slice 9, PROJECT_PROFILE §21):
+# the Production Board rotation timing per Department — whole seconds per
+# displayed row (1-60, default 3) and the minimum page dwell (1-300,
+# default 6). Repeated verbatim by migration
+# `0025_phase13_display_settings`.
+BOARD_SECONDS_PER_ROW_MIN = 1
+BOARD_SECONDS_PER_ROW_MAX = 60
+BOARD_SECONDS_PER_ROW_DEFAULT = 3
+BOARD_MIN_PAGE_SECONDS_MIN = 1
+BOARD_MIN_PAGE_SECONDS_MAX = 300
+BOARD_MIN_PAGE_SECONDS_DEFAULT = 6
+DEPARTMENT_BOARD_SECONDS_PER_ROW_SQL = "board_seconds_per_row BETWEEN 1 AND 60"
+DEPARTMENT_BOARD_MIN_PAGE_SECONDS_SQL = "board_min_page_seconds BETWEEN 1 AND 300"
+
+# The Due Soon warning policy (Phase 13 slice 9; GUI_DESIGN §3 rule 12,
+# §9; owner default OD-5): whole days 0-365 for both clamps (minimum never
+# above maximum) and a whole lead-time percentage 1-100; defaults 2 days,
+# 15 %, 7 days. Repeated verbatim by migration
+# `0025_phase13_display_settings`.
+DUE_SOON_DAYS_MIN = 0
+DUE_SOON_DAYS_MAX = 365
+DUE_SOON_PERCENT_MIN = 1
+DUE_SOON_PERCENT_MAX = 100
+DUE_SOON_MIN_DAYS_DEFAULT = 2
+DUE_SOON_LEAD_TIME_PERCENT_DEFAULT = 15
+DUE_SOON_MAX_DAYS_DEFAULT = 7
+POLICY_DUE_SOON_MIN_DAYS_SQL = "due_soon_min_days BETWEEN 0 AND 365"
+POLICY_DUE_SOON_MAX_DAYS_SQL = "due_soon_max_days BETWEEN 0 AND 365"
+POLICY_DUE_SOON_PERCENT_SQL = "due_soon_lead_time_percent BETWEEN 1 AND 100"
+POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
+
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
 # closed end-reason vocabulary, an end time exactly with an end reason,
 # an expiry after the start, an end inside the session's window, and an
@@ -359,13 +390,24 @@ class Base(DeclarativeBase):
 
 
 class Department(Base):
-    """Major organizational unit owning Areas (PROJECT_PROFILE §7)."""
+    """Major organizational unit owning Areas (PROJECT_PROFILE §7).
+
+    Department display settings (Phase 13): the Production Board rotation
+    timing — whole seconds per displayed row and the minimum page dwell —
+    configured per Department, never globally (PROJECT_PROFILE §21).
+    """
 
     __tablename__ = "departments"
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    board_seconds_per_row: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
+    board_min_page_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("6")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -373,7 +415,17 @@ class Department(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("name", name="uq_departments_name"),)
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_departments_name"),
+        CheckConstraint(
+            DEPARTMENT_BOARD_SECONDS_PER_ROW_SQL,
+            name=conv("ck_departments_board_seconds_per_row_range"),
+        ),
+        CheckConstraint(
+            DEPARTMENT_BOARD_MIN_PAGE_SECONDS_SQL,
+            name=conv("ck_departments_board_min_page_seconds_range"),
+        ),
+    )
 
 
 class Area(Base):
@@ -869,6 +921,11 @@ class ApplicationPolicy(Base):
     Slice 6 adds the Undo reason policy of Administration → Correction
     permissions (PROJECT_PROFILE §16 "require a reason when configured";
     owner default OD-6: one global switch, default off).
+
+    Slice 9 adds the Due Soon warning policy (Administration → Settings;
+    GUI_DESIGN §3 rule 12, §9; owner default OD-5) behind every derived
+    due countdown: the minimum and maximum warning days and the lead-time
+    warning percentage. No production command reads it.
     """
 
     __tablename__ = "application_policy"
@@ -886,6 +943,18 @@ class ApplicationPolicy(Base):
     # without a reason. Enforced by the command — never by a CHECK, which
     # cannot depend on configuration.
     undo_reason_required: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    # The Due Soon warning window: the lead-time percentage (whole percent,
+    # never a float ratio) of the received → due lead time, clamped into
+    # [min days, max days].
+    due_soon_min_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("2")
+    )
+    due_soon_lead_time_percent: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    due_soon_max_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("7")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -898,6 +967,22 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_WORKER_SESSION_TIMEOUT_SQL,
             name=conv("ck_application_policy_worker_session_timeout_range"),
+        ),
+        CheckConstraint(
+            POLICY_DUE_SOON_MIN_DAYS_SQL,
+            name=conv("ck_application_policy_due_soon_min_days_range"),
+        ),
+        CheckConstraint(
+            POLICY_DUE_SOON_MAX_DAYS_SQL,
+            name=conv("ck_application_policy_due_soon_max_days_range"),
+        ),
+        CheckConstraint(
+            POLICY_DUE_SOON_PERCENT_SQL,
+            name=conv("ck_application_policy_due_soon_lead_time_percent_range"),
+        ),
+        CheckConstraint(
+            POLICY_DUE_SOON_ORDER_SQL,
+            name=conv("ck_application_policy_due_soon_window_order"),
         ),
     )
 

@@ -3,7 +3,6 @@ import { expect, test } from 'vitest';
 import {
   daysBetweenIso,
   daysInProductionNote,
-  DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
   dueSoonWindowDays,
   elapsedMinutesSince,
@@ -12,8 +11,10 @@ import {
   formatElapsedSince,
   formatIsoDate,
   formatIsoDateShort,
+  isDueSoonPolicy,
   todayIso,
 } from './dates';
+import type { DueSoonPolicy } from './dates';
 
 // One fixed reference instant: 2026-08-05 10:00 local time.
 const NOW = new Date(2026, 7, 5, 10, 0, 0).getTime();
@@ -66,23 +67,13 @@ test('daysBetweenIso is calendar-day arithmetic on plain ISO dates', () => {
   expect(daysBetweenIso('2026-08-05', 'garbage')).toBeNull();
 });
 
-// The initial Due Soon defaults stand in for the future
-// Administration-configured policy at every call site.
-const dueSoon = (received: string | null) => ({
-  received,
-  policy: DEFAULT_DUE_SOON_POLICY,
-});
-
-test('DEFAULT_DUE_SOON_POLICY carries the initial Administration defaults', () => {
-  expect(DEFAULT_DUE_SOON_POLICY).toEqual({
-    minDays: 2,
-    ratio: 0.15,
-    maxDays: 7,
-  });
-});
+// A policy with the canonical initial values (the server's Due Soon
+// warning policy is the only production source; tests state their own).
+const POLICY: DueSoonPolicy = { minDays: 2, leadTimePercent: 15, maxDays: 7 };
+const dueSoon = (received: string | null) => ({ received, policy: POLICY });
 
 test('dueSoonWindowDays scales with the lead time, clamped by the policy', () => {
-  const policy = DEFAULT_DUE_SOON_POLICY;
+  const policy = POLICY;
   expect(dueSoonWindowDays(10, policy)).toBe(2); // ceil(1.5) = 2
   expect(dueSoonWindowDays(20, policy)).toBe(3); // ceil(3.0) = 3
   expect(dueSoonWindowDays(30, policy)).toBe(5); // ceil(4.5) = 5
@@ -93,6 +84,54 @@ test('dueSoonWindowDays scales with the lead time, clamped by the policy', () =>
   expect(dueSoonWindowDays(null, policy)).toBe(policy.minDays);
   expect(dueSoonWindowDays(0, policy)).toBe(policy.minDays);
   expect(dueSoonWindowDays(-4, policy)).toBe(policy.minDays);
+});
+
+test('dueSoonWindowDays uses exact integer arithmetic — no float ratio rounding', () => {
+  // 7 % of 100 days and 14 % of 50 days are exactly 7; a float ratio
+  // (0.07 × 100 = 7.000000000000001) rounded them up to 8.
+  expect(
+    dueSoonWindowDays(100, { minDays: 0, leadTimePercent: 7, maxDays: 365 }),
+  ).toBe(7);
+  expect(
+    dueSoonWindowDays(50, { minDays: 0, leadTimePercent: 14, maxDays: 365 }),
+  ).toBe(7);
+});
+
+test('a zero minimum window with an unknown lead time warns only on the due day', () => {
+  const policy: DueSoonPolicy = { minDays: 0, leadTimePercent: 15, maxDays: 7 };
+  expect(dueSoonWindowDays(null, policy)).toBe(0);
+  expect(dueCountdown('2026-08-06', NOW, { received: null, policy })).toEqual({
+    note: '1 day left',
+    dueClass: 'ok',
+  });
+  expect(dueCountdown('2026-08-05', NOW, { received: null, policy })).toEqual({
+    note: 'due today',
+    dueClass: 'soon',
+  });
+});
+
+test('isDueSoonPolicy admits exactly the server ranges', () => {
+  expect(isDueSoonPolicy({ minDays: 0, leadTimePercent: 1, maxDays: 0 })).toBe(
+    true,
+  );
+  expect(
+    isDueSoonPolicy({ minDays: 365, leadTimePercent: 100, maxDays: 365 }),
+  ).toBe(true);
+  for (const rejected of [
+    { leadTimePercent: 15, maxDays: 7 },
+    { minDays: Number.NaN, leadTimePercent: 15, maxDays: 7 },
+    { minDays: 2.5, leadTimePercent: 15, maxDays: 7 },
+    { minDays: -1, leadTimePercent: 15, maxDays: 7 },
+    { minDays: 2, leadTimePercent: 15, maxDays: 366 },
+    { minDays: 2, leadTimePercent: 0, maxDays: 7 },
+    { minDays: 2, leadTimePercent: 101, maxDays: 7 },
+    { minDays: 5, leadTimePercent: 15, maxDays: 3 },
+    { minDays: '2', leadTimePercent: 15, maxDays: 7 },
+    'policy',
+    null,
+  ]) {
+    expect(isDueSoonPolicy(rejected)).toBe(false);
+  }
 });
 
 test('dueCountdown derives the one shared countdown language', () => {

@@ -106,7 +106,15 @@ beforeEach(() => {
         );
       }
       if (/\/api\/departments$/.test(url)) {
-        return json([{ id: 1, name: 'Machining', is_active: true }]);
+        return json([
+          {
+            id: 1,
+            name: 'Machining',
+            is_active: true,
+            board_seconds_per_row: 3,
+            board_min_page_seconds: 6,
+          },
+        ]);
       }
       if (/\/api\/area-board/.test(url)) {
         // The Area Board is a real view since Phase 11: one Area with
@@ -144,9 +152,22 @@ beforeEach(() => {
         // Hot list keeps these routing tests focused on navigation.
         return json({ department: { id: 1, name: 'Machining' }, entries: [] });
       }
+      if (url === '/api/policies/due-soon') {
+        return json({
+          due_soon_min_days: 2,
+          due_soon_lead_time_percent: 15,
+          due_soon_max_days: 7,
+          updated_at: '2026-10-01T08:00:00Z',
+        });
+      }
       if (/\/api\/production-board/.test(url)) {
         return json({
-          department: { id: 1, name: 'Machining' },
+          department: {
+            id: 1,
+            name: 'Machining',
+            board_seconds_per_row: 3,
+            board_min_page_seconds: 6,
+          },
           rows: [],
           active_part_numbers: 0,
           active_quantity: 0,

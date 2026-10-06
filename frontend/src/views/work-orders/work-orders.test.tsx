@@ -99,7 +99,22 @@ interface FakeState {
   holdPartNumbers: Promise<void> | null;
   /** Same seam for the active Work Order list read. */
   holdWorkOrderList: Promise<void> | null;
+  /** The Due Soon warning policy (`GET /api/policies/due-soon` wire). */
+  policy: Record<string, unknown>;
+  /** Answer every policy read with a server error while set. */
+  failPolicy: boolean;
+  /** Hold every policy read until the test releases it. */
+  holdPolicy: Promise<void> | null;
   calls: string[];
+}
+
+function policyWire(minDays: number, percent: number, maxDays: number) {
+  return {
+    due_soon_min_days: minDays,
+    due_soon_lead_time_percent: percent,
+    due_soon_max_days: maxDays,
+    updated_at: '2026-10-01T08:00:00Z',
+  };
 }
 
 const T0 = '2026-08-01T00:00:00.000Z';
@@ -198,6 +213,9 @@ function seedState(): FakeState {
     failNextList: false,
     holdPartNumbers: null,
     holdWorkOrderList: null,
+    policy: policyWire(2, 15, 7),
+    failPolicy: false,
+    holdPolicy: null,
     calls: [],
   };
 }
@@ -418,6 +436,12 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
   if (url === '/api/areas') return json(AREAS);
   if (url === '/api/operations') return json(OPERATIONS);
+  if (url === '/api/policies/due-soon') {
+    if (state.holdPolicy) await state.holdPolicy;
+    return state.failPolicy
+      ? detailResponse('The policy store is unavailable.', 500)
+      : json(state.policy);
+  }
   if (url === '/api/route-templates') return json(ROUTE_TEMPLATES);
   if (url.startsWith('/api/part-numbers')) {
     if (state.holdPartNumbers) await state.holdPartNumbers;
@@ -3729,4 +3753,95 @@ test('unsaved demand changes disable saved-line removal; after Save the removals
   await waitFor(() =>
     expect(within(listRow).getByText('Released')).toBeInTheDocument(),
   );
+});
+
+/* ============ The Due Soon warning policy (S9) ============ */
+
+/** ISO date `days` from today (local calendar). */
+function isoDateIn(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+test('WO-1: a failing policy replaces only the table; the toolbar stays usable and Retry recovers', async () => {
+  // Due in 6 days with a 40-day lead: 15 % → a 6-day window (soon).
+  state.workOrders.push({
+    id: 4,
+    work_order_number: '007400',
+    received_date: isoDateIn(-34),
+    due_date: isoDateIn(6),
+    status: 'OPEN',
+    demands: [demand(401, 4, 'A-100', 2, { due_date: isoDateIn(6) })],
+  });
+  state.failPolicy = true;
+  window.history.replaceState({}, '', '/management/work-orders');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Work Orders' });
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(
+    'The Due Soon warning settings could not be loaded.',
+  );
+  expect(alert).toHaveTextContent('The policy store is unavailable.');
+  expect(document.querySelector('table.wolist')).toBeNull();
+  expect(screen.getByLabelText('Search WO Number')).toBeEnabled();
+  expect(
+    screen.getByRole('link', { name: 'Completed Work Orders ›' }),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: '＋ New Work Order' }),
+    ).toBeEnabled(),
+  );
+  const dialog = openNewWorkOrderDialog();
+  expect(dialog).toBeInTheDocument();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'New Work Order' })).toBeNull(),
+  );
+
+  state.failPolicy = false;
+  fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('007400')).toBeInTheDocument();
+  const tone = (number: string) =>
+    screen.getByText(number).closest('tr')?.querySelector('.duetxt')
+      ?.className ?? '';
+  expect(tone('007400')).toContain('soon');
+});
+
+test('WO-1: due tones follow the served policy, and its first read gates only the table', async () => {
+  state.workOrders.push({
+    id: 4,
+    work_order_number: '007400',
+    received_date: isoDateIn(-34),
+    due_date: isoDateIn(6),
+    status: 'OPEN',
+    demands: [demand(401, 4, 'A-100', 2, { due_date: isoDateIn(6) })],
+  });
+  state.policy = policyWire(2, 15, 5);
+  let releasePolicy: () => void = () => {};
+  state.holdPolicy = new Promise<void>((resolve) => {
+    releasePolicy = resolve;
+  });
+  window.history.replaceState({}, '', '/management/work-orders');
+  render(<App />);
+  await screen.findByRole('heading', { name: 'Work Orders' });
+  expect(
+    await screen.findByRole('status', {
+      name: 'Loading Due Soon warning settings',
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText('Search WO Number')).toBeInTheDocument();
+  expect(document.querySelector('table.wolist')).toBeNull();
+
+  await act(async () => {
+    releasePolicy();
+  });
+  expect(await screen.findByText('007400')).toBeInTheDocument();
+  const row = screen.getByText('007400').closest('tr');
+  const className = row?.querySelector('.duetxt')?.className ?? '';
+  expect(className).toContain('ok');
+  expect(className).not.toContain('soon');
 });

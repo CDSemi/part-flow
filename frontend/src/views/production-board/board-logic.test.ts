@@ -2,10 +2,9 @@ import { expect, test } from 'vitest';
 
 import {
   FIT_SCALE_MIN,
-  ROTATE_MS_MIN,
-  ROTATE_MS_PER_ROW,
   autoFitScale,
   fallbackPageBreaks,
+  isBoardRotationTiming,
   pageBreaksByHeight,
   rotationDurationMs,
 } from './board-logic';
@@ -76,19 +75,40 @@ test('the auto-fit scale is 1 when measurements are unavailable', () => {
 
 /* ============ Per-page rotation timing (v15) ============ */
 
-test('rotation dwell time is proportional to the displayed rows — 3 s per row', () => {
-  expect(rotationDurationMs(3)).toBe(3 * ROTATE_MS_PER_ROW);
-  expect(rotationDurationMs(3)).toBe(9_000);
-  expect(rotationDurationMs(7)).toBe(21_000);
-  // A full fallback page (10 rows) dwells 30 s.
-  expect(rotationDurationMs(10)).toBe(30_000);
+test('rotation dwell time is proportional to the displayed rows, per the Department', () => {
+  const timing = { secondsPerRow: 3, minPageSeconds: 6 };
+  expect(rotationDurationMs(3, timing)).toBe(9_000);
+  expect(rotationDurationMs(10, { secondsPerRow: 2, minPageSeconds: 10 })).toBe(
+    20_000,
+  );
 });
 
-test('a near-empty page never flashes past — the 6 s floor applies', () => {
-  expect(rotationDurationMs(0)).toBe(ROTATE_MS_MIN);
-  expect(rotationDurationMs(1)).toBe(ROTATE_MS_MIN);
-  // 2 rows × 3 s meets the floor exactly; from 3 rows the
-  // proportional duration takes over.
-  expect(rotationDurationMs(2)).toBe(6_000);
-  expect(rotationDurationMs(3)).toBeGreaterThan(ROTATE_MS_MIN);
+test('a near-empty page never flashes past — the Department floor applies', () => {
+  const timing = { secondsPerRow: 3, minPageSeconds: 6 };
+  expect(rotationDurationMs(0, timing)).toBe(6_000);
+  expect(rotationDurationMs(1, timing)).toBe(6_000);
+  expect(rotationDurationMs(10, { secondsPerRow: 2, minPageSeconds: 25 })).toBe(
+    25_000,
+  );
+});
+
+test('isBoardRotationTiming admits exactly the server ranges', () => {
+  expect(isBoardRotationTiming({ secondsPerRow: 1, minPageSeconds: 1 })).toBe(
+    true,
+  );
+  expect(
+    isBoardRotationTiming({ secondsPerRow: 60, minPageSeconds: 300 }),
+  ).toBe(true);
+  for (const rejected of [
+    { secondsPerRow: 0, minPageSeconds: 6 },
+    { secondsPerRow: 61, minPageSeconds: 6 },
+    { secondsPerRow: 3, minPageSeconds: 0 },
+    { secondsPerRow: 3, minPageSeconds: 301 },
+    { secondsPerRow: 3.5, minPageSeconds: 6 },
+    { secondsPerRow: 3 },
+    { secondsPerRow: Number.NaN, minPageSeconds: 6 },
+    { secondsPerRow: undefined, minPageSeconds: undefined },
+  ]) {
+    expect(isBoardRotationTiming(rejected)).toBe(false);
+  }
 });

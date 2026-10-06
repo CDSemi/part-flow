@@ -26,11 +26,12 @@ import {
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
+import { useDueSoonPolicy } from '../../components/due-soon-policy-context';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { useUiClock } from '../../components/ui-clock';
 import { useBoardFeed } from './board-feed';
 import { compareDemandOrder } from '../demand-order';
 import {
-  DEFAULT_DUE_SOON_POLICY,
   dueCountdown,
   dueSoonWindowDays,
   daysInProductionNote,
@@ -38,6 +39,11 @@ import {
   formatElapsedSince,
   formatIsoDateShort,
 } from '../dates';
+import type { DueSoonPolicy } from '../dates';
+import {
+  PREVIEW_BOARD_ROTATION,
+  PREVIEW_DUE_SOON_POLICY,
+} from '../display-settings-preview';
 import {
   autoFitScale,
   FALLBACK_PAGE_SIZE,
@@ -45,6 +51,7 @@ import {
   pageBreaksByHeight,
   rotationDurationMs,
 } from './board-logic';
+import type { BoardRotationTiming } from './board-logic';
 
 /**
  * Subtle next-rotation indicator: a thin progress track plus a small
@@ -55,14 +62,17 @@ import {
  * count, so the track must scale from the same value) and owns its
  * own tick, so the complete board never rerenders per animation
  * frame. Under `prefers-reduced-motion` the track is hidden by
- * production-board.css while the seconds label remains.
+ * production-board.css while the seconds label remains. The tooltip
+ * states the Department's rotation timing.
  */
 function RotationProgress({
   deadline,
   durationMs,
+  rotation,
 }: {
   deadline: number;
   durationMs: number;
+  rotation: BoardRotationTiming;
 }) {
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, deadline - Date.now()),
@@ -77,7 +87,7 @@ function RotationProgress({
   return (
     <span
       className="pb-rotate"
-      title="Time until the next automatic page rotation (3 s per displayed row)"
+      title={`Time until the next automatic page rotation (${rotation.secondsPerRow} s per displayed row, at least ${rotation.minPageSeconds} s per page)`}
     >
       <span className="pb-rotatetrack" aria-hidden="true">
         <i style={{ width: `${pct}%` }} />
@@ -241,12 +251,10 @@ function BoardRowCells({ row, no }: { row: BoardRow; no: number }) {
   // Countdown, urgency and Total Days are DERIVED from the fixed due /
   // received dates and the shared minute clock — never stored.
   const now = useUiClock('minute');
+  const policy = useDueSoonPolicy();
   const dueInfo = row.totalStocked
     ? { note: '✓ stocked', dueClass: 'none' as const }
-    : dueCountdown(row.due, now, {
-        received: row.received,
-        policy: DEFAULT_DUE_SOON_POLICY,
-      });
+    : dueCountdown(row.due, now, { received: row.received, policy });
   const urgent = dueInfo.dueClass === 'soon' || dueInfo.dueClass === 'late';
   return (
     <>
@@ -367,12 +375,16 @@ const SWIPE_MIN_DISTANCE_PX = 48;
 //
 // The Due Date tooltip explains the Due Soon warning window. Every
 // number in its copy — the percentage, the clamps, and the example
-// windows — derives from the shared policy (views/dates,
-// Administration-configurable later), never from duplicated literals.
-const DUE_SOON = DEFAULT_DUE_SOON_POLICY;
+// windows — derives from the Due Soon policy read with the board
+// (Administration → Settings), never from duplicated literals.
 const DUE_SOON_EXAMPLE_LEADS = [10, 30, 90];
 
+function warnsAhead(days: number): string {
+  return `warns ${days} day${days === 1 ? '' : 's'} ahead`;
+}
+
 function BoardHeadRow() {
+  const policy = useDueSoonPolicy();
   return (
     <tr>
       <th className="hastip">
@@ -396,15 +408,14 @@ function BoardHeadRow() {
           <span className="tiprow">
             <span className="tipkey">Due soon</span>
             <span className="tipdesc">
-              within {Math.round(DUE_SOON.ratio * 100)}% of the lead time
-              (received → due), {DUE_SOON.minDays}–{DUE_SOON.maxDays} days
+              {`within ${policy.leadTimePercent}% of the lead time (received → due), ${policy.minDays}–${policy.maxDays} days`}
             </span>
           </span>
           {DUE_SOON_EXAMPLE_LEADS.map((lead) => (
             <span className="tiprow" key={lead}>
               <span className="tipkey">{lead}-day lead</span>
               <span className="tipdesc">
-                warns {dueSoonWindowDays(lead, DUE_SOON)} days ahead
+                {warnsAhead(dueSoonWindowDays(lead, policy))}
               </span>
             </span>
           ))}
@@ -596,9 +607,12 @@ const LONG_PREVIEW_ROWS: BoardRow[] = import.meta.env.DEV
   : [];
 
 /** A deterministic board around preview rows (development only). */
-function previewBoard(rows: BoardRow[]): ProductionBoard {
+function previewBoard(
+  rows: BoardRow[],
+  rotation: BoardRotationTiming,
+): ProductionBoard {
   return {
-    department: { id: 0, name: 'Machine Shop' },
+    department: { id: 0, name: 'Machine Shop', rotation },
     rows,
     activePartNumbers: rows.filter((row) => !row.totalStocked).length,
     activeQuantity: rows.reduce((sum, row) => sum + row.activeQuantity, 0),
@@ -628,11 +642,29 @@ export function ProductionBoardView() {
   // and performs no request.
   const [departmentId] = useState(departmentIdFromLocation);
   const feed = useBoardFeed(departmentId, connectivity, preview === null);
-  const board: ProductionBoard | null = useMemo(() => {
-    if (preview === 'long') return previewBoard(LONG_PREVIEW_ROWS);
-    if (preview === 'empty') return previewBoard([]);
-    if (preview !== null) return null;
-    return feed.state.status === 'ready' ? feed.state.board : null;
+  // The board and the Due Soon policy read with it are one ready state:
+  // both are present together or neither is. The development previews
+  // take the DEV-only preview display settings (null in a production
+  // build, where the previews are unreachable).
+  const { board, dueSoon } = useMemo((): {
+    board: ProductionBoard | null;
+    dueSoon: DueSoonPolicy | null;
+  } => {
+    const none = { board: null, dueSoon: null };
+    if (preview === 'long' || preview === 'empty') {
+      if (PREVIEW_BOARD_ROTATION === null || PREVIEW_DUE_SOON_POLICY === null) {
+        return none;
+      }
+      return {
+        board: previewBoard(
+          preview === 'long' ? LONG_PREVIEW_ROWS : [],
+          PREVIEW_BOARD_ROTATION,
+        ),
+        dueSoon: PREVIEW_DUE_SOON_POLICY,
+      };
+    }
+    if (preview !== null || feed.state.status !== 'ready') return none;
+    return { board: feed.state.board, dueSoon: feed.state.dueSoon };
   }, [preview, feed.state]);
   // The `● Live` status is the BOARD's operational status, so it reads
   // healthy only while a complete board is actually on screen: the
@@ -817,15 +849,21 @@ export function ProductionBoardView() {
   const prevPageRef = useRef(safePage);
   const pageDirRef = useRef('');
   // Rows displayed on the CURRENT page — the rotation duration derives
-  // from it (v15): 3 s per displayed row with a 6 s floor
-  // (board-logic.ts), recomputed per page instead of one constant for
-  // all pages. A plain number, so the rotation effect below re-arms
-  // only when the actual count changes.
+  // from it (v15): the Department's seconds per displayed row with its
+  // minimum page dwell (board-logic.ts), recomputed per page instead of
+  // one constant for all pages. A plain number, so the rotation effect
+  // below re-arms only when the actual count or the Department's timing
+  // changes (a changed timing applies at the refresh delivering it).
+  // Without a board there are no rows and no second page, so the `0`
+  // is never armed.
   const rowsOnPage = Math.max(
     0,
     (breaks[safePage + 1] ?? allRows.length) - (breaks[safePage] ?? 0),
   );
-  const rotateMs = rotationDurationMs(rowsOnPage);
+  const rotateMs =
+    board === null
+      ? 0
+      : rotationDurationMs(rowsOnPage, board.department.rotation);
   // One timing source for rotation AND its indicator: every displayed
   // page arms one deadline (now + the page's own duration); the
   // timeout that fires at that deadline advances the page, and
@@ -988,36 +1026,9 @@ export function ProductionBoardView() {
   const stocked = board?.stockedQuantity ?? 0;
   const scrappedTotal = board?.scrappedQuantity ?? 0;
 
-  return (
-    <section
-      className={`pb${kiosk ? ' kiosk' : ''}`}
-      aria-label="Production Board"
-      ref={sectionRef}
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
-      onTouchCancel={onTouchCancel}
-    >
-      {/* Header (restructured v17): ONE identical identity group in
-          both presentations, styled like the Scan Station header —
-          the Department line above the `Production` board title
-          (BoardTitle: the `● Live` status with the connectivity
-          chip's round glowing dot and the shared heartbeat, never a
-          second `ONLINE` chip); a flexible
-          center; then the clock zone. Kiosk mode renders the shared
-          borderless Dark/Light control inside the clock's time row
-          (centered on the time text — what the hidden navigation
-          would otherwise provide) and NO app brand — the board
-          identity carries the header. The explicit enter/exit action
-          lives in the footer controls row. Two presentations of one
-          board, not two boards. */}
-      <div className={`pb-head${kiosk ? ' pbk-head' : ''}`} ref={headRef}>
-        <div className="pb-headid">
-          <div className="dept">{board?.department.name ?? '\u00a0'}</div>
-          <BoardTitle stale={feedStale} />
-        </div>
-        <span className="spacer" />
-        <LiveClock control={kiosk ? <ThemeToggle compact /> : undefined} />
-      </div>
+  // The table area by feed state (the header and footer stay outside).
+  const boardBody = (
+    <>
       {loading ? (
         <LoadingState label="Loading Production Board" />
       ) : loadError !== null ? (
@@ -1063,6 +1074,49 @@ export function ProductionBoardView() {
           </table>
         </div>
       ) : null}
+    </>
+  );
+
+  return (
+    <section
+      className={`pb${kiosk ? ' kiosk' : ''}`}
+      aria-label="Production Board"
+      ref={sectionRef}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchCancel}
+    >
+      {/* Header (restructured v17): ONE identical identity group in
+          both presentations, styled like the Scan Station header —
+          the Department line above the `Production` board title
+          (BoardTitle: the `● Live` status with the connectivity
+          chip's round glowing dot and the shared heartbeat, never a
+          second `ONLINE` chip); a flexible
+          center; then the clock zone. Kiosk mode renders the shared
+          borderless Dark/Light control inside the clock's time row
+          (centered on the time text — what the hidden navigation
+          would otherwise provide) and NO app brand — the board
+          identity carries the header. The explicit enter/exit action
+          lives in the footer controls row. Two presentations of one
+          board, not two boards. */}
+      <div className={`pb-head${kiosk ? ' pbk-head' : ''}`} ref={headRef}>
+        <div className="pb-headid">
+          <div className="dept">{board?.department.name ?? '\u00a0'}</div>
+          <BoardTitle stale={feedStale} />
+        </div>
+        <span className="spacer" />
+        <LiveClock control={kiosk ? <ThemeToggle compact /> : undefined} />
+      </div>
+      {dueSoon !== null ? (
+        // Every due consumer (the visible table and the hidden
+        // measurement copy) renders only with a board, and the board
+        // comes only with its Due Soon policy.
+        <DueSoonPolicyProvider policy={dueSoon}>
+          {boardBody}
+        </DueSoonPolicyProvider>
+      ) : (
+        boardBody
+      )}
       {/* Footer: a normal flex child anchored to the bottom of the
           board viewport (margin-top: auto — never position: fixed), so
           it stays part of layout, never covers table content, and its
@@ -1086,6 +1140,7 @@ export function ProductionBoardView() {
               <RotationProgress
                 deadline={rotateDeadline}
                 durationMs={rotateMs}
+                rotation={board.department.rotation}
               />
             ) : null}
             {/* Manual page navigation: Previous/Next never wrap (automatic

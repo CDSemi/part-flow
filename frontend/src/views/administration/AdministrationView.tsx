@@ -7,9 +7,11 @@ import { ErrorState, LoadingState } from '../../components/view-states';
 import { AreasSection } from './AreasSection';
 import { BarcodeConfigurationSection } from './BarcodeConfigurationSection';
 import { CorrectionPermissionsSection } from './CorrectionPermissionsSection';
+import { DepartmentDisplaySection } from './DepartmentDisplaySection';
 import { DepartmentsSection } from './DepartmentsSection';
 import { OperationsSection } from './OperationsSection';
 import { ScanStationsSection } from './ScanStationsSection';
+import { SettingsSection } from './SettingsSection';
 import { WorkerSessionsSection } from './WorkerSessionsSection';
 import { WorkersSection } from './WorkersSection';
 import { SectionHeader } from './section-widgets';
@@ -22,10 +24,12 @@ import type { AdminSection } from './sections';
 // configuration — read and write the real configuration through the
 // /api surface, and so do the full Administration phase (Phase 13)
 // sections built so far: Workers, Worker sessions (the real sliding
-// inactivity timeout — default and per-Area overrides) and Correction
-// permissions (the real Undo reason policy). Every other section
-// arrives later in that phase and presents itself honestly as not
-// available yet.
+// inactivity timeout — default and per-Area overrides), Correction
+// permissions (the real Undo reason policy), Department display
+// settings (the per-Department Production Board rotation timing) and
+// Settings (the real Due Soon warning policy; the rest of Settings says
+// it is not available yet). Every other section arrives later in that
+// phase and presents itself honestly as not available yet.
 
 export function AdministrationView() {
   const preview = getViewStatePreview();
@@ -98,6 +102,10 @@ function SectionBody({ section }: { section: AdminSection }) {
       return <WorkerSessionsSection />;
     case 'correction-permissions':
       return <CorrectionPermissionsSection />;
+    case 'department-display':
+      return <DepartmentDisplaySection />;
+    case 'settings':
+      return <SettingsSection />;
     default:
       return <PlaceholderSection section={section} entryAction />;
   }
@@ -107,9 +115,10 @@ function SectionBody({ section }: { section: AdminSection }) {
  * One later-phase section, presented honestly: the entry action that
  * does not exist yet is disabled (never made to appear functional) and
  * the panel states when the section becomes real. All Phase 3.5
- * minimum-environment sections, Workers, Worker sessions and
- * Correction permissions are real above — every placeholder here belongs to the later full
- * Administration phase.
+ * minimum-environment sections, Workers, Worker sessions, Correction
+ * permissions, Department display settings and Settings are real above
+ * — every placeholder here belongs to the later full Administration
+ * phase.
  */
 function PlaceholderSection({
   section,

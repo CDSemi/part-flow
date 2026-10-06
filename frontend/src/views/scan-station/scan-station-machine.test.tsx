@@ -127,6 +127,12 @@ const FIXED_TRAN = {
 };
 /** While set, the station context read fails (a transient 502/503). */
 let contextFailure: boolean;
+/** The Area's open demand context (wire `demand_context`). */
+let demandContext: unknown[];
+/** The Due Soon warning policy answer: a wire policy, or a failure. */
+let dueSoonAnswer: Record<string, unknown> | 'fail';
+/** Every Due Soon policy read the station sent. */
+let policyReads: number;
 
 function areaRef(areaId: number) {
   const area = AREAS.find((a) => a.id === areaId)!;
@@ -231,7 +237,7 @@ function inventory(areaId: number) {
   const all = lines(here);
   return json({
     area: areaRef(areaId),
-    demand_context: [],
+    demand_context: demandContext,
     scrapped: [],
     has_machines: areaId === 2,
     lines: all,
@@ -284,7 +290,22 @@ function commit(deviceEventId: string, result: unknown): Response {
   return json(result, 201);
 }
 
+/** The Due Soon warning policy on the wire (the initial values). */
+const DUE_SOON_POLICY_WIRE = {
+  due_soon_min_days: 2,
+  due_soon_lead_time_percent: 15,
+  due_soon_max_days: 7,
+  updated_at: '2026-10-01T08:00:00Z',
+};
+
 function handle(url: string, method: string, body: unknown): Response {
+  // The Due Soon warning policy of the `In this Area now` due tones.
+  if (url === '/api/policies/due-soon') {
+    policyReads += 1;
+    return dueSoonAnswer === 'fail'
+      ? json({ detail: 'The policy store is unavailable.' }, 503)
+      : json(dueSoonAnswer);
+  }
   if (url === '/api/health') {
     return healthDown
       ? json({ status: 'unavailable' }, 503)
@@ -625,6 +646,9 @@ beforeEach(() => {
     session: null,
   };
   contextFailure = false;
+  demandContext = [];
+  dueSoonAnswer = DUE_SOON_POLICY_WIRE;
+  policyReads = 0;
   writeFailure = null;
   healthDown = false;
   vi.stubGlobal(
@@ -633,7 +657,8 @@ beforeEach(() => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      if (!url.endsWith('/api/health')) requests.push({ url, method, body });
+      if (!url.endsWith('/api/health') && url !== '/api/policies/due-soon')
+        requests.push({ url, method, body });
       return Promise.resolve().then(() => handle(url, method, body));
     }),
   );
@@ -1796,4 +1821,208 @@ test('a failed context re-read when a row action opens keeps the station and the
   fireEvent.click(within(done).getByRole('button', { name: 'Next' }));
   expectWorkerBeforeStation(done, 'H. Nguyen');
   expect(document.querySelector('.ss-pill')).toHaveTextContent('H. Nguyen');
+});
+
+/* ============ The Due Soon warning policy (S9) ============ */
+
+/** ISO date `days` from today (local calendar). */
+function isoDateIn(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function policyWire(minDays: number, percent: number, maxDays: number) {
+  return {
+    ...DUE_SOON_POLICY_WIRE,
+    due_soon_min_days: minDays,
+    due_soon_lead_time_percent: percent,
+    due_soon_max_days: maxDays,
+  };
+}
+
+/** Open demand of `pn` due in `dueIn` days, received `lead` days
+ * before its due date. */
+function demandOf(pn: string, dueIn: number, lead: number) {
+  return {
+    part_number: pn,
+    demands: [
+      {
+        work_order_id: 1,
+        work_order_number: '007003',
+        work_order_demand_id: 11,
+        request_type: 'NEW',
+        requested_quantity: 20,
+        job_numbers: ['18190'],
+        due_date: isoDateIn(dueIn),
+        priority_rank: null,
+        received_date: isoDateIn(dueIn - lead),
+      },
+    ],
+  };
+}
+
+/** Due in 6 days with a 40-day lead (15 % → a 6-day window), and an
+ * overdue PN. */
+function seedDueDemands() {
+  demandContext = [
+    demandOf('2027-60-8114-00', 6, 40),
+    demandOf('118-052', -2, 30),
+  ];
+}
+
+/** The due status element of `pn`'s row in the `In this Area now` card. */
+function dueOf(pn: string): HTMLElement | null {
+  const summary = document.querySelector('.abd-summary');
+  const row = Array.from(summary?.querySelectorAll('.mc-list li') ?? []).find(
+    (li) => li.textContent?.includes(pn),
+  );
+  return row?.querySelector<HTMLElement>('.r2 .mono:last-child') ?? null;
+}
+
+const POLICY_NOTICE = 'The Due Soon warning settings could not be loaded.';
+
+async function completeOnLathe1() {
+  fireEvent.click(
+    within(machineCard('Lathe 1')).getByRole('button', {
+      name: 'Complete Area processing',
+    }),
+  );
+  const dlg = await screen.findByRole('dialog', {
+    name: 'Complete Area processing',
+  });
+  fireEvent.click(within(dlg).getByRole('button', { name: 'Next' }));
+  fireEvent.click(
+    within(dialog()).getByRole('button', { name: 'Confirm completion' }),
+  );
+  const gate = await screen.findByRole('dialog', {
+    name: 'Confirm finished quantity?',
+  });
+  fireEvent.click(within(gate).getByRole('button', { name: 'Yes — finished' }));
+  expect(await notice()).toHaveTextContent('finished on Lathe 1');
+}
+
+test('SS-1: the In this Area now due tone follows the served policy and is re-read after a confirmed command', async () => {
+  seedDueDemands();
+  await renderStation();
+  await waitFor(() => expect(dueOf('2027-60-8114-00')).not.toBeNull());
+  expect(dueOf('2027-60-8114-00')?.textContent).toBe('6 days left');
+  expect(dueOf('2027-60-8114-00')?.className).toContain('soon');
+  const readsBefore = policyReads;
+
+  dueSoonAnswer = policyWire(2, 15, 5);
+  await completeOnLathe1();
+  await waitFor(() => expect(policyReads).toBeGreaterThan(readsBefore));
+  await waitFor(() =>
+    expect(dueOf('2027-60-8114-00')?.className).not.toContain('soon'),
+  );
+});
+
+test('SS-2: a failing policy keeps the full Area layout and every action; only the soon tone is withheld', async () => {
+  seedDueDemands();
+  dueSoonAnswer = 'fail';
+  const input = await renderStation();
+
+  expect(await screen.findByText(POLICY_NOTICE)).toBeInTheDocument();
+  expect(
+    screen.getByText(POLICY_NOTICE).closest('[role="alert"]'),
+  ).toHaveTextContent('The policy store is unavailable.');
+  expect(
+    screen.queryByText('The Area inventory could not be loaded.'),
+  ).toBeNull();
+  const lathe1 = machineCard('Lathe 1');
+  expect(
+    within(lathe1).getByRole('button', { name: 'Complete Area processing' }),
+  ).toBeEnabled();
+  expect(
+    within(lathe1).getByRole('button', { name: 'Return to Area queue' }),
+  ).toBeEnabled();
+  expect(screen.getByLabelText('Area statistics')).toBeInTheDocument();
+
+  // `N days left` is neutral and says why; overdue stays late.
+  const soonCell = dueOf('2027-60-8114-00')!;
+  expect(soonCell.textContent).toBe('6 days left');
+  expect(soonCell.className).not.toContain('soon');
+  expect(soonCell.getAttribute('title')).toBe('Due Soon warning unavailable');
+  expect(dueOf('118-052')?.className).toContain('late');
+
+  // The scan input still works: a PN scan resolves.
+  expect(input).toBeEnabled();
+  scan('PF:PN:2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.keyDown(actions, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // Retry with the policy answering: the notice goes, the tone follows.
+  dueSoonAnswer = DUE_SOON_POLICY_WIRE;
+  const notice = screen.getByText(POLICY_NOTICE).closest('[role="alert"]')!;
+  fireEvent.click(
+    within(notice as HTMLElement).getByRole('button', { name: 'Retry' }),
+  );
+  await waitFor(() => expect(screen.queryByText(POLICY_NOTICE)).toBeNull());
+  expect(dueOf('2027-60-8114-00')?.className).toContain('soon');
+  expect(dueOf('2027-60-8114-00')?.getAttribute('title')).toBeNull();
+});
+
+test('SS-3: with the policy failing, the In-Area dialog and a Machine-card DONE work unchanged', async () => {
+  seedDueDemands();
+  dueSoonAnswer = 'fail';
+  await renderStation();
+  expect(await screen.findByText(POLICY_NOTICE)).toBeInTheDocument();
+
+  // In-Area dialog → Assign lists the Area's Machines and queued flows.
+  scan('PF:PN:2027-60-8114-00');
+  const actions = await screen.findByRole('dialog', {
+    name: 'Select an action',
+  });
+  fireEvent.click(
+    within(actions).getByRole('button', { name: /Assign to Machine/ }),
+  );
+  const assign = await screen.findByRole('dialog', {
+    name: 'Assign to Machine',
+  });
+  const machines = within(assign).getByRole('group', { name: 'Machine' });
+  expect(
+    within(machines).getByRole('button', { name: /Lathe 1/ }),
+  ).toBeInTheDocument();
+  expect(
+    within(machines).getByRole('button', { name: /Lathe 2/ }),
+  ).toBeInTheDocument();
+  const pns = within(assign).getByRole('group', { name: /PN/ });
+  expect(
+    within(pns).getByRole('button', { name: /2027-60-8114-00/ }),
+  ).toBeInTheDocument();
+  fireEvent.keyDown(assign, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  // A Machine-card DONE completes through its wizard.
+  await completeOnLathe1();
+  expect(writes()[0].url).toMatch(/\/area-completions$/);
+  // Still failing after the command: the notice stays, nothing else.
+  await waitFor(() =>
+    expect(machineCard('Lathe 1')).toHaveTextContent('No production assigned'),
+  );
+  expect(screen.getByText(POLICY_NOTICE)).toBeInTheDocument();
+});
+
+test('SS-3: a policy that loaded once keeps its value through a failed revalidation', async () => {
+  seedDueDemands();
+  await renderStation();
+  await waitFor(() =>
+    expect(dueOf('2027-60-8114-00')?.className).toContain('soon'),
+  );
+  const readsBefore = policyReads;
+
+  dueSoonAnswer = 'fail';
+  await completeOnLathe1();
+  await waitFor(() => expect(policyReads).toBeGreaterThan(readsBefore));
+  await waitFor(() =>
+    expect(machineCard('Lathe 1')).toHaveTextContent('No production assigned'),
+  );
+  expect(screen.queryByText(POLICY_NOTICE)).toBeNull();
+  expect(dueOf('2027-60-8114-00')?.className).toContain('soon');
 });

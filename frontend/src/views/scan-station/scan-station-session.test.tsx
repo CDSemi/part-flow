@@ -210,7 +210,17 @@ function sessionRequired(): Response | null {
   return json({ detail: E_S1, worker_session_required: true }, 409);
 }
 
+/** The Due Soon warning policy on the wire (the initial values). */
+const DUE_SOON_POLICY_WIRE = {
+  due_soon_min_days: 2,
+  due_soon_lead_time_percent: 15,
+  due_soon_max_days: 7,
+  updated_at: '2026-10-01T08:00:00Z',
+};
+
 function handle(url: string, method: string, body: unknown): Response {
+  // The Due Soon warning policy of the `In this Area now` due tones.
+  if (url === '/api/policies/due-soon') return json(DUE_SOON_POLICY_WIRE);
   if (url === '/api/health') {
     return healthDown
       ? json({ status: 'unavailable' }, 503)
@@ -533,7 +543,8 @@ beforeEach(() => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      if (!url.endsWith('/api/health')) requests.push({ url, method, body });
+      if (!url.endsWith('/api/health') && url !== '/api/policies/due-soon')
+        requests.push({ url, method, body });
       const hold =
         contextHold && url.endsWith('/context')
           ? contextHold

@@ -67,6 +67,17 @@ interface FakeState {
   holdRead: { path: string; until: Promise<void> } | null;
   /** Answer the NEXT GET of this path (with its query) with a 503. */
   failRead: string | null;
+  /** The Due Soon warning policy (`GET /api/policies/due-soon` wire). */
+  policy: Record<string, unknown>;
+}
+
+function policyWire(minDays: number, percent: number, maxDays: number) {
+  return {
+    due_soon_min_days: minDays,
+    due_soon_lead_time_percent: percent,
+    due_soon_max_days: maxDays,
+    updated_at: '2026-10-01T08:00:00Z',
+  };
 }
 
 const STALE =
@@ -179,6 +190,7 @@ function seedState(): FakeState {
     holdPost: null,
     holdRead: null,
     failRead: null,
+    policy: policyWire(2, 15, 7),
   };
 }
 
@@ -392,6 +404,7 @@ async function handle(
     });
   }
   if (url.pathname === '/api/hot-list/candidates') return candidates(url);
+  if (url.pathname === '/api/policies/due-soon') return json(state.policy);
   return detail('Not found.', 404);
 }
 
@@ -1582,4 +1595,62 @@ test('the impact/action block separates the Action label from its emphasized val
   expect(impact?.querySelector('.pr-actionlbl')?.textContent).toBe('Action');
   expect(impact?.querySelector('.pr-actionval')?.textContent).toBe('Move Down');
   fireEvent.click(screen.getByRole('button', { name: 'Cancel (Esc)' }));
+});
+
+/* ============ The Due Soon warning policy (S9) ============ */
+
+/** ISO date `days` from today (local calendar). */
+function isoDateIn(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+test('PR-1: a demand’s due tone follows the served Due Soon policy', async () => {
+  // Due in 6 days with a 40-day lead: 15 % → a 6-day window.
+  const target = state.demands.find((d) => d.pn === 'A-100')!;
+  target.due = isoDateIn(6);
+  target.received = isoDateIn(-34);
+  const view = render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  await screen.findByText('A-100');
+  const tone = () => rowOf('A-100').querySelector('.d2')?.className ?? '';
+  expect(tone()).toContain('soon');
+  view.unmount();
+
+  state.policy = policyWire(2, 15, 5);
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  await screen.findByText('A-100');
+  expect(tone()).toContain('ok');
+  expect(tone()).not.toContain('soon');
+});
+
+test('PR-1: a failed policy read is the view’s error state; Retry recovers', async () => {
+  state.failRead = '/api/policies/due-soon';
+  render(
+    <ConnectivityProvider>
+      <PriorityView />
+    </ConnectivityProvider>,
+  );
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(
+    'The Due Soon warning settings could not be loaded.',
+  );
+  expect(alert).toHaveTextContent('Service unavailable.');
+  expect(document.querySelector('.pr-item')).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('A-100')).toBeInTheDocument();
+  expect(
+    screen.queryByText('The Due Soon warning settings could not be loaded.'),
+  ).toBeNull();
 });

@@ -25,6 +25,15 @@ handlers in ``app.api.errors`` translate typed failures.
   ``{"undo_reason_required": bool}`` (a missing field, a non-boolean, a
   ``null`` or an extra field is 422); answers with the stored policy,
   also when nothing changed.
+- ``GET /policies/due-soon`` — the Due Soon warning window behind every
+  derived due countdown — Administration → Settings (Phase 13 slice 9):
+  the minimum and maximum warning days and the lead-time warning
+  percentage.
+- ``PUT /policies/due-soon`` — a full replace: all three fields are
+  required strict integers (a missing field, a string, float, bool,
+  ``null`` or an extra field is 422); the ranges and the minimum ≤
+  maximum rule are the Application's 422; answers with the stored
+  policy, also when nothing changed.
 """
 
 import datetime
@@ -92,6 +101,31 @@ def _correction_permissions_response(
     )
 
 
+class DueSoonPolicyResponse(BaseModel):
+    due_soon_min_days: int
+    due_soon_lead_time_percent: int
+    due_soon_max_days: int
+    # The singleton row's timestamp, shared by every policy section.
+    updated_at: datetime.datetime
+
+
+class DueSoonPolicyPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    due_soon_min_days: StrictInt
+    due_soon_lead_time_percent: StrictInt
+    due_soon_max_days: StrictInt
+
+
+def _due_soon_response(policy: ApplicationPolicy) -> DueSoonPolicyResponse:
+    return DueSoonPolicyResponse(
+        due_soon_min_days=policy.due_soon_min_days,
+        due_soon_lead_time_percent=policy.due_soon_lead_time_percent,
+        due_soon_max_days=policy.due_soon_max_days,
+        updated_at=policy.updated_at,
+    )
+
+
 @router.get("/policies/worker-sessions")
 def get_worker_session_policy(session: SessionDep) -> WorkerSessionPolicyResponse:
     return _response(policies.get_policy(session))
@@ -121,3 +155,21 @@ def put_correction_permissions_policy(
         session, undo_reason_required=body.undo_reason_required
     )
     return _correction_permissions_response(policy)
+
+
+@router.get("/policies/due-soon")
+def get_due_soon_policy(session: SessionDep) -> DueSoonPolicyResponse:
+    return _due_soon_response(policies.get_policy(session))
+
+
+@router.put("/policies/due-soon")
+def put_due_soon_policy(
+    body: DueSoonPolicyPutRequest, session: SessionDep
+) -> DueSoonPolicyResponse:
+    policy = policies.update_due_soon_policy(
+        session,
+        min_days=body.due_soon_min_days,
+        lead_time_percent=body.due_soon_lead_time_percent,
+        max_days=body.due_soon_max_days,
+    )
+    return _due_soon_response(policy)

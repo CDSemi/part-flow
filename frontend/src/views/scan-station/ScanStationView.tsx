@@ -59,6 +59,7 @@ import type {
   UndoResult,
   WorkOrderContext,
 } from '../../api/scan-station';
+import { getDueSoonPolicy } from '../../api/policies';
 import { useApiData } from '../../api/use-api-data';
 import {
   AreaMachineLayout,
@@ -66,6 +67,7 @@ import {
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
 import { ConnectivityChip } from '../../components/ConnectivityChip';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { DevNotice } from '../../components/DevNotice';
 import { AreaDot, RouteModeChip, TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -580,6 +582,19 @@ function StationView({
     [areaId],
   );
   const inventory = useApiData(loadInventory);
+  // The Due Soon warning policy behind the `In this Area now` due tones
+  // (GUI_DESIGN §3.12): a SEPARATE read that never joins the inventory,
+  // so a policy failure never removes a production action — the panel
+  // then withholds only the `soon` judgement behind an explicit notice.
+  // It is re-read with every inventory reload; a transient failure keeps
+  // the last loaded policy.
+  const dueSoon = useApiData(getDueSoonPolicy);
+  const reloadInventory = inventory.reload;
+  const revalidateDueSoon = dueSoon.revalidate;
+  const reloadAreaReads = useCallback(() => {
+    reloadInventory();
+    revalidateDueSoon();
+  }, [reloadInventory, revalidateDueSoon]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [touchPrimary] = useState(isTouchPrimaryDevice);
@@ -847,7 +862,7 @@ function StationView({
           // inventory, and ask for the scan again.
           setFlow(null);
           context.reload();
-          inventory.reload();
+          reloadAreaReads();
           setNotice({
             kind: 'warn',
             icon: '⚠',
@@ -881,7 +896,7 @@ function StationView({
       stationId,
       ready,
       context,
-      inventory,
+      reloadAreaReads,
       openResolution,
       focusScan,
       sessionTicket,
@@ -898,7 +913,7 @@ function StationView({
         if (ready && resolution.area.id !== ready.area.id) {
           setFlow(null);
           context.reload();
-          inventory.reload();
+          reloadAreaReads();
           setNotice({
             kind: 'warn',
             icon: '⚠',
@@ -945,7 +960,7 @@ function StationView({
       stationId,
       ready,
       context,
-      inventory,
+      reloadAreaReads,
       inventoryReady,
       focusScan,
       sessionTicket,
@@ -1203,11 +1218,11 @@ function StationView({
       // cards) and the header totals refresh from the server
       // (PROJECT_PROFILE §15 step 10) — never from an optimistic guess.
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, recordAction],
+    [context, reloadAreaReads, focusScan, recordAction],
   );
 
   /** A Stockroom arrival the SERVER confirmed (Phase 10): refresh the
@@ -1242,10 +1257,10 @@ function StationView({
           : `This stocking was already recorded by the server (${events}) — nothing was recorded twice.${split}`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow({ kind: 'allocate', stocked: result, candidate });
     },
-    [context, inventory, ready],
+    [context, reloadAreaReads, ready],
   );
 
   /** A receiving allocation the SERVER confirmed: note it, refresh, refocus. */
@@ -1270,11 +1285,11 @@ function StationView({
           : `This allocation was already recorded by the server — nothing was recorded twice.${completedNote}`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan],
+    [context, reloadAreaReads, focusScan],
   );
 
   /** The operator leaves the stocked quantity unallocated for now. */
@@ -1336,11 +1351,11 @@ function StationView({
           : `This action was already recorded by the server (${result.movementType} #${result.movementId}) — nothing was recorded twice.${split}`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready, recordAction],
+    [context, reloadAreaReads, focusScan, ready, recordAction],
   );
 
   /** A combine the SERVER confirmed (Phase 8): refresh, note, refocus. */
@@ -1362,11 +1377,11 @@ function StationView({
           : `This combine was already recorded by the server (MERGED #${result.movementId}) — nothing was recorded twice.`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready, recordAction],
+    [context, reloadAreaReads, focusScan, ready, recordAction],
   );
 
   /** A scrap the SERVER confirmed (Phase 9): refresh, note, refocus. */
@@ -1391,11 +1406,11 @@ function StationView({
           : `This scrap was already recorded by the server (SCRAPPED #${result.movementId}) — nothing was recorded twice.${split}`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready, recordAction],
+    [context, reloadAreaReads, focusScan, ready, recordAction],
   );
 
   /** An addition the SERVER confirmed (Phase 9): refresh, note, refocus. */
@@ -1420,11 +1435,11 @@ function StationView({
           : `This addition was already recorded by the server (QUANTITY_ADJUSTED #${result.movementId}) — nothing was recorded twice.`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready, recordAction],
+    [context, reloadAreaReads, focusScan, ready, recordAction],
   );
 
   /** A receipt the SERVER confirmed (Phase 10.5): the quantity, its
@@ -1453,11 +1468,11 @@ function StationView({
           : `This receipt was already recorded by the server (RECEIVED #${result.movementId}) — nothing was recorded twice.`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan, ready],
+    [context, reloadAreaReads, focusScan, ready],
   );
 
   /** An Undo the SERVER confirmed (Phase 9, §4.5): the undone entry
@@ -1484,11 +1499,11 @@ function StationView({
           : `This reversal was already recorded by the server — nothing was reversed twice.`,
       });
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setFlow(null);
       focusScan();
     },
-    [context, inventory, focusScan],
+    [context, reloadAreaReads, focusScan],
   );
 
   /**
@@ -1623,8 +1638,8 @@ function StationView({
    */
   const refreshAfterRejection = useCallback(() => {
     context.reload();
-    inventory.reload();
-  }, [context, inventory]);
+    reloadAreaReads();
+  }, [context, reloadAreaReads]);
 
   const abandonUnknown = useCallback(
     (what: string) => {
@@ -1633,7 +1648,7 @@ function StationView({
       // shows where the quantity actually is.
       setFlow(null);
       context.reload();
-      inventory.reload();
+      reloadAreaReads();
       setNotice({
         kind: 'warn',
         icon: '⚠',
@@ -1642,7 +1657,7 @@ function StationView({
       });
       focusScan();
     },
-    [context, inventory, focusScan],
+    [context, reloadAreaReads, focusScan],
   );
 
   /**
@@ -1995,40 +2010,55 @@ function StationView({
             <ErrorState
               message="The Area inventory could not be loaded."
               detail={inventory.state.message}
-              onRetry={inventory.reload}
+              onRetry={reloadAreaReads}
             />
-          ) : inventoryLoading ? (
+          ) : inventoryLoading || dueSoon.state.status === 'loading' ? (
+            // The first policy read runs beside the inventory read: no
+            // production action renders under an undecided tone.
             <LoadingState label="Loading Area inventory" />
           ) : (
-            <AreaMachineLayout
-              summary={
-                area ? (
-                  // In an Area with Machines the summary carries no row
-                  // actions (assignment comes through PN scan, Machine
-                  // scan and the action dialog; DONE / QUEUE live on the
-                  // Machine cards); without Machines its actively
-                  // processing rows carry the single direct DONE.
-                  <AreaSummaryCard
-                    area={area}
-                    cards={cards}
-                    machines={machines}
-                    title="In this Area now"
-                    rowAction={directRowAction}
-                    showStats={false}
-                  />
-                ) : null
+            <DueSoonPolicyProvider
+              policy={
+                dueSoon.state.status === 'ready' ? dueSoon.state.data : null
               }
-              machineCards={machines.map((machine) => (
-                <MachineMonitoringCard
-                  key={machine.name}
-                  machine={machine}
-                  entries={machineCardEntries.filter(
-                    (entry) => entry.context === machine.name,
-                  )}
-                  rowAction={machineRowAction}
+            >
+              {dueSoon.state.status === 'error' ? (
+                <ErrorState
+                  message="The Due Soon warning settings could not be loaded."
+                  detail={dueSoon.state.message}
+                  onRetry={dueSoon.reload}
                 />
-              ))}
-            />
+              ) : null}
+              <AreaMachineLayout
+                summary={
+                  area ? (
+                    // In an Area with Machines the summary carries no row
+                    // actions (assignment comes through PN scan, Machine
+                    // scan and the action dialog; DONE / QUEUE live on the
+                    // Machine cards); without Machines its actively
+                    // processing rows carry the single direct DONE.
+                    <AreaSummaryCard
+                      area={area}
+                      cards={cards}
+                      machines={machines}
+                      title="In this Area now"
+                      rowAction={directRowAction}
+                      showStats={false}
+                    />
+                  ) : null
+                }
+                machineCards={machines.map((machine) => (
+                  <MachineMonitoringCard
+                    key={machine.name}
+                    machine={machine}
+                    entries={machineCardEntries.filter(
+                      (entry) => entry.context === machine.name,
+                    )}
+                    rowAction={machineRowAction}
+                  />
+                ))}
+              />
+            </DueSoonPolicyProvider>
           )}
         </div>
 

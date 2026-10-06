@@ -9,10 +9,11 @@ import {
   FINISHED_GROUP_LABEL,
 } from '../views/area-monitoring';
 import {
-  DEFAULT_DUE_SOON_POLICY,
+  daysBetweenIso,
   dueCountdown,
   exceedsExpectedDuration,
   formatElapsedSince,
+  todayIso,
 } from '../views/dates';
 import { formatStateAge } from '../views/machine-state';
 import type { AreaAssignment } from '../views/area-monitoring';
@@ -22,6 +23,7 @@ import type {
   MockAreaCard,
   MockAreaMachine,
 } from '../views/view-models';
+import { useDueSoonPolicyIfLoaded } from './due-soon-policy-context';
 import { AreaDot, HotPn } from './indicators';
 import { useUiClock } from './ui-clock';
 
@@ -38,28 +40,62 @@ import { useUiClock } from './ui-clock';
 export function DueStatus({
   due,
   dueClass,
+  title,
 }: {
   due: string;
   dueClass: DueClass | 'none';
+  title?: string;
 }) {
   return (
-    <span className={`mono ${dueClass === 'ok' ? '' : dueClass}`}>{due}</span>
+    <span className={`mono ${dueClass === 'ok' ? '' : dueClass}`} title={title}>
+      {due}
+    </span>
   );
 }
 
 /**
  * Derived due status of one Area presence card: the countdown text and
  * urgency class come from the fixed due date plus the shared UI clock
- * (views/dates `dueCountdown`); a card-level `dueText` (e.g. the
- * Stockroom `allocated 50/50`) renders verbatim and neutral instead.
+ * (views/dates `dueCountdown`) under the provided Due Soon policy; a
+ * card-level `dueText` (e.g. the Stockroom `allocated 50/50`) renders
+ * verbatim and neutral instead.
+ *
+ * When the provider states the policy is unavailable (`null` — only the
+ * Scan Station, whose production actions never wait on a display
+ * policy), the countdown text stays and every judgement the policy does
+ * not decide still applies (`overdue` is `late`, `due today` is
+ * `soon`); only an `N days left` card renders neutral with an explicit
+ * tooltip — amber is never guessed in either direction.
  */
 function CardDueStatus({ card, now }: { card: MockAreaCard; now: number }) {
+  const policy = useDueSoonPolicyIfLoaded();
   if (card.dueText) return <DueStatus due={card.dueText} dueClass="ok" />;
-  const { note, dueClass } = dueCountdown(card.due, now, {
-    received: card.received,
-    policy: DEFAULT_DUE_SOON_POLICY,
-  });
-  return <DueStatus due={note} dueClass={dueClass} />;
+  if (policy !== null) {
+    const { note, dueClass } = dueCountdown(card.due, now, {
+      received: card.received,
+      policy,
+    });
+    return <DueStatus due={note} dueClass={dueClass} />;
+  }
+  if (!card.due) return <DueStatus due="No due date" dueClass="none" />;
+  const days = daysBetweenIso(todayIso(now), card.due);
+  if (days === null) return <DueStatus due={card.due} dueClass="none" />;
+  if (days < 0) {
+    return (
+      <DueStatus
+        due={`overdue ${-days} day${days === -1 ? '' : 's'}`}
+        dueClass="late"
+      />
+    );
+  }
+  if (days === 0) return <DueStatus due="due today" dueClass="soon" />;
+  return (
+    <DueStatus
+      due={`${days} day${days === 1 ? '' : 's'} left`}
+      dueClass="none"
+      title="Due Soon warning unavailable"
+    />
+  );
 }
 
 /**

@@ -509,6 +509,9 @@ def test_the_board_names_its_department_and_refuses_an_unknown_one(
     board = _board(client, shop.department_id)
     assert board["department"]["id"] == shop.department_id
     assert board["department"]["name"].startswith("DEPT-")
+    # The Department's display settings (Phase 13 slice 9): the defaults.
+    assert board["department"]["board_seconds_per_row"] == 3
+    assert board["department"]["board_min_page_seconds"] == 6
 
     missing = client.get("/api/production-board", params={"department_id": 999_999})
     assert missing.status_code == 404

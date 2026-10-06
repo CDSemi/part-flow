@@ -13,16 +13,59 @@ export const FALLBACK_PAGE_SIZE = 10;
 /**
  * Automatic page rotation timing (v15): the dwell time of a page is
  * proportional to the number of rows it actually displays — a page
- * with 7 rows stays 7 × ROTATE_MS_PER_ROW, never one fixed constant
- * for every page — with a floor so a near-empty last page never
- * flashes past. These named defaults are deliberately NOT inlined in
- * the component: a future Administration page exposes them as
- * Department display settings, configured PER DEPARTMENT — never
- * globally (GUI_DESIGN §5 / §9, decided post-v18); the board consumes
- * only `rotationDurationMs`.
+ * with 7 rows stays 7 × the seconds per displayed row, never one fixed
+ * constant for every page — with a floor so a near-empty last page
+ * never flashes past. The values are the Department's display settings
+ * (Administration → Department display settings, configured PER
+ * DEPARTMENT — never globally, GUI_DESIGN §5 / §9), delivered with the
+ * board feed; nothing here restates them. Whole seconds.
  */
-export const ROTATE_MS_PER_ROW = 3_000;
-export const ROTATE_MS_MIN = 6_000;
+export interface BoardRotationTiming {
+  secondsPerRow: number;
+  minPageSeconds: number;
+}
+
+/** Inclusive range of the seconds per displayed row (bounds only). */
+export const BOARD_SECONDS_PER_ROW_RANGE = [1, 60] as const;
+/** Inclusive range of the minimum page dwell in seconds (bounds only). */
+export const BOARD_MIN_PAGE_SECONDS_RANGE = [1, 300] as const;
+
+function isWholeNumberIn(
+  value: unknown,
+  [min, max]: readonly [number, number],
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= min &&
+    value <= max
+  );
+}
+
+/** Whether `value` is a whole number of seconds per displayed row in range. */
+export function isBoardSecondsPerRow(value: unknown): value is number {
+  return isWholeNumberIn(value, BOARD_SECONDS_PER_ROW_RANGE);
+}
+
+/** Whether `value` is a whole minimum page dwell in seconds in range. */
+export function isBoardMinPageSeconds(value: unknown): value is number {
+  return isWholeNumberIn(value, BOARD_MIN_PAGE_SECONDS_RANGE);
+}
+
+/**
+ * Whole seconds: per row 1–60, minimum dwell 1–300 (the server's
+ * ranges). Used by the API mapper and the rotation editor's inline
+ * validation.
+ */
+export function isBoardRotationTiming(
+  value: unknown,
+): value is BoardRotationTiming {
+  if (typeof value !== 'object' || value === null) return false;
+  const { secondsPerRow, minPageSeconds } = value as Record<string, unknown>;
+  return (
+    isBoardSecondsPerRow(secondsPerRow) && isBoardMinPageSeconds(minPageSeconds)
+  );
+}
 
 /**
  * Auto-refresh period of the board feed (GUI_DESIGN §5): the read
@@ -34,9 +77,15 @@ export const ROTATE_MS_MIN = 6_000;
  */
 export const BOARD_REFRESH_MS = 15_000;
 
-/** Rotation dwell time for a page showing `rowCount` rows. */
-export function rotationDurationMs(rowCount: number): number {
-  return Math.max(ROTATE_MS_MIN, rowCount * ROTATE_MS_PER_ROW);
+/** Rotation dwell of a page showing `rowCount` rows: proportional, with
+ * the Department's floor. */
+export function rotationDurationMs(
+  rowCount: number,
+  rotation: BoardRotationTiming,
+): number {
+  return (
+    Math.max(rotation.minPageSeconds, rowCount * rotation.secondsPerRow) * 1000
+  );
 }
 
 /**

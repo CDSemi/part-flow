@@ -18,6 +18,7 @@ import {
   AreaSummaryCard,
   MachineMonitoringCard,
 } from '../../components/area-monitoring';
+import { DueSoonPolicyProvider } from '../../components/due-soon-policy-provider';
 import { AreaDot } from '../../components/indicators';
 import {
   EmptyState,
@@ -34,6 +35,7 @@ import {
 import { splitAssignments } from '../area-monitoring';
 import { elapsedMinutesSince } from '../dates';
 import { compareDemandOrder } from '../demand-order';
+import { PREVIEW_DUE_SOON_POLICY } from '../display-settings-preview';
 import type { MockArea, MockAreaCard, MockAreaMachine } from '../view-models';
 import { useAreaBoardFeed } from './area-board-feed';
 import { LONG_PREVIEW_BOARD } from './area-board-preview';
@@ -219,7 +221,16 @@ export function AreaBoardView() {
     if (preview === 'empty')
       return { department: { id: 0, name: '' }, areas: [] };
     if (preview !== null) return null;
-    return feed.state.status === 'ready' ? feed.state.data : null;
+    return feed.state.status === 'ready' ? feed.state.data.board : null;
+  }, [preview, feed.state]);
+  // The Due Soon policy read with the board (one ready state); the
+  // development previews use the DEV-only preview policy.
+  const dueSoon = useMemo(() => {
+    if (preview === 'long' || preview === 'empty') {
+      return PREVIEW_DUE_SOON_POLICY;
+    }
+    if (preview !== null) return null;
+    return feed.state.status === 'ready' ? feed.state.data.dueSoon : null;
   }, [preview, feed.state]);
 
   const areas = useMemo(
@@ -317,133 +328,142 @@ export function AreaBoardView() {
     );
   }
 
+  if (dueSoon === null) {
+    // Unreachable: Areas are on screen only with the policy read beside
+    // them (a production build never reaches a preview). Nothing is
+    // guessed.
+    return null;
+  }
+
   return (
     <section className="ab" aria-label="Area Board">
-      {/* Narrow viewports render NO tab strip — the detail pages (and
+      <DueSoonPolicyProvider policy={dueSoon}>
+        {/* Narrow viewports render NO tab strip — the detail pages (and
           the Summary overview's card headers) are the navigation. */}
-      {!narrow ? (
-        <div className="ab-tabs">
-          <button
-            className={`ab-tab all ${activeTab === 'all' ? 'active' : ''}`}
-            aria-pressed={activeTab === 'all'}
-            onClick={() => setActiveTab('all')}
-          >
-            All Areas{' '}
-            <span className="cnt">
-              {new Set(allCards.map((c) => `${c.area}|${c.pn}`)).size}
-            </span>
-          </button>
-          {areas.map((entry) => (
+        {!narrow ? (
+          <div className="ab-tabs">
             <button
-              key={entry.area.key}
-              className={`ab-tab ${activeTab === entry.area.key ? 'active' : ''}`}
-              aria-pressed={activeTab === entry.area.key}
-              onClick={() => setActiveTab(entry.area.key)}
+              className={`ab-tab all ${activeTab === 'all' ? 'active' : ''}`}
+              aria-pressed={activeTab === 'all'}
+              onClick={() => setActiveTab('all')}
             >
-              <AreaDot colorVar={entry.area.colorVar} />
-              {entry.area.name}{' '}
+              All Areas{' '}
               <span className="cnt">
-                {new Set(entry.cards.map((c) => c.pn)).size}
+                {new Set(allCards.map((c) => `${c.area}|${c.pn}`)).size}
               </span>
             </button>
-          ))}
-        </div>
-      ) : null}
-
-      <div className="ab-tools">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search PN, WO, Job Number…"
-          aria-label="Search PN, WO, Job Number"
-        />
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as SortKey)}
-          aria-label="Sort"
-        >
-          <option value="due">Sort: Due date</option>
-          <option value="prio">Sort: Priority</option>
-          <option value="tia">Sort: Time in Area</option>
-          <option value="qty">Sort: Quantity</option>
-        </select>
-        {narrow ? (
-          // Narrow layout choice (post-v18): OFF (default) pages the
-          // per-Area details, ON stacks the All Areas overview — the
-          // same slide-toggle presentation as Wrap columns.
-          <button
-            type="button"
-            role="switch"
-            aria-checked={summary}
-            className={`ab-wrap ${summary ? 'on' : ''}`}
-            onClick={() => setSummary((s) => !s)}
-            title="Show the stacked All Areas summary instead of the per-Area pages"
-          >
-            <span className="knob" aria-hidden="true" />
-            Summary
-          </button>
-        ) : activeTab === 'all' ? (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={wrapOverview}
-            className={`ab-wrap ${wrapOverview ? 'on' : ''}`}
-            onClick={() => setWrapOverview((w) => !w)}
-            title="Wrap Area columns onto additional rows instead of scrolling horizontally"
-          >
-            <span className="knob" aria-hidden="true" />
-            Wrap columns
-          </button>
+            {areas.map((entry) => (
+              <button
+                key={entry.area.key}
+                className={`ab-tab ${activeTab === entry.area.key ? 'active' : ''}`}
+                aria-pressed={activeTab === entry.area.key}
+                onClick={() => setActiveTab(entry.area.key)}
+              >
+                <AreaDot colorVar={entry.area.colorVar} />
+                {entry.area.name}{' '}
+                <span className="cnt">
+                  {new Set(entry.cards.map((c) => c.pn)).size}
+                </span>
+              </button>
+            ))}
+          </div>
         ) : null}
-        <span className="ab-meta">
-          {narrow
-            ? summary
-              ? metaFor(undefined)
-              : metaFor(pageArea)
-            : metaFor(activeArea)}
-        </span>
-        <FeedStatus stale={feedStale} />
-      </div>
 
-      {narrow ? (
-        summary ? (
+        <div className="ab-tools">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search PN, WO, Job Number…"
+            aria-label="Search PN, WO, Job Number"
+          />
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortKey)}
+            aria-label="Sort"
+          >
+            <option value="due">Sort: Due date</option>
+            <option value="prio">Sort: Priority</option>
+            <option value="tia">Sort: Time in Area</option>
+            <option value="qty">Sort: Quantity</option>
+          </select>
+          {narrow ? (
+            // Narrow layout choice (post-v18): OFF (default) pages the
+            // per-Area details, ON stacks the All Areas overview — the
+            // same slide-toggle presentation as Wrap columns.
+            <button
+              type="button"
+              role="switch"
+              aria-checked={summary}
+              className={`ab-wrap ${summary ? 'on' : ''}`}
+              onClick={() => setSummary((s) => !s)}
+              title="Show the stacked All Areas summary instead of the per-Area pages"
+            >
+              <span className="knob" aria-hidden="true" />
+              Summary
+            </button>
+          ) : activeTab === 'all' ? (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={wrapOverview}
+              className={`ab-wrap ${wrapOverview ? 'on' : ''}`}
+              onClick={() => setWrapOverview((w) => !w)}
+              title="Wrap Area columns onto additional rows instead of scrolling horizontally"
+            >
+              <span className="knob" aria-hidden="true" />
+              Wrap columns
+            </button>
+          ) : null}
+          <span className="ab-meta">
+            {narrow
+              ? summary
+                ? metaFor(undefined)
+                : metaFor(pageArea)
+              : metaFor(activeArea)}
+          </span>
+          <FeedStatus stale={feedStale} />
+        </div>
+
+        {narrow ? (
+          summary ? (
+            <AllAreasOverview
+              areas={areas}
+              cardsOf={overviewRowsOf}
+              wrap
+              onOpenArea={(key) => {
+                // A summary card header jumps straight to that Area's
+                // detail page (the Summary toggle switches off).
+                setSummary(false);
+                setDetailPage(
+                  Math.max(
+                    0,
+                    areas.findIndex((entry) => entry.area.key === key),
+                  ),
+                );
+              }}
+            />
+          ) : (
+            <AreaDetailPager
+              areas={areas}
+              cardsOf={cardsOf}
+              page={safeDetailPage}
+              onPageChange={setDetailPage}
+            />
+          )
+        ) : activeTab === 'all' ? (
           <AllAreasOverview
             areas={areas}
             cardsOf={overviewRowsOf}
-            wrap
-            onOpenArea={(key) => {
-              // A summary card header jumps straight to that Area's
-              // detail page (the Summary toggle switches off).
-              setSummary(false);
-              setDetailPage(
-                Math.max(
-                  0,
-                  areas.findIndex((entry) => entry.area.key === key),
-                ),
-              );
-            }}
+            wrap={wrapOverview}
+            onOpenArea={(key) => setActiveTab(key)}
           />
         ) : (
-          <AreaDetailPager
-            areas={areas}
-            cardsOf={cardsOf}
-            page={safeDetailPage}
-            onPageChange={setDetailPage}
+          <AreaDetail
+            presentation={activeArea}
+            cards={activeArea ? cardsOf(activeArea.area.key) : []}
           />
-        )
-      ) : activeTab === 'all' ? (
-        <AllAreasOverview
-          areas={areas}
-          cardsOf={overviewRowsOf}
-          wrap={wrapOverview}
-          onOpenArea={(key) => setActiveTab(key)}
-        />
-      ) : (
-        <AreaDetail
-          presentation={activeArea}
-          cards={activeArea ? cardsOf(activeArea.area.key) : []}
-        />
-      )}
+        )}
+      </DueSoonPolicyProvider>
     </section>
   );
 }

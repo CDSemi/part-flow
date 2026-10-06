@@ -278,9 +278,12 @@ const BOARD_ROWS = [
   },
 ];
 
-function boardPayload(rows = BOARD_ROWS) {
+/** The Department's display settings on the board wire (S9). */
+const ROTATION_WIRE = { board_seconds_per_row: 3, board_min_page_seconds: 6 };
+
+function boardPayload(rows = BOARD_ROWS, rotation = ROTATION_WIRE) {
   return {
-    department: { id: 1, name: 'Machine Shop' },
+    department: { id: 1, name: 'Machine Shop', ...rotation },
     rows,
     active_part_numbers: rows.filter((row) => row.active_quantity > 0).length,
     active_quantity: rows.reduce((sum, row) => sum + row.active_quantity, 0),
@@ -294,16 +297,29 @@ function boardPayload(rows = BOARD_ROWS) {
 
 type FetchImpl = (input: RequestInfo | URL) => Promise<Response>;
 
-/** Health ok + the board answered from `boardResponse` (overridable). */
+/** The Due Soon warning policy on the wire (`GET /api/policies/due-soon`). */
+function policyPayload(minDays = 2, percent = 15, maxDays = 7) {
+  return {
+    due_soon_min_days: minDays,
+    due_soon_lead_time_percent: percent,
+    due_soon_max_days: maxDays,
+    updated_at: '2026-10-01T08:00:00Z',
+  };
+}
+
+const okJson = (body: unknown) =>
+  Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+
+/** Health ok + the board answered from `boardResponse` and the Due Soon
+ * policy from `policyResponse` (both overridable). */
 function stubFetch(
-  boardResponse: () => Promise<Response> = () =>
-    Promise.resolve(
-      new Response(JSON.stringify(boardPayload()), { status: 200 }),
-    ),
+  boardResponse: () => Promise<Response> = () => okJson(boardPayload()),
+  policyResponse: () => Promise<Response> = () => okJson(policyPayload()),
 ) {
   const impl = vi.fn<FetchImpl>((input) => {
     const url = String(input);
     if (url.startsWith('/api/production-board')) return boardResponse();
+    if (url === '/api/policies/due-soon') return policyResponse();
     return Promise.resolve(
       new Response(JSON.stringify({ status: 'ok' }), { status: 200 }),
     );
@@ -1200,7 +1216,8 @@ test('long data paginates and rotates automatically; single pages never claim ro
 test('rotation fires exactly at the current page’s computed duration — never before', async () => {
   await renderBoard('/production-board?state=long');
 
-  // 10 rows on page 1 → rotationDurationMs(10) = 30 s. One
+  // 10 rows on page 1 → rotationDurationMs(10, the preview's 3 s per
+  // row with a 6 s floor) = 30 s. One
   // millisecond before the deadline nothing rotates…
   await act(async () => {
     await vi.advanceTimersByTimeAsync(29_999);
@@ -1502,9 +1519,10 @@ test('a multi-page board shows the rotation indicator with track and seconds', a
   expect(rotate?.querySelector('.pb-rotatetrack i')).not.toBeNull();
   // Full countdown for the current page: 10 rows × 3 s (v15).
   expect(rotate?.querySelector('.pb-rotatesec')?.textContent).toBe('30 s');
-  // The tooltip states the per-row rule instead of a fixed interval.
+  // The tooltip states the Department's rule (the preview's values)
+  // instead of a fixed interval.
   expect(rotate?.getAttribute('title')).toBe(
-    'Time until the next automatic page rotation (3 s per displayed row)',
+    'Time until the next automatic page rotation (3 s per displayed row, at least 6 s per page)',
   );
 });
 
@@ -2179,5 +2197,307 @@ test('the development state previews perform no board request', async () => {
       String(input).startsWith('/api/production-board'),
     ),
   ).toHaveLength(0);
+  expect(
+    fetchImpl.mock.calls.filter(
+      ([input]) => String(input) === '/api/policies/due-soon',
+    ),
+  ).toHaveLength(0);
   expect(rowByPn('0118-40-0022-07-0455-88-REV-C')).toBeDefined();
+});
+
+/* ============ Department display settings and the Due Soon policy (S9) ============ */
+
+/** `count` simple rows (one queued quantity each) in server order. */
+function plainRows(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    part_number: `PN-${String(index + 1).padStart(2, '0')}`,
+    hot_rank: null,
+    due_date: isoDateIn(60),
+    received_date: isoDateIn(-10),
+    locations: [location(AREA.cut, 'QUEUE', 1, 10)],
+    active_quantity: 1,
+    stocked_quantity: 0,
+    scrapped_quantity: 0,
+    total_quantity: 1,
+    master: NO_MASTER,
+    demands: [demand(9000 + index, `9${index}`, ['J'], 1)],
+  }));
+}
+
+const TIMING_2_12 = { board_seconds_per_row: 2, board_min_page_seconds: 12 };
+
+const policyCalls = (fetchImpl: ReturnType<typeof stubFetch>) =>
+  fetchImpl.mock.calls.filter(
+    ([input]) => String(input) === '/api/policies/due-soon',
+  ).length;
+const boardRequests = (fetchImpl: ReturnType<typeof stubFetch>) =>
+  fetchImpl.mock.calls.filter(([input]) =>
+    String(input).startsWith('/api/production-board'),
+  ).length;
+
+test('PB-1: the board reads the board and the Due Soon policy, then renders its rows', async () => {
+  const fetchImpl = stubFetch();
+  await renderBoard();
+  expect(boardRequests(fetchImpl)).toBe(1);
+  expect(policyCalls(fetchImpl)).toBe(1);
+  // The board's own read starts first.
+  expect(
+    fetchImpl.mock.calls
+      .map(([input]) => String(input))
+      .filter((url) => url.startsWith('/api/'))
+      .filter((url) => url !== '/api/health')[0],
+  ).toBe('/api/production-board');
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+});
+
+test('PB-2: rotation follows the Department — proportional dwell and its own floor', async () => {
+  stubFetch(() => okJson(boardPayload(plainRows(25), TIMING_2_12)));
+  await renderBoard();
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+
+  // 10 rows × 2 s = 20 s: not one millisecond earlier, not the 30 s a
+  // fixed 3 s per row would give.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(19_999);
+  });
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
+
+  // The 5-row last page: 5 × 2 s = 10 s proportional, but the
+  // Department's 12 s minimum page dwell applies.
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  await act(async () => {});
+  expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_999);
+  });
+  expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+});
+
+test('PB-3: a changed rotation timing applies at the next refresh, without a reload', async () => {
+  let timing = TIMING_2_12;
+  stubFetch(() => okJson(boardPayload(plainRows(25), timing)));
+  await renderBoard();
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+
+  timing = { board_seconds_per_row: 1, board_min_page_seconds: 4 };
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BOARD_REFRESH_MS);
+  });
+  // The refresh delivered 1 s per row: the current page's dwell
+  // restarted with 10 × 1 s = 10 s on the same mounted board.
+  expect(document.querySelector('.pb-rotate')?.getAttribute('title')).toBe(
+    'Time until the next automatic page rotation (1 s per displayed row, at least 4 s per page)',
+  );
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(9_999);
+  });
+  expect(screen.getByText('Page 1 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
+  // The next 10-row page dwells 10 s too.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(9_999);
+  });
+  expect(screen.getByText('Page 2 / 3')).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1);
+  });
+  expect(screen.getByText('Page 3 / 3')).toBeInTheDocument();
+});
+
+test('PB-4: the rotation indicator states the Department timing', async () => {
+  stubFetch(() => okJson(boardPayload(plainRows(25), TIMING_2_12)));
+  await renderBoard();
+  expect(document.querySelector('.pb-rotate')?.getAttribute('title')).toBe(
+    'Time until the next automatic page rotation (2 s per displayed row, at least 12 s per page)',
+  );
+  expect(document.querySelector('.pb-rotatesec')?.textContent).toBe('20 s');
+});
+
+test('PB-5: the Due Date tooltip derives every number from the served policy', async () => {
+  stubFetch(undefined, () => okJson(policyPayload(1, 20, 5)));
+  await renderBoard();
+  const tip = Array.from(visibleTable().querySelectorAll('thead th')).find(
+    (th) => th.querySelector('.thlbl')?.textContent === 'Due Date',
+  );
+  const descs = Array.from(
+    tip?.querySelectorAll('.tipdesc') ?? [],
+    (el) => el.textContent,
+  );
+  expect(descs).toContain(
+    'within 20% of the lead time (received → due), 1–5 days',
+  );
+  const rows = Array.from(tip?.querySelectorAll('.tiprow') ?? [], (row) => [
+    row.querySelector('.tipkey')?.textContent,
+    row.querySelector('.tipdesc')?.textContent,
+  ]);
+  expect(rows).toContainEqual(['10-day lead', 'warns 2 days ahead']);
+  expect(rows).toContainEqual(['30-day lead', 'warns 5 days ahead']);
+  expect(rows).toContainEqual(['90-day lead', 'warns 5 days ahead']);
+});
+
+test('PB-6: the amber tone follows the served policy', async () => {
+  // Due in 6 days with a 40-day lead: 15 % → 6 days.
+  const row = {
+    ...plainRows(1)[0],
+    part_number: 'PN-SOON',
+    due_date: isoDateIn(6),
+    received_date: isoDateIn(-34),
+  };
+  const dueClass = () =>
+    rowByPn('PN-SOON')?.querySelector('.due .d2')?.className ?? '';
+
+  stubFetch(
+    () => okJson(boardPayload([row])),
+    () => okJson(policyPayload(2, 15, 7)),
+  );
+  const view = await renderBoard();
+  expect(dueClass()).toContain('soon');
+  view.unmount();
+
+  stubFetch(
+    () => okJson(boardPayload([row])),
+    () => okJson(policyPayload(2, 15, 5)),
+  );
+  await renderBoard();
+  expect(dueClass()).not.toContain('soon');
+});
+
+test('PB-7: a policy failing on the first load is the error state; Retry recovers', async () => {
+  let policyFails = true;
+  stubFetch(undefined, () =>
+    policyFails
+      ? Promise.resolve(
+          new Response(JSON.stringify({ detail: 'policy down' }), {
+            status: 500,
+          }),
+        )
+      : okJson(policyPayload()),
+  );
+  await renderBoard();
+  expect(screen.getByRole('alert').textContent).toContain(
+    'The production feed could not be loaded.',
+  );
+  expect(document.querySelector('table.pb-table')).toBeNull();
+
+  policyFails = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await act(async () => {});
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+});
+
+test('PB-8: a policy failing on a refresh keeps the last complete board, stale', async () => {
+  let policyFails = false;
+  stubFetch(undefined, () =>
+    policyFails
+      ? Promise.resolve(
+          new Response(JSON.stringify({ detail: 'policy down' }), {
+            status: 500,
+          }),
+        )
+      : okJson(policyPayload()),
+  );
+  await renderBoard();
+  const live = () => document.querySelector('.pb-head h1.live');
+  expect(live()?.className).not.toContain('stale');
+
+  policyFails = true;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BOARD_REFRESH_MS);
+  });
+  expect(rowByPn('2027-60-8114-00')).toBeDefined();
+  expect(live()?.querySelector('.stalenote')?.textContent).toBe(
+    'Feed stale — reconnecting',
+  );
+
+  policyFails = false;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BOARD_REFRESH_MS);
+  });
+  expect(live()?.className).not.toContain('stale');
+});
+
+test('PB-10: one request at a time — a rejected policy waits for the pending board', async () => {
+  let resolveBoard: (response: Response) => void = () => {};
+  const fetchImpl = stubFetch(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveBoard = resolve;
+      }),
+    () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ detail: 'policy down' }), {
+          status: 500,
+        }),
+      ),
+  );
+  await renderBoard();
+  expect(boardRequests(fetchImpl)).toBe(1);
+
+  // The policy already failed, but the board request is still in
+  // flight: the feed has not settled, so no next run is armed.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BOARD_REFRESH_MS * 3);
+  });
+  expect(boardRequests(fetchImpl)).toBe(1);
+  expect(
+    screen.getByRole('status', { name: 'Loading Production Board' }),
+  ).toBeInTheDocument();
+
+  // The board answers: the feed settles (first load → error state) and
+  // only then is the next run armed.
+  await act(async () => {
+    resolveBoard(new Response(JSON.stringify(boardPayload()), { status: 200 }));
+  });
+  expect(screen.getByRole('alert').textContent).toContain(
+    'The production feed could not be loaded.',
+  );
+  expect(boardRequests(fetchImpl)).toBe(1);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(BOARD_REFRESH_MS);
+  });
+  expect(boardRequests(fetchImpl)).toBe(2);
+});
+
+test('PB-11: an invalid wire timing or policy never degrades silently', async () => {
+  const withoutTiming = {
+    ...boardPayload(plainRows(25)),
+    department: { id: 1, name: 'Machine Shop' },
+  };
+  stubFetch(() => okJson(withoutTiming));
+  const view = await renderBoard();
+  expect(screen.getByRole('alert').textContent).toContain(
+    'The production feed could not be loaded.',
+  );
+  expect(screen.getByRole('alert').textContent).toContain(
+    'The server answered an invalid Production Board rotation timing.',
+  );
+  expect(document.querySelector('table.pb-table')).toBeNull();
+  expect(document.querySelector('.pb-rotate')).toBeNull();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(document.querySelector('table.pb-table')).toBeNull();
+  view.unmount();
+
+  stubFetch(undefined, () => okJson(policyPayload(5, 15, 3)));
+  await renderBoard();
+  expect(screen.getByRole('alert').textContent).toContain(
+    'The server answered an invalid Due Soon warning policy.',
+  );
+  expect(document.querySelector('table.pb-table')).toBeNull();
 });

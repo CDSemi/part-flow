@@ -225,7 +225,17 @@ function inventory(areaId: number) {
   });
 }
 
+/** The Due Soon warning policy on the wire (the initial values). */
+const DUE_SOON_POLICY_WIRE = {
+  due_soon_min_days: 2,
+  due_soon_lead_time_percent: 15,
+  due_soon_max_days: 7,
+  updated_at: '2026-10-01T08:00:00Z',
+};
+
 function handle(url: string, method: string, body: unknown): Response {
+  // The Due Soon warning policy of the `In this Area now` due tones.
+  if (url === '/api/policies/due-soon') return json(DUE_SOON_POLICY_WIRE);
   if (url === '/api/health') {
     return healthDown ? json({ detail: 'down' }, 503) : json({ status: 'ok' });
   }
@@ -500,7 +510,7 @@ beforeEach(() => {
       const requestBody = init?.body
         ? JSON.parse(String(init.body))
         : undefined;
-      if (!url.endsWith('/api/health')) {
+      if (!url.endsWith('/api/health') && url !== '/api/policies/due-soon') {
         requests.push({ url, method, body: requestBody });
       }
       return Promise.resolve().then(() => handle(url, method, requestBody));

@@ -7,7 +7,8 @@
 // each position, the stocked and scrapped quantities, the demand
 // context (Work Order Number, Job Numbers, requested / allocated
 // quantity) and the Hot rank, in the canonical board order, plus the
-// Department totals of the footer. The server never sends a derived
+// Department totals of the footer, and the Department's display
+// settings (the rotation timing). The server never sends a derived
 // time value: dwell times, the due countdown and `Total Days` derive
 // at render from these fixed timestamps and dates plus the shared UI
 // clock (§3.12), so the board can never disagree with another view.
@@ -17,7 +18,9 @@
 //
 // Production-safe: no mock data, no framework imports.
 
-import { apiRequest } from './client';
+import { isBoardRotationTiming } from '../views/production-board/board-logic';
+import type { BoardRotationTiming } from '../views/production-board/board-logic';
+import { ApiError, apiRequest } from './client';
 import { partNumberSecondaryLine } from './part-numbers';
 
 // ---------------------------------------------------------------------------
@@ -123,7 +126,13 @@ export interface BoardRow {
 }
 
 export interface ProductionBoard {
-  department: { id: number; name: string };
+  department: {
+    id: number;
+    name: string;
+    /** The Department's display settings: the page rotation timing
+     * (PROJECT_PROFILE §21 — configured per Department). */
+    rotation: BoardRotationTiming;
+  };
   rows: BoardRow[];
   /** Footer totals. */
   activePartNumbers: number;
@@ -182,7 +191,12 @@ interface BoardRowWire {
 }
 
 interface ProductionBoardWire {
-  department: { id: number; name: string };
+  department: {
+    id: number;
+    name: string;
+    board_seconds_per_row: number;
+    board_min_page_seconds: number;
+  };
   rows: BoardRowWire[];
   active_part_numbers: number;
   active_quantity: number;
@@ -248,8 +262,26 @@ function toRow(wire: BoardRowWire): BoardRow {
 }
 
 function toBoard(wire: ProductionBoardWire): ProductionBoard {
+  const rotation = {
+    secondsPerRow: wire.department.board_seconds_per_row,
+    minPageSeconds: wire.department.board_min_page_seconds,
+  };
+  // A missing or invalid timing never reaches the board: an undefined
+  // value would make the dwell NaN, and the pages would flip every tick.
+  if (!isBoardRotationTiming(rotation)) {
+    // An ApiError, so the view states this reason (a plain Error reads
+    // as "could not be reached", which a 200 answer was not).
+    throw new ApiError(
+      200,
+      'The server answered an invalid Production Board rotation timing.',
+    );
+  }
   return {
-    department: wire.department,
+    department: {
+      id: wire.department.id,
+      name: wire.department.name,
+      rotation,
+    },
     rows: wire.rows.map(toRow),
     activePartNumbers: wire.active_part_numbers,
     activeQuantity: wire.active_quantity,
