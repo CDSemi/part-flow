@@ -1,7 +1,9 @@
 // Production mock-boundary verification (runs as part of `npm run build`).
 //
-// The Phase 2 mock views and datasets live behind the development-only
-// registry in src/app/dev-views.ts. This check fails the build when any
+// The development-only mock views and datasets (src/mocks/) are reached
+// only through `import.meta.env.DEV`-guarded lazy imports inside the
+// real views (e.g. the mock Scan Station preview), which a production
+// build compiles away. This check fails the build when any
 // known mock sentinel value appears in the generated production assets,
 // so development mock data can never silently leak into a production
 // bundle. src/production-boundary.test.ts keeps this sentinel list in

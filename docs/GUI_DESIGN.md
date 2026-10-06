@@ -716,9 +716,9 @@ The **usage dialog** lists the Quantity Flows released with the template — flo
 - Archived templates are never offered for new route assignments.
 - There is **no separate template-versioning system**: existing Assigned Route snapshots preserve the historical route definitions (PROJECT_PROFILE §8.8, §8.10).
 
-## 13.4 States and Phase 2 boundary
+## 13.4 States and implementation boundary
 
-Loading, error and empty states follow the standard view-state presentation (`No Planned Routes defined yet.` / no-match message). In Phase 2 the view edits development-only mock state (one concise `DevNotice`); the mock templates include a used active template, an archived previously used template, and a never-used draft so every action path is demonstrable.
+Loading, error and empty states follow the standard view-state presentation (`No Planned Routes defined yet.` / no-match message). **Implementation boundary (Phase 13).** The view is real on the `/api/route-templates` surface: create, edit (full step set), Duplicate (a server create of `{name} (variant)`), Archive (ever-used) and Delete (never-used), and the usage dialog (the newest 200 released Quantity Flows with the total); writes are blocked while disconnected. Est. time is entered and shown in the shared duration tokens (`45m`, `4h 00m`, `2d 03h`); a stored Operation or Machine that is no longer offered renders `(unavailable)` and must be replaced before saving (§13.2). The development-only `?state=` previews remain.
 
 ---
 

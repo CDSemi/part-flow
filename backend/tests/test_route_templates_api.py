@@ -1,13 +1,14 @@
-"""Integration tests for the Phase 4 read-only RouteTemplate listing.
+"""Integration tests for the Phase 4 RouteTemplate release listing.
 
-`GET /api/route-templates` exists only so the release flow (GUI_DESIGN
-§11.4) can offer an existing **active** RouteTemplate for a PLANNED
-release. Covered:
+`GET /api/route-templates` lets the release flow (GUI_DESIGN §11.4)
+offer an existing **active** RouteTemplate for a PLANNED release.
+Covered:
 
 - active templates are listed with their steps in sequence order;
-- archived templates never appear;
-- the surface is read-only — no create/update/archive route exists
-  (Planned Routes management is a later phase).
+- archived templates never appear.
+
+Planned Routes management (Phase 13 slice 8) is covered by
+`test_route_template_management_api.py`.
 """
 
 import datetime
@@ -74,7 +75,7 @@ def client(api_database_url: URL) -> Iterator[TestClient]:
 
 @pytest.fixture(scope="module")
 def db_engine(api_database_url: URL) -> Iterator[Engine]:
-    """Direct database access for seeding (no management API exists)."""
+    """Direct database access for seeding legacy-shaped templates."""
     engine = create_engine(api_database_url)
     yield engine
     engine.dispose()
@@ -107,7 +108,7 @@ def _create_route_template(
     archived: bool = False,
     description: str | None = None,
 ) -> int:
-    """Seed a RouteTemplate directly (no management API exists yet)."""
+    """Seed a RouteTemplate directly (non-contiguous sequences, no Operation)."""
     with Session(engine) as session:
         template = models.RouteTemplate(
             name=name,
@@ -160,6 +161,7 @@ def test_active_templates_list_with_ordered_steps(client: TestClient, db_engine:
     assert entry["steps"][0]["instructions"] == "Start"
     assert entry["steps"][1]["area_id"] == area_b["id"]
     assert entry["steps"][1]["operation_id"] is None
+    assert [step["preferred_machine_id"] for step in entry["steps"]] == [None, None]
 
 
 def test_archived_templates_never_appear(client: TestClient, db_engine: Engine) -> None:
@@ -171,13 +173,3 @@ def test_archived_templates_never_appear(client: TestClient, db_engine: Engine) 
     response = client.get("/api/route-templates")
     assert response.status_code == 200, response.text
     assert archived_id not in {entry["id"] for entry in response.json()}
-
-
-def test_the_surface_is_read_only(client: TestClient) -> None:
-    # No management surface exists: templates cannot be created,
-    # changed, or archived through the API (Planned Routes is a later
-    # phase). FastAPI answers 405 for the defined path with an
-    # unsupported method.
-    assert client.post("/api/route-templates", json={"name": "X"}).status_code == 405
-    assert client.patch("/api/route-templates/1", json={}).status_code in (404, 405)
-    assert client.delete("/api/route-templates/1").status_code in (404, 405)

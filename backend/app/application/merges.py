@@ -19,8 +19,9 @@ Rules owned here:
   processing state, the same Machine (ON_MACHINE sources on one
   Machine; otherwise none), the same recorded Operation (its effective
   latest Movement), and the same route context (`lineage.route_context`
-  — all FLOATING, or all PLANNED with structurally equal snapshots at
-  the same last-known step). Any difference is refused explicitly with
+  — all FLOATING, or all PLANNED with structurally equal snapshots
+  (every copied step field, the preferred Machine included) at the
+  same last-known step). Any difference is refused explicitly with
   zero writes.
 - Quantity conservation: the resulting flow's quantity is exactly the
   sum of the sources'; every source closes (`status = MERGED`,

@@ -6,12 +6,13 @@ verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
 `0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation`,
-`0022_phase13_undo_reason_policy` and `0023_phase13_part_number_master`
-add (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.1, §8.4,
-§8.11, §8.12, §8.13, §10, §16, §19, §21, §28; owner decisions OD-2,
-OD-3, OD-6, OD-10, S2-F6). Later Phase 13 slices extend this module:
+`0022_phase13_undo_reason_policy`, `0023_phase13_part_number_master` and
+`0024_phase13_planned_routes` add (IMPLEMENTATION_ROADMAP Phase 13;
+PROJECT_PROFILE §7, §8.1, §8.4, §8.8–§8.11, §8.12, §8.13, §10, §16, §19,
+§21, §28; owner decisions OD-2, OD-3, OD-6, OD-10, OD-11, S2-F6). Later
+Phase 13 slices extend this module:
 
-- exact head boundary: `0023_phase13_part_number_master` is the single
+- exact head boundary: `0024_phase13_planned_routes` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -77,7 +78,15 @@ OD-3, OD-6, OD-10, S2-F6). Later Phase 13 slices extend this module:
   2 MiB), and no FK referencing `part_numbers` at all; the upgrade keeps
   every master and audit row; the downgrade restores the 0022 boundary
   and refuses while any master carries a detail or an image, never
-  because of `PartNumber` audit rows.
+  because of `PartNumber` audit rows;
+- Planned Routes (0024): `route_steps.preferred_machine_id` (nullable,
+  FK to `machines`) and `assigned_route_steps.preferred_machine_id`
+  (nullable, deliberately no FK), the index
+  `ix_assigned_routes_source_route_template_id` and `RouteTemplate` in
+  the audit entity CHECK — which the hand-written model CHECK names too;
+  the upgrade keeps every template, step, snapshot and audit row (the new
+  columns NULL); the downgrade restores the 0023 boundary and refuses
+  while a preferred Machine or a `RouteTemplate` audit row exists.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -119,7 +128,8 @@ _WORKER_IDENTITY_REVISION = "0019_phase13_worker_identity"
 _WORKER_SESSIONS_REVISION = "0020_phase13_worker_sessions"
 _BADGE_CONFIRMATION_REVISION = "0021_phase13_badge_confirmation"
 _UNDO_REASON_POLICY_REVISION = "0022_phase13_undo_reason_policy"
-_HEAD_REVISION = "0023_phase13_part_number_master"
+_PART_NUMBER_MASTER_REVISION = "0023_phase13_part_number_master"
+_HEAD_REVISION = "0024_phase13_planned_routes"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -131,6 +141,7 @@ _WORKER_SESSIONS_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0020_phase13_worker_
 _BADGE_CONFIRMATION_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0021_phase13_badge_confirmation.py"
 _UNDO_REASON_POLICY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0022_phase13_undo_reason_policy.py"
 _PART_NUMBER_MASTER_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0023_phase13_part_number_master.py"
+_PLANNED_ROUTES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0024_phase13_planned_routes.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -1400,9 +1411,10 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
     assert set(re.findall(r"'([^']*)'", models.WORKER_SESSION_END_REASON_SQL)) == {
         reason.value for reason in WorkerSessionEndReason
     }
+    # 0024 (slice 8) appends RouteTemplate after this literal.
     assert set(re.findall(r"'([^']*)'", migration._POLICY_ENTITY_TYPES)) == {
         entity.value for entity in AuditEntityType
-    }
+    } - {AuditEntityType.ROUTE_TEMPLATE.value}
 
 
 def test_application_policy_is_one_seeded_row(connection: Connection) -> None:
@@ -2392,5 +2404,256 @@ def test_downgrade_refuses_while_part_number_details_exist(
         with engine.connect() as connection:
             assert _version(connection) == _HEAD_REVISION
             assert _part_number_rows(connection) == stored
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Planned Routes (0024)
+# ---------------------------------------------------------------------------
+
+_PREFERRED_MACHINE_FK = "fk_route_steps_preferred_machine_id_machines"
+_SOURCE_TEMPLATE_INDEX = "ix_assigned_routes_source_route_template_id"
+_ROUTE_TABLES = ("route_templates", "route_steps", "assigned_routes", "assigned_route_steps")
+
+
+def test_preferred_machine_columns_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    for table in ("route_steps", "assigned_route_steps"):
+        columns = {str(column["name"]): column for column in inspector.get_columns(table)}
+        column = columns["preferred_machine_id"]
+        assert isinstance(column["type"], sa.Integer)
+        assert column["nullable"] is True
+        assert column["default"] is None
+    step_fks = {
+        str(fk["name"]): fk
+        for fk in inspector.get_foreign_keys("route_steps")
+        if fk["constrained_columns"] == ["preferred_machine_id"]
+    }
+    assert set(step_fks) == {_PREFERRED_MACHINE_FK}
+    assert step_fks[_PREFERRED_MACHINE_FK]["referred_table"] == "machines"
+    assert step_fks[_PREFERRED_MACHINE_FK]["referred_columns"] == ["id"]
+    # The snapshot copy carries no FK: production commands never lock a
+    # Machine row through it (S8-OD20).
+    assert not [
+        fk
+        for fk in inspector.get_foreign_keys("assigned_route_steps")
+        if "preferred_machine_id" in fk["constrained_columns"]
+    ]
+
+
+def test_source_template_index(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    indexes = {str(index["name"]): index for index in inspector.get_indexes("assigned_routes")}
+    assert indexes[_SOURCE_TEMPLATE_INDEX]["column_names"] == ["source_route_template_id"]
+    assert indexes[_SOURCE_TEMPLATE_INDEX]["unique"] is False
+    # No reader filters by the preferred Machine: no index on either column.
+    for table in ("route_steps", "assigned_route_steps"):
+        for index in inspector.get_indexes(table):
+            assert "preferred_machine_id" not in index["column_names"]
+
+
+def test_model_entity_check_names_every_enum_member() -> None:
+    # The model CHECK is a hand-written list and compare_metadata does
+    # not compare CHECK text: assert it names exactly the enum.
+    checks = [
+        constraint
+        for constraint in cast(sa.Table, models.AuditEvent.__table__).constraints
+        if isinstance(constraint, sa.CheckConstraint)
+        and constraint.name == "ck_audit_events_entity_type"
+    ]
+    assert len(checks) == 1
+    sqltext = str(checks[0].sqltext)
+    assert set(re.findall(r"'([^']*)'", sqltext)) == {e.value for e in AuditEntityType}
+
+
+def test_planned_routes_migration_restores_the_0020_literal() -> None:
+    planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
+    worker_sessions = _load_migration(_WORKER_SESSIONS_MIGRATION_FILE)
+    assert planned_routes._PREVIOUS_ENTITY_TYPES == worker_sessions._POLICY_ENTITY_TYPES
+    widened = worker_sessions._POLICY_ENTITY_TYPES[:-1] + ", 'RouteTemplate')"
+    assert widened == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES
+    assert set(re.findall(r"'([^']*)'", planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES)) == {
+        entity.value for entity in AuditEntityType
+    }
+
+
+def test_audit_admits_the_route_template_entity(connection: Connection) -> None:
+    _insert_audit(connection, "CREATED", "RouteTemplate")
+    _insert_audit(connection, "DELETED", "RouteTemplate")
+    _refused_by(
+        connection,
+        "ck_audit_events_entity_type",
+        lambda: _insert_audit(connection, "CREATED", "AssignedRoute"),
+    )
+
+
+def _seed_routes(connection: Connection) -> dict[str, int]:
+    """Raw-SQL rows valid at 0023 and at head: a template with a step
+    without an Operation, its snapshot, a Machine and an Area audit row."""
+    department = _scalar_id(
+        connection, "INSERT INTO departments (name) VALUES ('Route Seed') RETURNING id"
+    )
+    area = _scalar_id(
+        connection,
+        "INSERT INTO areas (department_id, name) VALUES (:department, 'Route Area') RETURNING id",
+        department=department,
+    )
+    operation = _scalar_id(
+        connection,
+        "INSERT INTO operations (area_id, code) VALUES (:area, 'RT-OP') RETURNING id",
+        area=area,
+    )
+    machine = _scalar_id(
+        connection,
+        "INSERT INTO machines (area_id, name, asset_tag) VALUES (:area, 'Lathe', 'RT-1')"
+        " RETURNING id",
+        area=area,
+    )
+    template = _scalar_id(
+        connection,
+        "INSERT INTO route_templates (name, description) VALUES ('Bracket', 'Two steps')"
+        " RETURNING id",
+    )
+    _execute(
+        connection,
+        "INSERT INTO route_steps (route_template_id, sequence, area_id, operation_id,"
+        " expected_duration, instructions) VALUES (:template, 10, :area, :operation,"
+        " interval '4 hours', 'Deburr'), (:template, 20, :area, NULL, NULL, NULL)",
+        template=template,
+        area=area,
+        operation=operation,
+    )
+    assigned = _scalar_id(
+        connection,
+        "INSERT INTO assigned_routes (source_route_template_id) VALUES (:template) RETURNING id",
+        template=template,
+    )
+    _execute(
+        connection,
+        "INSERT INTO assigned_route_steps (assigned_route_id, sequence, area_id, operation_id,"
+        " expected_duration, instructions) VALUES (:assigned, 10, :area, :operation,"
+        " interval '4 hours', 'Deburr'), (:assigned, 20, :area, NULL, NULL, NULL)",
+        assigned=assigned,
+        area=area,
+        operation=operation,
+    )
+    _insert_audit(connection, "CREATED", "Area")
+    return {"template": template, "machine": machine, "assigned": assigned}
+
+
+def _route_rows(connection: Connection) -> dict[str, list[dict[str, object]]]:
+    return {table: _rows(connection, table) for table in (*_ROUTE_TABLES, "audit_events")}
+
+
+def test_upgrade_keeps_routes_snapshots_and_audit_rows(admin_engine: Engine) -> None:
+    """0023 → head keeps every template, step, snapshot and audit row;
+    both new columns are NULL (no backfill)."""
+    name = "partflow_test_phase13_routes_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _PART_NUMBER_MASTER_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _seed_routes(connection)
+                before = _route_rows(connection)
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                after = _route_rows(connection)
+            for table in ("route_steps", "assigned_route_steps"):
+                assert after[table] == [
+                    {**row, "preferred_machine_id": None} for row in before[table]
+                ]
+            for table in ("route_templates", "assigned_routes", "audit_events"):
+                assert after[table] == before[table]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_to_part_number_master_revision_restores_the_boundary(
+    admin_engine: Engine,
+) -> None:
+    """Routes without preferred Machines (and other entities' audit
+    rows) never block the downgrade; the re-upgrade restores the head."""
+    name = "partflow_test_phase13_downgrade_s8"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _seed_routes(connection)
+            command.downgrade(config, _PART_NUMBER_MASTER_REVISION)
+            inspector = inspect(engine)
+            for table in ("route_steps", "assigned_route_steps"):
+                columns = {str(column["name"]) for column in inspector.get_columns(table)}
+                assert "preferred_machine_id" not in columns
+            assert _SOURCE_TEMPLATE_INDEX not in {
+                str(index["name"]) for index in inspector.get_indexes("assigned_routes")
+            }
+            assert "'RouteTemplate'" not in _audit_checks(engine)["ck_audit_events_entity_type"]
+            with engine.connect() as connection:
+                assert _version(connection) == _PART_NUMBER_MASTER_REVISION
+                assert len(_rows(connection, "route_steps")) == 2
+                assert len(_rows(connection, "assigned_route_steps")) == 2
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE route_steps SET preferred_machine_id = :machine WHERE sequence = 10",
+        "UPDATE assigned_route_steps SET preferred_machine_id = :machine WHERE sequence = 10",
+    ],
+    ids=["route-step", "assigned-route-step"],
+)
+def test_downgrade_refuses_while_a_preferred_machine_exists(
+    refused_database: URL, statement: str
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            seeded = _seed_routes(connection)
+            _execute(connection, statement, machine=seeded["machine"])
+            stored = _route_rows(connection)
+        with pytest.raises(ProgrammingError, match="Preferred Machines are recorded"):
+            command.downgrade(_alembic_config(refused_database), _PART_NUMBER_MASTER_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _route_rows(connection) == stored
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_route_template_audit_history_exists(
+    refused_database: URL,
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_audit(connection, "CREATED", "RouteTemplate")
+        # The re-created 0020 entity CHECK refuses the RouteTemplate row.
+        with pytest.raises(IntegrityError, match="ck_audit_events_entity_type"):
+            command.downgrade(_alembic_config(refused_database), _PART_NUMBER_MASTER_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'RouteTemplate'")
+            ).scalar_one()
+        assert kept == 1
     finally:
         engine.dispose()

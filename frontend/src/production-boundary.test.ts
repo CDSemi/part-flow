@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from 'vitest';
 
-import { DEV_MOCK_VIEWS } from './app/dev-views';
 import { REAL_VIEWS } from './app/real-views';
 
 // The production mock boundary has three parts:
@@ -79,33 +78,21 @@ test('the sentinel list is non-empty and every sentinel exists in mock sources',
   }
 });
 
-test('development builds expose the remaining mock views through the dev-only registry', () => {
-  // Vitest runs with import.meta.env.DEV === true, so the registry must
-  // exist and cover every view that is still a Phase 2 mock view;
-  // production builds compile the registry to null and render the
-  // not-connected state for these routes instead. Machines and
-  // Administration left this registry with Phase 3.5, Work Orders with
-  // Phase 4, the Scan Station with Phase 5, the Production Board, the
-  // Area Board and PN Tracking with Phase 11, Priority Management
-  // with Phase 12 and Management → Part Numbers with Phase 13 — they
-  // are real views now.
-  expect(DEV_MOCK_VIEWS).not.toBeNull();
-  expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(['planned-routes']);
-});
-
-test('the real views ship in every build', () => {
+test('every approved view is a real view that ships in every build', () => {
   // Management → Machines, Administration (Phase 3.5), Management →
   // Work Orders (Phase 4), the Scan Station (Phase 5), the Production
   // Board, Area Board and PN Tracking (Phase 11), Management →
-  // Priority (Phase 12) and Management → Part Numbers (Phase 13) read
-  // real server state — they live in the always-available registry,
-  // never behind the development-only boundary.
+  // Priority (Phase 12), Management → Part Numbers and Management →
+  // Planned Routes (Phase 13) read real server state — all ten live in
+  // the always-available registry; no development-only view registry
+  // and no not-connected placeholder remain.
   expect(Object.keys(REAL_VIEWS).sort()).toEqual(
     [
       'administration',
       'area-board',
       'machines',
       'part-numbers',
+      'planned-routes',
       'priority',
       'production-board',
       'scan-station',
@@ -254,21 +241,24 @@ test('no production module reaches src/mocks/', () => {
   expect(graph).toContain(join('api', 'scan-station.ts'));
   expect(graph.length).toBeGreaterThan(30);
   // ...and only if the DEV boundary really cut the mock views away —
-  // including the mock Scan Station preview reachable from the real
-  // Scan Station view only through its DEV-guarded lazy import.
-  expect(graph).toContain(join('app', 'dev-views.ts')); // statically imported
+  // the mock Scan Station preview is reachable from the real Scan
+  // Station view only through its DEV-guarded lazy import.
   expect(graph).not.toContain(
     join('views', 'scan-station', 'ScanStationMockView.tsx'),
   );
   expect(graph).not.toContain(
     join('views', 'scan-station', 'mock-area-state.ts'),
   );
-  // A still-mock view (Planned Routes) stays cut away…
-  expect(graph).not.toContain(
+  // Management → Planned Routes is a REAL view since Phase 13 on
+  // `/api/route-templates`: it ships in every build and imports nothing
+  // from src/mocks/ (its long-data preview is built at runtime behind
+  // the DEV boundary).
+  expect(graph).toContain(
     join('views', 'planned-routes', 'PlannedRoutesView.tsx'),
   );
-  // …while Priority Management is a REAL view since Phase 12: it ships
-  // in every build on `/api/hot-list` and imports nothing from
+  expect(graph).toContain(join('api', 'route-templates.ts'));
+  // Priority Management is a REAL view since Phase 12: it ships in
+  // every build on `/api/hot-list` and imports nothing from
   // src/mocks/.
   expect(graph).toContain(join('views', 'priority', 'PriorityView.tsx'));
   expect(graph).toContain(join('api', 'hot-list.ts'));

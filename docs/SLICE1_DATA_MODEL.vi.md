@@ -216,7 +216,11 @@ không sửa quantity flow cũ.
 ## 10. Tạo AssignedRoute snapshot (chỉ `PLANNED`)
 
 - Copy template steps vào `assigned_routes` + `assigned_route_steps`: sequence,
-  Area, Operation, expected duration, instruction. Floating không snapshot.
+  Area, Operation, expected duration, instruction và — từ Phase 13 slice 8 —
+  `preferred_machine_id` (cũng nằm trên bản copy split/merge). Merge
+  compatibility ("snapshot bằng nhau về cấu trúc") bao gồm `preferred_machine_id`,
+  nên các flow có snapshot chỉ khác nhau ở preferred Machine không bao giờ được
+  merge. Floating không snapshot.
 - `source_route_template_id` informational; snapshot độc lập với template edit.
 - Flow sở hữu snapshot qua `quantity_flows.assigned_route_id`; snapshot không có
   reverse `quantity_flow_id`. `UNIQUE (assigned_route_id)` và CHECK route mode.
@@ -331,6 +335,8 @@ trigger; creation có before NULL, update append row mới, không rewrite row c
 
 **Application policy (Phase 13, `0020_phase13_worker_sessions`).** Các write policy toàn cục được audit với giá trị `entity_type` bổ sung `ApplicationPolicy`; `entity_id` là section Administration, `worker-sessions` cho Worker session timeout và `correction-permissions` cho Undo reason policy. Mỗi `PUT /api/policies/worker-sessions` có hiệu lực append đúng một row `UPDATED` trong cùng transaction (PUT không đổi gì không append gì) với snapshot `{worker_session_timeout_minutes, badge_confirm_done, badge_confirm_queue, badge_confirm_undo}` (ba option do `0021_phase13_badge_confirmation` thêm vào); mỗi `PUT /api/policies/correction-permissions` có hiệu lực cũng append đúng một row `UPDATED` theo cách đó, với snapshot `{undo_reason_required}` (`0022_phase13_undo_reason_policy`). Snapshot Area cũng mang `worker_session_timeout_minutes` (override theo Area, `null` khi chưa đặt). Row Worker Session và việc đóng chúng — kể cả các gate sign-in — là production audit identity (PROFILE §9; `worker_sessions`, `scan_session_id`), không bao giờ là row `audit_events`.
 
+**Planned Routes (Phase 13, `0024_phase13_planned_routes`).** Các write cấu hình Planned Routes được audit với giá trị `entity_type` bổ sung `RouteTemplate`; `entity_id` là id nội bộ của template dưới dạng text. Mỗi write hiệu lực append đúng một row trong cùng transaction: `CREATED` (tạo), `UPDATED` (edit hoặc archive) và `DELETED` (xóa template chưa từng dùng). Snapshot là danh sách key tường minh `{name, description, archived_at, steps}` với `archived_at` là text ISO-8601 UTC và mỗi step `{sequence, area_id, operation_id, expected_duration_seconds, preferred_machine_id, instructions}` (duration tính bằng giây, số JSON); write no-op hoặc bị từ chối không append gì. Snapshot Assigned Route và release là production record và không bao giờ được audit ở đây.
+
 ---
 
 ## 17. Database constraint và index
@@ -369,13 +375,14 @@ indexes WorkOrder và PN. Không Job aggregate/GIN index trong slice.
 không version column. Used template archive, never-used delete.
 
 **`route_steps`** — Template FK, sequence unique per template, Area, optional
-Operation/duration/instruction. `preferred_machine_id` đến phase dùng Machine.
+Operation/duration/instruction. `preferred_machine_id` (PROJECT_PROFILE §8.9) không tạo trong slice này; `0024_phase13_planned_routes` (Phase 13 slice 8) tạo nó dưới dạng FK nullable `fk_route_steps_preferred_machine_id_machines` tới `machines.id` (NO ACTION; Machine được retire, không bao giờ xóa). Việc khớp với Area của step là Application rule chỉ ở thời điểm save, nên preference đã lưu có thể cũ đi và khi đó hiển thị `(unavailable)`.
 
-**`assigned_routes`** — PK, optional source template, snapshot time; không reverse
+**`assigned_routes`** — PK, optional source template (có index `ix_assigned_routes_source_route_template_id` từ `0024_phase13_planned_routes`, phục vụ usage list của Planned Routes, kiểm tra ever-used và kiểm tra FK khi xóa template), snapshot time; không reverse
 Flow reference.
 
 **`assigned_route_steps`** — AssignedRoute FK, unique sequence, Area, optional
 Operation/duration/instruction.
+`0024_phase13_planned_routes` thêm `preferred_machine_id` nullable — integer thường **không có foreign key**: giá trị được copy từ cột template đã qua kiểm tra FK (hoặc từ snapshot khác), Machine không bao giờ bị xóa, và một FK sẽ khiến release, receipt, split và merge khóa row Machine sau khi đã khóa Area hoặc Machine, ngược thứ tự production.
 
 **`quantity_flows`** — PK, canonical PN/no master FK, positive quantity, active
 status, route-mode CHECK, nullable AssignedRoute FK unique, exact-mode CHECK:
@@ -401,7 +408,7 @@ WHERE movement_type = 'RECEIVED'
 JSONB subscript expression phải khớp Application exactly; index không tạo column,
 FK hay stored counter. UPDATE/DELETE bị guard.
 
-**`audit_events`** — BIGSERIAL, constrained event/entity types (`0014_phase13_workers` mở rộng `event_type` thành `('CREATED','UPDATED','DELETED')` và thêm `'Worker'` vào `entity_type`; `0016_phase13_environment_audit` thêm `'Department'`, `'Area'`, `'Operation'`, `'ScanStation'`, `'MachineAssetTagConfig'`; `0017_phase13_machine_audit` thêm `'Machine'`; `0020_phase13_worker_sessions` thêm `'ApplicationPolicy'`), polymorphic id,
+**`audit_events`** — BIGSERIAL, constrained event/entity types (`0014_phase13_workers` mở rộng `event_type` thành `('CREATED','UPDATED','DELETED')` và thêm `'Worker'` vào `entity_type`; `0016_phase13_environment_audit` thêm `'Department'`, `'Area'`, `'Operation'`, `'ScanStation'`, `'MachineAssetTagConfig'`; `0017_phase13_machine_audit` thêm `'Machine'`; `0020_phase13_worker_sessions` thêm `'ApplicationPolicy'`; `0024_phase13_planned_routes` thêm `'RouteTemplate'`), polymorphic id,
 actor/time/before/after/metadata, `(entity_type,entity_id,id)` index, append-only; Phase 12 thêm partial expression index `ix_audit_events_hot_list_device_event_id` trên `(metadata['hot_list_change'] ->> 'device_event_id') WHERE entity_type = 'WorkOrderDemand'` cho idempotency lookup của Hot command (dạng lưu là operator `->>` tường minh trên JSONB subscript, và Application lookup phát ra cùng expression).
 
 **`application_policy`** (`0020_phase13_worker_sessions`) — singleton có kiểu duy nhất cho policy toàn cục: PK `id` với `ck_application_policy_singleton` (`id = 1`), được migration seed nên row luôn tồn tại; `worker_session_timeout_minutes integer NOT NULL DEFAULT 15` với `ck_application_policy_worker_session_timeout_range` (1–720); `created_at`, `updated_at`. `badge_confirm_done`, `badge_confirm_queue` và `badge_confirm_undo` (`0021_phase13_badge_confirmation`) là `boolean NOT NULL DEFAULT true`, mỗi cái cho một sensitive action, quyết định form của final gate của nó ở Area Scanned-session. `undo_reason_required` (`0022_phase13_undo_reason_policy`) là `boolean NOT NULL DEFAULT false`: khi true, Undo command từ chối reversal không có reason. Policy sau này được thêm thành column có kiểu với server default; không có key/value store.
@@ -433,6 +440,7 @@ protocol, reconciliation và concurrency test enforce.
 | Priority/Hot UI | Phase 12 — implemented, `0013_phase12_priority` | không thêm column: `priority_rank` hiện có nhận CHECK dương và UNIQUE (dense `1..N`, §5/§17) sau pre-check từ chối, cùng audit expression index (§17); writer là Hot command và automatic / line-deletion removal (`hot_ranks`), cả hai audit qua `audit_events` (§16) |
 | Full Administration | Phase 13 | master tables đã có từ Phase 3.5 |
 | Quản lý metadata PartNumber, ảnh, hard delete | Phase 13 — implemented (`0023_phase13_part_number_master`) | column nullable trên `part_numbers`; không chạm bảng production nào |
+| Quản lý Planned Routes | Phase 13 — implemented (`0024_phase13_planned_routes`) | hai column nullable `preferred_machine_id` (FK trên `route_steps`, không FK trên `assigned_route_steps`), một index, vocabulary audit `RouteTemplate`; không backfill |
 | Authentication/role | Phase 14 | actor may migrate; không couple Movement |
 | File Work Order import | Phase 15 | reuse validation idempotently |
 | Worker/ScanSession persistence | Phase 13 — Workers registry **implemented** (`0014_phase13_workers`); `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` **implemented** (`0019_phase13_worker_identity`); `scan_session_id`, `worker_sessions`, `application_policy` và override theo Area **implemented** (`0020_phase13_worker_sessions`); badge-confirmation option **implemented** (`0021_phase13_badge_confirmation`) | bảng `workers` (badge UNIQUE trên dạng chuẩn hóa, avatar trên row) và vocabulary audit mở rộng (§16) đã có; `0019_phase13_worker_identity` thêm `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` (§11, §17); `0020_phase13_worker_sessions` thêm `scan_session_id`, `worker_sessions`, `application_policy` và `areas.worker_session_timeout_minutes` (§11, §17); `0021_phase13_badge_confirmation` thêm ba column option của `application_policy` (§17) |

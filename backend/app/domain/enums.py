@@ -257,7 +257,10 @@ class AuditEntityType(StrEnum):
     retirement and reactivation stay recorded in
     machine_lifecycle_events. Phase 13 (slice 4) adds ApplicationPolicy:
     the global policy singleton, one `entity_id` per Administration
-    section (`worker-sessions`). Widens additively in later phases.
+    section (`worker-sessions`). Phase 13 (slice 8) adds RouteTemplate:
+    Planned Routes configuration (create, edit, archive, delete) — never
+    the Assigned Route snapshots, which are production records. Widens
+    additively in later phases.
     """
 
     WORK_ORDER = "WorkOrder"
@@ -271,6 +274,7 @@ class AuditEntityType(StrEnum):
     MACHINE_ASSET_TAG_CONFIG = "MachineAssetTagConfig"
     MACHINE = "Machine"
     APPLICATION_POLICY = "ApplicationPolicy"
+    ROUTE_TEMPLATE = "RouteTemplate"
 
 
 class WorkerIdentificationMode(StrEnum):

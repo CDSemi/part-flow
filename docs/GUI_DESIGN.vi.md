@@ -961,10 +961,17 @@ Never-used delete bằng plain confirm. Ever-used archive: protect unsaved choic
 typed exact route name, explain future unavailability/snapshots/history. Archived
 không selectable. Không version system riêng.
 
-## 13.4 States và Phase 2 boundary
+## 13.4 States và implementation boundary
 
-Standard loading/error/empty. Phase 2 dev-only mock state với one DevNotice; real
-backend phase sau.
+Standard loading/error/empty. **Implementation boundary (Phase 13).** View là
+view thật trên surface `/api/route-templates`: create, edit (toàn bộ step set),
+Duplicate (server create `{name} (variant)`), Archive (route đã từng dùng) và
+Delete (route chưa từng dùng), cùng usage dialog (200 Quantity Flow đã release
+mới nhất kèm total); write bị chặn khi mất kết nối. Est. time được nhập và hiển
+thị bằng duration token dùng chung (`45m`, `4h 00m`, `2d 03h`); Operation hoặc
+Machine đã lưu mà không còn được cung cấp thì render `(unavailable)` và phải
+thay trước khi lưu (§13.2). Các preview `?state=` chỉ dành cho development vẫn
+còn.
 
 ---
 

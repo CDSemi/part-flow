@@ -172,7 +172,7 @@ beforeEach(() => {
         });
       }
       if (
-        /\/api\/(machines|operations|work-orders|part-numbers|route-templates)/.test(
+        /\/api\/(areas|machines|operations|work-orders|part-numbers|route-templates)/.test(
           url,
         )
       ) {
@@ -485,6 +485,17 @@ test('the Planned Routes management view renders from its URL', async () => {
   expect(
     screen.getByRole('heading', { name: 'Planned Routes' }),
   ).toBeInTheDocument();
+  // The REAL view (Phase 13): it reads the management listing.
+  expect(
+    await screen.findByText('No Planned Routes defined yet.'),
+  ).toBeInTheDocument();
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.some(
+        ([input]) => String(input) === '/api/route-templates/management',
+      ),
+  ).toBe(true);
 });
 
 test('browser back and forward navigation works', async () => {

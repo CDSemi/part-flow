@@ -109,10 +109,13 @@ line, an allocation reversal, and an Undo that reopens a flow its
 command had closed. The no-active-demand precondition and the
 separate-quantity confirmation are therefore judged on state no
 concurrent transaction can still change before this one commits. Lock
-order is PN advisory → Scan Station → demand → WorkOrder → Area →
-Operation — the advisory lock always first, then the established row
-order of the release (demand → Area → Operation) and the demand save
-(demand → WorkOrder), with no cycle.
+order is PN advisory → Scan Station → demand → WorkOrder → RouteTemplate
+(FOR SHARE, PLANNED only) → Area → Operation — the advisory lock always
+first, then the established row order of the release (demand →
+RouteTemplate → Area → Operation) and the demand save (demand →
+WorkOrder), with no cycle. Planned Route writers lock their template row
+before any Machine, Area or Operation row (`app.application.route_templates`),
+so a receipt never holds an Area while it waits on a template.
 
 Worker identity is recorded per the station Area's Worker ID mode
 (`app.application.station_identity`) — in a Scanned-session Area the
@@ -135,7 +138,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import audit, station_identity, work_orders
+from app.application import audit, route_templates, station_identity, work_orders
 from app.application.common import device_event_id_text, flush, optional_text, required_flag
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -716,8 +719,9 @@ def receive_quantity(
     authoritative active/binding re-check → the separate-quantity
     confirmation judged on the distribution re-read under the lock and
     the no-active-demand precondition → the internal Work Order
-    resolution under the demand → WorkOrder locks → the locked Area
-    re-read (active, non-terminal) → the Operation lock → the writes →
+    resolution under the demand → WorkOrder locks → the Planned Route
+    FOR SHARE (PLANNED only) → the locked Area re-read (active,
+    non-terminal) → the Operation lock → the writes →
     COMMIT (or the replay of a race winner). Any failure before COMMIT
     leaves zero writes.
     """
@@ -833,6 +837,12 @@ def receive_quantity(
         request_type=intake_request_type,
         work_order_id=work_order_id,
     )
+
+    # Template FOR SHARE before the Area row (the release's order): a
+    # template writer may wait on this Area while holding the template,
+    # never the reverse; the template is re-read under it below.
+    if mode is RouteMode.PLANNED and route_template_id is not None:
+        route_templates.lock_template_for_assignment(session, route_template_id)
 
     # The Area row locked until COMMIT and its flags judged on the
     # locked re-read (the same protocol as a transfer destination):
@@ -967,6 +977,7 @@ def receive_quantity(
                 area_id=step.area_id,
                 operation_id=step.operation_id,
                 expected_duration=step.expected_duration,
+                preferred_machine_id=step.preferred_machine_id,
                 instructions=step.instructions,
             )
             for step in template_steps

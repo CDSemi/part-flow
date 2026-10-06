@@ -7,8 +7,6 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import { useConnectivity } from './app/connectivity-context';
 import { ConnectivityProvider } from './app/connectivity-provider';
 import { ConnectivityChip } from './components/ConnectivityChip';
-import { DEV_MOCK_VIEWS } from './app/dev-views';
-import type { DevMockViewKey } from './app/dev-views';
 import { REAL_VIEWS } from './app/real-views';
 import type { AppViewKey } from './app/view-keys';
 import { Link } from './app/link';
@@ -18,7 +16,6 @@ import type { ManagementSubview, Route } from './app/router-core';
 import { RouterProvider } from './app/router-provider';
 import { ThemeProvider } from './app/theme-provider';
 import { ThemeToggle } from './components/ThemeToggle';
-import { UnconnectedView } from './app/UnconnectedView';
 import { LoadingState } from './components/view-states';
 
 const TOP_NAV: {
@@ -82,38 +79,16 @@ function OfflineBanner() {
   );
 }
 
-const VIEW_TITLES: Record<AppViewKey, string> = {
-  'scan-station': 'Scan Station',
-  'production-board': 'Production Board',
-  'area-board': 'Area Board',
-  machines: 'Machines',
-  tracking: 'PN Tracking',
-  'work-orders': 'Work Orders',
-  'planned-routes': 'Planned Routes',
-  'part-numbers': 'Part Numbers',
-  priority: 'Priority Management',
-  administration: 'Administration',
-};
-
 function ViewForRoute({ route }: { route: Route }) {
   if (route.view === 'not-found') {
     return <NotFoundView path={route.path} />;
   }
   const key: AppViewKey =
     route.view === 'management' ? route.subview : route.view;
-  // Real Phase 3.5 views (real-views.ts) ship in every build; the
-  // remaining mock views exist only in development builds
-  // (dev-views.ts). A production build renders the explicit
-  // not-connected state for every route without a real view.
+  // Every approved view is a real view (real-views.ts) that ships in
+  // every build.
   const RealView = REAL_VIEWS[key];
-  if (RealView) {
-    return <RealView />;
-  }
-  const DevView = DEV_MOCK_VIEWS?.[key as DevMockViewKey];
-  if (!DevView) {
-    return <UnconnectedView title={VIEW_TITLES[key]} />;
-  }
-  return <DevView />;
+  return <RealView />;
 }
 
 function AppShell() {

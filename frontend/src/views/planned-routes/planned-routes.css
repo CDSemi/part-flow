@@ -549,6 +549,22 @@
   font-size: 12.5px;
 }
 
+/* The usage list shows the newest released Quantity Flows only; this
+   line says so when the total is larger. */
+.rt-usagelimit {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* A refused or unanswered Archive / Delete inside its confirmation. */
+.rt-confirmerr {
+  margin-top: 10px;
+  color: var(--err-t);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
 /* Below ~680px the Planned Routes tables cannot hold their desktop
    column layout: both tables collapse to stacked rows — header row
    hidden, each route one vertical block, the usage cell carrying its

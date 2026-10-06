@@ -1188,8 +1188,9 @@ function StationView({
             </div>
             {/* Development-only demo barcodes: the shared DevNotice
                 renders only in the dev build (the whole mock view is
-                also excluded from production bundles — see
-                app/dev-views.ts and the mock-sentinel build check). */}
+                also excluded from production bundles — see the real
+                Scan Station view's DEV-guarded lazy import and the
+                mock-sentinel build check). */}
             <DevNotice>
               Demo barcodes (development build only) — click one to simulate a
               scan — <code>PF:PN:&lt;part-number&gt;</code> (e.g.{' '}

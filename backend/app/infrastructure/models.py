@@ -1092,7 +1092,13 @@ class RouteTemplate(Base):
 
 
 class RouteStep(Base):
-    """Ordered expected step of a RouteTemplate (PROJECT_PROFILE §8.9)."""
+    """Ordered expected step of a RouteTemplate (PROJECT_PROFILE §8.9).
+
+    The preferred Machine is referenced by stable id (advisory,
+    PROJECT_PROFILE §8.9); it is validated against the step's Area at
+    save time only — a Machine may later move Areas or retire, and the
+    stale preference is then displayed, never silently cleared.
+    """
 
     __tablename__ = "route_steps"
 
@@ -1110,6 +1116,10 @@ class RouteStep(Base):
         Integer, ForeignKey("operations.id", name="fk_route_steps_operation_id_operations")
     )
     expected_duration: Mapped[datetime.timedelta | None] = mapped_column(Interval)
+    preferred_machine_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("machines.id", name="fk_route_steps_preferred_machine_id_machines"),
+    )
     instructions: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
@@ -1143,9 +1153,19 @@ class AssignedRoute(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+    __table_args__ = (
+        # Usage lists, per-template usage counts, the ever-used check and
+        # the FK check of a template delete are all per template.
+        Index("ix_assigned_routes_source_route_template_id", "source_route_template_id"),
+    )
+
 
 class AssignedRouteStep(Base):
-    """Snapshot copy of a route step, independent of the mutable template."""
+    """Snapshot copy of a route step, independent of the mutable template.
+
+    Copies every template step field, including `preferred_machine_id`
+    (a plain integer, no FK — lock order, S8-OD20).
+    """
 
     __tablename__ = "assigned_route_steps"
 
@@ -1168,6 +1188,14 @@ class AssignedRouteStep(Base):
         ForeignKey("operations.id", name="fk_assigned_route_steps_operation_id_operations"),
     )
     expected_duration: Mapped[datetime.timedelta | None] = mapped_column(Interval)
+    # Advisory copy of the template step's preferred Machine (OD-11).
+    # Deliberately NO foreign key (S8-OD20): the snapshot INSERT runs
+    # after the release/receipt starting Area or a split/merge Machine is
+    # locked FOR UPDATE, and an FK check would take FOR KEY SHARE on
+    # Machine rows in an order production commands never use. The value
+    # is copied from the FK-checked `route_steps` column (or another
+    # snapshot) and Machines are never deleted, so it cannot dangle.
+    preferred_machine_id: Mapped[int | None] = mapped_column(Integer)
     instructions: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
@@ -1639,13 +1667,15 @@ class AuditEvent(Base):
     Worker, the environment configuration entities Department, Area,
     Operation, ScanStation and MachineAssetTagConfig (the Asset Tag
     format), Machine configuration (lifecycle transitions stay in
-    `machine_lifecycle_events`) and the global ApplicationPolicy. Rows are descriptive history for
+    `machine_lifecycle_events`), the global ApplicationPolicy and
+    (slice 8) RouteTemplate — Planned Routes configuration, never the
+    Assigned Route snapshots. Rows are descriptive history for
     display and accountability: never replayed to build state, never
     describing production actions (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
     framework. `entity_id` is polymorphic text with no FK — the
     internal PK for WorkOrder/WorkOrderDemand/Worker/Department/Area/
-    Operation/Machine, the canonical PN string for PartNumber, the
+    Operation/Machine/RouteTemplate, the canonical PN string for PartNumber, the
     stable Station ID for ScanStation, `"1"` for the singleton
     MachineAssetTagConfig and the Administration section
     (`worker-sessions`) for ApplicationPolicy;
@@ -1685,7 +1715,8 @@ class AuditEvent(Base):
             f" '{AuditEntityType.WORKER}', '{AuditEntityType.DEPARTMENT}',"
             f" '{AuditEntityType.AREA}', '{AuditEntityType.OPERATION}',"
             f" '{AuditEntityType.SCAN_STATION}', '{AuditEntityType.MACHINE_ASSET_TAG_CONFIG}',"
-            f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}')",
+            f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
+            f" '{AuditEntityType.ROUTE_TEMPLATE}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.

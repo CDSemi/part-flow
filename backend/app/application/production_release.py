@@ -72,7 +72,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.application import allocations
+from app.application import allocations, route_templates
 from app.application.common import flush, required_flag
 from app.application.errors import (
     ActiveQuantityConfirmationRequiredError,
@@ -394,6 +394,14 @@ def release_to_production(
             f" released). Release {remaining} pcs or less."
         )
 
+    # Template FOR SHARE before the starting Area row (lock order demand
+    # → RouteTemplate → Area → Operation): a template writer may wait on
+    # this Area while holding the template, never the reverse. Held to
+    # COMMIT, it serializes the snapshot below with every template edit,
+    # archive and delete; the template is re-read under it below.
+    if mode is RouteMode.PLANNED and route_template_id is not None:
+        route_templates.lock_template_for_assignment(session, route_template_id)
+
     # The starting Area row is locked until COMMIT: Area deactivation
     # takes the same row lock before its active-quantity check, so a
     # concurrent release-vs-deactivation always has exactly one serial
@@ -490,6 +498,7 @@ def release_to_production(
                 area_id=step.area_id,
                 operation_id=step.operation_id,
                 expected_duration=step.expected_duration,
+                preferred_machine_id=step.preferred_machine_id,
                 instructions=step.instructions,
             )
             for step in template_steps

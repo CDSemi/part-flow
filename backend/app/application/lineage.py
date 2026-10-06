@@ -69,8 +69,12 @@ class RouteContext(NamedTuple):
 
     route_mode: str
     # Every snapshot step as (sequence, area, operation, duration,
-    # instructions) — empty for FLOATING.
-    steps: tuple[tuple[int, int, int | None, datetime.timedelta | None, str | None], ...]
+    # instructions, preferred Machine) — every copied step field, so
+    # "structurally equal" never lets a merge result silently keep one
+    # source's preference (Phase 13 slice 8). Empty for FLOATING.
+    steps: tuple[
+        tuple[int, int, int | None, datetime.timedelta | None, str | None, int | None], ...
+    ]
     # The sequence of the last snapshot step a Movement of the flow
     # fulfilled (None for FLOATING).
     last_known_sequence: int | None
@@ -120,6 +124,7 @@ def route_context(session: Session, flow: QuantityFlow) -> RouteContext:
                 step.operation_id,
                 step.expected_duration,
                 step.instructions,
+                step.preferred_machine_id,
             )
             for step in steps
         ),
@@ -158,6 +163,7 @@ def copy_assigned_route(
             area_id=step.area_id,
             operation_id=step.operation_id,
             expected_duration=step.expected_duration,
+            preferred_machine_id=step.preferred_machine_id,
             instructions=step.instructions,
         )
         for step in snapshot_steps(session, assigned_route_id)
