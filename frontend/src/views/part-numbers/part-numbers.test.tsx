@@ -801,7 +801,87 @@ test('a duplicate found by the debounced lookup disables Add Part Number; a 409 
       'Part Number “RACE-1” already has saved details.',
     ),
   ).toBeInTheDocument();
-  expect(screen.getByRole('dialog', { name: 'New Part Number' })).toBe(dialog);
+  // E1 reloads the record: the dialog becomes Edit of RACE-1.
+  await waitFor(() =>
+    expect(
+      within(dialog).getByRole('button', { name: 'Save changes' }),
+    ).toBeEnabled(),
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit Part Number' })).toBe(dialog);
+});
+
+test('a typed-PN create answered 409 after an unknown outcome reloads into Edit, keeping only the entered values and the staged image', async () => {
+  await renderPartNumbers();
+
+  const dialog = openNew();
+  fireEvent.change(within(dialog).getByLabelText('Part Number'), {
+    target: { value: ' ab-9 ' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/Name \/ Description/), {
+    target: { value: 'PLATE' },
+  });
+  await chooseImage(dialog);
+  await waitFor(() =>
+    expect(calls).toContain('GET /api/part-numbers?number=AB-9'),
+  );
+
+  // The first create gets no answer…
+  failures.POST = 'network';
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Part Number' }),
+  );
+  expect(
+    await within(dialog).findByText(/The server did not answer/),
+  ).toBeInTheDocument();
+  // …and someone else saves details for the same PN meanwhile.
+  records.push(
+    record('AB-9', { name: 'FIRST', current_revision: 'C', erp_id: 'ERP-9' }),
+  );
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Add Part Number' }),
+  );
+
+  expect(
+    await within(dialog).findByText(
+      'Part Number “AB-9” already has saved details.',
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      within(dialog).getByRole('button', { name: 'Save changes' }),
+    ).toBeEnabled(),
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit Part Number' })).toBe(dialog);
+  expect(within(dialog).queryByLabelText('Part Number')).toBeNull();
+  // The entered name stays as an edit; the fields left blank show the
+  // saved values instead of clearing them.
+  expect(within(dialog).getByLabelText(/Name \/ Description/)).toHaveValue(
+    'PLATE',
+  );
+  expect(within(dialog).getByLabelText(/Revision/)).toHaveValue('C');
+  expect(within(dialog).getByLabelText(/ERP ID/)).toHaveValue('ERP-9');
+  expect(dialog.querySelector('img.pn-img')).toHaveAttribute(
+    'src',
+    'blob:staged-pn-image',
+  );
+  expect(within(dialog).getByText('● Unsaved changes')).toBeInTheDocument();
+
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writeSummary()).toEqual([
+    'POST /api/part-numbers',
+    'POST /api/part-numbers',
+    'PATCH /api/part-numbers?number=AB-9',
+    'PUT /api/part-numbers/image?number=AB-9',
+  ]);
+  expect(writes[2].body).toEqual({ name: 'PLATE' });
+  const saved = records.find((r) => r.part_number === 'AB-9');
+  expect(saved).toMatchObject({
+    name: 'PLATE',
+    current_revision: 'C',
+    erp_id: 'ERP-9',
+  });
+  expect(saved?.image_updated_at).not.toBeNull();
 });
 
 test('a new Part Number with an image creates the record, then uploads to the canonical PN', async () => {

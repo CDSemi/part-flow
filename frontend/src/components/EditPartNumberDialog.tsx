@@ -138,7 +138,8 @@ export function EditPartNumberDialog({
   onClose: (result: { wroteAny: boolean; exists: boolean | null }) => void;
 }) {
   // The PN the dialog is fixed to: the given one, or — after a new
-  // record was created from a typed entry — the server's canonical PN.
+  // record was created from a typed entry — the server's canonical PN,
+  // or — after a typed entry's create answered E1 — its canonical PN.
   const [fixedPn, setFixedPn] = useState<string | undefined>(pn);
   const [loadState, setLoadState] = useState<LoadState>(
     pn !== undefined ? { status: 'loading' } : { status: 'ready' },
@@ -171,8 +172,11 @@ export function EditPartNumberDialog({
 
   /**
    * (Re)load the saved details of the fixed PN. `keepInput` keeps the
-   * entered values as unsaved edits against the loaded record (the
-   * E1 recovery); otherwise the fields start from the record.
+   * values actually entered (non-blank) as unsaved edits against the
+   * loaded record (the E1 recovery) and fills every blank field from the
+   * record, so a field the user never filled in is not dirty and the
+   * next save never clears a value saved elsewhere; otherwise the
+   * fields start from the record.
    */
   const load = useCallback((target: string, keepInput: boolean) => {
     const generation = ++loadGeneration.current;
@@ -182,11 +186,11 @@ export function EditPartNumberDialog({
         if (loadGeneration.current !== generation) return;
         exists.current = found !== null;
         setRecord(found);
-        if (!keepInput) {
-          setName(found?.name ?? '');
-          setRevision(found?.currentRevision ?? '');
-          setErpId(found?.erpId ?? '');
-        }
+        const field = (entered: string, saved: string | null | undefined) =>
+          keepInput && storedText(entered) !== null ? entered : (saved ?? '');
+        setName((entered) => field(entered, found?.name));
+        setRevision((entered) => field(entered, found?.currentRevision));
+        setErpId((entered) => field(entered, found?.erpId));
         setLoadState({ status: 'ready' });
       },
       (error: unknown) => {
@@ -379,14 +383,17 @@ export function EditPartNumberDialog({
         setRecord(null);
         setServerError(error.message);
       } else if (step === 'details' && error.status === 409) {
-        // Someone created the details meanwhile (E1).
+        // Someone created the details meanwhile, or a retried create
+        // already committed (E1). Reload into Edit — fixing a typed PN
+        // to its canonical form — keeping the entered values and the
+        // staged image as unsaved edits against the loaded record.
         exists.current = true;
         setServerError(error.message);
-        if (fixedPn !== undefined) {
-          // Reload into Edit, keeping the entered values as unsaved
-          // edits against the loaded record.
+        const target = fixedPn ?? canonical;
+        if (target !== null) {
+          setFixedPn(target);
           keepInputOnRetry.current = true;
-          load(fixedPn, true);
+          load(target, true);
         }
       } else if (step === 'details') {
         setServerError(error.message);

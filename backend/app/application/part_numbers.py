@@ -60,7 +60,7 @@ import datetime
 from collections.abc import Collection, Iterable
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, false, func, or_, select
 from sqlalchemy.orm import Session, undefer
 
 from app.application import audit, images
@@ -83,10 +83,15 @@ def canonical_part_number(value: object) -> str:
 
     Thin translation of the framework-independent domain rule into the
     application error vocabulary — the normalization itself lives only
-    in ``app.domain.part_number``.
+    in ``app.domain.part_number``. A value holding NUL (U+0000) is
+    refused here: PostgreSQL text cannot hold it, so it can never be a
+    stored PN, and the driver would otherwise fail the first query with
+    an unhandled DataError.
     """
     if not isinstance(value, str):
         raise InvalidInputError("Part Number must be text.")
+    if "\x00" in value:
+        raise InvalidInputError("Part Number must not contain a NUL character.")
     try:
         return normalize_part_number(value)
     except InvalidPartNumberError as exc:
@@ -307,7 +312,14 @@ def _contains_pattern(term: str) -> str:
 
 
 def _matches_any(term: str, *columns: Any) -> ColumnElement[bool]:
-    """Escaped case-insensitive contains-match of ``term`` over any column."""
+    """Escaped case-insensitive contains-match of ``term`` over any column.
+
+    A term holding NUL (U+0000) matches nothing: PostgreSQL text cannot
+    hold it, so no stored value contains it — and the pattern is never
+    sent, because the driver would fail the query.
+    """
+    if "\x00" in term:
+        return false()
     pattern = _contains_pattern(term)
     return or_(*(column.ilike(pattern, escape="\\") for column in columns))
 
@@ -386,8 +398,13 @@ def _not_found(part_number: str) -> NotFoundError:
 
 
 def _detail_text(value: object, field: str) -> str | None:
-    """Normalize one optional detail: text (trimmed, blank → NULL) or None."""
-    if value is not None and not isinstance(value, str):
+    """Normalize one optional detail: text (trimmed, blank → NULL) or None.
+
+    NUL (U+0000) is refused as not text: PostgreSQL text cannot hold it,
+    and the driver would otherwise fail at flush with an unhandled
+    DataError.
+    """
+    if value is not None and (not isinstance(value, str) or "\x00" in value):
         raise InvalidInputError(f"{_DETAIL_LABELS[field]} must be text.")
     return optional_text(value)
 
@@ -417,6 +434,26 @@ def _lock_master(session: Session, part_number: str, *, with_image: bool = False
     )
     if master is None:
         raise _not_found(part_number)
+    return master
+
+
+def _commit_detached(
+    session: Session, master: PartNumber, conflict_messages: dict[str, str]
+) -> PartNumber:
+    """Commit a management write and return the master as committed.
+
+    The route builds its response after the commit. An attached master
+    would be expired by the commit and reloaded in a NEW transaction —
+    and a delete of the same PN committed in between would fail that
+    reload although this write and its audit row are committed. So
+    every reported column is re-read under the lock this transaction
+    holds and the master is detached before the commit: the response
+    carries exactly what this transaction committed. The image bytes
+    stay unloaded (deferred).
+    """
+    session.refresh(master)
+    session.expunge(master)
+    commit(session, conflict_messages)
     return master
 
 
@@ -488,8 +525,7 @@ def create_part_number(
         before_data=None,
         after_data=master_snapshot(master),
     )
-    commit(session, conflicts)
-    return master
+    return _commit_detached(session, master, conflicts)
 
 
 def update_part_number(
@@ -534,8 +570,7 @@ def update_part_number(
         before_data=before,
         after_data=master_snapshot(master),
     )
-    commit(session, PART_NUMBER_CONFLICTS)
-    return master
+    return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 
 
 def delete_part_number(session: Session, value: object) -> None:
@@ -592,8 +627,7 @@ def set_part_number_image(
         before_data={"image": before},
         after_data={"image": after},
     )
-    commit(session, PART_NUMBER_CONFLICTS)
-    return master
+    return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 
 
 def remove_part_number_image(session: Session, value: object) -> PartNumber:
@@ -617,8 +651,7 @@ def remove_part_number_image(session: Session, value: object) -> PartNumber:
         before_data={"image": before},
         after_data={"image": None},
     )
-    commit(session, PART_NUMBER_CONFLICTS)
-    return master
+    return _commit_detached(session, master, PART_NUMBER_CONFLICTS)
 
 
 def get_part_number_image(session: Session, value: object) -> PartNumberImage:

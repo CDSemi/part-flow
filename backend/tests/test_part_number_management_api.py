@@ -466,6 +466,53 @@ def test_writes_on_a_pn_without_details_are_404_with_zero_writes(
     assert _write_counts(db_engine) == counts
 
 
+def test_nul_characters_are_refused_or_match_nothing_with_zero_writes(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """PostgreSQL text cannot hold NUL (U+0000): a detail or a PN holding
+    it is a typed 422 and a search holding it matches nothing — never a
+    500 from the driver — and nothing is written."""
+    pn = _unique("NUL")
+    _create(client, pn, name="KEEP")
+    stored = _stored(db_engine, pn)
+    counts = _write_counts(db_engine)
+
+    for field, label in (
+        ("name", "Name / Description"),
+        ("current_revision", "Revision"),
+        ("erp_id", "ERP ID"),
+    ):
+        for response in (
+            _patch(client, pn, {field: "A\x00B"}),
+            client.post("/api/part-numbers", json={"part_number": _unique("NUL"), field: "x\x00"}),
+        ):
+            assert response.status_code == 422, response.text
+            assert response.json()["detail"] == f"{label} must be text."
+
+    nul_pn = f"{pn}\x00"
+    for response in (
+        client.post("/api/part-numbers", json={"part_number": nul_pn}),
+        _patch(client, nul_pn, {"name": "X"}),
+        client.delete("/api/part-numbers", params={"number": nul_pn}),
+        _put_image(client, nul_pn, _PNG),
+        client.delete("/api/part-numbers/image", params={"number": nul_pn}),
+        client.get("/api/part-numbers/image", params={"number": nul_pn}),
+        client.get("/api/part-numbers", params={"number": nul_pn}),
+    ):
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "Part Number must not contain a NUL character."
+
+    page = client.get("/api/part-numbers/page", params={"search": "a\x00"})
+    assert page.status_code == 200, page.text
+    assert (page.json()["rows"], page.json()["total"], page.json()["has_more"]) == ([], 0, False)
+    lookup = client.get("/api/part-numbers", params={"search": "a\x00"})
+    assert lookup.status_code == 200, lookup.text
+    assert lookup.json() == []
+
+    assert _stored(db_engine, pn) == stored
+    assert _write_counts(db_engine) == counts
+
+
 def test_patch_never_edits_the_pn_or_server_owned_fields(
     client: TestClient, db_engine: Engine
 ) -> None:
@@ -983,6 +1030,50 @@ def test_a_write_that_loses_to_a_delete_answers_404(
     assert response.status_code == 404, response.text
     assert response.json()["detail"] == _no_details(pn)
     assert [event.event_type for event in _audit_rows(db_engine, pn)] == ["CREATED"]
+
+
+@pytest.mark.parametrize("write", ["create", "patch", "image", "remove image"])
+def test_a_committed_write_answers_success_when_a_delete_commits_right_after(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch, write: str
+) -> None:
+    """A delete of the same PN that commits between a write's commit and
+    the route's answer never turns the committed write into a 500: the
+    answer reports exactly what the write committed."""
+    pn = _unique("AFTER")
+    if write != "create":
+        _create(client, pn)
+    if write == "remove image":
+        assert _put_image(client, pn, _PNG).status_code == 200
+    actions: dict[str, Callable[[], Any]] = {
+        "create": lambda: client.post(
+            "/api/part-numbers", json={"part_number": pn, "name": "COMMITTED"}
+        ),
+        "patch": lambda: _patch(client, pn, {"name": "COMMITTED"}),
+        "image": lambda: _put_image(client, pn, _PNG),
+        "remove image": lambda: client.delete("/api/part-numbers/image", params={"number": pn}),
+    }
+    pause = _Pause(common.commit)
+    monkeypatch.setattr(part_numbers, "commit", pause)
+    call = _Call(actions[write])
+    try:
+        assert pause.first_inside.wait(timeout=10)
+        deleted = client.delete("/api/part-numbers", params={"number": pn})
+        assert deleted.status_code == 204, deleted.text
+    finally:
+        pause.let_first_finish.set()
+    response = call.finish()
+    monkeypatch.undo()
+
+    assert response.status_code == (201 if write == "create" else 200), response.text
+    body = response.json()
+    assert set(body) == _RESPONSE_KEYS
+    assert body["part_number"] == pn
+    if write in {"create", "patch"}:
+        assert body["name"] == "COMMITTED"
+    assert (body["image_updated_at"] is not None) == (write == "image")
+    assert _stored(db_engine, pn) is None
+    events = [event.event_type for event in _audit_rows(db_engine, pn)]
+    assert events[-2:] == ["CREATED" if write == "create" else "UPDATED", "DELETED"]
 
 
 # ---------------------------------------------------------------------------
