@@ -9,7 +9,10 @@ completed Work Order, and the Completed Work Orders history read model
 of GUI_DESIGN §11.5 (site-calendar done date, Done range, server-side
 sort, keyset paging). Business demand only — no production release, no
 allocation write, no QuantityFlow, no PartMovement, and no projection
-change ever originates here (PROJECT_PROFILE §13; SLICE1_DATA_MODEL §7).
+change ever originates here (PROJECT_PROFILE §13; SLICE1_DATA_MODEL §7)
+— except the one derived consequence a demand change can have: a Save
+or a removal that leaves every current line fully allocated completes
+the Work Order (``allocations.complete_after_demand_change``).
 
 Rules owned here (PROJECT_PROFILE §7 Work Order, §8.2, §8.3, §13;
 SLICE1_DATA_MODEL §5, §16; IMPLEMENTATION_ROADMAP Phase 4):
@@ -99,7 +102,7 @@ from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
-from app.application import audit, hot_ranks, production_release
+from app.application import allocations, audit, hot_ranks, production_release
 from app.application.common import UNSET, UnsetType, commit, flush, optional_text
 from app.application.errors import (
     ConflictError,
@@ -754,6 +757,13 @@ def update_work_order(
     with the save as the cause (OD1, ``hot_ranks.remove_from_hot_list``).
     A ranked line whose quantity the save does not change is never
     removed by it. Raising the quantity again re-adds nothing.
+
+    Completion is derived (PROJECT_PROFILE §8.2): a save whose changed
+    requested quantity leaves every current line fully allocated
+    completes the Work Order in this transaction — done date the save's
+    own timestamp, audited with the save as its cause
+    (``allocations.complete_after_demand_change``) — and a ranked line
+    it filled leaves the Hot list as ``WORK_ORDER_COMPLETED``.
     """
     detail = get_work_order(session, work_order_id)
     work_order = detail.work_order
@@ -920,17 +930,32 @@ def update_work_order(
     ]
     flush(session, _WORK_ORDER_CONFLICTS)
 
+    # Completion (PROJECT_PROFILE §8.2), judged before the Hot removal as
+    # in the allocation command: a lowered Qty that leaves every current
+    # line fully allocated completes the Work Order in this save, under
+    # the Work Order lock taken above. Only a changed requested quantity
+    # can do so — a new line is always short, and a header, due-date or
+    # Job Number edit never fills a line.
+    completed = bool(quantity_changed) and allocations.complete_after_demand_change(
+        session, work_order, trigger="WORK_ORDER_SAVE", actor=actor
+    )
+
     # Automatic Hot removal (OD1): a ranked line whose requested quantity
     # this save lowered to its allocated quantity is inactive and leaves
-    # the Hot list in this transaction. A ranked line this save did not
-    # make inactive (its quantity unchanged) is never removed here, so
-    # the audit never names the save as a cause it was not. Runs after
-    # the flush above, so Work Order and PN conflicts keep their own
-    # mapping.
+    # the Hot list in this transaction — as a Work Order completion when
+    # the save completed it. A ranked line this save did not make
+    # inactive (its quantity unchanged) is never removed here, so the
+    # audit never names the save as a cause it was not. Runs after the
+    # flush above, so Work Order and PN conflicts keep their own mapping.
     hot_changes: list[hot_ranks.HotRankChange] = []
     if scope is not None:
+        removal_reason = (
+            hot_ranks.HotRemovalReason.WORK_ORDER_COMPLETED
+            if completed
+            else hot_ranks.HotRemovalReason.FULLY_ALLOCATED
+        )
         removals = {
-            demand_id: hot_ranks.HotRemovalReason.FULLY_ALLOCATED
+            demand_id: removal_reason
             for demand_id in sorted(scope.ranked_candidates & quantity_changed)
             if demands_by_id[demand_id].requested_quantity
             <= demands_by_id[demand_id].allocated_quantity
@@ -1060,6 +1085,12 @@ def delete_work_order_demand(
     and edits only (SLICE1_DATA_MODEL §16) and the demand's existing
     CREATED/UPDATED history remains — historical records never
     disappear.
+
+    The removed line is always short (an allocated line is never
+    removable), so removing it may leave only fully allocated lines:
+    the removal then completes the Work Order in its transaction,
+    audited with the removal as its cause
+    (``allocations.complete_after_demand_change``, PROJECT_PROFILE §8.2).
     """
     scope: hot_ranks.HotRankScope | None = None
     locked: dict[int, WorkOrderDemand] = {}
@@ -1148,6 +1179,13 @@ def delete_work_order_demand(
             actor=None,
         )
     session.delete(demand)
+    flush(session, _WORK_ORDER_CONFLICTS)
+    # The removed line was short (never allocated), so removing it may
+    # leave only fully allocated lines: the removal then completes the
+    # Work Order (PROJECT_PROFILE §8.2), under the Work Order lock above.
+    allocations.complete_after_demand_change(
+        session, work_order, trigger="DEMAND_LINE_REMOVAL", actor=None
+    )
     commit(session, _WORK_ORDER_CONFLICTS)
 
 

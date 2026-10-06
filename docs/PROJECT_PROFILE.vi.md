@@ -348,8 +348,12 @@ Thuộc tính minh họa: `id`, `work_order_number`, `received_date`, `due_date`
 - `received_date` bắt buộc, mặc định current date; `due_date` có thể null.
 - Chứa ít nhất một Demand.
 - Complete khi mọi Demand fully allocated; status derive từ allocations.
-- `completed_at` là timestamp allocation hoàn tất line cuối, phục vụ server-side
-  sort/filter/keyset pagination; không nhập tay.
+- `completed_at` là timestamp của event làm line cuối fully allocated: allocation
+  hoàn tất line đó, hoặc demand change khiến mọi Demand còn lại fully allocated
+  (save hạ requested quantity xuống bằng allocated quantity, §13, hoặc remove line
+  cuối chưa fully allocated) — complete Work Order trong cùng transaction, audited
+  với change đó là cause. Phục vụ server-side sort/filter/keyset pagination; không
+  nhập tay.
 - Reversal allocation có thể reopen Work Order và clear `completed_at`; history
   không bị xóa.
 - Completed Work Order rời active view nhưng ở read-only unbounded history;

@@ -1537,6 +1537,178 @@ def test_demand_line_with_allocation_history_is_not_removable(
     assert len(_allocation_rows(db_engine, pn)) == 2
 
 
+def _work_order_audit_rows(engine: Engine, work_order_id: int) -> list[Any]:
+    with engine.connect() as connection:
+        return list(
+            connection.execute(
+                sa.select(models.AuditEvent.__table__)
+                .where(
+                    models.AuditEvent.__table__.c.entity_type == "WorkOrder",
+                    models.AuditEvent.__table__.c.entity_id == str(work_order_id),
+                )
+                .order_by(models.AuditEvent.__table__.c.id)
+            )
+        )
+
+
+def _completion_audit_rows(engine: Engine, work_order_id: int) -> list[Any]:
+    return [
+        row
+        for row in _work_order_audit_rows(engine, work_order_id)
+        if (row.metadata or {}).get("completion") is not None
+    ]
+
+
+def test_demand_save_that_fully_allocates_the_last_short_line_completes_the_work_order(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """BUG-WO-COMPLETION: completion is derived from allocation (PROJECT_PROFILE
+    §8.2, §18) — every current line fully allocated means complete, whatever
+    write made it so. A Save that lowers the last short line's Qty to exactly
+    its allocated quantity completes the Work Order in that transaction: the
+    done date is the save's own timestamp, the completion is audited with the
+    save as its cause, the Hot entry of the line leaves the list as a
+    completion, the Work Order moves from the active list to the completed
+    history, it becomes read-only, and the done-date replay agrees."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn_a = _unique("PN")
+    pn_b = _unique("PN")
+    number = _unique("WO")
+    work_order = _create_work_order(
+        client,
+        [
+            {"part_number": pn_a, "requested_quantity": 5},
+            {"part_number": pn_b, "requested_quantity": 10},
+        ],
+        number=number,
+    )
+    line_a, line_b = work_order.demand_ids
+    _supply(client, material, stockroom, pn_a, 5)
+    _supply(client, material, stockroom, pn_b, 6)
+    assert _allocate(client, pn_a, [(line_a, 5)]).status_code == 201
+    assert _allocate(client, pn_b, [(line_b, 6)]).status_code == 201
+    assert _work_order_row(db_engine, work_order.id).completed_at is None
+    _set_priority(db_engine, line_b, 1)
+
+    # Lowering while the line stays short completes nothing.
+    still_short = client.patch(
+        f"/api/work-orders/{work_order.id}",
+        json={"line_edits": [{"id": line_b, "requested_quantity": 8}]},
+    )
+    assert still_short.status_code == 200, still_short.text
+    assert still_short.json()["status"] != "COMPLETED"
+    assert still_short.json()["completed_at"] is None
+    assert _completion_audit_rows(db_engine, work_order.id) == []
+    assert _demand_row(db_engine, line_b).priority_rank == 1
+
+    completing = client.patch(
+        f"/api/work-orders/{work_order.id}",
+        json={"line_edits": [{"id": line_b, "requested_quantity": 6}]},
+    )
+    assert completing.status_code == 200, completing.text
+    body = completing.json()
+    assert body["status"] == "COMPLETED"
+    assert body["completed_at"] is not None and body["done_date"] is not None
+
+    stored = _work_order_row(db_engine, work_order.id)
+    assert stored.completed_at is not None
+    # The done date is the completing save's own moment — never an older
+    # allocation's timestamp.
+    assert all(row.allocated_at < stored.completed_at for row in _allocation_rows(db_engine, pn_b))
+    [completion] = _completion_audit_rows(db_engine, work_order.id)
+    assert completion.event_type == "UPDATED"
+    assert completion.before_data == {"completed_at": None}
+    assert completion.after_data == {"completed_at": stored.completed_at.isoformat()}
+    assert completion.occurred_at == stored.completed_at
+    assert completion.metadata == {"completion": {"trigger": "WORK_ORDER_SAVE"}}
+
+    # The ranked line left the Hot list as a completion, in the same save.
+    assert _demand_row(db_engine, line_b).priority_rank is None
+    with db_engine.connect() as connection:
+        hot_rows = list(
+            connection.execute(
+                sa.select(models.AuditEvent.__table__)
+                .where(
+                    models.AuditEvent.__table__.c.entity_type == "WorkOrderDemand",
+                    models.AuditEvent.__table__.c.entity_id == str(line_b),
+                )
+                .order_by(models.AuditEvent.__table__.c.id)
+            )
+        )
+    [hot_change] = [
+        row.metadata["hot_list_change"]
+        for row in hot_rows
+        if (row.metadata or {}).get("hot_list_change") is not None
+    ]
+    assert hot_change["cause"]["trigger"] == "WORK_ORDER_SAVE"
+    assert hot_change["cause"]["removed"] == [
+        {"work_order_demand_id": line_b, "reason": "WORK_ORDER_COMPLETED"}
+    ]
+
+    # Active list → completed history, read-only from now on.
+    assert work_order.id not in _active_ids(client)
+    history = _completed(client, search=number)
+    assert [row["id"] for row in history["work_orders"]] == [work_order.id]
+    assert history["work_orders"][0]["done_date"] == body["done_date"]
+    refused = client.patch(
+        f"/api/work-orders/{work_order.id}",
+        json={"line_edits": [{"id": line_b, "requested_quantity": 7}]},
+    )
+    assert refused.status_code == 409 and "completed" in refused.json()["detail"]
+    _assert_projections_match_replay(db_engine)
+
+    # An allocation adjustment reopens it exactly as for an allocation-completed one.
+    allocation_id = _allocation_rows(db_engine, pn_b)[-1].id
+    assert _reverse(client, allocation_id).status_code == 201
+    assert _work_order_row(db_engine, work_order.id).completed_at is None
+    assert work_order.id in _active_ids(client)
+    _assert_projections_match_replay(db_engine)
+
+
+def test_removing_the_last_short_line_completes_the_work_order(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """BUG-WO-COMPLETION, the removal path: removing an unreleased,
+    never-allocated line from a Work Order whose every other line is fully
+    allocated leaves only fully allocated lines — the removal completes the
+    Work Order in its transaction, audited with the removal as its cause."""
+    material = _Cell(client, machine_count=1)
+    stockroom = _Cell(client, is_terminal=True)
+    pn = _unique("PN")
+    number = _unique("WO")
+    work_order = _create_work_order(
+        client,
+        [
+            {"part_number": pn, "requested_quantity": 4},
+            {"part_number": _unique("PN"), "requested_quantity": 2},
+        ],
+        number=number,
+    )
+    allocated_line, short_line = work_order.demand_ids
+    _supply(client, material, stockroom, pn, 4)
+    assert _allocate(client, pn, [(allocated_line, 4)]).status_code == 201
+    assert _work_order_row(db_engine, work_order.id).completed_at is None
+
+    removed = client.delete(f"/api/work-orders/{work_order.id}/demands/{short_line}")
+    assert removed.status_code == 204, removed.text
+
+    stored = _work_order_row(db_engine, work_order.id)
+    assert stored.completed_at is not None
+    assert all(row.allocated_at < stored.completed_at for row in _allocation_rows(db_engine, pn))
+    [completion] = _completion_audit_rows(db_engine, work_order.id)
+    assert completion.after_data == {"completed_at": stored.completed_at.isoformat()}
+    assert completion.metadata == {"completion": {"trigger": "DEMAND_LINE_REMOVAL"}}
+    detail = _work_order(client, work_order.id)
+    assert detail["status"] == "COMPLETED"
+    assert [line["id"] for line in detail["demands"]] == [allocated_line]
+    assert work_order.id not in _active_ids(client)
+    assert [row["id"] for row in _completed(client, search=number)["work_orders"]] == [
+        work_order.id
+    ]
+    _assert_projections_match_replay(db_engine)
+
+
 def test_completed_history_search_filters_and_pages(client: TestClient, db_engine: Engine) -> None:
     material = _Cell(client, machine_count=1)
     stockroom = _Cell(client, is_terminal=True)

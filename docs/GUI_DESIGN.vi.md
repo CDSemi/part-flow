@@ -797,7 +797,8 @@ history `/management/work-orders/completed`; both keep Work Orders subnav active
 Details/New là modal trên list, URL không đổi. Native `<input type="date">`, ISO
 internal. Phase 4 active workflows real API-backed; trang Completed Work Orders là
 production UI thật từ Phase 10 (§11.5). Work Order chỉ rời active list qua
-allocation-derived completion (Phase 10, §11.5): list tăng theo intake, giảm chỉ
+allocation-derived completion (Phase 10, §11.5 — mọi line fully allocated, dù do
+allocation cuối hay do demand change): list tăng theo intake, giảm chỉ
 theo completion.
 
 ## 11.1 WO list
@@ -851,7 +852,9 @@ fully released disables action; WO Released only all lines exhausted.
 
 ## 11.5 Completed Work Orders (post-v17)
 
-Real deep-link read-only page. Giá trị trung tâm là `completed_at` hiển thị thành
+Real deep-link read-only page. Giá trị trung tâm là `completed_at` (timestamp của
+event làm line cuối fully allocated: allocation, hoặc save hạ Qty xuống bằng
+allocated quantity / remove line cuối chưa fully allocated) hiển thị thành
 **done date** theo múi giờ của site (một rule server-side `SITE_TIMEZONE` cho ngày
 hiển thị, Done range và due outcome; không bao giờ theo ngày local của browser).
 Bounded default date range, server search WO/PN/Job, done range, due outcome.

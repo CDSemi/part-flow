@@ -73,9 +73,13 @@ Rules owned here:
 - **Completion is derived** (§8.2, §18 Work Order Completion): a Work
   Order is complete when every one of its demand lines is fully
   allocated. `work_orders.completed_at` is the persisted done-date
-  projection: set to the timestamp of the allocation event that fully
-  allocated the last open line, cleared by a reversal that reopens
-  one, rebuildable from the allocation rows alone
+  projection: set to the timestamp of the event that left the last
+  open line fully allocated — the allocation that filled it, or the
+  demand change (a Save lowering its Qty to its allocated quantity, or
+  the removal of the last short line) that made the remaining lines
+  all fully allocated (`complete_after_demand_change`, audited with
+  its cause) — cleared by a reversal that reopens one, rebuildable
+  from the allocation rows and those completion audit rows
   (`rebuild_completed_at`). A completed Work Order leaves the active
   list and becomes read-only history (`app.application.work_orders`).
   Movement history is never touched by any of this.
@@ -102,13 +106,13 @@ import datetime
 import hashlib
 import json
 from collections.abc import Collection, Mapping, Sequence
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, Literal, NamedTuple
 
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
-from app.application import hot_ranks, station_identity
+from app.application import audit, hot_ranks, station_identity
 from app.application.common import device_event_id_text, optional_text, required_text
 from app.application.errors import (
     ConflictError,
@@ -118,10 +122,11 @@ from app.application.errors import (
 )
 from app.application.part_numbers import acquire_part_number_lock, canonical_part_number
 from app.application.projections import stocked_quantity_of
-from app.domain.enums import AllocationSource
+from app.domain.enums import AllocationSource, AuditEntityType, AuditEventType
 from app.infrastructure.models import (
     ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT,
     Area,
+    AuditEvent,
     ScanStation,
     WorkOrder,
     WorkOrderAllocation,
@@ -673,6 +678,65 @@ def _apply_completion(
     return completed, reopened
 
 
+#: Audit metadata key of a completion a demand change caused — the record
+#: `rebuild_completed_at` replays beside the allocation rows.
+COMPLETION_AUDIT_KEY: Final = "completion"
+
+#: The demand change that left a Work Order fully allocated.
+DemandChangeTrigger = Literal["WORK_ORDER_SAVE", "DEMAND_LINE_REMOVAL"]
+
+
+def complete_after_demand_change(
+    session: Session,
+    work_order: WorkOrder,
+    *,
+    trigger: DemandChangeTrigger,
+    actor: str | None,
+) -> bool:
+    """Complete an open Work Order a demand change left fully allocated (§8.2).
+
+    Completion is derived from allocation whatever write makes every
+    current line fully allocated: a Save that lowers the last short
+    line's requested quantity to its allocated quantity, or the removal
+    of the last short line, completes the Work Order exactly as the
+    allocation that fills that line would. Only completing is possible
+    here — a completed Work Order is read-only for demand changes, so a
+    demand change never reopens one (a reversal does).
+
+    The caller holds the Work Order row lock (re-read under it — the
+    lock every allocation and reversal of its lines also takes, so the
+    judgement and a concurrent allocation serialize) and has flushed
+    its demand change: the judgement reads the current lines and the
+    committed active allocation. The done date is this transaction's
+    own timestamp — the completing event, as `_apply_completion` uses
+    the allocation's — and the completion is audited on the Work Order
+    with its cause (the allocation rows carry theirs in their command
+    metadata). Returns whether the Work Order completed.
+    """
+    if work_order.completed_at is not None or not _work_order_is_complete(
+        session, work_order.id, {}
+    ):
+        return False
+    # `now()` is the transaction timestamp: the same instant the audit
+    # row's `occurred_at` records, which the done-date replay relies on.
+    completed_at = session.scalar(select(func.now()))
+    if completed_at is None:  # pragma: no cover - now() is never NULL
+        raise RuntimeError("The database returned no transaction timestamp.")
+    work_order.completed_at = completed_at
+    work_order.updated_at = completed_at
+    audit.append_audit_event(
+        session,
+        event_type=AuditEventType.UPDATED,
+        entity_type=AuditEntityType.WORK_ORDER,
+        entity_id=str(work_order.id),
+        before_data={"completed_at": None},
+        after_data={"completed_at": completed_at.isoformat()},
+        actor_reference=actor,
+        metadata={COMPLETION_AUDIT_KEY: {"trigger": trigger}},
+    )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # The confirmation command
 # ---------------------------------------------------------------------------
@@ -1093,13 +1157,18 @@ def rebuild_allocated_quantities(session: Session) -> dict[int, int]:
 
 
 def rebuild_completed_at(session: Session) -> dict[int, datetime.datetime | None]:
-    """Every Work Order's done date from the allocation rows alone.
+    """Every Work Order's done date from the allocation rows and the
+    demand-change completion audit rows.
 
     Complete exactly when every demand line's active allocation covers
-    its requested quantity; the done date is then the newest effective
-    allocation row's `allocated_at` — the event that completed the last
-    open line (after a reversal reopened a Work Order, the allocation
-    that completes it again is newer than every earlier row).
+    its requested quantity; the done date is then the newest of the
+    effective allocation rows' `allocated_at` and the Work Order's
+    demand-change completions (`complete_after_demand_change` — the
+    audit row's `occurred_at` is its `completed_at`) — the event that
+    completed the last open line (a completed Work Order takes no
+    further allocation or demand change, and after a reversal reopened
+    one, the event that completes it again is newer than every earlier
+    one).
     """
     allocated = rebuild_allocated_quantities(session)
     lines = list(
@@ -1123,6 +1192,17 @@ def rebuild_completed_at(session: Session) -> dict[int, datetime.datetime | None
             .group_by(WorkOrderDemand.work_order_id)
         )
     }
+    for entity_id, stamp in session.execute(
+        select(AuditEvent.entity_id, func.max(AuditEvent.occurred_at))
+        .where(
+            AuditEvent.entity_type == AuditEntityType.WORK_ORDER,
+            AuditEvent.metadata_.has_key(COMPLETION_AUDIT_KEY),
+        )
+        .group_by(AuditEvent.entity_id)
+    ):
+        work_order_id = int(entity_id)
+        if work_order_id not in newest or stamp > newest[work_order_id]:
+            newest[work_order_id] = stamp
     return {
         work_order_id: (
             newest.get(work_order_id)
