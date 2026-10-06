@@ -486,7 +486,7 @@ chạy hoặc đã lỗi đều mang tone warning kèm ghi chú, không bao gi�
 (Department, tiêu đề với status, đồng hồ), footer hiện khi đã có board hoàn
 chỉnh. Cột Job Numbers nêu mọi demand của row (`<job numbers> · WO <number hoặc —>
 [· MODIFY] · <n> pcs`, hoặc `· allocated a/n` khi đã allocate), dòng tên /
-revision PN chỉ render khi Part Numbers management (Phase 13) cung cấp. Mọi thứ
+revision PN (`{name} · rev {revision}`) lấy từ chi tiết Part Number đã lưu (Phase 13) và vắng khi chưa có. Mọi thứ
 khác ở trên — kiosk, pagination và rotation, auto scale, điều hướng tay, location
 grid, tooltip, legend — giữ nguyên; mock dataset Phase 2 của board đã bỏ, các
 preview `?state=` chỉ development (loading / empty / error / long) render state
@@ -690,7 +690,7 @@ tầm với —, page đã nối của bất kỳ section nào bị bỏ và đ�
 khi refresh dời ranh giới của nó hoặc đổi nội dung các row nó hiển thị (flow
 đóng hoặc mở lại, scrap bị undo), không bao giờ khi refresh không đổi gì liên
 quan, name / revision / image / ERP
-id từ master render `—` cho đến khi Part Numbers management (Phase 13) cung cấp,
+id từ master lấy từ chi tiết Part Number đã lưu từ Phase 13 và render `—` (ảnh mặc định) khi vắng,
 và section Corrections (§7.2 mục 8) ẩn hoàn toàn cho đến khi có authorized
 corrections (Phase 14) — không bao giờ render nút vô hiệu. Dòng position của một
 Quantity Flow thêm ghi chú advisory tường minh `· exceeds expected duration`
@@ -803,7 +803,7 @@ Accessible modal/focus trap/stacked child dialogs. `Save demand` + `Cancel (Esc)
 dirty close phải discard confirm. Header identity/meta, editable WO due chỉ Open.
 
 Demand row fields PN, Request Type, qty, due, priority, Jobs, requester/reason/notes.
-PN control mở shared barcode label; new marker inline. Open WO primary Add Part
+PN control trên demand line (đổi đích ở Phase 13): chính PN là control, mở dialog dùng chung `Edit Part Number` (§14.2) với icon bút chì (edit) sau PN; label in được mở từ trong dialog bằng `Barcode label…` (§14.3), và PN chưa có chi tiết đã lưu mở dialog dưới tên `New Part Number` với PN cố định. Control thay chữ PN tại chỗ (không thêm chiều cao row); draft line có PN chưa có master mang marker `new PN` inline, marker theo sự tồn tại mà dialog quan sát được. Mở dialog chỉ là presentation: không đụng draft, dirty state hay release — write của dialog chỉ liên quan chi tiết Part Number, không bao giờ liên quan demand — và vẫn dùng được trên released line. Trước Phase 13 control mở thẳng label dialog với glyph nhãn vì bút chì sẽ hứa hẹn việc sửa chưa tồn tại; Phase 13 slice 7 đã đổi đích. Link `Barcode label…` của Add Part không đổi. Open WO primary Add Part
 manually, barcode optional. Duplicate PN focus existing line.
 
 Released line: qty/due/Jobs editable, PN/Request Type read-only; qty below committed
@@ -822,7 +822,7 @@ Accessible modal over list, focus restore, dirty discard confirmation. Header:
 optional WO Number, today received, optional WO due. Blank number stores NULL/`—`;
 existing active/completed number opens existing after protecting entered draft.
 
-Add Part multi-step: PN exact lookup/create → positive quantity → optional due with
+Add Part multi-step: PN lookup/create (trạng thái triển khai Phase 13 slice 7: search khớp PN và Name / Description đã lưu, mỗi kết quả hiện name đã lưu, hoặc barcode derive khi chưa lưu name) → positive quantity → optional due with
 explicit no-date → optional NEW/MODIFY/Job/requester/reason/notes; Back preserves.
 Barcode is secondary valid-PN method. Draft line returns to parent. Save requires
 ≥1 valid line; omission summary for blank WO/due/optional metadata makes consequences
@@ -995,12 +995,11 @@ Work Order history, có thể create lại; no archive/soft-delete/active lifecy
 
 Shared Code128 `PF:PN:<part-number>` on white/black label, PN primary dưới bars,
 full scanned value muted. `Print Label` chỉ print label; same dialog/encoder được mở
-từ Part Numbers, Work Order line và Add Part. Không barcode config tại đây.
+từ Part Numbers (§14.2) và dialog `Edit Part Number` trên demand line (§11.2) qua `Barcode label…`, còn Add Part (§11.2/§11.3) mở trực tiếp. Không barcode config tại đây.
 
-## 14.4 States và Phase 2 boundary
+## 14.4 States và implementation boundary
 
-Standard loading/error/empty. Phase 2 dev-only mock with one DevNotice; deliberate
-deleted-master PN absent để test Tracking behavior.
+Standard loading/error/empty. **Implementation boundary (Phase 13).** View thật trên `/api/part-numbers`: tìm kiếm phía server có giới hạn (`Showing N of T Part Numbers`, `Show more`, tối đa 200 row), tạo, sửa, upload và gỡ ảnh, hard delete, write bị chặn khi mất kết nối; các preview `?state=` chỉ-development vẫn còn. Dòng bounded-list là chỉ báo trạng thái list (pattern PN Tracking §7.1), không phải page-level note mà §14.1 loại trừ.
 
 ---
 

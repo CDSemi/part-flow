@@ -1,4 +1,4 @@
-"""Integration tests for the Phase 4 PartNumber master API.
+"""Integration tests for the PartNumber master API (Phase 4; Phase 13 create).
 
 Exercises the full request path — FastAPI routes, Application-layer
 services, and PostgreSQL — against a dedicated temporary database
@@ -12,18 +12,24 @@ SLICE1_DATA_MODEL §6, §16):
   single master row;
 - internal whitespace is rejected with zero writes — never silently
   removed to turn invalid input into a valid PN;
-- create-on-first-valid-use with reuse of the existing canonical PN:
-  the master is created exactly once, and its ``CREATED`` audit row
+- the explicit create is create-only (Phase 13 slice 7): the master is
+  created exactly once with its optional details, every later variant
+  of the same canonical PN answers 409, concurrent creates have one
+  winner, and the ``CREATED`` audit row — the full details snapshot —
   commits in the same transaction (rolled back together on failure);
 - the barcode is fully derived (``PF:PN:<canonical-part-number>``) —
   no barcode is stored, entered, or separately issued;
 - lookup by exact canonical number and by contains-search.
+
+The Phase 13 management routes (edit, image, delete, page) are covered
+by ``test_part_number_management_api.py``.
 
 The API commits real transactions, so tests isolate through unique PN
 values; the module database is dropped afterwards.
 """
 
 import os
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,9 +41,11 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.orm import Session
 
 from alembic import command
 from app.application import part_numbers
+from app.application.errors import InvalidInputError
 from app.core.config import get_settings
 from app.infrastructure import models
 from app.main import create_app
@@ -92,6 +100,25 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
     engine.dispose()
 
 
+def _snapshot(
+    part_number: str,
+    name: str | None = None,
+    current_revision: str | None = None,
+    erp_id: str | None = None,
+) -> dict[str, str | None]:
+    """The audited details snapshot of a master (Phase 13 S7-OD3)."""
+    return {
+        "part_number": part_number,
+        "name": name,
+        "current_revision": current_revision,
+        "erp_id": erp_id,
+    }
+
+
+def _already_saved(part_number: str) -> str:
+    return f"Part Number \u201c{part_number}\u201d already has saved details."
+
+
 def _unique_pn(prefix: str = "PN") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10].upper()}"
 
@@ -129,7 +156,7 @@ def test_create_normalizes_and_derives_the_barcode(client: TestClient, db_engine
     assert len(events) == 1
     assert events[0].event_type == "CREATED"
     assert events[0].before_data is None
-    assert events[0].after_data == {"part_number": canonical}
+    assert events[0].after_data == _snapshot(canonical)
 
 
 def test_pn_the_os_libc_would_uppercase_is_created(client: TestClient, db_engine: Engine) -> None:
@@ -145,32 +172,143 @@ def test_pn_the_os_libc_would_uppercase_is_created(client: TestClient, db_engine
 
     events = _audit_rows(db_engine, canonical)
     assert [event.event_type for event in events] == ["CREATED"]
-    assert events[0].after_data == {"part_number": canonical}
+    assert events[0].after_data == _snapshot(canonical)
 
 
-def test_existing_canonical_pn_is_reused_not_duplicated(
-    client: TestClient, db_engine: Engine
-) -> None:
-    """Every case/whitespace variant resolves to the one master row;
-    reuse appends no second CREATED event."""
+def _master_rows(engine: Engine, canonical: str) -> int:
+    with engine.connect() as connection:
+        return connection.execute(
+            sa.select(sa.func.count())
+            .select_from(models.PartNumber.__table__)
+            .where(models.PartNumber.part_number == canonical)
+        ).scalar_one()
+
+
+def test_post_is_create_only(client: TestClient, db_engine: Engine) -> None:
+    """Every case/whitespace variant of an existing master answers 409
+    naming the canonical PN; the one row and its one CREATED event stay."""
     canonical = _unique_pn()
     first = client.post("/api/part-numbers", json={"part_number": canonical})
     assert first.status_code == 201, first.text
 
     for variant in (canonical, canonical.lower(), f" {canonical.lower()} ", f"\t{canonical}\n"):
-        reused = client.post("/api/part-numbers", json={"part_number": variant})
-        assert reused.status_code == 200, reused.text
-        assert reused.json()["part_number"] == canonical
-        assert reused.json()["created_at"] == first.json()["created_at"]
+        refused = client.post("/api/part-numbers", json={"part_number": variant})
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"] == _already_saved(canonical)
 
-    with db_engine.connect() as connection:
-        rows = connection.execute(
-            sa.select(sa.func.count())
-            .select_from(models.PartNumber.__table__)
-            .where(models.PartNumber.part_number == canonical)
-        ).scalar_one()
-    assert rows == 1
+    assert _master_rows(db_engine, canonical) == 1
     assert len(_audit_rows(db_engine, canonical)) == 1
+
+
+def test_post_records_trimmed_details(client: TestClient, db_engine: Engine) -> None:
+    """The details are trimmed (blank → null) and the CREATED row
+    carries the full four-key snapshot."""
+    canonical = _unique_pn("DETAILS")
+    created = client.post(
+        "/api/part-numbers",
+        json={
+            "part_number": canonical,
+            "name": "  BRACKET, MOUNTING  ",
+            "current_revision": "   ",
+            "erp_id": " ERP-PN-1 ",
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["name"] == "BRACKET, MOUNTING"
+    assert body["current_revision"] is None
+    assert body["erp_id"] == "ERP-PN-1"
+    assert body["image_updated_at"] is None
+
+    events = _audit_rows(db_engine, canonical)
+    assert [event.event_type for event in events] == ["CREATED"]
+    assert events[0].after_data == _snapshot(canonical, name="BRACKET, MOUNTING", erp_id="ERP-PN-1")
+
+
+def test_post_refuses_non_text_and_unknown_fields_with_zero_writes(
+    client: TestClient, db_engine: Engine
+) -> None:
+    """A non-text detail is refused by request validation (422) and
+    nothing is written; so are the derived barcode, an actor, an image
+    field and any unknown field."""
+    masters_before = _count(db_engine, models.PartNumber.__table__)
+    audits_before = _count(db_engine, models.AuditEvent.__table__)
+
+    extras: list[dict[str, Any]] = [
+        {"name": 12},
+        {"current_revision": 3},
+        {"erp_id": ["ERP"]},
+        {"barcode_value": "PF:PN:FORGED"},
+        {"actor": "mallory"},
+        {"image_updated_at": "2026-10-05T00:00:00Z"},
+        {"unknown": "x"},
+    ]
+    for extra in extras:
+        rejected = client.post("/api/part-numbers", json={"part_number": _unique_pn(), **extra})
+        assert rejected.status_code == 422, (extra, rejected.text)
+
+    assert _count(db_engine, models.PartNumber.__table__) == masters_before
+    assert _count(db_engine, models.AuditEvent.__table__) == audits_before
+
+
+def test_services_refuse_non_text_details_before_any_write(
+    api_database_url: URL, db_engine: Engine
+) -> None:
+    """The Application guard (E5) runs before any lock or write — over
+    HTTP the typed request model refuses a non-string first."""
+    canonical = _unique_pn("GUARD")
+    engine = create_engine(api_database_url)
+    try:
+        with Session(engine) as session:
+            part_numbers.create_part_number(session, canonical)
+        masters_before = _count(db_engine, models.PartNumber.__table__)
+        audits_before = _count(db_engine, models.AuditEvent.__table__)
+        cases = (
+            ("name", "Name / Description must be text."),
+            ("current_revision", "Revision must be text."),
+            ("erp_id", "ERP ID must be text."),
+        )
+        for field, message in cases:
+            with Session(engine) as session:
+                with pytest.raises(InvalidInputError) as created:
+                    part_numbers.create_part_number(session, _unique_pn(), **{field: 7})
+                assert created.value.message == message
+            with Session(engine) as session:
+                with pytest.raises(InvalidInputError) as updated:
+                    part_numbers.update_part_number(session, canonical, **{field: 7})
+                assert updated.value.message == message
+    finally:
+        engine.dispose()
+
+    assert _count(db_engine, models.PartNumber.__table__) == masters_before
+    assert _count(db_engine, models.AuditEvent.__table__) == audits_before
+
+
+def test_concurrent_creates_have_one_winner(client: TestClient, db_engine: Engine) -> None:
+    """Two simultaneous POSTs of one new PN: exactly one 201, one 409,
+    one row and one CREATED event."""
+    canonical = _unique_pn("RACE")
+    barrier = threading.Barrier(2)
+    statuses: list[int] = []
+    guard = threading.Lock()
+
+    def _post(raw: str) -> None:
+        barrier.wait()
+        response = client.post("/api/part-numbers", json={"part_number": raw})
+        with guard:
+            statuses.append(response.status_code)
+
+    threads = [
+        threading.Thread(target=_post, args=(raw,)) for raw in (canonical, canonical.lower())
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sorted(statuses) == [201, 409]
+    assert _master_rows(db_engine, canonical) == 1
+    assert [event.event_type for event in _audit_rows(db_engine, canonical)] == ["CREATED"]
 
 
 def test_invalid_part_numbers_are_rejected_with_zero_writes(
@@ -190,7 +328,8 @@ def test_invalid_part_numbers_are_rejected_with_zero_writes(
 
 def test_lookup_by_number_and_search(client: TestClient) -> None:
     """`number` resolves the exact canonical PN (empty list on a miss);
-    `search` is a case-insensitive contains-match."""
+    `search` is a case-insensitive contains-match (the name match is
+    covered by the management tests)."""
     canonical = _unique_pn("LOOKUP")
     assert client.post("/api/part-numbers", json={"part_number": canonical}).status_code == 201
 
@@ -250,7 +389,7 @@ def test_one_character_part_number_is_valid_and_exactly_resolvable(
     """A short PN is a PN: the search bound is an optimization, never a
     domain rule about what a Part Number may be."""
     created = client.post("/api/part-numbers", json={"part_number": "x"})
-    assert created.status_code in {200, 201}, created.text
+    assert created.status_code == 201, created.text
     assert created.json()["part_number"] == "X"
     assert created.json()["barcode_value"] == "PF:PN:X"
 

@@ -124,8 +124,8 @@ PartFlow may enter pilot/production only when all gates below are satisfied.
   development bind mounts;
 - reverse proxy configuration owns TLS, SPA fallback, request limits, and
   `/api` routing — the proxy must accept request bodies of at least 3 MiB on the
-  image upload routes (`PUT /api/workers/{id}/avatar`, later the Part Number and
-  User image routes), because the application accepts images up to 2 MiB; a
+  image upload routes (`PUT /api/workers/{id}/avatar`,
+  `PUT /api/part-numbers/image?number=…`, later the User image route), because the application accepts images up to 2 MiB; a
   proxy-generated 413 carries no JSON `detail`, so the UI could only show a
   generic failure;
 - required configuration is validated at startup and secrets have no committed

@@ -142,7 +142,7 @@ không sở hữu Movement; Allocation slice sau vẫn tách cả hai.
   `AbC-123`, `" ABC-123 "` đều thành `ABC-123`; `"ABC 123"` và tab/newline bên
   trong invalid.
 - Create master on first valid use, không catalog preload. Master keyed canonical
-  PN nhưng optional; production table không FK, nên có thể hard-delete/recreate.
+  PN nhưng optional; production table không FK, nên có thể hard-delete/recreate. Từ Phase 13 slice 7, `POST /api/part-numbers` chỉ tạo mới và lấy PN advisory lock (mọi nơi tạo master đều tuần tự hóa theo PN), `GET ?search=` cũng khớp name đã lưu, và Management → Part Numbers sửa, quản lý ảnh và hard-delete master; create-on-first-use không đổi.
 - Barcode derive `PF:PN:<part-number>`; không stored key riêng và không encode WO,
   quantity, route hay location.
 
@@ -302,7 +302,7 @@ tin projection nếu chưa lock Flow trong transaction.
 Audit trong slice:
 
 - WorkOrder/Demand create/edit;
-- PN master creation;
+- PN master creation (từ Phase 13 slice 7 còn sửa, đổi ảnh và hard delete master);
 - release do `RECEIVED` Movement audit, gồm actor/context informational.
 
 Hai mechanism tách trách nhiệm:
@@ -316,14 +316,14 @@ Hai mechanism tách trách nhiệm:
 `audit_events`: BIGSERIAL id, `CREATED|UPDATED`, entity type/key, nullable actor,
 timestamp, `before_data`/`after_data`, metadata. Entity id polymorphic không FK;
 integrity do audit row và change commit cùng transaction. PartNumber entity id là
-canonical PN. Phase 14 có thể migrate actor tới User.
+canonical PN. Phase 14 có thể migrate actor tới User. Ánh xạ event của PN master từ Phase 13 slice 7: tạo → `CREATED`, sửa → `UPDATED`, đổi ảnh → `UPDATED` (digest), hard delete → `DELETED` (`before_data` = snapshot cộng digest ảnh); snapshot `PartNumber` là `{part_number, name, current_revision, erp_id}`.
 
 Mọi audited write phải có audit row cùng transaction. Audit immutable qua revoke +
 trigger; creation có before NULL, update append row mới, không rewrite row cũ.
 
 **Thay đổi priority của Hot list (Phase 12).** Thay đổi priority được audit bằng row `UPDATED` trên `WorkOrderDemand`, một row cho mỗi demand đổi `priority_rank` (gồm cả demand được đánh số lại để lấp chỗ hở), ghi cùng transaction với rank: `before_data = {"priority_rank": old}`, `after_data = {"priority_rank": new}` (NULL nghĩa là ngoài list), và `metadata.hot_list_change` giữ `device_event_id`, `action`, request `fingerprint`, `sequence` của row trong command và một **identity snapshot** lấy lúc chạy command (`work_order_demand_id`, `part_number`, `work_order_id`, `work_order_number`). Snapshot cho phép replay của command dựng lại `changes` chỉ từ audit row, kể cả khi demand đã bị xóa. Audit row cũng là idempotency record của command: khác cơ chế dựa trên UNIQUE của §14, lookup được làm race-free bằng Hot advisory lock. Thay đổi rank thực hiện ngoài command ghi cùng loại row: `metadata.hot_list_change` khi đó mang `action` `AUTO_REMOVE` (một allocation hoặc một Work Order save hạ quantity làm demand inactive) hoặc `LINE_DELETE` (việc xóa Hot line đã confirm), `sequence`, identity snapshot và một block `cause` (`trigger`, `reference`, và list `removed` kèm từng `reason`), và **không** có `device_event_id` hay `fingerprint` ở level đó, nên idempotency lookup của command không bao giờ thấy chúng. Không thêm audit vocabulary. Ghi rank trên demand của Work Order completed là ngoại lệ được chấp nhận và có tài liệu so với việc Work Order đó read-only (IMPLEMENTATION_ROADMAP Phase 12, OD1): ghi priority không phải sửa Work Order. Có hai writer làm việc đó — automatic removal bên trong allocation làm completed, và REMOVE / MOVE của manager trên entry tồn đọng từ trước thay đổi qua command.
 
-**Cấu hình Worker và vocabulary được mở rộng (Phase 13, `0014_phase13_workers`).** Vocabulary `event_type` mở rộng thêm `DELETED` (hard delete record master/configuration; chưa có writer) và vocabulary `entity_type` thêm `Worker` (cấu hình audit identity của Scan Station, không bao giờ là hoạt động production). Mỗi write Worker có hiệu lực append đúng một row trong cùng transaction với write; `entity_id` là internal id của Worker dạng text, `actor_reference` NULL và `metadata` NULL. Row profile snapshot `{name, badge_barcode, is_active}` (`before_data` NULL với `CREATED`); row avatar snapshot `{"avatar": null | {content_type, byte_size, sha256}}` — digest, không bao giờ là byte ảnh. Row Worker được lock trước, nên trong từng facet (profile, avatar) `before_data` của một row là `after_data` của row liền trước; hai facet đan xen và không nối chuỗi với nhau. Write bị từ chối và no-op không append gì.
+**Cấu hình Worker và vocabulary được mở rộng (Phase 13, `0014_phase13_workers`).** Vocabulary `event_type` mở rộng thêm `DELETED` (hard delete record master/configuration; writer đầu tiên là hard delete Part Number của Phase 13 slice 7) và vocabulary `entity_type` thêm `Worker` (cấu hình audit identity của Scan Station, không bao giờ là hoạt động production). Mỗi write Worker có hiệu lực append đúng một row trong cùng transaction với write; `entity_id` là internal id của Worker dạng text, `actor_reference` NULL và `metadata` NULL. Row profile snapshot `{name, badge_barcode, is_active}` (`before_data` NULL với `CREATED`); row avatar snapshot `{"avatar": null | {content_type, byte_size, sha256}}` — digest, không bao giờ là byte ảnh. Row Worker được lock trước, nên trong từng facet (profile, avatar) `before_data` của một row là `after_data` của row liền trước; hai facet đan xen và không nối chuỗi với nhau. Write bị từ chối và no-op không append gì.
 
 **Cấu hình môi trường (Phase 13, `0016_phase13_environment_audit`).** Các write môi trường Phase 3.5 được audit với năm giá trị `entity_type` bổ sung: `Department`, `Area`, `Operation`, `ScanStation` và `MachineAssetTagConfig` (định dạng Asset Tag). `entity_id` là internal id dạng text cho Department, Area và Operation, Station ID cho `ScanStation`, và `'1'` cho singleton `MachineAssetTagConfig`. Mỗi create hoặc update có hiệu lực append đúng một row `CREATED` hoặc `UPDATED` trong cùng transaction (một PATCH nhiều field là một row; no-op, write bị từ chối hoặc race thua không append gì). Snapshot là danh sách field tường minh: Department `{name, is_active}`; Area `{department_id, name, barcode_value, description, color, icon_url, is_terminal, is_active, worker_identification_mode, fixed_worker_id}` (hai key cuối từ Phase 13 slice 3); Operation `{area_id, code, name, description, default_expected_duration_seconds, is_external, is_active}` (thời lượng tính bằng giây dạng JSON number, `null` khi chưa đặt); ScanStation `{area_id, is_active}`; MachineAssetTagConfig `{prefix, digits}` — `next_sequence` (bộ đếm never-reuse của việc tạo Machine) không phải cấu hình và không bao giờ được audit, và cột slice sau thêm chỉ được audit khi slice đó thêm nó vào snapshot. Mỗi update khóa row của mình trước, theo mode mà UPDATE của chính nó dùng, và snapshot dưới lock, nên các row liên tiếp của một entity nối chuỗi: mỗi `before_data` bằng `after_data` liền trước trên mọi key có ở cả hai. Không backfill: row audit đầu tiên của cấu hình có trước revision là `UPDATED` có `before_data` giữ trạng thái tìm thấy. `actor_reference` và `metadata` NULL cho đến Phase 14.
 
@@ -354,7 +354,7 @@ AND part_number <> ''
 (Cả hai vế chỉ ASCII và độc lập với libc của OS kể từ `0018_phase13_pn_check_collation`; việc uppercase Unicode đầy đủ và từ chối whitespace do domain normalization sở hữu, §6.)
 
 Không surrogate id, active flag, stored barcode hoặc lowercase index; production
-không FK. Barcode derive và master delete/recreate được.
+không FK. Barcode derive và master delete/recreate được. Từ `0023_phase13_part_number_master` bảng còn có các chi tiết nullable `name`, `current_revision` và `erp_id` (free text, không unique, không index) và ảnh nằm trên row — `image` (`bytea`), `image_type`, `image_updated_at` — với `ck_part_numbers_image_shape` (cả ba hoặc không cột nào), `ck_part_numbers_image_type` (`image/png`, `image/jpeg`, `image/webp`) và `ck_part_numbers_image_size` (từ 1 byte đến 2 MiB); vẫn không có FK từ bảng production.
 
 **`work_orders`** — internal PK; nullable number với partial unique non-null;
 required received date; nullable due; status/time. `completed_at` không thuộc slice,
@@ -432,6 +432,7 @@ protocol, reconciliation và concurrency test enforce.
 | Monitoring read models | Phase 11 | Movement-derived query |
 | Priority/Hot UI | Phase 12 — implemented, `0013_phase12_priority` | không thêm column: `priority_rank` hiện có nhận CHECK dương và UNIQUE (dense `1..N`, §5/§17) sau pre-check từ chối, cùng audit expression index (§17); writer là Hot command và automatic / line-deletion removal (`hot_ranks`), cả hai audit qua `audit_events` (§16) |
 | Full Administration | Phase 13 | master tables đã có từ Phase 3.5 |
+| Quản lý metadata PartNumber, ảnh, hard delete | Phase 13 — implemented (`0023_phase13_part_number_master`) | column nullable trên `part_numbers`; không chạm bảng production nào |
 | Authentication/role | Phase 14 | actor may migrate; không couple Movement |
 | File Work Order import | Phase 15 | reuse validation idempotently |
 | Worker/ScanSession persistence | Phase 13 — Workers registry **implemented** (`0014_phase13_workers`); `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` **implemented** (`0019_phase13_worker_identity`); `scan_session_id`, `worker_sessions`, `application_policy` và override theo Area **implemented** (`0020_phase13_worker_sessions`); badge-confirmation option **implemented** (`0021_phase13_badge_confirmation`) | bảng `workers` (badge UNIQUE trên dạng chuẩn hóa, avatar trên row) và vocabulary audit mở rộng (§16) đã có; `0019_phase13_worker_identity` thêm `worker_id`, `allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` (§11, §17); `0020_phase13_worker_sessions` thêm `scan_session_id`, `worker_sessions`, `application_policy` và `areas.worker_session_timeout_minutes` (§11, §17); `0021_phase13_badge_confirmation` thêm ba column option của `application_policy` (§17) |

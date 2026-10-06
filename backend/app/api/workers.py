@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, Header, Response
 from pydantic import BaseModel, ConfigDict
 
 from app.api.dependencies import SessionDep
-from app.api.uploads import UploadedImage, read_image_body
+from app.api.uploads import UploadedImage, read_image_body, stored_image_response
 from app.application import workers
 from app.infrastructure.models import Worker
 
@@ -117,19 +117,6 @@ def remove_worker_avatar(worker_id: int, session: SessionDep) -> WorkerResponse:
     return worker_response(workers.remove_worker_avatar(session, worker_id))
 
 
-def _avatar_etag(updated_at: datetime.datetime) -> str:
-    """Strong ETag from the avatar version, in whole microseconds."""
-    return f'"{int(updated_at.timestamp()) * 1_000_000 + updated_at.microsecond}"'
-
-
-def _etag_matches(if_none_match: str | None, etag: str) -> bool:
-    if if_none_match is None:
-        return False
-    candidates = {candidate.strip() for candidate in if_none_match.split(",")}
-    # If-None-Match uses the weak comparison (RFC 9110 §13.1.2).
-    return "*" in candidates or etag in candidates or f"W/{etag}" in candidates
-
-
 @router.get("/workers/{worker_id}/avatar")
 def get_worker_avatar(
     worker_id: int,
@@ -137,13 +124,4 @@ def get_worker_avatar(
     if_none_match: Annotated[str | None, Header()] = None,
 ) -> Response:
     avatar = workers.get_worker_avatar(session, worker_id)
-    etag = _avatar_etag(avatar.updated_at)
-    # A 304 repeats the validator and the caching policy (RFC 9110 §15.4.5).
-    cache_headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
-    if _etag_matches(if_none_match, etag):
-        return Response(status_code=304, headers=cache_headers)
-    return Response(
-        content=avatar.data,
-        media_type=avatar.content_type,
-        headers={**cache_headers, "X-Content-Type-Options": "nosniff"},
-    )
+    return stored_image_response(avatar.data, avatar.content_type, avatar.updated_at, if_none_match)

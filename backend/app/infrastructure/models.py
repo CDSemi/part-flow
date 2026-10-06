@@ -114,6 +114,16 @@ CANONICAL_PART_NUMBER_SQL = (
     """ AND part_number COLLATE "C" !~ '[[:space:]]' AND part_number <> ''"""
 )
 
+# Part Number image on the master row (Phase 13 slice 7, CD1; owner
+# decision OD-10): the S1 avatar rules repeated — all three image
+# columns or none, PNG/JPEG/WebP only, 1 byte to 2 MiB. Repeated
+# verbatim by migration `0023_phase13_part_number_master`.
+PART_NUMBER_IMAGE_SHAPE_SQL = (
+    "(image IS NULL) = (image_type IS NULL) AND (image IS NULL) = (image_updated_at IS NULL)"
+)
+PART_NUMBER_IMAGE_TYPE_SQL = "image_type IN ('image/png', 'image/jpeg', 'image/webp')"
+PART_NUMBER_IMAGE_SIZE_SQL = "image IS NULL OR octet_length(image) BETWEEN 1 AND 2097152"
+
 # Area barcode ownership (PROJECT_PROFILE §10): an assigned Area
 # barcode is always `PF:AREA:<stable-id>` with a non-empty,
 # whitespace-free stable-id suffix. NULL (no barcode assigned) passes a
@@ -899,11 +909,25 @@ class PartNumber(Base):
     `part_number_id` exists anywhere. Production tables never reference
     this table, so a master row can be hard-deleted (and later recreated
     for the same canonical PN) without touching production data.
+
+    Optional metadata (Phase 13 slice 7): the free-text Name /
+    Description, the informational current revision and the ERP id —
+    none unique, none looked up — plus the PN image stored on the row
+    (CD1). The image bytes are mapped deferred, so no list, lock or
+    read-model query loads them; type and timestamp travel with every
+    read.
     """
 
     __tablename__ = "part_numbers"
 
     part_number: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str | None] = mapped_column(Text)
+    current_revision: Mapped[str | None] = mapped_column(Text)
+    erp_id: Mapped[str | None] = mapped_column(Text)
+    image: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    image_type: Mapped[str | None] = mapped_column(Text)
+    # The image's cache version: drives the ETag and the `?v=` URL.
+    image_updated_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -926,6 +950,9 @@ class PartNumber(Base):
         CheckConstraint(
             CANONICAL_PART_NUMBER_SQL, name=conv("ck_part_numbers_part_number_canonical")
         ),
+        CheckConstraint(PART_NUMBER_IMAGE_SHAPE_SQL, name=conv("ck_part_numbers_image_shape")),
+        CheckConstraint(PART_NUMBER_IMAGE_TYPE_SQL, name=conv("ck_part_numbers_image_type")),
+        CheckConstraint(PART_NUMBER_IMAGE_SIZE_SQL, name=conv("ck_part_numbers_image_size")),
     )
 
 

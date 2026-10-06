@@ -5,13 +5,13 @@ PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
 `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
-`0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation` and
-`0022_phase13_undo_reason_policy` add (IMPLEMENTATION_ROADMAP Phase 13;
-PROJECT_PROFILE §7, §8.4, §8.11, §8.12, §8.13, §10, §16, §19, §28; owner
-decisions OD-2, OD-3, OD-6, OD-10, S2-F6). Later Phase 13 slices extend
-this module:
+`0020_phase13_worker_sessions`, `0021_phase13_badge_confirmation`,
+`0022_phase13_undo_reason_policy` and `0023_phase13_part_number_master`
+add (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.1, §8.4,
+§8.11, §8.12, §8.13, §10, §16, §19, §21, §28; owner decisions OD-2,
+OD-3, OD-6, OD-10, S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0022_phase13_undo_reason_policy` is the single
+- exact head boundary: `0023_phase13_part_number_master` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -69,7 +69,15 @@ this module:
   existing policy, audit and Movement rows; the downgrade restores the
   0021 boundary and refuses while the policy is on or a
   `correction-permissions` audit row exists, never because of a
-  `REVERSED` row carrying a reason.
+  `REVERSED` row carrying a reason;
+- Part Number details (0023): the six nullable `part_numbers` columns
+  (`name`, `current_revision`, `erp_id`, `image`, `image_type`,
+  `image_updated_at`) with no index, the three image CHECKs with their
+  exact names and literals (all-or-none, PNG/JPEG/WebP, 1 byte to
+  2 MiB), and no FK referencing `part_numbers` at all; the upgrade keeps
+  every master and audit row; the downgrade restores the 0022 boundary
+  and refuses while any master carries a detail or an image, never
+  because of `PartNumber` audit rows.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -85,6 +93,7 @@ import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 
 import pytest
 import sqlalchemy as sa
@@ -109,7 +118,8 @@ _PN_CHECK_REVISION = "0018_phase13_pn_check_collation"
 _WORKER_IDENTITY_REVISION = "0019_phase13_worker_identity"
 _WORKER_SESSIONS_REVISION = "0020_phase13_worker_sessions"
 _BADGE_CONFIRMATION_REVISION = "0021_phase13_badge_confirmation"
-_HEAD_REVISION = "0022_phase13_undo_reason_policy"
+_UNDO_REASON_POLICY_REVISION = "0022_phase13_undo_reason_policy"
+_HEAD_REVISION = "0023_phase13_part_number_master"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -120,6 +130,7 @@ _WORKER_IDENTITY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0019_phase13_worker_
 _WORKER_SESSIONS_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0020_phase13_worker_sessions.py"
 _BADGE_CONFIRMATION_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0021_phase13_badge_confirmation.py"
 _UNDO_REASON_POLICY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0022_phase13_undo_reason_policy.py"
+_PART_NUMBER_MASTER_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0023_phase13_part_number_master.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -2132,3 +2143,254 @@ def test_upgrade_keeps_the_policy_audit_and_reversal_rows(admin_engine: Engine) 
             engine.dispose()
     finally:
         _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Part Number details and image (0023)
+# ---------------------------------------------------------------------------
+
+_PART_NUMBER_DETAIL_COLUMNS = {
+    "name": sa.Text,
+    "current_revision": sa.Text,
+    "erp_id": sa.Text,
+    "image": sa.LargeBinary,
+    "image_type": sa.Text,
+    "image_updated_at": sa.DateTime,
+}
+_PART_NUMBER_IMAGE_CHECKS = {
+    "ck_part_numbers_image_shape": "PART_NUMBER_IMAGE_SHAPE_SQL",
+    "ck_part_numbers_image_type": "PART_NUMBER_IMAGE_TYPE_SQL",
+    "ck_part_numbers_image_size": "PART_NUMBER_IMAGE_SIZE_SQL",
+}
+
+
+def _insert_master(connection: Connection, part_number: str, **details: object) -> None:
+    columns = ["part_number", *details]
+    values = [":part_number", *(f":{column}" for column in details)]
+    connection.execute(
+        sa.text(f"INSERT INTO part_numbers ({', '.join(columns)}) VALUES ({', '.join(values)})"),
+        {"part_number": part_number, **details},
+    )
+
+
+def test_part_number_detail_columns_shape(migrated_engine: Engine) -> None:
+    inspector = inspect(migrated_engine)
+    columns = {str(column["name"]): column for column in inspector.get_columns("part_numbers")}
+    assert set(columns) == {"part_number", "created_at", "updated_at"} | set(
+        _PART_NUMBER_DETAIL_COLUMNS
+    )
+    for name, column_type in _PART_NUMBER_DETAIL_COLUMNS.items():
+        column = columns[name]
+        assert isinstance(column["type"], column_type), name
+        assert column["nullable"] is True, name
+        assert column["default"] is None, name
+    assert cast(sa.DateTime, columns["image_updated_at"]["type"]).timezone is True
+    # No index and nothing unique beyond the natural key: the details
+    # are never looked up.
+    assert inspector.get_indexes("part_numbers") == []
+    assert inspector.get_unique_constraints("part_numbers") == []
+
+
+def test_part_number_image_checks_have_exact_names_and_literals(migrated_engine: Engine) -> None:
+    checks = {
+        str(check["name"])
+        for check in inspect(migrated_engine).get_check_constraints("part_numbers")
+    }
+    assert checks == {"ck_part_numbers_part_number_canonical", *_PART_NUMBER_IMAGE_CHECKS}
+    migration = _load_migration(_PART_NUMBER_MASTER_MIGRATION_FILE)
+    assert migration.down_revision == _UNDO_REASON_POLICY_REVISION
+    for name, constant in _PART_NUMBER_IMAGE_CHECKS.items():
+        assert getattr(migration, f"_{constant}") == getattr(models, constant), name
+    # The PN image repeats the S1 avatar rules exactly, column for column.
+    assert models.PART_NUMBER_IMAGE_TYPE_SQL.replace("image_type", "avatar_image_type") == (
+        "avatar_image_type IN ('image/png', 'image/jpeg', 'image/webp')"
+    )
+    assert "BETWEEN 1 AND 2097152" in models.PART_NUMBER_IMAGE_SIZE_SQL
+
+
+def test_no_foreign_key_references_part_numbers(migrated_engine: Engine) -> None:
+    """The structural proof that deleting a master can never cascade
+    into, or be blocked by, production data."""
+    with migrated_engine.connect() as connection:
+        referencing = connection.execute(
+            sa.text(
+                "SELECT conname FROM pg_constraint"
+                " WHERE contype = 'f' AND confrelid = 'part_numbers'::regclass"
+            )
+        ).all()
+    assert referencing == []
+
+
+def test_part_number_image_checks_refuse_invalid_rows(connection: Connection) -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    _refused_by(
+        connection,
+        "ck_part_numbers_image_shape",
+        lambda: _insert_master(connection, "PN-PARTIAL", image=b"\x89PNG"),
+    )
+    _refused_by(
+        connection,
+        "ck_part_numbers_image_shape",
+        lambda: _insert_master(connection, "PN-NOSTAMP", image=b"\x89PNG", image_type="image/png"),
+    )
+    _refused_by(
+        connection,
+        "ck_part_numbers_image_type",
+        lambda: _insert_master(
+            connection,
+            "PN-GIF",
+            image=b"GIF89a",
+            image_type="image/gif",
+            image_updated_at=now,
+        ),
+    )
+    _refused_by(
+        connection,
+        "ck_part_numbers_image_size",
+        lambda: _insert_master(
+            connection, "PN-EMPTY", image=b"", image_type="image/png", image_updated_at=now
+        ),
+    )
+
+    def oversized() -> None:
+        connection.execute(
+            sa.text(
+                "INSERT INTO part_numbers (part_number, image, image_type, image_updated_at)"
+                " VALUES ('PN-BIG', decode(repeat('00', 2097153), 'hex'), 'image/png', now())"
+            )
+        )
+
+    _refused_by(connection, "ck_part_numbers_image_size", oversized)
+
+    _insert_master(connection, "PN-PLAIN")
+    _insert_master(
+        connection,
+        "PN-FULL",
+        name="Bracket",
+        current_revision="C",
+        erp_id="ERP-1",
+        image=b"\x00" * 2097152,
+        image_type="image/webp",
+        image_updated_at=now,
+    )
+
+
+def _part_number_rows(connection: Connection) -> list[dict[str, object]]:
+    return [
+        dict(row._mapping)
+        for row in connection.execute(sa.text("SELECT * FROM part_numbers ORDER BY part_number"))
+    ]
+
+
+def test_upgrade_keeps_existing_masters_and_their_audit_rows(admin_engine: Engine) -> None:
+    """0022 → head keeps every master (the six new columns NULL) and
+    every audit row."""
+    name = "partflow_test_phase13_pn_master_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _UNDO_REASON_POLICY_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                for part_number in ("PN-A", "PN-B"):
+                    _insert_master(connection, part_number)
+                    _execute(
+                        connection,
+                        "INSERT INTO audit_events (event_type, entity_type, entity_id,"
+                        " occurred_at, after_data) VALUES ('CREATED', 'PartNumber', :pn, now(),"
+                        " CAST(:after AS jsonb))",
+                        pn=part_number,
+                        after=json.dumps({"part_number": part_number}),
+                    )
+                masters = _part_number_rows(connection)
+                audits = _rows(connection, "audit_events")
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _part_number_rows(connection) == [
+                    {**row, **dict.fromkeys(_PART_NUMBER_DETAIL_COLUMNS)} for row in masters
+                ]
+                assert _rows(connection, "audit_events") == audits
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def test_downgrade_to_undo_reason_revision_drops_the_details(admin_engine: Engine) -> None:
+    """Masters without details (and PartNumber UPDATED / DELETED audit
+    rows) never block the downgrade; the re-upgrade restores the head."""
+    name = "partflow_test_phase13_downgrade_s7"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _insert_master(connection, "PN-PLAIN")
+                for event_type in ("UPDATED", "DELETED"):
+                    _execute(
+                        connection,
+                        "INSERT INTO audit_events (event_type, entity_type, entity_id,"
+                        " occurred_at) VALUES (:event_type, 'PartNumber', 'PN-GONE', now())",
+                        event_type=event_type,
+                    )
+            command.downgrade(config, _UNDO_REASON_POLICY_REVISION)
+            inspector = inspect(engine)
+            columns = {str(column["name"]) for column in inspector.get_columns("part_numbers")}
+            assert columns == {"part_number", "created_at", "updated_at"}
+            checks = {
+                str(check["name"]) for check in inspector.get_check_constraints("part_numbers")
+            }
+            assert checks == {"ck_part_numbers_part_number_canonical"}
+            with engine.connect() as connection:
+                assert _version(connection) == _UNDO_REASON_POLICY_REVISION
+                kept = _part_number_rows(connection)
+            assert [row["part_number"] for row in kept] == ["PN-PLAIN"]
+            with engine.connect() as connection:
+                deleted = connection.execute(
+                    sa.text("SELECT count(*) FROM audit_events WHERE entity_id = 'PN-GONE'")
+                ).scalar_one()
+            assert deleted == 2
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"name": "Bracket"},
+        {"current_revision": "C"},
+        {"erp_id": "ERP-1"},
+        {
+            "image": b"\x89PNG",
+            "image_type": "image/png",
+            "image_updated_at": datetime.datetime(2026, 10, 5, tzinfo=datetime.UTC),
+        },
+    ],
+    ids=["name", "revision", "erp-id", "image"],
+)
+def test_downgrade_refuses_while_part_number_details_exist(
+    refused_database: URL, details: dict[str, object]
+) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _insert_master(connection, "PN-KEPT", **details)
+            stored = _part_number_rows(connection)
+        with pytest.raises(ProgrammingError, match="Part Number details exist"):
+            command.downgrade(_alembic_config(refused_database), _UNDO_REASON_POLICY_REVISION)
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+            assert _part_number_rows(connection) == stored
+    finally:
+        engine.dispose()

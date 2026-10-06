@@ -84,7 +84,7 @@ from app.application.allocations import (
 )
 from app.application.errors import NotFoundError
 from app.application.lineage import snapshot_steps
-from app.application.part_numbers import canonical_part_number
+from app.application.part_numbers import canonical_part_number, masters_by_part_number
 from app.application.production_board import (
     BoardLocation,
     FlowPosition,
@@ -183,6 +183,8 @@ class DistributionEntry(NamedTuple):
 class TrackingRow(NamedTuple):
     part_number: str
     has_master: bool
+    # The saved Name / Description; None without a master or a name.
+    name: str | None
     hot_rank: int | None
     # The OPEN demand context in canonical order (empty = history only).
     demands: list[DemandContext]
@@ -462,17 +464,6 @@ def _totals_by_part_number(totals: Mapping[tuple[str, int], int]) -> dict[str, i
     return found
 
 
-def _masters(session: Session, part_numbers: Collection[str]) -> dict[str, PartNumber]:
-    if not part_numbers:
-        return {}
-    return {
-        master.part_number: master
-        for master in session.scalars(
-            select(PartNumber).where(PartNumber.part_number.in_(part_numbers))
-        )
-    }
-
-
 def _distribution(
     locations: Iterable[BoardLocation],
     stocked: Mapping[tuple[str, int], int],
@@ -586,7 +577,7 @@ def tracking_list(
     # One grouped query for every PN's active allocation — never per row.
     allocated_by_pn = active_allocated_quantities(session, stocked_by_pn.keys())
     demands = open_demand_context(session, part_numbers)
-    masters = _masters(session, part_numbers)
+    masters = masters_by_part_number(session, part_numbers)
     due_bounds = due_window_bounds(filters.due, site_today())
 
     rows: list[TrackingRow] = []
@@ -598,9 +589,11 @@ def tracking_list(
         allocated_quantity = allocated_by_pn.get(pn, 0)
         available_stocked = max(stocked_quantity - allocated_quantity, 0)
         first = context[0] if context else None
+        master = masters.get(pn)
         row = TrackingRow(
             part_number=pn,
-            has_master=pn in masters,
+            has_master=master is not None,
+            name=master.name if master is not None else None,
             hot_rank=first.demand.priority_rank if first is not None else None,
             demands=context,
             distribution=_distribution(locations, stocked, pn, areas),
@@ -1308,7 +1301,7 @@ def tracking_detail(
     released = released_quantities(session, [entry.demand.id for entry in context])
     allocated_quantity = active_allocated_quantity_of(session, pn)
     available_stocked = max(stocked_quantity - allocated_quantity, 0)
-    master = _masters(session, [pn]).get(pn)
+    master = masters_by_part_number(session, [pn]).get(pn)
     return TrackingDetail(
         part_number=pn,
         master=master,

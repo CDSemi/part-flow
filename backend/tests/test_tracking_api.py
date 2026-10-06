@@ -382,8 +382,9 @@ def _allocate(client: TestClient, pn: str, lines: list[tuple[int, int]]) -> int:
 
 
 def _delete_master(engine: Engine, pn: str) -> None:
-    """The master is hard-deletable (PROJECT_PROFILE §8.1); full
-    management arrives with Phase 13, so the seed removes it directly."""
+    """The master is hard-deletable (PROJECT_PROFILE §8.1); the seed
+    removes it directly — the management DELETE (Phase 13) is covered
+    by ``test_part_number_management_api.py``."""
     with engine.begin() as connection:
         connection.execute(sa.delete(models.PartNumber).where(models.PartNumber.part_number == pn))
 

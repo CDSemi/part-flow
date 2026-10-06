@@ -171,8 +171,9 @@ export function AddPartDialog({
 
   // Header context for the selected PN: the derived barcode for an
   // existing PN master, a `new Part Number` marker otherwise; the
-  // final step adds the entered quantity and due-date choice. (PN
-  // master metadata such as a description arrives with Phase 13.)
+  // final step adds the entered quantity and due-date choice. The
+  // step-1 results show the saved Name / Description (the barcode when
+  // none is saved) — the server search matches the PN and the name.
 
   function dueSummary(): string {
     if (dueMode === 'none') return 'no due date';
@@ -295,7 +296,11 @@ export function AddPartDialog({
                   onClick={() => choosePn(entry.partNumber, false)}
                 >
                   <span className="mono ap-pn">{entry.partNumber}</span>
-                  <span className="ap-name mono">{entry.barcodeValue}</span>
+                  {entry.name ? (
+                    <span className="ap-name">{entry.name}</span>
+                  ) : (
+                    <span className="ap-name mono">{entry.barcodeValue}</span>
+                  )}
                 </button>
               ))}
               {searchData.state.status === 'error' ? (

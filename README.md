@@ -65,7 +65,7 @@ the Scan Station reads — and the PN-centric Management Tracking on
 immutable Movement history) — and the **Phase 12 Priority Management**:
 the Hot list of Work Order Demands (`GET /api/hot-list`,
 `GET /api/hot-list/candidates`, `POST /api/hot-list/changes`) and the
-real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5 and 6): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6):
+real Management → Priority view on it — and the **Phase 13 Workers registry** (in progress; slices 1, 2, 2b, 2c, 3, 4, 5, 6 and 7): `/api/workers` with its avatar endpoints and the real Administration → Workers section, plus the audit of every Department, Area, Operation, Scan Station and Asset Tag format write (slice 2), plus the Machine configuration audit, two lost-race fixes and the collation-independent PN CHECK (slice 2b), plus the parent-activity locks that serialize child configuration writes with a concurrent parent deactivation (slice 2c), plus the Area Worker ID modes (Disabled / Fixed Worker) and the Worker recorded on production Movements and station allocations (slice 3), plus the scanned Worker Sessions with their sliding inactivity timeout (`GET`/`PUT /api/policies/worker-sessions`, a per-Area override on the Area, badge sign-in through `POST /api/scan-stations/{id}/badge-scans`) and the real Administration → Worker sessions section (slice 4), plus the badge-confirmation gates of `DONE`, `QUEUE` return and Undo (the three options on the same policy, `confirming_badge` on the three commands, the badge Worker signed in by the command) with Scanned session selectable in Administration → Areas (slice 5), plus the Undo reason policy (`GET`/`PUT /api/policies/correction-permissions`, an optional `reason` on the Undo command that is mandatory while the switch is on, the real Administration → Correction permissions switch and the required Reason field in the Scan Station Undo summary) (slice 6), plus Part Numbers management (the real Management → Part Numbers view and the shared `Edit Part Number` dialog on `/api/part-numbers`: create-only creation, a partial edit, the image, the bounded `/page` search and the hard delete of the master record; the pencil `Edit Part Number` control on Work Order demand lines; the saved name on Add Part results, the Production Board rows and PN Tracking) (slice 7):
 
 - `frontend/` — React + TypeScript (Vite): design tokens with switchable
   Dark/Light themes (Dark default), application shell with routing, the
@@ -74,8 +74,8 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   sections and Management → Machines from Phase 3.5, Management →
   Work Orders from Phase 4 with the Completed Work Orders page from
   Phase 10, the Scan Station from Phases 5–10.5, and the Production
-  Board, Area Board and PN Tracking from Phase 11, and Priority from
-  Phase 12) read and
+  Board, Area Board and PN Tracking from Phase 11, Priority from
+  Phase 12 and Part Numbers from Phase 13) read and
   write the real `/api` surface through the shared client layer in
   `src/api/` and ship in every build from `src/app/real-views.ts`,
   while the remaining views stay development-only mock views until
@@ -91,8 +91,10 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   append-only lifecycle events), the Phase 4 Work Order intake and
   production-release APIs (`/api/work-orders` — create/find, list and
   server-side bounded search, the one-transaction demand save and the
-  demand-line removal rule; `/api/part-numbers` — canonical lookup and
-  create-or-reuse with the derived `PF:PN:` barcode; the read-only
+  demand-line removal rule; `/api/part-numbers` — canonical lookup, search over the PN and the saved
+  name, create-only creation (Phase 13) with the derived `PF:PN:` barcode, plus
+  the Phase 13 management routes (`PATCH` / `DELETE ?number=`, `GET` / `PUT` /
+  `DELETE /image`, `GET /page`); the read-only
   `GET /api/route-templates` a `PLANNED` release selects from; and
   `POST /api/work-orders/{id}/demands/{id}/release`, the one command
   that introduces production quantity — transactional and idempotent
@@ -279,7 +281,9 @@ real Management → Priority view on it — and the **Phase 13 Workers registry*
   `0021_phase13_badge_confirmation` adds the three badge-confirmation
   options to `application_policy`; the downgrade refuses;
   `0022_phase13_undo_reason_policy` adds the Undo reason option to
-  `application_policy`; the downgrade refuses)
+  `application_policy`; the downgrade refuses;
+  `0023_phase13_part_number_master` adds the Part Number details and image
+  to `part_numbers`; the downgrade refuses)
 - Docker Compose development stack with health checks
 
 **Management → Work Orders (Phase 4)**
@@ -411,8 +415,8 @@ available stock reading `Open`. Phase 12 makes Management → Priority
 real: the Hot list reads and writes `/api/hot-list` (confirmation before
 every order change, session Undo / Redo, drag-and-drop and Move Up /
 Move Down, add by search or `PF:PN:` scan), and Management → Work Orders
-removes a Hot demand line only after a typed confirmation. Every other view (Planned Routes,
-Part Numbers) renders development-only mock data; Phase 11 also lists the server's per-PN
+removes a Hot demand line only after a typed confirmation. Every other view (Planned Routes)
+renders development-only mock data (Management → Part Numbers is real since Phase 13); Phase 11 also lists the server's per-PN
 breakdown of each Machine's assigned quantity in Management →
 Machines (`assigned_lines` on `/api/machines`), was audited on
 2026-09-13 (IMPLEMENTATION_ROADMAP Phase 11), and closes with the
@@ -604,7 +608,7 @@ adding the partial expression index that serves the released-quantity
 derivation — and the Phase 5 revision `0006_phase5_transfer` widening
 `part_movements` (`TRANSFERRED`, `station_id`, per-type shape check) on
 top of the no-op repository-foundation baseline; the current head is
-`0006_phase5_transfer`):
+`0023_phase13_part_number_master`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -728,8 +732,9 @@ integration):
   `tests/test_machine_audit_api.py`,
   `tests/test_worker_identity_api.py`,
   `tests/test_worker_sessions_api.py`,
-  `tests/test_badge_confirmation_api.py`, and
-  `tests/test_undo_reason_policy_api.py` — **integration** tests that
+  `tests/test_badge_confirmation_api.py`,
+  `tests/test_undo_reason_policy_api.py`, and
+  `tests/test_part_number_management_api.py` — **integration** tests that
   require the PostgreSQL service to be
   reachable via `DATABASE_URL`: the connectivity test calls
   `GET /api/health` through the real application wiring with no
@@ -750,8 +755,9 @@ integration):
   `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
   `0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
   `0020_phase13_worker_sessions`,
-  `0021_phase13_badge_confirmation` and
-  `0022_phase13_undo_reason_policy`: the `workers`
+  `0021_phase13_badge_confirmation`,
+  `0022_phase13_undo_reason_policy` and
+  `0023_phase13_part_number_master`: the `workers`
   table's constraints, the widened audit vocabulary including the
   environment audit entities, the refusing
   downgrades, and

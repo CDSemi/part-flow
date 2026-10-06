@@ -145,6 +145,8 @@ class TrackingRowResponse(BaseModel):
     # The optional PartNumber master exists (PROJECT_PROFILE §8.1); the
     # canonical PN and its history render normally either way.
     has_master: bool
+    # The saved Name / Description; null without a master or a name.
+    name: str | None
     barcode_value: str
     hot_rank: int | None
     # The OPEN demand context in canonical order (empty = history only).
@@ -195,6 +197,7 @@ def _row(row: tracking.TrackingRow) -> TrackingRowResponse:
     return TrackingRowResponse(
         part_number=row.part_number,
         has_master=row.has_master,
+        name=row.name,
         barcode_value=f"PF:PN:{row.part_number}",
         hot_rank=row.hot_rank,
         demands=[_demand(entry) for entry in row.demands],
@@ -253,11 +256,17 @@ def list_tracking(
 
 
 class TrackingMasterResponse(BaseModel):
-    """The optional master record — only its existence and timestamps
-    exist before Part Numbers management (Phase 13) adds metadata."""
+    """The optional master record and its saved details (Phase 13):
+    null values render as absent; ``image_updated_at`` is the PN
+    image's cache version (null = the default image)."""
 
     part_number: str
     created_at: datetime.datetime
+    updated_at: datetime.datetime
+    name: str | None
+    current_revision: str | None
+    erp_id: str | None
+    image_updated_at: datetime.datetime | None
 
 
 class DetailDemandResponse(TrackingDemandResponse):
@@ -712,7 +721,13 @@ def get_tracking_detail(
         part_number=detail.part_number,
         master=(
             TrackingMasterResponse(
-                part_number=detail.master.part_number, created_at=detail.master.created_at
+                part_number=detail.master.part_number,
+                created_at=detail.master.created_at,
+                updated_at=detail.master.updated_at,
+                name=detail.master.name,
+                current_revision=detail.master.current_revision,
+                erp_id=detail.master.erp_id,
+                image_updated_at=detail.master.image_updated_at,
             )
             if detail.master is not None
             else None

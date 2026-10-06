@@ -154,6 +154,15 @@ beforeEach(() => {
           scrapped_quantity: 0,
         });
       }
+      if (url.startsWith('/api/part-numbers/page?')) {
+        return json({
+          rows: [],
+          total: 0,
+          offset: 0,
+          limit: 100,
+          has_more: false,
+        });
+      }
       if (/\/api\/work-orders\/completed\?/.test(url)) {
         return json({
           work_orders: [],
@@ -447,12 +456,24 @@ test('the Machines management view renders from its URL', async () => {
 test('the Part Numbers management view renders from its URL', async () => {
   renderAt('/management/part-numbers');
 
+  // The REAL view (Phase 13): it reads its first page from the server.
   expect(
-    await screen.findByRole('region', { name: 'Part Numbers' }),
+    await screen.findByRole('heading', { name: 'Part Numbers' }),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole('heading', { name: 'Part Numbers' }),
+    screen.getByRole('region', { name: 'Part Numbers' }),
   ).toBeInTheDocument();
+  expect(
+    screen.getByText('No Part Number details have been added yet.'),
+  ).toBeInTheDocument();
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.some(
+        ([input]) =>
+          String(input) === '/api/part-numbers/page?search=&limit=100',
+      ),
+  ).toBe(true);
 });
 
 test('the Planned Routes management view renders from its URL', async () => {

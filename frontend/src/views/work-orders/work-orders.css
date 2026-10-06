@@ -277,7 +277,7 @@
   color: var(--info-t);
 }
 
-/* Demand-line PN cell: the PN label control and, for a PN with no
+/* Demand-line PN cell: the PN edit control and, for a PN with no
    master record yet, the quiet `new PN` marker beside it on the same
    line — the marker never adds a row. */
 .wo-table .pncell {
@@ -1031,7 +1031,7 @@
 
 /* ============ Add Part multi-step dialog ============ */
 /* Selected-PN header block: the strong PN plus one quiet context line
-   (catalog description or `new Part Number`; the final step appends
+   (the barcode or `new Part Number`; the final step appends
    quantity and due-date choice). The hairline keeps the first control
    of every step clear of the header. */
 .ap-pnhead {

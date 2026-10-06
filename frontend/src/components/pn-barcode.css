@@ -66,9 +66,10 @@
   }
 }
 
-/* The label entry: the PN itself is the control, with a small label
-   glyph after it. It carries the demand-line PN typography and adds no
-   row height — the button sits exactly where the PN text sat. */
+/* The demand-line PN control (PnEditButton): the PN itself is the
+   control, with a small pencil glyph after it. It carries the
+   demand-line PN typography and adds no row height — the button sits
+   exactly where the PN text sat. */
 .pnb-pnbtn {
   display: inline-flex;
   align-items: baseline;

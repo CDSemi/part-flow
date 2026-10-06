@@ -51,6 +51,7 @@ function row(
   return {
     pn,
     hasMaster: true,
+    name: null,
     barcodeValue: `PF:PN:${pn}`,
     hotRank,
     demands: [

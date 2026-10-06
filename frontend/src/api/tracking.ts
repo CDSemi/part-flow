@@ -124,6 +124,9 @@ export interface TrackingRow {
   /** The optional PartNumber master exists; the canonical PN and its
    * history render normally either way (PROJECT_PROFILE §8.1). */
   hasMaster: boolean;
+  /** The saved Name / Description, or null (no saved details or no
+   * name saved). */
+  name: string | null;
   barcodeValue: string;
   hotRank: number | null;
   demands: TrackingDemand[];
@@ -312,10 +315,22 @@ export interface TrackingAllocationPage {
   nextBeforeAllocationId: number | null;
 }
 
+/** The saved Part Number details shown in the PN detail (Phase 13). */
+export interface TrackingMaster {
+  partNumber: string;
+  createdAt: string;
+  updatedAt: string;
+  name: string | null;
+  currentRevision: string | null;
+  erpId: string | null;
+  /** Image cache version; null = the default Part Number image. */
+  imageUpdatedAt: string | null;
+}
+
 export interface TrackingDetail {
   pn: string;
-  /** The optional master record (existence only until Phase 13). */
-  master: { partNumber: string; createdAt: string } | null;
+  /** The saved Part Number details, or null when none exist. */
+  master: TrackingMaster | null;
   barcodeValue: string;
   status: TrackingStatus;
   demands: TrackingDetailDemand[];
@@ -379,6 +394,7 @@ interface DistributionWire {
 interface RowWire {
   part_number: string;
   has_master: boolean;
+  name: string | null;
   barcode_value: string;
   hot_rank: number | null;
   demands: DemandWire[];
@@ -523,7 +539,15 @@ interface AllocationPageWire {
 
 interface DetailWire {
   part_number: string;
-  master: { part_number: string; created_at: string } | null;
+  master: {
+    part_number: string;
+    created_at: string;
+    updated_at: string;
+    name: string | null;
+    current_revision: string | null;
+    erp_id: string | null;
+    image_updated_at: string | null;
+  } | null;
   barcode_value: string;
   status: TrackingStatus;
   demands: DetailDemandWire[];
@@ -597,6 +621,7 @@ function toRow(wire: RowWire): TrackingRow {
   return {
     pn: wire.part_number,
     hasMaster: wire.has_master,
+    name: wire.name,
     barcodeValue: wire.barcode_value,
     hotRank: wire.hot_rank,
     demands: wire.demands.map(toDemand),
@@ -764,6 +789,11 @@ function toDetail(wire: DetailWire): TrackingDetail {
       ? {
           partNumber: wire.master.part_number,
           createdAt: wire.master.created_at,
+          updatedAt: wire.master.updated_at,
+          name: wire.master.name,
+          currentRevision: wire.master.current_revision,
+          erpId: wire.master.erp_id,
+          imageUpdatedAt: wire.master.image_updated_at,
         }
       : null,
     barcodeValue: wire.barcode_value,

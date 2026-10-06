@@ -7,8 +7,8 @@ import { resolvePartNumber } from '../../api/part-numbers';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
-import { PnLabelButton } from '../../components/PnLabelButton';
-import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
+import { EditPartNumberDialog } from '../../components/EditPartNumberDialog';
+import { PnEditButton } from '../../components/PnEditButton';
 import { todayIso } from '../dates';
 import type { RequestType } from '../view-models';
 import { AddPartDialog } from './AddPartDialog';
@@ -77,9 +77,10 @@ export function NewWorkOrderDialog({
   const [confirmMissing, setConfirmMissing] =
     useState<MissingDemandInfo | null>(null);
   const [addPartOpen, setAddPartOpen] = useState(false);
-  // The printable PN barcode label of one entered line (§10 — the
-  // barcode derives from the PN identity itself).
-  const [labelPn, setLabelPn] = useState<string | null>(null);
+  // The PN whose shared `Edit Part Number` dialog is open (§11.2 — the
+  // printable label is reachable inside it; its writes concern only the
+  // Part Number details, never this draft).
+  const [editPn, setEditPn] = useState<string | null>(null);
   // One in-flight server interaction at a time (duplicate resolution
   // or the save itself); a failed write keeps the draft and shows the
   // server's message here.
@@ -420,11 +421,11 @@ export function NewWorkOrderDialog({
                       >
                         {/* Lines always carry a PN here: they come from
                             the Add Part flow or a valid PN barcode. The PN
-                            itself opens its printable label. */}
+                            itself opens `Edit Part Number`. */}
                         {line.pn ? (
-                          <PnLabelButton
+                          <PnEditButton
                             pn={line.pn}
-                            onOpen={() => setLabelPn(line.pn)}
+                            onOpen={() => setEditPn(line.pn)}
                           />
                         ) : (
                           <div className="pn">{line.pn}</div>
@@ -585,8 +586,14 @@ export function NewWorkOrderDialog({
         />
       ) : null}
 
-      {labelPn !== null ? (
-        <PnBarcodeLabelDialog pn={labelPn} onClose={() => setLabelPn(null)} />
+      {editPn !== null ? (
+        // New Work Order renders no `new PN` marker, so the dialog's
+        // result needs no follow-up here.
+        <EditPartNumberDialog
+          pn={editPn}
+          writeBlocked={writeBlocked}
+          onClose={() => setEditPn(null)}
+        />
       ) : null}
 
       {confirmMissing ? (

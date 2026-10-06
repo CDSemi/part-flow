@@ -1,5 +1,5 @@
 // Real production views (Phase 3.5 + Phase 4 + Phase 5 + Phase 11 +
-// Phase 12).
+// Phase 12 + Phase 13).
 //
 // The views listed here read and write real server state through the
 // /api surface and ship in EVERY build — development and production
@@ -57,6 +57,11 @@ export const REAL_VIEWS: Partial<
   priority: lazy(() =>
     import('../views/priority/PriorityView').then((m) => ({
       default: m.PriorityView,
+    })),
+  ),
+  'part-numbers': lazy(() =>
+    import('../views/part-numbers/PartNumbersView').then((m) => ({
+      default: m.PartNumbersView,
     })),
   ),
 };

@@ -108,6 +108,7 @@ from sqlalchemy.orm import Session
 from app.application.allocations import DemandContext, open_demand_context
 from app.application.errors import ConflictError, NotFoundError
 from app.application.machines import areas_with_machines
+from app.application.part_numbers import masters_by_part_number
 from app.application.projections import (
     EffectivePosition,
     effective_positions,
@@ -121,6 +122,7 @@ from app.infrastructure.models import (
     Department,
     Machine,
     Operation,
+    PartNumber,
     QuantityFlow,
 )
 
@@ -183,6 +185,10 @@ class BoardRow(NamedTuple):
     # defines the row's Hot rank, due date and received date. Empty
     # when only history explains the quantity.
     demands: list[BoardDemand]
+    # The optional PN master (Phase 13): its Name / Description and
+    # revision are the row's secondary line. None without a master —
+    # production never depends on it, and it never affects the order.
+    master: PartNumber | None
 
     @property
     def total_quantity(self) -> int:
@@ -441,6 +447,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
 
     part_numbers = set(groups) | set(stocked_by_pn)
     demands = open_demand_context(session, part_numbers)
+    masters = masters_by_part_number(session, part_numbers)
     zone = ZoneInfo(site_timezone())
 
     rows: list[BoardRow] = []
@@ -481,6 +488,7 @@ def production_board(session: Session, department_id: int | None) -> ProductionB
                 stocked_quantity=stocked_by_pn.get(pn, 0),
                 scrapped_quantity=scrapped_by_pn.get(pn, 0),
                 demands=context,
+                master=masters.get(pn),
             )
         )
     rows.sort(key=board_row_sort_key)

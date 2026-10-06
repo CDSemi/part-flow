@@ -86,26 +86,26 @@ test('development builds expose the remaining mock views through the dev-only re
   // not-connected state for these routes instead. Machines and
   // Administration left this registry with Phase 3.5, Work Orders with
   // Phase 4, the Scan Station with Phase 5, the Production Board, the
-  // Area Board and PN Tracking with Phase 11 and Priority Management
-  // with Phase 12 — they are real views now.
+  // Area Board and PN Tracking with Phase 11, Priority Management
+  // with Phase 12 and Management → Part Numbers with Phase 13 — they
+  // are real views now.
   expect(DEV_MOCK_VIEWS).not.toBeNull();
-  expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(
-    ['part-numbers', 'planned-routes'].sort(),
-  );
+  expect(Object.keys(DEV_MOCK_VIEWS!).sort()).toEqual(['planned-routes']);
 });
 
 test('the real views ship in every build', () => {
   // Management → Machines, Administration (Phase 3.5), Management →
   // Work Orders (Phase 4), the Scan Station (Phase 5), the Production
-  // Board, Area Board and PN Tracking (Phase 11) and Management →
-  // Priority (Phase 12) read real server state — they live in the
-  // always-available registry, never behind the development-only
-  // boundary.
+  // Board, Area Board and PN Tracking (Phase 11), Management →
+  // Priority (Phase 12) and Management → Part Numbers (Phase 13) read
+  // real server state — they live in the always-available registry,
+  // never behind the development-only boundary.
   expect(Object.keys(REAL_VIEWS).sort()).toEqual(
     [
       'administration',
       'area-board',
       'machines',
+      'part-numbers',
       'priority',
       'production-board',
       'scan-station',
@@ -272,6 +272,12 @@ test('no production module reaches src/mocks/', () => {
   // src/mocks/.
   expect(graph).toContain(join('views', 'priority', 'PriorityView.tsx'));
   expect(graph).toContain(join('api', 'hot-list.ts'));
+  // Management → Part Numbers is a REAL view since Phase 13 on
+  // `/api/part-numbers`, with the shared `Edit Part Number` dialog —
+  // neither imports anything from src/mocks/ (the long-data preview
+  // sits behind the DEV boundary).
+  expect(graph).toContain(join('views', 'part-numbers', 'PartNumbersView.tsx'));
+  expect(graph).toContain(join('components', 'EditPartNumberDialog.tsx'));
   // So are the Production Board, the Area Board and PN Tracking —
   // REAL views since Phase 11: they ship in every build on
   // `/api/production-board`, `/api/area-board` and `/api/tracking` and

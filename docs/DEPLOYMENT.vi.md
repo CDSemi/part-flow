@@ -122,7 +122,7 @@ PartFlow chỉ được vào pilot/production khi toàn bộ gate sau đã đạ
   mount;
 - reverse proxy chịu trách nhiệm TLS, SPA fallback, request limit và route
   `/api` — proxy phải nhận request body tối thiểu 3 MiB trên các route upload ảnh
-  (`PUT /api/workers/{id}/avatar`, về sau là route ảnh Part Number và User), vì
+  (`PUT /api/workers/{id}/avatar`, `PUT /api/part-numbers/image?number=…`, về sau là route ảnh User), vì
   application nhận ảnh đến 2 MiB; mã 413 do proxy tự sinh không có JSON `detail`,
   nên UI chỉ có thể hiện lỗi chung;
 - configuration bắt buộc được validate lúc startup và secret không có default

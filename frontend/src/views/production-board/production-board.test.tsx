@@ -116,6 +116,21 @@ function demand(
   };
 }
 
+/** The saved Part Number details of a board row (or null = none). */
+type BoardMasterWire = {
+  name: string | null;
+  current_revision: string | null;
+} | null;
+
+function master(
+  name: string | null,
+  current_revision: string | null,
+): BoardMasterWire {
+  return { name, current_revision };
+}
+
+const NO_MASTER: BoardMasterWire = null;
+
 // Rows in the SERVER's canonical order — exactly the canonical demand
 // ordering of each row's defining OPEN demand (Hot rank → earliest due
 // date → undated by received date → demand id), stocked quantity being
@@ -142,6 +157,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 1,
     total_quantity: 10,
+    master: master('BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125', 'C'),
     demands: [
       demand(7001, '007001', ['18112'], 10, {
         dueDate: isoDateIn(2),
@@ -162,6 +178,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 2,
     total_quantity: 20,
+    master: master('PLATE, BASE', null),
     demands: [
       demand(7005, '007005', ['18031'], 20, {
         dueDate: isoDateIn(-6),
@@ -179,6 +196,7 @@ const BOARD_ROWS = [
     stocked_quantity: 50,
     scrapped_quantity: 0,
     total_quantity: 50,
+    master: master(null, 'B'),
     demands: [
       // Entirely stocked, partially allocated: the demand is still
       // open, so the row stays — and sorts by its (overdue) due date.
@@ -203,6 +221,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 0,
     total_quantity: 12,
+    master: NO_MASTER,
     demands: [demand(7003, '007003', ['18190'], 12, { dueDate: isoDateIn(9) })],
   },
   {
@@ -217,6 +236,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 0,
     total_quantity: 12,
+    master: NO_MASTER,
     demands: [demand(7007, '007007', ['18377'], 12, { dueDate: isoDateIn(9) })],
   },
   {
@@ -234,6 +254,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 0,
     total_quantity: 6,
+    master: NO_MASTER,
     demands: [
       demand(7002, '007002', ['18102'], 6, { dueDate: isoDateIn(16) }),
       // Internal MODIFY demand without an external WO Number → `—`.
@@ -252,6 +273,7 @@ const BOARD_ROWS = [
     stocked_quantity: 0,
     scrapped_quantity: 0,
     total_quantity: 4,
+    master: NO_MASTER,
     demands: [demand(7011, '007011', ['18520'], 4)],
   },
 ];
@@ -382,6 +404,21 @@ test('the PN cell holds only the PN (15ch intrinsic minimum) and description', a
   const part = cell?.querySelector('.part');
   expect(part?.textContent).toBe('2027-60-8114-00');
   expect(cell?.textContent).not.toContain('🔥');
+});
+
+test('the PN secondary line shows the saved name and revision, absent when neither is saved', async () => {
+  await renderBoard();
+
+  const pname = (pn: string) =>
+    rowByPn(pn)?.querySelector('td.pn .pname')?.textContent ?? null;
+  // `{name} · rev {revision}` from the saved Part Number details.
+  expect(pname('2027-60-8114-00')).toBe(
+    'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125 · rev C',
+  );
+  expect(pname('142-260')).toBe('PLATE, BASE');
+  expect(pname('309-127')).toBe('rev B');
+  // No saved details: no secondary line at all.
+  expect(pname('118-052')).toBeNull();
 });
 
 test('a longer PN renders fully in the PN cell without ellipsis markup', async () => {
@@ -585,6 +622,7 @@ test('every Hot rank carries a row tint — ranks 1 and 2 keep their stronger on
     stocked_quantity: 0,
     scrapped_quantity: 0,
     total_quantity: 2,
+    master: NO_MASTER,
     demands: [
       demand(9000 + (rank ?? 9), '00900' + (rank ?? 9), ['19001'], 2, {
         dueDate: due,

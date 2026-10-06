@@ -1,67 +1,109 @@
 import './part-numbers.css';
 
-import { useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
+import { listPartNumberPage, partNumberImageUrl } from '../../api/part-numbers';
+import type { PartNumberMaster } from '../../api/part-numbers';
+import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
-import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { DevNotice } from '../../components/DevNotice';
-import { ModalDialog } from '../../components/ModalDialog';
-import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
+import { EditPartNumberDialog } from '../../components/EditPartNumberDialog';
 import { PnImage } from '../../components/PnImage';
-import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
   EmptyState,
   ErrorState,
   LoadingState,
 } from '../../components/view-states';
-import { MOCK_PART_NUMBERS } from '../../mocks/part-numbers';
-import { normalizePartNumber, pnBarcode } from '../scan-station/barcode';
-import type { MockPartNumberMaster } from '../view-models';
+import { pnBarcode } from '../scan-station/barcode';
 
-// Management → Part Numbers: the single place for PartNumber master
-// metadata (GUI_DESIGN §14; PROJECT_PROFILE §8.1, §20, §21). Access is
+// Management → Part Numbers: the single place for saved Part Number
+// details (GUI_DESIGN §14; PROJECT_PROFILE §8.1, §20, §21) — a REAL view
+// on the `/api/part-numbers` surface since Phase 13. Access is
 // permission-based like Machines and Planned Routes. The canonical PN
 // string itself is the production identity — records here are optional
 // current metadata only (image, name/description, informational
 // revision, ERP mapping) and never gate production use: deleting a
 // record touches nothing but the metadata, and every surface keeps
 // showing the canonical PN.
+//
+// The list is a server-side bounded search (the PN Tracking pattern):
+// the first page, `Show more` up to the cap, and an explicit line when
+// more records exist than are listed. The list reloads only after the
+// shared `Edit Part Number` dialog closes having written something, so
+// a failing refresh never unmounts an open dialog.
+
+/** First page size and the most rows the list ever shows. */
+const PART_NUMBERS_PAGE_SIZE = 100;
+const PART_NUMBERS_MAX_ROWS = 200;
+const SEARCH_DEBOUNCE_MS = 250;
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; pn: string };
 
-// Long-data preview records (?state=long): many records plus one with
-// an over-long PN, name/description and metadata, to exercise
-// dense-table and truncation behavior.
-const LONG_PREVIEW_PART_NUMBERS: MockPartNumberMaster[] = [
-  ...Array.from({ length: 15 }, (_, i): MockPartNumberMaster => {
-    const n = i + 1;
-    return {
-      pn: `0114-60-${String(100 + n).padStart(4, '0')}-00`,
-      name: `LONG PREVIEW PART ${n} — AUTO-GENERATED SAMPLE FOR LAYOUT TESTING ONLY`,
-      revision: String.fromCharCode(65 + (n % 6)),
-      erpId: `ERP-PN-LONG-${String(90000 + n)}`,
-    };
-  }),
-  {
-    pn: '0118-40-0022-07-0455-88-REV-C-SUPPLEMENTAL-LONG-PREVIEW',
-    name: 'SUPPLEMENTAL LONG-PREVIEW PART NUMBER, MULTI-STAGE HOUSING ASSEMBLY WITH OUTSIDE PLATING AND SECONDARY DEBURR OPERATION — OVER-LONG NAME FOR LAYOUT TESTING',
-    revision: 'REV-SUPPLEMENTAL-LONG',
-    erpId: 'ERP-PN-40412-SUPPLEMENTAL-AMENDMENT-2026-REV-B-LONG-PREVIEW',
-  },
-];
+// Long-data preview records (?state=long, development builds only):
+// many records plus one with an over-long PN, name/description and
+// metadata, to exercise dense-table and truncation behavior. Never part
+// of the server data — added to the rendered list only.
+const LONG_PREVIEW_PART_NUMBERS: PartNumberMaster[] | null = import.meta.env.DEV
+  ? [
+      ...Array.from({ length: 15 }, (_, i): PartNumberMaster => {
+        const n = i + 1;
+        const pn = `0114-60-${String(100 + n).padStart(4, '0')}-00`;
+        return {
+          partNumber: pn,
+          barcodeValue: pnBarcode(pn),
+          name: `LONG PREVIEW PART ${n} — AUTO-GENERATED SAMPLE FOR LAYOUT TESTING ONLY`,
+          currentRevision: String.fromCharCode(65 + (n % 6)),
+          erpId: `ERP-PN-LONG-${String(90000 + n)}`,
+          imageUpdatedAt: null,
+        };
+      }),
+      {
+        partNumber: '0118-40-0022-07-0455-88-REV-C-SUPPLEMENTAL-LONG-PREVIEW',
+        barcodeValue: pnBarcode(
+          '0118-40-0022-07-0455-88-REV-C-SUPPLEMENTAL-LONG-PREVIEW',
+        ),
+        name: 'SUPPLEMENTAL LONG-PREVIEW PART NUMBER, MULTI-STAGE HOUSING ASSEMBLY WITH OUTSIDE PLATING AND SECONDARY DEBURR OPERATION — OVER-LONG NAME FOR LAYOUT TESTING',
+        currentRevision: 'REV-SUPPLEMENTAL-LONG',
+        erpId: 'ERP-PN-40412-SUPPLEMENTAL-AMENDMENT-2026-REV-B-LONG-PREVIEW',
+        imageUpdatedAt: null,
+      },
+    ]
+  : null;
 
 export function PartNumbersView() {
   const preview = getViewStatePreview();
   const { status } = useConnectivity();
   const writeBlocked = status !== 'connected';
-  const [records, setRecords] =
-    useState<MockPartNumberMaster[]>(MOCK_PART_NUMBERS);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [limit, setLimit] = useState(PART_NUMBERS_PAGE_SIZE);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
 
-  if (preview === 'loading') {
+  // The search field reaches the server debounced; a new search starts
+  // again from the first page. An unchanged search arms no timer, so it
+  // never resets a `Show more` limit (on mount, or after typing back to
+  // the applied search).
+  useEffect(() => {
+    if (search === debouncedSearch) return;
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(search);
+      setLimit(PART_NUMBERS_PAGE_SIZE);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [search, debouncedSearch]);
+
+  const loadPage = useCallback(
+    () => listPartNumberPage(debouncedSearch, limit),
+    [debouncedSearch, limit],
+  );
+  const pageData = useApiData(loadPage);
+
+  const closeDialog = (result: { wroteAny: boolean }) => {
+    setDialog(null);
+    if (result.wroteAny) pageData.reload();
+  };
+
+  if (preview === 'loading' || pageData.state.status === 'loading') {
     return (
       <section className="pnm" aria-label="Part Numbers">
         <LoadingState label="Loading Part Numbers" />
@@ -78,22 +120,26 @@ export function PartNumbersView() {
       </section>
     );
   }
+  if (pageData.state.status === 'error') {
+    return (
+      <section className="pnm" aria-label="Part Numbers">
+        <ErrorState
+          message="Part Number data could not be loaded."
+          detail={pageData.state.message}
+          onRetry={pageData.reload}
+        />
+      </section>
+    );
+  }
 
-  const query = search.trim().toLowerCase();
-  const matches = (record: MockPartNumberMaster): boolean =>
-    !query ||
-    [record.pn, record.name ?? '', record.revision ?? '', record.erpId ?? '']
-      .join(' ')
-      .toLowerCase()
-      .includes(query);
-  const baseRecords =
-    preview === 'long' ? [...records, ...LONG_PREVIEW_PART_NUMBERS] : records;
-  const visible = preview === 'empty' ? [] : baseRecords.filter(matches);
-
-  const editRecord =
-    dialog?.kind === 'edit'
-      ? records.find((record) => record.pn === dialog.pn)
-      : undefined;
+  const page = pageData.state.data;
+  const longRows =
+    preview === 'long' && LONG_PREVIEW_PART_NUMBERS
+      ? LONG_PREVIEW_PART_NUMBERS
+      : [];
+  const rows = preview === 'empty' ? [] : [...page.rows, ...longRows];
+  const total = page.total + longRows.length;
+  const searched = debouncedSearch.trim();
 
   return (
     <section className="pnm" aria-label="Part Numbers">
@@ -102,10 +148,6 @@ export function PartNumbersView() {
         Manage optional Part Number details, images, ERP IDs, and barcode
         labels.
       </p>
-      <DevNotice>
-        Development preview — Part Number records shown are sample data and
-        changes affect only this preview.
-      </DevNotice>
       <div className="pnm-toolbar">
         <input
           type="search"
@@ -124,461 +166,94 @@ export function PartNumbersView() {
         </button>
       </div>
 
-      {visible.length === 0 ? (
+      {rows.length === 0 ? (
         <EmptyState
           message={
-            query
-              ? `No saved Part Number details match “${search.trim()}”.`
+            searched
+              ? `No saved Part Number details match “${searched}”.`
               : 'No Part Number details have been added yet.'
           }
         />
       ) : (
-        <table className="pnm-table">
-          <thead>
-            <tr>
-              <th className="pnm-imgcol">Image</th>
-              <th>Part Number</th>
-              <th>Name / Description</th>
-              <th>Revision</th>
-              <th>ERP ID</th>
-              <th>Barcode</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((record) => (
-              // The COMPLETE row opens Edit Part Number (the Machines/
-              // Tracking whole-row pattern): the PN-cell button is the
-              // keyboard and screen-reader entry point — its activation
-              // bubbles to this row handler.
-              <tr
-                key={record.pn}
-                className="selrow"
-                onClick={() => setDialog({ kind: 'edit', pn: record.pn })}
-              >
-                <td className="pnm-imgcol">
-                  <PnImage pn={record.pn} image={record.image} size="sm" />
-                </td>
-                <td>
-                  <button className="rowbtn" aria-label={`Edit ${record.pn}`}>
-                    <span className="pnm-pn">{record.pn}</span>
-                  </button>
-                </td>
-                <td className="pnm-name">{record.name || '—'}</td>
-                <td className="pnm-meta">{record.revision ?? '—'}</td>
-                <td className="pnm-meta mono">{record.erpId ?? '—'}</td>
-                <td>
-                  <span className="barcodeval">{pnBarcode(record.pn)}</span>
-                </td>
+        <>
+          <table className="pnm-table">
+            <thead>
+              <tr>
+                <th className="pnm-imgcol">Image</th>
+                <th>Part Number</th>
+                <th>Name / Description</th>
+                <th>Revision</th>
+                <th>ERP ID</th>
+                <th>Barcode</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((record) => (
+                // The COMPLETE row opens Edit Part Number (the Machines/
+                // Tracking whole-row pattern): the PN-cell button is the
+                // keyboard and screen-reader entry point — its activation
+                // bubbles to this row handler.
+                <tr
+                  key={record.partNumber}
+                  className="selrow"
+                  onClick={() =>
+                    setDialog({ kind: 'edit', pn: record.partNumber })
+                  }
+                >
+                  <td className="pnm-imgcol">
+                    <PnImage
+                      pn={record.partNumber}
+                      image={partNumberImageUrl(record) ?? undefined}
+                      size="sm"
+                    />
+                  </td>
+                  <td>
+                    <button
+                      className="rowbtn"
+                      aria-label={`Edit ${record.partNumber}`}
+                    >
+                      <span className="pnm-pn">{record.partNumber}</span>
+                    </button>
+                  </td>
+                  <td className="pnm-name">{record.name ?? '—'}</td>
+                  <td className="pnm-meta">{record.currentRevision ?? '—'}</td>
+                  <td className="pnm-meta mono">{record.erpId ?? '—'}</td>
+                  <td>
+                    <span className="barcodeval">
+                      {pnBarcode(record.partNumber)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="pnm-paging" role="status">
+            <span>
+              Showing <b>{rows.length}</b> of <b>{total}</b> Part Numbers
+            </span>
+            {page.hasMore && limit < PART_NUMBERS_MAX_ROWS ? (
+              <button
+                className="btn ghost"
+                onClick={() => setLimit(PART_NUMBERS_MAX_ROWS)}
+              >
+                Show more
+              </button>
+            ) : page.hasMore ? (
+              <span>
+                Only the first {PART_NUMBERS_MAX_ROWS} are listed — narrow the
+                search to find the rest.
+              </span>
+            ) : null}
+          </div>
+        </>
       )}
-      {dialog?.kind === 'new' ? (
-        <PartNumberEditDialog
-          records={records}
+      {dialog ? (
+        <EditPartNumberDialog
+          pn={dialog.kind === 'edit' ? dialog.pn : undefined}
           writeBlocked={writeBlocked}
-          onCancel={() => setDialog(null)}
-          onSave={(record) => {
-            setRecords((current) => [...current, record]);
-            setDialog(null);
-          }}
-        />
-      ) : null}
-      {dialog?.kind === 'edit' && editRecord ? (
-        <PartNumberEditDialog
-          records={records}
-          record={editRecord}
-          writeBlocked={writeBlocked}
-          onCancel={() => setDialog(null)}
-          onSave={(record) => {
-            setRecords((current) =>
-              current.map((r) => (r.pn === record.pn ? record : r)),
-            );
-            setDialog(null);
-          }}
-          onDelete={() => {
-            setRecords((current) =>
-              current.filter((r) => r.pn !== editRecord.pn),
-            );
-            setDialog(null);
-          }}
+          onClose={closeDialog}
         />
       ) : null}
     </section>
-  );
-}
-
-function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
-  return (
-    <label>
-      <span>{label}</span>
-      {children}
-    </label>
-  );
-}
-
-/**
- * Read-only Part Number identity header at the top of the Edit dialog
- * (the Machines §12.3 idiom): the canonical PN and the barcode derived
- * from it — one value in the PF:PN: namespace, never an independently
- * editable field — plus the entry to the printable barcode label.
- */
-function IdentityHeader({
-  pn,
-  onOpenLabel,
-}: {
-  pn: string;
-  onOpenLabel: () => void;
-}) {
-  return (
-    <div className="pnm-idhead">
-      <div className="idcol">
-        <span className="idlabel">Part Number</span>
-        <span className="idvalue tag">{pn}</span>
-      </div>
-      <div className="idcol grow">
-        <span className="idlabel">Barcode</span>
-        <span className="idvalue barcodeval">{pnBarcode(pn)}</span>
-      </div>
-      <button type="button" className="pnm-labelbtn" onClick={onOpenLabel}>
-        Barcode label…
-      </button>
-    </div>
-  );
-}
-
-/**
- * Add or edit one PartNumber master record. The PN is entered once at
- * creation (canonicalized like every PN entry path: trimmed, internal
- * whitespace rejected — never silently removed — and uppercased) and
- * is never edited afterwards — the canonical PN is the identity and
- * the barcode always derives from it. All metadata stays optional.
- * Editing hosts the delete section (the Machines Danger-Zone
- * presentation, user-facing title `Delete Part Number Details`):
- * `Delete details…` hard-deletes only this metadata record behind a
- * plain destructive confirmation.
- */
-function PartNumberEditDialog({
-  records,
-  record,
-  writeBlocked = false,
-  onCancel,
-  onSave,
-  onDelete,
-}: {
-  records: MockPartNumberMaster[];
-  record?: MockPartNumberMaster;
-  /** Disables Save/Delete while the backend is unreachable (Management
-   * → Part Numbers offline write-block). */
-  writeBlocked?: boolean;
-  onCancel: () => void;
-  onSave: (record: MockPartNumberMaster) => void;
-  onDelete?: () => void;
-}) {
-  const initial = {
-    pnInput: record?.pn ?? '',
-    name: record?.name ?? '',
-    revision: record?.revision ?? '',
-    erpId: record?.erpId ?? '',
-    image: record?.image,
-  };
-  const [pnInput, setPnInput] = useState(initial.pnInput);
-  const [name, setName] = useState(initial.name);
-  const [revision, setRevision] = useState(initial.revision);
-  const [erpId, setErpId] = useState(initial.erpId);
-  const [image, setImage] = useState<string | undefined>(initial.image);
-  const [pnAttempted, setPnAttempted] = useState(false);
-  const [labelOpen, setLabelOpen] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(false);
-  const [leaveConfirm, setLeaveConfirm] = useState(false);
-
-  // A NEW record starts with the PN focused — the one required field.
-  // Edit keeps the dialog-root focus (the whole record is equally
-  // editable).
-  const pnInputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (!record) pnInputRef.current?.focus();
-    // Initial focus only — `record` never changes while open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const dirty =
-    pnInput !== initial.pnInput ||
-    name !== initial.name ||
-    revision !== initial.revision ||
-    erpId !== initial.erpId ||
-    image !== initial.image;
-
-  // PN entry feedback (new record only): canonicalization mirrors
-  // every other PN entry path — trimmed, internal whitespace rejected
-  // with an inline explanation, uppercased. One master record may
-  // exist per canonical PN.
-  const trimmed = pnInput.trim();
-  const canonical = normalizePartNumber(pnInput);
-  const duplicate =
-    !record && canonical !== null
-      ? records.some((r) => r.pn === canonical)
-      : false;
-  const pnFeedback = record ? null : trimmed && !canonical ? (
-    <div className="err" role="alert">
-      Part Number cannot contain spaces or other whitespace.
-    </div>
-  ) : duplicate ? (
-    <div className="err" role="alert">
-      Part Number “{canonical}” already has saved details.
-    </div>
-  ) : !trimmed && pnAttempted ? (
-    <div className="err" role="alert">
-      A Part Number is required.
-    </div>
-  ) : canonical ? (
-    <div className="pnm-fieldok">
-      ✓ Will be saved as <b>{canonical}</b> · Barcode{' '}
-      <span className="barcodeval">{pnBarcode(canonical)}</span>
-    </div>
-  ) : null;
-
-  const build = (): MockPartNumberMaster | null => {
-    const pn = record?.pn ?? canonical;
-    if (!pn || duplicate) return null;
-    return {
-      ...(record ?? {}),
-      pn,
-      name: name.trim() || undefined,
-      revision: revision.trim() || undefined,
-      erpId: erpId.trim() || undefined,
-      image,
-    };
-  };
-
-  const save = () => {
-    if (!record && !canonical) {
-      setPnAttempted(true);
-      return;
-    }
-    const built = build();
-    if (!built) return; // covered by the field feedback
-    onSave(built);
-  };
-
-  /** Close request: unsaved input asks for an explicit decision. */
-  const requestClose = () => {
-    if (dirty) {
-      setLeaveConfirm(true);
-      return;
-    }
-    onCancel();
-  };
-
-  const uploadFile = (file: File | undefined) => {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') setImage(reader.result);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const built = build();
-  const displayPn = record?.pn ?? canonical ?? undefined;
-
-  return (
-    <ModalDialog
-      label={record ? 'Edit Part Number' : 'New Part Number'}
-      onClose={requestClose}
-      size="wide"
-    >
-      <div className="pnm-dlghead">
-        <h3>{record ? 'Edit Part Number' : 'New Part Number'}</h3>
-        {dirty ? <span className="pnm-dirty">● Unsaved changes</span> : null}
-      </div>
-      {record ? (
-        <IdentityHeader pn={record.pn} onOpenLabel={() => setLabelOpen(true)} />
-      ) : null}
-      <div className="pnm-form">
-        {!record ? (
-          <div className="pnm-fieldcol">
-            <Field label="Part Number">
-              <input
-                ref={pnInputRef}
-                className="field mono"
-                value={pnInput}
-                onChange={(e) => setPnInput(e.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="e.g. 2027-60-8114-00"
-              />
-            </Field>
-            {pnFeedback}
-          </div>
-        ) : null}
-        <Field
-          label={
-            <>
-              Name / Description{' '}
-              <span className="field-optional">(optional)</span>
-            </>
-          }
-        >
-          <input
-            className="field"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. BRACKET, MOUNTING SS 304, 2.50 X 4.00"
-          />
-        </Field>
-        <div className="pnm-grid2">
-          <Field
-            label={
-              <>
-                Revision <span className="field-optional">(optional)</span>
-              </>
-            }
-          >
-            <input
-              className="field mono"
-              value={revision}
-              onChange={(e) => setRevision(e.target.value)}
-              placeholder="e.g. C"
-            />
-          </Field>
-          <Field
-            label={
-              <>
-                ERP ID <span className="field-optional">(optional)</span>
-              </>
-            }
-          >
-            <input
-              className="field mono"
-              value={erpId}
-              onChange={(e) => setErpId(e.target.value)}
-              placeholder="e.g. ERP-PN-40412"
-            />
-          </Field>
-        </div>
-        <div className="pnm-imgblock">
-          <span className="pnm-imglabel">
-            Image <span className="field-optional">(optional)</span>
-          </span>
-          <div className="pnm-imgrow">
-            <PnImage pn={displayPn ?? '—'} image={image} />
-            <div className="pnm-imgactions">
-              <label className="pnm-upload">
-                {image ? 'Change image…' : 'Upload image…'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  aria-label={image ? 'Change image' : 'Upload image'}
-                  onChange={(e) => {
-                    uploadFile(e.target.files?.[0]);
-                    e.target.value = '';
-                  }}
-                />
-              </label>
-              {image ? (
-                <button
-                  type="button"
-                  className="pnm-imgremove"
-                  onClick={() => setImage(undefined)}
-                >
-                  Remove image
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <p className="pnm-imghelp">
-            If no image is uploaded, the default Part Number image is shown.
-          </p>
-        </div>
-      </div>
-      <div className="row">
-        <button className="bigbtn ghost" onClick={requestClose}>
-          Cancel (Esc)
-        </button>
-        <button
-          className="bigbtn primary"
-          disabled={writeBlocked}
-          onClick={save}
-        >
-          {record ? 'Save changes' : 'Add Part Number'}
-        </button>
-      </div>
-      {record && onDelete ? (
-        <div className="pnm-dangerzone">
-          <div className="dz-title">Delete Part Number Details</div>
-          <div className="dz-body">
-            <p className="dz-live">
-              This removes the saved image, description, revision, and ERP ID
-              for <b>{record.pn}</b>. Production tracking and Work Order history
-              are not affected.
-            </p>
-            <button
-              className="dz-delete"
-              disabled={writeBlocked}
-              onClick={() => setDeleteConfirm(true)}
-            >
-              Delete details…
-            </button>
-          </div>
-        </div>
-      ) : null}
-      {labelOpen && record ? (
-        <PnBarcodeLabelDialog
-          pn={record.pn}
-          onClose={() => setLabelOpen(false)}
-        />
-      ) : null}
-      {deleteConfirm && record ? (
-        // The final confirmation is the strongest warning in the flow:
-        // the shared attention confirmation variant in the danger tone
-        // (the Machines final-question presentation, §12.4) — still one
-        // plain destructive confirmation, never a typed gate or an
-        // extra step. The delete section above keeps its lighter
-        // danger-zone treatment.
-        <ConfirmDialog
-          title="Delete Part Number details?"
-          confirmLabel="Delete details"
-          cancelLabel="Cancel (Esc)"
-          tone="danger"
-          confirmDisabled={writeBlocked}
-          onCancel={() => setDeleteConfirm(false)}
-          onConfirm={() => onDelete?.()}
-        >
-          This permanently removes the saved image, description, revision, and
-          ERP ID for <b>{record.pn}</b>
-          {dirty ? ' (unsaved edits are discarded with it)' : ''}. The Part
-          Number and its production history remain available.
-        </ConfirmDialog>
-      ) : null}
-      {leaveConfirm && record ? (
-        <UnsavedChoiceDialog
-          title="Unsaved changes"
-          saveLabel="Save changes"
-          discardLabel="Discard changes"
-          saveDisabled={writeBlocked}
-          onCancel={() => setLeaveConfirm(false)}
-          onSave={() => {
-            if (!built) return;
-            onSave(built);
-          }}
-          onDiscard={onCancel}
-        >
-          You have unsaved changes to <b>{record.pn}</b>.
-        </UnsavedChoiceDialog>
-      ) : null}
-      {leaveConfirm && !record ? (
-        <ConfirmDialog
-          title="Discard new Part Number?"
-          confirmLabel="Discard input"
-          cancelLabel="Keep editing"
-          onCancel={() => setLeaveConfirm(false)}
-          onConfirm={onCancel}
-        >
-          Your entered information will not be saved.
-        </ConfirmDialog>
-      ) : null}
-    </ModalDialog>
   );
 }

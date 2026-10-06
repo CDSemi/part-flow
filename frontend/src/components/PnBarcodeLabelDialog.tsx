@@ -8,8 +8,9 @@ import { ModalDialog } from './ModalDialog';
  * The ONE printable PN barcode label: the Code 128 barcode of the
  * scanned value (`PF:PN:<canonical-PN>`), the canonical PN beneath it,
  * and the full value as the quiet verification line. Every surface that
- * offers a PN label renders THIS dialog (Management → Part Numbers, New
- * Work Order, Work Order Details, Add Part) — no per-surface copy and
+ * offers a PN label renders THIS dialog (the shared `Edit Part Number`
+ * dialog of Management → Part Numbers and the Work Orders demand lines,
+ * and Add Part) — no per-surface copy and
  * no second barcode renderer exists; the bars come from the shared
  * `Code128Svg`, which owns the ONE encoder.
  *

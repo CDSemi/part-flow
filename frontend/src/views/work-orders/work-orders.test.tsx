@@ -59,7 +59,10 @@ interface ReleaseCommit {
 
 interface FakeState {
   workOrders: FakeWorkOrder[];
+  /** PNs with saved details (create-on-first-use or explicit create). */
   partNumbers: string[];
+  /** Saved Name / Description per PN (absent = null). */
+  partNumberNames: Record<string, string>;
   /** Released quantity per demand id (server knowledge — derived from
    * Movement history on the real backend). A demand may be released in
    * several parts, so this is a running total, never a flag. */
@@ -164,6 +167,7 @@ function seedState(): FakeState {
       },
     ],
     partNumbers: ['309-127', 'A-100', 'B-200', 'C-300', 'D-400', 'E-500'],
+    partNumberNames: {},
     // Demands 102 (10 pcs) and 301 (8 pcs) are fully released.
     releasedQuantities: new Map([
       [102, 10],
@@ -419,34 +423,67 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     if (state.holdPartNumbers) await state.holdPartNumbers;
     const params = new URLSearchParams(url.split('?')[1] ?? '');
     const number = params.get('number');
+    // The §4.1 PartNumberResponse shape.
+    const pnWire = (pn: string) => ({
+      part_number: pn,
+      barcode_value: `PF:PN:${pn}`,
+      name: state.partNumberNames[pn] ?? null,
+      current_revision: null,
+      erp_id: null,
+      image_updated_at: null,
+      created_at: T0,
+      updated_at: T0,
+    });
+    if (method === 'POST') {
+      const pn = String(body.part_number).trim().toUpperCase();
+      if (state.partNumbers.includes(pn)) {
+        return detailResponse(
+          `Part Number “${pn}” already has saved details.`,
+          409,
+        );
+      }
+      state.partNumbers.push(pn);
+      if (typeof body.name === 'string') state.partNumberNames[pn] = body.name;
+      return json(pnWire(pn), 201);
+    }
+    if (method === 'PATCH' || method === 'DELETE') {
+      const pn = String(number).trim().toUpperCase();
+      if (!state.partNumbers.includes(pn)) {
+        return detailResponse(`Part Number ${pn} has no saved details.`, 404);
+      }
+      if (method === 'DELETE') {
+        state.partNumbers = state.partNumbers.filter((p) => p !== pn);
+        return new Response(null, { status: 204 });
+      }
+      if ('name' in body) {
+        if (typeof body.name === 'string') {
+          state.partNumberNames[pn] = body.name;
+        } else delete state.partNumberNames[pn];
+      }
+      return json(pnWire(pn));
+    }
     if (number !== null) {
       const canonical = number.trim().toUpperCase();
       return json(
-        state.partNumbers
-          .filter((pn) => pn === canonical)
-          .map((pn) => ({
-            part_number: pn,
-            barcode_value: `PF:PN:${pn}`,
-            created_at: T0,
-            updated_at: T0,
-          })),
+        state.partNumbers.filter((pn) => pn === canonical).map(pnWire),
       );
     }
+    // The server search matches the PN or the saved name.
     const search = (params.get('search') ?? '').toUpperCase();
     return json(
       state.partNumbers
-        .filter((pn) => !search || pn.toUpperCase().includes(search))
+        .filter(
+          (pn) =>
+            !search ||
+            pn.toUpperCase().includes(search) ||
+            (state.partNumberNames[pn] ?? '').toUpperCase().includes(search),
+        )
         .sort()
         // The real backend bounds the listing in the query
         // (part_numbers.SEARCH_RESULT_LIMIT) — mirrored so the fake
         // cannot promise the client an unbounded catalog.
         .slice(0, 50)
-        .map((pn) => ({
-          part_number: pn,
-          barcode_value: `PF:PN:${pn}`,
-          created_at: T0,
-          updated_at: T0,
-        })),
+        .map(pnWire),
     );
   }
 
@@ -1074,21 +1111,21 @@ test('a PN barcode carries the PN itself; an unknown PN is created on first use'
 
 test('scanned lines reflect the real master lookup — existing PN reuse vs. create-on-first-use', async () => {
   await renderWorkOrders();
-  // Every line carries the same barcode chip; only the `new PN`
-  // marker distinguishes a PN that has no master record yet.
+  // Every line carries the same PN control; only the `new PN`
+  // marker distinguishes a PN that has no saved details yet.
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
   scanBarcode('PF:PN:309-127');
   expect(
     await within(dialog).findByRole('button', {
-      name: 'Open barcode label for 309-127',
+      name: 'Edit Part Number 309-127',
     }),
   ).toHaveTextContent('309-127');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
   const newLine = (
     await within(dialog).findByRole('button', {
-      name: 'Open barcode label for NEW-PLATE-9',
+      name: 'Edit Part Number NEW-PLATE-9',
     })
   ).closest('td') as HTMLElement;
   // The `new PN` marker sits on the PN's own line — no extra row.
@@ -3315,23 +3352,59 @@ test('the Add Part intake offers a printable Code 128 label for a new canonical 
   ).toBeInTheDocument();
 });
 
-test('a New Work Order demand line opens the shared label through the barcode chip', async () => {
+/** Open the shared Edit Part Number dialog from a demand line's PN and
+ * wait for its saved details to load. */
+async function openPnDialog(pn: string, title: string): Promise<HTMLElement> {
+  fireEvent.click(
+    screen.getByRole('button', { name: `Edit Part Number ${pn}` }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Edit Part Number' });
+  await within(dialog).findByLabelText(/Name \/ Description/);
+  expect(dialog).toHaveAccessibleName(title);
+  return dialog;
+}
+
+/** The `new PN` marker of a demand line, or null. */
+function newPnMarker(pn: string): HTMLElement | null {
+  const cell = screen
+    .getByRole('button', { name: `Edit Part Number ${pn}` })
+    .closest('td') as HTMLElement;
+  return within(cell).queryByText('new PN');
+}
+
+/** The Save demand button's disabled state, or null when not offered. */
+function saveDemandState(dialog: HTMLElement): boolean | null {
+  const button = within(dialog).queryByRole('button', { name: 'Save demand' });
+  return button === null ? null : (button as HTMLButtonElement).disabled;
+}
+
+test('a New Work Order demand line opens Edit Part Number through the pencil control', async () => {
   await renderWorkOrders();
   const dialog = openNewWorkOrderDialog();
 
   scanBarcode('PF:PN:309-127');
   await screen.findByLabelText('Quantity for 309-127');
 
-  // The per-line text link is gone — the PN itself is the ONE entry,
-  // rendered identically to Work Order Details.
+  // The PN itself is the ONE entry, rendered identically to Work Order
+  // Details: the PN followed by the pencil glyph.
   expect(dialog.querySelector('.pn-labellink')).toBeNull();
   const pnControl = within(dialog).getByRole('button', {
-    name: 'Open barcode label for 309-127',
+    name: 'Edit Part Number 309-127',
   });
   expect(pnControl).toHaveClass('pnb-pnbtn');
-  expect(pnControl).toHaveTextContent('309-127');
+  expect(pnControl).toHaveAttribute('title', '309-127');
+  expect(pnControl).toHaveTextContent('309-127✎');
+  expect(pnControl.querySelector('.pnb-pnicon')).toHaveAttribute(
+    'aria-hidden',
+    'true',
+  );
 
-  fireEvent.click(pnControl);
+  const pnDialog = await openPnDialog('309-127', 'Edit Part Number');
+  expect(state.calls).toContain('GET /api/part-numbers?number=309-127');
+  // The printable label is reachable from inside the dialog.
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Barcode label…' }),
+  );
   const label = await screen.findByRole('dialog', {
     name: 'Part Number barcode label',
   });
@@ -3340,65 +3413,244 @@ test('a New Work Order demand line opens the shared label through the barcode ch
   ).toBeInTheDocument();
   expect(label.querySelector('.lpn')?.textContent).toBe('309-127');
   expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:309-127');
+
+  // Closing returns to the New Work Order draft, untouched.
+  fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(screen.getByRole('dialog', { name: 'New Work Order' })).toBe(dialog);
+  expect(screen.getByLabelText('Quantity for 309-127')).toBeInTheDocument();
 });
 
-test('a saved Work Order Details line carries the barcode chip and opens the shared label', async () => {
+test('a saved Work Order Details line opens Edit Part Number without touching the draft', async () => {
   await renderWorkOrders();
   const dialog = await openWorkOrderDetail('007201', 'A-100');
 
-  // No barcode sentence and no extra entry row in the PN column any
-  // more — the PN itself carries the affordance.
+  // No barcode sentence and no extra entry row in the PN column — the
+  // PN itself carries the affordance at the PN typography (no extra
+  // row height).
   expect(within(dialog).queryByText(/existing PN · barcode/)).toBeNull();
   expect(dialog.querySelector('.pn-labellink')).toBeNull();
-
   const pnControl = within(dialog).getByRole('button', {
-    name: 'Open barcode label for A-100',
+    name: 'Edit Part Number A-100',
   });
   expect(pnControl).toHaveAttribute('type', 'button');
   expect(pnControl).toHaveClass('pnb-pnbtn');
-  expect(pnControl).toHaveTextContent('A-100');
-  // Opening the label is presentation only — the draft stays clean.
+  expect(pnControl.closest('.pncell')).not.toBeNull();
   expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+  const saveBefore = saveDemandState(dialog);
 
-  fireEvent.click(pnControl);
-  const label = await screen.findByRole('dialog', {
-    name: 'Part Number barcode label',
-  });
-  expect(
-    within(label).getByRole('img', { name: 'Barcode PF:PN:A-100' }),
-  ).toBeInTheDocument();
-  expect(label.querySelector('.lpn')?.textContent).toBe('A-100');
-  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:A-100');
-  expect(
-    within(label).getByRole('button', { name: 'Print Label' }),
-  ).toBeInTheDocument();
+  const pnDialog = await openPnDialog('A-100', 'Edit Part Number');
+  // Opening it never marks the Work Order draft dirty.
   expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
-
-  // Closing the label returns to the Work Order Details dialog.
-  fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
   expect(
     screen.getByRole('dialog', { name: 'Work Order Details' }),
   ).toBeInTheDocument();
+  expect(within(dialog).queryByText('● Unsaved changes')).toBeNull();
+  expect(saveDemandState(dialog)).toBe(saveBefore);
+  // A saved line never shows the `new PN` marker.
+  expect(newPnMarker('A-100')).toBeNull();
 });
 
-test('a draft line for a new PN carries the same chip — the label derives from the PN alone', async () => {
+test('a draft line for a new PN opens New Part Number with the PN fixed; Add Part Number clears the marker', async () => {
   await renderWorkOrders();
-  const dialog = await openWorkOrderDetail('007201', 'A-100');
+  await openWorkOrderDetail('007201', 'A-100');
 
   scanBarcode('PF:PN:NEW-PLATE-9');
-  const pnControl = await within(dialog).findByRole('button', {
-    name: 'Open barcode label for NEW-PLATE-9',
-  });
-  expect(pnControl).toHaveClass('pnb-pnbtn');
+  await screen.findByRole('button', { name: 'Edit Part Number NEW-PLATE-9' });
+  expect(newPnMarker('NEW-PLATE-9')).not.toBeNull();
 
-  fireEvent.click(pnControl);
+  const pnDialog = await openPnDialog('NEW-PLATE-9', 'New Part Number');
+  expect(pnDialog.querySelector('.pnm-idhead')?.textContent).toContain(
+    'PF:PN:NEW-PLATE-9',
+  );
+  expect(pnDialog.querySelector('.pnm-dangerzone')).toBeNull();
+  // The label derives from the PN alone — no saved details needed.
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Barcode label…' }),
+  );
   const label = await screen.findByRole('dialog', {
     name: 'Part Number barcode label',
   });
-  expect(
-    within(label).getByRole('img', { name: 'Barcode PF:PN:NEW-PLATE-9' }),
-  ).toBeInTheDocument();
   expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:NEW-PLATE-9');
+  fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+
+  fireEvent.change(within(pnDialog).getByLabelText(/Name \/ Description/), {
+    target: { value: 'PLATE, NEW' },
+  });
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Add Part Number' }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'New Part Number' }),
+    ).toBeNull(),
+  );
+  expect(state.calls).toContain('POST /api/part-numbers');
+  expect(state.partNumbers).toContain('NEW-PLATE-9');
+  expect(newPnMarker('NEW-PLATE-9')).toBeNull();
+  // The demand draft itself is untouched: the line is still unsaved.
+  expect(screen.getByLabelText('Quantity for NEW-PLATE-9')).toBeInTheDocument();
+  expect(
+    state.calls.filter((call) => call.startsWith('PATCH /api/work-orders')),
+  ).toEqual([]);
+});
+
+test('a draft line marked new whose PN gained saved details loses the marker once the pencil observes them', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:LATE-PLATE');
+  await screen.findByRole('button', { name: 'Edit Part Number LATE-PLATE' });
+  expect(newPnMarker('LATE-PLATE')).not.toBeNull();
+
+  // Saved details appear elsewhere; opening the pencil observes them
+  // through its load alone — closing without saving clears the marker.
+  state.partNumbers.push('LATE-PLATE');
+  const pnDialog = await openPnDialog('LATE-PLATE', 'Edit Part Number');
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  expect(newPnMarker('LATE-PLATE')).toBeNull();
+  expect(
+    state.calls.filter((call) => call.startsWith('POST /api/part-numbers')),
+  ).toEqual([]);
+});
+
+test('a fixed-PN create answered 409 reloads into Edit keeping the entered values', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:RACE-PLATE');
+  await screen.findByRole('button', { name: 'Edit Part Number RACE-PLATE' });
+  const pnDialog = await openPnDialog('RACE-PLATE', 'New Part Number');
+  fireEvent.change(within(pnDialog).getByLabelText(/Name \/ Description/), {
+    target: { value: 'PLATE, RACED' },
+  });
+  // Someone saves details for the same PN meanwhile.
+  state.partNumbers.push('RACE-PLATE');
+  state.partNumberNames['RACE-PLATE'] = 'PLATE, FIRST';
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Add Part Number' }),
+  );
+
+  expect(
+    await within(pnDialog).findByText(
+      'Part Number “RACE-PLATE” already has saved details.',
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      within(pnDialog).getByRole('button', { name: 'Save changes' }),
+    ).toBeEnabled(),
+  );
+  expect(pnDialog).toHaveAccessibleName('Edit Part Number');
+  expect(within(pnDialog).getByLabelText(/Name \/ Description/)).toHaveValue(
+    'PLATE, RACED',
+  );
+  expect(within(pnDialog).getByText('● Unsaved changes')).toBeInTheDocument();
+
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Save changes' }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Edit Part Number' }),
+    ).toBeNull(),
+  );
+  expect(state.calls).toContain('PATCH /api/part-numbers?number=RACE-PLATE');
+  expect(state.partNumberNames['RACE-PLATE']).toBe('PLATE, RACED');
+  expect(newPnMarker('RACE-PLATE')).toBeNull();
+});
+
+test('deleting the details from a draft line shows the new PN marker', async () => {
+  await renderWorkOrders();
+  await openWorkOrderDetail('007201', 'A-100');
+
+  scanBarcode('PF:PN:309-127');
+  await screen.findByRole('button', { name: 'Edit Part Number 309-127' });
+  expect(newPnMarker('309-127')).toBeNull();
+
+  const pnDialog = await openPnDialog('309-127', 'Edit Part Number');
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Delete details…' }),
+  );
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Delete Part Number details?' }),
+    ).getByRole('button', { name: 'Delete details' }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Edit Part Number' }),
+    ).toBeNull(),
+  );
+  expect(state.calls).toContain('DELETE /api/part-numbers?number=309-127');
+  expect(newPnMarker('309-127')).not.toBeNull();
+});
+
+test('a released line still offers the pencil; offline it opens with the label but writes blocked', async () => {
+  await renderWorkOrders();
+  // 007201: B-200 is released (server evidence).
+  const dialog = await openWorkOrderDetail('007201', 'B-200');
+  expect(
+    within(dialog).getByRole('button', { name: 'Edit Part Number B-200' }),
+  ).toBeInTheDocument();
+
+  state.healthDown = true;
+  act(() => {
+    window.dispatchEvent(new Event('offline'));
+  });
+  const pnDialog = await openPnDialog('B-200', 'Edit Part Number');
+  await waitFor(() =>
+    expect(
+      within(pnDialog).getByRole('button', { name: 'Save changes' }),
+    ).toBeDisabled(),
+  );
+  expect(
+    within(pnDialog).getByRole('button', { name: 'Delete details…' }),
+  ).toBeDisabled();
+  fireEvent.click(
+    within(pnDialog).getByRole('button', { name: 'Barcode label…' }),
+  );
+  expect(
+    await screen.findByRole('dialog', { name: 'Part Number barcode label' }),
+  ).toBeInTheDocument();
+});
+
+test('Add Part results show the saved name, or the barcode when none is saved', async () => {
+  state.partNumberNames['309-127'] = 'PLATE, MOUNTING 309';
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  // The server matches the saved name too; the typed term travels as is.
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'mounting' },
+  });
+  const named = await screen.findByRole('button', { name: /309-127/ });
+  expect(state.calls).toContain('GET /api/part-numbers?search=mounting');
+  const name = named.querySelector('.ap-name') as HTMLElement;
+  expect(name.textContent).toBe('PLATE, MOUNTING 309');
+  expect(name).not.toHaveClass('mono');
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: 'A-1' },
+  });
+  const unnamed = await screen.findByRole('button', { name: /A-100/ });
+  const barcode = unnamed.querySelector('.ap-name') as HTMLElement;
+  expect(barcode.textContent).toBe('PF:PN:A-100');
+  expect(barcode).toHaveClass('mono');
+
+  // The picked-PN header still shows the barcode, not the name.
+  fireEvent.click(unnamed);
+  expect(
+    document.querySelector('.ap-pnhead .ap-pninfo')?.textContent,
+  ).toContain('PF:PN:A-100');
 });
 
 /* ============ Saved-line removal vs. unsaved demand edits ============ */

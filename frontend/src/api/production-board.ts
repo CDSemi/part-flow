@@ -18,6 +18,7 @@
 // Production-safe: no mock data, no framework imports.
 
 import { apiRequest } from './client';
+import { partNumberSecondaryLine } from './part-numbers';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -85,9 +86,9 @@ export interface BoardDemand {
 
 export interface BoardRow {
   pn: string;
-  /** PN master description (name · revision) as a secondary line —
-   * absent until Part Numbers management (Phase 13) supplies the
-   * metadata; the development long-data preview fills it. */
+  /** The saved Part Number details as a secondary line
+   * (`{name} · rev {revision}`, Phase 13) — absent when neither is
+   * saved; the development long-data preview fills it too. */
   name?: string;
   /** Manager-defined Hot rank of the row's defining demand (1 =
    * highest); undefined when not Hot. */
@@ -176,6 +177,8 @@ interface BoardRowWire {
   scrapped_quantity: number;
   total_quantity: number;
   demands: BoardDemandWire[];
+  /** The saved Part Number details, or null when none exist. */
+  master: { name: string | null; current_revision: string | null } | null;
 }
 
 interface ProductionBoardWire {
@@ -224,8 +227,13 @@ function toDemand(wire: BoardDemandWire): BoardDemand {
 }
 
 function toRow(wire: BoardRowWire): BoardRow {
+  const name = partNumberSecondaryLine(
+    wire.master?.name ?? null,
+    wire.master?.current_revision ?? null,
+  );
   return {
     pn: wire.part_number,
+    ...(name !== undefined ? { name } : {}),
     ...(wire.hot_rank !== null ? { hotRank: wire.hot_rank } : {}),
     locations: wire.locations.map(toLocation),
     activeQuantity: wire.active_quantity,

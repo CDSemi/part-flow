@@ -79,6 +79,7 @@ function listPayload() {
       {
         part_number: '2027-60-8114-00',
         has_master: true,
+        name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125',
         barcode_value: 'PF:PN:2027-60-8114-00',
         hot_rank: 1,
         demands: [
@@ -108,6 +109,7 @@ function listPayload() {
       {
         part_number: '142-260',
         has_master: false,
+        name: null,
         barcode_value: 'PF:PN:142-260',
         hot_rank: null,
         demands: [],
@@ -184,6 +186,11 @@ function detailPayload() {
     master: {
       part_number: '2027-60-8114-00',
       created_at: '2030-07-01T00:00:00Z',
+      updated_at: '2030-07-02T00:00:00Z',
+      name: 'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125',
+      current_revision: 'C',
+      erp_id: 'ERP-PN-40412',
+      image_updated_at: '2030-07-02T00:00:00Z',
     },
     barcode_value: 'PF:PN:2027-60-8114-00',
     status: 'ACTIVE',
@@ -1713,6 +1720,67 @@ test('a failed detail refresh keeps the panel and marks it stale until the next 
   expect(panel.querySelector('.tk-stale')).toBeNull();
 });
 
+test('the list name line shows the saved name, or — when none is saved', async () => {
+  await renderTracking();
+
+  const rows = document.querySelectorAll('.tk-table tbody tr');
+  const nameLine = (row: Element) =>
+    row.querySelector('.rowbtn .sub')?.textContent;
+  expect(nameLine(rows[0])).toBe(
+    'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125',
+  );
+  expect(nameLine(rows[1])).toBe('—');
+});
+
+test('the detail shows the saved name as plain leading text, then revision, barcode and ERP id', async () => {
+  await renderTracking();
+  await openFirstRow();
+
+  const panel = document.querySelector('.tk-right') as HTMLElement;
+  const line = panel.querySelector('.tk-pnrow .jsub') as HTMLElement;
+  expect(line.textContent).toBe(
+    'BRACKET, MOUNTING SS 304, 2.50 X 4.00 X 0.125 · revision C (informational) · barcode PF:PN:2027-60-8114-00 · ERP id ERP-PN-40412',
+  );
+  // The name is plain text — no `name` label, not bold.
+  expect(
+    Array.from(line.querySelectorAll('b')).map((b) => b.textContent),
+  ).toEqual(['C', 'PF:PN:2027-60-8114-00', 'ERP-PN-40412']);
+  // The saved image, versioned for caching.
+  expect(panel.querySelector('.tk-pnrow img.pn-img')?.getAttribute('src')).toBe(
+    `/api/part-numbers/image?number=2027-60-8114-00&v=${encodeURIComponent('2030-07-02T00:00:00Z')}`,
+  );
+  expect(panel.textContent).not.toContain('no Part Number master record');
+});
+
+test('saved details without a name, revision, ERP id or image render — and the default image', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/detail')
+      ? jsonResponse({
+          ...detailPayload(),
+          master: {
+            part_number: '2027-60-8114-00',
+            created_at: '2030-07-01T00:00:00Z',
+            updated_at: '2030-07-01T00:00:00Z',
+            name: null,
+            current_revision: null,
+            erp_id: null,
+            image_updated_at: null,
+          },
+        })
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+
+  const panel = document.querySelector('.tk-right') as HTMLElement;
+  expect(panel.querySelector('.tk-pnrow .jsub')?.textContent).toBe(
+    'name — · revision — (informational) · barcode PF:PN:2027-60-8114-00 · ERP id —',
+  );
+  expect(panel.querySelector('.tk-pnrow img')).toBeNull();
+  expect(panel.querySelector('.tk-pnrow span.pn-img')).not.toBeNull();
+  expect(panel.textContent).not.toContain('no Part Number master record');
+});
+
 test('a PN whose master record is absent still renders its history', async () => {
   stubFetch((url) =>
     url.startsWith('/api/tracking/detail')
@@ -1726,6 +1794,10 @@ test('a PN whose master record is absent still renders its history', async () =>
   expect(panel.textContent).toContain(
     'no Part Number master record — history unaffected',
   );
+  expect(panel.querySelector('.tk-pnrow .jsub')?.textContent).toContain(
+    'name — · revision — (informational) · barcode PF:PN:2027-60-8114-00 · ERP id —',
+  );
+  expect(panel.querySelector('.tk-pnrow img')).toBeNull();
   expect(panel.querySelectorAll('.mv.history li').length).toBe(5);
 });
 

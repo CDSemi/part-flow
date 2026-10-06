@@ -6,7 +6,9 @@ order with their distributed quantity per Area / Machine / External
 activity, the fixed entry timestamps the display derives dwell times
 from, the stocked and scrapped quantities, the OPEN demand context (Work
 Order Number, Job Numbers, requested / allocated quantity) and the
-Hot rank, plus the Department totals of the footer. ``department_id``
+Hot rank, the optional PN master's Name / Description and revision
+(Phase 13 — the row's secondary line), plus the Department totals of
+the footer. ``department_id``
 selects the Department; omitted, the single active Department is
 used — none is 404, several is 409 naming them (a display is never
 silently pointed at the wrong Department). A read: nothing is
@@ -72,6 +74,13 @@ class BoardDemandResponse(BaseModel):
     priority_rank: int | None
 
 
+class BoardMasterResponse(BaseModel):
+    """The saved PN details the row's secondary line shows."""
+
+    name: str | None
+    current_revision: str | None
+
+
 class BoardRowResponse(BaseModel):
     part_number: str
     hot_rank: int | None
@@ -83,6 +92,8 @@ class BoardRowResponse(BaseModel):
     scrapped_quantity: int
     total_quantity: int
     demands: list[BoardDemandResponse]
+    # The optional PN master; null when the PN has none.
+    master: BoardMasterResponse | None
 
 
 class BoardDepartmentRef(BaseModel):
@@ -148,6 +159,11 @@ def _row(row: production_board.BoardRow) -> BoardRowResponse:
         scrapped_quantity=row.scrapped_quantity,
         total_quantity=row.total_quantity,
         demands=[_demand(entry) for entry in row.demands],
+        master=(
+            BoardMasterResponse(name=row.master.name, current_revision=row.master.current_revision)
+            if row.master is not None
+            else None
+        ),
     )
 
 

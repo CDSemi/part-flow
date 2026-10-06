@@ -2,6 +2,7 @@ import './tracking.css';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { partNumberImageUrl } from '../../api/part-numbers';
 import type {
   TrackingAllocation,
   TrackingDetail,
@@ -409,12 +410,10 @@ export function TrackingView() {
                         <span className="part">
                           <HotPn rank={row.hotRank ?? undefined} pn={row.pn} />
                         </span>
-                        {/* The master-derived name arrives with Part
-                            Numbers management (Phase 13); until then —
-                            and for a PN whose master record was
-                            deleted — the line renders absent. */}
+                        {/* The saved Name / Description; `—` when no
+                            details (or no name) are saved. */}
                         <span className="sub" style={{ display: 'block' }}>
-                          —
+                          {row.name ?? '—'}
                         </span>
                       </button>
                     </td>
@@ -823,17 +822,31 @@ function TrackingDetailContent({
   return (
     <>
       <div className="tk-pnrow">
-        {/* The ONE shared PN image presentation (PnImage) — the same
-            default placeholder as Management → Part Numbers. */}
-        <PnImage pn={d.pn} />
+        {/* The ONE shared PN image presentation (PnImage) — the saved
+            image, or the same default placeholder as Management → Part
+            Numbers. */}
+        <PnImage
+          pn={d.pn}
+          image={
+            d.master ? (partNumberImageUrl(d.master) ?? undefined) : undefined
+          }
+        />
         <div>
           <h2>{d.pn}</h2>
           <div className="jsub">
-            {/* Master-derived metadata (name, revision, image, ERP id)
-                arrives with Part Numbers management (Phase 13); absent
-                fields render `—`, and a PN without a master record
-                keeps its canonical PN and derived barcode. */}
-            name <b>—</b> · barcode <b>{d.barcodeValue}</b> · ERP id <b>—</b>
+            {/* The saved details (GUI §7.2): a saved name leads as plain
+                text; absent fields render `—`, and a PN without saved
+                details keeps its canonical PN and derived barcode. */}
+            {d.master?.name ? (
+              d.master.name
+            ) : (
+              <>
+                name <b>—</b>
+              </>
+            )}{' '}
+            · revision <b>{d.master?.currentRevision ?? '—'}</b> (informational)
+            · barcode <b>{d.barcodeValue}</b> · ERP id{' '}
+            <b>{d.master?.erpId ?? '—'}</b>
             {d.master === null ? (
               <> · no Part Number master record — history unaffected</>
             ) : null}

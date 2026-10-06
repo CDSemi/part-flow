@@ -14,8 +14,8 @@ import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
-import { PnLabelButton } from '../../components/PnLabelButton';
-import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
+import { EditPartNumberDialog } from '../../components/EditPartNumberDialog';
+import { PnEditButton } from '../../components/PnEditButton';
 import { UnsavedChoiceDialog } from '../../components/UnsavedChoiceDialog';
 import {
   EmptyState,
@@ -129,8 +129,9 @@ export function WorkOrderDetailPanel({
   const [due, setDue] = useState('');
   const [lines, setLines] = useState<DemandLineDraft[]>([]);
   const [addPartOpen, setAddPartOpen] = useState(false);
-  // Presentation-only: the PN whose printable label is open.
-  const [labelPn, setLabelPn] = useState<string | null>(null);
+  // The PN whose shared `Edit Part Number` dialog is open (its writes
+  // concern only the Part Number details, never this draft).
+  const [editPn, setEditPn] = useState<string | null>(null);
   const [lineErrors, setLineErrors] = useState<LineError[]>([]);
   const [confirmRemove, setConfirmRemove] = useState<DemandLineDraft | null>(
     null,
@@ -682,12 +683,12 @@ export function WorkOrderDetailPanel({
                         className={errorFor(line.id, 'pn') ? 'err-cell' : ''}
                       >
                         {line.pn ? (
-                          // The PN itself opens its printable label; a
-                          // PN with no master yet is marked beside it.
+                          // The PN itself opens `Edit Part Number`; a PN
+                          // without saved details is marked beside it.
                           <div className="pncell">
-                            <PnLabelButton
+                            <PnEditButton
                               pn={line.pn}
-                              onOpen={() => setLabelPn(line.pn)}
+                              onOpen={() => setEditPn(line.pn)}
                             />
                             {line.isNewPn ? (
                               <span className="bc newpn">new PN</span>
@@ -1171,8 +1172,26 @@ export function WorkOrderDetailPanel({
         />
       ) : null}
 
-      {labelPn !== null ? (
-        <PnBarcodeLabelDialog pn={labelPn} onClose={() => setLabelPn(null)} />
+      {editPn !== null ? (
+        <EditPartNumberDialog
+          pn={editPn}
+          writeBlocked={writeBlocked}
+          onClose={({ exists }) => {
+            setEditPn(null);
+            // The `new PN` marker follows the existence the dialog last
+            // observed — on unsaved draft lines only (saved lines never
+            // show it). Display-only: the draft, dirty state,
+            // validation and release behavior never read it.
+            if (exists === null) return;
+            setLines((current) =>
+              current.map((l) =>
+                l.demandId === null && l.pn === editPn
+                  ? { ...l, isNewPn: !exists }
+                  : l,
+              ),
+            );
+          }}
+        />
       ) : null}
 
       {confirmMissing ? (
