@@ -146,10 +146,19 @@ def refresh_on_resolve(session: Session, station: ScanStation, area: Area) -> Op
     close); otherwise ``expires_at`` moves to the clock plus the
     effective timeout and the refresh commits — the ONLY commit a
     resolve ever makes. Never refuses: a resolve answers either way.
+
+    A resolve takes no station lock, so it can wait on a row that a
+    concurrent badge switch closes while inserting its replacement. The
+    re-evaluation drops the closed row but cannot see the replacement
+    (not in the statement's snapshot), so an empty lock is retried once
+    in a new statement — a fresh snapshot that sees the committed
+    replacement, which is then refreshed and reported.
     """
     if area.worker_identification_mode != WorkerIdentificationMode.SCANNED:
         return None
     row = _lock_open_row(session, station.station_id)
+    if row is None:
+        row = _lock_open_row(session, station.station_id)
     if row is None:
         return None
     now = session_clock(session)

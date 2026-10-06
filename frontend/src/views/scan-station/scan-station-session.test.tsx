@@ -39,6 +39,8 @@ const STATION = 'PLATE-ST-01';
 const E_S1 =
   'No Worker is signed in at this Scan Station. Scan your badge to continue. Nothing was recorded.';
 const MINUTE = 60_000;
+const BADGE_CONFLICT =
+  'Another badge was scanned at this Scan Station at the same moment. Scan your badge again. Nothing was recorded.';
 
 interface FakeWorker {
   id: number;
@@ -107,6 +109,8 @@ let requests: { url: string; method: string; body: any }[];
 let nextMovementId: number;
 let healthDown: boolean;
 let badgeFailure: boolean;
+/** The sign-in loses the open-session race (the server's own 409). */
+let badgeConflict: boolean;
 let previewFailure: boolean;
 /** While set, the matching reads stay pending until it resolves. */
 let contextHold: Promise<void> | null;
@@ -324,6 +328,9 @@ function handle(url: string, method: string, body: unknown): Response {
     if (badgeFailure) {
       return json({ detail: 'The badge check is unavailable.' }, 503);
     }
+    if (badgeConflict) {
+      return json({ detail: BADGE_CONFLICT }, 409);
+    }
     const badge = String((body as { badge: string }).badge)
       .trim()
       .toUpperCase();
@@ -514,6 +521,7 @@ beforeEach(() => {
   nextMovementId = 500;
   healthDown = false;
   badgeFailure = false;
+  badgeConflict = false;
   previewFailure = false;
   contextHold = null;
   previewHold = null;
@@ -766,6 +774,19 @@ test('an unknown badge, a failed check and a disconnected station keep the modal
   ).toBeInTheDocument();
   expect(signInModal()).toHaveAccessibleName('Worker sign-in required');
   expect(badgeRequests()).toHaveLength(2);
+
+  // A server refusal that already says nothing was recorded is shown
+  // once, without the suffix repeated.
+  badgeFailure = false;
+  badgeConflict = true;
+  scanBadgeInModal('100482');
+  expect(
+    await within(signInModal()!).findByText(
+      `Badge could not be checked — ${BADGE_CONFLICT}`,
+    ),
+  ).toBeInTheDocument();
+  expect(badgeRequests()).toHaveLength(3);
+  badgeConflict = false;
   cleanup();
 
   healthDown = true;
@@ -779,7 +800,25 @@ test('an unknown badge, a failed check and a disconnected station keep the modal
     'Disconnected — scanning disabled',
   );
   fireEvent.keyDown(badgeField(), { key: 'Enter' });
-  expect(badgeRequests()).toHaveLength(2);
+  expect(badgeRequests()).toHaveLength(3);
+});
+
+test('a badge answer under a mode other than Scanned re-reads the station and lifts the modal', async () => {
+  await renderStation();
+  await waitFor(() => expect(signInModal()).not.toBeNull());
+  const contextReads = () =>
+    requests.filter((r) => r.url === `/api/scan-stations/${STATION}/context`)
+      .length;
+  const readsBefore = contextReads();
+
+  // The Area left Scanned session mode meanwhile; an inactive Worker's
+  // badge is answered UNKNOWN under the new mode.
+  mode = 'FIXED';
+  scanBadgeInModal('B-77');
+  await waitFor(() => expect(signInModal()).toBeNull());
+  expect(contextReads()).toBeGreaterThan(readsBefore);
+  expect(screen.queryByText(/Badge not recognized/)).toBeNull();
+  expect(serverSession).toBeNull();
 });
 
 test('the countdown warns at two minutes and the expired modal appears at zero', async () => {

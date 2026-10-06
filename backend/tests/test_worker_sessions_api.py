@@ -1787,6 +1787,48 @@ def test_a_resolve_behind_a_session_close_answers_without_a_session(
     assert (closed.expires_at, closed.end_reason) == (session.expires_at, "STATION_CHANGED")
 
 
+def test_a_resolve_behind_a_badge_switch_refreshes_the_replacement_session(
+    client: TestClient, db_engine: Engine
+) -> None:
+    worker, successor = _worker(client), _worker(client)
+    cell = _scanned_cell(client, db_engine, worker)
+    _, pn = _release(client, cell)
+    session = _open(db_engine, cell.station_id)
+    with db_engine.connect() as holder:
+        # A concurrent switch, uncommitted: the old row closed SWITCHED and
+        # its replacement inserted in the same transaction.
+        holder.execute(
+            sa.text(
+                "UPDATE worker_sessions SET ended_at = clock_timestamp(),"
+                " end_reason = 'SWITCHED' WHERE id = :id"
+            ),
+            {"id": session.id},
+        )
+        replacement_id, inserted_expiry = holder.execute(
+            sa.text(
+                "INSERT INTO worker_sessions (station_id, area_id, worker_id, started_at,"
+                " expires_at) VALUES (:station, :area, :worker, clock_timestamp(),"
+                " clock_timestamp() + interval '15 minutes') RETURNING id, expires_at"
+            ),
+            {"station": cell.station_id, "area": cell.area_id, "worker": successor["id"]},
+        ).one()
+        thread, results = _start(lambda: _resolve(client, cell, pn))
+        try:
+            _assert_blocked(thread)
+            holder.commit()
+        finally:
+            response = _finish(thread, results)
+    assert response.status_code == 200, response.text
+    reported = response.json()["worker_session"]
+    assert reported is not None
+    assert reported["worker"] == _worker_ref(successor)
+    replacement = _open(db_engine, cell.station_id)
+    assert replacement.id == replacement_id
+    assert _parse(reported["expires_at"]) == replacement.expires_at
+    assert replacement.expires_at > inserted_expiry
+    assert _session_row(db_engine, session.id).end_reason == "SWITCHED"
+
+
 def test_a_sign_in_waiting_on_a_worker_deactivation_answers_unknown(
     client: TestClient, db_engine: Engine
 ) -> None:
