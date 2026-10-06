@@ -39,8 +39,9 @@ IMPLEMENTATION_ROADMAP Phase 3.5, GUI_DESIGN §9):
   the parent and the child write have one serial outcome (Phase 13
   slice 2c).
 - An Area's Worker ID mode (Phase 13 slice 3, PROJECT_PROFILE §8.13,
-  §19) is Disabled or Fixed Worker; Scanned session is refused until
-  the badge gates exist. A Fixed Worker exists
+  §19) is Disabled, Fixed Worker or Scanned session (badge sign-in,
+  Worker Sessions and the badge-confirmation gates — selectable since
+  Phase 13 slice 5). A Fixed Worker exists
   exactly in Fixed Worker mode — leaving the mode clears it — and must
   be an active Worker whenever a request makes or changes it or
   activates the Area, judged on the Worker row locked FOR SHARE (taken
@@ -381,9 +382,8 @@ def _worker_identification(
 
     Reads only — the caller assigns. Leaving Fixed Worker mode clears
     the Fixed Worker without the client sending ``null``. Scanned
-    session mode is refused until the badge gates exist (an Area
-    already in it through a fixture may be saved unchanged, or leave
-    it). The Fixed Worker is judged — locked FOR SHARE and
+    session mode (selectable since Phase 13 slice 5) takes no Fixed
+    Worker, like Disabled. The Fixed Worker is judged — locked FOR SHARE and
     re-read, so a concurrent deactivation and this save have one serial
     outcome — only when this request makes or changes it, or activates
     the Area: an unrelated edit never re-judges a Fixed Worker.
@@ -407,13 +407,6 @@ def _worker_identification(
     else:
         target_fixed = None
 
-    if (
-        requested is WorkerIdentificationMode.SCANNED
-        and current is not WorkerIdentificationMode.SCANNED
-    ):
-        raise InvalidInputError(
-            "Scanned session mode is not available yet. Choose Disabled or Fixed Worker."
-        )
     if target_mode is WorkerIdentificationMode.FIXED and target_fixed is None:
         raise InvalidInputError("Choose the Fixed Worker for Fixed Worker mode.")
     if target_mode is not WorkerIdentificationMode.FIXED and target_fixed is not None:

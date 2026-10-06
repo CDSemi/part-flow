@@ -124,11 +124,12 @@ Rules owned here:
   Allocation is a separate record (`app.application.allocations`).
 - Explicitly NOT here (their own modules / later phases): the explicit
   merge (`app.application.merges`), Scrap and quantity additions
-  (`app.application.quantity_events`), Undo (`app.application.undo`),
-  the badge gates (a later Phase 13 slice). Every row of a command
-  records the Worker identified by the station Area's mode — in Scanned
-  session mode with the valid Worker Session, which the command
-  refreshes.
+  (`app.application.quantity_events`), Undo (`app.application.undo`).
+  Every row of a command records the Worker identified by the station
+  Area's mode — in Scanned session mode with the valid Worker Session,
+  which the command refreshes; the badge-confirmation gate applies only
+  to DONE, QUEUE and Undo (an implicit `AREA_COMPLETED` of a transfer is
+  not a DONE gate).
 """
 
 import datetime

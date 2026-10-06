@@ -337,7 +337,6 @@ def test_area_deactivation_blocked_while_holding_quantity(
 # Areas — Worker ID mode and Fixed Worker (Phase 13 S3)
 # ---------------------------------------------------------------------------
 
-_E1 = "Scanned session mode is not available yet. Choose Disabled or Fixed Worker."
 _E2 = "Choose the Fixed Worker for Fixed Worker mode."
 _E3 = "A Fixed Worker can be set only in Fixed Worker mode."
 _E7 = "Worker ID mode must be DISABLED, FIXED or SCANNED."
@@ -384,7 +383,6 @@ def test_area_create_sets_the_worker_identification_mode(
     assert deactivated.status_code == 200
     department_id = int(_create_department(client)["id"])
     refusals = [
-        ({"worker_identification_mode": "SCANNED"}, 422, _E1),
         ({"worker_identification_mode": "FIXED"}, 422, _E2),
         ({"worker_identification_mode": "DISABLED", "fixed_worker_id": worker["id"]}, 422, _E3),
         ({"fixed_worker_id": worker["id"]}, 422, _E3),
@@ -418,9 +416,7 @@ def test_area_create_sets_the_worker_identification_mode(
     assert _area_count(db_engine) == before
 
 
-def test_area_update_changes_and_clears_the_fixed_worker(
-    client: TestClient, db_engine: Engine
-) -> None:
+def test_area_update_changes_and_clears_the_fixed_worker(client: TestClient) -> None:
     first, second = _create_worker(client), _create_worker(client)
     area = _create_area(client)
     path = f"/api/areas/{area['id']}"
@@ -444,18 +440,11 @@ def test_area_update_changes_and_clears_the_fixed_worker(
     assert (refused.status_code, refused.json()["detail"]) == (422, _E3)
     explicit_null = patch(worker_identification_mode=None)
     assert (explicit_null.status_code, explicit_null.json()["detail"]) == (422, _E7)
-    scanned = patch(worker_identification_mode="SCANNED")
-    assert (scanned.status_code, scanned.json()["detail"]) == (422, _E1)
     fixed_without_worker = patch(worker_identification_mode="FIXED")
     assert (fixed_without_worker.status_code, fixed_without_worker.json()["detail"]) == (422, _E2)
 
-    # An Area already in Scanned session mode (fixture) saves unchanged.
-    with db_engine.begin() as connection:
-        connection.execute(
-            sa.update(models.Area)
-            .where(models.Area.id == area["id"])
-            .values(worker_identification_mode="SCANNED", fixed_worker_id=None)
-        )
+    # Scanned session mode is selectable (Phase 13 slice 5) and saves unchanged.
+    assert _identity(patch(worker_identification_mode="SCANNED").json()) == ("SCANNED", None)
     assert patch(name=_unique("AREA")).status_code == 200
     assert patch(worker_identification_mode="SCANNED").status_code == 200
 

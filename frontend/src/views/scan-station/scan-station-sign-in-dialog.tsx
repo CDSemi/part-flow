@@ -1,22 +1,12 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { errorMessage } from '../../api/client';
 import { scanBadge } from '../../api/scan-station';
 import type { BadgeScanResult } from '../../api/scan-station';
 import { ModalDialog } from '../../components/ModalDialog';
 import { normalizeScanInput } from './barcode';
+import { DevBadgesSlot } from './scan-station-dev-badges-slot';
 import { Guidance } from './scan-station-presentation';
-
-// Development-only demo badges: the lazy import sits behind
-// `import.meta.env.DEV`, so production builds drop the module from the
-// graph (verified by src/production-boundary.test.ts).
-const DevBadges = import.meta.env.DEV
-  ? lazy(() =>
-      import('./scan-station-dev-badges').then((module) => ({
-        default: module.DevBadges,
-      })),
-    )
-  : null;
 
 const BADGE_NOT_RECOGNIZED =
   'Badge not recognized. Check the badge and scan again — nothing was recorded.';
@@ -148,11 +138,7 @@ export function WorkerSignInDialog({
         }}
       />
       {scanError ? <Guidance tone="error">{scanError}</Guidance> : null}
-      {DevBadges ? (
-        <Suspense fallback={null}>
-          <DevBadges onScan={simulate} />
-        </Suspense>
-      ) : null}
+      <DevBadgesSlot onScan={simulate} disabled={writeBlocked || checking} />
     </ModalDialog>
   );
 }

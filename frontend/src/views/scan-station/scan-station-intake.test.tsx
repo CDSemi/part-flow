@@ -270,7 +270,10 @@ function handle(url: string, method: string, body: unknown): Response {
       demand_context: [],
       scrapped: [],
       has_machines: areaHasMachines,
-      worker_identification: workerIdentification,
+      worker_identification: {
+        final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
+        ...(workerIdentification as object),
+      },
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

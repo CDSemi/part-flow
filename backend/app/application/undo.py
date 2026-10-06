@@ -74,10 +74,13 @@ mode identifies when it is confirmed (never the original's) — in a
 Scanned-session Area that Worker is the station's valid Worker Session
 at confirmation, whose session the reversal records and refreshes; the
 preview names the original command's recorded Worker and the Worker
-the reversal would record now.
+the reversal would record now. The final gate is a badge scan when the
+Area is in Scanned session mode and the `UNDO` badge-confirmation option
+is on (Phase 13 slice 5): the confirming badge's Worker is signed in by
+this command and recorded on every REVERSED row; otherwise it is the
+client's final question (not provable here).
 
-Deliberate boundaries (no simulation of later phases): the badge /
-final gate arrives in a later Phase 13 slice, no
+Deliberate boundaries (no simulation of later phases): no
 reason-when-configured
 (the configuration does not exist before Phase 13), and no role
 authorization — Operators/Managers/Admins arrive with Users/RBAC
@@ -590,6 +593,7 @@ def undo_command(
     part_number: object,
     reverses_device_event_id: object,
     device_event_id: object,
+    confirming_badge: object = None,
 ) -> UndoResult:
     """Reverse one complete committed command, ONE transaction.
 
@@ -607,6 +611,7 @@ def undo_command(
             "The Undo needs its own device_event_id — it is a new production"
             " event and never reuses the id of the action it reverses."
         )
+    badge = station_identity.confirming_badge_text(confirming_badge)
     fingerprint = _request_fingerprint(
         station_id=station_id, part_number=pn, reverses_device_event_id=reverses_id
     )
@@ -709,7 +714,9 @@ def undo_command(
                 " quantity to it and cannot proceed. Reactivate the Area first."
                 " Nothing was reversed."
             )
-    identity = station_identity.resolve_station_identity(session, station)
+    identity = station_identity.resolve_station_identity(
+        session, station, gate=station_identity.SensitiveAction.UNDO, confirming_badge=badge
+    )
 
     # -- Writes — all inside the one open transaction --------------------
     metadata: dict[str, Any] = {

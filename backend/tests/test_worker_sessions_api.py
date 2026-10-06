@@ -26,8 +26,12 @@ Alembic chain (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §9,
 
 The API commits real transactions, so tests isolate through unique
 PNs/Areas/stations/Workers; the module database is dropped afterwards.
-Scanned session mode is set with SQL (``_force_scanned``): the Area
-service refuses a change to it until the badge gates exist.
+Scanned session mode is set with SQL (``_force_scanned``, from before
+the Area service accepted it in slice 5). Slice 5 defaults the three
+badge-confirmation options ON; this module tests the slice 4 session
+path (the question form), so it turns them off module-wide
+(``badge_confirmation_off``); ``test_badge_confirmation_api.py`` owns
+the badge path.
 """
 
 import copy
@@ -111,6 +115,21 @@ def db_engine(api_database_url: URL) -> Iterator[Engine]:
     engine = create_engine(api_database_url)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def badge_confirmation_off(db_engine: Engine) -> None:
+    """Slice 5 defaults the badge-confirmation options ON; this module tests
+    the slice 4 session path (the question form), so it turns them off.
+    `test_badge_confirmation_api.py` owns the badge path. Raw SQL, so no
+    audit row disturbs the module's audit counts."""
+    with db_engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "UPDATE application_policy SET badge_confirm_done = false,"
+                " badge_confirm_queue = false, badge_confirm_undo = false WHERE id = 1"
+            )
+        )
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -1473,7 +1492,10 @@ def _held(
 
 def test_command_area_lock_modes_per_route_group(client: TestClient, db_engine: Engine) -> None:
     worker = _worker(client)
-    # (a) Group B: the station Area is only KEY SHARE-locked by the command.
+    # (a) Group B: the station Area is only KEY SHARE-locked by the command —
+    # in the question form (options off). The badge path of DONE / QUEUE
+    # takes the Area FOR SHARE and IS blocked by a NO KEY UPDATE
+    # (test_badge_confirmation_api.py owns that).
     cell = _scanned_cell(client, db_engine, worker, machine_count=1)
     direct = _scanned_cell(client, db_engine, worker)
     for mode, expect_blocked in (("NO KEY UPDATE", False), ("UPDATE", True)):
@@ -1920,11 +1942,18 @@ def test_worker_session_policy_api(
             )
         )
     assert len(rows) == before + 1
+    # The snapshot is the full section (slice 5 adds the badge options,
+    # which this module keeps off).
+    options_off = {
+        "badge_confirm_done": False,
+        "badge_confirm_queue": False,
+        "badge_confirm_undo": False,
+    }
     assert tuple(rows[-1]) == (
         "UPDATED",
         "worker-sessions",
-        {"worker_session_timeout_minutes": 15},
-        {"worker_session_timeout_minutes": 30},
+        {"worker_session_timeout_minutes": 15, **options_off},
+        {"worker_session_timeout_minutes": 30, **options_off},
         None,
     )
     # An identical PUT is a no-op.
@@ -2028,12 +2057,12 @@ def test_the_server_clock_drives_every_session(client: TestClient, db_engine: En
     assert invalid == 0
 
 
-def test_the_area_editor_still_refuses_scanned_mode(client: TestClient, db_engine: Engine) -> None:
+def test_the_area_editor_accepts_scanned_mode(client: TestClient, db_engine: Engine) -> None:
     cell = _Cell(client)
-    refused = client.patch(
-        f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"}
+    accepted = _ok(
+        client.patch(f"/api/areas/{cell.area_id}", json={"worker_identification_mode": "SCANNED"})
     )
-    assert refused.status_code == 422
+    assert accepted["worker_identification_mode"] == "SCANNED"
     scanned = _scanned_cell(client, db_engine)
     saved = _ok(client.patch(f"/api/areas/{scanned.area_id}", json={"name": _unique("AREA")}))
     assert saved["worker_identification_mode"] == "SCANNED"
@@ -2076,7 +2105,7 @@ def test_worker_sessions_are_written_only_by_their_owners() -> None:
         if not _SESSION_WRITE.search(body):
             continue
         assert "session_clock(" in body, name
-        if name == "sign_in" or name == "refresh_on_resolve":
+        if name == "sign_in_locked" or name == "refresh_on_resolve":
             assert body.index("_lock_open_row(") < body.index("session_clock("), name
         else:
             assert name == "close_open_sessions", name

@@ -526,10 +526,19 @@ def test_area_worker_id_mode_changes_are_audited(client: TestClient, db_engine: 
     assert (identity(rows[2].before_data), identity(rows[2].after_data)) == (fixed, disabled)
     _assert_chain(rows)
 
-    # Refusals (E1–E5) append nothing.
+    # Scanned session mode is selectable (Phase 13 slice 5), audited like any mode change.
+    assert client.patch(path, json={"worker_identification_mode": "SCANNED"}).status_code == 200
+    assert client.patch(path, json={"worker_identification_mode": "DISABLED"}).status_code == 200
+    rows = _audit_rows(db_engine, "Area", area["id"])
+    assert [row.event_type for row in rows] == ["CREATED"] + ["UPDATED"] * 4
+    scanned = {"worker_identification_mode": "SCANNED", "fixed_worker_id": None}
+    assert (identity(rows[3].before_data), identity(rows[3].after_data)) == (disabled, scanned)
+    assert (identity(rows[4].before_data), identity(rows[4].after_data)) == (scanned, disabled)
+    _assert_chain(rows)
+
+    # Refusals (E2–E5) append nothing.
     before = _audit_count(db_engine)
     for body in (
-        {"worker_identification_mode": "SCANNED"},
         {"worker_identification_mode": "FIXED"},
         {"fixed_worker_id": worker["id"]},
         {"worker_identification_mode": "FIXED", "fixed_worker_id": 999_999_999},

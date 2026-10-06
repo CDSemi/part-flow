@@ -22,7 +22,11 @@ line (Phase 12 follow-up, OD3) carries the entry — PN and current rank —
 the warning and the typed confirmation present. A Scan Station command
 refused for want of a valid Worker Session (Phase 13) carries
 ``worker_session_required`` so the station raises the badge sign-in and
-resends the unchanged request.
+resends the unchanged request. The Phase 13 badge-confirmation gate
+refusals carry ``badge_confirmation_required``,
+``badge_confirmation_not_expected`` or ``badge_not_recognized``, so the
+Scan Station can switch or re-open the final gate without losing the
+operator's draft.
 """
 
 from typing import cast
@@ -44,7 +48,12 @@ from app.application.errors import (
     UnsupportedMediaTypeError,
 )
 from app.application.intake import WorkOrderSelectionRequiredError
-from app.application.station_identity import WorkerSessionRequiredError
+from app.application.station_identity import (
+    BadgeConfirmationNotExpectedError,
+    BadgeConfirmationRequiredError,
+    BadgeNotRecognizedError,
+    WorkerSessionRequiredError,
+)
 
 _STATUS_BY_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: 404,
@@ -162,3 +171,24 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(WorkerSessionRequiredError, worker_session_required_handler)
+
+    # Phase 13 slice 5: the final-gate refusals — nothing was recorded;
+    # the flag tells the station which gate form to present next. Each
+    # exact class registered here wins over its base along the MRO.
+    _gate_refusals: tuple[tuple[type[ApplicationError], int, str], ...] = (
+        (BadgeConfirmationRequiredError, 409, "badge_confirmation_required"),
+        (BadgeConfirmationNotExpectedError, 409, "badge_confirmation_not_expected"),
+        (BadgeNotRecognizedError, 422, "badge_not_recognized"),
+    )
+
+    def _register_gate_refusal(
+        error_type: type[ApplicationError], status_code: int, flag: str
+    ) -> None:
+        async def handler(request: Request, exc: Exception) -> JSONResponse:
+            message = cast(ApplicationError, exc).message
+            return JSONResponse(status_code=status_code, content={"detail": message, flag: True})
+
+        app.add_exception_handler(error_type, handler)
+
+    for error_type, status_code, flag in _gate_refusals:
+        _register_gate_refusal(error_type, status_code, flag)

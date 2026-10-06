@@ -169,11 +169,15 @@ import type { Notice } from './scan-station-presentation';
  * a valid session the blocking sign-in modal renders above any open
  * dialog (drafts kept underneath) until a badge the server accepts —
  * a command the server refuses with `worker_session_required` raises it
- * too, and the operator then confirms the unchanged request again. The
- * badge-confirmation gates (Phase 13) remain the one approved workflow
- * not implemented here — it stays an honest placeholder, and the mock
- * preview of it survives only behind the development-only boundary
- * below (`?preview=mock`).
+ * too, and the operator then confirms the unchanged request again.
+ * DONE, QUEUE return and Undo end in the final gate whose form the
+ * server reports per action: the toned question, or a Worker badge scan
+ * that the server matches, signs in and records on the action; a typed
+ * gate refusal keeps the draft and re-reads the context in the
+ * background. Every approved Scan Station workflow is implemented here,
+ * including Worker sessions and the badge-confirmation gates; the mock
+ * preview of the approved design stays reachable with `?preview=mock`
+ * in development builds only.
  */
 
 // Development-only preview of the mock Scan Station (Phase 6+
@@ -1939,10 +1943,9 @@ function StationView({
                 Number will be validated before any action is recorded.
               </div>
               <DevNotice>
-                Development build — this station records real transfers, Machine
-                actions, completions and the correction workflows (Undo, Repair,
-                Scrap, quantity additions) on the server. The mock preview of
-                the later workflows (badge confirmation) opens with{' '}
+                Development build — this station records every production action
+                on the server, including Worker sessions and badge confirmation.
+                The mock preview of the approved design opens with{' '}
                 <code>?preview=mock</code> on this route.
               </DevNotice>
               <div className="ss-lastpnlabel">Last Action</div>
@@ -2223,6 +2226,7 @@ function StationView({
             onCancel={cancelFlow}
             onDone={(result) => completeUndo(result, flow.entry)}
             onRejected={refreshAfterRejection}
+            onGateChanged={revalidateContext}
             onAbandonUnknown={() => abandonUnknown('Reversal')}
           />
         )}
@@ -2256,6 +2260,7 @@ function StationView({
               completeMachineAction(result, flow.machine?.name ?? null)
             }
             onRejected={refreshAfterRejection}
+            onGateChanged={revalidateContext}
             onAbandonUnknown={() =>
               abandonUnknown(
                 flow.action === 'DONE' ? 'Completion' : 'Queue return',

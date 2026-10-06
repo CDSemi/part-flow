@@ -334,7 +334,10 @@ function handle(url: string, method: string, body: unknown): Response {
         (o) => ({ ...o, is_external: false }),
       ),
       has_machines: station.area_id === 2,
-      worker_identification: workerIdentification,
+      worker_identification: {
+        final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
+        ...(workerIdentification as object),
+      },
     });
   }
   const inv = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

@@ -59,7 +59,10 @@ quantity it holds from then on — the history stays exactly what was
 recorded.
 
 Rows record the Worker identified by the station Area's mode
-(`station_identity`).
+(`station_identity`). The DONE carries the optional `confirming_badge`
+of its final gate (Phase 13 slice 5): shape-checked before the
+idempotency fast path, never part of the request fingerprint, judged
+and signed in by the identity resolver under the command's locks.
 
 Explicitly NOT here: the explicit merge (`app.application.merges`),
 Undo (Phase 9), Repair, Scrap, Stockroom.
@@ -103,6 +106,7 @@ def complete_direct_processing(
     quantity_flow_id: int,
     quantity: object,
     device_event_id: object,
+    confirming_badge: object = None,
 ) -> MachineProcessingResult:
     """DONE without a Machine: complete PROCESSING quantity, ONE transaction.
 
@@ -116,6 +120,7 @@ def complete_direct_processing(
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity)
     event_id = device_event_id_text(device_event_id)
+    badge = station_identity.confirming_badge_text(confirming_badge)
     fingerprint = request_fingerprint(
         kind="DONE",
         station_id=station_id,
@@ -164,7 +169,12 @@ def complete_direct_processing(
             f"Quantity Flow {context.flow.id} references a Machine although Area"
             f" '{context.area.name}' has none. Nothing was recorded."
         )
-    identity = station_identity.resolve_station_identity(session, context.station)
+    identity = station_identity.resolve_station_identity(
+        session,
+        context.station,
+        gate=station_identity.SensitiveAction.DONE,
+        confirming_badge=badge,
+    )
 
     # -- The writes, inside the open transaction ------------------------
     metadata = command_metadata("DONE", fingerprint, size=command_size(context, 1))

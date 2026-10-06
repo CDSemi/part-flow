@@ -12,8 +12,22 @@ ID mode of the station's Area:
   valid Worker Session and that session (``scan_session_id``), and
   refreshes the session in the command's own transaction; without a
   valid session the command is refused with nothing recorded
-  (:class:`WorkerSessionRequiredError`). The Area service still refuses
-  a change to the mode until the badge gates exist.
+  (:class:`WorkerSessionRequiredError`). For a DONE, QUEUE or Undo
+  whose badge-confirmation option is on (slice 5) it records instead the
+  Worker of the confirming badge, whom the command itself signs in
+  (open, switch or refresh — the badge-scan rules) and whose session it
+  records.
+
+The badge-confirmation gate (slice 5, PROJECT_PROFILE §16, §19; PLAN
+CD6): every DONE, QUEUE and Undo ends in a final gate whose FORM
+:func:`final_gate` decides — a required Worker badge scan exactly in a
+Scanned-session Area whose option for the action is on, else the final
+confirmation question (client-side only, not provable here). The
+command enforces the badge form: a missing badge is refused
+(:class:`BadgeConfirmationRequiredError`), a badge where none is
+expected is refused (:class:`BadgeConfirmationNotExpectedError`), and a
+badge that is not an active Worker's is refused
+(:class:`BadgeNotRecognizedError`) — each with nothing recorded.
 
 Identity is accountability metadata only: no request carries it, it
 never joins an idempotency fingerprint, and no eligibility, quantity,
@@ -28,17 +42,27 @@ Nothing here commits or speaks HTTP.
 """
 
 import datetime
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Final, NamedTuple
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.application import worker_sessions
-from app.application.errors import ConflictError, NotFoundError
+from app.application import policies, worker_sessions, workers
+from app.application.errors import ConflictError, InvalidInputError, NotFoundError
 from app.application.worker_sessions import OpenSession
 from app.domain.enums import WorkerIdentificationMode
-from app.infrastructure.models import Area, PartMovement, ScanStation, Worker, WorkerSession
+from app.domain.worker_badge import normalize_badge_barcode
+from app.infrastructure.models import (
+    ApplicationPolicy,
+    Area,
+    PartMovement,
+    ScanStation,
+    Worker,
+    WorkerSession,
+)
 
 # The resolver's lock on the Fixed Worker row: FOR KEY SHARE. It
 # conflicts only with FOR UPDATE — which every Worker write takes
@@ -77,6 +101,96 @@ _SESSION_REQUIRED: Final = (
 )
 
 
+class SensitiveAction(StrEnum):
+    """The three Scan Station actions that carry the final-confirmation gate (PROFILE §19)."""
+
+    DONE = "DONE"
+    QUEUE = "QUEUE"
+    UNDO = "UNDO"
+
+
+class FinalGate(StrEnum):
+    """The form of the ALWAYS-present final gate (PROFILE §16, §19; GUI_DESIGN §4.6)."""
+
+    # A Worker badge scan confirms and identifies the confirming Worker.
+    BADGE = "BADGE"
+    # A final toned confirmation question (no badge).
+    QUESTION = "QUESTION"
+
+
+_ALL_QUESTION: Final[Mapping[SensitiveAction, FinalGate]] = MappingProxyType(
+    {action: FinalGate.QUESTION for action in SensitiveAction}
+)
+
+
+def final_gate(
+    mode: WorkerIdentificationMode, policy: ApplicationPolicy, action: SensitiveAction
+) -> FinalGate:
+    """BADGE exactly in a Scanned-session Area whose option for ``action`` is on; else QUESTION.
+
+    The one place the rule lives — the station context and the command
+    resolver both call it.
+    """
+    if mode is not WorkerIdentificationMode.SCANNED:
+        return FinalGate.QUESTION
+    required = {
+        SensitiveAction.DONE: policy.badge_confirm_done,
+        SensitiveAction.QUEUE: policy.badge_confirm_queue,
+        SensitiveAction.UNDO: policy.badge_confirm_undo,
+    }[action]
+    return FinalGate.BADGE if required else FinalGate.QUESTION
+
+
+class BadgeConfirmationRequiredError(ConflictError):
+    """The final gate is a badge scan, and none was sent: nothing written.
+
+    The API adds ``{"badge_confirmation_required": true}`` so the station
+    switches the gate to the badge scan, keeping the draft.
+    """
+
+
+class BadgeConfirmationNotExpectedError(ConflictError):
+    """A badge was sent, but the final gate is the question: nothing written.
+
+    The API adds ``{"badge_confirmation_not_expected": true}`` so the
+    station asks the confirmation question again, keeping the draft.
+    """
+
+
+class BadgeNotRecognizedError(InvalidInputError):
+    """The confirming badge is no active Worker's badge: nothing written.
+
+    The API adds ``{"badge_not_recognized": true}`` so the station keeps
+    the badge gate open with the error in place.
+    """
+
+
+_BADGE_REQUIRED: Final = (
+    "This action is now confirmed by a Worker badge scan. Scan your badge to confirm."
+    " Nothing was recorded."
+)
+_BADGE_NOT_EXPECTED: Final = (
+    "This action is no longer confirmed by a badge scan. Confirm it again. Nothing was recorded."
+)
+_BADGE_NOT_RECOGNIZED: Final = (
+    "Badge not recognized. Check the badge and scan again — nothing was recorded."
+)
+
+
+def confirming_badge_text(value: object) -> str | None:
+    """Shape only, before a gated command's idempotency fast path: None or non-empty text.
+
+    Whether a badge is expected, and whose it is, is judged after the
+    fast path under the command's locks (:func:`resolve_station_identity`);
+    the badge never joins a request fingerprint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise InvalidInputError("The confirming badge must be text.")
+    return value
+
+
 class WorkerIdentification(NamedTuple):
     """The Area's Worker ID mode as the station context presents it."""
 
@@ -85,6 +199,8 @@ class WorkerIdentification(NamedTuple):
     fixed_worker: Worker | None
     # The station's valid Worker Session — only in SCANNED mode.
     session: OpenSession | None = None
+    # The final-gate form of each sensitive action (`final_gate`), as read now.
+    final_gates: Mapping[SensitiveAction, FinalGate] = _ALL_QUESTION
 
     @property
     def current_worker(self) -> Worker | None:
@@ -95,20 +211,31 @@ class WorkerIdentification(NamedTuple):
 def worker_identification(session: Session, area: Area, station_id: str) -> WorkerIdentification:
     """A read, no lock, no write: the mode and, in FIXED mode, the Fixed
     Worker row; in SCANNED mode the station's valid session (an expired
-    one is neither refreshed nor closed here)."""
+    one is neither refreshed nor closed here) and the final-gate form of
+    each sensitive action (QUESTION for all three outside SCANNED)."""
     mode = WorkerIdentificationMode(area.worker_identification_mode)
     if mode is WorkerIdentificationMode.SCANNED:
+        policy = policies.get_policy(session)
         return WorkerIdentification(
             mode=mode,
             fixed_worker=None,
             session=worker_sessions.open_session(session, station_id),
+            final_gates=MappingProxyType(
+                {action: final_gate(mode, policy, action) for action in SensitiveAction}
+            ),
         )
     if mode is not WorkerIdentificationMode.FIXED or area.fixed_worker_id is None:
         return WorkerIdentification(mode=mode, fixed_worker=None)
     return WorkerIdentification(mode=mode, fixed_worker=session.get(Worker, area.fixed_worker_id))
 
 
-def resolve_station_identity(session: Session, station: ScanStation) -> StationIdentity:
+def resolve_station_identity(
+    session: Session,
+    station: ScanStation,
+    *,
+    gate: SensitiveAction | None = None,
+    confirming_badge: str | None = None,
+) -> StationIdentity:
     """The identity a command at ``station`` records, judged NOW.
 
     Called once per command, after the idempotency fast path, the
@@ -130,13 +257,35 @@ def resolve_station_identity(session: Session, station: ScanStation) -> StationI
     - ``SCANNED`` → the station's valid Worker Session, locked and
       refreshed (:func:`_session_identity`); without one the command is
       refused (:class:`WorkerSessionRequiredError`).
+
+    A DONE, QUEUE or Undo passes its ``gate`` (slice 5) and the
+    ``confirming_badge`` it carries, if any (shape-checked before its
+    fast path):
+
+    1. the unlocked mode read above is not SCANNED → a badge is refused
+       (:class:`BadgeConfirmationNotExpectedError`), else the Disabled /
+       Fixed Worker identity;
+    2. SCANNED without a badge → :func:`_session_identity`, which first
+       refuses when the action's final gate is the badge scan
+       (:class:`BadgeConfirmationRequiredError`, before any session
+       work, so it takes precedence over a missing session);
+    3. SCANNED with a badge → :func:`_badge_identity`: the gate form is
+       re-judged under the station Area's ``FOR SHARE`` lock, the badge
+       resolved to its active Worker and that Worker signed in by the
+       command itself.
     """
+    if gate is None and confirming_badge is not None:  # pragma: no cover - programming error
+        raise AssertionError("A confirming badge is only ever passed with its gate.")
     area = session.get(Area, station.area_id)
     if area is None:  # pragma: no cover - FK guarantees the row
         raise NotFoundError(f"Area {station.area_id} does not exist.")
     mode = WorkerIdentificationMode(area.worker_identification_mode)
     if mode is WorkerIdentificationMode.SCANNED:
-        return _session_identity(session, station)
+        if gate is not None and confirming_badge is not None:
+            return _badge_identity(session, station, gate, confirming_badge)
+        return _session_identity(session, station, gate=gate)
+    if confirming_badge is not None:
+        raise BadgeConfirmationNotExpectedError(_BADGE_NOT_EXPECTED)
     return _identity_for(session, mode, area.fixed_worker_id, area.name)
 
 
@@ -162,7 +311,9 @@ def _identity_for(
     return StationIdentity(worker_id=worker.id)
 
 
-def _session_identity(session: Session, station: ScanStation) -> StationIdentity:
+def _session_identity(
+    session: Session, station: ScanStation, *, gate: SensitiveAction | None = None
+) -> StationIdentity:
     """The Scanned-session identity: the station's valid session, refreshed.
 
     Lock order (PLAN CD5; deadlock-free against every configuration
@@ -175,7 +326,9 @@ def _session_identity(session: Session, station: ScanStation) -> StationIdentity
        the Area ``FOR UPDATE`` (transfers, stocking, Repair, receipts,
        quantity additions) the lock is redundant and the mode read
        exact; elsewhere it is the lock the Movement FK check takes on
-       the Area at flush, taken earlier;
+       the Area at flush, taken earlier. A mode still SCANNED whose
+       final gate for the command's ``gate`` is the badge scan refuses
+       here (slice 5), before any session work;
     2. the open row's Worker ``FOR KEY SHARE`` (a Worker deactivation
        holds the Worker, then locks session rows) — inactive refuses;
     3. the open row ``FOR NO KEY UPDATE``, held to COMMIT so no closer
@@ -199,6 +352,8 @@ def _session_identity(session: Session, station: ScanStation) -> StationIdentity
     mode = WorkerIdentificationMode(locked.worker_identification_mode)
     if mode is not WorkerIdentificationMode.SCANNED:
         return _identity_for(session, mode, locked.fixed_worker_id, locked.name)
+    if gate is not None and final_gate(mode, policies.get_policy(session), gate) is FinalGate.BADGE:
+        raise BadgeConfirmationRequiredError(_BADGE_REQUIRED)
     open_row = session.execute(
         select(WorkerSession.id, WorkerSession.worker_id).where(
             WorkerSession.station_id == station.station_id, WorkerSession.ended_at.is_(None)
@@ -229,6 +384,59 @@ def _session_identity(session: Session, station: ScanStation) -> StationIdentity
         .execution_options(synchronize_session=False)
     )
     return StationIdentity(worker_id=worker.id, scan_session_id=row.id)
+
+
+def _badge_identity(
+    session: Session, station: ScanStation, gate: SensitiveAction, confirming_badge: str
+) -> StationIdentity:
+    """The badge-gate identity: the confirming badge's Worker, signed in by the command.
+
+    Lock order (after every lock of the command):
+
+    1. the station's Area ``FOR SHARE`` — not KEY SHARE: it conflicts
+       with an Area save's ``FOR NO KEY UPDATE``, so a mode change and
+       this sign-in have one serial outcome and no session can open in an
+       Area that left Scanned session mode. Where the command already
+       holds the Area ``FOR UPDATE`` (an Undo restoring into it) the lock
+       is a no-op. The gate form is re-judged on this locked read: no
+       longer the badge scan → refused, nothing written;
+    2. the badge resolved to its active Worker, then that Worker locked
+       ``FOR KEY SHARE`` and re-judged — a deactivation or badge edit
+       committed meanwhile refuses;
+    3. :func:`worker_sessions.sign_in_locked` — the open row ``FOR NO KEY
+       UPDATE``, the clock, then the open / switch / refresh.
+
+    Every refusal comes before the first staged write; the sign-in's
+    write commits with the command's rows, or not at all.
+    """
+    locked = session.execute(
+        select(Area.worker_identification_mode, Area.worker_session_timeout_minutes)
+        .where(Area.id == station.area_id)
+        .with_for_update(read=True)
+    ).one()
+    mode = WorkerIdentificationMode(locked.worker_identification_mode)
+    if final_gate(mode, policies.get_policy(session), gate) is not FinalGate.BADGE:
+        raise BadgeConfirmationNotExpectedError(_BADGE_NOT_EXPECTED)
+    found = workers.resolve_badge(session, confirming_badge)
+    if found is None:
+        raise BadgeNotRecognizedError(_BADGE_NOT_RECOGNIZED)
+    worker = session.get(
+        Worker, found.id, with_for_update=_WORKER_KEY_SHARE, populate_existing=True
+    )
+    if (
+        worker is None
+        or not worker.is_active
+        or worker.badge_barcode != normalize_badge_barcode(confirming_badge)
+    ):
+        raise BadgeNotRecognizedError(_BADGE_NOT_RECOGNIZED)
+    _, session_id = worker_sessions.sign_in_locked(
+        session,
+        station_id=station.station_id,
+        area_id=station.area_id,
+        worker=worker,
+        timeout_override=locked.worker_session_timeout_minutes,
+    )
+    return StationIdentity(worker_id=worker.id, scan_session_id=session_id)
 
 
 def stamp_movements(rows: Iterable[PartMovement], identity: StationIdentity) -> None:

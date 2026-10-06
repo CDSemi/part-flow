@@ -44,11 +44,12 @@ import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 // without affecting historical Movements. The Machine-assignment mode
 // column follows from the Area's Machines (Direct processing / Queue
 // → assign), never from a per-count configuration. The Worker ID mode
-// (Phase 13) is Disabled or Fixed Worker with its configured Fixed
-// Worker; Scanned session is shown but not selectable until badge
-// confirmation exists. The per-Area Worker session timeout override is
-// edited in Administration → Worker sessions. The server judges every rule
-// (an inactive Fixed Worker, deactivating a Worker who is still fixed).
+// (Phase 13) is Disabled, Fixed Worker with its configured Fixed Worker,
+// or Scanned session (badge sign-in, Worker Sessions and the
+// badge-confirmation gates). The per-Area Worker session timeout
+// override is edited in Administration → Worker sessions. The server
+// judges every rule (an inactive Fixed Worker, deactivating a Worker who
+// is still fixed).
 
 type PendingDialog = { kind: 'new' } | { kind: 'edit'; area: Area };
 
@@ -325,8 +326,10 @@ function AreaDialog({
     isTerminal: boolean;
     isActive: boolean;
     workerIdentificationMode: WorkerIdentificationMode;
-    /** The chosen Worker in Fixed Worker mode; null otherwise. */
-    fixedWorkerId: number | null;
+    /** The chosen Worker in Fixed Worker mode; null in Disabled mode;
+     * absent in Scanned session mode (the server clears a Fixed Worker
+     * when the Area leaves Fixed Worker mode). */
+    fixedWorkerId?: number | null;
   }) => Promise<void>;
 }) {
   const [departmentId, setDepartmentId] = useState(
@@ -382,7 +385,9 @@ function AreaDialog({
         isTerminal,
         isActive,
         workerIdentificationMode: workerIdMode,
-        fixedWorkerId: workerIdMode === 'FIXED' ? fixedWorkerId : null,
+        ...(workerIdMode === 'SCANNED'
+          ? {}
+          : { fixedWorkerId: workerIdMode === 'FIXED' ? fixedWorkerId : null }),
       });
     } catch (error) {
       setServerError(errorMessage(error));
@@ -474,23 +479,18 @@ function AreaDialog({
           >
             <option value="DISABLED">{WORKER_ID_MODE_LABELS.DISABLED}</option>
             <option value="FIXED">{WORKER_ID_MODE_LABELS.FIXED}</option>
-            <option
-              value="SCANNED"
-              disabled={area?.workerIdentificationMode !== 'SCANNED'}
-            >
-              Scanned session (not available yet)
-            </option>
+            <option value="SCANNED">{WORKER_ID_MODE_LABELS.SCANNED}</option>
           </select>
         </AdminField>
-        {workerIdMode !== 'SCANNED' ? (
-          <div className="ad-fieldnotes">
-            <p className="ad-fieldhelp">
-              {workerIdMode === 'FIXED'
-                ? "Every production action at this Area's Scan Stations records the Fixed Worker."
+        <div className="ad-fieldnotes">
+          <p className="ad-fieldhelp">
+            {workerIdMode === 'FIXED'
+              ? "Every production action at this Area's Scan Stations records the Fixed Worker."
+              : workerIdMode === 'SCANNED'
+                ? "Workers sign in at this Area's Scan Stations by scanning their badge. Every production action records the signed-in Worker."
                 : "No Worker is recorded for this Area's production activity."}
-            </p>
-          </div>
-        ) : null}
+          </p>
+        </div>
         {workerIdMode === 'FIXED' ? (
           <>
             <AdminField label="Fixed Worker">

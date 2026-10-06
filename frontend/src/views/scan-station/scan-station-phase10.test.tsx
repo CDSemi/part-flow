@@ -248,6 +248,7 @@ function handle(url: string, method: string, body: unknown): Response {
         mode: 'DISABLED',
         fixed_worker: null,
         session: null,
+        final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
     });
   }

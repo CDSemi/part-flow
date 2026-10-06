@@ -241,6 +241,7 @@ function handle(url: string, method: string, body: unknown): Response {
         mode,
         fixed_worker: mode === 'FIXED' ? workerRef(NGUYEN) : null,
         session: sessionWire(),
+        final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
       },
     });
   }
@@ -938,7 +939,12 @@ test('the allocation dialog treats worker_session_required the same way: modal r
     },
     operations: [],
     hasMachines: false,
-    workerIdentification: { mode: 'SCANNED', fixedWorker: null, session: null },
+    workerIdentification: {
+      mode: 'SCANNED',
+      fixedWorker: null,
+      session: null,
+      finalGates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
+    },
   };
   const stocked = {
     movementId: 1,

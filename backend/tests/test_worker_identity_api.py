@@ -1420,6 +1420,10 @@ def test_the_fixed_worker_is_locked_in_order(
 # ---------------------------------------------------------------------------
 
 
+# Outside Scanned session mode every final gate is the question (slice 5).
+_QUESTION_GATES = {"done": "QUESTION", "queue": "QUESTION", "undo": "QUESTION"}
+
+
 def test_station_context_reports_the_worker_identification(client: TestClient) -> None:
     cell = _Cell(client)
     path = f"/api/scan-stations/{cell.station_id}/context"
@@ -1427,6 +1431,7 @@ def test_station_context_reports_the_worker_identification(client: TestClient) -
         "mode": "DISABLED",
         "fixed_worker": None,
         "session": None,
+        "final_gates": _QUESTION_GATES,
     }
     worker = _worker(client)
     _set_mode(client, cell.area_id, "FIXED", int(worker["id"]))
@@ -1434,6 +1439,7 @@ def test_station_context_reports_the_worker_identification(client: TestClient) -
         "mode": "FIXED",
         "fixed_worker": {"id": worker["id"], "name": worker["name"], "avatar_updated_at": None},
         "session": None,
+        "final_gates": _QUESTION_GATES,
     }
 
 

@@ -197,13 +197,29 @@ role authorization exists yet (Phase 14).
   nothing recorded or refreshed. ``worker_session`` is the station's
   valid session after the scan. 409 for an inactive station or Area, or
   for two badges scanned at the same moment (scan again).
+
+Phase 13 slice 5 — the badge-confirmation gate. The context reports
+``worker_identification.final_gates`` — the form of the final gate of
+``done``, ``queue`` and ``undo`` (``BADGE`` exactly in a Scanned-session
+Area whose option is on, else ``QUESTION``), decided by the server. The
+DONE (``/area-completions``, both variants), QUEUE
+(``/machine-releases``) and Undo (``/undos``) bodies take an optional
+``confirming_badge`` (in the body only, never in the fingerprint): the
+badge's active Worker is signed in by the command and recorded on every
+row. Three typed refusals, each with nothing recorded: 409
+``badge_confirmation_required`` (no badge where the gate is the badge
+scan), 409 ``badge_confirmation_not_expected`` (a badge where the gate
+is the question) and 422 ``badge_not_recognized`` (no active Worker's
+badge). A committed command replays whatever the badge or the
+configuration says now.
 """
 
 import datetime
+from collections.abc import Mapping
 from typing import Literal
 
 from fastapi import APIRouter, Response
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from app.api.area_inventory import (
     AreaInventoryResponse,
@@ -233,6 +249,7 @@ from app.application import (
     transfers,
     undo,
 )
+from app.application.station_identity import FinalGate, SensitiveAction
 from app.application.worker_sessions import OpenSession
 from app.infrastructure.models import Worker
 
@@ -295,12 +312,33 @@ def worker_session_response(open_session: OpenSession | None) -> WorkerSessionRe
     )
 
 
+FinalGateLiteral = Literal["BADGE", "QUESTION"]
+
+
+class FinalGatesResponse(BaseModel):
+    """The form of each sensitive action's final gate (Phase 13 slice 5)."""
+
+    done: FinalGateLiteral
+    queue: FinalGateLiteral
+    undo: FinalGateLiteral
+
+
+def final_gates_response(gates: Mapping[SensitiveAction, FinalGate]) -> FinalGatesResponse:
+    return FinalGatesResponse(
+        done=gates[SensitiveAction.DONE].value,
+        queue=gates[SensitiveAction.QUEUE].value,
+        undo=gates[SensitiveAction.UNDO].value,
+    )
+
+
 class WorkerIdentificationResponse(BaseModel):
     mode: WorkerIdentificationModeLiteral
     # Set exactly when mode is FIXED.
     fixed_worker: WorkerRef | None
     # Set only in SCANNED mode with a valid Worker Session.
     session: WorkerSessionResponse | None
+    # Always present; QUESTION for all three outside SCANNED mode.
+    final_gates: FinalGatesResponse
 
 
 class StationContextResponse(BaseModel):
@@ -329,6 +367,7 @@ def get_station_context(station_id: str, session: SessionDep) -> StationContextR
             mode=context.worker_identification.mode.value,
             fixed_worker=worker_ref(context.worker_identification.fixed_worker),
             session=worker_session_response(context.worker_identification.session),
+            final_gates=final_gates_response(context.worker_identification.final_gates),
         ),
     )
 
@@ -813,6 +852,12 @@ class MachineProcessingRequest(BaseModel):
     device_event_id: str
 
 
+class MachineReleaseRequest(MachineProcessingRequest):
+    """QUEUE: the shared in-Area body plus the optional final-gate badge (PROFILE §19)."""
+
+    confirming_badge: str | None = Field(default=None, min_length=1)
+
+
 class AreaCompletionRequest(BaseModel):
     """The confirmed DONE on ONE QuantityFlow, whole or in part.
 
@@ -820,7 +865,8 @@ class AreaCompletionRequest(BaseModel):
     precondition) in a Machine Area. Without it (Phase 7): the
     direct-processing DONE of an Area without Machines — the same
     wizard without a Machine field. The two are distinct intents under
-    one ``device_event_id``.
+    one ``device_event_id``. ``confirming_badge`` is the scanned badge
+    of the final gate (Phase 13 slice 5) — never part of the intent.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -830,6 +876,7 @@ class AreaCompletionRequest(BaseModel):
     machine_id: int | None = None
     quantity: StrictInt
     device_event_id: str
+    confirming_badge: str | None = Field(default=None, min_length=1)
 
 
 class MachineProcessingResponse(BaseModel):
@@ -895,7 +942,7 @@ def assign_to_machine(
 
 @router.post("/scan-stations/{station_id}/machine-releases")
 def release_to_queue(
-    station_id: str, body: MachineProcessingRequest, session: SessionDep, response: Response
+    station_id: str, body: MachineReleaseRequest, session: SessionDep, response: Response
 ) -> MachineProcessingResponse:
     result = machine_processing.release_to_queue(
         session,
@@ -905,6 +952,7 @@ def release_to_queue(
         machine_id=body.machine_id,
         quantity=body.quantity,
         device_event_id=body.device_event_id,
+        confirming_badge=body.confirming_badge,
     )
     return _processing_response(result, response)
 
@@ -921,6 +969,7 @@ def complete_area_processing(
             quantity_flow_id=body.quantity_flow_id,
             quantity=body.quantity,
             device_event_id=body.device_event_id,
+            confirming_badge=body.confirming_badge,
         )
     else:
         result = machine_processing.complete_at_machine(
@@ -931,6 +980,7 @@ def complete_area_processing(
             machine_id=body.machine_id,
             quantity=body.quantity,
             device_event_id=body.device_event_id,
+            confirming_badge=body.confirming_badge,
         )
     return _processing_response(result, response)
 
@@ -1384,6 +1434,9 @@ class UndoRequest(BaseModel):
     reverses_device_event_id: str
     # The Undo's OWN idempotency key (a new production event).
     device_event_id: str
+    # The scanned badge of the final gate (Phase 13 slice 5) — never
+    # part of the intent.
+    confirming_badge: str | None = Field(default=None, min_length=1)
 
 
 class ReversedMovementResponse(BaseModel):
@@ -1416,6 +1469,7 @@ def undo_production_command(
         part_number=body.part_number,
         reverses_device_event_id=body.reverses_device_event_id,
         device_event_id=body.device_event_id,
+        confirming_badge=body.confirming_badge,
     )
     response.status_code = 201 if result.created else 200
     return UndoResponse(

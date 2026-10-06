@@ -30,12 +30,14 @@ Rules owned here (PLAN CD5):
   closers lock their rows ``ORDER BY id``, so two closers never
   deadlock each other.
 
-The writers of ``worker_sessions`` are :func:`sign_in`,
-:func:`refresh_on_resolve`, :func:`close_open_sessions` and the
-command-time refresh of ``station_identity``. :func:`sign_in` and
-:func:`refresh_on_resolve` commit their own transaction (the latter
-only when it refreshed a valid session); a close runs inside its
-caller's configuration transaction. Nothing here speaks HTTP.
+The writers of ``worker_sessions`` are :func:`sign_in_locked` (the
+one sign-in core of :func:`sign_in` and of the badge-confirmation gate
+of a DONE, QUEUE or Undo command, slice 5), :func:`refresh_on_resolve`,
+:func:`close_open_sessions` and the command-time refresh of
+``station_identity``. :func:`sign_in` and :func:`refresh_on_resolve`
+commit their own transaction (the latter only when it refreshed a valid
+session); a gate sign-in and a close run inside their caller's
+transaction. Nothing here speaks HTTP.
 """
 
 import datetime
@@ -47,7 +49,7 @@ from sqlalchemy import Row, case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.application import policies
-from app.application.common import commit
+from app.application.common import commit, flush
 from app.application.errors import ConflictError, NotFoundError
 from app.domain.enums import WorkerIdentificationMode, WorkerSessionEndReason
 from app.infrastructure.models import Area, ScanStation, Worker, WorkerSession
@@ -231,14 +233,7 @@ def sign_in(session: Session, station_id: str, worker_id: int) -> SignInResult |
     SHARE`` (both re-judged: inactive → the existing 409; the Area no
     longer in Scanned session mode → None, nothing written), the Worker
     ``FOR KEY SHARE`` (inactive meanwhile → None, nothing written), then
-    the open row ``FOR NO KEY UPDATE``; the clock is read after them.
-
-    - no open row → a new session → SIGNED_IN;
-    - an expired open row → closed EXPIRED at its expiry, a new session
-      → SIGNED_IN;
-    - a valid row of the same Worker → its expiry refreshed → REFRESHED;
-    - a valid row of another Worker → closed SWITCHED now, a new session
-      → SWITCHED.
+    :func:`sign_in_locked` (the open row, the clock and the write).
 
     One transaction, committed here.
     """
@@ -250,9 +245,45 @@ def sign_in(session: Session, station_id: str, worker_id: int) -> SignInResult |
     )
     if worker is None or not worker.is_active:
         return None
-    row = _lock_open_row(session, station.station_id)
+    result, _ = sign_in_locked(
+        session,
+        station_id=station.station_id,
+        area_id=area.id,
+        worker=worker,
+        timeout_override=area.worker_session_timeout_minutes,
+    )
+    commit(session, _SIGN_IN_CONFLICTS)
+    return result
+
+
+def sign_in_locked(
+    session: Session, *, station_id: str, area_id: int, worker: Worker, timeout_override: int | None
+) -> tuple[SignInResult, int]:
+    """Open, switch or refresh the station's session — NO commit, NO station/Area/Worker lock.
+
+    The one sign-in core of the badge scan (:func:`sign_in`) and of the
+    badge-confirmation gate of a DONE, QUEUE or Undo command (slice 5,
+    ``station_identity``). Precondition (the caller's): the station row
+    is held ``FOR UPDATE``, the station's Area at least ``FOR SHARE``
+    with its mode judged SCANNED on that locked read, and ``worker``
+    locked ``FOR KEY SHARE`` and judged active. Then the open row is
+    locked ``FOR NO KEY UPDATE`` and the clock read after it:
+
+    - no open row → a new session → SIGNED_IN;
+    - an expired open row → closed EXPIRED at its expiry, a new session
+      → SIGNED_IN;
+    - a valid row of the same Worker → its expiry refreshed → REFRESHED;
+    - a valid row of another Worker → closed SWITCHED now, a new session
+      → SWITCHED.
+
+    A new row is flushed with the sign-in's constraint translation (the
+    gate path needs its id; a lost open-row race surfaces as the same
+    409 as at COMMIT, with everything rolled back). Returns the result
+    and the open session's id — the refreshed row's or the new row's.
+    """
+    row = _lock_open_row(session, station_id)
     now = session_clock(session)
-    expires_at = now + _timeout(session, area.worker_session_timeout_minutes)
+    expires_at = now + _timeout(session, timeout_override)
 
     previous_worker: Worker | None = None
     if row is not None and row.expires_at > now and row.worker_id == worker.id:
@@ -262,14 +293,14 @@ def sign_in(session: Session, station_id: str, worker_id: int) -> SignInResult |
             .values(expires_at=expires_at)
             .execution_options(synchronize_session=False)
         )
-        commit(session, _SIGN_IN_CONFLICTS)
-        return SignInResult(
+        refreshed = SignInResult(
             outcome=SignInOutcome.REFRESHED,
             session=OpenSession(
                 worker=worker, started_at=row.started_at, expires_at=expires_at, server_now=now
             ),
             previous_worker=None,
         )
+        return refreshed, row.id
 
     outcome = SignInOutcome.SIGNED_IN
     if row is not None:
@@ -285,21 +316,21 @@ def sign_in(session: Session, station_id: str, worker_id: int) -> SignInResult |
             .values(ended_at=ended_at, end_reason=reason.value)
             .execution_options(synchronize_session=False)
         )
-    session.add(
-        WorkerSession(
-            station_id=station.station_id,
-            area_id=area.id,
-            worker_id=worker.id,
-            started_at=now,
-            expires_at=expires_at,
-        )
+    opened = WorkerSession(
+        station_id=station_id,
+        area_id=area_id,
+        worker_id=worker.id,
+        started_at=now,
+        expires_at=expires_at,
     )
-    commit(session, _SIGN_IN_CONFLICTS)
-    return SignInResult(
+    session.add(opened)
+    flush(session, _SIGN_IN_CONFLICTS)
+    signed = SignInResult(
         outcome=outcome,
         session=OpenSession(worker=worker, started_at=now, expires_at=expires_at, server_now=now),
         previous_worker=previous_worker,
     )
+    return signed, opened.id
 
 
 def close_open_sessions(

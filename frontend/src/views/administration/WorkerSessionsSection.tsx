@@ -5,8 +5,11 @@ import { areaColor, listAreas, updateArea } from '../../api/environment';
 import type { Area } from '../../api/environment';
 import {
   getWorkerSessionPolicy,
+  updateBadgeConfirmation,
   updateWorkerSessionPolicy,
 } from '../../api/policies';
+import type { WorkerSessionPolicy } from '../../api/policies';
+import type { SensitiveAction } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { AreaDot } from '../../components/indicators';
@@ -21,12 +24,45 @@ import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 // overrides, all in whole minutes from 1 to 720. The default lives in
 // the server's application policy (`/api/policies/worker-sessions`), an
 // override on its Area (`PATCH /api/areas/{id}`); both are audited and
-// re-validated by the server. The badge confirmation of sensitive
-// actions does not exist yet and says so — no switch is offered.
+// re-validated by the server. The section also holds the three real
+// badge-confirmation options of DONE, QUEUE return and Undo (default
+// On): each switch saves on click and sends ONLY its own option (the
+// policy PUT is a partial merge), so a stale read never overwrites
+// another administrator's change; the timeout Save sends only the
+// timeout.
 
 const TIMEOUT_MIN = 1;
 const TIMEOUT_MAX = 720;
 const TIMEOUT_ERROR = 'Enter a whole number of minutes from 1 to 720.';
+
+const BADGE_CONFIRMATION_OPTIONS: {
+  action: SensitiveAction;
+  key: keyof WorkerSessionPolicy['badgeConfirmation'];
+  label: string;
+  description: string;
+}[] = [
+  {
+    action: 'DONE',
+    key: 'done',
+    label: 'DONE — Complete Area processing',
+    description:
+      'Require a Worker badge scan as the final step of every completion.',
+  },
+  {
+    action: 'QUEUE',
+    key: 'queue',
+    label: 'QUEUE — Return unfinished quantity to queue',
+    description:
+      'Require a Worker badge scan as the final step of every queue return.',
+  },
+  {
+    action: 'UNDO',
+    key: 'undo',
+    label: 'UNDO — Reverse the last action',
+    description:
+      'Require a Worker badge scan as the final step of every reversal.',
+  },
+];
 
 /** The whole number of minutes the text holds, or null when it is not
  * a whole number from 1 to 720 (never rounded or clamped). */
@@ -44,6 +80,11 @@ export function WorkerSessionsSection() {
   const policyData = useApiData(getWorkerSessionPolicy);
   const areasData = useApiData(listAreas);
   const [editing, setEditing] = useState<Area | null>(null);
+  // One policy write at a time: a switch or the timeout Save in flight
+  // disables every other policy control until the server answered.
+  const [switchBusy, setSwitchBusy] = useState(false);
+  const [timeoutBusy, setTimeoutBusy] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   const header = (
     <SectionHeader
@@ -84,8 +125,28 @@ export function WorkerSessionsSection() {
     );
   }
 
-  const defaultMinutes = policyData.state.data.timeoutMinutes;
+  const policy = policyData.state.data;
+  const defaultMinutes = policy.timeoutMinutes;
   const areas = areasData.state.data;
+
+  // Toggled from the last read; the server's answer is re-read so every
+  // switch and the stored timeout show the server values.
+  const toggle = async (
+    action: SensitiveAction,
+    key: keyof WorkerSessionPolicy['badgeConfirmation'],
+  ) => {
+    if (writeBlocked || switchBusy || timeoutBusy) return;
+    setSwitchBusy(true);
+    setSwitchError(null);
+    try {
+      await updateBadgeConfirmation(action, !policy.badgeConfirmation[key]);
+      policyData.reload();
+    } catch (error) {
+      setSwitchError(errorMessage(error));
+    } finally {
+      setSwitchBusy(false);
+    }
+  };
 
   return (
     <>
@@ -99,7 +160,8 @@ export function WorkerSessionsSection() {
         </p>
         <DefaultTimeoutForm
           savedMinutes={defaultMinutes}
-          writeBlocked={writeBlocked}
+          writeBlocked={writeBlocked || switchBusy}
+          onBusyChange={setTimeoutBusy}
           onSaved={policyData.reload}
         />
         <h2>Per-Area overrides</h2>
@@ -148,9 +210,42 @@ export function WorkerSessionsSection() {
         </p>
         <h2>Badge confirmation for sensitive actions</h2>
         <p className="ad-confighelp">
-          Badge confirmation of DONE, QUEUE return and Undo is not available
-          yet.
+          Every sensitive action always ends in a final confirmation question
+          restating the key facts. Each option below upgrades that final step to
+          a required Worker badge scan in Areas with scanned Worker Sessions —
+          the badge records the confirming Worker and completes the action.
+          Areas with a fixed or disabled Worker always keep the question; no
+          badge exists there.
         </p>
+        <div className="ad-switchlist">
+          {BADGE_CONFIRMATION_OPTIONS.map(
+            ({ action, key, label, description }) => {
+              const on = policy.badgeConfirmation[key];
+              return (
+                <button
+                  key={action}
+                  type="button"
+                  role="switch"
+                  aria-checked={on}
+                  aria-label={`Require badge scan — ${label}`}
+                  className={`ad-switch${on ? ' on' : ''}`}
+                  disabled={writeBlocked || switchBusy || timeoutBusy}
+                  onClick={() => void toggle(action, key)}
+                >
+                  <span className="swtext">
+                    <span className="swlabel">{label}</span>
+                    <span className="swdesc">{description}</span>
+                  </span>
+                  <span className="track" aria-hidden="true">
+                    <span className="knob" />
+                  </span>
+                  <span className="swstate">{on ? 'On' : 'Off'}</span>
+                </button>
+              );
+            },
+          )}
+        </div>
+        <ServerErrorNote message={switchError} />
       </div>
       {editing ? (
         <AreaTimeoutDialog
@@ -171,10 +266,13 @@ export function WorkerSessionsSection() {
 function DefaultTimeoutForm({
   savedMinutes,
   writeBlocked,
+  onBusyChange,
   onSaved,
 }: {
   savedMinutes: number;
+  /** Disconnected, or another policy write is in flight. */
   writeBlocked: boolean;
+  onBusyChange: (busy: boolean) => void;
   onSaved: () => void;
 }) {
   const [text, setText] = useState(String(savedMinutes));
@@ -188,6 +286,7 @@ function DefaultTimeoutForm({
   const submit = async () => {
     if (minutes === null) return;
     setBusy(true);
+    onBusyChange(true);
     setServerError(null);
     setSavedNote(false);
     try {
@@ -198,6 +297,7 @@ function DefaultTimeoutForm({
       setServerError(errorMessage(error));
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
 

@@ -465,22 +465,38 @@ test('Worker sessions is a real section and the demo badges stay behind the DEV 
   );
   expect(adminView).not.toContain('WorkerSessionsPreview');
   expect(adminView).not.toContain('mocks/');
-  // The sign-in modal reaches the development-only demo badges ONLY
-  // through the import.meta.env.DEV-guarded lazy import — never a
-  // static import that would put them into the production graph.
-  const signIn = readFileSync(
-    join(srcDir, 'views', 'scan-station', 'scan-station-sign-in-dialog.tsx'),
+  // The sign-in modal and the badge-confirmation gate reach the
+  // development-only demo badges ONLY through the one slot module and
+  // its import.meta.env.DEV-guarded lazy import — never a static import
+  // that would put them into the production graph.
+  const scanStationDir = join(srcDir, 'views', 'scan-station');
+  const slot = readFileSync(
+    join(scanStationDir, 'scan-station-dev-badges-slot.tsx'),
     'utf8',
   );
-  expect(signIn).not.toMatch(/^import .*scan-station-dev-badges/m);
-  expect(signIn).toMatch(
+  expect(slot).not.toMatch(/^import .*scan-station-dev-badges'/m);
+  expect(slot).toMatch(
     /import\.meta\.env\.DEV\s*\?\s*lazy\(\(\) =>\s*import\('\.\/scan-station-dev-badges'\)/,
   );
-  expect(
-    readFileSync(
-      join(srcDir, 'views', 'scan-station', 'scan-station-dev-badges.tsx'),
-      'utf8',
+  const importers = readdirSync(scanStationDir).filter((name) =>
+    readFileSync(join(scanStationDir, name), 'utf8').includes(
+      "'./scan-station-dev-badges'",
     ),
+  );
+  expect(importers).toEqual(['scan-station-dev-badges-slot.tsx']);
+  for (const name of [
+    'scan-station-sign-in-dialog.tsx',
+    'scan-station-badge-gate.tsx',
+  ]) {
+    const source = readFileSync(join(scanStationDir, name), 'utf8');
+    expect(source).toMatch(
+      /^import \{ DevBadgesSlot \} from '\.\/scan-station-dev-badges-slot';$/m,
+    );
+    expect(source).not.toMatch(/mocks\//);
+    expect(source).not.toContain('ScanStationMockView');
+  }
+  expect(
+    readFileSync(join(scanStationDir, 'scan-station-dev-badges.tsx'), 'utf8'),
   ).toContain('Demo badges');
 });
 

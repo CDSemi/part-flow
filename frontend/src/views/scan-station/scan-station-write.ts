@@ -9,16 +9,28 @@
 // once. A `worker_session_required` refusal (Phase 13) is neither: the
 // server recorded nothing because the station has no valid Worker
 // Session, so the sign-in modal is raised and, after the badge, the
-// operator confirms the IDENTICAL request again. Production-safe: no
-// mock data, no JSX.
+// operator confirms the IDENTICAL request again. A typed final-gate
+// refusal of DONE / QUEUE / Undo (Phase 13 badge confirmation) is not a
+// rejection either: nothing was recorded under this `device_event_id`,
+// so the owner switches or re-opens its final gate (`useFinalGate`) and
+// the same intent is confirmed again. Production-safe: no mock data, no
+// JSX.
 
 import { useCallback, useRef, useState } from 'react';
 
 import { errorMessage } from '../../api/client';
 import { newDeviceEventId } from '../../api/production-release';
 import {
+  badgeGateRefusal,
+  finalGateFor,
   workerSessionRequired,
   writeOutcomeUnknown,
+} from '../../api/scan-station';
+import type {
+  BadgeGateRefusal,
+  FinalGate,
+  SensitiveAction,
+  StationContext,
 } from '../../api/scan-station';
 import { useRequireWorkerSession } from './scan-station-session';
 
@@ -58,6 +70,7 @@ export function useOneShotWrite<T>({
   writeBlocked,
   onDone,
   onRejected,
+  onGateRefusal,
 }: {
   /** The request for THIS intent; called with the frozen key. */
   send: (deviceEventId: string) => Promise<T>;
@@ -71,6 +84,16 @@ export function useOneShotWrite<T>({
    * server just refused (a flow moved meanwhile, a Machine retired…).
    */
   onRejected?: () => void;
+  /**
+   * A typed refusal of the final gate (409 `badge_confirmation_required`
+   * / `badge_confirmation_not_expected`, 422 `badge_not_recognized`):
+   * nothing recorded and the intent is still valid — no error, no
+   * rejection, `onRejected` not called, the unknown-outcome state
+   * untouched and the same `device_event_id` kept (the server proved no
+   * commit exists for it, else it would have replayed). Without this
+   * handler such a refusal is an ordinary rejection.
+   */
+  onGateRefusal?: (refusal: BadgeGateRefusal, message: string) => void;
 }): OneShotWrite<T> {
   const requireSession = useRequireWorkerSession();
   const deviceEventId = useRef(newDeviceEventId());
@@ -105,6 +128,12 @@ export function useOneShotWrite<T>({
         setBusy(false);
         return;
       }
+      const refusal = badgeGateRefusal(error);
+      if (refusal && onGateRefusal) {
+        setBusy(false);
+        onGateRefusal(refusal, errorMessage(error));
+        return;
+      }
       if (writeOutcomeUnknown(error)) {
         setOutcomeUnknown(true);
         setServerError(null);
@@ -119,7 +148,15 @@ export function useOneShotWrite<T>({
     setBusy(false);
     setResult(confirmed);
     onDone(confirmed);
-  }, [busy, writeBlocked, send, onDone, onRejected, requireSession]);
+  }, [
+    busy,
+    writeBlocked,
+    send,
+    onDone,
+    onRejected,
+    onGateRefusal,
+    requireSession,
+  ]);
 
   const clearError = useCallback(() => setServerError(null), []);
 
@@ -140,5 +177,165 @@ export function useOneShotWrite<T>({
     clearError,
     resetIntent,
     result,
+  };
+}
+
+/** The approved in-place copy of an unrecognized gate badge (equal to
+ * the server's refusal text). */
+export const BADGE_NOT_RECOGNIZED =
+  'Badge not recognized. Check the badge and scan again — nothing was recorded.';
+
+/** What the final gate needs of the dialog's one-shot write. */
+type GateWrite = Pick<
+  OneShotWrite<unknown>,
+  'outcomeUnknown' | 'serverError' | 'submit'
+>;
+
+export interface FinalGateControl {
+  /** The open gate's form; null while the gate is closed. */
+  form: FinalGate | null;
+  /** In the BADGE gate: the in-place error of an unrecognized badge. */
+  error: string | null;
+  /** The server's reason for a gate switch — shown inside the BADGE
+   * gate when `noticeInGate`, else above the summary buttons. */
+  notice: string | null;
+  noticeInGate: boolean;
+  /** The badge scanned in THIS gate opening, for the request; null in
+   * the question form. Read by the write's `send` closure. */
+  badge: () => string | null;
+  /** The handler to pass to `useOneShotWrite`. */
+  onGateRefusal: (refusal: BadgeGateRefusal, message: string) => void;
+  /** The summary's primary: resend the frozen request, or open the gate. */
+  request: (write: GateWrite) => void;
+  /** The question's `Yes`. */
+  answerQuestion: (write: GateWrite) => void;
+  /** A badge scanned (or a demo badge clicked) in the BADGE gate. */
+  scanBadge: (badge: string, write: GateWrite) => void;
+  /** Cancel / Escape in either gate form: back to the summary. */
+  cancel: () => void;
+}
+
+/**
+ * The final-confirmation gate of a sensitive action (GUI_DESIGN §4.6;
+ * PROJECT_PROFILE §16, §19): a toned question, or a Worker badge scan
+ * where the server reports the BADGE form for `action`. The form the
+ * gate opens in is the server's — the context's `finalGates`, or the
+ * form a typed refusal just named (fresher than any context read, so a
+ * switch never waits on the background re-read). Retry rule:
+ * - an unknown outcome resends the frozen request, badge included,
+ *   without asking again (the same physical intent; a committed
+ *   original replays whatever the badge);
+ * - an explicit refusal of a question-form request resends without
+ *   asking again (the intent was already confirmed);
+ * - after an explicit refusal of a badge-form request, or any typed
+ *   gate refusal, the gate opens again: a badge is sent only by the
+ *   scan that just happened in this gate, so a later Retry — possibly
+ *   by another operator — never records an earlier badge's Worker.
+ * The `device_event_id` is kept throughout (a refusal recorded nothing).
+ */
+export function useFinalGate({
+  station,
+  action,
+  onGateChanged,
+}: {
+  station: StationContext;
+  action: SensitiveAction;
+  /** The server named another gate form: re-read the station context. */
+  onGateChanged?: () => void;
+}): FinalGateControl {
+  // The badge of the LAST request sent: set by the gate's scan, cleared
+  // by the question's Yes — so it is never a badge from an earlier gate
+  // opening, and it tells the retry rule which form was refused.
+  const badgeRef = useRef<string | null>(null);
+  // Set by a typed gate refusal while a badge request is in flight: the
+  // badge gate then stays as the refusal left it, else it closes.
+  const refusedRef = useRef(false);
+  const [form, setForm] = useState<FinalGate | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [noticeInGate, setNoticeInGate] = useState(false);
+  const [formHint, setFormHint] = useState<FinalGate | null>(null);
+  const [gateRedo, setGateRedo] = useState(false);
+
+  function open(next: FinalGate) {
+    setError(null);
+    setForm(next);
+  }
+
+  /** Bookkeeping of a request about to be sent from the gate. */
+  function sending() {
+    setFormHint(null);
+    setError(null);
+    setNotice(null);
+    setGateRedo(false);
+  }
+
+  function onGateRefusal(refusal: BadgeGateRefusal, message: string) {
+    refusedRef.current = true;
+    setGateRedo(true);
+    if (refusal === 'NOT_RECOGNIZED') {
+      setNotice(null);
+      setError(BADGE_NOT_RECOGNIZED);
+      setForm('BADGE');
+      return;
+    }
+    if (refusal === 'REQUIRED') {
+      // A question was sent and the server now wants a badge: the gate
+      // re-opens directly in BADGE form — the scan is the confirmation.
+      setFormHint('BADGE');
+      open('BADGE');
+      setNoticeInGate(true);
+    } else {
+      // A badge was sent and the server now wants the question: the
+      // operator answers it deliberately after the next Confirm.
+      setFormHint('QUESTION');
+      setForm(null);
+      setError(null);
+      setNoticeInGate(false);
+    }
+    setNotice(message);
+    onGateChanged?.();
+  }
+
+  return {
+    form,
+    error,
+    notice,
+    noticeInGate,
+    badge: () => badgeRef.current,
+    onGateRefusal,
+    request: (write) => {
+      if (write.outcomeUnknown && !gateRedo) {
+        void write.submit();
+        return;
+      }
+      if (write.serverError && badgeRef.current === null && !gateRedo) {
+        void write.submit();
+        return;
+      }
+      open(formHint ?? finalGateFor(station, action));
+    },
+    answerQuestion: (write) => {
+      badgeRef.current = null;
+      sending();
+      setForm(null);
+      void write.submit();
+    },
+    scanBadge: (badge, write) => {
+      badgeRef.current = badge;
+      refusedRef.current = false;
+      sending();
+      void write.submit().then(() => {
+        // Success completes the dialog; any other outcome than a typed
+        // gate refusal (unknown outcome, explicit refusal) closes the
+        // gate so the summary shows it.
+        if (!refusedRef.current) setForm(null);
+      });
+    },
+    cancel: () => {
+      setForm(null);
+      setError(null);
+      if (noticeInGate) setNotice(null);
+    },
   };
 }

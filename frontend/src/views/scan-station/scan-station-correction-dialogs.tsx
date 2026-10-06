@@ -30,8 +30,9 @@ import {
   StepButtons,
   StepRecap,
 } from './scan-station-presentation';
+import { BadgeGateDialog } from './scan-station-badge-gate';
 import { WriteGuidance } from './scan-station-machine-dialogs';
-import { useOneShotWrite } from './scan-station-write';
+import { useFinalGate, useOneShotWrite } from './scan-station-write';
 import {
   enterKeyHandler,
   operationLabel,
@@ -631,6 +632,7 @@ export function UndoDialog({
   onCancel,
   onDone,
   onRejected,
+  onGateChanged,
   onAbandonUnknown,
 }: {
   station: StationContext;
@@ -648,37 +650,40 @@ export function UndoDialog({
   onDone: (result: UndoResult) => void;
   /** The server refused the write (nothing recorded); see useOneShotWrite. */
   onRejected?: () => void;
+  /** A typed gate refusal named another final-gate form: re-read the
+   * station context in the background. */
+  onGateChanged?: () => void;
   onAbandonUnknown: () => void;
 }) {
   const pn = preview.partNumber;
-  // Final-confirmation gate (GUI_DESIGN §4.5/§4.6, post-v18): the
-  // summary's `Confirm reversal` opens the warning-toned final
-  // question before anything is reversed. The Worker badge variant
-  // arrives with the badge-confirmation gates.
-  const [gate, setGate] = useState(false);
+  // Final-confirmation gate (GUI_DESIGN §4.5/§4.6, §4.12; PROJECT_PROFILE
+  // §16, §19): the summary's `Confirm reversal` opens the warning-toned
+  // final question before anything is reversed — or a Worker badge scan
+  // where the server reports the BADGE form; the badge travels in the
+  // request and the server records its Worker on every REVERSED row.
+  const gate = useFinalGate({ station, action: 'UNDO', onGateChanged });
 
   const write = useOneShotWrite<UndoResult>({
     writeBlocked,
     onRejected,
+    onGateRefusal: gate.onGateRefusal,
     send: (deviceEventId) =>
       undoProductionCommand({
         stationId: station.stationId,
         partNumber: pn,
         reversesDeviceEventId: preview.reversesDeviceEventId,
         deviceEventId,
+        confirmingBadge: gate.badge(),
       }),
     onDone,
   });
 
   function requestConfirm() {
     if (write.busy || writeBlocked || previewRefreshing) return;
-    if (write.outcomeUnknown || write.serverError) {
-      // The intent was already confirmed through the gate: a retry
-      // resends the SAME request without asking the question again.
-      void write.submit();
-      return;
-    }
-    setGate(true);
+    // An unknown outcome — or a refused question-form request — resends
+    // the SAME request without asking again; otherwise the gate opens
+    // (a badge-form retry asks for a NEW scan). See useFinalGate.
+    gate.request(write);
   }
 
   const cancel = write.outcomeUnknown ? onAbandonUnknown : onCancel;
@@ -815,6 +820,9 @@ export function UndoDialog({
               writeBlocked={writeBlocked}
               what="reversal"
             />
+            {gate.notice && !gate.noticeInGate ? (
+              <Guidance tone="warn">{gate.notice}</Guidance>
+            ) : null}
             <StepButtons
               onCancel={cancel}
               cancelLabel={
@@ -845,21 +853,31 @@ export function UndoDialog({
           </>
         )}
       </ModalDialog>
-      {gate ? (
+      {gate.form === 'QUESTION' ? (
         <ConfirmDialog
           title="Reverse this action?"
           tone="warning"
           confirmLabel="Yes — reverse it"
           cancelLabel="Cancel (Esc)"
           confirmDisabled={writeBlocked || previewRefreshing}
-          onConfirm={() => {
-            setGate(false);
-            void write.submit();
-          }}
-          onCancel={() => setGate(false)}
+          onConfirm={() => gate.answerQuestion(write)}
+          onCancel={gate.cancel}
         >
           {gateInfo}
         </ConfirmDialog>
+      ) : null}
+      {gate.form === 'BADGE' ? (
+        <BadgeGateDialog
+          title="Scan badge to confirm the reversal"
+          tone="warning"
+          facts={gateInfo}
+          busy={write.busy}
+          writeBlocked={writeBlocked}
+          error={gate.error}
+          notice={gate.noticeInGate ? gate.notice : null}
+          onBadge={(badge) => gate.scanBadge(badge, write)}
+          onCancel={gate.cancel}
+        />
       ) : null}
     </>
   );

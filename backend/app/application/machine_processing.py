@@ -75,7 +75,11 @@ Rules owned here:
   recorded at. No snapshot step: an in-Area event creates no route
   visit (PROJECT_PROFILE §8.11).
 - Rows record the Worker identified by the station Area's mode
-  (`station_identity`).
+  (`station_identity`). QUEUE and DONE carry the optional
+  `confirming_badge` of their final gate (Phase 13 slice 5): only its
+  shape is checked before the idempotency fast path, it never joins the
+  request fingerprint, and the identity resolver judges and signs it in
+  under the command's locks. The assignment takes no badge.
 - Explicitly NOT here: the explicit merge (`app.application.merges`),
   Undo (Phase 9 — the command relationship it needs is
   `device_event_id` + `command_sequence`), Repair, Scrap, Stockroom.
@@ -667,11 +671,13 @@ def _leave_machine(
     machine_id: int,
     quantity: object,
     device_event_id: object,
+    confirming_badge: object,
 ) -> MachineProcessingResult:
     action = "Return to queue" if kind == "QUEUE" else "Completion"
     pn = canonical_part_number(part_number)
     confirmed_quantity = _validated_quantity(quantity, action)
     event_id = device_event_id_text(device_event_id)
+    badge = station_identity.confirming_badge_text(confirming_badge)
     fingerprint = request_fingerprint(
         kind=kind,
         station_id=station_id,
@@ -697,7 +703,16 @@ def _leave_machine(
         return replay_or_conflict(committed, kind, fingerprint)
 
     machine = _machine_on_flow(session, context, machine_id, action)
-    identity = station_identity.resolve_station_identity(session, context.station)
+    identity = station_identity.resolve_station_identity(
+        session,
+        context.station,
+        gate=(
+            station_identity.SensitiveAction.QUEUE
+            if kind == "QUEUE"
+            else station_identity.SensitiveAction.DONE
+        ),
+        confirming_badge=badge,
+    )
 
     before = assigned_quantity(session, machine.id)
     metadata = command_metadata(kind, fingerprint, size=command_size(context, 1))
@@ -738,6 +753,7 @@ def release_to_queue(
     machine_id: int,
     quantity: object,
     device_event_id: object,
+    confirming_badge: object = None,
 ) -> MachineProcessingResult:
     """QUEUE: return ON_MACHINE quantity to the Area queue (a part of it splits first)."""
     return _leave_machine(
@@ -749,6 +765,7 @@ def release_to_queue(
         machine_id=machine_id,
         quantity=quantity,
         device_event_id=device_event_id,
+        confirming_badge=confirming_badge,
     )
 
 
@@ -761,6 +778,7 @@ def complete_at_machine(
     machine_id: int,
     quantity: object,
     device_event_id: object,
+    confirming_badge: object = None,
 ) -> MachineProcessingResult:
     """DONE: complete processing of ON_MACHINE quantity at its Area (a part splits first)."""
     return _leave_machine(
@@ -772,4 +790,5 @@ def complete_at_machine(
         machine_id=machine_id,
         quantity=quantity,
         device_event_id=device_event_id,
+        confirming_badge=confirming_badge,
     )

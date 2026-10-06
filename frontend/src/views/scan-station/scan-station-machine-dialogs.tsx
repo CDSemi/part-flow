@@ -28,8 +28,9 @@ import {
   StepButtons,
   StepRecap,
 } from './scan-station-presentation';
+import { BadgeGateDialog } from './scan-station-badge-gate';
 import { useWorkerSessionSource } from './scan-station-session';
-import { useOneShotWrite } from './scan-station-write';
+import { useFinalGate, useOneShotWrite } from './scan-station-write';
 import {
   enterKeyHandler,
   operationLabel,
@@ -565,6 +566,7 @@ export function MachineActionDialog({
   onCancel,
   onDone,
   onRejected,
+  onGateChanged,
   onAbandonUnknown,
 }: {
   kind: 'DONE' | 'QUEUE';
@@ -584,6 +586,9 @@ export function MachineActionDialog({
   onDone: (result: MachineActionResult) => void;
   /** The server refused the write (nothing recorded); see useOneShotWrite. */
   onRejected?: () => void;
+  /** A typed gate refusal named another final-gate form: re-read the
+   * station context in the background. */
+  onGateChanged?: () => void;
   onAbandonUnknown: () => void;
 }) {
   const areaName = station.area.name;
@@ -597,15 +602,17 @@ export function MachineActionDialog({
   // summary, the final question and the request.
   const [confirmed, setConfirmed] = useState(max);
   const partial = confirmed < max;
-  // Final-confirmation gate (GUI_DESIGN §4.6, post-v18): the summary's
-  // primary opens ONE more question — DONE in the information tone,
-  // QUEUE in the warning tone — before anything is recorded. Worker
-  // badge gates arrive with the badge-confirmation slice.
-  const [gate, setGate] = useState(false);
+  // Final-confirmation gate (GUI_DESIGN §4.6, §4.12; PROJECT_PROFILE
+  // §19): the summary's primary opens ONE more step before anything is
+  // recorded — the toned question (DONE information, QUEUE warning), or
+  // a Worker badge scan where the server reports the BADGE form; the
+  // badge travels in the request and the server records its Worker.
+  const gate = useFinalGate({ station, action: kind, onGateChanged });
 
   const write = useOneShotWrite<MachineActionResult>({
     writeBlocked,
     onRejected,
+    onGateRefusal: gate.onGateRefusal,
     send: (deviceEventId) =>
       recordMachineAction(kind, {
         stationId: station.stationId,
@@ -614,6 +621,7 @@ export function MachineActionDialog({
         machineId: machine?.id ?? null,
         quantity: confirmed,
         deviceEventId,
+        confirmingBadge: gate.badge(),
       }),
     onDone,
   });
@@ -625,13 +633,10 @@ export function MachineActionDialog({
   }
   function requestConfirm() {
     if (write.busy || writeBlocked) return;
-    if (write.outcomeUnknown || write.serverError) {
-      // The intent was already confirmed through the gate: a retry
-      // resends the SAME request without asking the question again.
-      void write.submit();
-      return;
-    }
-    setGate(true);
+    // An unknown outcome — or a refused question-form request — resends
+    // the SAME request without asking again; otherwise the gate opens
+    // (a badge-form retry asks for a NEW scan). See useFinalGate.
+    gate.request(write);
   }
 
   const isDone = kind === 'DONE';
@@ -810,6 +815,9 @@ export function MachineActionDialog({
               writeBlocked={writeBlocked}
               what={what}
             />
+            {gate.notice && !gate.noticeInGate ? (
+              <Guidance tone="warn">{gate.notice}</Guidance>
+            ) : null}
             <StepButtons
               onBack={
                 write.outcomeUnknown || write.rejected
@@ -841,7 +849,7 @@ export function MachineActionDialog({
           </div>
         )}
       </ModalDialog>
-      {gate ? (
+      {gate.form === 'QUESTION' ? (
         <ConfirmDialog
           title={
             isDone
@@ -852,14 +860,28 @@ export function MachineActionDialog({
           confirmLabel={isDone ? 'Yes — finished' : 'Yes — return to queue'}
           cancelLabel="Cancel (Esc)"
           confirmDisabled={writeBlocked}
-          onConfirm={() => {
-            setGate(false);
-            void write.submit();
-          }}
-          onCancel={() => setGate(false)}
+          onConfirm={() => gate.answerQuestion(write)}
+          onCancel={gate.cancel}
         >
           {gateInfo}
         </ConfirmDialog>
+      ) : null}
+      {gate.form === 'BADGE' ? (
+        <BadgeGateDialog
+          title={
+            isDone
+              ? 'Scan badge to confirm completion'
+              : 'Scan badge to confirm the queue return'
+          }
+          tone={isDone ? 'info' : 'warning'}
+          facts={gateInfo}
+          busy={write.busy}
+          writeBlocked={writeBlocked}
+          error={gate.error}
+          notice={gate.noticeInGate ? gate.notice : null}
+          onBadge={(badge) => gate.scanBadge(badge, write)}
+          onCancel={gate.cancel}
+        />
       ) : null}
     </>
   );

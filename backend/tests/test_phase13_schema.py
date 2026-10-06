@@ -4,13 +4,13 @@ Runs the real Alembic migration chain against isolated, temporary
 PostgreSQL databases (created and dropped by the fixtures), then
 verifies what `0014_phase13_workers`, `0015_phase13_badge_check`,
 `0016_phase13_environment_audit`, `0017_phase13_machine_audit`,
-`0018_phase13_pn_check_collation`, `0019_phase13_worker_identity` and
-`0020_phase13_worker_sessions` add (IMPLEMENTATION_ROADMAP Phase 13;
-PROJECT_PROFILE §7, §8.4, §8.11, §8.12, §8.13, §10, §19, §28; owner
-decisions OD-2, OD-3, OD-10, S2-F6). Later Phase 13 slices extend this
-module:
+`0018_phase13_pn_check_collation`, `0019_phase13_worker_identity`,
+`0020_phase13_worker_sessions` and `0021_phase13_badge_confirmation` add
+(IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE §7, §8.4, §8.11,
+§8.12, §8.13, §10, §16, §19, §28; owner decisions OD-2, OD-3, OD-10,
+S2-F6). Later Phase 13 slices extend this module:
 
-- exact head boundary: `0020_phase13_worker_sessions` is the single
+- exact head boundary: `0021_phase13_badge_confirmation` is the single
   head;
 - the `workers` table shape and its exact constraint names; no FK from
   it, and the only FKs to it are the three identity references
@@ -57,7 +57,12 @@ module:
   UNIQUE, the composite session FK and the mutation-guard trigger; the
   upgrade preserves every existing row (never backfilled); the downgrade
   restores the 0019 boundary and refuses while session history, timeout
-  configuration or a policy audit row exists.
+  configuration or a policy audit row exists;
+- badge-confirmation options (0021): the three boolean
+  `application_policy` columns (NOT NULL, default `true`), seeded `true`
+  on the singleton; the upgrade keeps the existing policy and audit
+  rows; the downgrade restores the 0020 boundary and refuses while an
+  option is off or a policy audit row records an option.
 
 Phase 13 is the current head, so this module carries the head-level
 coverage. When a later phase adds its migration, pin this module to the
@@ -67,6 +72,7 @@ phase's schema test.
 
 import datetime
 import importlib.util
+import json
 import os
 import re
 from collections.abc import Callable, Iterator
@@ -93,7 +99,8 @@ _ENVIRONMENT_AUDIT_REVISION = "0016_phase13_environment_audit"
 _MACHINE_AUDIT_REVISION = "0017_phase13_machine_audit"
 _PN_CHECK_REVISION = "0018_phase13_pn_check_collation"
 _WORKER_IDENTITY_REVISION = "0019_phase13_worker_identity"
-_HEAD_REVISION = "0020_phase13_worker_sessions"
+_WORKER_SESSIONS_REVISION = "0020_phase13_worker_sessions"
+_HEAD_REVISION = "0021_phase13_badge_confirmation"
 _VERSIONS_DIR = _BACKEND_DIR / "alembic" / "versions"
 _MIGRATION_FILE = _VERSIONS_DIR / "20261004_0014_phase13_workers.py"
 _BADGE_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261004_0015_phase13_badge_check.py"
@@ -102,6 +109,7 @@ _MACHINE_AUDIT_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0017_phase13_machine_a
 _PN_CHECK_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0018_phase13_pn_check_collation.py"
 _WORKER_IDENTITY_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0019_phase13_worker_identity.py"
 _WORKER_SESSIONS_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0020_phase13_worker_sessions.py"
+_BADGE_CONFIRMATION_MIGRATION_FILE = _VERSIONS_DIR / "20261005_0021_phase13_badge_confirmation.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -1269,7 +1277,13 @@ def test_worker_sessions_table_shape(migrated_engine: Engine) -> None:
         assert columns[name]["default"] is None, name
 
     policy = {str(column["name"]): column for column in inspector.get_columns("application_policy")}
-    assert set(policy) == {"id", "worker_session_timeout_minutes", "created_at", "updated_at"}
+    assert set(policy) == {
+        "id",
+        "worker_session_timeout_minutes",
+        "created_at",
+        "updated_at",
+        *models.BADGE_CONFIRMATION_OPTIONS,  # 0021
+    }
     timeout = policy["worker_session_timeout_minutes"]
     assert isinstance(timeout["type"], sa.Integer) and timeout["nullable"] is False
     assert str(timeout["default"]) == "15"
@@ -1733,6 +1747,181 @@ def test_upgrade_preserves_existing_rows_without_sessions(admin_engine: Engine) 
                     sa.text("SELECT id, worker_session_timeout_minutes FROM application_policy")
                 ).all()
                 assert [tuple(row) for row in policy] == [(1, 15)]
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+# ---------------------------------------------------------------------------
+# Badge-confirmation options (0021)
+# ---------------------------------------------------------------------------
+
+
+def _policy_row(connection: Connection) -> tuple[object, ...]:
+    return tuple(
+        connection.execute(
+            sa.text(
+                "SELECT id, worker_session_timeout_minutes, badge_confirm_done,"
+                " badge_confirm_queue, badge_confirm_undo FROM application_policy"
+            )
+        ).one()
+    )
+
+
+def test_badge_confirmation_options_shape(migrated_engine: Engine) -> None:
+    columns = {
+        str(column["name"]): column
+        for column in inspect(migrated_engine).get_columns("application_policy")
+    }
+    for name in models.BADGE_CONFIRMATION_OPTIONS:
+        column = columns[name]
+        assert isinstance(column["type"], sa.Boolean), name
+        assert column["nullable"] is False, name
+        assert str(column["default"]) == "true", name
+
+
+def test_badge_confirmation_migration_repeats_the_model_literal() -> None:
+    migration = _load_migration(_BADGE_CONFIRMATION_MIGRATION_FILE)
+    assert migration._BADGE_OPTIONS == models.BADGE_CONFIRMATION_OPTIONS
+    assert migration.down_revision == _WORKER_SESSIONS_REVISION
+
+
+def test_badge_confirmation_options_are_seeded_on(connection: Connection) -> None:
+    assert _policy_row(connection) == (1, 15, True, True, True)
+    for name in models.BADGE_CONFIRMATION_OPTIONS:
+
+        def set_null(name: str = name) -> None:
+            _execute(connection, f"UPDATE application_policy SET {name} = NULL")
+
+        savepoint = connection.begin_nested()
+        with pytest.raises(IntegrityError) as raised:
+            set_null()
+        savepoint.rollback()
+        assert f'null value in column "{name}"' in str(raised.value.orig)
+
+
+def test_downgrade_to_worker_sessions_revision_drops_the_options(admin_engine: Engine) -> None:
+    name = "partflow_test_phase13_downgrade_s5"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, "head")
+        command.downgrade(config, _WORKER_SESSIONS_REVISION)
+        engine = create_engine(url)
+        try:
+            columns = {
+                str(column["name"]) for column in inspect(engine).get_columns("application_policy")
+            }
+            assert columns.isdisjoint(models.BADGE_CONFIRMATION_OPTIONS)
+            with engine.connect() as connection:
+                assert _version(connection) == _WORKER_SESSIONS_REVISION
+        finally:
+            engine.dispose()
+        command.upgrade(config, "head")
+        engine = create_engine(url)
+        try:
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _policy_row(connection) == (1, 15, True, True, True)
+        finally:
+            engine.dispose()
+    finally:
+        _drop_temp_database(admin_engine, name)
+
+
+def _refused_options_downgrade(url: URL) -> None:
+    with pytest.raises(ProgrammingError, match="Badge-confirmation configuration exists"):
+        command.downgrade(_alembic_config(url), _WORKER_SESSIONS_REVISION)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            assert _version(connection) == _HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("option", models.BADGE_CONFIRMATION_OPTIONS)
+def test_downgrade_refuses_while_an_option_is_off(refused_database: URL, option: str) -> None:
+    engine = create_engine(refused_database)
+    try:
+        with engine.begin() as connection:
+            _execute(connection, f"UPDATE application_policy SET {option} = false")
+        _refused_options_downgrade(refused_database)
+        with engine.connect() as connection:
+            stored = connection.execute(
+                sa.text(f"SELECT {option} FROM application_policy")
+            ).scalar_one()
+        assert stored is False
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_while_policy_audit_records_an_option(refused_database: URL) -> None:
+    engine = create_engine(refused_database)
+    snapshot = {
+        "worker_session_timeout_minutes": 15,
+        "badge_confirm_done": True,
+        "badge_confirm_queue": True,
+        "badge_confirm_undo": True,
+    }
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at,"
+                    " before_data, after_data) VALUES ('UPDATED', 'ApplicationPolicy',"
+                    " 'worker-sessions', now(), CAST(:before AS jsonb), CAST(:after AS jsonb))"
+                ),
+                {
+                    "before": json.dumps({**snapshot, "worker_session_timeout_minutes": 20}),
+                    "after": json.dumps(snapshot),
+                },
+            )
+        _refused_options_downgrade(refused_database)
+        with engine.connect() as connection:
+            kept = connection.execute(
+                sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'ApplicationPolicy'")
+            ).scalar_one()
+            assert _policy_row(connection) == (1, 15, True, True, True)
+        assert kept == 1
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_keeps_the_policy_and_its_audit_rows(admin_engine: Engine) -> None:
+    """0020 → head keeps the stored timeout and the policy audit history."""
+    name = "partflow_test_phase13_options_upgrade"
+    _create_temp_database(admin_engine, name)
+    url = make_url(os.environ["DATABASE_URL"]).set(database=name)
+    config = _alembic_config(url)
+    try:
+        command.upgrade(config, _WORKER_SESSIONS_REVISION)
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                _execute(
+                    connection, "UPDATE application_policy SET worker_session_timeout_minutes = 30"
+                )
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO audit_events (event_type, entity_type, entity_id,"
+                        " occurred_at, before_data, after_data) VALUES ('UPDATED',"
+                        " 'ApplicationPolicy', 'worker-sessions', now(), CAST(:before AS jsonb),"
+                        " CAST(:after AS jsonb))"
+                    ),
+                    {
+                        "before": json.dumps({"worker_session_timeout_minutes": 15}),
+                        "after": json.dumps({"worker_session_timeout_minutes": 30}),
+                    },
+                )
+                audits = _rows(connection, "audit_events")
+            command.upgrade(config, "head")
+            with engine.connect() as connection:
+                assert _version(connection) == _HEAD_REVISION
+                assert _policy_row(connection) == (1, 30, True, True, True)
+                assert _rows(connection, "audit_events") == audits
         finally:
             engine.dispose()
     finally:

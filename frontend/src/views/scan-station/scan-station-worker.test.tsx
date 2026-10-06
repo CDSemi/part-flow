@@ -140,7 +140,10 @@ function handle(url: string, method: string, body: unknown): Response {
       area: areaRef(2),
       operations: [operationRef()],
       has_machines: false,
-      worker_identification: identification,
+      worker_identification: {
+        final_gates: { done: 'QUESTION', queue: 'QUESTION', undo: 'QUESTION' },
+        ...identification,
+      },
     });
   }
   const inventory = /^\/api\/areas\/(\d+)\/inventory$/.exec(url);

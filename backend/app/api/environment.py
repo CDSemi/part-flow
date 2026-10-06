@@ -37,8 +37,9 @@ from app.application import environment
 
 router = APIRouter(prefix="/api")
 
-# The canonical Worker ID mode vocabulary (PROJECT_PROFILE §8.13); the
-# Application layer refuses a change to SCANNED until the badge gates exist.
+# The canonical Worker ID mode vocabulary (PROJECT_PROFILE §8.13); Scanned
+# session (badge sign-in, Worker Sessions and the badge-confirmation gates)
+# is selectable since Phase 13 slice 5.
 WorkerIdentificationModeLiteral = Literal["DISABLED", "FIXED", "SCANNED"]
 
 

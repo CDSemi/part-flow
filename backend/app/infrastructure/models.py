@@ -291,6 +291,12 @@ AREA_WORKER_SESSION_TIMEOUT_SQL = (
     "worker_session_timeout_minutes IS NULL OR worker_session_timeout_minutes BETWEEN 1 AND 720"
 )
 
+# The badge-confirmation options of the sensitive Scan Station actions
+# (Phase 13 slice 5, PROJECT_PROFILE §19): one boolean `application_policy`
+# column per action, default on. Repeated verbatim by migration
+# `0021_phase13_badge_confirmation`.
+BADGE_CONFIRMATION_OPTIONS = ("badge_confirm_done", "badge_confirm_queue", "badge_confirm_undo")
+
 # Worker Session rows (Phase 13 slice 4, PROJECT_PROFILE §19, §28): the
 # closed end-reason vocabulary, an end time exactly with an end reason,
 # an expiry after the start, an end inside the session's window, and an
@@ -842,6 +848,11 @@ class ApplicationPolicy(Base):
     default — a later slice adds its policy the same way; there is no
     key/value store. Per-record overrides live on their owner (the
     Area's `worker_session_timeout_minutes`).
+
+    Slice 5 adds the three badge-confirmation options of the sensitive
+    Scan Station actions (PROJECT_PROFILE §19; default on) — they decide
+    only the FORM of the always-present final gate in Scanned-session
+    Areas (`station_identity.final_gate`).
     """
 
     __tablename__ = "application_policy"
@@ -851,6 +862,10 @@ class ApplicationPolicy(Base):
     worker_session_timeout_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("15")
     )
+    # Badge confirmation of DONE, QUEUE return and Undo (BADGE_CONFIRMATION_OPTIONS).
+    badge_confirm_done: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    badge_confirm_queue: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    badge_confirm_undo: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

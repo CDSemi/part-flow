@@ -93,6 +93,8 @@ interface FakeState {
   workers: WorkerRow[];
   /** `application_policy` default Worker session timeout (minutes). */
   sessionTimeout: number;
+  /** `application_policy` badge-confirmation options. */
+  badgeConfirm: { done: boolean; queue: boolean; undo: boolean };
   nextId: number;
 }
 
@@ -167,6 +169,7 @@ function seedState(): FakeState {
       },
     ],
     sessionTimeout: 15,
+    badgeConfirm: { done: true, queue: true, undo: true },
     nextId: 100,
   };
 }
@@ -182,6 +185,8 @@ let workerListReads: number;
 let avatarVersion: number;
 /** A refusal of every `/api/policies/worker-sessions` call, if set. */
 let policyFailure: { status: number; detail: string } | null;
+/** While set, a policy PUT stays pending until it resolves. */
+let policyHold: Promise<void> | null;
 
 const AREA_TIMEOUT_REFUSAL =
   "An Area's Worker session timeout must be a whole number of minutes from 1 to 720, or empty to use the default.";
@@ -347,10 +352,26 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       return json({ detail: policyFailure.detail }, policyFailure.status);
     }
     if (method === 'PUT') {
-      state.sessionTimeout = Number(body.worker_session_timeout_minutes);
+      if (policyHold) await policyHold;
+      // Partial merge: every field absent from the body keeps its value.
+      if ('worker_session_timeout_minutes' in body) {
+        state.sessionTimeout = Number(body.worker_session_timeout_minutes);
+      }
+      if ('badge_confirm_done' in body) {
+        state.badgeConfirm.done = body.badge_confirm_done as boolean;
+      }
+      if ('badge_confirm_queue' in body) {
+        state.badgeConfirm.queue = body.badge_confirm_queue as boolean;
+      }
+      if ('badge_confirm_undo' in body) {
+        state.badgeConfirm.undo = body.badge_confirm_undo as boolean;
+      }
     }
     return json({
       worker_session_timeout_minutes: state.sessionTimeout,
+      badge_confirm_done: state.badgeConfirm.done,
+      badge_confirm_queue: state.badgeConfirm.queue,
+      badge_confirm_undo: state.badgeConfirm.undo,
       updated_at: T0,
     });
   }
@@ -470,25 +491,13 @@ function duplicateBadge(badge: string, exceptId?: number): Response | null {
   );
 }
 
-/** The server's Worker ID mode refusals the editor renders in place:
- * Scanned session not available yet, and a newly chosen Fixed Worker
- * that is inactive (an unchanged configuration is never re-judged). */
+/** The server's Worker ID mode refusal the editor renders in place: a
+ * newly chosen Fixed Worker that is inactive (an unchanged configuration
+ * is never re-judged). */
 function areaIdentityRefusal(
   body: Record<string, unknown>,
   current: Pick<AreaRow, 'worker_identification_mode' | 'fixed_worker_id'>,
 ): Response | null {
-  if (
-    body.worker_identification_mode === 'SCANNED' &&
-    current.worker_identification_mode !== 'SCANNED'
-  ) {
-    return json(
-      {
-        detail:
-          'Scanned session mode is not available yet. Choose Disabled or Fixed Worker.',
-      },
-      422,
-    );
-  }
   const worker = state.workers.find((w) => w.id === body.fixed_worker_id);
   const changed =
     body.worker_identification_mode !== current.worker_identification_mode ||
@@ -588,6 +597,7 @@ beforeEach(() => {
   workerListReads = 0;
   avatarVersion = 0;
   policyFailure = null;
+  policyHold = null;
   imagePreparation.rejectWith = null;
   // jsdom has no object URLs; the staged avatar preview needs one.
   URL.createObjectURL = vi.fn(() => 'blob:staged-avatar');
@@ -802,7 +812,7 @@ test('Fixed Worker mode lists active Workers only, requires a choice and sends t
   await waitFor(() => expect(workerIdModeCell('Lathe')).toBe('Disabled'));
 });
 
-test('Scanned session is shown but not selectable; without active Workers the Fixed Worker select is disabled with guidance', async () => {
+test('Scanned session is selectable with its help; without active Workers the Fixed Worker select is disabled with guidance', async () => {
   state.workers = state.workers.map((w) => ({ ...w, is_active: false }));
   renderAdmin();
 
@@ -813,8 +823,13 @@ test('Scanned session is shown but not selectable; without active Workers the Fi
   ) as HTMLSelectElement;
   expect(mode).toHaveValue('DISABLED');
   const scanned = Array.from(mode.options).find((o) => o.value === 'SCANNED')!;
-  expect(scanned.textContent).toBe('Scanned session (not available yet)');
-  expect(scanned.disabled).toBe(true);
+  expect(scanned.textContent).toBe('Scanned session');
+  expect(scanned.disabled).toBe(false);
+  fireEvent.change(mode, { target: { value: 'SCANNED' } });
+  expect(dialog.textContent).toContain(
+    "Workers sign in at this Area's Scan Stations by scanning their badge. Every production action records the signed-in Worker.",
+  );
+  expect(within(dialog).queryByLabelText('Fixed Worker')).toBeNull();
 
   fireEvent.change(mode, { target: { value: 'FIXED' } });
   expect(within(dialog).getByLabelText('Fixed Worker')).toBeDisabled();
@@ -840,8 +855,8 @@ test('an Area already in Scanned session keeps that option and saves it unchange
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(writes[0].body).toMatchObject({
     worker_identification_mode: 'SCANNED',
-    fixed_worker_id: null,
   });
+  expect(writes[0].body).not.toHaveProperty('fixed_worker_id');
 });
 
 test('an inactive current Fixed Worker stays visible as a disabled option', async () => {
@@ -884,24 +899,30 @@ test('a Fixed Worker the server finds inactive is refused in place with the draf
   expect(state.areas[0].worker_identification_mode).toBe('DISABLED');
 });
 
-test('a refused Scanned session save renders the server reason in place', async () => {
+test('an Area moves to Scanned session without a Fixed Worker in the PATCH; the table shows the mode', async () => {
+  // From Fixed Worker: the server clears the Fixed Worker itself.
+  state.areas[0].worker_identification_mode = 'FIXED';
+  state.areas[0].fixed_worker_id = 1;
   renderAdmin();
 
   fireEvent.click(await screen.findByRole('button', { name: 'Edit Lathe' }));
   const dialog = screen.getByRole('dialog', { name: 'Edit Area' });
-  // The editor never offers the option; a forced selection still meets
-  // the server's refusal — the server stays authoritative.
-  const mode = within(dialog).getByLabelText(
-    'Worker ID mode',
-  ) as HTMLSelectElement;
-  Array.from(mode.options).find((o) => o.value === 'SCANNED')!.disabled = false;
-  fireEvent.change(mode, { target: { value: 'SCANNED' } });
+  fireEvent.change(within(dialog).getByLabelText('Worker ID mode'), {
+    target: { value: 'SCANNED' },
+  });
+  expect(within(dialog).queryByLabelText('Fixed Worker')).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
-  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-    'Scanned session mode is not available yet. Choose Disabled or Fixed Worker.',
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ method: 'PATCH', url: '/api/areas/1' });
+  expect(writes[0].body).toMatchObject({
+    worker_identification_mode: 'SCANNED',
+  });
+  expect(writes[0].body).not.toHaveProperty('fixed_worker_id');
+  expect(state.areas[0].fixed_worker_id).toBeNull();
+  await waitFor(() =>
+    expect(workerIdModeCell('Lathe')).toBe('Scanned session'),
   );
-  expect(screen.getByRole('dialog', { name: 'Edit Area' })).toBe(dialog);
-  expect(state.areas[0].worker_identification_mode).toBe('DISABLED');
 });
 
 test('a Workers load failure is the Area data error with Retry; offline keeps Save disabled', async () => {
@@ -1782,23 +1803,128 @@ function sessionTimeoutCell(areaName: string): string | null | undefined {
     ?.querySelector('td[data-label="Session timeout"]')?.textContent;
 }
 
-test('Worker sessions loads the policy and the Areas, with an honest badge-confirmation panel', async () => {
+const BADGE_SWITCHES = [
+  'Require badge scan — DONE — Complete Area processing',
+  'Require badge scan — QUEUE — Return unfinished quantity to queue',
+  'Require badge scan — UNDO — Reverse the last action',
+];
+
+test('Worker sessions loads the policy and the Areas, with the three real badge-confirmation switches', async () => {
+  state.badgeConfirm.queue = false;
   const field = await openWorkerSessions();
 
   expect(field).toHaveValue(15);
   expect(screen.getByText('Sliding inactivity timeout')).toBeInTheDocument();
   expect(
-    screen.getByText(
-      'Badge confirmation of DONE, QUEUE return and Undo is not available yet.',
-    ),
+    screen.getByText('Badge confirmation for sensitive actions'),
   ).toBeInTheDocument();
-  // No development notice, no switches, no entry action.
+  expect(document.body.textContent).toContain(
+    'Every sensitive action always ends in a final confirmation question restating the key facts. Each option below upgrades that final step to a required Worker badge scan in Areas with scanned Worker Sessions — the badge records the confirming Worker and completes the action. Areas with a fixed or disabled Worker always keep the question; no badge exists there.',
+  );
+  expect(document.body.textContent).not.toContain('not available yet');
+  const switches = screen.getAllByRole('switch');
+  expect(switches.map((item) => item.getAttribute('aria-label'))).toEqual(
+    BADGE_SWITCHES,
+  );
+  expect(switches.map((item) => item.getAttribute('aria-checked'))).toEqual([
+    'true',
+    'false',
+    'true',
+  ]);
+  expect(
+    switches.map((item) => item.querySelector('.swstate')?.textContent),
+  ).toEqual(['On', 'Off', 'On']);
+  expect(switches[0]).toHaveTextContent(
+    'Require a Worker badge scan as the final step of every completion.',
+  );
+  expect(switches[1]).toHaveTextContent(
+    'Require a Worker badge scan as the final step of every queue return.',
+  );
+  expect(switches[2]).toHaveTextContent(
+    'Require a Worker badge scan as the final step of every reversal.',
+  );
+  // No development notice, no entry action.
   expect(screen.queryByRole('note')).toBeNull();
-  expect(screen.queryByRole('switch')).toBeNull();
   expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
   expect(document.body.textContent).not.toMatch(/Phase \d/);
   // Unchanged → Save disabled.
   expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
+test('a badge-confirmation switch saves only its own option, disables the policy controls in flight and re-reads', async () => {
+  const field = await openWorkerSessions();
+  // A typed but unsaved timeout draft is never sent by a switch.
+  fireEvent.change(field, { target: { value: '45' } });
+  const save = screen.getByRole('button', { name: 'Save' });
+  expect(save).toBeEnabled();
+  // Another administrator turned QUEUE off after this page read it.
+  state.badgeConfirm.queue = false;
+
+  let release: () => void = () => undefined;
+  policyHold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const undo = screen.getByRole('switch', { name: BADGE_SWITCHES[2] });
+  fireEvent.click(undo);
+  await waitFor(() => expect(undo).toBeDisabled());
+  for (const item of screen.getAllByRole('switch')) {
+    expect(item).toBeDisabled();
+  }
+  expect(save).toBeDisabled();
+  release();
+  policyHold = null;
+
+  await waitFor(() => expect(undo).toHaveAttribute('aria-checked', 'false'));
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/worker-sessions',
+      body: { badge_confirm_undo: false },
+    },
+  ]);
+  // The re-read shows every server value: the other administrator's
+  // QUEUE change survives and is displayed; the draft stays a draft.
+  expect(
+    screen.getByRole('switch', { name: BADGE_SWITCHES[1] }),
+  ).toHaveAttribute('aria-checked', 'false');
+  expect(state.sessionTimeout).toBe(15);
+  expect(state.badgeConfirm).toEqual({ done: true, queue: false, undo: false });
+  expect(field).toHaveValue(45);
+  await waitFor(() => expect(undo).toBeEnabled());
+  for (const item of screen.getAllByRole('switch')) {
+    expect(item).toBeEnabled();
+  }
+
+  // Back on: again exactly one field.
+  fireEvent.click(undo);
+  await waitFor(() => expect(undo).toHaveAttribute('aria-checked', 'true'));
+  expect(writes[1].body).toEqual({ badge_confirm_undo: true });
+});
+
+test('a refused badge-confirmation switch keeps its state with the reason; offline every switch is disabled', async () => {
+  await openWorkerSessions();
+  policyFailure = {
+    status: 422,
+    detail: 'Each badge-confirmation option must be On or Off.',
+  };
+  const done = screen.getByRole('switch', { name: BADGE_SWITCHES[0] });
+  fireEvent.click(done);
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Each badge-confirmation option must be On or Off.',
+  );
+  expect(done).toHaveAttribute('aria-checked', 'true');
+  expect(done).toBeEnabled();
+  expect(state.badgeConfirm.done).toBe(true);
+  cleanup();
+
+  policyFailure = null;
+  writes = [];
+  await openWorkerSessions('unavailable');
+  for (const item of screen.getAllByRole('switch')) {
+    expect(item).toBeDisabled();
+    fireEvent.click(item);
+  }
+  expect(writes).toEqual([]);
 });
 
 test('Worker sessions saves a whole-minute default and refuses anything else in place', async () => {

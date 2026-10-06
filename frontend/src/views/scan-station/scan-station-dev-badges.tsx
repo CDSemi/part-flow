@@ -5,9 +5,10 @@ import { listWorkers } from '../../api/workers';
 import { DevNotice } from '../../components/DevNotice';
 import { DemoBarcode } from './scan-station-presentation';
 
-// DEVELOPMENT-ONLY module: the demo badges of the Worker sign-in modal.
-// Reached only through the import.meta.env.DEV-guarded lazy import in
-// scan-station-sign-in-dialog.tsx, so production bundles never include
+// DEVELOPMENT-ONLY module: the demo badges of the Worker sign-in modal
+// and the badge-confirmation gate. Reached only through the
+// import.meta.env.DEV-guarded lazy import in
+// scan-station-dev-badges-slot.tsx, so production bundles never include
 // it. The badges are the REAL active Workers' badges from the Workers
 // registry; a click runs the same submit path as a wedge scan.
 

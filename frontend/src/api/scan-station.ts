@@ -102,6 +102,34 @@ export interface StationWorkerIdentification {
   fixedWorker: WorkerRef | null;
   /** The station's valid Worker Session; set only in `SCANNED` mode. */
   session: WorkerSession | null;
+  /** The form of each sensitive action's final gate as the SERVER
+   * computed it (PROJECT_PROFILE §16, §19): `BADGE` exactly in a
+   * Scanned-session Area whose badge-confirmation option is on. The
+   * client derives nothing — read it through `finalGateFor`. */
+  finalGates: Record<'done' | 'queue' | 'undo', FinalGate>;
+}
+
+/** The three Scan Station actions that carry the final gate (§19). */
+export type SensitiveAction = 'DONE' | 'QUEUE' | 'UNDO';
+
+/** The form of the ALWAYS-present final gate (GUI_DESIGN §4.6): a
+ * Worker badge scan, or a final toned confirmation question. */
+export type FinalGate = 'BADGE' | 'QUESTION';
+
+const FINAL_GATE_KEY: Record<SensitiveAction, 'done' | 'queue' | 'undo'> = {
+  DONE: 'done',
+  QUEUE: 'queue',
+  UNDO: 'undo',
+};
+
+/** The final-gate form of `action` at this station, as the server
+ * reported it in the context. The server judges it again at every
+ * confirmation and names the other form in a typed refusal. */
+export function finalGateFor(
+  station: StationContext,
+  action: SensitiveAction,
+): FinalGate {
+  return station.workerIdentification.finalGates[FINAL_GATE_KEY[action]];
 }
 
 /**
@@ -145,6 +173,7 @@ interface StationContextWire {
     mode: WorkerIdentificationMode;
     fixed_worker: WorkerRefWire | null;
     session: WorkerSessionWire | null;
+    final_gates: { done: FinalGate; queue: FinalGate; undo: FinalGate };
   };
 }
 
@@ -166,6 +195,11 @@ export async function getStationContext(
         ? toWorkerRef(wire.worker_identification.fixed_worker)
         : null,
       session: toWorkerSession(wire.worker_identification.session),
+      finalGates: {
+        done: wire.worker_identification.final_gates.done,
+        queue: wire.worker_identification.final_gates.queue,
+        undo: wire.worker_identification.final_gates.undo,
+      },
     },
   };
 }
@@ -565,6 +599,42 @@ export function workerSessionRequired(error: unknown): boolean {
   );
 }
 
+/** A typed refusal of a sensitive action's final gate (nothing was
+ * recorded): the gate form changed (`REQUIRED` — the server now wants a
+ * badge; `NOT_EXPECTED` — it now wants the question), or the confirming
+ * badge matched no active Worker (`NOT_RECOGNIZED`). */
+export type BadgeGateRefusal = 'REQUIRED' | 'NOT_EXPECTED' | 'NOT_RECOGNIZED';
+
+/**
+ * The typed final-gate refusal of a DONE / QUEUE / Undo, or null for
+ * any other outcome: 409 `badge_confirmation_required`, 409
+ * `badge_confirmation_not_expected`, 422 `badge_not_recognized`.
+ */
+export function badgeGateRefusal(error: unknown): BadgeGateRefusal | null {
+  if (
+    !(error instanceof ApiError) ||
+    typeof error.body !== 'object' ||
+    error.body === null
+  ) {
+    return null;
+  }
+  const body = error.body as {
+    badge_confirmation_required?: unknown;
+    badge_confirmation_not_expected?: unknown;
+    badge_not_recognized?: unknown;
+  };
+  if (error.status === 409 && body.badge_confirmation_required === true) {
+    return 'REQUIRED';
+  }
+  if (error.status === 409 && body.badge_confirmation_not_expected === true) {
+    return 'NOT_EXPECTED';
+  }
+  if (error.status === 422 && body.badge_not_recognized === true) {
+    return 'NOT_RECOGNIZED';
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Transfer command
 // ---------------------------------------------------------------------------
@@ -833,6 +903,10 @@ export interface MachineActionInput {
   /** Client-generated UUID, reused verbatim on every retry of the SAME
    * confirmed intent (idempotency key). */
   deviceEventId: string;
+  /** QUEUE / DONE only: the Worker badge scanned in the BADGE-form final
+   * gate, sent as typed (the server canonicalizes). Never part of the
+   * idempotency intent; ASSIGN never sends it. */
+  confirmingBadge?: string | null;
 }
 
 export interface MachineActionResult {
@@ -895,7 +969,12 @@ const MACHINE_ACTION_PATH: Record<MachineActionKind, string> = {
  * `ApiError` and nothing was recorded. A DONE with `machineId: null`
  * is the direct-processing completion (Phase 7): the request omits
  * `machine_id`, so the server records an `AREA_COMPLETED` without a
- * Machine — the same endpoint, a distinct intent.
+ * Machine — the same endpoint, a distinct intent. A QUEUE / DONE whose
+ * final gate is a badge carries `confirming_badge` (Phase 13): the
+ * server signs that Worker in and records it, or refuses with nothing
+ * recorded — 409 `badge_confirmation_required`, 409
+ * `badge_confirmation_not_expected`, 422 `badge_not_recognized`
+ * (`badgeGateRefusal`).
  */
 export async function recordMachineAction(
   kind: MachineActionKind,
@@ -911,6 +990,9 @@ export async function recordMachineAction(
         ...(input.machineId === null ? {} : { machine_id: input.machineId }),
         quantity: input.quantity,
         device_event_id: input.deviceEventId,
+        ...(kind !== 'ASSIGN' && input.confirmingBadge != null
+          ? { confirming_badge: input.confirmingBadge }
+          : {}),
       },
     },
   );
@@ -1568,6 +1650,9 @@ export interface UndoInput {
   /** The Undo's OWN idempotency key (a new production event), reused
    * verbatim on every retry of the same reversal. */
   deviceEventId: string;
+  /** The Worker badge scanned in the BADGE-form final gate, sent as
+   * typed (the server canonicalizes); never part of the intent. */
+  confirmingBadge?: string | null;
 }
 
 export interface ReversedMovement {
@@ -1627,7 +1712,12 @@ interface UndoResultWire {
  * 201 fresh, 200 for an idempotent replay of the same `deviceEventId`.
  * Every rejection — already reversed, no longer the most recent
  * operation, recorded elsewhere, a retired Machine or deactivated Area
- * in the way — is an `ApiError` and nothing was reversed.
+ * in the way — is an `ApiError` and nothing was reversed. An Undo whose
+ * final gate is a badge carries `confirming_badge` (Phase 13): the
+ * server signs that Worker in and records it on every REVERSED row, or
+ * refuses with nothing reversed — 409 `badge_confirmation_required`,
+ * 409 `badge_confirmation_not_expected`, 422 `badge_not_recognized`
+ * (`badgeGateRefusal`).
  */
 export async function undoProductionCommand(
   input: UndoInput,
@@ -1640,6 +1730,9 @@ export async function undoProductionCommand(
         part_number: input.partNumber,
         reverses_device_event_id: input.reversesDeviceEventId,
         device_event_id: input.deviceEventId,
+        ...(input.confirmingBadge != null
+          ? { confirming_badge: input.confirmingBadge }
+          : {}),
       },
     },
   );
