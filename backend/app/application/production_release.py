@@ -90,7 +90,6 @@ from app.application.part_numbers import (
 from app.domain.enums import MovementType, QuantityFlowStatus, RouteMode
 from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
-    Area,
     AssignedRoute,
     AssignedRouteStep,
     Operation,
@@ -395,19 +394,28 @@ def release_to_production(
         )
 
     # Template FOR SHARE before the starting Area row (lock order demand
-    # → RouteTemplate → Area → Operation): a template writer may wait on
-    # this Area while holding the template, never the reverse. Held to
+    # → RouteTemplate → Areas → Operations): a template writer may wait
+    # on this Area while holding the template, never the reverse. Held to
     # COMMIT, it serializes the snapshot below with every template edit,
-    # archive and delete; the template is re-read under it below.
+    # archive and delete; the steps are read under it.
+    template_steps: list[RouteStep] = []
     if mode is RouteMode.PLANNED and route_template_id is not None:
         route_templates.lock_template_for_assignment(session, route_template_id)
+        template_steps = route_templates.assignment_steps(session, route_template_id)
 
     # The starting Area row is locked until COMMIT: Area deactivation
     # takes the same row lock before its active-quantity check, so a
     # concurrent release-vs-deactivation always has exactly one serial
     # outcome and an inactive Area can never end up holding a fresh
-    # ACTIVE flow.
-    area = session.get(Area, starting_area_id, with_for_update=True)
+    # ACTIVE flow. It is taken in ONE ascending pass with the snapshot's
+    # other Areas (FOR KEY SHARE), then the Operations: a release never
+    # holds one Area while it waits on another in step order.
+    area = route_templates.lock_assignment_areas(session, starting_area_id, template_steps)
+    route_templates.lock_assignment_operations(
+        session,
+        {operation_id}
+        | {step.operation_id for step in template_steps if step.operation_id is not None},
+    )
     if area is None:
         raise InvalidInputError(f"Area {starting_area_id} does not exist.")
     if not area.is_active:
@@ -434,7 +442,6 @@ def release_to_production(
             f"Operation '{operation.code}' is inactive and cannot accept a production release."
         )
 
-    template_steps: list[RouteStep] = []
     template: RouteTemplate | None = None
     if mode is RouteMode.PLANNED:
         template = session.get(RouteTemplate, route_template_id)
@@ -445,13 +452,6 @@ def release_to_production(
                 f"Route Template '{template.name}' is archived and is never"
                 " offered for new route assignments."
             )
-        template_steps = list(
-            session.scalars(
-                select(RouteStep)
-                .where(RouteStep.route_template_id == template.id)
-                .order_by(RouteStep.sequence)
-            )
-        )
         if not template_steps:
             raise InvalidInputError(
                 f"Route Template '{template.name}' has no steps to release against."

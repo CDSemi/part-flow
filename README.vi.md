@@ -173,7 +173,7 @@ not-found của ứng dụng.
   (`real-views.ts`), preview state chỉ dành cho development.
 - `src/api/` — typed client và mapping `snake_case` ↔ `camelCase`; production-safe,
   không import `src/mocks/`.
-- `src/mocks/` — dataset mẫu chỉ dành cho development; mọi view đã duyệt đều là view thật nên không view mock nào đọc từ đây nữa (Planned Routes, view mock cuối cùng, trở thành thật ở Phase 13 slice 8), và production build loại trừ hoàn toàn các dataset này.
+- `src/mocks/` — dataset mẫu chỉ dành cho development; mọi view đã duyệt đều là view thật (Planned Routes, view mock cuối cùng, trở thành thật ở Phase 13 slice 8; dataset mock của nó và registry view chỉ-development cũ đã bị gỡ), nên nơi duy nhất còn đọc từ đây là preview Scan Station chỉ-development (`ScanStationMockView.tsx`, sau `import.meta.env.DEV`), và production build loại trừ hoàn toàn các dataset này.
 - `src/views/<view>/` — mỗi GUI view một thư mục.
 - `src/components/` — component dùng chung, gồm Area/Machine monitoring.
 

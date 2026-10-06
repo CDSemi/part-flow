@@ -22,6 +22,7 @@ import type {
   RouteTemplateInput,
   RouteTemplateRecord,
 } from '../../api/route-templates';
+import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { getViewStatePreview } from '../../app/view-state';
@@ -289,7 +290,8 @@ export function PlannedRoutesView() {
    * with every step copied. Success opens the new never-used route for
    * editing; a refusal opens `New Planned Route` prefilled with the
    * copy and the server's message (nothing was created). Returns the
-   * unknown-outcome message when the server did not answer — the
+   * unknown-outcome message when the server did not answer, timed out
+   * or failed (408 / 5xx — the copy may have been created) — the
    * caller shows it; nothing is retried.
    */
   const duplicate = async (
@@ -306,7 +308,7 @@ export function PlannedRoutesView() {
       openDialog({ kind: 'edit', catalog, record: created });
       return null;
     } catch (error) {
-      if (error instanceof ApiError) {
+      if (error instanceof ApiError && !writeOutcomeUnknown(error)) {
         reload();
         openDialog({
           kind: 'new',
@@ -962,7 +964,8 @@ function RouteEditDialog({
 
   /** Show a refused or unanswered save in the dialog, input kept. */
   const reportSaveError = (failure: unknown) => {
-    if (!(failure instanceof ApiError)) {
+    // No answer, a timeout or a 5xx: the save may have committed.
+    if (!(failure instanceof ApiError) || writeOutcomeUnknown(failure)) {
       wrote.current = true;
       setError(UNKNOWN_SAVE_MESSAGE);
       return;

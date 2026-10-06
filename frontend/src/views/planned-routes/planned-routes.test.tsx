@@ -1545,6 +1545,52 @@ test('an unanswered duplicate says the outcome is unknown', async () => {
   await waitFor(() => expect(listCalls()).toBe(3));
 });
 
+test('a duplicate answered by a gateway error is an unknown outcome, not a refusal', async () => {
+  await renderPlannedRoutes();
+  failures.POST = { status: 504, detail: 'Gateway Timeout' };
+  fireEvent.click(
+    within(routeRow('Legacy plating route')).getByRole('button', {
+      name: 'Duplicate',
+    }),
+  );
+  const notice = await screen.findByRole('dialog', {
+    name: 'Duplicate Planned Route',
+  });
+  expect(within(notice).getByRole('alert').textContent).toBe(
+    'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the route before trying again.',
+  );
+  // The copy may exist: no prefilled New Planned Route invites a second one.
+  expect(
+    screen.queryByRole('dialog', { name: 'New Planned Route' }),
+  ).toBeNull();
+  expect(writes).toHaveLength(1);
+  fireEvent.click(within(notice).getByRole('button', { name: 'Close' }));
+  await dialogClosed();
+  await waitFor(() => expect(listCalls()).toBe(2));
+});
+
+test('a create answered by a server error is an unknown outcome; closing reloads', async () => {
+  await renderPlannedRoutes();
+  fireEvent.click(screen.getByRole('button', { name: '+ New Planned Route' }));
+  const dialog = screen.getByRole('dialog', { name: 'New Planned Route' });
+  fireEvent.change(within(dialog).getByLabelText('Route name'), {
+    target: { value: 'Deburr path' },
+  });
+  failures.POST = { status: 502, detail: 'Bad Gateway' };
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Create route' }));
+  expect((await within(dialog).findByRole('alert')).textContent).toBe(
+    'The server did not answer — this change may or may not have been saved. Close this window to refresh the list, then check the route before trying again.',
+  );
+  expect(within(dialog).getByLabelText('Route name')).toHaveValue(
+    'Deburr path',
+  );
+  expect(writes).toHaveLength(1);
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+  await dialogClosed();
+  await waitFor(() => expect(listCalls()).toBe(2));
+});
+
 test('closing a dirty route dialog asks before discarding', async () => {
   await renderPlannedRoutes();
   const dialog = openEdit('Lathe trial');

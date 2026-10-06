@@ -497,10 +497,11 @@ Frontend structure:
   the `useApiData` loading/error/reload hook. Production-safe — never
   imports from `src/mocks/`.
 - `src/mocks/` — the development-only mock datasets. Every approved
-  view is now real, so no mock view reads from here any more
-  (Management → Planned Routes, the last one, became real in Phase 13
-  slice 8 and no module imports `src/mocks/planned-routes.ts` or the
-  former dev-only registry `src/app/dev-views.ts` any more); nothing in
+  view is now real (Management → Planned Routes, the last one, became
+  real in Phase 13 slice 8; its mock dataset and the former dev-only
+  view registry were removed), so the only reader left is the
+  development-only Scan Station preview (`ScanStationMockView.tsx`,
+  behind `import.meta.env.DEV`); nothing in
   `src/mocks` encodes production business rules or is written to the
   backend, and a production build excludes the datasets entirely. The
   real views (`src/app/real-views.ts` — Administration

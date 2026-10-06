@@ -37,6 +37,11 @@ here:
   (``lock_template_for_assignment``) before their starting Area, so a
   production command never holds an Area while it waits on a template,
   and a snapshot copies exactly one committed version of the steps.
+  They then lock every Area of the snapshot in one ascending pass — the
+  starting Area FOR UPDATE at its place, the others FOR KEY SHARE
+  (``lock_assignment_areas``) — and its Operations FOR KEY SHARE,
+  ascending, before the snapshot INSERT, so two assignments whose routes
+  cross Areas in opposite order serialize instead of deadlocking.
 
 Each write commits its own transaction (2xx = committed) and appends
 exactly one ``audit_events`` row in it (entity ``RouteTemplate``,
@@ -73,6 +78,11 @@ from app.infrastructure.models import (
 # The usage dialog lists at most this many released Quantity Flows
 # (newest first) and reports the total.
 USAGE_LIST_LIMIT: Final = 200
+
+# The largest id PostgreSQL can bind to an ``integer`` key. An id
+# outside 1.._MAX_ID names no row: it is answered as missing before any
+# query instead of failing in the driver.
+_MAX_ID: Final = 2_147_483_647
 
 # FOR NO KEY UPDATE: the lock an edit's or archive's own UPDATE takes
 # anyway, acquired before the audit snapshot so concurrent writers
@@ -286,8 +296,7 @@ def route_template_usage(session: Session, template_id: int) -> RouteTemplateUsa
     """The Quantity Flows released with the template (PROJECT_PROFILE
     §21): newest RECEIVED first, at most ``USAGE_LIST_LIMIT``, plus the
     total. Works for archived templates."""
-    if session.get(RouteTemplate, template_id) is None:
-        raise NotFoundError(f"Planned Route {template_id} does not exist.")
+    _get_template(session, template_id)
     released_at = func.min(PartMovement.occurred_at).label("released_at")
     released = (
         select(QuantityFlow.id, QuantityFlow.part_number, released_at)
@@ -327,6 +336,40 @@ def lock_template_for_assignment(session: Session, template_id: int) -> RouteTem
     return session.get(
         RouteTemplate, template_id, with_for_update=_ASSIGNMENT_LOCK, populate_existing=True
     )
+
+
+def assignment_steps(session: Session, template_id: int) -> list[RouteStep]:
+    """The template's steps in route order, read under the assignment lock."""
+    return _template_steps(session, template_id)
+
+
+def lock_assignment_areas(
+    session: Session, starting_area_id: int, steps: Sequence[RouteStep]
+) -> Area | None:
+    """The starting Area FOR UPDATE and the other step Areas FOR KEY SHARE,
+    all ascending by id; the starting Area RE-READ under its lock.
+
+    The snapshot INSERT's FK checks take FOR KEY SHARE on every step Area
+    in step order, which conflicts with the FOR UPDATE another release or
+    receipt holds on its own starting Area: two assignments whose routes
+    cross Areas in opposite order would each hold one Area and wait on
+    the other. Taking every Area here in ONE ascending pass — before any
+    Operation row — leaves the FK checks only re-requesting held locks.
+    """
+    others = {step.area_id for step in steps} - {starting_area_id}
+    _locked_rows(session, Area, {area_id for area_id in others if area_id < starting_area_id})
+    area = session.get(Area, starting_area_id, with_for_update=True, populate_existing=True)
+    _locked_rows(session, Area, {area_id for area_id in others if area_id > starting_area_id})
+    return area
+
+
+def lock_assignment_operations(session: Session, operation_ids: set[int]) -> None:
+    """The Operations FOR KEY SHARE, ascending by id, after every Area lock.
+
+    The lock the snapshot (and Movement) INSERT's FK checks take anyway,
+    acquired in id order instead of step order.
+    """
+    _locked_rows(session, Operation, operation_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +431,8 @@ def _locked_rows[Row: (Area, Operation, Machine)](
     production order beforehand; it never conflicts with admin edits
     (FOR NO KEY UPDATE) or child-write parent locks (FOR SHARE).
     """
+    # An id PostgreSQL cannot bind names no row: it stays absent (missing).
+    ids = {row_id for row_id in ids if 0 < row_id <= _MAX_ID}
     if not ids:
         return {}
     rows = session.scalars(
@@ -533,13 +578,22 @@ def _commit_record(
     return RouteTemplateRecord(template, steps, ever_used, usage_count)
 
 
-def _lock_for_edit(session: Session, template_id: int) -> RouteTemplate:
-    template = session.get(
-        RouteTemplate, template_id, with_for_update=_EDIT_LOCK, populate_existing=True
+def _get_template(
+    session: Session, template_id: int, *, lock: bool | dict[str, bool] = False
+) -> RouteTemplate:
+    """The template (RE-READ under ``lock`` when given), else 404."""
+    template = (
+        session.get(RouteTemplate, template_id, with_for_update=lock, populate_existing=True)
+        if 0 < template_id <= _MAX_ID
+        else None
     )
     if template is None:
         raise NotFoundError(f"Planned Route {template_id} does not exist.")
     return template
+
+
+def _lock_for_edit(session: Session, template_id: int) -> RouteTemplate:
+    return _get_template(session, template_id, lock=_EDIT_LOCK)
 
 
 def create_route_template(
@@ -685,9 +739,7 @@ def delete_route_template(session: Session, template_id: int) -> None:
     receipt holding the template FOR SHARE commits first and makes it
     used, or waits and then finds it gone. The source FK is the backstop.
     """
-    template = session.get(RouteTemplate, template_id, with_for_update=True, populate_existing=True)
-    if template is None:
-        raise NotFoundError(f"Planned Route {template_id} does not exist.")
+    template = _get_template(session, template_id, lock=True)
     used_message = (
         f"Planned Route '{template.name}' has been used by released Quantity Flows,"
         " so it cannot be deleted. Archive it instead."

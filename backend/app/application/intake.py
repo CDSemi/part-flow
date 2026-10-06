@@ -110,12 +110,16 @@ command had closed. The no-active-demand precondition and the
 separate-quantity confirmation are therefore judged on state no
 concurrent transaction can still change before this one commits. Lock
 order is PN advisory → Scan Station → demand → WorkOrder → RouteTemplate
-(FOR SHARE, PLANNED only) → Area → Operation — the advisory lock always
+(FOR SHARE, PLANNED only) → Areas → Operations — the advisory lock always
 first, then the established row order of the release (demand →
-RouteTemplate → Area → Operation) and the demand save (demand →
-WorkOrder), with no cycle. Planned Route writers lock their template row
-before any Machine, Area or Operation row (`app.application.route_templates`),
-so a receipt never holds an Area while it waits on a template.
+RouteTemplate → Areas → Operations) and the demand save (demand →
+WorkOrder). The station's Area (FOR UPDATE) and the Planned Route
+snapshot's other Areas (FOR KEY SHARE) are taken in one ascending pass,
+then the Operations, so two assignments whose routes cross Areas in
+opposite order serialize instead of deadlocking on the snapshot's FK
+checks. Planned Route writers lock their template row before any
+Machine, Area or Operation row (`app.application.route_templates`), so a
+receipt never holds an Area while it waits on a template.
 
 Worker identity is recorded per the station Area's Worker ID mode
 (`app.application.station_identity`) — in a Scanned-session Area the
@@ -840,14 +844,23 @@ def receive_quantity(
 
     # Template FOR SHARE before the Area row (the release's order): a
     # template writer may wait on this Area while holding the template,
-    # never the reverse; the template is re-read under it below.
+    # never the reverse; the template is re-read under it below and its
+    # steps are read under it here.
+    template_steps: list[RouteStep] = []
     if mode is RouteMode.PLANNED and route_template_id is not None:
         route_templates.lock_template_for_assignment(session, route_template_id)
+        template_steps = route_templates.assignment_steps(session, route_template_id)
 
     # The Area row locked until COMMIT and its flags judged on the
     # locked re-read (the same protocol as a transfer destination):
-    # Area deactivation and a receipt have one serial outcome.
-    session.refresh(area, with_for_update=True)
+    # Area deactivation and a receipt have one serial outcome. It is
+    # taken in ONE ascending pass with the snapshot's other Areas (FOR
+    # KEY SHARE), the release's protocol: a receipt never holds its Area
+    # while it waits on another Area in step order.
+    locked_area = route_templates.lock_assignment_areas(session, area.id, template_steps)
+    if locked_area is None:  # pragma: no cover - the station's FK guarantees the row
+        raise NotFoundError(f"Area {area.id} does not exist.")
+    area = locked_area
     if not area.is_active:
         raise ConflictError(
             f"Area '{area.name}' is inactive and cannot accept received quantity."
@@ -859,8 +872,13 @@ def receive_quantity(
             " Receive quantity at a production Area instead. Nothing was recorded."
         )
     operation = resolve_arrival_operation(session, area, operation_id)
+    # The snapshot's Operations FOR KEY SHARE, ascending, after every
+    # Area lock — the FK checks of the snapshot INSERT then only
+    # re-request held locks.
+    route_templates.lock_assignment_operations(
+        session, {step.operation_id for step in template_steps if step.operation_id is not None}
+    )
 
-    template_steps: list[RouteStep] = []
     template: RouteTemplate | None = None
     if mode is RouteMode.PLANNED:
         template = session.get(RouteTemplate, route_template_id)
@@ -871,13 +889,6 @@ def receive_quantity(
                 f"Planned Route '{template.name}' is archived and is never offered"
                 " for new route assignments. Nothing was recorded."
             )
-        template_steps = list(
-            session.scalars(
-                select(RouteStep)
-                .where(RouteStep.route_template_id == template.id)
-                .order_by(RouteStep.sequence)
-            )
-        )
         if not template_steps:
             raise InvalidInputError(
                 f"Planned Route '{template.name}' has no steps to receive against."

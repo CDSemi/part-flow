@@ -187,50 +187,6 @@ export interface MockMachine {
   notes?: string;
 }
 
-/** One expected step of a Planned Route (Route Template). */
-export interface MockRouteStep {
-  area: AreaKey;
-  operation: string;
-  /** Advisory expected duration, e.g. `4h` — never blocks production. */
-  expectedDuration?: string;
-  instructions?: string;
-  /**
-   * Preferred (not mandatory) Machine — the stable Machine id (v15,
-   * matching `preferred_machine_id`), never the reusable display name:
-   * `Lathe 1` may mean two different physical machines across a
-   * replacement, so a name cannot identify the preference. A retired
-   * or missing Machine renders as an explicit unavailable value —
-   * never silently cleared.
-   */
-  preferredMachineId?: string;
-}
-
-/**
- * One reusable Planned Route definition (internal name: RouteTemplate).
- * Editing a template affects FUTURE assignments only — a released
- * Quantity Flow keeps its independent Assigned Route snapshot. A
- * template that has ever been used is archived instead of deleted;
- * archived templates stay visible in historical context but never
- * appear as normal choices for new assignments.
- */
-export interface MockRouteTemplate {
-  /** Stable internal identity. */
-  id: string;
-  name: string;
-  description?: string;
-  steps: MockRouteStep[];
-  /** ISO date the template was archived; absent = active. */
-  archivedOn?: string;
-  /**
-   * Where the template has been used: Quantity Flows released with an
-   * Assigned Route snapshot copied from it. Empty = never used (such a
-   * template may be deleted outright).
-   */
-  usedBy: { flow: string; pn: string; releasedOn: string }[];
-  createdOn: string;
-  updatedOn: string;
-}
-
 /**
  * One PN presence in one Area — the shared row model for the Area/
  * Machine monitoring surfaces (Area Board detail and Scan Station).

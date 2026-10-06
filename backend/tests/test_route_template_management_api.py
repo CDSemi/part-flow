@@ -39,7 +39,15 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session
 
 from alembic import command
-from app.application import audit, intake, production_release, route_templates, work_orders
+from app.application import (
+    audit,
+    intake,
+    part_numbers,
+    production_release,
+    route_templates,
+    transfers,
+    work_orders,
+)
 from app.application.errors import ConflictError, InvalidInputError
 from app.application.route_templates import RouteStepInput
 from app.core.config import get_settings
@@ -953,6 +961,42 @@ def test_put_refuses_an_absent_or_archived_route(client: TestClient, db_engine: 
     assert _counts(db_engine) == before
 
 
+_UNBINDABLE_ID = 2**31
+
+
+def test_an_id_beyond_the_integer_range_is_answered_as_missing(
+    client: TestClient, db_engine: Engine
+) -> None:
+    cell = _Cell(client, machine_count=1, station=False)
+    before = _counts(db_engine)
+    missing = {"detail": f"Planned Route {_UNBINDABLE_ID} does not exist."}
+    path = f"/api/route-templates/{_UNBINDABLE_ID}"
+    responses = {
+        "put": _put(client, _UNBINDABLE_ID, {"name": "R", "steps": [_step(cell)]}),
+        "archive": client.post(f"{path}/archive"),
+        "delete": client.delete(path),
+        "usage": client.get(f"{path}/usage"),
+    }
+    for name, response in responses.items():
+        assert (response.status_code, response.json()) == (404, missing), name
+    assert _counts(db_engine) == before
+
+    bodies: list[tuple[dict[str, Any], str]] = [
+        ({**_step(cell), "area_id": _UNBINDABLE_ID}, f"Area {_UNBINDABLE_ID}"),
+        ({**_step(cell), "operation_id": _UNBINDABLE_ID}, f"Operation {_UNBINDABLE_ID}"),
+        (_step(cell, machine_id=_UNBINDABLE_ID), f"Machine {_UNBINDABLE_ID}"),
+    ]
+    existing = _created(client, [_step(cell)])
+    before = _counts(db_engine)
+    for step, reference in bodies:
+        expected = (422, {"detail": f"Step 1: {reference} does not exist."})
+        created = _create(client, [step])
+        assert (created.status_code, created.json()) == expected, reference
+        replaced = _put(client, existing["id"], {"name": "R", "steps": [step]})
+        assert (replaced.status_code, replaced.json()) == expected, reference
+    assert _counts(db_engine) == before
+
+
 # ---------------------------------------------------------------------------
 # T-4 Legacy step without an Operation (OD-11); T-5 stale references
 # ---------------------------------------------------------------------------
@@ -1589,6 +1633,98 @@ def test_writer_locks_areas_in_ascending_order(client: TestClient, db_engine: En
     record = runner.results["writer"]
     assert isinstance(record, route_templates.RouteTemplateRecord), record
     assert [step.area_id for step in record.steps] == [high.area_id, low.area_id]
+
+
+class _Gate:
+    """Test seam: EVERY wrapped call stops after completing — while the
+    caller holds its locks — until the gate opens; arrivals are counted."""
+
+    def __init__(self) -> None:
+        self.opened = threading.Event()
+        self._guard = threading.Lock()
+        self.arrivals = 0
+
+    def wrap(self, real: Callable[..., Any]) -> Callable[..., Any]:
+        def gated(*args: Any, **kwargs: Any) -> Any:
+            result = real(*args, **kwargs)
+            with self._guard:
+                self.arrivals += 1
+            assert self.opened.wait(timeout=20), "test deadlock: never opened"
+            return result
+
+        return gated
+
+
+def _crossing_assignments(
+    engine: Engine, gate: _Gate, first: Callable[[Session], Any], second: Callable[[Session], Any]
+) -> dict[str, Any]:
+    """Run two assignments whose routes cross Areas in opposite order.
+
+    ``first`` reaches the gate holding its Area locks; ``second`` then
+    either blocks on an Area lock (the ascending protocol) or reaches the
+    gate too, holding its own starting Area — the state in which
+    step-order snapshot FK locks deadlock once the gate opens.
+    """
+    runner = _Runner(engine)
+    try:
+        runner.start("first", first)
+        deadline = time.monotonic() + 10
+        while gate.arrivals < 1:
+            assert time.monotonic() < deadline, "the first assignment never reached the gate"
+            time.sleep(0.05)
+        runner.start("second", second)
+        deadline = time.monotonic() + 10
+        while gate.arrivals < 2 and _lock_waiters(engine) < 1:
+            assert time.monotonic() < deadline, "the second assignment neither waited nor arrived"
+            time.sleep(0.05)
+    finally:
+        gate.opened.set()
+    runner.join()
+    return runner.results
+
+
+def test_releases_over_crossing_routes_never_deadlock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    low = _Cell(client, station=False)
+    high = _Cell(client, station=False)
+    forward = _created(client, [_step(low), _step(high)])
+    backward = _created(client, [_step(high), _step(low)])
+    gate = _Gate()
+    monkeypatch.setattr(
+        production_release,
+        "active_quantity_distribution",
+        gate.wrap(part_numbers.active_quantity_distribution),
+    )
+    first_pn, first = _release_call(client, low, forward["id"])
+    second_pn, second = _release_call(client, high, backward["id"])
+    results = _crossing_assignments(db_engine, gate, first, second)
+    for name in ("first", "second"):
+        assert isinstance(results[name], production_release.ProductionRelease), results[name]
+    assert _flows_of(db_engine, first_pn) == 1
+    assert _flows_of(db_engine, second_pn) == 1
+
+
+def test_receipt_and_release_over_crossing_routes_never_deadlock(
+    client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    low = _Cell(client)
+    high = _Cell(client)
+    forward = _created(client, [_step(low), _step(high)])
+    backward = _created(client, [_step(high), _step(low)])
+    gate = _Gate()
+    monkeypatch.setattr(
+        intake, "resolve_arrival_operation", gate.wrap(transfers.resolve_arrival_operation)
+    )
+    monkeypatch.setattr(
+        production_release,
+        "active_quantity_distribution",
+        gate.wrap(part_numbers.active_quantity_distribution),
+    )
+    _, release = _release_call(client, high, backward["id"])
+    results = _crossing_assignments(db_engine, gate, _receipt_call(low, forward["id"]), release)
+    assert isinstance(results["first"], intake.IntakeReceipt), results["first"]
+    assert isinstance(results["second"], production_release.ProductionRelease), results["second"]
 
 
 # ---------------------------------------------------------------------------

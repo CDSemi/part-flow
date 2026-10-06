@@ -334,29 +334,6 @@ main {
   background: var(--error-border);
 }
 
-/* ============ Production not-connected state ============ */
-.unconnected {
-  max-width: 640px;
-  margin: 80px auto;
-  padding: 34px;
-  text-align: center;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.unconnected h1 {
-  font-size: 22px;
-  margin-bottom: 8px;
-}
-
-.unconnected p {
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
 /* ============ Not-found state ============ */
 .notfound {
   max-width: 560px;
